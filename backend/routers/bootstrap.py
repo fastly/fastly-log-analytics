@@ -696,9 +696,22 @@ def _bootstrap_sync(
     if analyst_session is not None:
         response_services = [_project_analyst_bootstrap_service(svc) for svc in services]
         if mask_ips_for(analyst_session):
-            from backend.core.share_db import apply_pii_policy, filter_saved_views_for_pii
+            from backend.core.share_db import apply_pii_policy, filter_saved_views_for_pii, is_saved_view_pii_key
 
-            schema = apply_pii_policy(schema, {"mask_ips": True})
+            def _is_non_pii_schema_col(col: object) -> bool:
+                if not isinstance(col, dict):
+                    return True
+                col_name = str(col.get("name") or col.get("column") or "")
+                return not is_saved_view_pii_key(col_name) and col_name.strip().lower() != "origin_ip"
+
+            schema = [col for col in schema if _is_non_pii_schema_col(col)]
+            for svc_proj in response_services:
+                svc_status = svc_proj.get("status")
+                if isinstance(svc_status, dict) and isinstance(svc_status.get("schema"), list):
+                    svc_proj["status"] = {
+                        **svc_status,
+                        "schema": [col for col in svc_status["schema"] if _is_non_pii_schema_col(col)],
+                    }
             response_services = apply_pii_policy(response_services, {"mask_ips": True})
             views = filter_saved_views_for_pii(views, {"mask_ips": True})
 
@@ -768,9 +781,14 @@ def schema_endpoint(
     raw_schema = _resolve_schema_for_source(request, source, stats=True)
     analyst_session = getattr(request.state, "analyst_session", None)
     if mask_ips_for(analyst_session):
-        from backend.core.share_db import apply_pii_policy
+        from backend.core.share_db import is_saved_view_pii_key
 
-        raw_schema = apply_pii_policy(raw_schema, {"mask_ips": True})
+        raw_schema = [
+            col
+            for col in raw_schema
+            if not is_saved_view_pii_key(str(col.get("name") or col.get("column") or ""))
+            and str(col.get("name") or col.get("column") or "").strip().lower() != "origin_ip"
+        ]
     return {"schema": raw_schema, "table_name": _safe_table_name(source["name"])}
 
 

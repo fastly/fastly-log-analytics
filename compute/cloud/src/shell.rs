@@ -1193,6 +1193,8 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
         }
         let path = format!("/service/{front_sid}/dictionary/{dict_id}/item/auth_epoch");
         let epoch_str = epoch.to_string();
+        let mut synced = false;
+        let mut last_error: Option<String> = None;
         for _ in 0..2 {
             let pushed = self.runtime.admin_api(crate::admin::ApiRequest {
                 method: "PUT",
@@ -1205,9 +1207,29 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
                 })),
                 timeout: std::time::Duration::from_secs(5),
             });
-            if matches!(pushed, Ok(resp) if (200..500).contains(&resp.status)) {
-                break;
+            match pushed {
+                Ok(resp) if (200..300).contains(&resp.status) => {
+                    synced = true;
+                    break;
+                }
+                Ok(resp) if (400..500).contains(&resp.status) && resp.status != 429 => {
+                    last_error = Some(format!("status_{}", resp.status));
+                    break;
+                }
+                Ok(resp) => {
+                    last_error = Some(format!("status_{}", resp.status));
+                }
+                Err(err) => {
+                    last_error = Some(err);
+                }
             }
+        }
+        if !synced {
+            self.runtime.admin_event(json!({
+                "event": "auth.epoch_sync_failed",
+                "auth_epoch": epoch,
+                "error": last_error.unwrap_or_else(|| "unknown".into()),
+            }));
         }
     }
 
@@ -3558,5 +3580,212 @@ mod tests {
             Some("1")
         );
         assert!(forged_register.cookies()[0].starts_with("flp_setup=;"));
+    }
+
+    #[test]
+    fn sync_front_auth_epoch_retries_http_429_and_emits_admin_event_on_exhaustion() {
+        use crate::auth::{AuthState, SetupState};
+        use crate::state::StateStore;
+
+        struct EpochSyncRuntime {
+            base: Platform,
+            statuses: std::cell::RefCell<std::collections::VecDeque<u16>>,
+            put_calls: std::cell::RefCell<Vec<(String, Value)>>,
+            dict_epoch: std::cell::RefCell<Option<String>>,
+            events: std::cell::RefCell<Vec<Value>>,
+        }
+
+        impl SetupStores for EpochSyncRuntime {
+            fn config_present(&self, name: &str) -> Result<bool, String> {
+                self.base.config_present(name)
+            }
+            fn secret_present(&self, name: &str) -> Result<bool, String> {
+                self.base.secret_present(name)
+            }
+            fn state_linked(&self) -> Result<bool, String> {
+                self.base.state_linked()
+            }
+        }
+
+        impl Runtime for EpochSyncRuntime {
+            fn config(&self, name: &str) -> Result<Option<String>, String> {
+                self.base.config(name)
+            }
+            fn secret(&self, name: &str) -> Result<Option<String>, String> {
+                self.base.secret(name)
+            }
+            fn random(&self) -> Result<[u8; 32], String> {
+                self.base.random()
+            }
+            fn now(&self) -> u64 {
+                self.base.now()
+            }
+            fn checks(&self, live: bool) -> Result<Value, String> {
+                self.base.checks(live)
+            }
+            fn versions(&self) -> Result<Value, String> {
+                self.base.versions()
+            }
+            fn compute_service_id(&self) -> Option<String> {
+                self.base.compute_service_id()
+            }
+            fn compute_service_version(&self) -> Option<String> {
+                self.base.compute_service_version()
+            }
+            fn admin_api(
+                &self,
+                request: crate::admin::ApiRequest<'_>,
+            ) -> Result<crate::admin::ApiResponse, String> {
+                let body = request.body.clone().unwrap_or(Value::Null);
+                self.put_calls
+                    .borrow_mut()
+                    .push((format!("{} {}", request.method, request.path), body.clone()));
+                let status = self.statuses.borrow_mut().pop_front().unwrap_or(500);
+                if (200..300).contains(&status) {
+                    if let Some(val) = body["item_value"].as_str() {
+                        *self.dict_epoch.borrow_mut() = Some(val.to_owned());
+                    }
+                }
+                Ok(crate::admin::ApiResponse {
+                    status,
+                    body: json!({}),
+                    retry_after: None,
+                })
+            }
+            fn admin_event(&self, event: Value) {
+                self.events.borrow_mut().push(event);
+            }
+        }
+
+        let mut base = platform(true);
+        base.config
+            .insert("front_service_id".into(), "svcFront".into());
+        base.config
+            .insert("front_auth_dictionary_id".into(), "dictAuth".into());
+        base.secrets
+            .insert("fastly_token".into(), "fastly-tok-test".into());
+
+        let rt = EpochSyncRuntime {
+            base,
+            statuses: std::cell::RefCell::new(std::collections::VecDeque::from([
+                429, 200, 429, 503,
+            ])),
+            put_calls: std::cell::RefCell::new(Vec::new()),
+            dict_epoch: std::cell::RefCell::new(None),
+            events: std::cell::RefCell::new(Vec::new()),
+        };
+
+        let state = MemoryStore::default();
+        let mut initial = AuthState {
+            setup: SetupState {
+                hash_generation: crate::auth::hash("setup-test"),
+                spent: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let active_cred = || crate::auth::Credential {
+            id: "cred-1".into(),
+            public_key: vec![1, 2, 3],
+            sign_count: 1,
+            revoked: false,
+        };
+        initial.users.insert(
+            "admin".into(),
+            User {
+                id: "admin".into(),
+                display_name: "Admin".into(),
+                role: Role::Admin,
+                credentials: vec![active_cred()],
+                revoked: false,
+                created_by: "setup".into(),
+                created_at: 50,
+                last_login_at: None,
+            },
+        );
+        initial.users.insert(
+            "analyst1".into(),
+            User {
+                id: "analyst1".into(),
+                display_name: "Analyst 1".into(),
+                role: Role::Analyst,
+                credentials: vec![active_cred()],
+                revoked: false,
+                created_by: "admin".into(),
+                created_at: 60,
+                last_login_at: None,
+            },
+        );
+        initial.users.insert(
+            "analyst2".into(),
+            User {
+                id: "analyst2".into(),
+                display_name: "Analyst 2".into(),
+                role: Role::Analyst,
+                credentials: vec![active_cred()],
+                revoked: false,
+                created_by: "admin".into(),
+                created_at: 61,
+                last_login_at: None,
+            },
+        );
+        assert!(state.compare_and_swap(None, &initial).unwrap());
+
+        let session_tok = compute_common::crypto::seal_json(
+            b"ssssssssssssssssssssssssssssssssssssssssssssssss",
+            &json!({
+                "sub": "admin",
+                "role": "admin",
+                "policy_version": 0,
+                "exp": 1000,
+                "iat": 100,
+                "jti": "epoch-test-jti"
+            }),
+        )
+        .unwrap();
+
+        let shell = Shell::new(&rt, &state, &[]);
+        let revoke_path = |target: &str| format!("/{}/users/{target}/revoke", "api/admin");
+
+        // 1. 429 -> 200 retries PUT .../item/auth_epoch twice and updates dictionary to "1"
+        let revoke1 = shell.handle(&Request {
+            method: "POST".into(),
+            path: revoke_path("analyst1"),
+            headers: BTreeMap::from([
+                ("x-flp-front-key".into(), "front-test-key-never-real".into()),
+                ("fastly-client-ip".into(), "192.0.2.1".into()),
+                ("origin".into(), "https://example.invalid".into()),
+                ("content-type".into(), "application/json".into()),
+                ("cookie".into(), format!("flp_session={session_tok}")),
+            ]),
+            body: b"{}".to_vec(),
+        });
+        assert_eq!(revoke1.status, 200);
+        assert_eq!(rt.put_calls.borrow().len(), 2);
+        assert_eq!(
+            rt.put_calls.borrow()[0].0,
+            "PUT /service/svcFront/dictionary/dictAuth/item/auth_epoch"
+        );
+        assert_eq!(rt.dict_epoch.borrow().as_deref(), Some("1"));
+        assert!(rt.events.borrow().is_empty());
+
+        // 2. 429 -> 503 exhausts both attempts, keeps HTTP 200, and emits admin_event
+        let revoke2 = shell.handle(&Request {
+            method: "POST".into(),
+            path: revoke_path("analyst2"),
+            headers: BTreeMap::from([
+                ("x-flp-front-key".into(), "front-test-key-never-real".into()),
+                ("fastly-client-ip".into(), "192.0.2.1".into()),
+                ("origin".into(), "https://example.invalid".into()),
+                ("content-type".into(), "application/json".into()),
+                ("cookie".into(), format!("flp_session={session_tok}")),
+            ]),
+            body: b"{}".to_vec(),
+        });
+        assert_eq!(revoke2.status, 200);
+        assert_eq!(rt.put_calls.borrow().len(), 4);
+        assert_eq!(rt.dict_epoch.borrow().as_deref(), Some("1"));
+        assert_eq!(rt.events.borrow().len(), 1);
+        assert_eq!(rt.events.borrow()[0]["event"], "auth.epoch_sync_failed");
     }
 }

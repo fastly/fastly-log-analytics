@@ -225,7 +225,6 @@ fn columns_arg_references_pii(lit: &str) -> bool {
 enum LastSig {
     Other,
     IdentOrClose,
-    SubscriptOpen,
     JsonArrow,
 }
 
@@ -367,8 +366,9 @@ fn decode_sql_unicode_escape(bytes: &[u8], i: usize, out: &mut String) -> Option
     }
 }
 
-/// Peeks past whitespace and SQL comments after a string literal to detect `:` in `{ 'k': v }`.
-fn next_non_ws_or_comment_is_colon(s: &str, mut i: usize) -> bool {
+/// Advances past ASCII/UTF-8 whitespace and SQL `--` / `/* ... */` comments, returning `None`
+/// if an unclosed block comment is encountered.
+fn skip_ws_and_comments(s: &str, mut i: usize) -> Option<usize> {
     let bytes = s.as_bytes();
     while i < bytes.len() {
         if bytes[i].is_ascii_whitespace() {
@@ -404,11 +404,46 @@ fn next_non_ws_or_comment_is_colon(s: &str, mut i: usize) -> bool {
                     i += 1;
                 }
             }
+            if depth > 0 {
+                return None;
+            }
             continue;
         }
-        return bytes[i] == b':';
+        break;
     }
-    false
+    Some(i)
+}
+
+/// Peeks past whitespace and SQL comments after a string literal to detect `:` in `{ 'k': v }`.
+fn next_non_ws_or_comment_is_colon(s: &str, i: usize) -> bool {
+    let bytes = s.as_bytes();
+    skip_ws_and_comments(s, i)
+        .is_some_and(|j| bytes.get(j) == Some(&b':') && bytes.get(j + 1) != Some(&b':'))
+}
+
+fn next_non_ws_or_comment_is_open_paren(s: &str, i: usize) -> bool {
+    skip_ws_and_comments(s, i).is_some_and(|j| s.as_bytes().get(j) == Some(&b'('))
+}
+
+fn next_non_ws_or_comment_is_concat_pipe(s: &str, i: usize) -> bool {
+    let bytes = s.as_bytes();
+    skip_ws_and_comments(s, i)
+        .is_some_and(|j| bytes.get(j) == Some(&b'|') && bytes.get(j + 1) == Some(&b'|'))
+}
+
+fn is_dynamic_key_fn(token: &str) -> bool {
+    matches!(
+        token.trim().to_ascii_lowercase().as_str(),
+        "chr"
+            | "char"
+            | "concat"
+            | "concat_ws"
+            | "printf"
+            | "format"
+            | "string_agg"
+            | "array_to_string"
+            | "list_aggr"
+    )
 }
 
 fn peek_simple_bracket_pii(rest: &str) -> bool {
@@ -452,17 +487,16 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
     let mut bracket_depth = 0u32;
     let mut brace_depth = 0u32;
     let mut paren_depth = 0u32;
+    let mut subscript_depths: Vec<u32> = Vec::new();
+    let mut brace_stack: Vec<(u32, u32, bool)> = Vec::new();
     let mut pending_extract_fn = false;
-    let mut extract_fn_depth: Option<u32> = None;
+    let mut extract_stack: Vec<(u32, u32, u32, u32)> = Vec::new();
     let mut pending_columns_fn = false;
     let mut columns_fn_depth: Option<u32> = None;
+    let mut columns_arg_count = 0u32;
+    let mut json_arrow_paren_depth: Option<u32> = None;
     let mut json_arrow_list_depth: Option<u32> = None;
     let mut last_sig = LastSig::Other;
-    let in_key_ctx = |ls: LastSig, ext: Option<u32>, arr_list: Option<u32>| {
-        matches!(ls, LastSig::SubscriptOpen | LastSig::JsonArrow)
-            || ext.is_some()
-            || arr_list.is_some()
-    };
 
     while i < bytes.len() {
         // 1. ASCII / UTF-8 whitespace (preserves `last_sig`, `pending_extract_fn`, `pending_columns_fn`)
@@ -509,13 +543,20 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             continue;
         }
 
+        let in_subscript = !subscript_depths.is_empty();
+        let in_brace_key = brace_stack.last().is_some_and(|b| b.2);
+        let in_arrow_rhs = last_sig == LastSig::JsonArrow
+            || json_arrow_paren_depth.is_some()
+            || json_arrow_list_depth.is_some();
+        let in_extract_key_arg = extract_stack.iter().any(|f| f.3 >= 1);
+        let check_key_ctx = in_subscript || in_arrow_rhs || !extract_stack.is_empty();
+
         // 4a. `U&'...'` / `u&'...'` Unicode-escaped string literal
         if matches!(bytes[i], b'U' | b'u')
             && bytes.get(i + 1) == Some(&b'&')
             && bytes.get(i + 2) == Some(&b'\'')
         {
             i += 3;
-            let check_key_ctx = in_key_ctx(last_sig, extract_fn_depth, json_arrow_list_depth);
             let mut captured = String::new();
             let mut closed = false;
             while i < bytes.len() {
@@ -543,11 +584,24 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             if !closed {
                 return true;
             }
-            if columns_fn_depth.is_some() && columns_arg_references_pii(&captured) {
-                return true;
+            if let Some(d) = columns_fn_depth {
+                if paren_depth != d
+                    || columns_arg_count > 0
+                    || columns_arg_references_pii(&captured)
+                {
+                    return true;
+                }
+                columns_arg_count = 1;
             }
             if (check_key_ctx || (brace_depth > 0 && next_non_ws_or_comment_is_colon(s, i)))
                 && is_pii_key_or_json_path(&captured)
+            {
+                return true;
+            }
+            if last_sig == LastSig::JsonArrow
+                && json_arrow_paren_depth.is_none()
+                && json_arrow_list_depth.is_none()
+                && next_non_ws_or_comment_is_concat_pipe(s, i)
             {
                 return true;
             }
@@ -563,7 +617,6 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
         {
             let backslash_escapes = bytes[i] != b'\'';
             i += if backslash_escapes { 2 } else { 1 };
-            let check_key_ctx = in_key_ctx(last_sig, extract_fn_depth, json_arrow_list_depth);
             let should_capture = check_key_ctx || columns_fn_depth.is_some() || brace_depth > 0;
             let mut captured = should_capture.then(String::new);
             let mut closed = false;
@@ -597,14 +650,25 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
                 return true;
             }
             if let Some(lit) = captured.as_deref() {
-                if columns_fn_depth.is_some() && columns_arg_references_pii(lit) {
-                    return true;
+                if let Some(d) = columns_fn_depth {
+                    if paren_depth != d || columns_arg_count > 0 || columns_arg_references_pii(lit)
+                    {
+                        return true;
+                    }
+                    columns_arg_count = 1;
                 }
                 if (check_key_ctx || (brace_depth > 0 && next_non_ws_or_comment_is_colon(s, i)))
                     && is_pii_key_or_json_path(lit)
                 {
                     return true;
                 }
+            }
+            if last_sig == LastSig::JsonArrow
+                && json_arrow_paren_depth.is_none()
+                && json_arrow_list_depth.is_none()
+                && next_non_ws_or_comment_is_concat_pipe(s, i)
+            {
+                return true;
             }
             pending_extract_fn = false;
             pending_columns_fn = false;
@@ -636,12 +700,22 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
                 };
                 let body = &s[body_start..body_start + rel];
                 let after = body_start + rel + delim.len();
-                let check_key_ctx = in_key_ctx(last_sig, extract_fn_depth, json_arrow_list_depth);
-                if columns_fn_depth.is_some() && columns_arg_references_pii(body) {
-                    return true;
+                if let Some(d) = columns_fn_depth {
+                    if paren_depth != d || columns_arg_count > 0 || columns_arg_references_pii(body)
+                    {
+                        return true;
+                    }
+                    columns_arg_count = 1;
                 }
                 if (check_key_ctx || (brace_depth > 0 && next_non_ws_or_comment_is_colon(s, after)))
                     && is_pii_key_or_json_path(body)
+                {
+                    return true;
+                }
+                if last_sig == LastSig::JsonArrow
+                    && json_arrow_paren_depth.is_none()
+                    && json_arrow_list_depth.is_none()
+                    && next_non_ws_or_comment_is_concat_pipe(s, after)
                 {
                     return true;
                 }
@@ -650,6 +724,9 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
                 pending_columns_fn = false;
                 last_sig = LastSig::Other;
                 continue;
+            }
+            if columns_fn_depth.is_some() || in_arrow_rhs || in_extract_key_arg {
+                return true;
             }
             i += 1;
             pending_extract_fn = false;
@@ -664,6 +741,9 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             && bytes.get(i + 2) == Some(&b'"'))
             || matches!(bytes[i], b'"' | b'`')
         {
+            if columns_fn_depth.is_some() || in_arrow_rhs || in_extract_key_arg {
+                return true;
+            }
             let unicode_escapes = matches!(bytes[i], b'U' | b'u');
             let quote = if unicode_escapes { b'"' } else { bytes[i] };
             i += if unicode_escapes { 3 } else { 1 };
@@ -694,6 +774,11 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             if !closed || is_pii_identifier(&ident_buf) {
                 return true;
             }
+            if (in_subscript || in_brace_key)
+                && (is_dynamic_key_fn(&ident_buf) || next_non_ws_or_comment_is_open_paren(s, i))
+            {
+                return true;
+            }
             pending_extract_fn = is_extract_fn_name(&ident_buf);
             pending_columns_fn = ident_buf.trim().eq_ignore_ascii_case("columns");
             last_sig = LastSig::IdentOrClose;
@@ -702,29 +787,43 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
 
         // 7. `[` ... `]` T-SQL single bracketed PII identifier OR DuckDB `LIST` / subscript
         if bytes[i] == b'[' {
+            if columns_fn_depth.is_some() {
+                return true;
+            }
             if s.get(i + 1..).is_some_and(peek_simple_bracket_pii) {
                 return true;
             }
             bracket_depth = bracket_depth.saturating_add(1);
-            if last_sig == LastSig::JsonArrow && json_arrow_list_depth.is_none() {
+            if (last_sig == LastSig::JsonArrow || json_arrow_paren_depth.is_some())
+                && json_arrow_list_depth.is_none()
+            {
                 json_arrow_list_depth = Some(bracket_depth);
+            } else if last_sig == LastSig::JsonArrow {
+                return true;
             }
-            last_sig = if last_sig == LastSig::IdentOrClose {
-                LastSig::SubscriptOpen
-            } else {
-                LastSig::Other
-            };
+            if last_sig == LastSig::IdentOrClose {
+                subscript_depths.push(bracket_depth);
+            }
+            last_sig = LastSig::Other;
             pending_extract_fn = false;
             pending_columns_fn = false;
             i += 1;
             continue;
         }
         if bytes[i] == b']' {
-            if bracket_depth == 0 {
+            if columns_fn_depth.is_some() || bracket_depth == 0 || last_sig == LastSig::JsonArrow {
                 return true;
             }
             if json_arrow_list_depth == Some(bracket_depth) {
                 json_arrow_list_depth = None;
+                if json_arrow_paren_depth.is_none()
+                    && next_non_ws_or_comment_is_concat_pipe(s, i + 1)
+                {
+                    return true;
+                }
+            }
+            if subscript_depths.last() == Some(&bracket_depth) {
+                subscript_depths.pop();
             }
             bracket_depth -= 1;
             pending_extract_fn = false;
@@ -736,6 +835,9 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
 
         // 8. Unquoted identifiers & hyphenated filter/header tokens
         if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' {
+            if columns_fn_depth.is_some() || in_arrow_rhs || in_extract_key_arg {
+                return true;
+            }
             let start = i;
             let mut end = start + 1;
             while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
@@ -773,6 +875,11 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             if token.eq_ignore_ascii_case("uescape") {
                 return true;
             }
+            if (in_subscript || in_brace_key)
+                && (is_dynamic_key_fn(token) || next_non_ws_or_comment_is_open_paren(s, end))
+            {
+                return true;
+            }
             pending_extract_fn = is_extract_fn_name(token);
             pending_columns_fn = token.eq_ignore_ascii_case("columns");
             last_sig = LastSig::IdentOrClose;
@@ -780,29 +887,52 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             continue;
         }
 
-        // 9. Parens, braces, JSON arrows (`->`, `->>`, `#>`, `#>>`) & other punctuation/digits
+        // 9. Strict single-literal `COLUMNS(...)` gate for all non-comment/non-literal tokens
+        if let Some(d) = columns_fn_depth {
+            if bytes[i] == b')' && paren_depth == d && columns_arg_count == 1 {
+                columns_fn_depth = None;
+                columns_arg_count = 0;
+                paren_depth = paren_depth.saturating_sub(1);
+                pending_extract_fn = false;
+                pending_columns_fn = false;
+                last_sig = LastSig::IdentOrClose;
+                i += 1;
+                continue;
+            }
+            return true;
+        }
+
+        // 10. Parens, braces, JSON arrows (`->`, `->>`, `#>`, `#>>`) & other punctuation/digits
         if bytes[i] == b'(' {
             paren_depth = paren_depth.saturating_add(1);
-            if pending_extract_fn && extract_fn_depth.is_none() {
-                extract_fn_depth = Some(paren_depth);
+            if pending_extract_fn {
+                extract_stack.push((paren_depth, bracket_depth, brace_depth, 0));
             }
             if pending_columns_fn && columns_fn_depth.is_none() {
                 columns_fn_depth = Some(paren_depth);
+                columns_arg_count = 0;
+            }
+            if last_sig == LastSig::JsonArrow && json_arrow_paren_depth.is_none() {
+                json_arrow_paren_depth = Some(paren_depth);
             }
             pending_extract_fn = false;
             pending_columns_fn = false;
-            if !matches!(last_sig, LastSig::SubscriptOpen | LastSig::JsonArrow) {
-                last_sig = LastSig::Other;
-            }
+            last_sig = LastSig::Other;
             i += 1;
             continue;
         }
         if bytes[i] == b')' {
-            if extract_fn_depth == Some(paren_depth) {
-                extract_fn_depth = None;
+            if last_sig == LastSig::JsonArrow {
+                return true;
             }
-            if columns_fn_depth == Some(paren_depth) {
-                columns_fn_depth = None;
+            if extract_stack.last().is_some_and(|f| f.0 == paren_depth) {
+                extract_stack.pop();
+            }
+            if json_arrow_paren_depth == Some(paren_depth) {
+                json_arrow_paren_depth = None;
+                if next_non_ws_or_comment_is_concat_pipe(s, i + 1) {
+                    return true;
+                }
             }
             paren_depth = paren_depth.saturating_sub(1);
             pending_extract_fn = false;
@@ -812,7 +942,11 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             continue;
         }
         if bytes[i] == b'{' {
+            if in_arrow_rhs || in_extract_key_arg {
+                return true;
+            }
             brace_depth = brace_depth.saturating_add(1);
+            brace_stack.push((paren_depth, bracket_depth, true));
             pending_extract_fn = false;
             pending_columns_fn = false;
             last_sig = LastSig::Other;
@@ -820,7 +954,11 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             continue;
         }
         if bytes[i] == b'}' {
+            if in_arrow_rhs || in_extract_key_arg {
+                return true;
+            }
             brace_depth = brace_depth.saturating_sub(1);
+            brace_stack.pop();
             pending_extract_fn = false;
             pending_columns_fn = false;
             last_sig = LastSig::IdentOrClose;
@@ -828,6 +966,9 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             continue;
         }
         if matches!(bytes[i], b'-' | b'#') && bytes.get(i + 1) == Some(&b'>') {
+            if in_arrow_rhs || in_extract_key_arg {
+                return true;
+            }
             i += if bytes.get(i + 2) == Some(&b'>') {
                 3
             } else {
@@ -843,12 +984,66 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             while i < bytes.len() && bytes[i].is_ascii_digit() {
                 i += 1;
             }
+            if last_sig == LastSig::JsonArrow
+                && json_arrow_paren_depth.is_none()
+                && json_arrow_list_depth.is_none()
+                && next_non_ws_or_comment_is_concat_pipe(s, i)
+            {
+                return true;
+            }
             pending_extract_fn = false;
             pending_columns_fn = false;
             last_sig = LastSig::Other;
             continue;
         }
-        if columns_fn_depth.is_some() && bytes[i] == b'*' {
+        if bytes[i] == b',' {
+            if last_sig == LastSig::JsonArrow
+                || (json_arrow_paren_depth.is_some() && json_arrow_list_depth.is_none())
+            {
+                return true;
+            }
+            if let Some(top) = extract_stack.last_mut() {
+                if top.0 == paren_depth && top.1 == bracket_depth && top.2 == brace_depth {
+                    top.3 = top.3.saturating_add(1);
+                }
+            }
+            if let Some(top) = brace_stack.last_mut() {
+                if top.0 == paren_depth && top.1 == bracket_depth {
+                    top.2 = true;
+                }
+            }
+            i += 1;
+            pending_extract_fn = false;
+            pending_columns_fn = false;
+            last_sig = LastSig::Other;
+            continue;
+        }
+        if bytes[i] == b':' {
+            if in_arrow_rhs || in_extract_key_arg {
+                return true;
+            }
+            if bytes.get(i + 1) == Some(&b':') {
+                i += 2;
+            } else {
+                if let Some(top) = brace_stack.last_mut() {
+                    if top.0 == paren_depth && top.1 == bracket_depth {
+                        top.2 = false;
+                    }
+                }
+                i += 1;
+            }
+            pending_extract_fn = false;
+            pending_columns_fn = false;
+            last_sig = LastSig::Other;
+            continue;
+        }
+        if bytes[i] == b'|'
+            && bytes.get(i + 1) == Some(&b'|')
+            && (in_subscript || in_brace_key || in_arrow_rhs || in_extract_key_arg)
+        {
+            return true;
+        }
+        if in_arrow_rhs || in_extract_key_arg {
             return true;
         }
 
@@ -861,7 +1056,7 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
         last_sig = LastSig::Other;
     }
 
-    bracket_depth > 0
+    bracket_depth > 0 || columns_fn_depth.is_some()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2487,6 +2682,101 @@ mod tests {
             (
                 "benign-pill-bracket-prefix-literal",
                 r#"{"filters":[{"column":"url","mode":"include","value":"[ERROR] /api/ip/sid"}]}"#,
+            ),
+        ];
+
+        for (case_id, payload) in allowed_vectors {
+            assert!(
+                !filters_reference_pii(payload),
+                "expected {case_id} to be allowed for AnalystNoPii: {payload}"
+            );
+        }
+    }
+
+    #[test]
+    fn sec19_blocks_columns_lambdas_and_dynamic_key_concat_while_preserving_benign_views() {
+        let blocked_vectors = [
+            (
+                "bug-cloud-1-columns-negated-lambda",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE COLUMNS(c -> c != 'url') = '198.51.100.7'"}}"#,
+            ),
+            (
+                "bug-cloud-1-columns-starts-with-lambda",
+                r#"{"_view_extras":{"sql":"SELECT COLUMNS(c -> starts_with(c, 'clien')) FROM logs"}}"#,
+            ),
+            (
+                "bug-cloud-1-columns-concat",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE COLUMNS('clien' || 't_ip') = '198.51.100.7'"}}"#,
+            ),
+            (
+                "bug-cloud-1-subscript-concat",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE _extra['clien' || 't_ip'] = '198.51.100.7'"}}"#,
+            ),
+            (
+                "bug-cloud-1-json-extract-concat",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE json_extract_string(_extra, 'clien' || 't_ip') = '198.51.100.7'"}}"#,
+            ),
+            (
+                "bug-cloud-1-json-extract-chr-concat",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE json_extract_string(_extra, chr(99) || 'id') = 'sess1'"}}"#,
+            ),
+            (
+                "bug-cloud-1-struct-key-concat",
+                r#"{"_view_extras":{"sql":"SELECT {'clien' || 't_ip': 1}"}}"#,
+            ),
+            (
+                "bug-cloud-1-columns-empty",
+                r#"{"_view_extras":{"sql":"SELECT COLUMNS() FROM logs"}}"#,
+            ),
+            (
+                "bug-cloud-1-columns-two-literals",
+                r#"{"_view_extras":{"sql":"SELECT COLUMNS('url', 'pop') FROM logs"}}"#,
+            ),
+            (
+                "bug-cloud-1-json-arrow-paren-concat",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE _extra->>('clien' || 't_ip') = '198.51.100.7'"}}"#,
+            ),
+            (
+                "bug-cloud-1-json-arrow-fn-rhs",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE _extra->>concat('clien', 't_ip') = '198.51.100.7'"}}"#,
+            ),
+            (
+                "bug-cloud-1-json-arrow-list-concat",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE _extra->['headers', 'clien' || 't_ip'] IS NOT NULL"}}"#,
+            ),
+            (
+                "bug-cloud-1-subscript-fn-key",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE _extra[concat('clien', 't_ip')] = '198.51.100.7'"}}"#,
+            ),
+            (
+                "bug-cloud-1-struct-fn-key",
+                r#"{"_view_extras":{"sql":"SELECT {format('{}', 'cid'): 1}"}}"#,
+            ),
+        ];
+
+        for (case_id, payload) in blocked_vectors {
+            assert!(
+                filters_reference_pii(payload),
+                "expected {case_id} to be blocked as PII-referencing: {payload}"
+            );
+        }
+
+        let allowed_vectors = [
+            (
+                "benign-columns-regex-nonpii",
+                r#"{"_view_extras":{"sql":"SELECT COLUMNS('^(status|url|pop)$') FROM logs"}}"#,
+            ),
+            (
+                "benign-array-index",
+                r#"{"_view_extras":{"sql":"SELECT arr[1] FROM logs"}}"#,
+            ),
+            (
+                "benign-extra-subscript-safe",
+                r#"{"_view_extras":{"sql":"SELECT _extra['safe'] FROM logs"}}"#,
+            ),
+            (
+                "benign-struct-safe-key",
+                r#"{"_view_extras":{"sql":"SELECT {'safe': 1}"}}"#,
             ),
         ];
 

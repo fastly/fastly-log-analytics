@@ -82,13 +82,21 @@ def backup_export(payload: BackupExportPayload, request: Request):
     )
 
 
+MAX_BACKUP_UPLOAD_BYTES = 10 * 1024 * 1024
+
+
 @sessions_admin_router.post("/backup/import", response_model=BackupImportResponse, response_model_exclude_unset=True)
 async def backup_import(
     request: Request, file: UploadFile = File(...), passphrase: str = Form(...), mode: str = Form("skip-collisions")
 ):
     if mode not in ("skip-collisions", "merge-services-on-collision", "abort"):
         raise HTTPException(status_code=400, detail={"error": "invalid_mode"})
-    blob = await file.read()
+    blob = await file.read(MAX_BACKUP_UPLOAD_BYTES + 1)
+    if len(blob) > MAX_BACKUP_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail={"error": "payload_too_large", "max_bytes": MAX_BACKUP_UPLOAD_BYTES},
+        )
     try:
         result = await asyncio.to_thread(share_db.import_backup, blob, passphrase, mode=mode)
     except ValueError as exc:

@@ -878,3 +878,173 @@ fn sec21_active_scoring_service_patch_round_trips_canonical_fields_and_blocks_sp
     assert_eq!(drop_st, 409);
     assert_eq!(drop_body["error"], "committed_field_locked");
 }
+
+#[test]
+fn scoring_retrain_and_restore_validate_matrix_versions_and_protect_index_json() {
+    let p = Platform::new();
+    p.provision_logging_service();
+    let en = p.ok(
+        "POST",
+        "/api/services/fixtureService/scoring/enable",
+        json!({}),
+    );
+    assert_eq!(p.run_job(en["job"].clone())["status"], "complete");
+
+    let valid_retrain = p.ok(
+        "POST",
+        "/api/services/fixtureService/scoring/retrain",
+        json!({
+            "matrix": {
+                "version": "2027-01-15-v1",
+                "vocab_size": 2,
+                "session_count": 4,
+                "transition_count": 6,
+                "counts": {"/": {"/checkout": 6}},
+                "row_totals": {"/": 6},
+                "categories": {"/": "home", "/checkout": "checkout"},
+                "anchors": []
+            },
+            "stats": {"sessions_kept": 4, "transitions": 6},
+            "auc_against_labels": null
+        }),
+    );
+    assert_eq!(valid_retrain["ok"], true);
+    assert_eq!(valid_retrain["version"], "2027-01-15-v1");
+
+    let long_ver = "a".repeat(65);
+    for bad_ver in ["index", "..", ".", "", long_ver.as_str(), "v1\0", "a..b"] {
+        let (retrain_st, retrain_body) = p.call(
+            "POST",
+            "/api/services/fixtureService/scoring/retrain",
+            json!({
+                "matrix": {
+                    "version": bad_ver,
+                    "vocab_size": 2,
+                    "session_count": 1,
+                    "transition_count": 1,
+                    "counts": {"/": {"/checkout": 1}},
+                    "row_totals": {"/": 1}
+                }
+            }),
+        );
+        assert_eq!(
+            retrain_st, 400,
+            "expected retrain 400 for {bad_ver:?}, got {retrain_st}: {retrain_body}"
+        );
+        assert_eq!(
+            retrain_body["error"], "invalid_matrix_version",
+            "retrain error mismatch for {bad_ver:?}: {retrain_body}"
+        );
+
+        let (restore_st, restore_body) = p.call(
+            "POST",
+            "/api/services/fixtureService/scoring/matrix/versions/restore?confirm=true",
+            json!({"version": bad_ver}),
+        );
+        assert_eq!(
+            restore_st, 400,
+            "expected restore 400 for {bad_ver:?}, got {restore_st}: {restore_body}"
+        );
+        assert_eq!(
+            restore_body["error"], "invalid_matrix_version",
+            "restore error mismatch for {bad_ver:?}: {restore_body}"
+        );
+    }
+
+    let versions = p.ok(
+        "GET",
+        "/api/services/fixtureService/scoring/matrix/versions",
+        json!({}),
+    );
+    let version_list = versions["versions"].as_array().unwrap();
+    assert_eq!(
+        version_list.len(),
+        1,
+        "matrices/index.json must stay intact: {versions}"
+    );
+    assert_eq!(version_list[0]["version"], "2027-01-15-v1");
+    assert_eq!(versions["active_version"], "2027-01-15-v1");
+
+    let restored = p.ok(
+        "POST",
+        "/api/services/fixtureService/scoring/matrix/versions/restore?confirm=true",
+        json!({"version": "2027-01-15-v1"}),
+    );
+    assert_eq!(restored["ok"], true);
+    assert_eq!(restored["version"], "2027-01-15-v1");
+
+    // Seed 52 entries (49 valid + "index" + "../escape" + "old-valid-50") in matrices/index.json
+    // and verify MAX_MATRIX_HISTORY eviction deletes "old-valid-50" while skipping poisoned names.
+    let svc_rec = p.admin_get("svc:fixtureService").unwrap().unwrap().value;
+    let ak_ref = svc_rec["fos_access_key_ref"].as_str().unwrap();
+    let sk_ref = svc_rec["fos_secret_key_ref"].as_str().unwrap();
+    let ak = p.adapter.secret(ak_ref).unwrap().unwrap();
+    let sk_env: Value = serde_json::from_str(&p.adapter.secret(sk_ref).unwrap().unwrap()).unwrap();
+    let sk = sk_env["secret_key"].as_str().unwrap().to_owned();
+    let index_key = p
+        .adapter
+        .calls()
+        .into_iter()
+        .find_map(|(m, path)| {
+            (m == "PUT" && path.ends_with("/matrices/index.json"))
+                .then(|| path.strip_prefix("/fos-fixture-logs/").unwrap().to_owned())
+        })
+        .expect("retrain must have written matrices/index.json");
+    let mut seeded_versions: Vec<Value> = (1..=49)
+        .map(|n| json!({"version": format!("2027-01-15-keep-{n:02}"), "vocab_size": 2}))
+        .collect();
+    seeded_versions.push(json!({"version": "index", "vocab_size": 2}));
+    seeded_versions.push(json!({"version": "../escape", "vocab_size": 2}));
+    seeded_versions.push(json!({"version": "2027-01-15-evict-ok", "vocab_size": 2}));
+    let put_resp = p
+        .adapter
+        .fos(FosRequest {
+            method: "PUT",
+            region: "us-east-1",
+            bucket: "fos-fixture-logs",
+            key: &index_key,
+            query: "",
+            access_key: &ak,
+            secret_key: &sk,
+            body: serde_json::to_vec(&json!({"versions": seeded_versions})).unwrap(),
+            timeout: std::time::Duration::from_secs(5),
+            response_limit: 65_536,
+            content_md5: None,
+        })
+        .unwrap();
+    assert_eq!(put_resp.status, 200);
+
+    let calls_before = p.adapter.calls().len();
+    p.ok(
+        "POST",
+        "/api/services/fixtureService/scoring/retrain",
+        json!({
+            "matrix": {
+                "version": "2027-01-15-v2",
+                "vocab_size": 2,
+                "session_count": 4,
+                "transition_count": 6,
+                "counts": {"/": {"/checkout": 6}},
+                "row_totals": {"/": 6}
+            }
+        }),
+    );
+    let all_calls = p.adapter.calls();
+    let new_deletes: Vec<&str> = all_calls[calls_before..]
+        .iter()
+        .filter(|(m, _)| m == "DELETE")
+        .map(|(_, path)| path.as_str())
+        .collect();
+    assert!(
+        new_deletes
+            .iter()
+            .any(|p| p.ends_with("/matrices/2027-01-15-evict-ok.json")),
+        "expected valid evicted version to be deleted from FOS, got {new_deletes:?}"
+    );
+    assert!(
+        !new_deletes
+            .iter()
+            .any(|p| p.ends_with("/matrices/index.json") || p.contains("..")),
+        "MAX_MATRIX_HISTORY eviction must never delete index.json or traversal paths: {new_deletes:?}"
+    );
+}

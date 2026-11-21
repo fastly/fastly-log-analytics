@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.responses import StreamingResponse
 
 from backend.core.request_context import RequestContext, build_request_context
@@ -27,6 +28,7 @@ from backend.models.analytics import (
 from backend.models.common import DEFAULT_ERROR_RESPONSES
 from backend.utils.auth import mask_ips_for
 from backend.utils.router_utils import (
+    make_error,
     make_section_expander,
     query_errors,
     require_high_scale,
@@ -91,6 +93,13 @@ def export_proxies_csv(
     format: str = "fastly-acl",
     ctx: RequestContext = Depends(build_request_context),
 ):
+    norm_threshold = threshold.strip().lower()
+    if norm_threshold not in {"high", "medium", "low"}:
+        raise HTTPException(status_code=400, detail=make_error("bad_request", "threshold must be High, Medium, or Low"))
+    norm_format = format.strip().lower()
+    if norm_format not in {"fastly-acl", "csv", "txt", "plain", "ip-list"}:
+        raise HTTPException(status_code=400, detail=make_error("bad_request", "Unsupported export format"))
+
     resolved_start, resolved_end = ctx.clamp(start_time, end_time)
     mask_ips = mask_ips_for(ctx.analyst_session)
     high_scale_service = require_high_scale(ctx)
@@ -98,10 +107,12 @@ def export_proxies_csv(
     res = res_raw.model_dump() if hasattr(res_raw, "model_dump") else res_raw
 
     clients = res.get("active_clients", [])
-    if threshold == "High":
+    if norm_threshold == "high":
         filtered_clients = [c for c in clients if c.get("risk_level") == "High"]
-    else:
+    elif norm_threshold == "medium":
         filtered_clients = [c for c in clients if c.get("risk_level") in ("High", "Medium")]
+    else:
+        filtered_clients = [c for c in clients if c.get("risk_level") in ("High", "Medium", "Low")]
 
     seen_ips = set()
     unique_clients = []
@@ -119,8 +130,9 @@ def export_proxies_csv(
 
     output = io.StringIO()
     writer = csv.writer(output)
+    is_csv = norm_format in {"fastly-acl", "csv"}
 
-    if format == "fastly-acl":
+    if is_csv:
         writer.writerow(["ip", "comment"])
         for client in filtered_clients:
             reason = (
@@ -132,17 +144,14 @@ def export_proxies_csv(
             output.write(f"{client['ip']}\n")
 
     output.seek(0)
-    filename = (
-        f"watchdog_blocklist_{threshold.lower()}_{format}.csv"
-        if format == "fastly-acl"
-        else f"blocklist_{threshold.lower()}.txt"
-    )
-    media_type = "text/csv" if format == "fastly-acl" else "text/plain"
+    filename = f"watchdog_blocklist_{norm_threshold}_{norm_format}.csv" if is_csv else f"blocklist_{norm_threshold}.txt"
+    safe_filename = re.sub(r"[^A-Za-z0-9._-]", "_", filename)
+    media_type = "text/csv" if is_csv else "text/plain"
 
     return StreamingResponse(
         io.BytesIO(output.getvalue().encode("utf-8")),
         media_type=media_type,
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
+        headers={"Content-Disposition": f'attachment; filename="{safe_filename}"'},
     )
 
 

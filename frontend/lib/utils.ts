@@ -37,8 +37,39 @@ export function oneOf<T extends string>(allowed: readonly T[], value: string | n
 
 export const IP_FAMILY_FIELDS = ['ip', 'client_ip', 'ip_address', 'remote_addr'] as const
 
+export const SHARED_PII_FIELDS = [
+  'ip',
+  'client_ip',
+  'c_ip',
+  'ip_address',
+  'remote_addr',
+  'oip',
+  'x-forwarded-for',
+  'x_forwarded_for',
+  'true-client-ip',
+  'true_client_ip',
+  'fastly-client-ip',
+  'fastly_client_ip',
+  'cookie_session',
+  'cid',
+  'client_id',
+  'edge_sid',
+  'sid',
+  'session_id',
+] as const
+
+const PII_RESTRICTED_FIELD_SET = new Set<string>([
+  ...SHARED_PII_FIELDS,
+  'origin_ip',
+  'xff',
+  'cmcd_sid',
+  'cmcd_cid',
+  'cmcd_session',
+])
+
 export function isIpFamilyField(column: string): boolean {
-  return (IP_FAMILY_FIELDS as readonly string[]).includes(column)
+  if (typeof column !== 'string') return false
+  return PII_RESTRICTED_FIELD_SET.has(column.trim().toLowerCase())
 }
 
 export const ACTIVE_SERVICE_COOKIE = 'fla.activeServiceId'

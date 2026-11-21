@@ -189,8 +189,12 @@ fn parse_fsm1(buf: &[u8]) -> Option<TransitionMatrix> {
     let ver_len = r.u16()? as usize;
     let version = std::str::from_utf8(r.take(ver_len)?).ok()?.to_string();
 
-    let mut str_off = Vec::with_capacity(n_routes + 1);
-    for _ in 0..=n_routes {
+    let off_count = n_routes.checked_add(1)?;
+    if off_count.checked_mul(4)? > r.buf.len() - r.pos {
+        return None;
+    }
+    let mut str_off = Vec::with_capacity(off_count);
+    for _ in 0..off_count {
         str_off.push(r.u32()?);
     }
     // Offsets must be monotonic and bounded so route_bytes slicing is panic-free.
@@ -200,13 +204,19 @@ fn parse_fsm1(buf: &[u8]) -> Option<TransitionMatrix> {
     let blob_len = *str_off.last()? as usize;
     let str_blob = r.take(blob_len)?.to_vec();
 
+    if n_routes > r.buf.len() - r.pos {
+        return None;
+    }
     let mut row_total = Vec::with_capacity(n_routes);
     for _ in 0..n_routes {
         row_total.push(r.uvarint()?);
     }
 
-    let mut row_off = Vec::with_capacity(n_routes + 1);
-    for _ in 0..=n_routes {
+    if off_count > r.buf.len() - r.pos {
+        return None;
+    }
+    let mut row_off = Vec::with_capacity(off_count);
+    for _ in 0..off_count {
         row_off.push(u32::try_from(r.uvarint()?).ok()?);
     }
     if row_off.windows(2).any(|w| w[0] > w[1]) {
@@ -214,6 +224,9 @@ fn parse_fsm1(buf: &[u8]) -> Option<TransitionMatrix> {
     }
     let total_pairs = *row_off.last()? as usize;
 
+    if total_pairs.checked_mul(2)? > r.buf.len() - r.pos {
+        return None;
+    }
     let mut col_ids = Vec::with_capacity(total_pairs);
     let mut counts = Vec::with_capacity(total_pairs);
     for _ in 0..total_pairs {
@@ -476,5 +489,82 @@ mod tests {
             // Any prefix-truncation parses to None or a value, never panics.
             let _ = parse_fsm1(&bytes[..cut]);
         }
+    }
+
+    #[test]
+    fn adversarial_header_counts_return_none_without_oom() {
+        use std::alloc::{GlobalAlloc, Layout, System};
+        use std::cell::Cell;
+
+        thread_local! {
+            static ALLOC_CAP: Cell<usize> = const { Cell::new(usize::MAX) };
+        }
+
+        struct CappedAlloc;
+
+        // SAFETY: Delegates directly to `std::alloc::System` with unmodified `layout`/`ptr`
+        // arguments when within the thread-local test cap, or returns `null_mut()` per the
+        // `GlobalAlloc` contract when a single allocation exceeds the Wasm memory ceiling.
+        unsafe impl GlobalAlloc for CappedAlloc {
+            unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+                if ALLOC_CAP.with(|cap| layout.size() > cap.get()) {
+                    return std::ptr::null_mut();
+                }
+                // SAFETY: Caller upholds `GlobalAlloc::alloc` preconditions (`layout.size() > 0`).
+                unsafe { System.alloc(layout) }
+            }
+            unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+                if ALLOC_CAP.with(|cap| layout.size() > cap.get()) {
+                    return std::ptr::null_mut();
+                }
+                // SAFETY: Caller upholds `GlobalAlloc::alloc_zeroed` preconditions.
+                unsafe { System.alloc_zeroed(layout) }
+            }
+            unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+                if ALLOC_CAP.with(|cap| new_size > cap.get()) {
+                    return std::ptr::null_mut();
+                }
+                // SAFETY: Caller upholds `GlobalAlloc::realloc` preconditions.
+                unsafe { System.realloc(ptr, layout, new_size) }
+            }
+            unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+                // SAFETY: Caller upholds `GlobalAlloc::dealloc` preconditions.
+                unsafe { System.dealloc(ptr, layout) }
+            }
+        }
+
+        #[global_allocator]
+        static TEST_ALLOC: CappedAlloc = CappedAlloc;
+
+        struct CapGuard;
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                ALLOC_CAP.with(|cap| cap.set(usize::MAX));
+            }
+        }
+        ALLOC_CAP.with(|cap| cap.set(64 * 1024 * 1024));
+        let _guard = CapGuard;
+
+        // n_routes = u32::MAX (overflows n_routes + 1 on 32-bit wasm32, 16 GiB alloc on 64-bit)
+        let n_routes_u32_max = b"FSM1\x01\x01\x00\x00\x00\xff\xff\xff\xff\x00\x00";
+        assert!(parse_fsm1(n_routes_u32_max).is_none());
+
+        // n_routes = 0x2000_0000 (> isize::MAX bytes on 32-bit wasm32, 2 GiB alloc on 64-bit)
+        let n_routes_half_gib = b"FSM1\x01\x01\x00\x00\x00\x00\x00\x00\x20\x00\x00";
+        assert!(parse_fsm1(n_routes_half_gib).is_none());
+
+        // n_routes = 1, str_off = [0, 0], row_total = [1], row_off = [0, u32::MAX]
+        // (total_pairs = u32::MAX -> 48 GiB col_ids + counts preallocation without bounds check)
+        let mut total_pairs_u32_max = Vec::new();
+        total_pairs_u32_max.extend_from_slice(b"FSM1\x01");
+        total_pairs_u32_max.extend_from_slice(&1u32.to_le_bytes()); // vocab_size = 1
+        total_pairs_u32_max.extend_from_slice(&1u32.to_le_bytes()); // n_routes = 1
+        total_pairs_u32_max.extend_from_slice(&0u16.to_le_bytes()); // ver_len = 0
+        total_pairs_u32_max.extend_from_slice(&0u32.to_le_bytes()); // str_off[0] = 0
+        total_pairs_u32_max.extend_from_slice(&0u32.to_le_bytes()); // str_off[1] = 0
+        total_pairs_u32_max.push(1); // row_total[0] = 1
+        total_pairs_u32_max.push(0); // row_off[0] = 0
+        total_pairs_u32_max.extend_from_slice(&[0xff, 0xff, 0xff, 0xff, 0x0f]); // row_off[1] = u32::MAX
+        assert!(parse_fsm1(&total_pairs_u32_max).is_none());
     }
 }

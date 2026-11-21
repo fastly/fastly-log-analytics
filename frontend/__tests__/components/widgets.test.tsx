@@ -1635,11 +1635,18 @@ describe('FilterBar, ActiveFiltersBanner, AddFilterDialogContent & FilterValueCe
       expect(container.querySelector('button')).toBeNull()
     })
 
-    it('still allows filtering by oip (origin IP) when masking', () => {
+    it('also renders oip (origin IP) as plain text (no filter menu) when masking while keeping non-PII fields interactive', () => {
       mocks.maskIps.mockReturnValue(true)
-      render(<FilterValueCell filters={[{ column: 'oip', value: '151.101.1.51' }]} />)
+      const { container, unmount } = render(
+        <FilterValueCell filters={[{ column: 'oip', value: '151.101.1.51' }]} />,
+      )
+      expect(screen.getByText('151.101.1.51')).toBeInTheDocument()
+      expect(container.querySelector('button')).toBeNull()
+      unmount()
+
+      render(<FilterValueCell filters={[{ column: 'pop', value: 'JFK' }]} />)
       expect(
-        screen.getByRole('button', { name: /Filter actions for 151.101.1.51/i }),
+        screen.getByRole('button', { name: /Filter actions for JFK/i }),
       ).toBeInTheDocument()
     })
   })
@@ -2249,7 +2256,7 @@ describe('TimeSeriesChart, ScorerSeries, PlotlyChart, TrafficChart, CardGrid, Fi
       expect(urlRowButton.className).toMatch(/\bpl-4\.5\b/)
     })
 
-    it('disables drill-down on `ip` when masking while keeping `oip` clickable', () => {
+    it('disables drill-down on `ip` and `oip` when masking while keeping non-PII fields clickable', () => {
       mocks.maskIps.mockReturnValue(true)
       const onRowClick = vi.fn()
       const { unmount } = render(
@@ -2261,9 +2268,16 @@ describe('TimeSeriesChart, ScorerSeries, PlotlyChart, TrafficChart, CardGrid, Fi
       expect(screen.queryByRole('button', { name: /filter to/i })).toBeNull()
       unmount()
 
-      render(<TopTenTable title="Top Origin IPs" field="oip" data={{ total: 1, top: [{ value: '151.101.1.51', count: 9 }] }} onRowClick={onRowClick} />)
-      fireEvent.click(screen.getByRole('button', { name: /filter to 151.101.1.51/i }))
-      expect(onRowClick).toHaveBeenCalledWith('oip', '151.101.1.51')
+      const { unmount: unmountOip } = render(
+        <TopTenTable title="Top Origin IPs" field="oip" data={{ total: 1, top: [{ value: '151.101.1.xxx', count: 9 }] }} onRowClick={onRowClick} />,
+      )
+      expect(screen.getByText('151.101.1.xxx')).toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: /filter to/i })).toBeNull()
+      unmountOip()
+
+      render(<TopTenTable title="Top POPs" field="pop" data={{ total: 1, top: [{ value: 'JFK', count: 9 }] }} onRowClick={onRowClick} />)
+      fireEvent.click(screen.getByRole('button', { name: /filter to JFK/i }))
+      expect(onRowClick).toHaveBeenCalledWith('pop', 'JFK')
     })
 
     it('copies CSV to clipboard, escapes formula-injection payloads, mounts NotLoggedIndicator, and colors deltas', async () => {

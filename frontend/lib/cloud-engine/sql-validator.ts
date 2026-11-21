@@ -79,6 +79,18 @@ export const BLOCKED_FUNCTIONS = [
   "query_table",
   "sniff_csv",
   "which_secret",
+  "arrow_scan",
+  "arrow_scan_dumb",
+  "seq_scan",
+  "enable_logging",
+  "disable_logging",
+  "enable_profiling",
+  "disable_profiling",
+  "truncate_duckdb_logs",
+  "force_checkpoint",
+  "summary",
+  "test_all_types",
+  "test_vector_types",
 ] as const;
 
 export const BLOCKED_FUNCTION_PREFIXES = [
@@ -575,109 +587,225 @@ export function validateUserSql(
     ? new Set(Array.from(allowedTables, (t) => t.toLowerCase()))
     : null;
 
-  for (let i = 0; i < effectiveLen; i++) {
-    const tok = tokens[i];
-    const nextTok = i + 1 < effectiveLen ? tokens[i + 1] : null;
-    const prevTok = i > 0 ? tokens[i - 1] : null;
+  const FROM_CLAUSE_END_KEYWORDS = new Set([
+    "where",
+    "group",
+    "having",
+    "window",
+    "qualify",
+    "order",
+    "limit",
+    "offset",
+    "fetch",
+    "union",
+    "intersect",
+    "except",
+  ]);
+  const SUBQUERY_START_KEYWORDS = new Set([
+    "select",
+    "with",
+    "values",
+    "summarize",
+    "describe",
+  ]);
 
-    if (tok.kind === "word" || tok.kind === "quoted_ident") {
-      const lower = tok.lower;
-
-      // Check blocked statement keywords (allow scalar `replace(...)` and `truncate(...)` function calls,
-      // and `grouping sets` / `set time zone` checks)
-      if (tok.kind === "word" && BLOCKED_STATEMENT_KEYWORDS.has(lower)) {
-        const isScalarCall =
-          (lower === "replace" || lower === "truncate") &&
-          nextTok?.kind === "symbol" &&
-          nextTok.value === "(" &&
-          prevTok?.lower !== "or";
-        if (!isScalarCall) {
-          throw new SQLValidationError(
-            `keyword_blocked:${lower}`,
-            `Keyword '${tok.value}' is not allowed in user queries.`,
-          );
-        }
+  const checkIdentifierAndCall = (identTok: SqlToken, prev: SqlToken | null, next: SqlToken | null) => {
+    const lower = identTok.lower;
+    if (identTok.kind === "word" && BLOCKED_STATEMENT_KEYWORDS.has(lower)) {
+      const isScalarCall =
+        (lower === "replace" || lower === "truncate") &&
+        next?.kind === "symbol" &&
+        next.value === "(" &&
+        prev?.lower !== "or";
+      if (!isScalarCall) {
+        throw new SQLValidationError(
+          `keyword_blocked:${lower}`,
+          `Keyword '${identTok.value}' is not allowed in user queries.`,
+        );
       }
-
-      // Check function call: `ident (`
-      if (nextTok && nextTok.kind === "symbol" && nextTok.value === "(") {
-        if (BLOCKED_FUNCTION_SET.has(lower)) {
-          throw new SQLValidationError(
-            `function_denylist:${lower}`,
-            `Function '${tok.value}' is not allowed in user queries.`,
-          );
-        }
-        for (const prefix of BLOCKED_FUNCTION_PREFIXES) {
-          if (lower.startsWith(prefix)) {
-            throw new SQLValidationError(
-              `function_prefix:${prefix}`,
-              `Function '${tok.value}' uses blocked prefix '${prefix}'.`,
-            );
-          }
-        }
+    }
+    if (next && next.kind === "symbol" && next.value === "(") {
+      if (BLOCKED_FUNCTION_SET.has(lower)) {
+        throw new SQLValidationError(
+          `function_denylist:${lower}`,
+          `Function '${identTok.value}' is not allowed in user queries.`,
+        );
       }
-
-      // Check schema qualification: `schema . table`
-      if (nextTok && nextTok.kind === "symbol" && nextTok.value === ".") {
-        if (BLOCKED_SCHEMAS.has(lower)) {
+      for (const prefix of BLOCKED_FUNCTION_PREFIXES) {
+        if (lower.startsWith(prefix)) {
           throw new SQLValidationError(
-            `schema_blocklist:${lower}`,
-            `Schema '${tok.value}' is not allowed in user queries.`,
-          );
-        }
-      }
-
-      // Check table references after FROM or JOIN
-      if (
-        prevTok &&
-        prevTok.kind === "word" &&
-        (prevTok.lower === "from" || prevTok.lower === "join")
-      ) {
-        if (tok.value.includes("/") || tok.value.includes("\\") || tok.value.includes(".")) {
-          throw new SQLValidationError(
-            "catalog_blocklist:table_name_path",
-            `Table name '${tok.value}' contains path-like characters.`,
-          );
-        }
-        if (lower.startsWith("pg_")) {
-          throw new SQLValidationError(
-            "table_prefix:pg_",
-            `System table '${tok.value}' is not allowed in user queries.`,
-          );
-        }
-        const isFunctionTable = nextTok && nextTok.kind === "symbol" && nextTok.value === "(";
-        if (isFunctionTable && !ALLOWED_TABLE_FUNCTIONS.has(lower)) {
-          throw new SQLValidationError(
-            `function_table_not_allowed:${lower}`,
-            `Table function '${tok.value}' is not allowed in user queries.`,
-          );
-        }
-        if (
-          !isFunctionTable &&
-          nextTok?.value !== "." &&
-          allowedTableSet &&
-          !allowedTableSet.has(lower) &&
-          !cteAliases.has(lower)
-        ) {
-          throw new SQLValidationError(
-            "table_not_allowed",
-            `Table '${tok.value}' is not in the allowed table list.`,
+            `function_prefix:${prefix}`,
+            `Function '${identTok.value}' uses blocked prefix '${prefix}'.`,
           );
         }
       }
     }
+    if (next && next.kind === "symbol" && next.value === ".") {
+      if (BLOCKED_SCHEMAS.has(lower)) {
+        throw new SQLValidationError(
+          `schema_blocklist:${lower}`,
+          `Schema '${identTok.value}' is not allowed in user queries.`,
+        );
+      }
+    }
+  };
 
-    // Block DuckDB string-literal file scan shorthand: `FROM 'secret.parquet'` or `JOIN '/etc/passwd'`
-    if (
-      tok.kind === "string" &&
-      prevTok &&
-      prevTok.kind === "word" &&
-      (prevTok.lower === "from" || prevTok.lower === "join")
+  const validateTableObjectToken = (
+    objTok: SqlToken,
+    afterObj: SqlToken | null,
+    allowCte: boolean,
+  ) => {
+    const lower = objTok.lower;
+    if (objTok.value.includes("/") || objTok.value.includes("\\") || objTok.value.includes(".")) {
+      throw new SQLValidationError(
+        "catalog_blocklist:table_name_path",
+        `Table name '${objTok.value}' contains path-like characters.`,
+      );
+    }
+    if (lower.startsWith("pg_")) {
+      throw new SQLValidationError(
+        "table_prefix:pg_",
+        `System table '${objTok.value}' is not allowed in user queries.`,
+      );
+    }
+    const isFunctionTable = afterObj && afterObj.kind === "symbol" && afterObj.value === "(";
+    if (isFunctionTable) {
+      if (!ALLOWED_TABLE_FUNCTIONS.has(lower)) {
+        throw new SQLValidationError(
+          `function_table_not_allowed:${lower}`,
+          `Table function '${objTok.value}' is not allowed in user queries.`,
+        );
+      }
+    } else if (
+      allowedTableSet &&
+      !allowedTableSet.has(lower) &&
+      !(allowCte && cteAliases.has(lower))
     ) {
       throw new SQLValidationError(
-        "table_path_literal",
-        "String literal file paths in FROM/JOIN are not allowed in user queries.",
+        "table_not_allowed",
+        `Table '${objTok.value}' is not in the allowed table list.`,
       );
+    }
+  };
+
+  type ParenFrame = {
+    isSubquery: boolean;
+    savedInFrom: boolean;
+    savedExpectingTableRef: boolean;
+  };
+  const parenStack: ParenFrame[] = [];
+  let inFromClause = false;
+  let expectingTableRef = false;
+
+  for (let i = 0; i < effectiveLen; i++) {
+    const tok = tokens[i];
+    const nextTok = i + 1 < effectiveLen ? tokens[i + 1] : null;
+    const prevTok = i > 0 ? tokens[i - 1] : null;
+    const inExprParen =
+      parenStack.length > 0 && !parenStack[parenStack.length - 1].isSubquery;
+
+    if (tok.kind === "word" || tok.kind === "quoted_ident") {
+      checkIdentifierAndCall(tok, prevTok, nextTok);
+    }
+
+    if (tok.kind === "symbol" && tok.value === "(") {
+      const isSubquery =
+        nextTok?.kind === "word" && SUBQUERY_START_KEYWORDS.has(nextTok.lower);
+      parenStack.push({
+        isSubquery,
+        savedInFrom: inFromClause,
+        savedExpectingTableRef: isSubquery ? false : expectingTableRef,
+      });
+      if (isSubquery) {
+        inFromClause = false;
+        expectingTableRef = false;
+      } else {
+        expectingTableRef = false;
+      }
+      continue;
+    }
+
+    if (tok.kind === "symbol" && tok.value === ")") {
+      const frame = parenStack.pop();
+      if (frame) {
+        inFromClause = frame.savedInFrom;
+        expectingTableRef = false;
+      }
+      continue;
+    }
+
+    if (!inExprParen) {
+      if (tok.kind === "word") {
+        const lower = tok.lower;
+        if (lower === "from" && prevTok?.lower !== "distinct") {
+          inFromClause = true;
+          expectingTableRef = true;
+          continue;
+        }
+        if (lower === "join") {
+          inFromClause = true;
+          expectingTableRef = true;
+          continue;
+        }
+        if ((lower === "summarize" || lower === "describe") && (i === 0 || prevTok?.value === "(")) {
+          if (
+            nextTok &&
+            !(nextTok.kind === "word" && (nextTok.lower === "select" || nextTok.lower === "with" || nextTok.lower === "from")) &&
+            !(nextTok.kind === "symbol" && nextTok.value === "(")
+          ) {
+            inFromClause = true;
+            expectingTableRef = true;
+          }
+          continue;
+        }
+        if (inFromClause && FROM_CLAUSE_END_KEYWORDS.has(lower)) {
+          inFromClause = false;
+          expectingTableRef = false;
+        }
+      } else if (inFromClause && tok.kind === "symbol" && tok.value === ",") {
+        expectingTableRef = true;
+        continue;
+      }
+    }
+
+    if (expectingTableRef) {
+      if (tok.kind === "word" && tok.lower === "lateral") {
+        continue;
+      }
+      if (tok.kind === "string") {
+        throw new SQLValidationError(
+          "table_path_literal",
+          "String literal file paths in table positions are not allowed in user queries.",
+        );
+      }
+      if (tok.kind === "word" || tok.kind === "quoted_ident") {
+        if (nextTok && nextTok.kind === "symbol" && nextTok.value === ".") {
+          const objTok = i + 2 < effectiveLen ? tokens[i + 2] : null;
+          const afterObj = i + 3 < effectiveLen ? tokens[i + 3] : null;
+          if (!objTok || (objTok.kind !== "word" && objTok.kind !== "quoted_ident")) {
+            throw new SQLValidationError("parse_error", "Malformed qualified table reference.");
+          }
+          if (afterObj && afterObj.kind === "symbol" && afterObj.value === ".") {
+            throw new SQLValidationError(
+              `schema_blocklist:${tok.lower}`,
+              `Catalog-qualified table '${tok.value}.${objTok.value}' is not allowed in user queries.`,
+            );
+          }
+          if (tok.lower !== "main") {
+            throw new SQLValidationError(
+              `schema_blocklist:${tok.lower}`,
+              `Schema '${tok.value}' is not allowed in user queries.`,
+            );
+          }
+          checkIdentifierAndCall(objTok, nextTok, afterObj);
+          validateTableObjectToken(objTok, afterObj, false);
+          i += 2;
+          expectingTableRef = false;
+          continue;
+        }
+        validateTableObjectToken(tok, nextTok, true);
+        expectingTableRef = false;
+      }
     }
   }
 

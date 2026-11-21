@@ -1617,6 +1617,9 @@ impl Acc {
             }
             fn cells(&mut self) -> Result<Vec<Cell>, String> {
                 let len = self.u32()? as usize;
+                if len > self.0.len() {
+                    return Err("partial_unreadable".to_string());
+                }
                 let mut out = Vec::with_capacity(len);
                 for _ in 0..len {
                     let cell = match self.u8()? {
@@ -1675,6 +1678,9 @@ impl Acc {
             let truncated = cur.u8()? != 0;
             let f_sources = cur.u64()?;
             let val_len = cur.u32()? as usize;
+            if val_len > cur.0.len() / 22 {
+                return Err("partial_unreadable".to_string());
+            }
             let mut values = HashMap::with_capacity(val_len);
             for _ in 0..val_len {
                 let val = cur.str()?;
@@ -1708,6 +1714,9 @@ impl Acc {
         }
 
         let ses_len = cur.u32()? as usize;
+        if ses_len > cur.0.len() / 9 {
+            return Err("partial_unreadable".to_string());
+        }
         let mut sessions = HashMap::with_capacity(ses_len);
         for _ in 0..ses_len {
             let ip = cur.str()?;
@@ -1729,6 +1738,9 @@ impl Acc {
                 let truncated = cur.u8()? != 0;
                 let sources = cur.u64()?;
                 let v_len = cur.u32()? as usize;
+                if v_len > cur.0.len() / 8 {
+                    return Err("partial_unreadable".to_string());
+                }
                 let mut values = HashMap::with_capacity(v_len);
                 for _ in 0..v_len {
                     let val = cur.str()?;
@@ -3439,5 +3451,132 @@ mod tests {
             255
         );
         assert!(parse_name("x/summary=1-2-p1s0-n1.parquet").is_none());
+    }
+
+    #[test]
+    fn decode_partial_rejects_oversized_element_counts_without_oom_and_preserves_valid_roundtrip() {
+        use std::alloc::{GlobalAlloc, Layout, System};
+
+        thread_local! {
+            static ALLOC_CAP: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
+        }
+
+        struct CappedAlloc;
+
+        // SAFETY: Delegates directly to `std::alloc::System` with unmodified `layout`/`ptr`
+        // arguments when within the thread-local test cap, or returns `null_mut()` per the
+        // `GlobalAlloc` contract when a single allocation exceeds the Wasm memory ceiling.
+        unsafe impl GlobalAlloc for CappedAlloc {
+            unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+                if ALLOC_CAP.with(|cap| layout.size() > cap.get()) {
+                    return std::ptr::null_mut();
+                }
+                // SAFETY: Caller upholds `GlobalAlloc::alloc` preconditions (`layout.size() > 0`).
+                unsafe { System.alloc(layout) }
+            }
+            unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+                if ALLOC_CAP.with(|cap| layout.size() > cap.get()) {
+                    return std::ptr::null_mut();
+                }
+                // SAFETY: Caller upholds `GlobalAlloc::alloc_zeroed` preconditions.
+                unsafe { System.alloc_zeroed(layout) }
+            }
+            unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+                if ALLOC_CAP.with(|cap| new_size > cap.get()) {
+                    return std::ptr::null_mut();
+                }
+                // SAFETY: Caller upholds `GlobalAlloc::realloc` preconditions.
+                unsafe { System.realloc(ptr, layout, new_size) }
+            }
+            unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+                // SAFETY: Caller upholds `GlobalAlloc::dealloc` preconditions.
+                unsafe { System.dealloc(ptr, layout) }
+            }
+        }
+
+        #[global_allocator]
+        static TEST_ALLOC: CappedAlloc = CappedAlloc;
+
+        struct CapGuard;
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                ALLOC_CAP.with(|cap| cap.set(usize::MAX));
+            }
+        }
+        ALLOC_CAP.with(|cap| cap.set(64 * 1024 * 1024));
+        let _guard = CapGuard;
+
+        for count in [0x4000_0000u32, u32::MAX] {
+            // 1. Cur::cells (via overview[0].cells)
+            let mut raw_cells = PARTIAL_MAGIC.to_vec();
+            raw_cells.extend_from_slice(&1u64.to_le_bytes()); // sources
+            raw_cells.extend_from_slice(&1u32.to_le_bytes()); // ov_len = 1
+            raw_cells.extend_from_slice(&0i64.to_le_bytes()); // hour = 0
+            raw_cells.extend_from_slice(&count.to_le_bytes()); // cells len
+            assert_eq!(
+                Acc::decode_partial(&raw_cells, Unit::Hour).err().as_deref(),
+                Some("partial_unreadable")
+            );
+
+            // 2. fields -> val_len
+            let mut raw_val = PARTIAL_MAGIC.to_vec();
+            raw_val.extend_from_slice(&1u64.to_le_bytes()); // sources
+            raw_val.extend_from_slice(&0u32.to_le_bytes()); // ov_len = 0
+            raw_val.extend_from_slice(&0u32.to_le_bytes()); // min_len = 0
+            raw_val.extend_from_slice(&1u32.to_le_bytes()); // fld_len = 1
+            raw_val.extend_from_slice(&1u32.to_le_bytes()); // field str len = 1
+            raw_val.push(b'f');
+            raw_val.extend_from_slice(&1i64.to_le_bytes()); // total
+            raw_val.push(0); // truncated
+            raw_val.extend_from_slice(&1u64.to_le_bytes()); // f_sources
+            raw_val.extend_from_slice(&count.to_le_bytes()); // val_len
+            assert_eq!(
+                Acc::decode_partial(&raw_val, Unit::Hour).err().as_deref(),
+                Some("partial_unreadable")
+            );
+
+            // 3. sessions -> ses_len
+            let mut raw_ses = PARTIAL_MAGIC.to_vec();
+            raw_ses.extend_from_slice(&1u64.to_le_bytes()); // sources
+            raw_ses.extend_from_slice(&0u32.to_le_bytes()); // ov_len = 0
+            raw_ses.extend_from_slice(&0u32.to_le_bytes()); // min_len = 0
+            raw_ses.extend_from_slice(&0u32.to_le_bytes()); // fld_len = 0
+            raw_ses.extend_from_slice(&count.to_le_bytes()); // ses_len
+            assert_eq!(
+                Acc::decode_partial(&raw_ses, Unit::Hour).err().as_deref(),
+                Some("partial_unreadable")
+            );
+
+            // 4. groups[0] -> v_len
+            let mut raw_grp = PARTIAL_MAGIC.to_vec();
+            raw_grp.extend_from_slice(&1u64.to_le_bytes()); // sources
+            raw_grp.extend_from_slice(&0u32.to_le_bytes()); // ov_len = 0
+            raw_grp.extend_from_slice(&0u32.to_le_bytes()); // min_len = 0
+            raw_grp.extend_from_slice(&0u32.to_le_bytes()); // fld_len = 0
+            raw_grp.extend_from_slice(&0u32.to_le_bytes()); // ses_len = 0
+            raw_grp.extend_from_slice(&1u32.to_le_bytes()); // groups[0] f_len = 1
+            raw_grp.extend_from_slice(&1u32.to_le_bytes()); // field str len = 1
+            raw_grp.push(b'g');
+            raw_grp.extend_from_slice(&1i64.to_le_bytes()); // total
+            raw_grp.push(0); // truncated
+            raw_grp.extend_from_slice(&1u64.to_le_bytes()); // sources
+            raw_grp.extend_from_slice(&count.to_le_bytes()); // v_len
+            assert_eq!(
+                Acc::decode_partial(&raw_grp, Unit::Hour).err().as_deref(),
+                Some("partial_unreadable")
+            );
+        }
+
+        // Valid empty & populated partial round-trips remain intact
+        let empty_acc = Acc::new(Unit::Hour);
+        let empty_encoded = empty_acc.encode_partial();
+        let empty_decoded = Acc::decode_partial(&empty_encoded, Unit::Hour).unwrap();
+        assert_eq!(empty_decoded.encode_partial(), empty_encoded);
+
+        let mut populated = Acc::new(Unit::Hour);
+        populated.fold(rich_window(0), 1).unwrap();
+        let pop_encoded = populated.encode_partial();
+        let pop_decoded = Acc::decode_partial(&pop_encoded, Unit::Hour).unwrap();
+        assert_eq!(pop_decoded.encode_partial().len(), pop_encoded.len());
     }
 }

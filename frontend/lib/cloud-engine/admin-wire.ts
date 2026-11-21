@@ -212,9 +212,18 @@ async function usage(request: Request): Promise<Response> {
     .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
   if (url.pathname.endsWith("/export")) {
     const columns = ["timestamp", "service_id", "operation_class", "operation_type", "url", "bytes", "function_name", "process_context", "estimated_cost", "count"] as const;
+    const plainNumRe = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
+    const leadingCtrlOrSpaceRe = /^[\s\x00-\x1f\x7f\u200b-\u200f\u2028-\u202f\ufeff]*/u;
     const cell = (value: unknown) => {
-      let text = String(value ?? "");
-      if (/^[=+\-@\t\r]/.test(text)) text = `'${text}`;
+      if (value == null) return '""';
+      if (typeof value === "number") return Number.isFinite(value) ? String(value) : '""';
+      if (typeof value === "boolean") return String(value);
+      let text = String(value);
+      if (!plainNumRe.test(text)) {
+        if (/^[\t\r\n]/.test(text) || /^[=+\-@|%]/.test(text.replace(leadingCtrlOrSpaceRe, ""))) {
+          text = `'${text}`;
+        }
+      }
       return `"${text.replaceAll('"', '""')}"`;
     };
     return new Response([columns.join(","), ...rows.map((row) => columns.map((key) => cell(row[key])).join(","))].join("\r\n"), {

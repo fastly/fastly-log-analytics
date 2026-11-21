@@ -961,7 +961,7 @@ def test_sec08_high_scale_aggregates_oip_bucket_merging_session_403_and_export_s
                 headers=req_hdrs,
             )
             assert r_other_svc.status_code == 403
-            assert r_other_svc.json()["detail"]["error"] == "service_not_authorized"
+            assert r_other_svc.json()["error"] == "service_not_authorized"
 
         with TestClient(http_app, client=("127.0.0.1", 50000), base_url="http://localhost") as admin_hc:
             r_exp_admin = admin_hc.get("/api/high-scale/services/svc-a/exports/exp-admin-1")

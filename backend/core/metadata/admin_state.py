@@ -9,6 +9,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
+from fastapi import HTTPException
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, TypeAdapter
 
 from backend.core.metadata.pg_pool import get_con, get_con_readonly
@@ -260,6 +261,12 @@ def list_views(service_id: str) -> list[dict]:
 def save_view(service_id: str, view) -> dict:
     con = get_con(service_id)
     view_id = view.id or str(uuid.uuid4())
+    existing = con.execute("SELECT service_id FROM views WHERE id = ?", (view_id,)).fetchone()
+    if existing is not None and str(existing["service_id"]) != str(service_id):
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "conflict", "message": "Saved view ID belongs to another service."},
+        )
     con.execute(
         "INSERT OR REPLACE INTO views (id, service_id, name, filters_json, time_range_type, start_time, end_time, page) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",

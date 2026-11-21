@@ -99,13 +99,32 @@ export const DEFAULT_SCHEMA_COLUMNS: readonly QuerySchemaColumn[] = [
   { column: "cookie_session", type: "VARCHAR" },
 ];
 
-const IP_PII_COLUMNS = new Set(["ip", "client_ip", "oip", "xff"]);
-const SESSION_PII_COLUMNS = new Set([
-  "edge_sid",
-  "cmcd_sid",
+export const IP_PII_COLUMNS = new Set([
+  "ip",
+  "client_ip",
+  "c_ip",
+  "ip_address",
+  "remote_addr",
+  "oip",
+  "origin_ip",
+  "xff",
+  "x-forwarded-for",
+  "x_forwarded_for",
+  "true-client-ip",
+  "true_client_ip",
+  "fastly-client-ip",
+  "fastly_client_ip",
+]);
+export const SESSION_PII_COLUMNS = new Set([
   "cookie_session",
   "cid",
+  "client_id",
+  "edge_sid",
+  "sid",
+  "session_id",
+  "cmcd_sid",
   "cmcd_cid",
+  "cmcd_session",
 ]);
 
 /**
@@ -319,7 +338,7 @@ export function rewriteCloudQuerySql(
 ): { rewrittenSql: string; hasExplicitLimit: boolean } {
   const cleaned = stripSqlComments(sql).trim().replace(/;\s*$/, "");
   const tableRewritten = cleaned.replace(
-    /\b(FROM|JOIN|SUMMARIZE|DESCRIBE)\s+(?:"logs"|logs|"requests"|requests)\b/gi,
+    /\b(FROM|JOIN|SUMMARIZE|DESCRIBE)\s+(?:(?:"main"|main)\s*\.\s*)?(?:"logs"|logs|"requests"|requests)\b/gi,
     (_m, kw: string) => `${kw} ${targetTable}`,
   );
   const hasExplicitLimit = /\bLIMIT\s+\d+/i.test(tableRewritten);
@@ -356,6 +375,32 @@ export function redactQueryRowsForPii(
     }
     return copy;
   });
+}
+
+function mergeLeadingCtes(
+  sqlStmt: string,
+  cteDefs: string[],
+  shadowSelectSql?: string,
+  targetTable?: string,
+): string {
+  if (cteDefs.length === 0) return sqlStmt;
+  const trimmed = sqlStmt.trim();
+  if (shadowSelectSql && targetTable) {
+    const sumMatch = /^(SUMMARIZE|DESCRIBE)\s+([A-Za-z0-9_"]+)\s*$/i.exec(trimmed);
+    if (sumMatch) {
+      const refName = sumMatch[2].replaceAll('"', "").toLowerCase();
+      if (refName === targetTable.toLowerCase() || refName === "logs" || refName === "requests") {
+        return `${sumMatch[1]} (${shadowSelectSql})`;
+      }
+    }
+  }
+  if (/^WITH\s+RECURSIVE\b/i.test(trimmed)) {
+    return `WITH RECURSIVE ${cteDefs.join(", ")}, ${trimmed.replace(/^WITH\s+RECURSIVE\s+/i, "")}`;
+  }
+  if (/^WITH\b/i.test(trimmed)) {
+    return `WITH ${cteDefs.join(", ")}, ${trimmed.replace(/^WITH\s+/i, "")}`;
+  }
+  return `WITH ${cteDefs.join(", ")} ${trimmed}`;
 }
 
 /**
@@ -404,36 +449,123 @@ export async function executeCloudQuery(
     Math.min(Number(req.max_rows ?? 1000), MAX_QUERY_ROWS),
   );
   const targetTable = ctx.tableName ?? "requests";
-  const { rewrittenSql, hasExplicitLimit } = rewriteCloudQuerySql(
+  const { rewrittenSql: baseRewrittenSql, hasExplicitLimit } = rewriteCloudQuerySql(
     rawSql,
     targetTable,
     maxRows,
   );
+  const maskIps = Boolean(ctx.maskIps || ctx.role === "analyst-no-pii");
+  const rewrittenSql = maskIps
+    ? baseRewrittenSql.replace(
+        /(,\s*)(?:(?:"main"|main)\s*\.\s*)?(?:"logs"|logs)\b/gi,
+        `$1${targetTable}`,
+      )
+    : baseRewrittenSql;
+
+  const baseInnerSql = stripSqlComments(rawSql)
+    .trim()
+    .replace(/;\s*$/, "")
+    .replace(
+      /\b(FROM|JOIN)\s+(?:(?:"main"|main)\s*\.\s*)?(?:"logs"|logs|"requests"|requests)\b/gi,
+      `$1 ${targetTable}`,
+    );
+  const innerSql = maskIps
+    ? baseInnerSql.replace(
+        /(,\s*)(?:(?:"main"|main)\s*\.\s*)?(?:"logs"|logs)\b/gi,
+        `$1${targetTable}`,
+      )
+    : baseInnerSql;
 
   const execSql =
     isSimpleSelectStatement(rewrittenSql) && hasExplicitLimit
       ? `SELECT * FROM (${rewrittenSql}) AS _q LIMIT ${maxRows + 1}`
       : isSimpleSelectStatement(rewrittenSql)
-        ? `SELECT * FROM (${ stripSqlComments(rawSql).trim().replace(/;\s*$/, "").replace(/\b(FROM|JOIN)\s+(?:"logs"|logs)\b/gi, `$1 ${targetTable}`) }) AS _q LIMIT ${maxRows + 1}`
+        ? `SELECT * FROM (${innerSql}) AS _q LIMIT ${maxRows + 1}`
         : rewrittenSql;
-
-  const maskIps = Boolean(ctx.maskIps || ctx.role === "analyst-no-pii");
-  const scope = ctx.since
-    ? `WITH ${quoteSqlIdent(ctx.since.table)} AS (SELECT * FROM main.${quoteSqlIdent(ctx.since.table)} WHERE ts_ms >= ${Math.floor(ctx.since.ms)}) `
-    : "";
 
   try {
     let fetchedRows: Record<string, unknown>[] = [];
     let explainPlan: string | null = null;
+    let finalRewrittenSql = rewrittenSql;
 
     if (ctx.runSql) {
+      const cteDefs: string[] = [];
+      let shadowSelectSql: string | undefined;
+
+      if (maskIps) {
+        const describeTarget =
+          targetTable === "requests" ? "requests" : `main.${quoteSqlIdent(targetTable)}`;
+        const descRows = await ctx
+          .runSql(`DESCRIBE SELECT * FROM ${describeTarget} LIMIT 0`)
+          .catch(() => []);
+        const validDesc =
+          Array.isArray(descRows) &&
+          descRows.length > 0 &&
+          typeof descRows[0]?.column_name === "string"
+            ? descRows
+            : [];
+        if (validDesc.length > 0) {
+          const replacements: string[] = [];
+          for (const col of validDesc) {
+            const colName = String(col.column_name);
+            const colLower = colName.toLowerCase();
+            const colType = String(col.column_type ?? "VARCHAR").toUpperCase();
+            const colIdent = quoteSqlIdent(colName);
+            const isTextType = /CHAR|TEXT|STRING/i.test(colType);
+            if (IP_PII_COLUMNS.has(colLower)) {
+              replacements.push(
+                isTextType
+                  ? `'0.0.0.0' AS ${colIdent}`
+                  : `CAST(NULL AS ${colType}) AS ${colIdent}`,
+              );
+            } else if (SESSION_PII_COLUMNS.has(colLower)) {
+              replacements.push(
+                isTextType
+                  ? `'[redacted]' AS ${colIdent}`
+                  : `CAST(NULL AS ${colType}) AS ${colIdent}`,
+              );
+            }
+          }
+          const replaceExpr =
+            replacements.length > 0 ? ` * REPLACE (${replacements.join(", ")})` : " *";
+          const sinceClause =
+            ctx.since && ctx.since.table === targetTable
+              ? ` WHERE ts_ms >= ${Math.floor(ctx.since.ms)}`
+              : "";
+          shadowSelectSql = `SELECT${replaceExpr} FROM main.${quoteSqlIdent(targetTable)}${sinceClause}`;
+          cteDefs.push(`${quoteSqlIdent(targetTable)} AS (${shadowSelectSql})`);
+        }
+      }
+
+      if (ctx.since && !(maskIps && shadowSelectSql && ctx.since.table === targetTable)) {
+        cteDefs.push(
+          `${quoteSqlIdent(ctx.since.table)} AS (SELECT * FROM main.${quoteSqlIdent(ctx.since.table)} WHERE ts_ms >= ${Math.floor(ctx.since.ms)})`,
+        );
+      }
+
+      const effectiveExplainTarget = mergeLeadingCtes(
+        rewrittenSql,
+        cteDefs,
+        shadowSelectSql,
+        targetTable,
+      );
+      const effectiveExecSql = mergeLeadingCtes(
+        execSql,
+        cteDefs,
+        shadowSelectSql,
+        targetTable,
+      );
+      finalRewrittenSql = effectiveExplainTarget;
+
       if (req.explain) {
-        const planRows = await ctx.runSql(`EXPLAIN ${scope}${rewrittenSql}`);
+        const planRows = await ctx.runSql(`EXPLAIN ${effectiveExplainTarget}`);
         explainPlan = planRows
           .map((r) => Object.values(r).join(" "))
           .join("\n");
       }
-      fetchedRows = await ctx.runSql(`${scope}${execSql}`);
+      fetchedRows = await ctx.runSql(effectiveExecSql);
+    } else if (ctx.since) {
+      finalRewrittenSql = `WITH ${quoteSqlIdent(ctx.since.table)} AS (SELECT * FROM main.${quoteSqlIdent(ctx.since.table)} WHERE ts_ms >= ${Math.floor(ctx.since.ms)}) ${rewrittenSql}`;
     }
 
     const truncated = fetchedRows.length > maxRows;
@@ -452,7 +584,7 @@ export async function executeCloudQuery(
 
     const debugEntry = {
       engine: "DuckDB-Wasm",
-      sql: `${scope}${rewrittenSql}`,
+      sql: finalRewrittenSql,
       duration_ms: elapsedMs,
     };
 

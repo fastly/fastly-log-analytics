@@ -192,6 +192,24 @@ _live_events_cache: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=1
 CacheRegistry.register("rum._live_events_cache", _live_events_cache)
 
 
+def _scrub_rum_live_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    from backend.core.share_db import apply_pii_policy, scrub_ip_text
+
+    def _walk(node: Any) -> Any:
+        if isinstance(node, str):
+            return scrub_ip_text(node) if node and node != "[redacted]" else node
+        if isinstance(node, dict):
+            return {k: _walk(v) for k, v in node.items()}
+        if isinstance(node, list):
+            return [_walk(v) for v in node]
+        if isinstance(node, tuple):
+            return tuple(_walk(v) for v in node)
+        return node
+
+    masked = apply_pii_policy(events, {"mask_ips": True})
+    return _walk(masked)
+
+
 @rum_analytics_router.get("/{service_id}/rum/live-events", response_model=list[RumLiveEventItem])
 async def rum_live_events(
     start_time: str | None = None,
@@ -202,6 +220,8 @@ async def rum_live_events(
     anchor: Annotated[str | None, Query()] = None,
 ) -> list[dict[str, Any]]:
     """Fetch recent live beacons stream to feed frontend ticker."""
+    from backend.utils.auth import mask_ips_for
+
     window = SimpleNamespace(range_token=range_token, anchor=anchor, start_time=start_time, end_time=end_time)
     high_scale_service = ctx.high_scale
     if high_scale_service is None:
@@ -232,7 +252,8 @@ async def rum_live_events(
     )
     cached_hs_live = _live_events_cache.get(hs_live_key)
     if cached_hs_live:
-        return list(cached_hs_live)
+        out_cached = list(cached_hs_live)
+        return _scrub_rum_live_events(out_cached) if mask_ips_for(ctx.analyst_session) else out_cached
     try:
         hs_events = await asyncio.to_thread(
             hs_rum_live, high_scale_service, start_time, end_time, 50, parsed_hs_filters
@@ -243,4 +264,4 @@ async def rum_live_events(
         ) from exc
     if hs_events:
         _live_events_cache[hs_live_key] = hs_events
-    return hs_events
+    return _scrub_rum_live_events(hs_events) if mask_ips_for(ctx.analyst_session) else hs_events

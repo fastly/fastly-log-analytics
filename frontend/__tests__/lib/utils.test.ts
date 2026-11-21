@@ -62,9 +62,9 @@ describe('downloadAsCsv', () => {
 })
 
 describe('isIpFamilyField, formatPopGeo & shouldLoadRumScript', () => {
-  it('matches client-IP-family columns and rejects non-IP / origin IP columns', () => {
-    for (const col of ['ip', 'client_ip', 'ip_address', 'remote_addr']) expect(isIpFamilyField(col)).toBe(true)
-    for (const col of ['oip', 'country', 'asn', 'city', 'url', 'ua', '']) expect(isIpFamilyField(col)).toBe(false)
+  it('matches client-IP-family and shared PII columns and rejects non-PII columns', () => {
+    for (const col of ['ip', 'client_ip', 'ip_address', 'remote_addr', 'oip']) expect(isIpFamilyField(col)).toBe(true)
+    for (const col of ['country', 'asn', 'city', 'url', 'ua', '']) expect(isIpFamilyField(col)).toBe(false)
     expect([...IP_FAMILY_FIELDS].sort()).toEqual(['client_ip', 'ip', 'ip_address', 'remote_addr'])
   })
 
@@ -552,14 +552,14 @@ describe('middleware /admin gate (security)', () => {
 
   it('enforces spoof resistance, Server Action blocking, non-admin pass-through, and x-service-id propagation', () => {
     expect(middleware(makeReq('http://localhost/admin', { host: 'localhost', 'x-proxied-by-caddy': 'true' })).status).toBe(307)
-    expect(middleware(makeReq('http://localhost/admin', { 'x-proxied-by-caddy': 'maybe' })).status).toBe(200)
+    expect(middleware(makeReq('http://localhost/admin', { 'x-proxied-by-caddy': 'maybe' })).status).toBe(307)
     expect(middleware(makeReq('http://localhost/_next/data/build-id/admin/settings.json', { 'x-proxied-by-caddy': 'true' })).status).toBe(403)
     expect(middleware(makeReq('http://localhost/_next/data/build-id/admin.json')).status).toBe(200)
     expect(middleware(makeReq('http://localhost/', { 'x-proxied-by-caddy': 'true', 'next-action': 'some-action-id' })).status).toBe(403)
     expect(middleware(makeReq('http://localhost/', { 'next-action': 'some-action-id' })).status).toBe(200)
-    for (const p of ['/dashboard', '/logs', '/_next/data/build-id/logs.json']) {
-      expect(middleware(makeReq(`http://localhost${p}`, { 'x-proxied-by-caddy': 'true' })).status).toBe(200)
-    }
+    expect(middleware(makeReq('http://localhost/dashboard', { 'x-proxied-by-caddy': 'true' })).status).toBe(200)
+    expect(middleware(makeReq('http://localhost/logs', { 'x-proxied-by-caddy': 'true' })).status).toBe(307)
+    expect(middleware(makeReq('http://localhost/_next/data/build-id/logs.json', { 'x-proxied-by-caddy': 'true' })).status).toBe(403)
 
     const nextSpy = vi.spyOn(NextResponse, 'next')
     middleware(makeReq('http://localhost/dashboard?service=my-service-id'))

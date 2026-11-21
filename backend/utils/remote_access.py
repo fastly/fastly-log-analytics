@@ -11,8 +11,10 @@ import re
 import secrets
 import sys
 import time
+from collections.abc import MutableMapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from urllib.parse import urlparse
 
 from fastapi import HTTPException, Request, Response
@@ -20,7 +22,14 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
 from backend.core import share_db
-from backend.core.share_db import EXTRA_IP_PII_KEYS, IP_FAMILY_KEYS, SESSION_ID_KEYS, _canon_pii_key
+from backend.core.share_db import (
+    CMCD_SESSION_ALIAS_KEYS,
+    EXTRA_IP_PII_KEYS,
+    SAVED_VIEW_PII_FILTER_KEYS,
+    _canon_pii_key,
+    _extract_saved_view_filter_keys,
+    is_saved_view_pii_key,
+)
 from backend.utils.auth import (
     ANALYST_PENDING_SESSION_COOKIE,
     ANALYST_SESSION_COOKIE,
@@ -540,24 +549,48 @@ def _is_blocked_path(path: str) -> bool:
 
 _PATH_SERVICE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^/api/services/([^/]+)(?:/|$)"),
+    re.compile(r"^/api/high-scale/services/([^/]+)(?:/|$)"),
+    re.compile(r"^/api/query/schema/([^/]+)(?:/|$)"),
     re.compile(r"^/api/alerts/([^/]+)(?:/|$)"),
     re.compile(r"^/api/views/([^/]+)(?:/|$)"),
 )
 
 
+def _match_route_service_ids(routes: object, scope: MutableMapping[str, Any]) -> list[str]:
+    from starlette.routing import Match
+
+    for route in routes:  # type: ignore[attr-defined]
+        eff_ctxs = getattr(route, "effective_route_contexts", None)
+        if callable(eff_ctxs):
+            for cand in eff_ctxs():
+                match, child_scope = cand.matches(scope)
+                if match == Match.FULL:
+                    path_params = child_scope.get("path_params", {})
+                    out = [path_params[k] for k in ("service_id", "service") if k in path_params]
+                    if out:
+                        return out
+            continue
+        sub_routes = getattr(route, "routes", None)
+        if sub_routes:
+            nested = _match_route_service_ids(sub_routes, scope)
+            if nested:
+                return nested
+        match, child_scope = route.matches(scope)
+        if match == Match.FULL:
+            path_params = child_scope.get("path_params", {})
+            out = [path_params[k] for k in ("service_id", "service") if k in path_params]
+            if out:
+                return out
+            break
+    return []
+
+
 def _path_service_ids(request: Request) -> list[str]:
     routes = getattr(getattr(getattr(request, "app", None), "router", None), "routes", None)
     if routes:
-        from starlette.routing import Match
-
-        for route in routes:
-            match, child_scope = route.matches(request.scope)
-            if match == Match.FULL:
-                path_params = child_scope.get("path_params", {})
-                out = [path_params[k] for k in ("service_id", "service") if k in path_params]
-                if out:
-                    return out
-                break
+        matched = _match_route_service_ids(routes, request.scope)
+        if matched:
+            return matched
     path = request.url.path
     return [m.group(1) for pat in _PATH_SERVICE_PATTERNS if (m := pat.match(path))]
 
@@ -789,13 +822,20 @@ async def _body_service_ids(request: Request) -> list[str]:
     return [str(v) for k in ("service_id", "service") if isinstance(v := body.get(k), (str, int)) and str(v)]
 
 
-_PII_FORBIDDEN_FILTER_COLS = IP_FAMILY_KEYS | SESSION_ID_KEYS
+_PII_FORBIDDEN_FILTER_COLS = SAVED_VIEW_PII_FILTER_KEYS | CMCD_SESSION_ALIAS_KEYS | frozenset({"origin_ip"})
+_PII_FORBIDDEN_DIMENSION_COLS = _PII_FORBIDDEN_FILTER_COLS - frozenset({"oip"})
 
 
 async def _body_filter_keys(request: Request) -> list[str]:
     body = await _inspect_request_body(request) or {}
     filters = body.get("filters")
-    return [str(k) for k in filters] if isinstance(filters, dict) else []
+    if isinstance(filters, dict):
+        extracted, _ = _extract_saved_view_filter_keys(filters)
+        return list({*(str(k) for k in filters), *extracted})
+    if isinstance(filters, (list, str)):
+        extracted, _ = _extract_saved_view_filter_keys(filters)
+        return list(extracted)
+    return []
 
 
 async def _body_field_param(request: Request) -> str | None:
@@ -805,6 +845,24 @@ async def _body_field_param(request: Request) -> str | None:
         if isinstance(val, str) and val:
             return val
     return None
+
+
+async def _body_field_params(request: Request) -> tuple[list[str], list[str]]:
+    body = await _inspect_request_body(request) or {}
+    field_keys: list[str] = []
+    dim_keys: list[str] = []
+    singular_field = body.get("field")
+    if isinstance(singular_field, str) and singular_field:
+        field_keys.append(singular_field)
+    plural_fields = body.get("fields")
+    if isinstance(plural_fields, list):
+        for item in plural_fields:
+            if isinstance(item, str) and item:
+                field_keys.append(item)
+    singular_dim = body.get("dimension")
+    if isinstance(singular_dim, str) and singular_dim:
+        dim_keys.append(singular_dim)
+    return field_keys, dim_keys
 
 
 _static_limiter = _StaticAssetLimiter()
@@ -884,6 +942,7 @@ _EXTRA_FORBIDDEN_FILTER_COLS = EXTRA_IP_PII_KEYS
 
 async def _enforce_service_and_pii_scope(request: Request, session) -> JSONResponse | None:
     from backend import config as svcconfig
+    from backend.core.request_context import _valid_cookie_service_id
 
     raw_candidates: list[str] = list(_path_service_ids(request))
     for src in (
@@ -898,6 +957,11 @@ async def _enforce_service_and_pii_scope(request: Request, session) -> JSONRespo
     if getattr(request.state, _BODY_TOO_LARGE_ATTR, False):
         return _error_json(413, "payload_too_large", max_bytes=BODY_INSPECT_MAX_BYTES)
     raw_candidates.extend(body_sids)
+    if not raw_candidates:
+        cookie_sid = _valid_cookie_service_id(request)
+        if cookie_sid:
+            raw_candidates.append(cookie_sid)
+    caller_supplied = bool(raw_candidates)
     cdn_map = svcconfig.get_cdn_service_id_map() if raw_candidates else {}
     resolved_candidates = [cand if svcconfig.load_config(cand) else cdn_map.get(cand, cand) for cand in raw_candidates]
     if not resolved_candidates:
@@ -909,15 +973,20 @@ async def _enforce_service_and_pii_scope(request: Request, session) -> JSONRespo
         return _error_json(403, "service_not_authorized", service="")
     for eff in resolved_candidates:
         if not eff or eff not in allowed_services:
-            return _error_json(403, "service_not_authorized", service=eff or "")
+            return _error_json(403, "service_not_authorized", service=(eff or "") if caller_supplied else "")
     if session.pii_policy.get("mask_ips"):
         from backend.repositories.utils.filters import normalize_filter_key
 
-        dim = await _body_field_param(request)
+        field_keys, dim_keys = await _body_field_params(request)
         if getattr(request.state, _BODY_TOO_LARGE_ATTR, False):
             return _error_json(413, "payload_too_large", max_bytes=BODY_INSPECT_MAX_BYTES)
-        raw_keys = [*(await _body_filter_keys(request)), *((dim,) if dim is not None else ())]
-        for raw_key in raw_keys:
+        query_filter_keys: list[str] = []
+        raw_query_filters = request.query_params.get("filters")
+        if raw_query_filters:
+            qf_extracted, _ = _extract_saved_view_filter_keys(raw_query_filters)
+            query_filter_keys.extend(qf_extracted)
+        filter_and_field_keys = [*(await _body_filter_keys(request)), *query_filter_keys, *field_keys]
+        for raw_key in filter_and_field_keys:
             col = normalize_filter_key(raw_key)
             canon = _canon_pii_key(raw_key)
             if (
@@ -925,6 +994,18 @@ async def _enforce_service_and_pii_scope(request: Request, session) -> JSONRespo
                 or col in _EXTRA_FORBIDDEN_FILTER_COLS
                 or canon in _PII_FORBIDDEN_FILTER_COLS
                 or canon in _EXTRA_FORBIDDEN_FILTER_COLS
+                or is_saved_view_pii_key(raw_key)
+            ):
+                return _error_json(403, "pii_policy_violation", field=col)
+        for raw_dim in dim_keys:
+            col = normalize_filter_key(raw_dim)
+            canon = _canon_pii_key(raw_dim)
+            if (
+                col in _PII_FORBIDDEN_DIMENSION_COLS
+                or col in _EXTRA_FORBIDDEN_FILTER_COLS
+                or canon in _PII_FORBIDDEN_DIMENSION_COLS
+                or canon in _EXTRA_FORBIDDEN_FILTER_COLS
+                or (col != "oip" and canon != "oip" and is_saved_view_pii_key(raw_dim))
             ):
                 return _error_json(403, "pii_policy_violation", field=col)
     return None

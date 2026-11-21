@@ -263,6 +263,7 @@ def test_admin_attachment_analyst_scope_and_revocation_lifecycle(client, monkeyp
     monkeypatch.setattr("backend.utils.remote_access.get_tunnel_manager", lambda: manager)
     monkeypatch.setattr("backend.utils.remote_access.compute_fingerprint", lambda headers: "fixture")
     monkeypatch.setattr("backend.core.share_db.set_setting", lambda *args, **kwargs: None)
+    monkeypatch.setattr("backend.core.share_db.get_remote_invite", lambda *args, **kwargs: None)
     client.cookies.set("analyst_session_id", "session-1")
 
     assert client.post("/api/views").status_code == 200
@@ -401,9 +402,10 @@ def test_analyst_masking_allows_non_ip_filter(client):
 
 
 @pytest.mark.security_regression
-def test_analyst_masking_allows_oip_filter(client):
+def test_analyst_masking_blocks_oip_filter(client):
     _as_analyst(client, service_ids=["svcA"], pii_policy=_MASK)
-    assert _post_filter(client, filters={"oip": {"mode": "include", "values": ["151.101.1.51"]}}).status_code == 200
+    r = _post_filter(client, filters={"oip": {"mode": "include", "values": ["151.101.1.51"]}})
+    assert r.status_code == 403 and r.json()["error"] == "pii_policy_violation"
 
 
 @pytest.mark.security_regression
@@ -570,10 +572,10 @@ def test_normalize_filter_key_resolves_junk_pii_keys_into_forbidden_set(key):
 
 
 @pytest.mark.security_regression
-@pytest.mark.parametrize("key", "url status country oip waf_sig_ind _bot_name".split())
+@pytest.mark.parametrize("key", "url status country waf_sig_ind _bot_name".split())
 def test_normalize_filter_key_leaves_non_pii_keys_allowed(key):
     assert normalize_filter_key(key) not in _PII_FORBIDDEN_FILTER_COLS, key
-    assert _PII_FORBIDDEN_FILTER_COLS == IP_FAMILY_KEYS | SESSION_ID_KEYS
+    assert IP_FAMILY_KEYS | SESSION_ID_KEYS | {"oip", "origin_ip"} <= _PII_FORBIDDEN_FILTER_COLS
 
 
 @pytest.mark.security_regression

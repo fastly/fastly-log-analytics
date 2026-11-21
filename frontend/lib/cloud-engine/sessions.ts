@@ -7,6 +7,7 @@
  */
 
 import { escapeSqlLiteral, requireSafeIdent } from "./sql-validator";
+import { redactQueryRowsForPii } from "./query";
 import { compileFiltersToSql, type DuckDBColumnType } from "./dashboard/duckdb";
 import {
   buildSessionsEnrichSql,
@@ -730,6 +731,17 @@ export async function handleSessionsDetail(
   let endTime = body.end_time ?? "";
 
   if (body.session_token) {
+    if (maskIps && body.ip && body.ip !== "0.0.0.0") {
+      return {
+        status: 403,
+        body: {
+          detail: {
+            error: "pii_filter_forbidden",
+            field: "ip",
+          },
+        },
+      };
+    }
     const opened = openSessionToken(body.session_token);
     if (!opened) {
       return {
@@ -747,49 +759,58 @@ export async function handleSessionsDetail(
     startTime = opened.s;
     endTime = opened.e;
   } else if (maskIps) {
-    return {
-      status: 403,
-      body: {
-        detail: {
-          error: "pii_policy_violation",
-          field: "ip",
+    if (targetIp && targetIp !== "0.0.0.0") {
+      return {
+        status: 403,
+        body: {
+          detail: {
+            error: "pii_policy_violation",
+            field: "ip",
+          },
         },
-      },
-    };
+      };
+    }
+    if (!targetJa4) {
+      return {
+        status: 403,
+        body: {
+          detail: {
+            error: "pii_policy_violation",
+            field: "ip",
+          },
+        },
+      };
+    }
   }
 
   const tableName = requireSafeIdent(ctx.tableName ?? "requests", "tableName");
+  const useJa4Only = maskIps && !body.session_token && (!targetIp || targetIp === "0.0.0.0") && Boolean(targetJa4);
   const ja4Clause =
     targetJa4 != null && targetJa4 !== ""
-      ? ` AND "ja4" = '${escapeSqlLiteral(targetJa4)}'`
+      ? `${useJa4Only ? "" : " AND "}"ja4" = '${escapeSqlLiteral(targetJa4)}'`
       : "";
+  const ipWherePrefix = useJa4Only ? "" : `"ip" = '${escapeSqlLiteral(targetIp)}' AND `;
   const timestampSql = ctx.availableColumns?.has("ts_ms")
     ? 'EPOCH_MS(CAST("ts_ms" AS BIGINT))'
     : 'EPOCH_MS(EPOCH_MS("timestamp"))';
   const sql = `
     SELECT *
     FROM ${tableName}
-    WHERE "ip" = '${escapeSqlLiteral(targetIp)}'
-      AND ${timestampSql} >= EPOCH_MS(CAST(${Date.parse(startTime)} AS BIGINT))
-      AND ${timestampSql} <= EPOCH_MS(CAST(${Date.parse(endTime)} AS BIGINT))${ja4Clause}
+    WHERE ${ipWherePrefix}${timestampSql} >= EPOCH_MS(CAST(${Date.parse(startTime)} AS BIGINT))
+      AND ${timestampSql} <= EPOCH_MS(CAST(${Date.parse(endTime)} AS BIGINT))${useJa4Only ? ` AND ${ja4Clause}` : ja4Clause}
     ORDER BY ${timestampSql} ASC
     LIMIT 500
   `;
 
   const rawRows = ctx.runSql ? await ctx.runSql(sql) : [];
-  const data = rawRows.map((r) => {
+  const normalizedRows = rawRows.map((r) => {
     const copy: Record<string, unknown> = { ...r };
     if (typeof copy.timestamp === "number") {
       copy.timestamp = new Date(copy.timestamp).toISOString();
     }
-    if (!maskIps) return copy;
-    if ("ip" in copy) copy.ip = "0.0.0.0";
-    if ("edge_sid" in copy && copy.edge_sid != null) copy.edge_sid = "[redacted]";
-    if ("cookie_session" in copy && copy.cookie_session != null) {
-      copy.cookie_session = "[redacted]";
-    }
     return copy;
   });
+  const data = redactQueryRowsForPii(normalizedRows, maskIps);
   const columns = data.length > 0 ? Object.keys(data[0]) : [];
 
   return {

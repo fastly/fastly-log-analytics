@@ -15,6 +15,7 @@ from backend.core import metadata
 from backend.core.request_context import RequestContext, build_request_context, require_admin
 from backend.core.request_telemetry import HighScaleSections
 from backend.core.share_db import (
+    CMCD_SESSION_ALIAS_KEYS,
     PII_IP_KEYS,
     SESSION_ID_KEYS,
     _canon_pii_key,
@@ -584,7 +585,9 @@ def aggregates(
     should_mask_ips = mask_ips_for(ctx.analyst_session)
     dim_kind = _classify_saved_view_pii_key(dimension) if should_mask_ips else None
     canon_dim = _canon_pii_key(dimension) if should_mask_ips else ""
-    if should_mask_ips and (dim_kind == "session" or canon_dim in SESSION_ID_KEYS):
+    if should_mask_ips and (
+        dim_kind == "session" or canon_dim in SESSION_ID_KEYS or canon_dim in CMCD_SESSION_ALIAS_KEYS
+    ):
         raise HTTPException(
             status_code=403,
             detail=make_error(
