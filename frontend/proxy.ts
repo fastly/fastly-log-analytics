@@ -96,6 +96,23 @@ function isGatewayAuthenticatedRequest(request: NextRequest): boolean {
   )
 }
 
+function isLoopbackIpLiteral(ip: string): boolean {
+  const lc = ip.trim().toLowerCase()
+  if (/^[0:]+1$/.test(lc)) return true
+  const v4 = lc.startsWith('::ffff:') ? lc.slice(7) : lc
+  return v4 === '127.0.0.1' || v4.startsWith('127.') || v4 === '7f00:1'
+}
+
+function hasExternalForwardedFor(headers: Headers): boolean {
+  const raw = headers.get('x-forwarded-for')
+  if (!raw || raw.trim() === '') return false
+  const trimmed = raw.trim()
+  // Next.js `next start` injects a single loopback x-forwarded-for (e.g. `127.0.0.1`,
+  // `::1`, or `::ffff:127.0.0.1`) on local loopback requests. Mirror `apiSsrProxy.ts`
+  // and `backend/utils/remote_access.py`: any multi-hop chain or non-loopback IP is external.
+  return trimmed.includes(',') || !isLoopbackIpLiteral(trimmed)
+}
+
 function shouldGateAdminRequest(request: NextRequest): boolean {
   if (isGatewayAuthenticatedRequest(request)) return false
 
@@ -110,7 +127,7 @@ function shouldGateAdminRequest(request: NextRequest): boolean {
   const gatewayToken = headers.get('x-admin-gateway-token') ?? headers.get('x-fla-admin-gateway')
 
   const hasExternalProxyHeaders =
-    hasNonEmptyHeader(headers, 'x-forwarded-for') ||
+    hasExternalForwardedFor(headers) ||
     hasNonEmptyHeader(headers, 'fastly-client-ip') ||
     hasNonEmptyHeader(headers, 'true-client-ip') ||
     hasNonEmptyHeader(headers, 'x-real-ip') ||

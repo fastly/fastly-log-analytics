@@ -228,4 +228,26 @@ describe('SEC-02 & SEC-10.3 frontend proxy gating and cookie hardening', () => {
       else process.env.ADMIN_GATEWAY_REQUIRED = prevReq
     }
   })
+
+  it('allows single loopback x-forwarded-for on loopback /admin while gating multi-hop or external x-forwarded-for', () => {
+    const prevReq = process.env.ADMIN_GATEWAY_REQUIRED
+    try {
+      delete process.env.ADMIN_GATEWAY_REQUIRED
+      for (const xff of ['127.0.0.1', '::1', '::ffff:127.0.0.1']) {
+        const req = new NextRequest('http://127.0.0.1:13004/admin', {
+          headers: { host: '127.0.0.1:13004', 'x-forwarded-for': xff },
+        })
+        expect(proxy(req).status).toBe(200)
+      }
+      for (const xff of ['203.0.113.5', '127.0.0.1, 203.0.113.5', '127.0.0.1, ::1']) {
+        const req = new NextRequest('http://127.0.0.1:13004/admin', {
+          headers: { host: '127.0.0.1:13004', 'x-forwarded-for': xff },
+        })
+        expect(proxy(req).status).toBe(307)
+      }
+    } finally {
+      if (prevReq === undefined) delete process.env.ADMIN_GATEWAY_REQUIRED
+      else process.env.ADMIN_GATEWAY_REQUIRED = prevReq
+    }
+  })
 })
