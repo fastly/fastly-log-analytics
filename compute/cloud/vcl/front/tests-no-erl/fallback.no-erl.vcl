@@ -1,5 +1,6 @@
 // @scope: recv
 sub fallback_is_authenticated_and_declared_to_compute {
+  testing.inject_variable("req.is_ssl", true);
   set req.http.x-flp-front-key = "attacker";
   set req.http.x-flp-front-rl = "1";
   set req.url = "/api/auth/login/options";
