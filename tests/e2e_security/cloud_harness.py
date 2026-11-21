@@ -802,8 +802,9 @@ fn main() {
             let origin = "https://logs.example.test";
             let setup_code = "test-sentinel-setup-code-0001";
             let front_val = "f".repeat(28);
+            let front_key = front_val.as_str();
             let cdn_key = "test-sentinel-cdn-key-0001";
-            let runtime = EpochTestRuntime::new(origin, setup_code, &front_val, cdn_key);
+            let runtime = EpochTestRuntime::new(origin, setup_code, front_key, cdn_key);
             let store = MemoryStore::default();
             let now = runtime.now();
             let mut initial = AuthState {
@@ -1334,8 +1335,9 @@ fn main() {
             let origin = "https://logs.example.test";
             let setup_code = "test-sentinel-setup-code-0001";
             let front_val = "f".repeat(28);
+            let front_key = front_val.as_str();
             let cdn_key = "test-sentinel-cdn-key-0001";
-            let runtime = EpochTestRuntime::new(origin, setup_code, &front_val, cdn_key);
+            let runtime = EpochTestRuntime::new(origin, setup_code, front_key, cdn_key);
             let store = MemoryStore::default();
             let base_t = 1_800_000_000u64;
             let mut initial = AuthState {
@@ -1548,8 +1550,9 @@ fn main() {
             let origin = "https://logs.example.test";
             let setup_code = "test-sentinel-setup-code-0001";
             let front_val = "f".repeat(28);
+            let front_key = front_val.as_str();
             let cdn_key = "test-sentinel-cdn-key-0001";
-            let runtime = EpochTestRuntime::new(origin, setup_code, &front_val, cdn_key);
+            let runtime = EpochTestRuntime::new(origin, setup_code, front_key, cdn_key);
             let store = MemoryStore::default();
             let now = runtime.now();
 
@@ -2018,8 +2021,9 @@ fn main() {
             let origin = "https://logs.example.test";
             let setup_code = "test-sentinel-setup-code-0001";
             let front_val = "f".repeat(28);
+            let front_key = front_val.as_str();
             let cdn_key = "test-sentinel-cdn-key-0001";
-            let runtime = EpochTestRuntime::new(origin, setup_code, &front_val, cdn_key);
+            let runtime = EpochTestRuntime::new(origin, setup_code, front_key, cdn_key);
             let (p_st, p_body) = runtime.admin_call(
                 "POST",
                 "/api/admin/provision/execute",
