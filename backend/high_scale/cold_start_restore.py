@@ -34,7 +34,6 @@ from urllib.parse import quote, quote_plus, urlsplit
 
 import boto3
 from botocore.config import Config
-from fastapi import HTTPException
 
 from backend import config as svcconfig
 from backend import scoring
@@ -62,9 +61,8 @@ from backend.high_scale.postgres_control import (
 )
 from backend.high_scale.recovery import RecoveryReport, rebuild_serving_state_from_fos
 from backend.provision.fos_setup import ensure_fos_access_key
-from backend.routers.alerts import validate_webhook_url
 from backend.utils.bounded_cache import CacheRegistry
-from backend.utils.webhook_url import restricted_webhook_host
+from backend.utils.webhook_url import restricted_webhook_host, validate_webhook_url_syntax
 
 logger = logging.getLogger(__name__)
 
@@ -178,9 +176,9 @@ def _row_service_id(row: Any) -> str:
 
 def _validate_restored_webhook_url(url: str) -> str:
     try:
-        return validate_webhook_url(url)
-    except HTTPException as exc:
-        raise ValueError(f"invalid alert webhook URL: {exc.detail}") from None
+        return validate_webhook_url_syntax(url)
+    except ValueError as exc:
+        raise ValueError(f"invalid alert webhook URL: {exc}") from None
 
 
 def _source_object_id(service_id: str, domain: str, object_key: str, checksum: str) -> str:
