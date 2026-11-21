@@ -113,8 +113,12 @@ test.describe('Analyst Share Login Page Contract (/share-login)', () => {
       'Skipping destructive share state reset against non-local PLAYWRIGHT_BASE_URL',
     )
     await request.post('/api/admin/share/stop').catch(() => {})
+    const target = new URL(baseURL || process.env.PLAYWRIGHT_BASE_URL || 'http://127.0.0.1:13004')
     await request.post('/api/admin/share/start', {
-      data: { public_endpoint: 'https://share-e2e.example.com', forward_port: 13004 },
+      data: {
+        public_endpoint: `https://${target.host}`,
+        forward_port: Number(target.port) || 13004,
+      },
     })
   })
 
