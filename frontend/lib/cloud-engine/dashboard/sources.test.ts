@@ -234,6 +234,29 @@ describe("browserSource", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("does not share an in-flight or cached file read across services", async () => {
+    const pending = new Map<string, (response: Response) => void>();
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const serviceId = new Headers(init?.headers).get("x-service-id") ?? "";
+      return await new Promise<Response>((resolve) => pending.set(serviceId, resolve));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const base = browserSource("");
+    const a = base.withOptions({ serviceId: "service-a" });
+    const b = base.withOptions({ serviceId: "service-b" });
+
+    const first = a.fetchFile("same-file");
+    const second = b.fetchFile("same-file");
+    await vi.waitFor(() => expect(pending.size).toBe(2));
+    pending.get("service-a")!(new Response(new Uint8Array([1])));
+    pending.get("service-b")!(new Response(new Uint8Array([2])));
+
+    const [aFile, bFile] = await Promise.all([first, second]);
+    expect(new Uint8Array(aFile.bytes)).toEqual(new Uint8Array([1]));
+    expect(new Uint8Array(bFile.bytes)).toEqual(new Uint8Array([2]));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("reports telemetry per derived source while sharing its caches", async () => {
     const fetchMock = vi.fn<
       (url: string, init?: RequestInit) => Promise<Response>

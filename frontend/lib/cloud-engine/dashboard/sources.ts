@@ -692,6 +692,8 @@ export function browserSource(
     options?.serviceId
       ? `${cacheScope ?? "browser"}:${options.serviceId}`
       : cacheScope ?? "browser";
+  const fileScope = (options?: BrowserSourceOptions) =>
+    options?.serviceId ? sourceScope(options) : cacheScope;
   const sourceWith = (options?: BrowserSourceOptions): BrowserFileSource => ({
     async readDerivedFile(key, identity) {
       const cache = await getFileCache();
@@ -1039,14 +1041,15 @@ export function browserSource(
       const reqPath = fileRequestPath(key);
       const path = fileDisplayPath(key);
       const pageLoadId = options?.getPageLoadId?.();
+      const requestScope = mode?.identity ?? fileScope(options);
       const inMemory = memoryFiles.get(key);
-      if (inMemory && memoryFileIdentities.get(key) === mode?.identity) {
+      if (inMemory && memoryFileIdentities.get(key) === requestScope) {
         if (transfer) {
           memoryFiles.delete(key);
           memoryFileIdentities.delete(key);
           memoryFileBytes -= inMemory.byteLength;
         } else {
-          rememberFile(key, inMemory, mode?.identity);
+          rememberFile(key, inMemory, requestScope);
         }
         options?.onApiCall?.({
           source: "Browser Cache",
@@ -1063,7 +1066,7 @@ export function browserSource(
       }
       const url = `${baseUrl}${reqPath}`;
       // A caller identity already carries the current scope; the one captured at creation can be stale.
-      const cacheUrl = scopedCacheUrl(url, mode?.identity ?? cacheScope);
+      const cacheUrl = scopedCacheUrl(url, requestScope);
       const cacheStart =
         typeof performance !== "undefined" ? performance.now() : Date.now();
       const cache = await getFileCache();
@@ -1073,7 +1076,7 @@ export function browserSource(
         storeIndex.touch(key, bytes.byteLength);
         const cacheEnd =
           typeof performance !== "undefined" ? performance.now() : Date.now();
-        if (!transfer) rememberFile(key, bytes, mode?.identity);
+        if (!transfer) rememberFile(key, bytes, requestScope);
         options?.onApiCall?.({
           source: "Browser Cache",
           method: "GET",
@@ -1228,7 +1231,7 @@ export function browserSource(
         const network = await (aborted
           ? Promise.race([request.promise, aborted])
           : request.promise);
-        if (!transfer) rememberFile(key, network.bytes.slice(0), mode?.identity);
+        if (!transfer) rememberFile(key, network.bytes.slice(0), requestScope);
         return {
           bytes: network.bytes.slice(0),
           cached,
@@ -1240,11 +1243,15 @@ export function browserSource(
       }
     },
     async hasFile(key) {
-      if (memoryFiles.has(key) && memoryFileIdentities.get(key) === undefined) return true;
+      const requestScope = fileScope(options);
+      if (
+        memoryFiles.has(key) &&
+        memoryFileIdentities.get(key) === requestScope
+      ) return true;
       try {
         const cache = await getFileCache();
         const url = `${baseUrl}${fileRequestPath(key)}`;
-        return Boolean(await cache?.match(scopedCacheUrl(url, cacheScope)));
+        return Boolean(await cache?.match(scopedCacheUrl(url, requestScope)));
       } catch {
         return false;
       }
