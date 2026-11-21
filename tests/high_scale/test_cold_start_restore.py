@@ -1858,3 +1858,209 @@ def test_mismatched_nested_service_config_service_id_rejected_without_writes() -
     assert con.execute("SELECT COUNT(*) FROM alerts").fetchone()[0] == 0
     assert con.execute("SELECT COUNT(*) FROM scoring_labels").fetchone()[0] == 0
     assert con.execute("SELECT COUNT(*) FROM audit_logs").fetchone()[0] == 0
+
+
+# ── 11. Iteration 12 Tier-5 Security Hardening Regression Tests ──────────────
+
+
+@pytest.mark.no_postgres
+@pytest.mark.security_regression
+def test_cross_service_pk_collision_remints_uuids_and_preserves_other_tenant_rows() -> None:
+    con = _make_sqlite_metadata_db()
+    s3 = _FakeS3Client()
+
+    # Restore svc_a first with fixed IDs ("view-1", "alert-1", "lbl-1")
+    dr_a = _sample_dr_state("svc_a")
+    dr_a["views"][0]["name"] = "Tenant A Exclusive View"
+    dr_a["alerts"][0]["name"] = "Tenant A Exclusive Alert"
+    dr_a["scoring_labels"][0]["notes"] = "tenant-a-note"
+    s3.put_object(Bucket="bkt-a", Key="meta/dr_state.json", Body=json.dumps(dr_a).encode("utf-8"))
+
+    restore_from_fos(
+        service_id="svc_a",
+        bucket="bkt-a",
+        region="us-east-1",
+        fos_access_key="ak-a",
+        fos_secret_key="sk-a",
+        restore_serving_state=False,
+        s3_client=s3,
+        archive=ArchivePublication(InMemoryObjectStore()),
+        control=_InMemoryControlPlane(),
+        metadata_con=con,
+        save_config_fn=lambda _sid, _cfg: None,
+        clear_fos_client_fn=lambda _sid: None,
+        ensure_pg_schema_fn=lambda: True,
+        now=NOW,
+    )
+
+    # Now restore svc_b whose dr_state collides on "view-1", "alert-1", and "lbl-1"
+    dr_b = _sample_dr_state("svc_b")
+    dr_b["views"][0]["name"] = "Tenant B View"
+    dr_b["alerts"][0]["name"] = "Tenant B Alert"
+    dr_b["scoring_labels"][0]["notes"] = "tenant-b-note"
+    s3.put_object(Bucket="bkt-b", Key="meta/dr_state.json", Body=json.dumps(dr_b).encode("utf-8"))
+
+    res_b = restore_from_fos(
+        service_id="svc_b",
+        bucket="bkt-b",
+        region="us-east-1",
+        fos_access_key="ak-b",
+        fos_secret_key="sk-b",
+        restore_serving_state=False,
+        s3_client=s3,
+        archive=ArchivePublication(InMemoryObjectStore()),
+        control=_InMemoryControlPlane(),
+        metadata_con=con,
+        save_config_fn=lambda _sid, _cfg: None,
+        clear_fos_client_fn=lambda _sid: None,
+        ensure_pg_schema_fn=lambda: True,
+        now=NOW,
+    )
+    assert res_b.views_restored == 1
+    assert res_b.alerts_restored == 1
+    assert res_b.scoring_labels_restored == 1
+
+    # svc_a's original rows MUST remain 100% intact and owned by svc_a!
+    view_a = con.execute("SELECT service_id, name FROM views WHERE id = 'view-1'").fetchone()
+    assert view_a is not None and view_a["service_id"] == "svc_a" and view_a["name"] == "Tenant A Exclusive View"
+
+    alert_a = con.execute("SELECT service_id, name FROM alerts WHERE id = 'alert-1'").fetchone()
+    assert alert_a is not None and alert_a["service_id"] == "svc_a" and alert_a["name"] == "Tenant A Exclusive Alert"
+
+    lbl_a = con.execute("SELECT service_id, notes FROM scoring_labels WHERE id = 'lbl-1'").fetchone()
+    assert lbl_a is not None and lbl_a["service_id"] == "svc_a" and lbl_a["notes"] == "tenant-a-note"
+
+    # svc_b's restored rows exist under freshly minted UUIDs
+    view_b = con.execute("SELECT id, name FROM views WHERE service_id = 'svc_b'").fetchone()
+    assert view_b is not None and view_b["id"] != "view-1" and view_b["name"] == "Tenant B View"
+
+    alert_b = con.execute("SELECT id, name FROM alerts WHERE service_id = 'svc_b'").fetchone()
+    assert alert_b is not None and alert_b["id"] != "alert-1" and alert_b["name"] == "Tenant B Alert"
+
+    lbl_b = con.execute("SELECT id, notes FROM scoring_labels WHERE service_id = 'svc_b'").fetchone()
+    assert lbl_b is not None and lbl_b["id"] != "lbl-1" and lbl_b["notes"] == "tenant-b-note"
+
+
+@pytest.mark.no_postgres
+@pytest.mark.security_regression
+def test_restore_rejects_ssrf_webhook_urls_and_ssrf_cdn_urls(monkeypatch: pytest.MonkeyPatch) -> None:
+    for bad_hook_dr in (
+        {"webhook_url": "http://169.254.169.254/latest/meta-data/"},
+        {"webhook_url": "http://127.0.0.1:8000/admin"},
+        {"webhook_url": "https://[::ffff:127.0.0.1]/hook"},
+        {"webhook_url": None, "channels": [{"type": "webhook", "url": "http://169.254.169.254/latest/meta-data/"}]},
+        {"webhook_url": None, "channels": [{"type": "webhook", "webhook_url": "https://intranet.local/hook"}]},
+    ):
+        s3 = _FakeS3Client()
+        dr = _sample_dr_state("svc_ssrf")
+        dr["alerts"][0].update(bad_hook_dr)
+        s3.put_object(Bucket="bkt", Key="meta/dr_state.json", Body=json.dumps(dr).encode("utf-8"))
+        con = _make_sqlite_metadata_db()
+        with pytest.raises(ValueError, match="webhook"):
+            restore_from_fos(
+                service_id="svc_ssrf",
+                bucket="bkt",
+                region="us-east-1",
+                fos_access_key="ak",
+                fos_secret_key="sk",
+                restore_serving_state=False,
+                s3_client=s3,
+                archive=ArchivePublication(InMemoryObjectStore()),
+                control=_InMemoryControlPlane(),
+                metadata_con=con,
+                save_config_fn=lambda _sid, _cfg: None,
+                clear_fos_client_fn=lambda _sid: None,
+                ensure_pg_schema_fn=lambda: True,
+                now=NOW,
+            )
+        assert con.execute("SELECT COUNT(*) FROM alerts").fetchone()[0] == 0
+
+    # SSRF cdn_url rejected in reconstruct_service_config (both with and without cdn_secret)
+    for bad_cdn_cfg in (
+        {"cdn_url": "http://169.254.169.254/latest/meta-data/", "cdn_secret": "sec"},
+        {"cdn_url": "http://127.0.0.1:8000", "cdn_secret": "sec"},
+        {"cdn_url": "https://evil.example.com", "cdn_secret": "sec"},
+        {"cdn_url": "http://169.254.169.254/latest/meta-data/"},
+    ):
+        with pytest.raises(ValueError, match="cdn_url"):
+            reconstruct_service_config(
+                service_id="svc_cdn_bad",
+                bucket="bkt",
+                region="us-east-1",
+                prefix="",
+                fos_access_key="ak",
+                fos_secret_key="sk",
+                dr_service_config=bad_cdn_cfg,
+            )
+
+    ok_fastly_cfg = reconstruct_service_config(
+        service_id="svc_cdn_ok",
+        bucket="bkt",
+        region="us-east-1",
+        prefix="",
+        fos_access_key="ak",
+        fos_secret_key="sk",
+        dr_service_config={"cdn_url": "https://fos-cdn-test.global.ssl.fastly.net", "cdn_secret": "sec"},
+    )
+    assert ok_fastly_cfg["cdn_url"] == "https://fos-cdn-test.global.ssl.fastly.net"
+
+
+@pytest.mark.no_postgres
+@pytest.mark.security_regression
+def test_restore_validates_bucket_and_prefix_and_clears_bootstrap_cache() -> None:
+    from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
+
+    for bad_bucket in ("ab", "../evil", "my/bucket", "a..b", "MY-BUCKET", "-bad-bucket", "bad_bucket"):
+        with pytest.raises(ValueError, match="bucket"):
+            restore_from_fos(
+                service_id="svc1",
+                bucket=bad_bucket,
+                region="us-east-1",
+                fos_access_key="ak",
+                fos_secret_key="sk",
+            )
+
+    for bad_prefix in ("../secret", "logs/../../secret", "a\\b", "a?b", "a#b", "a\x00b", "a\nb"):
+        with pytest.raises(ValueError, match="prefix"):
+            restore_from_fos(
+                service_id="svc1",
+                bucket="my-bucket",
+                region="us-east-1",
+                prefix=bad_prefix,
+                fos_access_key="ak",
+                fos_secret_key="sk",
+            )
+        with pytest.raises(ValueError, match="archive_prefix"):
+            restore_from_fos(
+                service_id="svc1",
+                bucket="my-bucket",
+                region="us-east-1",
+                archive_prefix=bad_prefix,
+                fos_access_key="ak",
+                fos_secret_key="sk",
+            )
+
+    # Verify routers.bootstrap._bootstrap_cache is busted when restore_from_fos saves config
+    from backend.routers import bootstrap as bootstrap_mod
+
+    bootstrap_mod._bootstrap_cache["__test_stale__"] = {"stale": True}
+    assert isinstance(bootstrap_mod._bootstrap_cache, BoundedTTLCache)
+    assert bootstrap_mod._bootstrap_cache.get("__test_stale__") == {"stale": True}
+
+    restore_from_fos(
+        service_id="svc_cache_bust",
+        bucket="my-fos-bucket",
+        region="us-east-1",
+        fos_access_key="ak",
+        fos_secret_key="sk",
+        restore_serving_state=False,
+        s3_client=_FakeS3Client(),
+        archive=ArchivePublication(InMemoryObjectStore()),
+        control=_InMemoryControlPlane(),
+        save_config_fn=lambda _sid, _cfg: None,
+        clear_fos_client_fn=lambda _sid: None,
+        ensure_pg_schema_fn=lambda: True,
+        now=NOW,
+    )
+    assert CacheRegistry is not None
+    assert bootstrap_mod._bootstrap_cache.get("__test_stale__") is None

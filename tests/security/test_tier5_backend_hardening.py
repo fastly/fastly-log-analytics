@@ -1918,3 +1918,154 @@ def test_sec_t5_iter10_within_group_ordered_set_aggregate_comma_joins() -> None:
     assert "request_facts" not in wg_sql and "FROM logs" not in wg_sql, wg_sql
     assert wg_sql.count("fla_cv_m_req") == 3, wg_sql
     assert "fla_cv_m_req" in str(wg_settings.get("additional_table_filters", "")), wg_settings
+
+
+def test_sec_t5_iter12_as_parity_global_not_in_on_join_skip_union_split_and_tuple_dot() -> None:
+    from backend.core.sql_validator import SQLValidationError, validate_user_sql
+    from backend.high_scale import query as hs_query
+    from backend.models.analytics import QueryRequest as DashboardQueryRequest
+
+    # 1. Sub-case 1A (AS-parity), 1B (GLOBAL NOT IN & USING), and 1C (ON 1 = <prev_kw> JOIN) attacks blocked
+    for blocked_sql in (
+        # 1A: AS-run operand prefix swallowing FROM / JOIN
+        "WITH 'ok' AS as SELECT name, as FROM system.tables",
+        "WITH 'ok' AS as SELECT url, country FROM logs UNION ALL SELECT secret_meta, as FROM high_scale_batch_publications",
+        "SELECT c.secret_meta FROM (SELECT 1 AS as, url FROM logs) AS a JOIN logs AS b ON 1 = as JOIN high_scale_batch_publications AS c ON 1 = 1",
+        "SELECT 2 * as FROM system.tables",
+        "SELECT as FROM system.tables",
+        # 1B: GLOBAL NOT IN & USING inside ON keeping in_on_clause=True
+        "SELECT c.secret_meta FROM (SELECT 1 AS where, '/ok' AS url FROM logs) AS a JOIN logs AS b ON a.url = b.url AND a.url GLOBAL NOT IN ('/nope') AND where = 1, high_scale_batch_publications AS c",
+        "SELECT c.name FROM (SELECT 1 AS where, '/ok' AS url FROM logs) AS a JOIN logs AS b ON a.url = b.url AND a.url GLOBAL NOT IN ('/nope') AND where = 1, system.tables AS c",
+        "SELECT c.secret_meta FROM (SELECT 1 AS using, 1 AS where FROM logs) AS a JOIN logs AS b ON 1 = using AND where = 1, high_scale_batch_publications AS c",
+        "WITH a AS (SELECT 'x' AS format FROM logs) SELECT c.secret_col FROM a JOIN logs AS b ON format NOT IN ('y'), ops_secret AS c",
+        # 1C: ON 1 = <prev_word> JOIN <disallowed_table | parquet>
+        "WITH a AS (SELECT 1 AS zone FROM logs) SELECT c.secret_col FROM a JOIN logs AS b ON 1 = zone JOIN ops_secret AS c ON 1 = 1",
+        "WITH a AS (SELECT 1 AS escape FROM logs) SELECT c.secret_col FROM a JOIN logs AS b ON 1 = escape JOIN ops_secret AS c ON 1 = 1",
+        "WITH a AS (SELECT 1 AS global FROM logs) SELECT c.secret_col FROM a JOIN logs AS b ON 1 = global JOIN ops_secret AS c ON 1 = 1",
+        "SELECT * FROM (SELECT 1 AS zone FROM logs) AS a JOIN logs AS b ON 1 = zone JOIN 'secret.parquet' AS c ON 1 = 1",
+        "SELECT c.secret_meta FROM (SELECT 1 AS to FROM logs) AS a JOIN logs AS b ON 1 = to JOIN high_scale_batch_publications AS c ON 1 = 1",
+        "SELECT c.secret_meta FROM (SELECT 1 AS and FROM logs) AS a JOIN logs AS b ON 1 = and JOIN high_scale_batch_publications AS c ON 1 = 1",
+        "SELECT c.secret_meta FROM (SELECT 1 AS on FROM logs) AS a JOIN logs AS b ON 1 = on JOIN high_scale_batch_publications AS c ON 1 = 1",
+        "SELECT c.secret_meta FROM logs AS a JOIN logs AS b ON left(read_parquet('/etc/passwd'), 3) = '/a'",
+    ):
+        with pytest.raises(SQLValidationError):
+            validate_user_sql(blocked_sql, allowed_tables={"logs"})
+
+    # 2. Benign controls (1A AS chains, 1B GLOBAL LEFT JOIN / WHERE NOT, 1C post-ON ORDER BY/GROUP BY/UNION, 1D tuple .1)
+    for benign_sql in (
+        "WITH 1 AS as SELECT 1 = as AS flag, url FROM logs",
+        "SELECT 1 = where AS flag FROM (SELECT 1 AS where FROM logs)",
+        "SELECT x.select AS as FROM (SELECT 1 AS select FROM logs) AS x",
+        "SELECT a.url FROM logs AS a GLOBAL LEFT JOIN logs AS b ON a.url = b.url",
+        "SELECT a.url FROM logs AS a JOIN logs AS b ON a.url GLOBAL NOT IN ('/nope') WHERE NOT (a.status = 500)",
+        "WITH b AS (SELECT 200 AS zone FROM logs) SELECT a.status, a.url FROM logs AS a JOIN b ON a.status = zone ORDER BY a.status, a.url",
+        "WITH b AS (SELECT 200 AS escape FROM logs) SELECT a.status, a.url FROM logs AS a JOIN b ON a.status = escape GROUP BY a.status, a.url",
+        "WITH b AS (SELECT 200 AS global FROM logs) SELECT a.status, a.url FROM logs AS a JOIN b ON a.status = global UNION ALL SELECT status, url FROM logs",
+        "WITH b AS (SELECT 200 AS on FROM logs) SELECT a.status, a.url FROM logs AS a JOIN b ON a.status = on WHERE a.status = 200",
+        "SELECT status FROM (SELECT tuple(1) AS where, 200 AS status FROM logs) AS s WHERE where.1 = 1",
+        "SELECT union.1 FROM (SELECT tuple(200) AS union FROM logs) AS u",
+    ):
+        assert validate_user_sql(benign_sql, allowed_tables={"logs"}).parse_tree.get("statements"), benign_sql
+
+    executed: list[tuple[str, dict[str, object]]] = []
+
+    class _StubCH:
+        _table_filters_verified = True
+
+        def execute(
+            self,
+            sql: str,
+            params: dict[str, object] | None = None,
+            *,
+            settings: dict[str, object] | None = None,
+        ) -> list[dict[str, object]]:
+            del params
+            executed.append((sql, dict(settings or {})))
+            return [{"service_id": "svc_alpha", "client_ip": "0.0.0.0"}]
+
+    hs_svc = SimpleNamespace(service_id="svc_alpha", client=_StubCH())
+
+    for hs_blocked_sql in (
+        "WITH 'ok' AS as SELECT name, as FROM system.tables",
+        "WITH 'ok' AS as SELECT url, country FROM logs UNION ALL SELECT secret_meta, as FROM high_scale_batch_publications",
+        "SELECT c.secret_meta FROM (SELECT 1 AS as, url FROM logs) AS a JOIN logs AS b ON 1 = as JOIN high_scale_batch_publications AS c ON 1 = 1",
+        "SELECT c.secret_meta FROM (SELECT 1 AS where, '/ok' AS url FROM logs) AS a JOIN logs AS b ON a.url = b.url AND a.url GLOBAL NOT IN ('/nope') AND where = 1, high_scale_batch_publications AS c",
+        "SELECT c.name FROM (SELECT 1 AS where, '/ok' AS url FROM logs) AS a JOIN logs AS b ON a.url = b.url AND a.url GLOBAL NOT IN ('/nope') AND where = 1, system.tables AS c",
+        "SELECT c.secret_meta FROM (SELECT 1 AS zone FROM logs) AS a JOIN logs AS b ON 1 = zone JOIN high_scale_batch_publications AS c ON 1 = 1",
+        "SELECT c.secret_meta FROM (SELECT 1 AS escape FROM logs) AS a JOIN logs AS b ON 1 = escape JOIN high_scale_batch_publications AS c ON 1 = 1",
+        "SELECT c.secret_meta FROM (SELECT 1 AS global FROM logs) AS a JOIN logs AS b ON 1 = global JOIN high_scale_batch_publications AS c ON 1 = 1",
+        "SELECT c.secret_meta FROM (SELECT 1 AS to FROM logs) AS a JOIN logs AS b ON 1 = to JOIN high_scale_batch_publications AS c ON 1 = 1",
+    ):
+        with pytest.raises(PermissionError):
+            hs_query.query_endpoint(
+                hs_svc,
+                DashboardQueryRequest(sql=hs_blocked_sql, max_rows=10),
+                "2026-11-19T00:00:00Z",
+                "2026-11-19T01:00:00Z",
+                mask_ips=True,
+                tables={"request_facts": "fla_cv_m_req", "rum_vitals_facts": "fla_cv_m_vit"},
+            )
+    assert executed == []
+
+    # 3. request_facts 3x rewrite verification across 1A, 1B, and 1C
+    for hs_rf_sql in (
+        "SELECT c.service_id, c.url FROM (SELECT 1 AS as, url FROM logs) AS a JOIN logs AS b ON 1 = as JOIN request_facts AS c ON 1 = 1",
+        "SELECT c.service_id, c.client_ip FROM (SELECT 1 AS where, '/ok' AS url FROM logs) AS a JOIN logs AS b ON a.url = b.url AND a.url GLOBAL NOT IN ('/nope') AND where = 1, request_facts AS c",
+        "SELECT c.service_id, c.url FROM (SELECT 1 AS zone, url FROM logs) AS a JOIN logs AS b ON 1 = zone JOIN request_facts AS c ON 1 = 1",
+    ):
+        executed.clear()
+        hs_query.query_endpoint(
+            hs_svc,
+            DashboardQueryRequest(sql=hs_rf_sql, max_rows=10),
+            "2026-11-19T00:00:00Z",
+            "2026-11-19T01:00:00Z",
+            mask_ips=True,
+            tables={"request_facts": "fla_cv_m_req"},
+        )
+        assert len(executed) == 1, hs_rf_sql
+        ran_sql, ran_settings = executed[0]
+        assert "request_facts" not in ran_sql and "FROM logs" not in ran_sql, ran_sql
+        assert ran_sql.count("fla_cv_m_req") == 3, ran_sql
+        assert "fla_cv_m_req" in str(ran_settings.get("additional_table_filters", "")), ran_settings
+
+    # 4. UNION branch splitting preserves native pop on client_vitals when Branch 1 ends with * or zone
+    for union_sql in (
+        "FROM (SELECT url, pop AS pop FROM logs) SELECT * UNION ALL SELECT url, pop FROM client_vitals",
+        "SELECT url, pop FROM logs zone UNION ALL SELECT url, pop FROM client_vitals",
+        "SELECT a.url, a.pop FROM (SELECT 1 AS zone, url, pop FROM logs) AS a JOIN logs AS b ON 1 = zone UNION ALL SELECT url, pop FROM client_vitals",
+    ):
+        executed.clear()
+        hs_query.query_endpoint(
+            hs_svc,
+            DashboardQueryRequest(sql=union_sql, max_rows=10),
+            "2026-11-19T00:00:00Z",
+            "2026-11-19T01:00:00Z",
+            mask_ips=True,
+            tables={"request_facts": "fla_cv_m_req", "rum_vitals_facts": "fla_cv_m_vit"},
+        )
+        assert len(executed) == 1, union_sql
+        u_sql, u_settings = executed[0]
+        left_b, right_b = u_sql.split("UNION ALL", 1)
+        assert "custom_fields['pop']" in left_b, left_b
+        assert "custom_fields['pop']" not in right_b and "fla_cv_m_vit" in right_b, right_b
+        u_atf = str(u_settings.get("additional_table_filters", ""))
+        assert "fla_cv_m_req" in u_atf and "fla_cv_m_vit" in u_atf, u_settings
+
+    # 5. Benign High-Scale tuple .1, AS-parity, and dot-qualified IN/JOIN alias controls execute cleanly
+    for hs_benign_sql in (
+        "WITH 1 AS as SELECT 1 = as AS flag, url FROM logs",
+        "SELECT status FROM (SELECT tuple(1) AS where, 200 AS status FROM logs) AS s WHERE where.1 = 1",
+        "SELECT union.1 FROM (SELECT tuple(200) AS union FROM logs) AS u",
+        "WITH b AS (SELECT '1' AS in FROM logs) SELECT a.url FROM logs AS a JOIN b ON '1' = b.in ORDER BY a.url",
+        "WITH b AS (SELECT '1' AS join FROM logs) SELECT a.url FROM logs AS a JOIN b ON '1' = b.join ORDER BY a.url",
+    ):
+        executed.clear()
+        hs_query.query_endpoint(
+            hs_svc,
+            DashboardQueryRequest(sql=hs_benign_sql, max_rows=10),
+            "2026-11-19T00:00:00Z",
+            "2026-11-19T01:00:00Z",
+            mask_ips=True,
+            tables={"request_facts": "fla_cv_m_req"},
+        )
+        assert len(executed) == 1, hs_benign_sql

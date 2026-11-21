@@ -71,13 +71,14 @@ function timingSafeStringEqual(a: string, b: string): boolean {
   return diff === 0
 }
 
-function shouldGateAdminRequest(request: NextRequest): boolean {
+function isGatewayAuthenticatedRequest(request: NextRequest): boolean {
   const { headers } = request
   const isPublicMarker =
     hasNonEmptyHeader(headers, PROXIED_BY_CADDY_HEADER) ||
     hasNonEmptyHeader(headers, PUBLIC_GATEWAY_HEADER) ||
     hasNonEmptyHeader(headers, FRONTEND_PROXY_HEADER) ||
     hasNonEmptyHeader(headers, 'x-remote-analyst')
+  if (isPublicMarker) return false
 
   const effectiveHost =
     headers.get('host') || request.nextUrl?.host || (request.url ? new URL(request.url).host : '')
@@ -87,14 +88,26 @@ function shouldGateAdminRequest(request: NextRequest): boolean {
     headers.get('sec-fetch-site') === 'cross-site' ||
     (headers.get('origin') !== null &&
       headers.get('origin')?.toLowerCase() !== `https://${effectiveHost.toLowerCase()}`)
-  const gatewayAuthenticated =
-    !isPublicMarker &&
+  return (
     Boolean(effectiveHost) &&
     !crossOrigin &&
     gatewaySecret.length >= 32 &&
     timingSafeStringEqual(gatewayToken || '', gatewaySecret)
+  )
+}
 
-  if (gatewayAuthenticated) return false
+function shouldGateAdminRequest(request: NextRequest): boolean {
+  if (isGatewayAuthenticatedRequest(request)) return false
+
+  const { headers } = request
+  const isPublicMarker =
+    hasNonEmptyHeader(headers, PROXIED_BY_CADDY_HEADER) ||
+    hasNonEmptyHeader(headers, PUBLIC_GATEWAY_HEADER) ||
+    hasNonEmptyHeader(headers, FRONTEND_PROXY_HEADER) ||
+    hasNonEmptyHeader(headers, 'x-remote-analyst')
+  const effectiveHost =
+    headers.get('host') || request.nextUrl?.host || (request.url ? new URL(request.url).host : '')
+  const gatewayToken = headers.get('x-admin-gateway-token') ?? headers.get('x-fla-admin-gateway')
 
   const hasExternalProxyHeaders =
     hasNonEmptyHeader(headers, 'x-forwarded-for') ||
@@ -187,12 +200,21 @@ export function proxy(request: NextRequest) {
     return new NextResponse(null, { status: 204 })
   }
 
+  const gatewayAuthenticated = isGatewayAuthenticatedRequest(request)
+  const stampWireForwardedProxy =
+    !gatewayAuthenticated && hasNonEmptyHeader(request.headers, 'x-forwarded-for')
+
   // Bypass CSP/gating entirely -- those exist for HTML page renders, not
   // proxied API responses. Route Handlers under app/api/[...path]/route.ts
   // and app/js/[...path]/route.ts proxy to API_PROXY_URL with agent:false
   // and graceful SSE/disconnect handling (avoiding Next's internal httpxy
   // rewrite proxy which logs unhandled ECONNRESET on socket close).
   if (API_PROXY_PREFIXES.some(p => pathname.startsWith(p))) {
+    if (stampWireForwardedProxy) {
+      const requestHeaders = new Headers(request.headers)
+      requestHeaders.set(FRONTEND_PROXY_HEADER, '1')
+      return NextResponse.next({ request: { headers: requestHeaders } })
+    }
     return NextResponse.next()
   }
 
@@ -227,6 +249,9 @@ export function proxy(request: NextRequest) {
   const nonce = btoa(crypto.randomUUID())
   const requestHeaders = new Headers(request.headers)
   requestHeaders.set('x-nonce', nonce)
+  if (stampWireForwardedProxy) {
+    requestHeaders.set(FRONTEND_PROXY_HEADER, '1')
+  }
 
   const rawServiceParam = request.nextUrl?.searchParams?.get('service') || (request.url ? new URL(request.url).searchParams.get('service') : null)
   const rawServiceCookie = readCookieValue(request, ACTIVE_SERVICE_COOKIE)

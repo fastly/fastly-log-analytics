@@ -506,7 +506,13 @@ sub vcl_deliver {
 
 sub vcl_error {
   if (obj.status == 801) {
-    set obj.http.Location = "https://" req.http.Host req.url;
+    if (!req.http.Host || req.http.Host !~ "^[A-Za-z0-9.-]+(:[0-9]{1,5})?$") {
+      set obj.status = 400;
+      set obj.response = "Bad Request";
+      synthetic {""};
+      return(deliver);
+    }
+    set obj.http.Location = "https://" req.http.Host regsub(req.url, "^/+", "/");
     set obj.status = 308;
     set obj.response = "Permanent Redirect";
     synthetic {""};

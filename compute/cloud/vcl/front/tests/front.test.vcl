@@ -20,6 +20,46 @@ sub https_redirect_preserves_host_path_and_query {
 }
 
 
+// @scope: error
+sub https_redirect_normalizes_leading_slashes_and_rejects_malformed_host {
+  set obj.status = 801;
+  set req.url = "///evil.example/path";
+  set req.http.Host = "logs.example.com";
+  testing.call_subroutine("vcl_error");
+  assert.equal(obj.status, 308);
+  assert.equal(obj.http.Location, "https://logs.example.com/evil.example/path");
+  assert.state(deliver);
+
+  unset obj.http.Location;
+  set obj.status = 801;
+  set req.url = "/dashboard?q=1";
+  set req.http.Host = "legit.example@evil.example";
+  testing.call_subroutine("vcl_error");
+  assert.equal(obj.status, 400);
+  assert.equal(obj.response, "Bad Request");
+  assert.is_notset(obj.http.Location);
+  assert.state(deliver);
+
+  unset obj.http.Location;
+  set obj.status = 801;
+  set req.url = "/dashboard?q=1";
+  unset req.http.Host;
+  testing.call_subroutine("vcl_error");
+  assert.equal(obj.status, 400);
+  assert.equal(obj.response, "Bad Request");
+  assert.is_notset(obj.http.Location);
+  assert.state(deliver);
+
+  set obj.status = 801;
+  set req.url = "/dashboard?q=1";
+  set req.http.Host = "logs.example.com";
+  testing.call_subroutine("vcl_error");
+  assert.equal(obj.status, 308);
+  assert.equal(obj.http.Location, "https://logs.example.com/dashboard?q=1");
+  assert.state(deliver);
+}
+
+
 // @scope: recv
 sub public_shell_queries_share_a_cache_key {
   testing.inject_variable("req.is_ssl", true);

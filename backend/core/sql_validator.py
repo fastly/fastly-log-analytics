@@ -573,7 +573,6 @@ _ON_EXPR_PREV_WORDS = frozenset(
         "NOT",
         "IS",
         "IN",
-        "GLOBAL",
         "LIKE",
         "ILIKE",
         "RLIKE",
@@ -589,7 +588,6 @@ _ON_EXPR_PREV_WORDS = frozenset(
         "WHEN",
         "THEN",
         "ELSE",
-        "DISTINCT",
         "DIV",
         "MOD",
         "FROM",
@@ -600,6 +598,8 @@ _ON_EXPR_PREV_WORDS = frozenset(
 )
 _ON_EXPR_NEXT_WORDS = frozenset(
     {
+        "NOT",
+        "AT",
         "IS",
         "IN",
         "BETWEEN",
@@ -619,6 +619,96 @@ _ON_EXPR_NEXT_WORDS = frozenset(
         "AND",
         "OR",
         "XOR",
+    }
+)
+_AS_OPERAND_PREFIX_WORDS = (
+    _CLAUSE_STOP_KEYWORDS
+    | _JOIN_MODIFIERS
+    | frozenset(
+        {
+            "SELECT",
+            "DISTINCT",
+            "WITH",
+            "FROM",
+            "ON",
+            "USING",
+            "BY",
+            "AND",
+            "OR",
+            "XOR",
+            "NOT",
+            "IS",
+            "IN",
+            "LIKE",
+            "ILIKE",
+            "RLIKE",
+            "REGEXP",
+            "GLOB",
+            "SIMILAR",
+            "TO",
+            "ESCAPE",
+            "BETWEEN",
+            "CASE",
+            "WHEN",
+            "THEN",
+            "ELSE",
+            "DIV",
+            "MOD",
+            "COLLATE",
+            "INTERVAL",
+        }
+    )
+)
+_SQL_INTERVAL_UNITS = frozenset(
+    {
+        "YEAR",
+        "YEARS",
+        "QUARTER",
+        "QUARTERS",
+        "MONTH",
+        "MONTHS",
+        "WEEK",
+        "WEEKS",
+        "DAY",
+        "DAYS",
+        "HOUR",
+        "HOURS",
+        "MINUTE",
+        "MINUTES",
+        "SECOND",
+        "SECONDS",
+        "MILLISECOND",
+        "MILLISECONDS",
+        "MICROSECOND",
+        "MICROSECONDS",
+        "NANOSECOND",
+        "NANOSECONDS",
+    }
+)
+_ON_OPERATOR_CONTEXT_WORDS = frozenset(
+    {
+        "ON",
+        "AND",
+        "OR",
+        "XOR",
+        "NOT",
+        "IS",
+        "IN",
+        "LIKE",
+        "ILIKE",
+        "RLIKE",
+        "REGEXP",
+        "GLOB",
+        "SIMILAR",
+        "TO",
+        "BETWEEN",
+        "CASE",
+        "WHEN",
+        "THEN",
+        "ELSE",
+        "DIV",
+        "MOD",
+        "COLLATE",
     }
 )
 _FROM_FIRST_SELECT_FN_KEYWORDS = frozenset({"ANY", "ARRAY", "LEFT", "RIGHT", "FORMAT", "SAMPLE", "WINDOW"})
@@ -936,6 +1026,19 @@ def _is_dot_or_typecast_tok(tokens: list[_Tok], pos: int) -> bool:
     return tk.kind == "DOT" or (tk.kind == "OTHER" and tk.val.endswith("::") and not tk.val.endswith(":::"))
 
 
+def _cannot_end_aliasable_tok(tokens: list[_Tok], pos: int) -> bool:
+    if pos < 0 or _is_dot_or_typecast_tok(tokens, pos):
+        return True
+    tk = tokens[pos]
+    if tk.kind in ("COMMA", "SEMI", "LPAREN", "LBRACK", "LBRACE"):
+        return True
+    if tk.kind == "OTHER" and not tk.val[0].isdigit():
+        return True
+    return (
+        tk.kind == "WORD" and tk.val.upper() in _AS_OPERAND_PREFIX_WORDS and not _is_non_keyword_ident_pos(tokens, pos)
+    )
+
+
 def _is_non_keyword_ident_pos(tokens: list[_Tok], idx: int) -> bool:
     if idx <= 0:
         return False
@@ -948,7 +1051,7 @@ def _is_non_keyword_ident_pos(tokens: list[_Tok], idx: int) -> bool:
         p -= 1
     if r == 0:
         return False
-    if _is_dot_or_typecast_tok(tokens, p):
+    if _cannot_end_aliasable_tok(tokens, p):
         r -= 1
     return (r % 2) == 1
 
@@ -959,7 +1062,10 @@ def _is_dot_qualifier_at(tokens: list[_Tok], idx: int) -> bool:
         and tokens[idx + 1].kind == "DOT"
         and (
             tokens[idx + 2].kind in ("WORD", "QIDENT", "STRING")
-            or (tokens[idx + 2].kind == "OTHER" and tokens[idx + 2].val.startswith("*"))
+            or (
+                tokens[idx + 2].kind == "OTHER"
+                and (tokens[idx + 2].val.startswith("*") or tokens[idx + 2].val[0].isdigit())
+            )
         )
     )
 
@@ -981,7 +1087,12 @@ def _validate_select_syntax(tokens: list[_Tok]) -> str | None:
             continue
         if tok.kind == "RPAREN":
             return "unmatched closing parenthesis"
-        if tok.kind == "WORD" and not _is_non_keyword_ident_pos(tokens, i) and not _is_dot_qualifier_at(tokens, i):
+        if (
+            tok.kind == "WORD"
+            and not _is_non_keyword_ident_pos(tokens, i)
+            and not _is_dot_qualifier_at(tokens, i)
+            and not (i > 0 and tokens[i - 1].kind == "OTHER" and not tokens[i - 1].val[0].isdigit())
+        ):
             wu = tok.val.upper()
             if wu == "SELECT":
                 nxt = i + 1
@@ -1210,20 +1321,118 @@ def _is_within_group_at(tokens: list[_Tok], idx: int) -> bool:
     )
 
 
+def _is_on_operator_tok_at(tokens: list[_Tok], pos: int) -> bool:
+    if pos < 0:
+        return True
+    tk = tokens[pos]
+    if tk.kind in ("COMMA", "SEMI", "LPAREN", "LBRACK", "LBRACE", "DOT"):
+        return True
+    if tk.kind == "OTHER" and not tk.val[0].isdigit():
+        return True
+    return (
+        tk.kind == "WORD"
+        and tk.val.upper() in _ON_OPERATOR_CONTEXT_WORDS
+        and not _is_non_keyword_ident_pos(tokens, pos)
+    )
+
+
+def _is_prev_word_operator_at(tokens: list[_Tok], prev_idx: int, nxt_tok: _Tok | None) -> bool:
+    pw = tokens[prev_idx].val.upper()
+    if pw not in _ON_EXPR_PREV_WORDS or _is_non_keyword_ident_pos(tokens, prev_idx):
+        return False
+    if pw == "FROM":
+        return _is_distinct_from_op(tokens, prev_idx)
+    if pw == "TO":
+        return (
+            prev_idx >= 1
+            and tokens[prev_idx - 1].kind == "WORD"
+            and tokens[prev_idx - 1].val.upper() == "SIMILAR"
+            and not _is_non_keyword_ident_pos(tokens, prev_idx - 1)
+        )
+    if pw == "ZONE":
+        return (
+            prev_idx >= 2
+            and tokens[prev_idx - 1].kind == "WORD"
+            and tokens[prev_idx - 1].val.upper() == "TIME"
+            and not _is_non_keyword_ident_pos(tokens, prev_idx - 1)
+            and tokens[prev_idx - 2].kind == "WORD"
+            and tokens[prev_idx - 2].val.upper() == "AT"
+            and not _is_non_keyword_ident_pos(tokens, prev_idx - 2)
+        )
+    if pw == "INTERVAL":
+        return (
+            nxt_tok is not None
+            and nxt_tok.kind == "WORD"
+            and nxt_tok.val.upper() in _SQL_INTERVAL_UNITS
+            and not _is_non_keyword_ident_pos(tokens, prev_idx + 2)
+        )
+    if pw == "ESCAPE":
+        return prev_idx >= 1 and not _is_on_operator_tok_at(tokens, prev_idx - 1)
+    if pw in ("SYMMETRIC", "ASYMMETRIC"):
+        return (
+            prev_idx >= 1
+            and tokens[prev_idx - 1].kind == "WORD"
+            and tokens[prev_idx - 1].val.upper() == "BETWEEN"
+            and not _is_non_keyword_ident_pos(tokens, prev_idx - 1)
+        )
+    if pw in ("NOT", "CASE"):
+        return True
+    if pw == "ON":
+        return prev_idx == 0 or not _is_on_operator_tok_at(tokens, prev_idx - 1)
+    if pw == "WHEN":
+        if prev_idx >= 1 and tokens[prev_idx - 1].kind == "WORD" and tokens[prev_idx - 1].val.upper() == "CASE":
+            return not _is_non_keyword_ident_pos(tokens, prev_idx - 1)
+        return prev_idx >= 1 and not _is_on_operator_tok_at(tokens, prev_idx - 1)
+    if (
+        pw in ("IN", "LIKE", "ILIKE", "RLIKE", "REGEXP", "GLOB", "SIMILAR", "BETWEEN")
+        and prev_idx >= 2
+        and tokens[prev_idx - 1].kind == "WORD"
+        and tokens[prev_idx - 1].val.upper() == "NOT"
+        and not _is_non_keyword_ident_pos(tokens, prev_idx - 1)
+    ):
+        return not _is_on_operator_tok_at(tokens, prev_idx - 2)
+    return prev_idx >= 1 and not _is_on_operator_tok_at(tokens, prev_idx - 1)
+
+
+def _is_multi_token_post_on_exit(tokens: list[_Tok], idx: int) -> bool:
+    if _is_within_group_at(tokens, idx):
+        return False
+    wu = tokens[idx].val.upper()
+    nxt_tok = tokens[idx + 1] if idx + 1 < len(tokens) else None
+    if nxt_tok is None:
+        return False
+    nxt_is_kw = nxt_tok.kind == "WORD" and not _is_non_keyword_ident_pos(tokens, idx + 1)
+    if wu in ("GROUP", "ORDER"):
+        return nxt_is_kw and nxt_tok.val.upper() in ("BY", "ALL")
+    if wu == "FETCH":
+        return nxt_is_kw and nxt_tok.val.upper() in ("FIRST", "NEXT")
+    if wu == "INTO":
+        return nxt_is_kw and nxt_tok.val.upper() == "OUTFILE"
+    if wu in ("UNION", "INTERSECT", "EXCEPT"):
+        if nxt_tok.kind == "LPAREN":
+            return True
+        return (
+            nxt_is_kw
+            and not _is_dot_qualifier_at(tokens, idx + 1)
+            and nxt_tok.val.upper() in ("ALL", "DISTINCT", "BY", "SELECT", "WITH", "FROM", "VALUES", "TABLE")
+        )
+    return False
+
+
 def _is_on_expr_ident_at(tokens: list[_Tok], idx: int) -> bool:
     if _is_dot_qualifier_at(tokens, idx):
         return True
+    if _is_within_group_at(tokens, idx):
+        return True
+    if _is_multi_token_post_on_exit(tokens, idx):
+        return False
     wu = tokens[idx].val.upper()
     prev_tok = tokens[idx - 1] if idx > 0 else None
     nxt_tok = tokens[idx + 1] if idx + 1 < len(tokens) else None
     if prev_tok is not None:
         if prev_tok.kind == "DOT" or (prev_tok.kind == "OTHER" and not prev_tok.val[0].isdigit()):
             return True
-        if (
-            prev_tok.kind == "WORD"
-            and prev_tok.val.upper() in _ON_EXPR_PREV_WORDS
-            and not _is_non_keyword_ident_pos(tokens, idx - 1)
-        ):
+        if prev_tok.kind == "WORD" and _is_prev_word_operator_at(tokens, idx - 1, nxt_tok):
             return True
     if nxt_tok is not None and nxt_tok.kind == "OTHER" and not nxt_tok.val[0].isdigit():
         if wu == "SELECT" and nxt_tok.val in ("*", "+", "-", "~", "!"):
@@ -1238,9 +1447,16 @@ def _is_on_expr_ident_at(tokens: list[_Tok], idx: int) -> bool:
         return True
     if (
         nxt_tok is not None
+        and nxt_tok.kind == "LBRACK"
+        and wu not in ("SELECT", "WHERE", "PREWHERE", "HAVING", "QUALIFY", "LIMIT", "OFFSET")
+    ):
+        return True
+    if (
+        nxt_tok is not None
         and nxt_tok.kind == "WORD"
         and nxt_tok.val.upper() in _ON_EXPR_NEXT_WORDS
-        and wu not in ("SELECT", "WHERE", "PREWHERE", "HAVING", "QUALIFY")
+        and not _is_non_keyword_ident_pos(tokens, idx + 1)
+        and wu not in ("SELECT", "WHERE", "PREWHERE", "HAVING", "QUALIFY", "LIMIT", "OFFSET")
     ):
         return True
     return False
@@ -1391,7 +1607,12 @@ def _scan_body_tokens(
                     )
                     return
             is_dot_qual = _is_dot_qualifier_at(tokens, i)
-            is_on_ident = in_on_clause and not expect_table and _is_on_expr_ident_at(tokens, i)
+            is_on_ident = (
+                in_on_clause
+                and not expect_table
+                and (wu in _CLAUSE_STOP_KEYWORDS or wu in ("SELECT", "FROM"))
+                and _is_on_expr_ident_at(tokens, i)
+            )
             if is_dot_qual or is_on_ident:
                 in_sample_clause = False
             else:
@@ -1462,12 +1683,16 @@ def _scan_body_tokens(
                     at_branch_start = False
                     i += 1
                     continue
-                if wu in _JOIN_MODIFIERS:
-                    if wu == "JOIN":
-                        in_from = True
-                        expect_table = True
+                if wu == "JOIN":
+                    in_from = True
+                    expect_table = True
                     in_sample_clause = False
                     in_on_clause = False
+                    at_branch_start = False
+                    i += 1
+                    continue
+                if wu in _JOIN_MODIFIERS and not (in_on_clause and i + 1 < n and tokens[i + 1].kind == "LPAREN"):
+                    in_sample_clause = False
                     at_branch_start = False
                     i += 1
                     continue
@@ -1522,7 +1747,7 @@ def _scan_body_tokens(
                     at_branch_start = False
                     i += 1
                     continue
-                if in_from and wu in ("ON", "USING"):
+                if in_from and (wu == "ON" or (wu == "USING" and not in_on_clause)):
                     if expect_table:
                         node["children"].append(
                             {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: expected table reference"}

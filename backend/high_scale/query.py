@@ -728,7 +728,6 @@ _ON_EXPR_PREV_WORDS = frozenset(
         "NOT",
         "IS",
         "IN",
-        "GLOBAL",
         "LIKE",
         "ILIKE",
         "RLIKE",
@@ -744,7 +743,6 @@ _ON_EXPR_PREV_WORDS = frozenset(
         "WHEN",
         "THEN",
         "ELSE",
-        "DISTINCT",
         "DIV",
         "MOD",
         "FROM",
@@ -755,6 +753,8 @@ _ON_EXPR_PREV_WORDS = frozenset(
 )
 _ON_EXPR_NEXT_WORDS = frozenset(
     {
+        "NOT",
+        "AT",
         "IS",
         "IN",
         "BETWEEN",
@@ -774,6 +774,97 @@ _ON_EXPR_NEXT_WORDS = frozenset(
         "AND",
         "OR",
         "XOR",
+    }
+)
+_AS_OPERAND_PREFIX_WORDS = (
+    _FROM_EXIT_KEYWORDS
+    | _JOIN_MODIFIER_KEYWORDS
+    | frozenset(
+        {
+            "JOIN",
+            "SELECT",
+            "DISTINCT",
+            "WITH",
+            "FROM",
+            "ON",
+            "USING",
+            "BY",
+            "AND",
+            "OR",
+            "XOR",
+            "NOT",
+            "IS",
+            "IN",
+            "LIKE",
+            "ILIKE",
+            "RLIKE",
+            "REGEXP",
+            "GLOB",
+            "SIMILAR",
+            "TO",
+            "ESCAPE",
+            "BETWEEN",
+            "CASE",
+            "WHEN",
+            "THEN",
+            "ELSE",
+            "DIV",
+            "MOD",
+            "COLLATE",
+            "INTERVAL",
+        }
+    )
+)
+_SQL_INTERVAL_UNITS = frozenset(
+    {
+        "YEAR",
+        "YEARS",
+        "QUARTER",
+        "QUARTERS",
+        "MONTH",
+        "MONTHS",
+        "WEEK",
+        "WEEKS",
+        "DAY",
+        "DAYS",
+        "HOUR",
+        "HOURS",
+        "MINUTE",
+        "MINUTES",
+        "SECOND",
+        "SECONDS",
+        "MILLISECOND",
+        "MILLISECONDS",
+        "MICROSECOND",
+        "MICROSECONDS",
+        "NANOSECOND",
+        "NANOSECONDS",
+    }
+)
+_ON_OPERATOR_CONTEXT_WORDS = frozenset(
+    {
+        "ON",
+        "AND",
+        "OR",
+        "XOR",
+        "NOT",
+        "IS",
+        "IN",
+        "LIKE",
+        "ILIKE",
+        "RLIKE",
+        "REGEXP",
+        "GLOB",
+        "SIMILAR",
+        "TO",
+        "BETWEEN",
+        "CASE",
+        "WHEN",
+        "THEN",
+        "ELSE",
+        "DIV",
+        "MOD",
+        "COLLATE",
     }
 )
 _FROM_FIRST_SELECT_FN_KEYWORDS = frozenset({"ANY", "ARRAY", "LEFT", "RIGHT", "FORMAT", "SAMPLE", "WINDOW"})
@@ -840,6 +931,14 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
             and not (pos >= 2 and tokens[pos - 2] == ("OTHER", ":"))
         )
 
+    def _cannot_end_aliasable_lex(tokens: list[tuple[str, str]], pos: int | None) -> bool:
+        if pos is None or pos < 0 or _is_dot_or_dcolon_lex(tokens, pos):
+            return True
+        pk, pt = tokens[pos]
+        if pk == "OTHER" or (pk == "OP" and pt not in (")", "]", "}")):
+            return True
+        return pk == "IDENT" and pt.upper() in _AS_OPERAND_PREFIX_WORDS and not _is_non_kw_lex_pos(tokens, pos)
+
     def _is_non_kw_lex_pos(tokens: list[tuple[str, str]], idx: int) -> bool:
         p = _prev_sig_idx(tokens, idx)
         if p is None:
@@ -852,7 +951,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
             p = _prev_sig_idx(tokens, p)
         if r == 0:
             return False
-        if _is_dot_or_dcolon_lex(tokens, p):
+        if _cannot_end_aliasable_lex(tokens, p):
             r -= 1
         return (r % 2) == 1
 
@@ -888,6 +987,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
             and (
                 tokens[sig_list[s_pos + 2]][0] in ("IDENT", "DQUOTE", "STR")
                 or tokens[sig_list[s_pos + 2]] == ("OP", "*")
+                or (tokens[sig_list[s_pos + 2]][0] == "NUM" and not tokens[sig_list[s_pos + 2]][1].startswith("-"))
             )
         )
 
@@ -907,9 +1007,114 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
             and (nxt_tok == ("OP", "(") or nxt_tok[0] == "SUBQ")
         )
 
+    def _is_lex_on_operator_tok(tokens: list[tuple[str, str]], s_pos: int, sig_list: list[int]) -> bool:
+        if s_pos < 0:
+            return True
+        tk, tt = tokens[sig_list[s_pos]]
+        if tk == "OTHER" or (tk == "OP" and tt not in (")", "]", "}")):
+            return True
+        return (
+            tk == "IDENT"
+            and tt.upper() in _ON_OPERATOR_CONTEXT_WORDS
+            and not _is_non_kw_lex_pos(tokens, sig_list[s_pos])
+        )
+
+    def _is_lex_prev_word_operator(
+        tokens: list[tuple[str, str]], prev_s_pos: int, sig_list: list[int], nxt_sig: tuple[str, str] | None
+    ) -> bool:
+        prev_idx = sig_list[prev_s_pos]
+        pw = tokens[prev_idx][1].upper()
+        if pw not in _ON_EXPR_PREV_WORDS or _is_non_kw_lex_pos(tokens, prev_idx):
+            return False
+        if pw == "FROM":
+            return _is_lex_distinct_from(tokens, prev_s_pos, sig_list)
+        if pw == "TO":
+            return (
+                prev_s_pos >= 1
+                and tokens[sig_list[prev_s_pos - 1]][0] == "IDENT"
+                and tokens[sig_list[prev_s_pos - 1]][1].upper() == "SIMILAR"
+                and not _is_non_kw_lex_pos(tokens, sig_list[prev_s_pos - 1])
+            )
+        if pw == "ZONE":
+            return (
+                prev_s_pos >= 2
+                and tokens[sig_list[prev_s_pos - 1]][0] == "IDENT"
+                and tokens[sig_list[prev_s_pos - 1]][1].upper() == "TIME"
+                and not _is_non_kw_lex_pos(tokens, sig_list[prev_s_pos - 1])
+                and tokens[sig_list[prev_s_pos - 2]][0] == "IDENT"
+                and tokens[sig_list[prev_s_pos - 2]][1].upper() == "AT"
+                and not _is_non_kw_lex_pos(tokens, sig_list[prev_s_pos - 2])
+            )
+        if pw == "INTERVAL":
+            return (
+                nxt_sig is not None
+                and nxt_sig[0] == "IDENT"
+                and nxt_sig[1].upper() in _SQL_INTERVAL_UNITS
+                and prev_s_pos + 2 < len(sig_list)
+                and not _is_non_kw_lex_pos(tokens, sig_list[prev_s_pos + 2])
+            )
+        if pw == "ESCAPE":
+            return prev_s_pos >= 1 and not _is_lex_on_operator_tok(tokens, prev_s_pos - 1, sig_list)
+        if pw in ("SYMMETRIC", "ASYMMETRIC"):
+            return (
+                prev_s_pos >= 1
+                and tokens[sig_list[prev_s_pos - 1]][0] == "IDENT"
+                and tokens[sig_list[prev_s_pos - 1]][1].upper() == "BETWEEN"
+                and not _is_non_kw_lex_pos(tokens, sig_list[prev_s_pos - 1])
+            )
+        if pw in ("NOT", "CASE"):
+            return True
+        if pw == "ON":
+            return prev_s_pos == 0 or not _is_lex_on_operator_tok(tokens, prev_s_pos - 1, sig_list)
+        if pw == "WHEN":
+            if (
+                prev_s_pos >= 1
+                and tokens[sig_list[prev_s_pos - 1]][0] == "IDENT"
+                and tokens[sig_list[prev_s_pos - 1]][1].upper() == "CASE"
+            ):
+                return not _is_non_kw_lex_pos(tokens, sig_list[prev_s_pos - 1])
+            return prev_s_pos >= 1 and not _is_lex_on_operator_tok(tokens, prev_s_pos - 1, sig_list)
+        if (
+            pw in ("IN", "LIKE", "ILIKE", "RLIKE", "REGEXP", "GLOB", "SIMILAR", "BETWEEN")
+            and prev_s_pos >= 2
+            and tokens[sig_list[prev_s_pos - 1]][0] == "IDENT"
+            and tokens[sig_list[prev_s_pos - 1]][1].upper() == "NOT"
+            and not _is_non_kw_lex_pos(tokens, sig_list[prev_s_pos - 1])
+        ):
+            return not _is_lex_on_operator_tok(tokens, prev_s_pos - 2, sig_list)
+        return prev_s_pos >= 1 and not _is_lex_on_operator_tok(tokens, prev_s_pos - 1, sig_list)
+
+    def _is_lex_multi_token_post_on_exit(tokens: list[tuple[str, str]], s_pos: int, sig_list: list[int]) -> bool:
+        if _is_lex_within_group(tokens, s_pos, sig_list):
+            return False
+        wu = tokens[sig_list[s_pos]][1].upper()
+        nxt_sig = tokens[sig_list[s_pos + 1]] if s_pos + 1 < len(sig_list) else None
+        if nxt_sig is None:
+            return False
+        nxt_is_kw = nxt_sig[0] == "IDENT" and not _is_non_kw_lex_pos(tokens, sig_list[s_pos + 1])
+        if wu in ("GROUP", "ORDER"):
+            return nxt_is_kw and nxt_sig[1].upper() in ("BY", "ALL")
+        if wu == "FETCH":
+            return nxt_is_kw and nxt_sig[1].upper() in ("FIRST", "NEXT")
+        if wu == "INTO":
+            return nxt_is_kw and nxt_sig[1].upper() == "OUTFILE"
+        if wu in ("UNION", "INTERSECT", "EXCEPT"):
+            if nxt_sig == ("OP", "(") or nxt_sig[0] == "SUBQ":
+                return True
+            return (
+                nxt_is_kw
+                and not _is_lex_dot_qualifier(tokens, s_pos + 1, sig_list)
+                and nxt_sig[1].upper() in ("ALL", "DISTINCT", "BY", "SELECT", "WITH", "FROM", "VALUES", "TABLE")
+            )
+        return False
+
     def _is_lex_on_expr_ident(tokens: list[tuple[str, str]], s_pos: int, sig_list: list[int]) -> bool:
         if _is_lex_dot_qualifier(tokens, s_pos, sig_list):
             return True
+        if _is_lex_within_group(tokens, s_pos, sig_list):
+            return True
+        if _is_lex_multi_token_post_on_exit(tokens, s_pos, sig_list):
+            return False
         wu = tokens[sig_list[s_pos]][1].upper()
         prev_idx = sig_list[s_pos - 1] if s_pos > 0 else None
         prev_sig = tokens[prev_idx] if prev_idx is not None else None
@@ -917,12 +1122,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
         if prev_sig is not None:
             if prev_sig[0] == "OTHER" or (prev_sig[0] == "OP" and prev_sig[1] not in (")", "]", "}", ";")):
                 return True
-            if (
-                prev_sig[0] == "IDENT"
-                and prev_sig[1].upper() in _ON_EXPR_PREV_WORDS
-                and prev_idx is not None
-                and not _is_non_kw_lex_pos(tokens, prev_idx)
-            ):
+            if prev_sig[0] == "IDENT" and _is_lex_prev_word_operator(tokens, s_pos - 1, sig_list, nxt_sig):
                 return True
         if nxt_sig is not None:
             if nxt_sig[0] == "OTHER":
@@ -931,6 +1131,16 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                     "!",
                 ):
                     return False
+                return True
+            if nxt_sig == ("OP", "[") and wu not in (
+                "SELECT",
+                "WHERE",
+                "PREWHERE",
+                "HAVING",
+                "QUALIFY",
+                "LIMIT",
+                "OFFSET",
+            ):
                 return True
             if nxt_sig[0] == "OP" and nxt_sig[1] not in ("(", ")", "[", "]", "{", "}", ",", ";"):
                 if wu == "SELECT" and nxt_sig[1] in ("*", "+", "-"):
@@ -941,7 +1151,8 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
             if (
                 nxt_sig[0] == "IDENT"
                 and nxt_sig[1].upper() in _ON_EXPR_NEXT_WORDS
-                and wu not in ("SELECT", "WHERE", "PREWHERE", "HAVING", "QUALIFY")
+                and not _is_non_kw_lex_pos(tokens, sig_list[s_pos + 1])
+                and wu not in ("SELECT", "WHERE", "PREWHERE", "HAVING", "QUALIFY", "LIMIT", "OFFSET")
             ):
                 return True
         return False
@@ -1158,32 +1369,114 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
         cur_branch: list[tuple[str, str]] = []
         i_tok = 0
         depth = 0
+        split_in_from = False
+        split_expect_table = False
+        split_in_on = False
         while i_tok < len(tokens):
             k, t = tokens[i_tok]
             if k == "OP" and t in ("(", "[", "{"):
+                if depth == 0 and split_in_from and split_expect_table:
+                    split_expect_table = False
                 depth += 1
             elif k == "OP" and t in (")", "]", "}"):
                 depth = max(0, depth - 1)
-            elif (
-                depth == 0
-                and k == "IDENT"
-                and t.upper() in ("UNION", "INTERSECT", "EXCEPT")
-                and not _is_non_kw_lex_pos(tokens, i_tok)
-                and not _is_lex_dot_qualifier(tokens, top_sig_pos[i_tok], top_sig)
-                and not _is_lex_on_expr_ident(tokens, top_sig_pos[i_tok], top_sig)
-            ):
-                sep: list[tuple[str, str]] = [tokens[i_tok]]
-                j = i_tok + 1
-                while j < len(tokens) and tokens[j][0] in ("WS", "COMMENT"):
-                    sep.append(tokens[j])
-                    j += 1
-                if j < len(tokens) and tokens[j][0] == "IDENT" and tokens[j][1].upper() in ("ALL", "DISTINCT"):
-                    sep.append(tokens[j])
-                    j += 1
-                branches.append((cur_branch, sep))
-                cur_branch = []
-                i_tok = j
-                continue
+            elif depth == 0 and k == "OP" and t == "," and split_in_from:
+                split_expect_table = True
+                split_in_on = False
+            elif depth == 0 and k == "IDENT" and not _is_non_kw_lex_pos(tokens, i_tok):
+                wu_top = t.upper()
+                s_pos_top = top_sig_pos[i_tok]
+                is_top_dot = _is_lex_dot_qualifier(tokens, s_pos_top, top_sig)
+                is_top_within = _is_lex_within_group(tokens, s_pos_top, top_sig)
+                is_top_on_ident = (
+                    split_in_on
+                    and not split_expect_table
+                    and (wu_top in _FROM_EXIT_KEYWORDS or wu_top in ("SELECT", "FROM"))
+                    and _is_lex_on_expr_ident(tokens, s_pos_top, top_sig)
+                )
+                if not is_top_dot and not is_top_within and not is_top_on_ident:
+                    if wu_top in ("UNION", "INTERSECT", "EXCEPT"):
+                        sep: list[tuple[str, str]] = [tokens[i_tok]]
+                        j = i_tok + 1
+                        while j < len(tokens) and tokens[j][0] in ("WS", "COMMENT"):
+                            sep.append(tokens[j])
+                            j += 1
+                        if j < len(tokens) and tokens[j][0] == "IDENT" and tokens[j][1].upper() in ("ALL", "DISTINCT"):
+                            sep.append(tokens[j])
+                            j += 1
+                        branches.append((cur_branch, sep))
+                        cur_branch = []
+                        split_in_from = False
+                        split_expect_table = False
+                        split_in_on = False
+                        i_tok = j
+                        continue
+                    if (wu_top == "FROM" and not _is_lex_distinct_from(tokens, s_pos_top, top_sig)) or wu_top == "JOIN":
+                        split_in_from = True
+                        split_expect_table = True
+                        split_in_on = False
+                    elif wu_top in _JOIN_MODIFIER_KEYWORDS:
+                        if split_in_from:
+                            split_expect_table = False
+                    elif split_in_from and not split_expect_table and not split_in_on and wu_top == "SELECT":
+                        after_top = tokens[top_sig[s_pos_top + 1]] if s_pos_top + 1 < len(top_sig) else None
+                        is_fn_proj_top = (
+                            after_top is not None
+                            and after_top[0] == "IDENT"
+                            and after_top[1].upper() in _FROM_FIRST_SELECT_FN_KEYWORDS
+                            and s_pos_top + 2 < len(top_sig)
+                            and tokens[top_sig[s_pos_top + 2]] == ("OP", "(")
+                        )
+                        is_bare_sel_top = not is_fn_proj_top and (
+                            after_top is None
+                            or after_top == ("OP", ",")
+                            or (
+                                after_top[0] == "IDENT"
+                                and not _is_lex_dot_qualifier(tokens, s_pos_top + 1, top_sig)
+                                and after_top[1].upper() in (_SQL_CLAUSE_STOPWORDS - {"ALL"})
+                            )
+                        )
+                        if not is_bare_sel_top:
+                            split_in_from = False
+                            split_in_on = False
+                    elif (
+                        split_in_from
+                        and not split_expect_table
+                        and not split_in_on
+                        and wu_top
+                        in (
+                            "PREWHERE",
+                            "SAMPLE",
+                            "SETTINGS",
+                            "FORMAT",
+                            "FOR",
+                            "SET",
+                        )
+                    ):
+                        after_top = tokens[top_sig[s_pos_top + 1]] if s_pos_top + 1 < len(top_sig) else None
+                        is_bare_top = (
+                            after_top is None
+                            or after_top in (("OP", ","), ("OP", "("))
+                            or (after_top[0] == "IDENT" and after_top[1].upper() in _SQL_CLAUSE_STOPWORDS)
+                        )
+                        if not is_bare_top and wu_top != "SAMPLE":
+                            split_in_from = False
+                            split_in_on = False
+                    elif (
+                        wu_top in _FROM_EXIT_KEYWORDS or (split_in_from and wu_top == "SELECT")
+                    ) and _can_exit_from_lex(tokens, s_pos_top, top_sig, in_on_clause=split_in_on):
+                        split_in_from = False
+                        split_expect_table = False
+                        split_in_on = False
+                    elif split_in_from and (wu_top == "ON" or (wu_top == "USING" and not split_in_on)):
+                        split_expect_table = False
+                        split_in_on = wu_top == "ON"
+                    elif split_in_from and not split_in_on and wu_top in ("FINAL", "SAMPLE"):
+                        split_expect_table = False
+                    elif split_in_from and split_expect_table and wu_top not in ("LATERAL", "ONLY"):
+                        split_expect_table = False
+            elif depth == 0 and split_in_from and split_expect_table and k in ("DQUOTE", "STR"):
+                split_expect_table = False
             cur_branch.append(tokens[i_tok])
             i_tok += 1
         branches.append((cur_branch, []))
@@ -1312,7 +1605,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 s_pos += 1
                 continue
 
-            if k == "IDENT" and t.upper() == "IN":
+            if k == "IDENT" and t.upper() == "IN" and not _is_non_kw_lex_pos(processed, idx):
                 if not (func_stack and func_stack[-1] in ("POSITION", "OVERLAY", "TRIM")):
                     nxt_tok = processed[sig_idxs[s_pos + 1]] if s_pos + 1 < len(sig_idxs) else None
                     if nxt_tok is None or (nxt_tok[0] != "SUBQ" and nxt_tok != ("OP", "(")):
@@ -1328,7 +1621,12 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 wu = t.upper()
                 if (
                     _is_lex_dot_qualifier(processed, s_pos, sig_idxs)
-                    or (in_on_clause and not expect_table and _is_lex_on_expr_ident(processed, s_pos, sig_idxs))
+                    or (
+                        in_on_clause
+                        and not expect_table
+                        and (wu in _FROM_EXIT_KEYWORDS or wu in ("SELECT", "FROM"))
+                        and _is_lex_on_expr_ident(processed, s_pos, sig_idxs)
+                    )
                     or _is_lex_within_group(processed, s_pos, sig_idxs)
                 ):
                     in_sample_clause = False
@@ -1342,10 +1640,15 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                     s_pos += 1
                     continue
                 if wu in _JOIN_MODIFIER_KEYWORDS:
-                    if in_from:
+                    if in_from and not (
+                        in_on_clause
+                        and s_pos + 1 < len(sig_idxs)
+                        and (
+                            processed[sig_idxs[s_pos + 1]] == ("OP", "(") or processed[sig_idxs[s_pos + 1]][0] == "SUBQ"
+                        )
+                    ):
                         expect_table = False
                         in_sample_clause = False
-                        in_on_clause = False
                     s_pos += 1
                     continue
                 if in_from and not expect_table and not in_on_clause and _is_bare_clause_alias_at(s_pos):
@@ -1366,10 +1669,15 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                     in_on_clause = False
                     s_pos += 1
                     continue
-                if in_from and wu in ("ON", "USING", "FINAL", "SAMPLE"):
+                if in_from and (wu == "ON" or (wu == "USING" and not in_on_clause)):
+                    expect_table = False
+                    in_sample_clause = False
+                    in_on_clause = wu == "ON"
+                    s_pos += 1
+                    continue
+                if in_from and not in_on_clause and wu in ("FINAL", "SAMPLE"):
                     expect_table = False
                     in_sample_clause = wu == "SAMPLE"
-                    in_on_clause = wu == "ON"
                     s_pos += 1
                     continue
 

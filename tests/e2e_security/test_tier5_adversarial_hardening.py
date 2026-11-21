@@ -1858,6 +1858,48 @@ sub test_multi_slash_fos_raw_blocked_622 {{
   testing.call_subroutine("vcl_recv");
   assert.error(622);
 }}
+
+// @scope: recv
+sub test_plain_http_recv_triggers_error_801 {{
+  testing.inject_variable("req.is_ssl", false);
+  set req.method = "GET";
+  set req.url = "/dashboard";
+  testing.call_subroutine("vcl_recv");
+  assert.error(801);
+}}
+
+// @scope: error
+sub test_error_801_collapses_leading_slashes_and_rejects_bad_or_missing_host {{
+  set obj.status = 801;
+  set req.url = "///evil.example/path";
+  set req.http.Host = "logs.example.com";
+  testing.call_subroutine("vcl_error");
+  assert.equal(obj.status, 308);
+  assert.equal(obj.http.Location, "https://logs.example.com/evil.example/path");
+
+  unset obj.http.Location;
+  set obj.status = 801;
+  set req.url = "/dashboard?q=1";
+  set req.http.Host = "legit.example@evil.example";
+  testing.call_subroutine("vcl_error");
+  assert.equal(obj.status, 400);
+  assert.is_notset(obj.http.Location);
+
+  unset obj.http.Location;
+  set obj.status = 801;
+  set req.url = "/dashboard?q=1";
+  unset req.http.Host;
+  testing.call_subroutine("vcl_error");
+  assert.equal(obj.status, 400);
+  assert.is_notset(obj.http.Location);
+
+  set obj.status = 801;
+  set req.url = "/dashboard?q=1";
+  set req.http.Host = "logs.example.com";
+  testing.call_subroutine("vcl_error");
+  assert.equal(obj.status, 308);
+  assert.equal(obj.http.Location, "https://logs.example.com/dashboard?q=1");
+}}
 """
     res_front = run_falco_test(main_vcl, front_test_vcl, extra_files=extras)
     assert res_front.returncode == 0, f"{res_front.stdout}\n{res_front.stderr}"
@@ -2533,6 +2575,14 @@ def test_t5_hs03_hs12_py08_sql_console_table_filter_parser_differentials_union_s
         "SELECT c.name FROM logs AS a JOIN logs select ON (a.url = select.url), system.tables AS c",
         "SELECT c.name FROM logs AS a JOIN logs select USING (url), system.tables AS c",
         "SELECT c.secret_meta FROM logs AS a JOIN logs AS b ON quantile(0.5) WITHIN GROUP (ORDER BY a.status) = 200, high_scale_batch_publications AS c",
+        "WITH 'ok' AS as SELECT name, as FROM system.tables",
+        "WITH 'ok' AS as SELECT url, country FROM logs UNION ALL SELECT secret_meta, as FROM high_scale_batch_publications",
+        "SELECT c.secret_meta FROM (SELECT 1 AS as, url FROM logs) AS a JOIN logs AS b ON 1 = as JOIN high_scale_batch_publications AS c ON 1 = 1",
+        "SELECT c.secret_meta FROM (SELECT 1 AS where, '/ok' AS url FROM logs) AS a JOIN logs AS b ON a.url = b.url AND a.url GLOBAL NOT IN ('/nope') AND where = 1, high_scale_batch_publications AS c",
+        "SELECT c.name FROM (SELECT 1 AS where, '/ok' AS url FROM logs) AS a JOIN logs AS b ON a.url = b.url AND a.url GLOBAL NOT IN ('/nope') AND where = 1, system.tables AS c",
+        "SELECT c.secret_meta FROM (SELECT 1 AS zone FROM logs) AS a JOIN logs AS b ON 1 = zone JOIN high_scale_batch_publications AS c ON 1 = 1",
+        "SELECT c.secret_meta FROM (SELECT 1 AS escape FROM logs) AS a JOIN logs AS b ON 1 = escape JOIN high_scale_batch_publications AS c ON 1 = 1",
+        "SELECT c.secret_meta FROM (SELECT 1 AS global FROM logs) AS a JOIN logs AS b ON 1 = global JOIN high_scale_batch_publications AS c ON 1 = 1",
     ]
     c = _analyst_client(analyst)
     for bad_sql in adversarial_sqls:
@@ -2564,6 +2614,12 @@ def test_t5_hs03_hs12_py08_sql_console_table_filter_parser_differentials_union_s
         "SELECT 1::union(a INT) AS u FROM logs",
         "SELECT status, 1. FROM logs",
         "SELECT status AS as FROM logs",
+        "WITH 1 AS as SELECT 1 = as AS flag, url FROM logs",
+        "SELECT a.url FROM logs AS a GLOBAL LEFT JOIN logs AS b ON a.url = b.url",
+        "SELECT a.url FROM logs AS a JOIN logs AS b ON a.url GLOBAL NOT IN ('/nope') WHERE NOT (a.status = 500)",
+        "WITH b AS (SELECT 200 AS zone FROM logs) SELECT a.status, a.url FROM logs AS a JOIN b ON a.status = zone ORDER BY a.status, a.url",
+        "SELECT status FROM (SELECT tuple(1) AS where, 200 AS status FROM logs) AS s WHERE where.1 = 1",
+        "SELECT union.1 FROM (SELECT tuple(200) AS union FROM logs) AS u",
         "SELECT a.status FROM logs AS a JOIN logs AS b ON [a.status, 1] = [b.status, 1]",
         """SELECT '{"where": 1}' AS j FROM logs""",
     ):
@@ -2617,6 +2673,18 @@ def test_t5_hs03_hs12_py08_sql_console_table_filter_parser_differentials_union_s
         ),
         (
             "SELECT c.service_id, c.client_ip FROM logs AS a JOIN logs AS b ON quantile(0.5) WITHIN GROUP (ORDER BY a.status) = 200, request_facts AS c",
+            3,
+        ),
+        (
+            "SELECT c.service_id, c.url FROM (SELECT 1 AS as, url FROM logs) AS a JOIN logs AS b ON 1 = as JOIN request_facts AS c ON 1 = 1",
+            3,
+        ),
+        (
+            "SELECT c.service_id, c.client_ip FROM (SELECT 1 AS where, '/ok' AS url FROM logs) AS a JOIN logs AS b ON a.url = b.url AND a.url GLOBAL NOT IN ('/nope') AND where = 1, request_facts AS c",
+            3,
+        ),
+        (
+            "SELECT c.service_id, c.url FROM (SELECT 1 AS zone, url FROM logs) AS a JOIN logs AS b ON 1 = zone JOIN request_facts AS c ON 1 = 1",
             3,
         ),
         ("WITH coalesce((SELECT status FROM request_facts LIMIT 1), '200') AS s SELECT s FROM logs", 2),
@@ -3392,6 +3460,128 @@ def test_t5_py05_py06_py07_proxies_export_crlf_pk_hijack_and_share_backup_harden
             == 413
         )
 
+        # 4. SEC-T5-EXT-CSR-PK-HIJACK-01 & CSR-BUCKET-URL-01: Cold-start restore preserves svc-a PKs & rejects SSRF/traversal
+        from types import SimpleNamespace
+
+        from backend.high_scale import cold_start_restore as csr_mod
+
+        class _StubRestoreS3:
+            def __init__(self, dr_obj: dict[str, Any]) -> None:
+                self._payload = json.dumps(dr_obj).encode("utf-8")
+
+            def get_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:
+                del Bucket, Key
+                return {"Body": io.BytesIO(self._payload)}
+
+        class _StubRestoreCtrl:
+            def create_schema(self) -> None:
+                return None
+
+            def initialize_owner(self, service_id: str, **_kw: Any) -> Any:
+                return SimpleNamespace(service_id=service_id, owner_epoch=1)
+
+        class _StubRestoreArchive:
+            def list_committed_manifests(self, **_kw: Any) -> list[Any]:
+                return []
+
+        monkeypatch.setattr(csr_mod, "ensure_pg_schema", lambda: True)
+        monkeypatch.setattr(csr_mod, "PostgresControlPlane", _StubRestoreCtrl)
+        monkeypatch.setattr(csr_mod, "ArchivePublication", lambda *_a, **_kw: _StubRestoreArchive())
+        monkeypatch.setattr(
+            csr_mod,
+            "_build_direct_fos_s3_client",
+            lambda **_kw: _StubRestoreS3(
+                {
+                    "service_id": "svc-b",
+                    "service_config": {"service_id": "svc-b", "name": "Svc B"},
+                    "views": [{"id": "pk-view-1", "name": "Restored B View", "filters_json": "{}"}],
+                    "alerts": [
+                        {
+                            "id": "pk-alert-1",
+                            "name": "Restored B Alert",
+                            "metric": "5xx",
+                            "operator": ">",
+                            "threshold": 5.0,
+                            "window_min": 5.0,
+                            "webhook_url": "https://hooks.example.invalid/ok",
+                        }
+                    ],
+                }
+            ),
+        )
+        r_csr_ok = adm.post(
+            "/api/high-scale/restore-from-fos",
+            json={
+                "service_id": "svc-b",
+                "bucket": "fos-restore-svcb",
+                "region": "us-east-1",
+                "fos_access_key": "ak-b",
+                "fos_secret_key": "sk-b",
+                "restore_serving_state": False,
+            },
+        )
+        assert r_csr_ok.status_code == 200, r_csr_ok.text
+        assert [v["name"] for v in adm.get("/api/views/svc-a").json()] == ["Tenant A View"]
+        assert [a["name"] for a in adm.get("/api/alerts/svc-a").json()["data"]] == ["Tenant A Alert"]
+        assert [v["name"] for v in adm.get("/api/views/svc-b").json()] == ["Restored B View"]
+
+        for bad_csr_req in (
+            {
+                "service_id": "svc-b",
+                "bucket": "../bad-bucket",
+                "region": "us-east-1",
+                "fos_access_key": "ak-b",
+                "fos_secret_key": "sk-b",
+                "restore_serving_state": False,
+            },
+            {
+                "service_id": "svc-b",
+                "bucket": "fos-restore-svcb",
+                "region": "us-east-1",
+                "prefix": "logs/../../escape",
+                "fos_access_key": "ak-b",
+                "fos_secret_key": "sk-b",
+                "restore_serving_state": False,
+            },
+        ):
+            assert adm.post("/api/high-scale/restore-from-fos", json=bad_csr_req).status_code in {400, 422}
+
+        monkeypatch.setattr(
+            csr_mod,
+            "_build_direct_fos_s3_client",
+            lambda **_kw: _StubRestoreS3(
+                {
+                    "service_id": "svc-b",
+                    "service_config": {"service_id": "svc-b"},
+                    "alerts": [
+                        {
+                            "id": "ssrf-csr-1",
+                            "name": "SSRF Restore Alert",
+                            "metric": "5xx",
+                            "operator": ">",
+                            "threshold": 5.0,
+                            "window_min": 5.0,
+                            "webhook_url": "http://169.254.169.254/latest/meta-data/",
+                        }
+                    ],
+                }
+            ),
+        )
+        assert (
+            adm.post(
+                "/api/high-scale/restore-from-fos",
+                json={
+                    "service_id": "svc-b",
+                    "bucket": "fos-restore-svcb",
+                    "region": "us-east-1",
+                    "fos_access_key": "ak-b",
+                    "fos_secret_key": "sk-b",
+                    "restore_serving_state": False,
+                },
+            ).status_code
+            == 400
+        )
+
 
 def test_t5_hs10_hs11_fe07_fe08_gateway_caddy_helm_metrics_cidrs_node_proxy_and_csv_parity(
     monkeypatch: pytest.MonkeyPatch,
@@ -3587,6 +3777,14 @@ if (!m || !m[1].includes("'/logs'") || m[1].includes("'/query'")) {
 }
 if (!adminWire.includes('plainNumRe') || !adminWire.includes('leadingCtrlOrSpaceRe')) {
   throw new Error('admin-wire missing formula neutralization');
+}
+if (!proxyTs.includes("'x-forwarded-for'") || !proxyTs.includes('FRONTEND_PROXY_HEADER')) {
+  throw new Error('proxy.ts missing wire x-forwarded-for proxy stamping');
+}
+// Verify proxy.ts stamps FRONTEND_PROXY_HEADER on both API_PROXY_PREFIXES and page render paths
+const proxyStampMatches = proxyTs.match(/set\\(FRONTEND_PROXY_HEADER,\\s*'1'\\)/g) || [];
+if (proxyStampMatches.length < 2) {
+  throw new Error('proxy.ts missing dual API + page wire x-forwarded-for FRONTEND_PROXY_HEADER stamp');
 }
 console.log('NODE_PROXY_AND_CSV_PARITY_OK');
 """,

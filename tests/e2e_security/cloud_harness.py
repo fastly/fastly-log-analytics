@@ -3145,7 +3145,10 @@ sub vcl_recv {{
 
 include "front_main.vcl";
 """
-    return wrapper, {"front_main.vcl": front_vcl_text}
+    return wrapper, {
+        "front_main.vcl": front_vcl_text,
+        ".falco.yaml": "testing:\n  overrides:\n    req.is_ssl: true\n",
+    }
 
 
 def make_flp_cdn_cookie(

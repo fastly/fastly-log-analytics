@@ -25,21 +25,22 @@ import json
 import logging
 import re
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, quote_plus
+from urllib.parse import quote, quote_plus, urlsplit
 
 import boto3
 from botocore.config import Config
+from fastapi import HTTPException
 
 from backend import config as svcconfig
 from backend import scoring
 from backend.core.clickhouse import ClickHouseClient, get_clickhouse_client
 from backend.core.fastly.client import region_endpoint
-from backend.core.fos_client import clear_fos_client
+from backend.core.fos_client import _safe_cdn_url, clear_fos_client
 from backend.core.metadata import get_con
 from backend.core.metadata.pg_schema import ensure_pg_schema
 from backend.core.metadata.state_sync import read_dr_state
@@ -61,11 +62,15 @@ from backend.high_scale.postgres_control import (
 )
 from backend.high_scale.recovery import RecoveryReport, rebuild_serving_state_from_fos
 from backend.provision.fos_setup import ensure_fos_access_key
+from backend.routers.alerts import validate_webhook_url
+from backend.utils.bounded_cache import CacheRegistry
+from backend.utils.webhook_url import restricted_webhook_host
 
 logger = logging.getLogger(__name__)
 
 _SERVICE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _REGION_RE = re.compile(r"^[a-z0-9-]{1,64}$")
+_BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
 _RESTORE_DOMAINS: tuple[str, ...] = ("request", "rum_vitals", "rum_errors")
 _RECENT_WINDOW = timedelta(hours=24)
 _DEFAULT_WARM_DAYS = 30
@@ -127,6 +132,57 @@ def _build_direct_fos_s3_client(*, access_key: str, secret_key: str, region: str
     )
 
 
+def _validate_dr_cdn_url(raw_cdn_url: str, *, require_fastly_host: bool) -> str:
+    cleaned = raw_cdn_url.strip().rstrip("/")
+    if any(ord(c) < 0x20 or ord(c) == 0x7F or c == "\\" for c in cleaned):
+        raise ValueError("invalid cdn_url in service_config")
+    try:
+        parsed = urlsplit(cleaned)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("invalid cdn_url in service_config") from exc
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise ValueError("cdn_url in service_config must use https with a valid hostname")
+    if parsed.username is not None or parsed.password is not None or "@" in parsed.netloc:
+        raise ValueError("cdn_url in service_config must not contain credentials")
+    if port not in (None, 443) or parsed.query or parsed.fragment:
+        raise ValueError("cdn_url in service_config must not use non-443 ports, query strings, or fragments")
+    if parsed.path and parsed.path != "/" and ".." in parsed.path.split("/"):
+        raise ValueError("cdn_url in service_config must not contain '..'")
+    if restricted_webhook_host(parsed.hostname):
+        raise ValueError("cdn_url in service_config points to a restricted host")
+    if require_fastly_host and _safe_cdn_url(cleaned) is None:
+        raise ValueError("cdn_url in service_config is not on the Fastly HTTPS allowlist")
+    return cleaned
+
+
+def _validate_s3_prefix(raw: str, label: str) -> str:
+    if any(ord(c) < 0x20 or ord(c) == 0x7F or c in ("\\", "?", "#") for c in raw):
+        raise ValueError(f"{label} contains invalid characters")
+    if ".." in raw.split("/"):
+        raise ValueError(f"{label} must not contain '..' traversal segments")
+    cleaned = raw.strip("/")
+    if cleaned and ".." in cleaned.split("/"):
+        raise ValueError(f"{label} must not contain '..' traversal segments")
+    return cleaned
+
+
+def _row_service_id(row: Any) -> str:
+    if isinstance(row, Mapping):
+        return str(row["service_id"])
+    try:
+        return str(row[0])
+    except (KeyError, IndexError, TypeError):
+        return str(row["service_id"])
+
+
+def _validate_restored_webhook_url(url: str) -> str:
+    try:
+        return validate_webhook_url(url)
+    except HTTPException as exc:
+        raise ValueError(f"invalid alert webhook URL: {exc.detail}") from None
+
+
 def _source_object_id(service_id: str, domain: str, object_key: str, checksum: str) -> str:
     """Match ``PostgresControlPlane``'s deterministic ``object_id`` format."""
     return hashlib.sha256("\0".join((service_id, domain, object_key, checksum)).encode()).hexdigest()
@@ -168,10 +224,16 @@ def reconstruct_service_config(
     else:
         cfg.setdefault("fastly_api_key", "")
 
-    # Strip cdn_url when cdn_secret was stripped during DR export so the
-    # telemetry proxy routes directly to FOS with SigV4 instead of hitting 403s.
-    if cfg.get("cdn_url") and not cfg.get("cdn_secret"):
-        cfg["cdn_url"] = ""
+    # Validate any non-empty cdn_url against SSRF; strip when cdn_secret was
+    # stripped during DR export, and require Fastly HTTPS allowlist when retained.
+    if cfg.get("cdn_url"):
+        raw_cdn = str(cfg["cdn_url"]).strip()
+        if raw_cdn:
+            has_secret = bool(str(cfg.get("cdn_secret") or "").strip())
+            validated_cdn = _validate_dr_cdn_url(raw_cdn, require_fastly_host=has_secret)
+            cfg["cdn_url"] = validated_cdn if has_secret else ""
+        else:
+            cfg["cdn_url"] = ""
 
     cfg.setdefault("storage_mode", "cloud")
     cfg.setdefault("raw_layout_version", 3)
@@ -209,6 +271,9 @@ def _restore_views(con: Any, service_id: str, views: Any) -> int:
         if not name:
             continue
         view_id = str(row.get("id") or uuid.uuid4())
+        existing = con.execute("SELECT service_id FROM views WHERE id = ?", (view_id,)).fetchone()
+        if existing is not None and _row_service_id(existing) != service_id:
+            view_id = str(uuid.uuid4())
         raw_filters = row.get("filters_json")
         if isinstance(raw_filters, str):
             filters_json = raw_filters
@@ -222,7 +287,6 @@ def _restore_views(con: Any, service_id: str, views: Any) -> int:
                 start_time, end_time, page, created_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
-                service_id = excluded.service_id,
                 name = excluded.name,
                 filters_json = excluded.filters_json,
                 time_range_type = excluded.time_range_type,
@@ -230,6 +294,7 @@ def _restore_views(con: Any, service_id: str, views: Any) -> int:
                 end_time = excluded.end_time,
                 page = excluded.page,
                 created_at = excluded.created_at
+            WHERE views.service_id = excluded.service_id
             """,
             (
                 view_id,
@@ -262,16 +327,41 @@ def _restore_alerts(con: Any, service_id: str, alerts: Any) -> int:
         if row.get("threshold") is None or row.get("window_min") is None:
             continue
         alert_id = str(row.get("id") or uuid.uuid4())
+        existing = con.execute("SELECT service_id FROM alerts WHERE id = ?", (alert_id,)).fetchone()
+        if existing is not None and _row_service_id(existing) != service_id:
+            alert_id = str(uuid.uuid4())
+
+        raw_webhook_url = row.get("webhook_url")
+        if raw_webhook_url is not None and str(raw_webhook_url).strip() != "":
+            webhook_url_val: str | None = _validate_restored_webhook_url(str(raw_webhook_url))
+        else:
+            webhook_url_val = None
 
         raw_channels = row.get("channels")
         if raw_channels is None:
             raw_channels = row.get("channels_json")
         if isinstance(raw_channels, str):
+            stripped_ch = raw_channels.strip()
+            if stripped_ch:
+                parsed_channels = json.loads(stripped_ch)
+                if not isinstance(parsed_channels, list):
+                    raise ValueError("alert channels_json must decode to a JSON list")
+            else:
+                parsed_channels = []
             channels_json = raw_channels
         elif isinstance(raw_channels, list):
+            parsed_channels = raw_channels
             channels_json = json.dumps(raw_channels)
         else:
+            parsed_channels = []
             channels_json = "[]"
+
+        for ch in parsed_channels:
+            if isinstance(ch, dict):
+                for url_key in ("url", "webhook_url"):
+                    ch_url = ch.get(url_key)
+                    if ch_url is not None and str(ch_url).strip() != "":
+                        _validate_restored_webhook_url(str(ch_url))
 
         raw_status_codes = row.get("status_codes")
         if raw_status_codes is None:
@@ -295,7 +385,6 @@ def _restore_alerts(con: Any, service_id: str, alerts: Any) -> int:
                 enabled, last_triggered_at, created_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
-                service_id = excluded.service_id,
                 name = excluded.name,
                 category = excluded.category,
                 metric = excluded.metric,
@@ -313,6 +402,7 @@ def _restore_alerts(con: Any, service_id: str, alerts: Any) -> int:
                 enabled = excluded.enabled,
                 last_triggered_at = excluded.last_triggered_at,
                 created_at = excluded.created_at
+            WHERE alerts.service_id = excluded.service_id
             """,
             (
                 alert_id,
@@ -327,7 +417,7 @@ def _restore_alerts(con: Any, service_id: str, alerts: Any) -> int:
                 float(row["window_min"]),
                 float(row["comparison_period_min"]) if row.get("comparison_period_min") is not None else None,
                 status_codes_val,
-                row.get("webhook_url"),
+                webhook_url_val,
                 channels_json,
                 float(zscore_raw) if zscore_raw is not None else 3.0,
                 int(baseline_raw) if baseline_raw is not None else 7,
@@ -352,6 +442,9 @@ def _restore_scoring_labels(con: Any, service_id: str, labels: Any) -> int:
         if not sid or label not in scoring.ALLOWED_LABELS:
             continue
         label_id = str(row.get("id") or uuid.uuid4())
+        existing = con.execute("SELECT service_id FROM scoring_labels WHERE id = ?", (label_id,)).fetchone()
+        if existing is not None and _row_service_id(existing) != service_id:
+            label_id = str(uuid.uuid4())
         now_iso = datetime.now(UTC).isoformat()
         created_at = row.get("created_at") or now_iso
         updated_at = row.get("updated_at") or created_at
@@ -663,12 +756,17 @@ def restore_from_fos(
     clean_bucket = (bucket or "").strip()
     if not clean_bucket:
         raise ValueError("bucket is required")
+    if ".." in clean_bucket or not _BUCKET_RE.fullmatch(clean_bucket):
+        raise ValueError("bucket must match ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ without '..'")
     clean_region = (region or "").strip()
     if not _REGION_RE.fullmatch(clean_region):
         raise ValueError("region must match ^[a-z0-9-]{1,64}$")
 
-    clean_prefix = (prefix or "").strip("/")
-    clean_archive_prefix = ("high-scale/archive" if archive_prefix is None else archive_prefix).strip("/")
+    clean_prefix = _validate_s3_prefix(prefix or "", "prefix")
+    clean_archive_prefix = _validate_s3_prefix(
+        "high-scale/archive" if archive_prefix is None else archive_prefix,
+        "archive_prefix",
+    )
 
     api_key = (fastly_api_key or "").strip() or None
     ak = (fos_access_key or "").strip() or None
@@ -750,6 +848,7 @@ def restore_from_fos(
         )
 
         (save_config_fn or svcconfig.save_config)(sid, cfg)
+        CacheRegistry.clear("routers.bootstrap._bootstrap_cache")
         (clear_fos_client_fn or clear_fos_client)(sid)
         (ensure_pg_schema_fn or ensure_pg_schema)()
 
