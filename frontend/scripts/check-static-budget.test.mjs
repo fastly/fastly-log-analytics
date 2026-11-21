@@ -60,7 +60,7 @@ test("measureRoute deduplicates dashboard assets and reports Brotli sizes", () =
     assert.equal(result.css_files, 1);
     assert.equal(
       result.javascript_brotli_bytes,
-      compressed(Buffer.concat([shared, dashboard])).byteLength,
+      compressed(shared).byteLength + compressed(dashboard).byteLength,
     );
     assert.equal(result.css_brotli_bytes, compressed(css).byteLength);
     assert.equal(
@@ -90,6 +90,35 @@ test("measureRoute rejects asset paths that escape the export root", () => {
     );
   } finally {
     rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("measureRoute rejects routes that escape the export root", () => {
+  const parent = mkdtempSync(join(scriptsDir, ".check-static-budget-"));
+  const root = join(parent, "out");
+  try {
+    mkdirSync(root);
+    writeFileSync(join(parent, "outside.html"), "<script src=\"/x.js\"></script>");
+
+    assert.throws(
+      () => measureRoute(root, "/../outside"),
+      /Route escapes the static export root/,
+    );
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("measureRoute fails when dashboard JavaScript is not discovered", () => {
+  const root = fixture();
+  try {
+    writeFileSync(join(root, "dashboard.html"), "<html><body>empty</body></html>");
+    assert.throws(
+      () => measureRoute(root),
+      /did not reference any JavaScript assets/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

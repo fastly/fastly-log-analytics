@@ -1,5 +1,6 @@
 // @scope: recv
 sub fos_requires_header_auth_even_for_cached_objects {
+  testing.inject_variable("req.is_ssl", true);
   set req.url = "/fos/AAAAAAAAAAAAAAAAAAAAAA/raw/request/a.gz?key=test-cdn-key-not-a-live-secret";
   testing.call_subroutine("vcl_recv");
   assert.error(622);
@@ -8,6 +9,7 @@ sub fos_requires_header_auth_even_for_cached_objects {
 
 // @scope: recv
 sub fos_unknown_service_is_not_an_app_request {
+  testing.inject_variable("req.is_ssl", true);
   set req.url = "/fos/BBBBBBBBBBBBBBBBBBBBBB/raw/a.gz";
   set req.http.x-fastly-key = "test-cdn-key-not-a-live-secret";
   testing.call_subroutine("vcl_recv");
@@ -17,6 +19,7 @@ sub fos_unknown_service_is_not_an_app_request {
 
 // @scope: recv
 sub fos_auth_and_registry_fail_closed {
+  testing.inject_variable("req.is_ssl", true);
   testing.table_set(flp_front_auth, "cdn_key", "");
   set req.url = "/fos/AAAAAAAAAAAAAAAAAAAAAA/raw/a.gz";
   set req.http.x-fastly-key = "";
@@ -27,6 +30,7 @@ sub fos_auth_and_registry_fail_closed {
 
 // @scope: recv
 sub fos_drops_secrets_and_canonicalizes_cache_keys {
+  testing.inject_variable("req.is_ssl", true);
   set req.url = "/fos/AAAAAAAAAAAAAAAAAAAAAA/raw/a.gz?key=private&max-keys=10&prefix=a&unexpected=secret";
   set req.http.x-fastly-key = "test-cdn-key-not-a-live-secret";
   set req.http.Cookie = "flp_session=private";
@@ -47,6 +51,7 @@ sub fos_drops_secrets_and_canonicalizes_cache_keys {
 
 // @scope: recv
 sub client_cannot_route_app_requests_to_storage {
+  testing.inject_variable("req.is_ssl", true);
   set req.url = "/sign-in";
   set req.http.x-flp-fos-service = "AAAAAAAAAAAAAAAAAAAAAA";
   set req.http.x-flp-fos-bucket = "private";
@@ -60,6 +65,7 @@ sub client_cannot_route_app_requests_to_storage {
 
 // @scope: recv
 sub fos_does_not_expose_writes {
+  testing.inject_variable("req.is_ssl", true);
   set req.url = "/fos/AAAAAAAAAAAAAAAAAAAAAA/raw/a.gz";
   set req.method = "DELETE";
   set req.http.x-fastly-key = "test-cdn-key-not-a-live-secret";
@@ -103,6 +109,7 @@ sub fos_errors_and_listings_are_never_cached {
 
 // @scope: recv
 sub immutable_fos_objects_can_use_segmented_cache {
+  testing.inject_variable("req.is_ssl", true);
   set req.url = "/fos/AAAAAAAAAAAAAAAAAAAAAA/processed/request/year=2026/month=10/day=30/hour=01/window=a.parquet";
   set req.http.x-fastly-key = "test-cdn-key-not-a-live-secret";
   testing.call_subroutine("vcl_recv");
@@ -114,6 +121,7 @@ sub immutable_fos_objects_can_use_segmented_cache {
 
 // @scope: recv
 sub fos_write_once_meta_objects_are_looked_up {
+  testing.inject_variable("req.is_ssl", true);
   set req.url = "/fos/AAAAAAAAAAAAAAAAAAAAAA/meta/cron-runs/dt=2026-10-29/tick-1.json";
   set req.http.x-fastly-key = "test-cdn-key-not-a-live-secret";
   testing.call_subroutine("vcl_recv");
@@ -124,6 +132,7 @@ sub fos_write_once_meta_objects_are_looked_up {
 
 // @scope: recv
 sub fos_listings_always_bypass_cache {
+  testing.inject_variable("req.is_ssl", true);
   set req.url = "/fos/AAAAAAAAAAAAAAAAAAAAAA/?list-type=2&prefix=raw%2F";
   set req.http.x-fastly-key = "test-cdn-key-not-a-live-secret";
   testing.call_subroutine("vcl_recv");
@@ -134,6 +143,7 @@ sub fos_listings_always_bypass_cache {
 
 // @scope: recv
 sub fos_versioned_object_reads_are_looked_up {
+  testing.inject_variable("req.is_ssl", true);
   set req.url = "/fos/AAAAAAAAAAAAAAAAAAAAAA/processed/request/a.parquet?versionId=v1";
   set req.http.x-fastly-key = "test-cdn-key-not-a-live-secret";
   testing.call_subroutine("vcl_recv");
@@ -155,6 +165,7 @@ sub fos_versioned_object_fetch_is_cacheable {
 
 // @scope: recv
 sub corrupted_registry_cannot_select_an_arbitrary_origin {
+  testing.inject_variable("req.is_ssl", true);
   testing.table_set(flp_fos_buckets, "AAAAAAAAAAAAAAAAAAAAAA", "fos-test-logs|attacker.example");
   set req.url = "/fos/AAAAAAAAAAAAAAAAAAAAAA/raw/a.gz";
   set req.http.x-fastly-key = "test-cdn-key-not-a-live-secret";
@@ -227,6 +238,7 @@ sub fos_request_keys_carry_request_surrogate_key() {
 
 // @scope: recv
 sub fos_immutable_raw_objects_are_looked_up() {
+  testing.inject_variable("req.is_ssl", true);
   set req.url = "/fos/AAAAAAAAAAAAAAAAAAAAAA/raw/request/a.gz";
   set req.http.x-fastly-key = "test-cdn-key-not-a-live-secret";
   testing.call_subroutine("vcl_recv");
@@ -237,6 +249,7 @@ sub fos_immutable_raw_objects_are_looked_up() {
 
 // @scope: recv
 sub fos_prefixed_raw_objects_are_looked_up() {
+  testing.inject_variable("req.is_ssl", true);
   set req.url = "/fos/AAAAAAAAAAAAAAAAAAAAAA/logs/edge/raw/rum/a.gz";
   set req.http.x-fastly-key = "test-cdn-key-not-a-live-secret";
   testing.call_subroutine("vcl_recv");
@@ -296,6 +309,7 @@ sub fos_prefixed_ops_keys_carry_family_surrogate_keys() {
 
 // @scope: recv
 sub api_file_with_valid_cdn_cookie_rewrites_directly_to_fos_cache_lookup() {
+  testing.inject_variable("req.is_ssl", true);
   testing.fixed_time("2026-10-29 12:34:56");
   declare local var.shash STRING;
   declare local var.payload STRING;
@@ -320,6 +334,7 @@ sub api_file_with_valid_cdn_cookie_rewrites_directly_to_fos_cache_lookup() {
 
 // @scope: recv
 sub api_file_denies_analyst_on_ops_and_allows_request_dataset() {
+  testing.inject_variable("req.is_ssl", true);
   testing.fixed_time("2026-10-29 12:34:56");
   declare local var.shash STRING;
   declare local var.payload STRING;
@@ -343,6 +358,7 @@ sub api_file_denies_analyst_on_ops_and_allows_request_dataset() {
 
 // @scope: recv
 sub api_file_denies_no_pii_and_invalid_keys() {
+  testing.inject_variable("req.is_ssl", true);
   testing.fixed_time("2026-10-29 12:34:56");
   declare local var.shash STRING;
   declare local var.payload STRING;
@@ -367,6 +383,7 @@ sub api_file_denies_no_pii_and_invalid_keys() {
 
 // @scope: recv
 sub api_file_falls_through_when_session_cookie_changes() {
+  testing.inject_variable("req.is_ssl", true);
   testing.fixed_time("2026-10-29 12:34:56");
   declare local var.shash STRING;
   declare local var.payload STRING;
@@ -405,6 +422,7 @@ sub api_file_delivery_sets_parquet_headers_and_cdn_cache_hit() {
 
 // @scope: recv
 sub direct_fos_parquet_path_with_valid_cdn_cookie_rewrites_to_service_fos_lookup() {
+  testing.inject_variable("req.is_ssl", true);
   testing.fixed_time("2026-10-29 12:34:56");
   declare local var.shash STRING;
   declare local var.payload STRING;
@@ -425,6 +443,7 @@ sub direct_fos_parquet_path_with_valid_cdn_cookie_rewrites_to_service_fos_lookup
 
 // @scope: recv
 sub direct_fos_parquet_path_falls_back_to_api_file_when_session_cookie_changes() {
+  testing.inject_variable("req.is_ssl", true);
   testing.fixed_time("2026-10-29 12:34:56");
   declare local var.shash STRING;
   declare local var.payload STRING;
@@ -443,6 +462,7 @@ sub direct_fos_parquet_path_falls_back_to_api_file_when_session_cookie_changes()
 
 // @scope: recv
 sub fos_constant_time_key_check_rejects_wrong_or_partial_keys {
+  testing.inject_variable("req.is_ssl", true);
   set req.url = "/fos/AAAAAAAAAAAAAAAAAAAAAA/raw/a.gz";
   unset req.http.x-fastly-key;
   testing.call_subroutine("vcl_recv");
@@ -460,6 +480,7 @@ sub fos_constant_time_key_check_rejects_wrong_or_partial_keys {
 
 // @scope: recv
 sub api_file_and_fos_pq_fall_through_cleanly_on_missing_expired_or_epoch_stale_cdn_cookie {
+  testing.inject_variable("req.is_ssl", true);
   testing.fixed_time("2026-10-29 12:34:56");
   declare local var.shash STRING;
   declare local var.payload STRING;
@@ -508,6 +529,7 @@ sub api_file_and_fos_pq_fall_through_cleanly_on_missing_expired_or_epoch_stale_c
 
 // @scope: recv
 sub api_file_with_valid_v2_epoch_cdn_cookie_rewrites_directly_to_fos_cache_lookup {
+  testing.inject_variable("req.is_ssl", true);
   testing.fixed_time("2026-10-29 12:34:56");
   testing.table_set(flp_front_auth, "auth_epoch", "1");
   declare local var.shash STRING;
@@ -533,6 +555,7 @@ sub api_file_with_valid_v2_epoch_cdn_cookie_rewrites_directly_to_fos_cache_looku
 
 // @scope: recv
 sub api_file_and_fos_pq_reject_malformed_or_tampered_cdn_cookie_at_edge {
+  testing.inject_variable("req.is_ssl", true);
   testing.fixed_time("2026-10-29 12:34:56");
   declare local var.shash STRING;
   declare local var.valid_payload STRING;
@@ -571,6 +594,7 @@ sub api_file_and_fos_pq_reject_malformed_or_tampered_cdn_cookie_at_edge {
 
 // @scope: recv
 sub host_flp_cdn_overrides_tossed_flp_cdn_and_supports_multi_segment_fos_prefix {
+  testing.inject_variable("req.is_ssl", true);
   testing.fixed_time("2026-10-29 12:34:56");
   declare local var.shash STRING;
   declare local var.payload STRING;

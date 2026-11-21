@@ -494,8 +494,8 @@ sub vcl_deliver {
 sub vcl_error {
   if (obj.status == 801) {
     set obj.http.Location = "https://" req.http.Host req.url;
-    set obj.status = 301;
-    set obj.response = "Moved Permanently";
+    set obj.status = 308;
+    set obj.response = "Permanent Redirect";
     synthetic {""};
     return(deliver);
   }

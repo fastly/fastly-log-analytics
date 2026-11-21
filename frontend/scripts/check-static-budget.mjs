@@ -25,7 +25,12 @@ function isInside(root, candidate) {
 }
 
 function htmlPathForRoute(outDir, route) {
-  const cleanRoute = `/${route.split(/[?#]/, 1)[0].replace(/^\/+|\/+$/g, "")}`;
+  const routePath = route.split(/[?#]/, 1)[0];
+  const routeSegments = routePath.split("/").filter(Boolean);
+  if (routeSegments.some((segment) => segment === "." || segment === "..")) {
+    throw new Error(`Route escapes the static export root: ${route}`);
+  }
+  const cleanRoute = `/${routeSegments.join("/")}`;
   if (cleanRoute === "/") return path.join(outDir, "index.html");
   const flat = path.join(outDir, `${cleanRoute.slice(1)}.html`);
   const nested = path.join(outDir, cleanRoute.slice(1), "index.html");
@@ -86,7 +91,11 @@ function assetKind(reference) {
 }
 
 function compressedSize(contents) {
-  return brotliCompressSync(Buffer.concat(contents), BROTLI_OPTIONS).byteLength;
+  return contents.reduce(
+    (total, content) =>
+      total + brotliCompressSync(content, BROTLI_OPTIONS).byteLength,
+    0,
+  );
 }
 
 export function measureRoute(outDir, route = "/dashboard") {
@@ -112,6 +121,9 @@ export function measureRoute(outDir, route = "/dashboard") {
 
   const javascript = [...assets.javascript.values()];
   const css = [...assets.css.values()];
+  if (javascript.length === 0) {
+    throw new Error(`Dashboard export did not reference any JavaScript assets: ${entry}`);
+  }
   const javascriptChunks = javascript.map((asset) => ({
     ...asset,
     brotliBytes: brotliCompressSync(asset.content, BROTLI_OPTIONS).byteLength,

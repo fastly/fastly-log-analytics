@@ -14,7 +14,7 @@ sub https_redirect_preserves_host_path_and_query {
   set req.url = "/usage?service=fixture";
   set req.http.Host = "flp.example";
   testing.call_subroutine("vcl_error");
-  assert.equal(obj.status, 301);
+  assert.equal(obj.status, 308);
   assert.equal(obj.http.Location, "https://flp.example/usage?service=fixture");
   assert.state(deliver);
 }
