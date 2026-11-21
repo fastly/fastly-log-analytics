@@ -463,8 +463,17 @@ describe('T5-FE-05: cloud-engine executeCloudQuery shadow-masked CTE and handleS
       expect(r.status, nestedCollisionSql).toBe(403)
     }
 
-    // 2. DESCRIBE TABLE logs / DESCRIBE TABLE main.requests strips PII column names under maskIps: true
-    for (const descTableSql of ['DESCRIBE TABLE logs', 'DESCRIBE TABLE main.requests', 'DESCRIBE TABLE "requests"']) {
+    // 2. DESCRIBE TABLE/FROM/(logs)/(TABLE logs)/(FROM logs)/SELECT * strips PII column names under maskIps: true
+    for (const descTableSql of [
+      'DESCRIBE TABLE logs',
+      'DESCRIBE TABLE main.requests',
+      'DESCRIBE TABLE "requests"',
+      'DESCRIBE FROM logs',
+      'DESCRIBE (logs)',
+      'DESCRIBE (TABLE logs)',
+      'DESCRIBE (FROM logs)',
+      'DESCRIBE SELECT * FROM logs',
+    ]) {
       const descRes = await executeCloudQuery(
         { sql: descTableSql },
         { maskIps: true, tableName: 'requests', allowedTables: ['logs', 'requests'], runSql },
@@ -478,6 +487,16 @@ describe('T5-FE-05: cloud-engine executeCloudQuery shadow-masked CTE and handleS
         expect(colNames, descTableSql).not.toContain('cookie_session')
         expect(colNames, descTableSql).not.toContain('x-forwarded-for')
       }
+    }
+
+    // 2b. Whitespace-less WITH"c" explain merges cleanly with shadow CTEs under maskIps: true
+    const explainWithQuotedRes = await executeCloudQuery(
+      { sql: 'WITH"c" AS (SELECT status FROM logs) SELECT * FROM "c"', explain: true },
+      { maskIps: true, tableName: 'requests', allowedTables: ['logs', 'requests'], runSql },
+    )
+    expect(explainWithQuotedRes.status).toBe(200)
+    if ('explain_plan' in explainWithQuotedRes.body) {
+      expect(explainWithQuotedRes.body.explain_plan).toBeTruthy()
     }
 
     // 3. Wave-3 PIVOT_LONGER/PIVOT_WIDER, memory catalog, WINDOW fake-CTE, self/sibling/subquery CTE, and subquery SHOW/DESC/DESCRIBE all return 403

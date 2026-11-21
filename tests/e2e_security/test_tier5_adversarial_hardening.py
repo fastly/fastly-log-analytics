@@ -766,6 +766,161 @@ def test_t5_c08_cloud_views_redteam_dupkeys_sticky_slots_columns_lambda_concat_a
         ),
         "bug-cloud-1-r4-json-map-extra": json.dumps({"_extra": {"mode": "include", "values": ["198.51.100.7"]}}),
         "bug-cloud-1-r4-json-kv-extra": json.dumps({"_extra": "198.51.100.7"}),
+        "bug-cloud-1-r5-json-merge-patch": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT * FROM logs WHERE json_merge_patch(_extra, '{\"safe\":\"ok\"}')::VARCHAR LIKE '%198.51.100.7%'"
+                }
+            }
+        ),
+        "bug-cloud-1-r5-dot-json-merge-patch": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT * FROM logs WHERE (_extra->'request').json_merge_patch('{\"safe\":\"1\"}')::VARCHAR LIKE '%198.51.100.7%'"
+                }
+            }
+        ),
+        "bug-cloud-1-r5-json-contains-scalar-sid": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM logs WHERE json_contains(_extra, '\"sess_secret_99\"')"}}
+        ),
+        "bug-cloud-1-r5-json-contains-scalar-ipv6": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM logs WHERE json_contains(_extra, '\"2001:db8::abcd\"')"}}
+        ),
+        "bug-cloud-1-r5-json-contains-array": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM logs WHERE json_contains(_extra, '[\"198.51.100.7\"]')"}}
+        ),
+        "bug-cloud-1-r5-json-contains-empty-obj": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM logs WHERE json_contains(_extra, '{}')"}}
+        ),
+        "bug-cloud-1-r5-from-json-map-schema": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT * FROM logs WHERE from_json(_extra::JSON, '\"MAP(VARCHAR, VARCHAR)\"')::VARCHAR LIKE '%198.51.100.7%'"
+                }
+            }
+        ),
+        "bug-cloud-1-r5-from-json-json-schema": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT * FROM logs WHERE from_json(_extra, '\"JSON\"')::VARCHAR LIKE '%198.51.100.7%'"
+                }
+            }
+        ),
+        "bug-cloud-1-r5-json-transform-json-schema": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT * FROM logs WHERE json_transform(_extra, '\"JSON\"')::VARCHAR LIKE '%198.51.100.7%'"
+                }
+            }
+        ),
+        "bug-cloud-1-r5-json-transform-strict-varchar": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT * FROM logs WHERE json_transform_strict(_extra, '\"VARCHAR\"') LIKE '%198.51.100.7%'"
+                }
+            }
+        ),
+        "bug-cloud-1-r5-nonascii-alias-cast": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM logs AS ä WHERE ä::VARCHAR LIKE '%198.51.100.7%'"}}
+        ),
+        "bug-cloud-1-r5-nonascii-cte-struct": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "WITH ä AS (SELECT * FROM logs) SELECT * FROM ä WHERE ä::VARCHAR LIKE '%198.51.100.7%'"
+                }
+            }
+        ),
+        "bug-cloud-1-r5-nonascii-subscript-concat": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT * FROM (SELECT (_extra->'request'->'headers') AS ä FROM logs) WHERE ä['x-forwar' || 'ded-for'] = '\"198.51.100.7\"'"
+                }
+            }
+        ),
+        "bug-cloud-1-r5-main-dot-logs-struct": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM logs WHERE main.logs::VARCHAR LIKE '%198.51.100.7%'"}}
+        ),
+        "bug-cloud-1-r5-memory-main-logs-struct": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM logs WHERE memory.main.logs::VARCHAR LIKE '%198.51.100.7%'"}}
+        ),
+        "bug-cloud-1-r5-dot-t-concat": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM logs AS t WHERE t.concat('') LIKE '%198.51.100.7%'"}}
+        ),
+        "bug-cloud-1-r5-dot-main-logs-concat": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM logs WHERE main.logs.concat('') LIKE '%198.51.100.7%'"}}
+        ),
+        "bug-cloud-1-r5-tvf-range-subquery": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT * FROM range((SELECT count(*) FROM logs AS t WHERE t::VARCHAR LIKE '%198.51.100.7%'))"
+                }
+            }
+        ),
+        "bug-cloud-1-r5-tvf-correlated-main-logs": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT logs.status, logs.url FROM logs WHERE EXISTS (SELECT 1 FROM range((SELECT count(*) FROM main.logs AS t WHERE t.timestamp = logs.timestamp AND t::VARCHAR LIKE '%198.51.100.7%')))"
+                }
+            }
+        ),
+        "bug-cloud-1-r5-summarize-logs": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM (SUMMARIZE logs) AS s WHERE s.max = '198.51.100.7'"}}
+        ),
+        "bug-cloud-1-r5-summarize-select-logs": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM (SUMMARIZE SELECT * FROM logs) AS s WHERE s.max = '198.51.100.7'"}}
+        ),
+        "bug-cloud-1-r5-from-alias-col-list": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM logs AS t(c1, c2) WHERE t.c2 = '198.51.100.7'"}}
+        ),
+        "bug-cloud-1-r5-cte-col-list-star": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "WITH c(c1, c2, c3, c4, c5, c6, c7) AS (SELECT * FROM logs) SELECT * FROM c WHERE c.c2 = '198.51.100.7'"
+                }
+            }
+        ),
+        "bug-cloud-1-r5-cte-col-list-table-logs": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "WITH c(c1, c2, c3, c4, c5, c6, c7) AS (TABLE logs) SELECT * FROM c WHERE c.c2 = '198.51.100.7'"
+                }
+            }
+        ),
+        "bug-cloud-1-r5-cte-col-list-from-first": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "WITH c(c1, c2, c3, c4, c5, c6, c7) AS (FROM logs) SELECT * FROM c WHERE c.c2 = '198.51.100.7'"
+                }
+            }
+        ),
+        "bug-cloud-1-r5-union-all-star-rename": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT * FROM (SELECT now()::TIMESTAMPTZ AS a, '' AS b, '' AS c, '' AS d, 0 AS e, '' AS f, '' AS g WHERE 1=0 UNION ALL SELECT * FROM logs) sub WHERE sub.b = '198.51.100.7'"
+                }
+            }
+        ),
+        "bug-cloud-1-r5-union-all-table-logs-rename": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT * FROM (SELECT now()::TIMESTAMPTZ AS a, '' AS b, '' AS c, '' AS d, 0 AS e, '' AS f, '' AS g WHERE 1=0 UNION ALL TABLE logs) sub WHERE sub.b = '198.51.100.7'"
+                }
+            }
+        ),
+        "bug-cloud-1-r5-intersect-star-values": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT * FROM logs INTERSECT VALUES ('2026-01-01'::TIMESTAMPTZ, '198.51.100.7', '', '', 200, '/', '{}')"
+                }
+            }
+        ),
+        "bug-cloud-1-r5-row-in-select-star": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT * FROM logs WHERE (logs.timestamp, '198.51.100.7', '', '', logs.status, logs.url, '') IN (SELECT * FROM logs)"
+                }
+            }
+        ),
     }
     benign_vectors: dict[str, str] = {
         "benign-columns-safe": json.dumps({"_view_extras": {"sql": "SELECT COLUMNS('^(status|url|pop)$') FROM logs"}}),
@@ -777,15 +932,41 @@ def test_t5_c08_cloud_views_redteam_dupkeys_sticky_slots_columns_lambda_concat_a
         "benign-json-contains-safe": json.dumps(
             {"_view_extras": {"sql": 'SELECT * FROM logs WHERE json_contains(_extra, \'{"safe_header":"ok"}\')'}}
         ),
+        "benign-r5-from-json-safe": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": 'SELECT * FROM logs WHERE from_json(_extra::JSON, \'{"safe_header":"VARCHAR"}\') IS NOT NULL'
+                }
+            }
+        ),
+        "benign-r5-json-transform-safe": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": 'SELECT * FROM logs WHERE json_transform(_extra, \'{"safe_header":"VARCHAR"}\') IS NOT NULL'
+                }
+            }
+        ),
         "benign-json-extract-eq-pii-lit": json.dumps(
             {"_view_extras": {"sql": "SELECT * FROM logs WHERE json_extract_string(_extra, '/meta/pop') = '/ip/sid'"}}
         ),
         "benign-r4-alias-qualified-cols": json.dumps(
-            {"_view_extras": {"sql": "SELECT t.status, logs.url FROM logs AS t WHERE t.status = 200"}}
+            {
+                "_view_extras": {
+                    "sql": "SELECT t.status, logs.url, main.logs.url FROM main.logs AS t WHERE t.status = 200"
+                }
+            }
         ),
         "benign-r4-dot-chain-safe": json.dumps(
             {"_view_extras": {"sql": "SELECT (_extra->'headers').json_extract_string('safe_header') FROM logs"}}
         ),
+        "benign-r5-count-derived-cte-star": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "WITH c AS (SELECT * FROM logs) SELECT count(*) FROM (SELECT status, url FROM c) sub WHERE sub.status = 200"
+                }
+            }
+        ),
+        "benign-r5-top-select-star": json.dumps({"_view_extras": {"sql": "SELECT * FROM logs WHERE status = 200"}}),
         "benign-4xx-pill": json.dumps(
             {
                 "status": {"mode": "include", "values": ["404", "429"]},

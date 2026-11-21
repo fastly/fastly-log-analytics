@@ -579,75 +579,264 @@ fn peek_simple_bracket_pii(rest: &str) -> bool {
         && is_pii_identifier(inner)
 }
 
-fn is_extract_fn_name(token: &str) -> bool {
-    matches!(
-        token.trim().to_ascii_lowercase().as_str(),
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExtractArgMode {
+    KeyOrPath,
+    JsonContainsNeedle,
+    JsonStructSchema,
+}
+
+#[derive(Clone, Copy)]
+struct ExtractFrame {
+    paren_depth: u32,
+    bracket_depth: u32,
+    brace_depth: u32,
+    arg_idx: u32,
+    mode: ExtractArgMode,
+}
+
+fn extract_fn_mode(token: &str) -> Option<ExtractArgMode> {
+    match trim_sql_ws(token).to_ascii_lowercase().as_str() {
         "json_extract"
-            | "json_extract_string"
-            | "json_extract_path"
-            | "json_extract_path_text"
-            | "json_value"
-            | "json_exists"
-            | "struct_extract"
-            | "map_extract"
-            | "element_at"
-            | "map_extract_value"
-            | "variant_extract"
-            | "union_extract"
-            | "struct_has"
-            | "struct_contains"
-            | "map_contains"
-            | "map_contains_entry"
-            | "json_contains"
-            | "json_merge_patch"
-            | "json_transform"
-            | "json_transform_strict"
-            | "from_json"
-            | "from_json_strict"
+        | "json_extract_string"
+        | "json_extract_path"
+        | "json_extract_path_text"
+        | "json_value"
+        | "json_exists"
+        | "struct_extract"
+        | "map_extract"
+        | "element_at"
+        | "map_extract_value"
+        | "variant_extract"
+        | "union_extract"
+        | "struct_has"
+        | "map_contains"
+        | "map_contains_entry" => Some(ExtractArgMode::KeyOrPath),
+        "json_contains" => Some(ExtractArgMode::JsonContainsNeedle),
+        "json_transform" | "json_transform_strict" | "from_json" | "from_json_strict" => {
+            Some(ExtractArgMode::JsonStructSchema)
+        }
+        _ => None,
+    }
+}
+
+fn is_safe_duckdb_scalar_schema_type(raw_ty: &str) -> bool {
+    let trimmed = trim_sql_ws(raw_ty);
+    if trimmed.is_empty() || trimmed.contains('[') || trimmed.contains(']') {
+        return false;
+    }
+    let base = if let Some((b, rest)) = trimmed.split_once('(') {
+        let Some(inner) = rest.strip_suffix(')') else {
+            return false;
+        };
+        let inner_trimmed = trim_sql_ws(inner);
+        if inner_trimmed.is_empty()
+            || !inner_trimmed
+                .bytes()
+                .all(|ch| ch.is_ascii_digit() || matches!(ch, b',' | b' '))
+        {
+            return false;
+        }
+        trim_sql_ws(b)
+    } else {
+        trimmed
+    };
+    matches!(
+        base.to_ascii_lowercase().as_str(),
+        "varchar"
+            | "text"
+            | "string"
+            | "char"
+            | "bpchar"
+            | "bigint"
+            | "int8"
+            | "long"
+            | "ubigint"
+            | "hugeint"
+            | "uhugeint"
+            | "integer"
+            | "int"
+            | "int4"
+            | "signed"
+            | "uinteger"
+            | "smallint"
+            | "int2"
+            | "short"
+            | "usmallint"
+            | "tinyint"
+            | "int1"
+            | "utinyint"
+            | "double"
+            | "float8"
+            | "float"
+            | "float4"
+            | "real"
+            | "decimal"
+            | "numeric"
+            | "boolean"
+            | "bool"
+            | "logical"
+            | "date"
+            | "time"
+            | "timetz"
+            | "timestamp"
+            | "datetime"
+            | "timestamptz"
+            | "timestamp_s"
+            | "timestamp_ms"
+            | "timestamp_ns"
+            | "interval"
+            | "uuid"
+            | "blob"
+            | "bytea"
     )
 }
 
+fn json_contains_object_is_safe(val: &Value, depth: usize) -> bool {
+    if depth > MAX_JSON_DEPTH {
+        return false;
+    }
+    let Value::Object(map) = val else {
+        return false;
+    };
+    if map.is_empty() {
+        return false;
+    }
+    map.iter().all(|(k, v)| {
+        !is_pii_key_or_json_path(k)
+            && !is_extra_column_ident(k)
+            && match v {
+                Value::String(_) | Value::Number(_) | Value::Bool(_) | Value::Null => true,
+                Value::Object(_) => json_contains_object_is_safe(v, depth + 1),
+                Value::Array(_) => false,
+            }
+    })
+}
+
+fn json_contains_needle_references_pii(lit: &str) -> bool {
+    if json_has_duplicate_keys(lit) {
+        return true;
+    }
+    let Ok(parsed) = serde_json::from_str::<Value>(lit) else {
+        return true;
+    };
+    !json_contains_object_is_safe(&parsed, 0)
+}
+
+fn json_struct_schema_object_is_safe(val: &Value, depth: usize) -> bool {
+    if depth > MAX_JSON_DEPTH {
+        return false;
+    }
+    let Value::Object(map) = val else {
+        return false;
+    };
+    if map.is_empty() {
+        return false;
+    }
+    map.iter().all(|(k, v)| {
+        !is_pii_key_or_json_path(k)
+            && !is_extra_column_ident(k)
+            && match v {
+                Value::String(ty) => is_safe_duckdb_scalar_schema_type(ty),
+                Value::Object(_) => json_struct_schema_object_is_safe(v, depth + 1),
+                _ => false,
+            }
+    })
+}
+
+fn json_struct_schema_references_pii(lit: &str) -> bool {
+    if json_has_duplicate_keys(lit) {
+        return true;
+    }
+    let Ok(parsed) = serde_json::from_str::<Value>(lit) else {
+        return true;
+    };
+    !json_struct_schema_object_is_safe(&parsed, 0)
+}
+
+fn literal_references_pii_in_key_or_extract_ctx(
+    lit: &str,
+    in_subscript_or_arrow_or_brace_key: bool,
+    extract_stack: &[ExtractFrame],
+) -> bool {
+    if in_subscript_or_arrow_or_brace_key && is_pii_key_or_json_path(lit) {
+        return true;
+    }
+    for frame in extract_stack {
+        if frame.arg_idx == 0 {
+            if is_pii_key_or_json_path(lit) {
+                return true;
+            }
+        } else {
+            match frame.mode {
+                ExtractArgMode::KeyOrPath => {
+                    if is_pii_key_or_json_path(lit) {
+                        return true;
+                    }
+                }
+                ExtractArgMode::JsonContainsNeedle => {
+                    if frame.arg_idx != 1 || json_contains_needle_references_pii(lit) {
+                        return true;
+                    }
+                }
+                ExtractArgMode::JsonStructSchema => {
+                    if frame.arg_idx != 1 || json_struct_schema_references_pii(lit) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 fn is_blind_pii_fn(token: &str) -> bool {
-    matches!(
-        trim_sql_ws(token).to_ascii_lowercase().as_str(),
-        "struct_extract_at"
-            | "json_each"
-            | "json_tree"
-            | "json_keys"
-            | "to_json"
-            | "json_quote"
-            | "array_to_json"
-            | "row_to_json"
-            | "struct_values"
-            | "map_values"
-            | "map_entries"
-            | "query"
-            | "query_table"
-            | "json_execute_serialized_sql"
-            | "json_deserialize_sql"
-            | "json_serialize_sql"
-            | "json_serialize_plan"
-            | "map_contains_value"
-            | "map_keys"
-            | "struct_indexof"
-            | "struct_position"
-            | "struct_keys"
-            | "remap_struct"
-            | "struct_insert"
-            | "struct_update"
-            | "struct_concat"
-            | "json_pretty"
-            | "json_group_array"
-            | "json_group_object"
-            | "json_group_structure"
-            | "json_structure"
-    )
+    let lower = trim_sql_ws(token).to_ascii_lowercase();
+    lower.starts_with("read_")
+        || lower.starts_with("parquet_")
+        || matches!(
+            lower.as_str(),
+            "struct_extract_at"
+                | "struct_contains"
+                | "json_merge_patch"
+                | "map_concat"
+                | "json_each"
+                | "json_tree"
+                | "json_keys"
+                | "to_json"
+                | "json_quote"
+                | "array_to_json"
+                | "row_to_json"
+                | "struct_values"
+                | "map_values"
+                | "map_entries"
+                | "query"
+                | "query_table"
+                | "json_execute_serialized_sql"
+                | "json_deserialize_sql"
+                | "json_serialize_sql"
+                | "json_serialize_plan"
+                | "map_contains_value"
+                | "map_keys"
+                | "struct_indexof"
+                | "struct_position"
+                | "struct_keys"
+                | "remap_struct"
+                | "struct_insert"
+                | "struct_update"
+                | "struct_concat"
+                | "json_pretty"
+                | "json_group_array"
+                | "json_group_object"
+                | "json_group_structure"
+                | "json_structure"
+        )
 }
 
 fn is_blocked_sql_keyword(token: &str) -> bool {
     matches!(
         trim_sql_ws(token).to_ascii_lowercase().as_str(),
-        "uescape" | "pivot" | "unpivot" | "pivot_wider" | "pivot_longer"
+        "uescape" | "pivot" | "unpivot" | "pivot_wider" | "pivot_longer" | "summarize"
     )
 }
 
@@ -762,7 +951,7 @@ fn read_json_type_ident(s: &str, k: usize) -> Option<usize> {
 
 struct ExtraExtractCtx<'a> {
     paren_stack: &'a [(ParenKind, bool)],
-    extract_stack: &'a [(u32, u32, u32, u32)],
+    extract_stack: &'a [ExtractFrame],
     bracket_depth: u32,
     brace_depth: u32,
     case_depth: u32,
@@ -839,10 +1028,10 @@ fn extra_is_safely_extracted(s: &str, after_ident: usize, ctx: &ExtraExtractCtx<
             }
             let eff_paren_depth = u32::try_from(unconsumed).unwrap_or(u32::MAX);
             return ctx.extract_stack.last().is_some_and(|f| {
-                f.0 == eff_paren_depth
-                    && f.1 == ctx.bracket_depth
-                    && f.2 == ctx.brace_depth
-                    && f.3 == 0
+                f.paren_depth == eff_paren_depth
+                    && f.bracket_depth == ctx.bracket_depth
+                    && f.brace_depth == ctx.brace_depth
+                    && f.arg_idx == 0
             });
         }
         if matches!(bytes.get(j), Some(b'-' | b'#')) && bytes.get(j + 1) == Some(&b'>') {
@@ -873,6 +1062,7 @@ enum RelTok {
     RParen,
     Comma,
     Dot,
+    Star,
     Other,
 }
 
@@ -974,9 +1164,453 @@ fn is_from_alias_stop_keyword(lower: &str) -> bool {
     )
 }
 
+fn is_schema_or_catalog_ident(lower: &str) -> bool {
+    matches!(
+        lower,
+        "main" | "memory" | "temp" | "system" | "duckdb" | "pg_catalog" | "information_schema"
+    )
+}
+
+fn is_preceded_by_non_schema_dot(tokens: &[RelTok], idx: usize) -> bool {
+    if idx == 0 || !matches!(tokens.get(idx - 1), Some(RelTok::Dot)) {
+        return false;
+    }
+    if idx >= 2
+        && matches!(
+            tokens.get(idx - 2),
+            Some(RelTok::Ident { lower: sch, .. }) if is_schema_or_catalog_ident(sch)
+        )
+    {
+        return false;
+    }
+    if idx >= 3 && matches!(tokens.get(idx - 3), Some(RelTok::Dot)) {
+        return false;
+    }
+    true
+}
+
+fn range_has_top_level_setop(tokens: &[RelTok], start: usize, end: usize) -> bool {
+    let mut k = start;
+    while k < end {
+        match &tokens[k] {
+            RelTok::LParen => {
+                let Some(rp) = find_matching_rel_rparen(tokens, k) else {
+                    return true;
+                };
+                k = rp + 1;
+            }
+            RelTok::Ident {
+                lower,
+                quoted: false,
+                ..
+            } if matches!(lower.as_str(), "union" | "intersect" | "except") => {
+                return true;
+            }
+            _ => {
+                k += 1;
+            }
+        }
+    }
+    false
+}
+
+#[derive(Clone, Copy)]
+struct WildcardScope {
+    is_expr_paren: bool,
+    is_distinct_on_paren: bool,
+    saved_in_from: bool,
+    in_setop_branch: bool,
+    in_disallowed_wildcard_subquery: bool,
+    branch_saw_select: bool,
+    branch_saw_from: bool,
+    in_select_list: bool,
+}
+
+fn has_positional_wildcard_subquery_or_setop(
+    tokens: &[RelTok],
+    cte_body_lparens: &std::collections::BTreeSet<usize>,
+) -> bool {
+    let mut scopes = vec![WildcardScope {
+        is_expr_paren: false,
+        is_distinct_on_paren: false,
+        saved_in_from: false,
+        in_setop_branch: range_has_top_level_setop(tokens, 0, tokens.len()),
+        in_disallowed_wildcard_subquery: false,
+        branch_saw_select: false,
+        branch_saw_from: false,
+        in_select_list: false,
+    }];
+    let mut in_from = false;
+    let mut expect_rel = false;
+    let mut prev_rparen_was_distinct_on = false;
+
+    let mut idx = 0usize;
+    while idx < tokens.len() {
+        let cur = *scopes.last().unwrap_or(&WildcardScope {
+            is_expr_paren: false,
+            is_distinct_on_paren: false,
+            saved_in_from: false,
+            in_setop_branch: false,
+            in_disallowed_wildcard_subquery: false,
+            branch_saw_select: false,
+            branch_saw_from: false,
+            in_select_list: false,
+        });
+
+        match &tokens[idx] {
+            RelTok::LParen => {
+                let mut look = idx + 1;
+                while matches!(tokens.get(look), Some(RelTok::LParen)) {
+                    look += 1;
+                }
+                let is_trim_from = look == idx + 1
+                    && matches!(
+                        tokens.get(look),
+                        Some(RelTok::Ident {
+                            lower: kw,
+                            quoted: false,
+                            ..
+                        }) if kw == "from"
+                    )
+                    && idx > 0
+                    && matches!(
+                        tokens.get(idx - 1),
+                        Some(RelTok::Ident {
+                            lower: fn_kw,
+                            quoted: false,
+                            ..
+                        }) if matches!(fn_kw.as_str(), "trim" | "btrim" | "ltrim" | "rtrim")
+                    );
+                let has_subquery_head = !is_trim_from
+                    && matches!(
+                        tokens.get(look),
+                        Some(RelTok::Ident {
+                            lower: kw,
+                            quoted: false,
+                            ..
+                        }) if matches!(kw.as_str(), "select" | "with" | "values" | "from" | "table")
+                    );
+
+                if expect_rel && !has_subquery_head {
+                    scopes.push(WildcardScope {
+                        is_expr_paren: false,
+                        is_distinct_on_paren: false,
+                        saved_in_from: in_from,
+                        in_setop_branch: cur.in_setop_branch,
+                        in_disallowed_wildcard_subquery: cur.in_disallowed_wildcard_subquery,
+                        branch_saw_select: true,
+                        branch_saw_from: false,
+                        in_select_list: false,
+                    });
+                    in_from = true;
+                    expect_rel = true;
+                } else if has_subquery_head {
+                    let rp = find_matching_rel_rparen(tokens, idx).unwrap_or(tokens.len());
+                    let own_setop = range_has_top_level_setop(tokens, idx + 1, rp);
+                    let is_exists = idx > 0
+                        && matches!(
+                            tokens.get(idx - 1),
+                            Some(RelTok::Ident {
+                                lower: kw,
+                                quoted: false,
+                                ..
+                            }) if kw == "exists"
+                        );
+                    let is_outer_stmt_wrap = idx == 0 && rp + 1 == tokens.len();
+                    let is_redundant_allowed_wrap = idx > 0
+                        && matches!(tokens.get(idx - 1), Some(RelTok::LParen))
+                        && !cur.is_expr_paren
+                        && !cur.in_disallowed_wildcard_subquery;
+                    let is_allowed_subquery = cte_body_lparens.contains(&idx)
+                        || expect_rel
+                        || is_exists
+                        || is_outer_stmt_wrap
+                        || is_redundant_allowed_wrap;
+                    let parent_setop_propagates = !cur.is_expr_paren
+                        && cur.in_setop_branch
+                        && (idx == 0
+                            || matches!(tokens.get(idx - 1), Some(RelTok::LParen))
+                            || matches!(
+                                tokens.get(idx - 1),
+                                Some(RelTok::Ident {
+                                    lower: kw,
+                                    quoted: false,
+                                    ..
+                                }) if matches!(
+                                    kw.as_str(),
+                                    "union" | "all" | "distinct" | "intersect" | "except" | "name"
+                                )
+                            ));
+                    scopes.push(WildcardScope {
+                        is_expr_paren: false,
+                        is_distinct_on_paren: false,
+                        saved_in_from: in_from,
+                        in_setop_branch: own_setop || parent_setop_propagates,
+                        in_disallowed_wildcard_subquery: !is_allowed_subquery,
+                        branch_saw_select: false,
+                        branch_saw_from: false,
+                        in_select_list: false,
+                    });
+                    in_from = false;
+                    expect_rel = false;
+                } else {
+                    let is_distinct_on = !cur.is_expr_paren
+                        && cur.in_select_list
+                        && idx >= 2
+                        && matches!(
+                            tokens.get(idx - 1),
+                            Some(RelTok::Ident {
+                                lower: k1,
+                                quoted: false,
+                                ..
+                            }) if k1 == "on"
+                        )
+                        && matches!(
+                            tokens.get(idx - 2),
+                            Some(RelTok::Ident {
+                                lower: k2,
+                                quoted: false,
+                                ..
+                            }) if k2 == "distinct"
+                        );
+                    scopes.push(WildcardScope {
+                        is_expr_paren: true,
+                        is_distinct_on_paren: is_distinct_on,
+                        saved_in_from: in_from,
+                        in_setop_branch: false,
+                        in_disallowed_wildcard_subquery: false,
+                        branch_saw_select: false,
+                        branch_saw_from: false,
+                        in_select_list: false,
+                    });
+                    expect_rel = false;
+                }
+                prev_rparen_was_distinct_on = false;
+                idx += 1;
+                continue;
+            }
+            RelTok::RParen => {
+                if scopes.len() > 1 {
+                    if let Some(popped) = scopes.pop() {
+                        if !popped.is_expr_paren
+                            && popped.branch_saw_from
+                            && !popped.branch_saw_select
+                            && (popped.in_setop_branch || popped.in_disallowed_wildcard_subquery)
+                        {
+                            return true;
+                        }
+                        in_from = popped.saved_in_from;
+                        expect_rel = false;
+                        prev_rparen_was_distinct_on = popped.is_distinct_on_paren;
+                    }
+                } else {
+                    prev_rparen_was_distinct_on = false;
+                }
+                idx += 1;
+                continue;
+            }
+            RelTok::Star => {
+                let is_qual_star = idx >= 2
+                    && matches!(tokens.get(idx - 1), Some(RelTok::Dot))
+                    && matches!(
+                        tokens.get(idx - 2),
+                        Some(RelTok::Ident { .. } | RelTok::RParen)
+                    );
+                if is_qual_star {
+                    if scopes
+                        .iter()
+                        .rev()
+                        .find(|sc| !sc.is_expr_paren)
+                        .is_some_and(|sc| sc.in_setop_branch || sc.in_disallowed_wildcard_subquery)
+                    {
+                        return true;
+                    }
+                } else if !cur.is_expr_paren && cur.in_select_list {
+                    let prev_is_select_item_start = prev_rparen_was_distinct_on
+                        || (idx > 0
+                            && match &tokens[idx - 1] {
+                                RelTok::Comma => true,
+                                RelTok::Ident {
+                                    lower: kw,
+                                    quoted: false,
+                                    ..
+                                } => matches!(kw.as_str(), "select" | "distinct" | "all"),
+                                _ => false,
+                            });
+                    if prev_is_select_item_start
+                        && (cur.in_setop_branch || cur.in_disallowed_wildcard_subquery)
+                    {
+                        return true;
+                    }
+                }
+                prev_rparen_was_distinct_on = false;
+                idx += 1;
+                continue;
+            }
+            _ => {}
+        }
+
+        prev_rparen_was_distinct_on = false;
+        if cur.is_expr_paren {
+            idx += 1;
+            continue;
+        }
+
+        if let RelTok::Ident {
+            lower,
+            quoted: false,
+            ..
+        } = &tokens[idx]
+        {
+            let prev_is_dot = idx > 0 && matches!(tokens.get(idx - 1), Some(RelTok::Dot));
+            if lower == "select" {
+                if let Some(top) = scopes.last_mut() {
+                    top.branch_saw_select = true;
+                    top.in_select_list = true;
+                }
+                in_from = false;
+                expect_rel = false;
+                idx += 1;
+                continue;
+            }
+            if lower == "from" && !is_rel_distinct_from_op(tokens, idx) {
+                if let Some(top) = scopes.last_mut() {
+                    top.in_select_list = false;
+                    top.branch_saw_from = true;
+                }
+                in_from = true;
+                expect_rel = true;
+                idx += 1;
+                continue;
+            }
+            if lower == "join" {
+                if let Some(top) = scopes.last_mut() {
+                    top.in_select_list = false;
+                }
+                in_from = true;
+                expect_rel = true;
+                idx += 1;
+                continue;
+            }
+            if lower == "table" && !prev_is_dot {
+                if cur.in_setop_branch || cur.in_disallowed_wildcard_subquery {
+                    return true;
+                }
+                if let Some(top) = scopes.last_mut() {
+                    top.in_select_list = false;
+                }
+                in_from = true;
+                expect_rel = true;
+                idx += 1;
+                continue;
+            }
+            if matches!(lower.as_str(), "union" | "intersect" | "except") {
+                if cur.branch_saw_from
+                    && !cur.branch_saw_select
+                    && (cur.in_setop_branch || cur.in_disallowed_wildcard_subquery)
+                {
+                    return true;
+                }
+                if let Some(top) = scopes.last_mut() {
+                    top.in_setop_branch = true;
+                    top.in_select_list = false;
+                    top.branch_saw_select = false;
+                    top.branch_saw_from = false;
+                }
+                in_from = false;
+                expect_rel = false;
+                idx += 1;
+                continue;
+            }
+            if matches!(
+                lower.as_str(),
+                "where"
+                    | "group"
+                    | "having"
+                    | "window"
+                    | "qualify"
+                    | "order"
+                    | "limit"
+                    | "offset"
+                    | "fetch"
+                    | "set"
+                    | "into"
+            ) {
+                if let Some(top) = scopes.last_mut() {
+                    top.in_select_list = false;
+                }
+                in_from = false;
+                expect_rel = false;
+                idx += 1;
+                continue;
+            }
+            if in_from && matches!(lower.as_str(), "on" | "using") {
+                expect_rel = false;
+                idx += 1;
+                continue;
+            }
+        }
+
+        if in_from && matches!(tokens[idx], RelTok::Comma) {
+            expect_rel = true;
+            idx += 1;
+            continue;
+        }
+
+        if expect_rel {
+            if let RelTok::Ident {
+                lower,
+                quoted,
+                followed_by_dot,
+                followed_by_open_paren,
+            } = &tokens[idx]
+            {
+                if !*quoted && lower == "lateral" {
+                    idx += 1;
+                    continue;
+                }
+                if *followed_by_dot {
+                    idx += 1;
+                    continue;
+                }
+                if *followed_by_open_paren && matches!(tokens.get(idx + 1), Some(RelTok::LParen)) {
+                    scopes.push(WildcardScope {
+                        is_expr_paren: true,
+                        is_distinct_on_paren: false,
+                        saved_in_from: in_from,
+                        in_setop_branch: false,
+                        in_disallowed_wildcard_subquery: false,
+                        branch_saw_select: false,
+                        branch_saw_from: false,
+                        in_select_list: false,
+                    });
+                    expect_rel = false;
+                    idx += 2;
+                    continue;
+                }
+                expect_rel = false;
+                idx += 1;
+                continue;
+            }
+            if !matches!(tokens[idx], RelTok::Dot) {
+                expect_rel = false;
+            }
+        }
+
+        idx += 1;
+    }
+
+    scopes.first().is_some_and(|root| {
+        root.branch_saw_from
+            && !root.branch_saw_select
+            && (root.in_setop_branch || root.in_disallowed_wildcard_subquery)
+    })
+}
+
 fn references_whole_row_relation_struct(tokens: &[RelTok]) -> bool {
     let mut declared_relations = std::collections::BTreeSet::new();
     let mut decl_indices = std::collections::BTreeSet::new();
+    let mut cte_body_lparens = std::collections::BTreeSet::new();
     // (was_from_rel_paren, saved_in_from, is_scalar_expr_paren)
     let mut paren_frames: Vec<(bool, bool, bool)> = Vec::new();
     let mut in_from = false;
@@ -993,8 +1627,20 @@ fn references_whole_row_relation_struct(tokens: &[RelTok]) -> bool {
             ..
         } = &tokens[idx]
         {
-            if lower == "with" && (idx == 0 || matches!(tokens.get(idx - 1), Some(RelTok::LParen)))
-            {
+            let prev_allows_with = idx == 0
+                || matches!(tokens.get(idx - 1), Some(RelTok::LParen))
+                || matches!(
+                    tokens.get(idx - 1),
+                    Some(RelTok::Ident {
+                        lower: kw,
+                        quoted: false,
+                        ..
+                    }) if matches!(
+                        kw.as_str(),
+                        "union" | "all" | "distinct" | "intersect" | "except" | "name"
+                    )
+                );
+            if lower == "with" && prev_allows_with {
                 let mut k = idx + 1;
                 if matches!(
                     tokens.get(k),
@@ -1011,7 +1657,8 @@ fn references_whole_row_relation_struct(tokens: &[RelTok]) -> bool {
                 }) = tokens.get(k)
                 {
                     let mut after_name = k + 1;
-                    if matches!(tokens.get(after_name), Some(RelTok::LParen)) {
+                    let has_col_alias_list = matches!(tokens.get(after_name), Some(RelTok::LParen));
+                    if has_col_alias_list {
                         let Some(col_close) = find_matching_rel_rparen(tokens, after_name) else {
                             break;
                         };
@@ -1054,6 +1701,10 @@ fn references_whole_row_relation_struct(tokens: &[RelTok]) -> bool {
                     let Some(body_close) = find_matching_rel_rparen(tokens, body_open) else {
                         break;
                     };
+                    if has_col_alias_list {
+                        return true;
+                    }
+                    cte_body_lparens.insert(body_open);
                     declared_relations.insert(cte_name.clone());
                     decl_indices.insert(k);
                     if matches!(tokens.get(body_close + 1), Some(RelTok::Comma)) {
@@ -1207,13 +1858,13 @@ fn references_whole_row_relation_struct(tokens: &[RelTok]) -> bool {
                     idx += 1;
                     continue;
                 }
-                if *followed_by_open_paren {
-                    if let Some(rp) = find_matching_rel_rparen(tokens, idx + 1) {
-                        expect_rel = false;
-                        expect_opt_alias = true;
-                        idx = rp + 1;
-                        continue;
-                    }
+                if *followed_by_open_paren && matches!(tokens.get(idx + 1), Some(RelTok::LParen)) {
+                    decl_indices.insert(idx);
+                    paren_frames.push((true, in_from, true));
+                    expect_rel = false;
+                    expect_opt_alias = false;
+                    idx += 2;
+                    continue;
                 }
                 declared_relations.insert(lower.clone());
                 decl_indices.insert(idx);
@@ -1236,28 +1887,22 @@ fn references_whole_row_relation_struct(tokens: &[RelTok]) -> bool {
                         lower: alias_lower, ..
                     }) = tokens.get(idx + 1)
                     {
+                        if matches!(tokens.get(idx + 2), Some(RelTok::LParen)) {
+                            return true;
+                        }
                         declared_relations.insert(alias_lower.clone());
                         decl_indices.insert(idx + 1);
                         expect_opt_alias = false;
-                        if matches!(tokens.get(idx + 2), Some(RelTok::LParen)) {
-                            if let Some(rp) = find_matching_rel_rparen(tokens, idx + 2) {
-                                idx = rp + 1;
-                                continue;
-                            }
-                        }
                         idx += 2;
                         continue;
                     }
                 } else if *quoted || !is_from_alias_stop_keyword(lower) {
+                    if matches!(tokens.get(idx + 1), Some(RelTok::LParen)) {
+                        return true;
+                    }
                     declared_relations.insert(lower.clone());
                     decl_indices.insert(idx);
                     expect_opt_alias = false;
-                    if matches!(tokens.get(idx + 1), Some(RelTok::LParen)) {
-                        if let Some(rp) = find_matching_rel_rparen(tokens, idx + 1) {
-                            idx = rp + 1;
-                            continue;
-                        }
-                    }
                     idx += 1;
                     continue;
                 }
@@ -1266,6 +1911,10 @@ fn references_whole_row_relation_struct(tokens: &[RelTok]) -> bool {
         }
 
         idx += 1;
+    }
+
+    if has_positional_wildcard_subquery_or_setop(tokens, &cte_body_lparens) {
+        return true;
     }
 
     if declared_relations.is_empty() {
@@ -1279,10 +1928,7 @@ fn references_whole_row_relation_struct(tokens: &[RelTok]) -> bool {
             ..
         } = tok
         {
-            if decl_indices.contains(&idx) || *followed_by_dot {
-                continue;
-            }
-            if idx > 0 && matches!(tokens.get(idx - 1), Some(RelTok::Dot)) {
+            if decl_indices.contains(&idx) || !declared_relations.contains(lower) {
                 continue;
             }
             if idx > 0
@@ -1297,7 +1943,21 @@ fn references_whole_row_relation_struct(tokens: &[RelTok]) -> bool {
             {
                 continue;
             }
-            if declared_relations.contains(lower) {
+            if is_preceded_by_non_schema_dot(tokens, idx) {
+                continue;
+            }
+            if !*followed_by_dot {
+                return true;
+            }
+            if matches!(tokens.get(idx + 1), Some(RelTok::Dot))
+                && matches!(
+                    tokens.get(idx + 2),
+                    Some(RelTok::Ident {
+                        followed_by_open_paren: true,
+                        ..
+                    })
+                )
+            {
                 return true;
             }
         }
@@ -1325,8 +1985,8 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
     let mut rel_tokens: Vec<RelTok> = Vec::new();
     let mut subscript_depths: Vec<u32> = Vec::new();
     let mut brace_stack: Vec<(u32, u32, bool)> = Vec::new();
-    let mut pending_extract_fn = false;
-    let mut extract_stack: Vec<(u32, u32, u32, u32)> = Vec::new();
+    let mut pending_extract_mode: Option<ExtractArgMode> = None;
+    let mut extract_stack: Vec<ExtractFrame> = Vec::new();
     let mut pending_columns_fn = false;
     let mut columns_fn_depth: Option<u32> = None;
     let mut columns_arg_count = 0u32;
@@ -1384,7 +2044,7 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
         let in_arrow_rhs = last_sig == LastSig::JsonArrow
             || json_arrow_paren_depth.is_some()
             || json_arrow_list_depth.is_some();
-        let in_extract_key_arg = extract_stack.iter().any(|f| f.3 >= 1);
+        let in_extract_key_arg = extract_stack.iter().any(|f| f.arg_idx >= 1);
         let check_key_ctx = in_subscript || in_arrow_rhs || !extract_stack.is_empty();
 
         // 4. `'...'`, `E'...'` / `e'...'`, and `U&'...'` / `u&'...'` string literals,
@@ -1485,9 +2145,14 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
                     }
                     columns_arg_count = 1;
                 }
-                if (check_key_ctx || (brace_depth > 0 && next_non_ws_or_comment_is_colon(s, i)))
-                    && is_pii_key_or_json_path(lit)
-                {
+                let in_sub_arrow_brace = in_subscript
+                    || in_arrow_rhs
+                    || (brace_depth > 0 && next_non_ws_or_comment_is_colon(s, i));
+                if literal_references_pii_in_key_or_extract_ctx(
+                    lit,
+                    in_sub_arrow_brace,
+                    &extract_stack,
+                ) {
                     return true;
                 }
             }
@@ -1508,7 +2173,7 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             }
             rel_tokens.push(RelTok::Other);
             pending_call = PendingCallKind::None;
-            pending_extract_fn = false;
+            pending_extract_mode = None;
             pending_extract_dot_chain = false;
             pending_columns_fn = false;
             prev_was_dot = false;
@@ -1547,9 +2212,14 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
                     }
                     columns_arg_count = 1;
                 }
-                if (check_key_ctx || (brace_depth > 0 && next_non_ws_or_comment_is_colon(s, after)))
-                    && is_pii_key_or_json_path(body)
-                {
+                let in_sub_arrow_brace = in_subscript
+                    || in_arrow_rhs
+                    || (brace_depth > 0 && next_non_ws_or_comment_is_colon(s, after));
+                if literal_references_pii_in_key_or_extract_ctx(
+                    body,
+                    in_sub_arrow_brace,
+                    &extract_stack,
+                ) {
                     return true;
                 }
                 if (check_key_ctx || columns_fn_depth.is_some() || in_brace_key)
@@ -1570,7 +2240,7 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
                 }
                 rel_tokens.push(RelTok::Other);
                 pending_call = PendingCallKind::None;
-                pending_extract_fn = false;
+                pending_extract_mode = None;
                 pending_extract_dot_chain = false;
                 pending_columns_fn = false;
                 prev_was_dot = false;
@@ -1586,7 +2256,7 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             }
             rel_tokens.push(RelTok::Other);
             pending_call = PendingCallKind::None;
-            pending_extract_fn = false;
+            pending_extract_mode = None;
             pending_extract_dot_chain = false;
             pending_columns_fn = false;
             prev_was_dot = false;
@@ -1667,9 +2337,9 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
                     top.1 = false;
                 }
             }
-            pending_extract_fn = is_extract_fn_name(&ident_buf);
-            pending_extract_dot_chain = pending_extract_fn && was_dot;
-            pending_call = if pending_extract_fn {
+            pending_extract_mode = extract_fn_mode(&ident_buf);
+            pending_extract_dot_chain = pending_extract_mode.is_some() && was_dot;
+            pending_call = if pending_extract_mode.is_some() {
                 PendingCallKind::ExtractFn
             } else if !was_dot && is_safe_json_cast_fn(ident_trimmed) {
                 PendingCallKind::SafeJsonCast
@@ -1678,7 +2348,7 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             };
             pending_columns_fn = ident_trimmed.eq_ignore_ascii_case("columns");
             rel_tokens.push(RelTok::Ident {
-                lower: ident_trimmed.to_ascii_lowercase(),
+                lower: ident_trimmed.to_lowercase(),
                 quoted: true,
                 followed_by_dot,
                 followed_by_open_paren,
@@ -1689,7 +2359,7 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
 
         // 7. `[` ... `]` T-SQL single bracketed PII identifier OR DuckDB `LIST` / subscript
         if bytes[i] == b'[' {
-            if columns_fn_depth.is_some() || in_subscript {
+            if columns_fn_depth.is_some() || in_subscript || in_extract_key_arg {
                 return true;
             }
             if s.get(i + 1..).is_some_and(peek_simple_bracket_pii) {
@@ -1712,7 +2382,7 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             rel_tokens.push(RelTok::Other);
             last_sig = LastSig::Other;
             pending_call = PendingCallKind::None;
-            pending_extract_fn = false;
+            pending_extract_mode = None;
             pending_extract_dot_chain = false;
             pending_columns_fn = false;
             prev_was_dot = false;
@@ -1740,7 +2410,7 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             }
             rel_tokens.push(RelTok::Other);
             pending_call = PendingCallKind::None;
-            pending_extract_fn = false;
+            pending_extract_mode = None;
             pending_extract_dot_chain = false;
             pending_columns_fn = false;
             prev_was_dot = false;
@@ -1749,15 +2419,30 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             continue;
         }
 
-        // 8. Unquoted identifiers & hyphenated filter/header tokens
-        if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' {
+        // 8. Unquoted identifiers (ASCII & non-ASCII UTF-8 per `libpg_query` `scan.l`) & hyphenated filter/header tokens
+        if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' || bytes[i] >= 0x80 {
             if columns_fn_depth.is_some() || in_subscript || in_arrow_rhs || in_extract_key_arg {
                 return true;
             }
             let start = i;
-            let mut end = start + 1;
-            while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
-                end += 1;
+            let mut end = start
+                + s.get(start..)
+                    .and_then(|tail| tail.chars().next())
+                    .map_or(1, char::len_utf8);
+            while end < bytes.len() {
+                if bytes[end].is_ascii_alphanumeric() || matches!(bytes[end], b'_' | b'$') {
+                    end += 1;
+                } else if bytes[end] >= 0x80 {
+                    let Some(ch) = s.get(end..).and_then(|tail| tail.chars().next()) else {
+                        break;
+                    };
+                    if is_sql_unicode_ws(ch) {
+                        break;
+                    }
+                    end += ch.len_utf8();
+                } else {
+                    break;
+                }
             }
             while bytes.get(end) == Some(&b'-') {
                 let seg_start = end + 1;
@@ -1826,9 +2511,9 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
                     top.1 = false;
                 }
             }
-            pending_extract_fn = is_extract_fn_name(token);
-            pending_extract_dot_chain = pending_extract_fn && was_dot;
-            pending_call = if pending_extract_fn {
+            pending_extract_mode = extract_fn_mode(token);
+            pending_extract_dot_chain = pending_extract_mode.is_some() && was_dot;
+            pending_call = if pending_extract_mode.is_some() {
                 PendingCallKind::ExtractFn
             } else if !was_dot && is_safe_json_cast_fn(token) {
                 PendingCallKind::SafeJsonCast
@@ -1839,7 +2524,7 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             };
             pending_columns_fn = token.eq_ignore_ascii_case("columns");
             rel_tokens.push(RelTok::Ident {
-                lower: token.to_ascii_lowercase(),
+                lower: token.to_lowercase(),
                 quoted: false,
                 followed_by_dot,
                 followed_by_open_paren,
@@ -1858,7 +2543,7 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
                 let _ = paren_stack.pop();
                 rel_tokens.push(RelTok::RParen);
                 pending_call = PendingCallKind::None;
-                pending_extract_fn = false;
+                pending_extract_mode = None;
                 pending_extract_dot_chain = false;
                 pending_columns_fn = false;
                 prev_was_dot = false;
@@ -1887,13 +2572,14 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             };
             paren_stack.push((pkind, true));
             paren_depth = paren_depth.saturating_add(1);
-            if pending_extract_fn {
-                extract_stack.push((
+            if let Some(mode) = pending_extract_mode {
+                extract_stack.push(ExtractFrame {
                     paren_depth,
                     bracket_depth,
                     brace_depth,
-                    u32::from(pending_extract_dot_chain),
-                ));
+                    arg_idx: u32::from(pending_extract_dot_chain),
+                    mode,
+                });
             }
             if pending_columns_fn && columns_fn_depth.is_none() {
                 columns_fn_depth = Some(paren_depth);
@@ -1904,7 +2590,7 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             }
             rel_tokens.push(RelTok::LParen);
             pending_call = PendingCallKind::None;
-            pending_extract_fn = false;
+            pending_extract_mode = None;
             pending_extract_dot_chain = false;
             pending_columns_fn = false;
             prev_was_dot = false;
@@ -1916,7 +2602,10 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             if last_sig == LastSig::JsonArrow {
                 return true;
             }
-            if extract_stack.last().is_some_and(|f| f.0 == paren_depth) {
+            if extract_stack
+                .last()
+                .is_some_and(|f| f.paren_depth == paren_depth)
+            {
                 extract_stack.pop();
             }
             if json_arrow_paren_depth == Some(paren_depth) {
@@ -1932,7 +2621,7 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             }
             rel_tokens.push(RelTok::RParen);
             pending_call = PendingCallKind::None;
-            pending_extract_fn = false;
+            pending_extract_mode = None;
             pending_extract_dot_chain = false;
             pending_columns_fn = false;
             prev_was_dot = false;
@@ -1952,7 +2641,7 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             rel_tokens.push(RelTok::Dot);
             prev_was_dot = true;
             pending_call = PendingCallKind::None;
-            pending_extract_fn = false;
+            pending_extract_mode = None;
             pending_extract_dot_chain = false;
             pending_columns_fn = false;
             last_sig = LastSig::Other;
@@ -1970,7 +2659,7 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             brace_stack.push((paren_depth, bracket_depth, true));
             rel_tokens.push(RelTok::Other);
             pending_call = PendingCallKind::None;
-            pending_extract_fn = false;
+            pending_extract_mode = None;
             pending_extract_dot_chain = false;
             pending_columns_fn = false;
             prev_was_dot = false;
@@ -1989,7 +2678,7 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             brace_stack.pop();
             rel_tokens.push(RelTok::Other);
             pending_call = PendingCallKind::None;
-            pending_extract_fn = false;
+            pending_extract_mode = None;
             pending_extract_dot_chain = false;
             pending_columns_fn = false;
             prev_was_dot = false;
@@ -2011,7 +2700,7 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             };
             rel_tokens.push(RelTok::Other);
             pending_call = PendingCallKind::None;
-            pending_extract_fn = false;
+            pending_extract_mode = None;
             pending_extract_dot_chain = false;
             pending_columns_fn = false;
             prev_was_dot = false;
@@ -2022,6 +2711,9 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             return true;
         }
         if bytes[i].is_ascii_digit() {
+            if in_extract_key_arg {
+                return true;
+            }
             if let Some(top) = paren_stack.last_mut() {
                 top.1 = false;
             }
@@ -2038,7 +2730,7 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             }
             rel_tokens.push(RelTok::Other);
             pending_call = PendingCallKind::None;
-            pending_extract_fn = false;
+            pending_extract_mode = None;
             pending_extract_dot_chain = false;
             pending_columns_fn = false;
             prev_was_dot = false;
@@ -2056,8 +2748,19 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
                 top.1 = false;
             }
             if let Some(top) = extract_stack.last_mut() {
-                if top.0 == paren_depth && top.1 == bracket_depth && top.2 == brace_depth {
-                    top.3 = top.3.saturating_add(1);
+                if top.paren_depth == paren_depth
+                    && top.bracket_depth == bracket_depth
+                    && top.brace_depth == brace_depth
+                {
+                    top.arg_idx = top.arg_idx.saturating_add(1);
+                    if top.arg_idx >= 2
+                        && matches!(
+                            top.mode,
+                            ExtractArgMode::JsonContainsNeedle | ExtractArgMode::JsonStructSchema
+                        )
+                    {
+                        return true;
+                    }
                 }
             }
             if let Some(top) = brace_stack.last_mut() {
@@ -2068,7 +2771,7 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             rel_tokens.push(RelTok::Comma);
             i += 1;
             pending_call = PendingCallKind::None;
-            pending_extract_fn = false;
+            pending_extract_mode = None;
             pending_extract_dot_chain = false;
             pending_columns_fn = false;
             prev_was_dot = false;
@@ -2094,7 +2797,7 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             }
             rel_tokens.push(RelTok::Other);
             pending_call = PendingCallKind::None;
-            pending_extract_fn = false;
+            pending_extract_mode = None;
             pending_extract_dot_chain = false;
             pending_columns_fn = false;
             prev_was_dot = false;
@@ -2110,6 +2813,25 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
         if in_subscript || in_arrow_rhs || in_extract_key_arg {
             return true;
         }
+        if bytes[i] == b'*' {
+            if let Some(top) = paren_stack.last_mut() {
+                top.1 = false;
+            }
+            if bytes.get(i + 1) == Some(&b'*') {
+                rel_tokens.push(RelTok::Other);
+                i += 2;
+            } else {
+                rel_tokens.push(RelTok::Star);
+                i += 1;
+            }
+            pending_call = PendingCallKind::None;
+            pending_extract_mode = None;
+            pending_extract_dot_chain = false;
+            pending_columns_fn = false;
+            prev_was_dot = false;
+            last_sig = LastSig::Other;
+            continue;
+        }
 
         if let Some(top) = paren_stack.last_mut() {
             top.1 = false;
@@ -2120,7 +2842,7 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             .and_then(|tail| tail.chars().next())
             .map_or(1, char::len_utf8);
         pending_call = PendingCallKind::None;
-        pending_extract_fn = false;
+        pending_extract_mode = None;
         pending_extract_dot_chain = false;
         pending_columns_fn = false;
         prev_was_dot = false;
@@ -4179,6 +4901,278 @@ mod tests {
             (
                 "benign-r4-trim-from-url",
                 r#"{"_view_extras":{"sql":"SELECT TRIM(FROM url) FROM logs WHERE url = '/ok'"}}"#,
+            ),
+        ];
+
+        for (case_id, payload) in allowed_vectors {
+            assert!(
+                !filters_reference_pii(payload),
+                "expected {case_id} to be allowed for AnalystNoPii: {payload}"
+            );
+        }
+    }
+
+    #[test]
+    fn sec19_blocks_wave5_r5_json_object_specs_nonascii_tvf_summarize_and_positional_wildcards() {
+        let blocked_vectors = [
+            // 1. 2-arg JSON/struct/map functions & file readers
+            (
+                "r5-json-merge-patch",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE json_merge_patch(_extra, '{\"safe\":\"ok\"}')::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r5-dot-json-merge-patch",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE (_extra->'request').json_merge_patch('{\"safe\":\"1\"}')::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r5-struct-contains",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE struct_contains((status, url), '198.51.100.7')"}}"#,
+            ),
+            (
+                "r5-map-concat",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE map_concat(kv, map {'a': 'b'})::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r5-read-parquet-fn",
+                r#"{"_view_extras":{"sql":"SELECT * FROM read_parquet('x.parquet')"}}"#,
+            ),
+            (
+                "r5-parquet-scan-fn",
+                r#"{"_view_extras":{"sql":"SELECT * FROM parquet_scan('x.parquet')"}}"#,
+            ),
+            (
+                "r5-json-contains-scalar-sid",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE json_contains(_extra, '\"sess_secret_99\"')"}}"#,
+            ),
+            (
+                "r5-json-contains-scalar-ipv6",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE json_contains(_extra, '\"2001:db8::dead:beef\"')"}}"#,
+            ),
+            (
+                "r5-json-contains-array",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE json_contains(_extra, '[\"198.51.100.7\"]')"}}"#,
+            ),
+            (
+                "r5-json-contains-empty-obj",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE json_contains(_extra, '{}')"}}"#,
+            ),
+            (
+                "r5-json-contains-nested-empty-obj",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE json_contains(_extra, '{\"request\":{}}')"}}"#,
+            ),
+            (
+                "r5-json-contains-dup-key",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE json_contains(_extra, '{\"client_ip\":\"198.51.100.7\",\"client_ip\":\"0.0.0.0\"}')"}}"#,
+            ),
+            (
+                "r5-from-json-map-schema",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE from_json(_extra::JSON, '\"MAP(VARCHAR, VARCHAR)\"')::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r5-from-json-strict-map-schema",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE from_json_strict(_extra::JSON, '\"MAP(VARCHAR, VARCHAR)\"')::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r5-from-json-json-schema",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE from_json(_extra, '\"JSON\"')::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r5-from-json-strict-json-schema",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE from_json_strict(_extra, '\"JSON\"')::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r5-json-transform-json-schema",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE json_transform(_extra, '\"JSON\"')::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r5-json-transform-varchar-schema",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE json_transform(_extra, '\"VARCHAR\"') LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r5-json-transform-strict-varchar",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE json_transform_strict(_extra, '\"VARCHAR\"') LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r5-from-json-nested-json-leaf",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE from_json(_extra::JSON, '{\"request\":\"JSON\"}')::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r5-from-json-nested-map-leaf",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE from_json(_extra::JSON, '{\"request\":\"MAP(VARCHAR, VARCHAR)\"}')::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r5-from-json-array-type-leaf",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE from_json(_extra::JSON, '{\"request\":\"VARCHAR[]\"}')::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r5-extract-list-key-arg",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE json_extract_string(_extra, ['safe']) IS NOT NULL"}}"#,
+            ),
+            (
+                "r5-extract-bare-digit-key-arg",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE json_extract_string(_extra, 0) IS NOT NULL"}}"#,
+            ),
+            // 2. Non-ASCII UTF-8 unquoted identifiers & dollar-in-ident continuations
+            (
+                "r5-nonascii-alias-cast",
+                "{\"_view_extras\":{\"sql\":\"SELECT * FROM logs AS ä WHERE ä::VARCHAR LIKE '%198.51.100.7%'\"}}",
+            ),
+            (
+                "r5-nonascii-cte-struct",
+                "{\"_view_extras\":{\"sql\":\"WITH ä AS (SELECT * FROM logs) SELECT * FROM ä WHERE ä::VARCHAR LIKE '%198.51.100.7%'\"}}",
+            ),
+            (
+                "r5-nonascii-subscript-concat",
+                "{\"_view_extras\":{\"sql\":\"SELECT * FROM (SELECT (_extra->'request'->'headers') AS ä FROM logs) WHERE ä['x-forwar' || 'ded-for'] = '\\\"198.51.100.7\\\"'\"}}",
+            ),
+            // 3. Schema/catalog-qualified relation structs, UFCS dot-chained rel.fn(...), and TVF subquery walking
+            (
+                "r5-main-dot-logs-struct",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE main.logs::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r5-quoted-main-dot-logs-struct",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE \"main\".\"logs\"::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r5-memory-main-logs-struct",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE memory.main.logs::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r5-dot-t-concat",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs AS t WHERE t.concat('') LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r5-dot-logs-concat",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE logs.concat('') LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r5-dot-main-logs-concat",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE main.logs.concat('') LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r5-tvf-range-subquery",
+                r#"{"_view_extras":{"sql":"SELECT * FROM range((SELECT count(*) FROM logs AS t WHERE t::VARCHAR LIKE '%198.51.100.7%'))"}}"#,
+            ),
+            (
+                "r5-tvf-correlated-main-logs",
+                r#"{"_view_extras":{"sql":"SELECT logs.status, logs.url FROM logs WHERE EXISTS (SELECT 1 FROM range((SELECT count(*) FROM main.logs AS t WHERE t.timestamp = logs.timestamp AND t::VARCHAR LIKE '%198.51.100.7%')))"}}"#,
+            ),
+            // 4. DuckDB SUMMARIZE keyword
+            (
+                "r5-summarize-logs",
+                r#"{"_view_extras":{"sql":"SELECT * FROM (SUMMARIZE logs) AS s WHERE s.max = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r5-summarize-select-logs",
+                r#"{"_view_extras":{"sql":"SELECT * FROM (SUMMARIZE SELECT * FROM logs) AS s WHERE s.max = '198.51.100.7'"}}"#,
+            ),
+            // 5. Positional column-alias lists, wildcard set-ops, and wildcard scalar/IN subqueries
+            (
+                "r5-from-alias-col-list",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs AS t(c1, c2) WHERE t.c2 = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r5-from-implicit-alias-col-list",
+                r#"{"_view_extras":{"sql":"SELECT * FROM (SELECT * FROM logs) t(c1, c2, c3, c4) WHERE t.c4 = 'sess_secret_99'"}}"#,
+            ),
+            (
+                "r5-cte-col-list-star",
+                r#"{"_view_extras":{"sql":"WITH c(c1, c2, c3, c4, c5, c6, c7) AS (SELECT * FROM logs) SELECT * FROM c WHERE c.c2 = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r5-cte-col-list-table-logs",
+                r#"{"_view_extras":{"sql":"WITH c(c1, c2, c3, c4, c5, c6, c7) AS (TABLE logs) SELECT * FROM c WHERE c.c2 = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r5-cte-col-list-from-first",
+                r#"{"_view_extras":{"sql":"WITH c(c1, c2, c3, c4, c5, c6, c7) AS (FROM logs) SELECT * FROM c WHERE c.c2 = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r5-union-all-star-rename",
+                r#"{"_view_extras":{"sql":"SELECT * FROM (SELECT now()::TIMESTAMPTZ AS a, '' AS b, '' AS c, '' AS d, 0 AS e, '' AS f, '' AS g WHERE 1=0 UNION ALL SELECT * FROM logs) sub WHERE sub.b = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r5-union-all-table-logs-rename",
+                r#"{"_view_extras":{"sql":"SELECT * FROM (SELECT now()::TIMESTAMPTZ AS a, '' AS b, '' AS c, '' AS d, 0 AS e, '' AS f, '' AS g WHERE 1=0 UNION ALL TABLE logs) sub WHERE sub.b = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r5-union-all-from-first-rename",
+                r#"{"_view_extras":{"sql":"SELECT * FROM (SELECT now()::TIMESTAMPTZ AS a, '' AS b, '' AS c, '' AS d, 0 AS e, '' AS f, '' AS g WHERE 1=0 UNION ALL FROM logs) sub WHERE sub.b = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r5-intersect-star-values",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs INTERSECT VALUES ('2026-01-01'::TIMESTAMPTZ, '198.51.100.7', '', '', 200, '/', '{}')"}}"#,
+            ),
+            (
+                "r5-row-in-select-star",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE (logs.timestamp, '198.51.100.7', '', '', logs.status, logs.url, '') IN (SELECT * FROM logs)"}}"#,
+            ),
+            (
+                "r5-scalar-subquery-star-cast",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE (SELECT * FROM logs AS t WHERE t.timestamp = logs.timestamp LIMIT 1)::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+        ];
+
+        for (case_id, payload) in blocked_vectors {
+            assert!(
+                filters_reference_pii(payload),
+                "expected {case_id} to be blocked as PII-referencing: {payload}"
+            );
+        }
+
+        let allowed_vectors = [
+            (
+                "benign-r5-json-contains-obj",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE json_contains(_extra, '{\"safe_header\":\"ok\"}')"}}"#,
+            ),
+            (
+                "benign-r5-json-contains-nested-obj",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE json_contains(_extra, '{\"request\":{\"safe_header\":\"ok\"}}')"}}"#,
+            ),
+            (
+                "benign-r5-from-json-safe-schema",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE from_json(_extra::JSON, '{\"safe_header\":\"VARCHAR\"}') IS NOT NULL"}}"#,
+            ),
+            (
+                "benign-r5-json-transform-safe-schema",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE json_transform(_extra, '{\"safe_header\":\"VARCHAR(64)\",\"nested\":{\"ok\":\"BOOLEAN\"}}') IS NOT NULL"}}"#,
+            ),
+            (
+                "benign-r5-main-logs-qualified-cols",
+                r#"{"_view_extras":{"sql":"SELECT t.status, logs.url, main.logs.url FROM main.logs AS t WHERE t.status = 200"}}"#,
+            ),
+            (
+                "benign-r5-dot-chain-extra-safe",
+                r#"{"_view_extras":{"sql":"SELECT (_extra->'request'->'headers').json_extract_string('safe_header') FROM logs"}}"#,
+            ),
+            (
+                "benign-r5-count-star-and-mult",
+                r#"{"_view_extras":{"sql":"SELECT count(*), status * 2 FROM logs WHERE status IN (SELECT status FROM logs)"}}"#,
+            ),
+            (
+                "benign-r5-derived-table-star",
+                r#"{"_view_extras":{"sql":"SELECT * FROM (SELECT status, url FROM logs) sub WHERE sub.status = 200"}}"#,
+            ),
+            (
+                "benign-r5-cte-select-star",
+                r#"{"_view_extras":{"sql":"WITH c AS (SELECT * FROM logs) SELECT c.status FROM c WHERE c.status = 200"}}"#,
+            ),
+            (
+                "benign-r5-cte-explicit-union-outer-star",
+                r#"{"_view_extras":{"sql":"WITH p AS (SELECT url FROM logs UNION ALL SELECT url FROM logs) SELECT * FROM p"}}"#,
+            ),
+            (
+                "benign-r5-exists-select-star",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE EXISTS (SELECT * FROM logs WHERE status = 500)"}}"#,
+            ),
+            (
+                "benign-r5-top-level-select-star",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE status = 200"}}"#,
+            ),
+            (
+                "benign-r5-tvf-range-count-star",
+                r#"{"_view_extras":{"sql":"SELECT * FROM range((SELECT count(*) FROM logs WHERE status = 200))"}}"#,
             ),
         ];
 

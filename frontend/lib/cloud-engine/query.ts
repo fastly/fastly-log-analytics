@@ -889,6 +889,7 @@ function mergeLeadingCtes(
   shadowSelectByTable?: ReadonlyMap<string, string>,
   targetTable?: string,
   shadowDescribeByTable?: ReadonlyMap<string, string>,
+  describeCteDefs?: string[],
 ): string {
   if (cteDefs.length === 0) return sqlStmt;
   const trimmed = sqlStmt.trim();
@@ -913,45 +914,65 @@ function mergeLeadingCtes(
       }
     }
 
-    const sumMatch =
-      /^(SUMMARIZE|DESCRIBE)\s+(?:TABLE\s+)?(?:(?:"main"|main)\s*\.\s*)?([A-Za-z0-9_"]+)\s*$/i.exec(
-        trimmed,
-      );
-    if (sumMatch) {
-      const kw = sumMatch[1];
-      const refName = sumMatch[2].replaceAll('"', "").toLowerCase();
-      const mapToUse =
-        kw.toUpperCase() === "DESCRIBE" && shadowDescribeByTable
-          ? shadowDescribeByTable
-          : shadowSelectByTable;
-      const shadowSql =
-        mapToUse.get(refName) ??
-        (refName === "logs" ? mapToUse.get(targetTable.toLowerCase()) : undefined) ??
-        shadowSelectByTable.get(refName) ??
-        (refName === "logs"
-          ? shadowSelectByTable.get(targetTable.toLowerCase())
-          : undefined);
-      if (shadowSql) {
-        return `${kw} (${shadowSql})`;
+    const kwTargetMatch = /^(SUMMARIZE|DESCRIBE)(?:\s+|(?=\())([\s\S]+)$/i.exec(
+      trimmed,
+    );
+    if (kwTargetMatch) {
+      const kw = kwTargetMatch[1];
+      const isDescribe = kw.toUpperCase() === "DESCRIBE";
+      const unwrappedTarget = unwrapOuterBalancedParens(kwTargetMatch[2]);
+      const sumMatch = isDescribe
+        ? /^(?:(?:TABLE|FROM)\s+)?(?:(?:"main"|main)\s*\.\s*)?([A-Za-z0-9_"]+)\s*$/i.exec(
+            unwrappedTarget,
+          )
+        : /^(?:TABLE\s+)?(?:(?:"main"|main)\s*\.\s*)?([A-Za-z0-9_"]+)\s*$/i.exec(
+            unwrappedTarget,
+          );
+      if (sumMatch) {
+        const refName = sumMatch[1].replaceAll('"', "").toLowerCase();
+        const mapToUse =
+          isDescribe && shadowDescribeByTable
+            ? shadowDescribeByTable
+            : shadowSelectByTable;
+        const shadowSql =
+          mapToUse.get(refName) ??
+          (refName === "logs"
+            ? mapToUse.get(targetTable.toLowerCase())
+            : undefined) ??
+          shadowSelectByTable.get(refName) ??
+          (refName === "logs"
+            ? shadowSelectByTable.get(targetTable.toLowerCase())
+            : undefined);
+        if (shadowSql) {
+          return `${kw} (${shadowSql})`;
+        }
       }
     }
   }
 
-  const sumSubMatch = /^(SUMMARIZE|DESCRIBE)\s+([\s\S]+)$/i.exec(trimmed);
+  const sumSubMatch = /^(SUMMARIZE|DESCRIBE)(?:\s+|(?=\())([\s\S]+)$/i.exec(
+    trimmed,
+  );
   if (sumSubMatch) {
     const kw = sumSubMatch[1];
+    const subCtes =
+      kw.toUpperCase() === "DESCRIBE" &&
+      describeCteDefs &&
+      describeCteDefs.length > 0
+        ? describeCteDefs
+        : cteDefs;
     const unwrapped = unwrapOuterBalancedParens(sumSubMatch[2]);
     if (/^(?:SELECT|WITH|VALUES|FROM|TABLE)\b/i.test(unwrapped)) {
-      return `${kw} (${mergeLeadingCtes(unwrapped, cteDefs)})`;
+      return `${kw} (${mergeLeadingCtes(unwrapped, subCtes)})`;
     }
-    return `${kw} (${mergeLeadingCtes(`SELECT * FROM (${unwrapped})`, cteDefs)})`;
+    return `${kw} (${mergeLeadingCtes(`SELECT * FROM (${unwrapped})`, subCtes)})`;
   }
 
   if (/^WITH\s+RECURSIVE\b/i.test(trimmed)) {
-    return `WITH RECURSIVE ${cteDefs.join(", ")}, ${trimmed.replace(/^WITH\s+RECURSIVE\s+/i, "")}`;
+    return `WITH RECURSIVE ${cteDefs.join(", ")}, ${trimmed.replace(/^WITH\s+RECURSIVE\s*/i, "")}`;
   }
   if (/^WITH\b/i.test(trimmed)) {
-    return `WITH ${cteDefs.join(", ")}, ${trimmed.replace(/^WITH\s+/i, "")}`;
+    return `WITH ${cteDefs.join(", ")}, ${trimmed.replace(/^WITH\s*/i, "")}`;
   }
   return `WITH ${cteDefs.join(", ")} ${trimmed}`;
 }
@@ -1074,6 +1095,7 @@ export async function executeCloudQuery(
 
     if (ctx.runSql) {
       const cteDefs: string[] = [];
+      const describeCteDefs: string[] = [];
       const shadowSelectByTable = new Map<string, string>();
       const shadowDescribeByTable = new Map<string, string>();
 
@@ -1157,6 +1179,7 @@ export async function executeCloudQuery(
             shadowSelectByTable.set(tbl.toLowerCase(), tblShadowSql);
             shadowDescribeByTable.set(tbl.toLowerCase(), tblDescribeSql);
             cteDefs.push(`${quoteSqlIdent(tbl)} AS (${tblShadowSql})`);
+            describeCteDefs.push(`${quoteSqlIdent(tbl)} AS (${tblDescribeSql})`);
           }
         }
 
@@ -1166,7 +1189,9 @@ export async function executeCloudQuery(
           !shadowSelectByTable.has("logs") &&
           referencedIdents.has("logs")
         ) {
-          cteDefs.push(`"logs" AS (SELECT * FROM ${quoteSqlIdent(targetTable)})`);
+          const logsAliasCte = `"logs" AS (SELECT * FROM ${quoteSqlIdent(targetTable)})`;
+          cteDefs.push(logsAliasCte);
+          describeCteDefs.push(logsAliasCte);
         }
       }
 
@@ -1174,9 +1199,11 @@ export async function executeCloudQuery(
         ctx.since &&
         !(maskIps && shadowSelectByTable.has(ctx.since.table.toLowerCase()))
       ) {
-        cteDefs.push(
-          `${quoteSqlIdent(ctx.since.table)} AS (SELECT * FROM main.${quoteSqlIdent(ctx.since.table)} WHERE ts_ms >= ${Math.floor(ctx.since.ms)})`,
-        );
+        const sinceCte = `${quoteSqlIdent(ctx.since.table)} AS (SELECT * FROM main.${quoteSqlIdent(ctx.since.table)} WHERE ts_ms >= ${Math.floor(ctx.since.ms)})`;
+        cteDefs.push(sinceCte);
+        if (describeCteDefs.length > 0) {
+          describeCteDefs.push(sinceCte);
+        }
       }
 
       const effectiveExplainTarget = mergeLeadingCtes(
@@ -1185,6 +1212,7 @@ export async function executeCloudQuery(
         shadowSelectByTable,
         targetTable,
         shadowDescribeByTable,
+        describeCteDefs,
       );
       const effectiveExecSql = mergeLeadingCtes(
         execSql,
@@ -1192,6 +1220,7 @@ export async function executeCloudQuery(
         shadowSelectByTable,
         targetTable,
         shadowDescribeByTable,
+        describeCteDefs,
       );
       finalRewrittenSql = effectiveExplainTarget;
 

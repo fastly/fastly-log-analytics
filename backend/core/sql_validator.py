@@ -324,6 +324,12 @@ def _walk_and_validate(
                                 and str(inner_n.get("setop_type", "UNION")).upper() == "UNION"
                             ):
                                 setop_target = inner_n
+                        if (
+                            setop_target is not None
+                            and isinstance(setop_target.get("right"), dict)
+                            and setop_target["right"].get("type") == "SET_OPERATION_NODE"
+                        ):
+                            setop_target = None
                         if setop_target is not None:
                             _walk_and_validate(
                                 setop_target["left"],
@@ -676,32 +682,51 @@ def _validate_select_syntax(tokens: list[_Tok]) -> str | None:
     return None
 
 
+def _has_top_level_setop(tokens: list[_Tok]) -> bool:
+    unwrapped = _strip_outer_parens(tokens)
+    k = 0
+    m = len(unwrapped)
+    while k < m:
+        tk = unwrapped[k]
+        if tk.kind == "LPAREN":
+            rp = _find_matching_rparen(unwrapped, k)
+            if rp == -1:
+                return True
+            k = rp + 1
+            continue
+        if tk.kind == "WORD" and tk.val.upper() in ("UNION", "INTERSECT", "EXCEPT"):
+            return True
+        k += 1
+    return False
+
+
 def _parse_recursive_cte_tokens(tokens: list[_Tok]) -> dict[str, Any]:
     inner = _strip_outer_parens(tokens)
     k = 0
     m = len(inner)
-    union_idx = -1
+    last_union_or_except_op = ""
+    last_idx = -1
     while k < m:
         tk = inner[k]
         if tk.kind == "LPAREN":
             rp = _find_matching_rparen(inner, k)
             if rp == -1:
+                last_union_or_except_op = ""
+                last_idx = -1
                 break
             k = rp + 1
             continue
-        if tk.kind == "WORD" and tk.val.upper() == "UNION":
-            union_idx = k
-            break
-        if tk.kind == "WORD" and tk.val.upper() in ("INTERSECT", "EXCEPT"):
-            break
+        if tk.kind == "WORD" and tk.val.upper() in ("UNION", "EXCEPT"):
+            last_union_or_except_op = tk.val.upper()
+            last_idx = k
         k += 1
 
-    if union_idx == -1:
+    if last_union_or_except_op != "UNION" or last_idx == -1:
         body = _parse_query_tokens(inner)
         body["type"] = "RECURSIVE_CTE_NODE"
         return body
 
-    after_union = union_idx + 1
+    after_union = last_idx + 1
     while (
         after_union < m
         and inner[after_union].kind == "WORD"
@@ -709,11 +734,17 @@ def _parse_recursive_cte_tokens(tokens: list[_Tok]) -> dict[str, Any]:
     ):
         after_union += 1
 
+    right_tokens = inner[after_union:]
+    if not right_tokens or _has_top_level_setop(right_tokens):
+        body = _parse_query_tokens(inner)
+        body["type"] = "RECURSIVE_CTE_NODE"
+        return body
+
     return {
         "type": "RECURSIVE_CTE_NODE",
         "setop_type": "UNION",
-        "left": _parse_query_tokens(inner[:union_idx]),
-        "right": _parse_query_tokens(inner[after_union:]),
+        "left": _parse_query_tokens(inner[:last_idx]),
+        "right": _parse_query_tokens(right_tokens),
     }
 
 

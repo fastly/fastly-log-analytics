@@ -959,13 +959,19 @@ def test_recursive_cte_anchor_cannot_shadow_disallowed_base_table() -> None:
         "WITH RECURSIVE ops_secret AS (SELECT * FROM ops_secret) SELECT * FROM ops_secret",
         "WITH RECURSIVE ops_secret AS ((SELECT * FROM ops_secret UNION ALL SELECT 1) UNION ALL SELECT * FROM ops_secret WHERE 1=0) SELECT * FROM ops_secret",
         "WITH RECURSIVE ops_secret AS (SELECT 1 INTERSECT SELECT * FROM ops_secret) SELECT * FROM ops_secret",
+        "WITH RECURSIVE ops_secret AS (SELECT 'a' AS secret_col UNION ALL SELECT secret_col FROM ops_secret UNION ALL SELECT secret_col FROM ops_secret WHERE 1=0) SELECT * FROM ops_secret",
+        "WITH RECURSIVE ops_secret AS (SELECT 'a' AS secret_col UNION ALL SELECT secret_col FROM ops_secret EXCEPT SELECT 'b' AS secret_col) SELECT * FROM ops_secret",
+        "WITH RECURSIVE ops_secret AS (SELECT 'a' AS secret_col UNION ALL SELECT secret_col FROM ops_secret INTERSECT SELECT 'a' AS secret_col) SELECT * FROM ops_secret",
+        "WITH RECURSIVE ops_secret AS (SELECT 'a' AS secret_col UNION ALL (SELECT secret_col FROM ops_secret UNION ALL SELECT 'b' AS secret_col WHERE 1=0)) SELECT * FROM ops_secret",
     ):
         with pytest.raises(SQLValidationError) as exc_info:
             validate_user_sql(attack_sql, allowed_tables={"logs"})
         assert exc_info.value.reason == "catalog_blocklist:foreign_table"
 
-    res = validate_user_sql(
+    for legit_sql in (
         "WITH RECURSIVE r AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM r WHERE n < 5) SELECT * FROM r",
-        allowed_tables={"logs"},
-    )
-    assert res.parse_tree.get("statements")
+        "WITH RECURSIVE r AS (SELECT status AS n FROM logs UNION ALL SELECT n + 1 FROM r WHERE n < 205) SELECT * FROM r",
+        "WITH RECURSIVE r AS (SELECT status AS n FROM logs UNION ALL SELECT status + 10 AS n FROM logs UNION ALL SELECT n + 1 FROM r WHERE n < 220) SELECT * FROM r",
+    ):
+        res = validate_user_sql(legit_sql, allowed_tables={"logs"})
+        assert res.parse_tree.get("statements")
