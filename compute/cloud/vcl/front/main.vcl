@@ -218,7 +218,12 @@ sub vcl_recv {
     unset req.http.Cookie;
   }
 #FASTLY recv
-  if (req.url.path ~ "^/(usage|how-it-works|share-login)(/acknowledge)?(\.html|\.txt)?/?$" || req.url.path == "/") {
+  if (
+    req.url.path == "/" ||
+    req.url.path ~ "^/(usage|how-it-works)(/|$)" ||
+    req.url.path ~ "^/(_next/static|duckdb|geo)/" ||
+    req.url.path ~ "^/maplibre-gl-"
+  ) {
     set req.url = req.url.path;
   }
   if (!req.http.x-flp-fos-service) {

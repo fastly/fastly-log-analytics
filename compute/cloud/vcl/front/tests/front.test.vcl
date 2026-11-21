@@ -31,6 +31,26 @@ sub public_shell_queries_share_a_cache_key {
 
 
 // @scope: recv
+sub public_rsc_and_static_asset_queries_share_a_cache_key {
+  testing.inject_variable("req.is_ssl", true);
+  set req.url = "/usage/__next._tree.txt?__rsc=abc";
+  testing.call_subroutine("vcl_recv");
+  assert.equal(req.url, "/usage/__next._tree.txt");
+  assert.state(lookup);
+
+  set req.url = "/_next/static/chunks/app.js?v=attacker";
+  testing.call_subroutine("vcl_recv");
+  assert.equal(req.url, "/_next/static/chunks/app.js");
+  assert.state(lookup);
+
+  set req.url = "/duckdb/duckdb-eh.wasm?v=attacker";
+  testing.call_subroutine("vcl_recv");
+  assert.equal(req.url, "/duckdb/duckdb-eh.wasm");
+  assert.state(lookup);
+}
+
+
+// @scope: recv
 sub private_api_queries_keep_the_complete_cache_key {
   testing.inject_variable("req.is_ssl", true);
   set req.url = "/api/files?from=a&to=b&service=fixture";
