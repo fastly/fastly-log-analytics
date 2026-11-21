@@ -620,10 +620,11 @@ def run_falco_test(
     test_vcl: str,
     *,
     extra_files: dict[str, str] | None = None,
+    inject_ssl: bool = True,
 ) -> FalcoResult:
     """Run `falco test -json` on temporary main.vcl + suite.test.vcl."""
     all_vcl = main_vcl + "\n".join((extra_files or {}).values())
-    if "if (!req.is_ssl" in all_vcl:
+    if inject_ssl and "if (!req.is_ssl" in all_vcl:
         test_vcl = test_vcl.replace(
             'testing.call_subroutine("vcl_recv");',
             'testing.inject_variable("req.is_ssl", true);\n  testing.call_subroutine("vcl_recv");',

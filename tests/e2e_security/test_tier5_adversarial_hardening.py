@@ -1895,11 +1895,10 @@ sub test_error_801_collapses_leading_slashes_and_rejects_bad_or_missing_host {{
     res_front = run_falco_test(main_vcl, front_test_vcl, extra_files=extras)
     assert res_front.returncode == 0, f"{res_front.stdout}\n{res_front.stderr}"
 
-    # falco 2.3.0's .falco.yaml `testing.overrides.req.is_ssl: true` takes precedence over
-    # `testing.inject_variable("req.is_ssl", false)`, so test plain-HTTP 801 with override false.
     plain_http_vcl = """
 // @scope: recv
 sub test_plain_http_recv_triggers_error_801 {
+  testing.inject_variable("req.is_ssl", false);
   set req.method = "GET";
   set req.url = "/dashboard";
   testing.call_subroutine("vcl_recv");
@@ -1910,6 +1909,7 @@ sub test_plain_http_recv_triggers_error_801 {
         main_vcl,
         plain_http_vcl,
         extra_files={**extras, ".falco.yaml": "testing:\n  overrides:\n    req.is_ssl: false\n"},
+        inject_ssl=False,
     )
     assert res_plain_http.returncode == 0, f"{res_plain_http.stdout}\n{res_plain_http.stderr}"
 
