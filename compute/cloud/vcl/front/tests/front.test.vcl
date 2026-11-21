@@ -128,6 +128,7 @@ sub static_has_year_ttl_and_surrogate_key {
   set beresp.http.Set-Cookie = "must-not-cache=1";
   testing.call_subroutine("vcl_fetch");
   assert.equal(beresp.ttl, 31536000s);
+  assert.equal(beresp.http.Cache-Control, "public, max-age=31536000, immutable");
   assert.is_notset(beresp.http.Set-Cookie);
   assert.equal(beresp.http.Surrogate-Key, "flp-static");
 }
@@ -486,17 +487,52 @@ sub fos_reads_keep_the_platform_accept_encoding {
 
 
 // @scope: fetch
-sub duckdb_has_year_ttl_and_surrogate_key {
+sub duckdb_has_day_ttl_and_revalidates {
   set req.url = "/duckdb/1.33.1-dev57.0/duckdb-eh.wasm";
   set beresp.status = 200;
   set beresp.http.Set-Cookie = "must-not-cache=1";
   testing.call_subroutine("vcl_fetch");
   assert.true(beresp.cacheable);
-  assert.equal(beresp.ttl, 31536000s);
-  assert.equal(beresp.http.Cache-Control, "public, max-age=31536000, immutable");
+  assert.equal(beresp.ttl, 86400s);
+  assert.equal(
+    beresp.http.Cache-Control,
+    "public, max-age=86400, must-revalidate"
+  );
   assert.is_notset(beresp.http.Set-Cookie);
   assert.equal(beresp.http.Surrogate-Key, "flp-static");
   assert.state(deliver);
+}
+
+
+// @scope: fetch
+sub geo_has_day_ttl_and_revalidates {
+  set req.url = "/geo/world.topo.json";
+  set beresp.status = 200;
+  set beresp.http.Set-Cookie = "must-not-cache=1";
+  testing.call_subroutine("vcl_fetch");
+  assert.equal(beresp.ttl, 86400s);
+  assert.equal(
+    beresp.http.Cache-Control,
+    "public, max-age=86400, must-revalidate"
+  );
+  assert.is_notset(beresp.http.Set-Cookie);
+  assert.equal(beresp.http.Surrogate-Key, "flp-static");
+}
+
+
+// @scope: fetch
+sub maplibre_worker_has_day_ttl_and_revalidates {
+  set req.url = "/maplibre-gl-worker.mjs";
+  set beresp.status = 200;
+  set beresp.http.Set-Cookie = "must-not-cache=1";
+  testing.call_subroutine("vcl_fetch");
+  assert.equal(beresp.ttl, 86400s);
+  assert.equal(
+    beresp.http.Cache-Control,
+    "public, max-age=86400, must-revalidate"
+  );
+  assert.is_notset(beresp.http.Set-Cookie);
+  assert.equal(beresp.http.Surrogate-Key, "flp-static");
 }
 
 

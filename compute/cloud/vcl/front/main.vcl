@@ -389,11 +389,19 @@ sub vcl_fetch {
     set beresp.cacheable = false;
     return(pass);
   }
-  if ((req.url.path ~ "^/(_next/static|duckdb|geo)/" || req.url.path ~ "^/maplibre-gl-") && beresp.status == 200) {
+  if (req.url.path ~ "^/_next/static/" && beresp.status == 200) {
     unset beresp.http.Set-Cookie;
     set beresp.cacheable = true;
     set beresp.ttl = 31536000s;
     set beresp.http.Cache-Control = "public, max-age=31536000, immutable";
+    set beresp.http.Surrogate-Key = "flp-static";
+    return(deliver);
+  }
+  if ((req.url.path ~ "^/(duckdb|geo)/" || req.url.path ~ "^/maplibre-gl-") && beresp.status == 200) {
+    unset beresp.http.Set-Cookie;
+    set beresp.cacheable = true;
+    set beresp.ttl = 86400s;
+    set beresp.http.Cache-Control = "public, max-age=86400, must-revalidate";
     set beresp.http.Surrogate-Key = "flp-static";
     return(deliver);
   }

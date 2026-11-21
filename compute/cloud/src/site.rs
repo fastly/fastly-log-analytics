@@ -7,23 +7,28 @@ pub struct Asset {
 }
 
 impl Asset {
-    fn is_static_bundle(&self) -> bool {
+    fn is_hashed_bundle(&self) -> bool {
         self.path.starts_with("/_next/static/")
-            || self.path.starts_with("/duckdb/")
+    }
+
+    fn is_bounded_static(&self) -> bool {
+        self.path.starts_with("/duckdb/")
             || self.path.starts_with("/geo/")
             || self.path.starts_with("/maplibre-gl-")
     }
 
     pub fn cache_control(&self) -> &'static str {
-        if self.is_static_bundle() {
+        if self.is_hashed_bundle() {
             "public, max-age=31536000, immutable"
+        } else if self.is_bounded_static() {
+            "public, max-age=86400, must-revalidate"
         } else {
             "public, max-age=60"
         }
     }
 
     pub fn surrogate_key(&self) -> &'static str {
-        if self.is_static_bundle() {
+        if self.is_hashed_bundle() || self.is_bounded_static() {
             "flp-static"
         } else {
             "flp-html"
@@ -150,6 +155,28 @@ mod tests {
         assert_eq!(script.surrogate_key(), "flp-static");
     }
 
+    #[test]
+    fn unhashed_static_assets_revalidate_daily() {
+        for path in [
+            "/geo/world.topo.json",
+            "/duckdb/1.33.1-dev57.0/duckdb-eh.wasm",
+            "/maplibre-gl-worker.mjs",
+        ] {
+            let asset = Asset {
+                path,
+                content_type: "application/octet-stream",
+                identity: Some(b"asset"),
+                gzip: None,
+                br: None,
+            };
+            assert_eq!(
+                asset.cache_control(),
+                "public, max-age=86400, must-revalidate"
+            );
+            assert_eq!(asset.surrogate_key(), "flp-static");
+        }
+    }
+
     static ENCODED: Asset = Asset {
         path: "/_next/static/chunk-abc.js",
         content_type: "application/javascript",
@@ -209,7 +236,10 @@ mod tests {
         );
         assert_eq!(WASM.negotiate(None), None);
         assert_eq!(WASM.negotiate(Some("deflate")), None);
-        assert_eq!(WASM.cache_control(), "public, max-age=31536000, immutable");
+        assert_eq!(
+            WASM.cache_control(),
+            "public, max-age=86400, must-revalidate"
+        );
         assert_eq!(WASM.surrogate_key(), "flp-static");
 
         let plain = &ASSETS[0];
