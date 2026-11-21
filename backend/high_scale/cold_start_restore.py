@@ -1,6 +1,6 @@
-"""Cold-start disaster recovery from Fastly Object Storage (FOS) for High-Scale Elevation.
+"""Cold-start disaster recovery from Fastly Object Storage (FOS) for High-Scale.
 
-Recovers a brand-new Elevation installation with empty Postgres and empty ClickHouse
+Recovers a brand-new High-Scale installation with empty Postgres and empty ClickHouse
 using only the Fastly API key + bucket/service (with explicit FOS keys as a fallback):
 
 1. Mints/rotates a fresh bucket-scoped FOS access key via ``ensure_fos_access_key``
@@ -655,16 +655,16 @@ def restore_from_fos(
     ensure_pg_schema_fn: Callable[[], Any] | None = None,
     now: datetime | None = None,
 ) -> ColdStartRestoreResult:
-    """Execute full Elevation cold-start restore from FOS."""
+    """Execute full High-Scale cold-start restore from FOS."""
     # ── Step 1: Validate inputs & resolve FOS credentials ──
     sid = (service_id or "").strip()
-    if not _SERVICE_ID_RE.match(sid):
+    if not _SERVICE_ID_RE.fullmatch(sid):
         raise ValueError("service_id must match ^[A-Za-z0-9_-]{1,64}$")
     clean_bucket = (bucket or "").strip()
     if not clean_bucket:
         raise ValueError("bucket is required")
     clean_region = (region or "").strip()
-    if not _REGION_RE.match(clean_region):
+    if not _REGION_RE.fullmatch(clean_region):
         raise ValueError("region must match ^[a-z0-9-]{1,64}$")
 
     clean_prefix = (prefix or "").strip("/")
@@ -682,7 +682,8 @@ def restore_from_fos(
     active_secrets: list[str | None] = [api_key, ak, sk]
 
     if not (ak and sk):
-        assert api_key is not None
+        if api_key is None:
+            raise ValueError("provide fastly_api_key or both fos_access_key and fos_secret_key")
         mint_fn = ensure_fos_key_fn or ensure_fos_access_key
         pending_mint_exc: Exception | None = None
         try:
@@ -702,7 +703,8 @@ def restore_from_fos(
             raise pending_mint_exc
         active_secrets.extend((ak, sk))
 
-    assert ak is not None and sk is not None
+    if ak is None or sk is None:
+        raise RuntimeError("FOS credentials could not be resolved")
 
     pending_exc: Exception | None = None
     try:
@@ -806,7 +808,8 @@ def restore_from_fos(
                 serving_pub = serving_publication
                 agg_pub = aggregates_publication
             else:
-                assert ch_client is not None
+                if ch_client is None:
+                    raise RuntimeError("ClickHouse client is not configured")
                 batch_store = PostgresBatchManifestStore(ctrl)
                 serving_pub = ClickHousePublication(batch_store, ClickHouseBatchAdapter(ch_client))
                 agg_pub = (
@@ -843,5 +846,6 @@ def restore_from_fos(
     except Exception as exc:
         scrubbed = scrub_secrets(str(exc), active_secrets)
         pending_exc = ValueError(scrubbed) if isinstance(exc, ValueError) else RuntimeError(scrubbed)
-    assert pending_exc is not None
-    raise pending_exc
+    if pending_exc is not None:
+        raise pending_exc
+    raise RuntimeError("Cold-start restore exited unexpectedly")

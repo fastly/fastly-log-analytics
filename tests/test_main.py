@@ -134,6 +134,7 @@ def _call_get_service_id(service=None, sid=None, x_fastly_service_id=None, x_ser
     """Call get_service_id directly without going through FastAPI's DI."""
     request = MagicMock()
     request.path_params = {}
+    request.state.analyst_session = None
     return deps.get_service_id(
         request=request,
         service=service,

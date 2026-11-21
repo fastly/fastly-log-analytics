@@ -716,7 +716,8 @@ def handle_set_snapshot_interval(args) -> None:
     from backend import config as svcconfig
 
     interval = _validate_snapshot_interval_minutes(args.snapshot_interval_minutes)
-    assert interval is not None
+    if interval is None:
+        raise typer.BadParameter("snapshot_interval_minutes is required")
 
     service_id = getattr(args, "service_id", None)
     if not service_id:

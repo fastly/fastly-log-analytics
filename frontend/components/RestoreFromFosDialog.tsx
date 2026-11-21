@@ -19,13 +19,13 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 
-type ElevationRestoreRequest = ApiComponents['schemas']['HighScaleRestoreFromFosRequest']
-type ElevationRestoreResponse = ApiComponents['schemas']['HighScaleRestoreFromFosResponse']
+type HighScaleRestoreRequest = ApiComponents['schemas']['HighScaleRestoreFromFosRequest']
+type HighScaleRestoreResponse = ApiComponents['schemas']['HighScaleRestoreFromFosResponse']
 type CloudRecoverRequest = CloudComponents['schemas']['ProvisionRecoverInput']
 type CloudRecoverResponse = CloudComponents['schemas']['ProvisionRecoverResponse']
 
 type RestoreResult =
-  | { edition: 'elevation'; data: ElevationRestoreResponse }
+  | { edition: 'high-scale'; data: HighScaleRestoreResponse }
   | { edition: 'cloud'; data: CloudRecoverResponse }
 
 const SERVICE_ID_RE = /^[A-Za-z0-9_-]+$/
@@ -97,7 +97,7 @@ function RestoreFromFosDialogBody({ open, onOpenChange, onRestored }: RestoreFro
         return { edition: 'cloud', data: parsed as CloudRecoverResponse }
       }
 
-      const body: ElevationRestoreRequest = {
+      const body: HighScaleRestoreRequest = {
         service_id: trimmedServiceId,
         bucket: trimmedBucket,
         region,
@@ -110,7 +110,7 @@ function RestoreFromFosDialogBody({ open, onOpenChange, onRestored }: RestoreFro
           : {}),
       }
       const data = await unwrapClient(client.POST('/api/high-scale/restore-from-fos', { body }))
-      return { edition: 'elevation', data }
+      return { edition: 'high-scale', data }
     },
     onSuccess: (res) => {
       // Clear secret inputs immediately after restore succeeds.

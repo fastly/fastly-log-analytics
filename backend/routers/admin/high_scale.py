@@ -874,7 +874,11 @@ def restore_from_fos_endpoint(
 
     if pending_http_exc is not None:
         raise pending_http_exc
-    assert result is not None
+    if result is None:
+        raise HTTPException(
+            status_code=500,
+            detail=make_error("restore_from_fos_failed", "Cold-start restore produced no result"),
+        )
 
     return HighScaleRestoreFromFosResponse(
         status="ok",

@@ -823,14 +823,16 @@ async def test_correlate_masks_client_ips_for_analyst():
         watermark_for=lambda domain: watermark,
     )
     request = SimpleNamespace(state=SimpleNamespace(analyst_session=SimpleNamespace(pii_policy={"mask_ips": True})))
-    response = await cr_mod.control_room_correlate(
-        cr_mod.CorrelateRequest(dimension="ip"),
-        MOCK_SERVICE_ID,
-        request,
-        None,
-        SimpleNamespace(resolve=lambda service_id: service),
-    )
-    assert response["top"] == [{"value": "203.0.113.xxx", "count": 7}]
+    with pytest.raises(HTTPException) as exc_info:
+        await cr_mod.control_room_correlate(
+            cr_mod.CorrelateRequest(dimension="ip"),
+            MOCK_SERVICE_ID,
+            request,
+            None,
+            SimpleNamespace(resolve=lambda service_id: service),
+        )
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail["error"] == "pii_policy_violation"
 
 
 @pytest.mark.asyncio

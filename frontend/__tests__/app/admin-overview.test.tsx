@@ -313,7 +313,7 @@ test('ServicesTable renders services, manual Refresh Status trigger, and Delete 
   expect(await screen.findByText('Delete Data: Production Edge CDN')).toBeInTheDocument()
 })
 
-test('ServicesTable shows Restore/Recover from FOS when 0 services exist in Elevation and Cloud modes, and hides in Cloud when a service exists', async () => {
+test('ServicesTable shows Restore/Recover from FOS when 0 services exist in High-Scale and Cloud modes, and hides in Cloud when a service exists', async () => {
   try {
     setCloudModeRuntime(false)
     server.use(http.get(`${API_BASE}/api/services`, () => HttpResponse.json({ services: [] })))

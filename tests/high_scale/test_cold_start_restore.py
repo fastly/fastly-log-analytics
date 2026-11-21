@@ -1,4 +1,4 @@
-"""Unit tests for High-Scale Elevation cold-start restore from FOS (Feature F6 / M2)."""
+"""Unit tests for High-Scale cold-start restore from FOS (Feature F6 / M2)."""
 
 from __future__ import annotations
 

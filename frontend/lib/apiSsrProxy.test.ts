@@ -253,4 +253,22 @@ describe('SEC-02 apiSsrProxy trust-boundary header sanitization', () => {
       await server.close()
     }
   })
+
+  it('classifySsrRequest allows Next.js single loopback x-forwarded-for on loopback host while rejecting multi-hop or external x-forwarded-for', () => {
+    delete process.env.ADMIN_GATEWAY_REQUIRED
+    for (const xff of ['127.0.0.1', '::1', '::ffff:127.0.0.1']) {
+      expect(classifySsrRequest(new Headers({ host: '127.0.0.1:13004', 'x-forwarded-for': xff }))).toEqual({
+        admin: true,
+        gatewayAuthenticated: false,
+        refusal: null,
+      })
+    }
+    for (const xff of ['203.0.113.5', '127.0.0.1, 203.0.113.5', '127.0.0.1, ::1']) {
+      expect(classifySsrRequest(new Headers({ host: '127.0.0.1:13004', 'x-forwarded-for': xff }))).toEqual({
+        admin: false,
+        gatewayAuthenticated: false,
+        refusal: null,
+      })
+    }
+  })
 })

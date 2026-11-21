@@ -149,7 +149,7 @@ export function Inputs({ s, r, set }: InputsProps) {
         </Row>
         <Row
           label='Cloud snapshot interval'
-          tooltip="How often Elevation flushes consolidated FOS Parquet archives and meta/dr_state.json DR state snapshots. Raw logs remain in FOS until archived plus a 15-minute grace period for zero data loss."
+          tooltip="How often High-Scale flushes consolidated FOS Parquet archives and meta/dr_state.json DR state snapshots. Raw logs remain in FOS until archived plus a 15-minute grace period for zero data loss."
         >
           <div className='inline-flex items-center gap-0.5 p-0.5 bg-muted/80 rounded-md' role='group' aria-label='Cloud snapshot interval'>
             {SNAPSHOT_INTERVAL_OPTIONS.map((mins) => {

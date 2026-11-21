@@ -141,7 +141,7 @@ export function LogSyncSection({
             </SelectContent>
           </Select>
           <p className="text-[10px] text-muted-foreground leading-tight">
-            How often Elevation flushes consolidated Parquet archives and DR state snapshots to FOS. Raw logs remain in FOS until archived (+15m grace).
+            How often High-Scale flushes consolidated Parquet archives and DR state snapshots to FOS. Raw logs remain in FOS until archived (+15m grace).
           </p>
         </div>
 

@@ -473,7 +473,7 @@ export function AutomationSection({ config, selectedServiceId, update }: Storage
         <div className="space-y-1.5 max-w-sm">
           <LabelWithInfo
             label="Cloud Snapshot Interval"
-            info="How often Elevation flushes consolidated Parquet archives and DR state snapshots to FOS. Raw logs stay in FOS until archived (+15m grace) for zero data loss."
+            info="How often High-Scale flushes consolidated Parquet archives and DR state snapshots to FOS. Raw logs stay in FOS until archived (+15m grace) for zero data loss."
           />
           <Select
             value={String(config.snapshot_interval_minutes)}

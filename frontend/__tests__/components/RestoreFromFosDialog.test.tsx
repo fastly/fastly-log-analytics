@@ -32,7 +32,7 @@ describe('RestoreFromFosDialog', () => {
     vi.unstubAllGlobals()
   })
 
-  it('Elevation mode: restores from FOS with 0 active services, validates half-paired FOS keys, displays summary, clears secrets, and invalidates caches', async () => {
+  it('High-Scale mode: restores from FOS with 0 active services, validates half-paired FOS keys, displays summary, clears secrets, and invalidates caches', async () => {
     const user = userEvent.setup()
     let capturedBody: Record<string, unknown> | null = null
     server.use(
@@ -62,7 +62,7 @@ describe('RestoreFromFosDialog', () => {
       { queryClient },
     )
 
-    // Elevation-specific fields are visible
+    // High-Scale-specific fields are visible
     expect(screen.getByLabelText('Archive Prefix')).toHaveValue('high-scale/archive')
     expect(screen.getByRole('switch', { name: /Rebuild ClickHouse serving state/i })).toHaveAttribute('aria-checked', 'true')
 
@@ -102,7 +102,7 @@ describe('RestoreFromFosDialog', () => {
     expect(capturedBody).not.toHaveProperty('fos_access_key')
     expect(capturedBody).not.toHaveProperty('fos_secret_key')
 
-    // Summary shows all Elevation metrics
+    // Summary shows all High-Scale metrics
     expect(screen.getByText('svc-cold-1')).toBeInTheDocument()
     expect(screen.getByText('request, rum_vitals')).toBeInTheDocument()
     expect(screen.getByText('12')).toBeInTheDocument()
@@ -118,7 +118,7 @@ describe('RestoreFromFosDialog', () => {
     expect(onRestored).toHaveBeenCalledWith('svc-cold-1')
   })
 
-  it('Cloud mode: hides Elevation-only fields, posts exact RecoverInput payload, invalidates Cloud metadata cache, and renders summary', async () => {
+  it('Cloud mode: hides High-Scale-only fields, posts exact RecoverInput payload, invalidates Cloud metadata cache, and renders summary', async () => {
     setCloudModeRuntime(true)
     const user = userEvent.setup()
     let capturedUrl = ''
@@ -152,7 +152,7 @@ describe('RestoreFromFosDialog', () => {
         { queryClient },
       )
 
-      // Elevation-only fields are NOT rendered in Cloud mode
+      // High-Scale-only fields are NOT rendered in Cloud mode
       expect(screen.queryByLabelText('Archive Prefix')).not.toBeInTheDocument()
       expect(screen.queryByRole('switch', { name: /Rebuild ClickHouse serving state/i })).not.toBeInTheDocument()
 
@@ -174,7 +174,7 @@ describe('RestoreFromFosDialog', () => {
         fos_region: 'us-east-1',
         fos_prefix: '',
       })
-      // Must never include Elevation-only keys or blank optional secrets
+      // Must never include High-Scale-only keys or blank optional secrets
       expect(capturedBody).not.toHaveProperty('archive_prefix')
       expect(capturedBody).not.toHaveProperty('restore_serving_state')
       expect(capturedBody).not.toHaveProperty('fos_access_key')

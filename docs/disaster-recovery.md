@@ -1,6 +1,6 @@
-# Disaster Recovery — Fastly Log Analytics (Cloud & Elevation)
+# Disaster Recovery — Fastly Log Analytics (Cloud & High-Scale)
 
-This runbook covers accidental service deletion and cold-start recovery from Fastly Object Storage (FOS) for **Fastly Log Analytics Cloud (Compute)**. For High-Scale **Elevation** Kubernetes capacity and cold-start recovery, see [docs/runbooks/high-scale-capacity-and-recovery.md](runbooks/high-scale-capacity-and-recovery.md).
+This runbook covers accidental service deletion and cold-start recovery from Fastly Object Storage (FOS) for **Fastly Log Analytics Cloud (Compute)**. For **High-Scale** Kubernetes capacity and cold-start recovery, see [docs/runbooks/high-scale-capacity-and-recovery.md](runbooks/high-scale-capacity-and-recovery.md).
 
 ## Failure Scenarios & Recovery Modes (FLP Cloud)
 

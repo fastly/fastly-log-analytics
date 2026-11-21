@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Standalone CLI for Elevation zero-DB cold-start restore from FOS."""
+"""Standalone CLI for High-Scale zero-DB cold-start restore from FOS."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="restore_from_fos",
         description=(
-            "Restore a brand-new High-Scale Elevation installation (empty Postgres & ClickHouse) "
+            "Restore a brand-new High-Scale installation (empty Postgres & ClickHouse) "
             "from Fastly Object Storage (FOS) using a Fastly API key or explicit FOS credentials."
         ),
     )

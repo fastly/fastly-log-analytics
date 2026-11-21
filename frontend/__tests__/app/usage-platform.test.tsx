@@ -200,7 +200,7 @@ describe('observed Platform usage', () => {
       .not.toBe(reference)
   })
 
-  it('lets users switch the Elevation Cloud snapshot interval and updates DR state snapshots and total cost', () => {
+  it('lets users switch the High-Scale Cloud snapshot interval and updates DR state snapshots and total cost', () => {
     render(<CostCalculator />)
     const group = screen.getByRole('group', { name: 'Cloud snapshot interval' })
     const btn5m = within(group).getByRole('button', { name: '5m' })

@@ -154,7 +154,7 @@ describe('ReviewStep (ExecuteStep)', () => {
     expect(screen.getByText(/Loading fields/i)).toBeInTheDocument()
   })
 
-  it('shows Cloud Snapshot Interval in Elevation mode and omits it in Cloud mode', () => {
+  it('shows Cloud Snapshot Interval in High-Scale mode and omits it in Cloud mode', () => {
     const { rerender } = renderWithQuery(
       <ExecuteStep s={makeReviewState({ config: { ...INITIAL_CONFIG, snapshot_interval_minutes: 60 } })} />,
     )

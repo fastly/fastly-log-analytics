@@ -157,6 +157,7 @@ _ANALYST_BLOCKED_SUBPATHS = (
     "/api/download-folder",
     "/api/cron-schedule",
     "/api/sync-status",
+    "/api/high-scale/restore-from-fos",
     "/metrics",
     "/openapi.json",
     "/docs",

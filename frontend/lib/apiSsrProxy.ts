@@ -339,6 +339,16 @@ function hasNonEmptyHeader(headerBag: Pick<Headers, "get">, name: string): boole
   return Boolean(v && v.trim() !== "");
 }
 
+function hasExternalForwardedFor(headerBag: Pick<Headers, "get">): boolean {
+  const raw = headerBag.get("x-forwarded-for");
+  if (!raw || raw.trim() === "") return false;
+  const trimmed = raw.trim();
+  // Next.js `next start` injects a single loopback x-forwarded-for (e.g. `127.0.0.1`
+  // or `::1` or `::ffff:127.0.0.1`) on local loopback requests. Mirror the backend's
+  // `is_request_remote()` rule: any multi-hop chain or non-loopback IP is external.
+  return trimmed.includes(",") || !isLoopbackIpLiteral(trimmed);
+}
+
 export function classifySsrRequest(headerBag: Pick<Headers, "get">): {
   admin: boolean;
   gatewayAuthenticated: boolean;
@@ -351,7 +361,7 @@ export function classifySsrRequest(headerBag: Pick<Headers, "get">): {
     proxiedByCaddy ||
     hasNonEmptyHeader(headerBag, "x-fla-frontend-proxy") ||
     hasNonEmptyHeader(headerBag, "x-remote-analyst") ||
-    hasNonEmptyHeader(headerBag, "x-forwarded-for") ||
+    hasExternalForwardedFor(headerBag) ||
     hasNonEmptyHeader(headerBag, "fastly-client-ip") ||
     hasNonEmptyHeader(headerBag, "true-client-ip") ||
     hasNonEmptyHeader(headerBag, "x-real-ip") ||
