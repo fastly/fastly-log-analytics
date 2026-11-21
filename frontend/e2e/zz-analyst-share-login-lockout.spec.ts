@@ -35,6 +35,12 @@ const SHARE_LOGIN_PATH = '/api/share/login'
 const MOCK_IDP = `http://127.0.0.1:${E2E_BACKEND_PORT}/mock-idp`
 const E2E_EMAIL = 'e2e-analyst@example.com'
 
+test.beforeEach(async ({ request }) => {
+  await request.post('/api/admin/share/start', {
+    data: { public_endpoint: 'https://share-e2e.example.com', forward_port: 13004 },
+  })
+})
+
 test.describe('analyst share-login', () => {
   test('brute-force lockout: 30 invalid passcodes return 429 + rate_limited shape', async ({ request }) => {
     test.skip(!!process.env.PLAYWRIGHT_BASE_URL, 'Lockout fault injection is isolated-backend only')
@@ -44,7 +50,7 @@ test.describe('analyst share-login', () => {
 
     for (let i = 0; i < 35; i++) {
       const r = await request.post(`http://127.0.0.1:${E2E_BACKEND_PORT}${SHARE_LOGIN_PATH}`, {
-        headers: { 'x-forwarded-for': clientIp },
+        headers: { 'x-forwarded-for': clientIp, host: 'share-e2e.example.com' },
         data: { email: 'attacker@example.com', passcode: `wrong-${i}` },
       })
       if (r.status() === 401) statusCounts['401']++

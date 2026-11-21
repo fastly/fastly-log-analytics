@@ -179,7 +179,7 @@ test.describe('SQL Query Pad Page Contract (/query)', () => {
     await page.goto('/query?q=' + encodeURIComponent('DROP TABLE logs'))
     await expect(page.locator('[data-testid="query-page-root"]')).toBeVisible({ timeout: 30_000 })
     await page.locator('[data-testid="query-run-btn"]').click()
-    await expect(page.locator('[data-testid="query-error-alert"]')).toContainText(/only SELECT|sql_not_permitted|Query Execution Failed/i, { timeout: 15_000 })
+    await expect(page.locator('[data-testid="query-error-alert"]')).toContainText(/only SELECT|sql_not_permitted|Query Execution Failed|not allowed/i, { timeout: 15_000 })
   })
 
   test('6. Client-side CSV export trigger', async ({ page }) => {
