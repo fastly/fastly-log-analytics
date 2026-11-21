@@ -50,7 +50,7 @@ test.describe('analyst share-login', () => {
 
     for (let i = 0; i < 35; i++) {
       const r = await request.post(`http://127.0.0.1:${E2E_BACKEND_PORT}${SHARE_LOGIN_PATH}`, {
-        headers: { 'x-forwarded-for': clientIp, host: 'share-e2e.example.com' },
+        headers: { 'x-forwarded-for': clientIp },
         data: { email: 'attacker@example.com', passcode: `wrong-${i}` },
       })
       if (r.status() === 401) statusCounts['401']++
@@ -113,6 +113,9 @@ test.describe('Analyst Share Login Page Contract (/share-login)', () => {
       'Skipping destructive share state reset against non-local PLAYWRIGHT_BASE_URL',
     )
     await request.post('/api/admin/share/stop').catch(() => {})
+    await request.post('/api/admin/share/start', {
+      data: { public_endpoint: 'https://share-e2e.example.com', forward_port: 13004 },
+    })
   })
 
   test('1. Route accessibility, card layout mounting & footer environment indicator', async ({ page }) => {
