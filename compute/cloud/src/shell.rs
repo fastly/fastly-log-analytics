@@ -1327,6 +1327,144 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
         }
     }
 
+    fn bootstrap_response(
+        &self,
+        auth: &AuthService<'_, S>,
+        request: &Request,
+        now: u64,
+    ) -> Result<Response, AuthError> {
+        let anonymous = || {
+            json_response(json!({
+                "runtime_mode": "cloud",
+                "user": null,
+                "services": [],
+                "active_service_id": null,
+                "active_log_field_ids": [],
+                "log_fields_catalog": null,
+                "views": [],
+                "build_sha": env!("FLP_BUILD_SHA"),
+                "ngwaf_configured": false,
+                "fastly_bots_available": true,
+                "settings": {
+                    "needs_login": true,
+                    "is_remote_analyst": false,
+                    "mask_ips": false,
+                    "initializing": false
+                },
+                "debug_state": {
+                    "query_debug_visibility": "disabled",
+                    "api_call_debug_visibility": "disabled"
+                }
+            }))
+        };
+        let (user, settings, stale_session) = match request.cookie("flp_session") {
+            Some(cookie) => match auth.authenticate_with_settings(&cookie, now) {
+                Ok((user, settings)) => (Some(user), Some(settings), false),
+                Err(AuthError::Unauthorized) => (None, None, true),
+                Err(other) => return Err(other),
+            },
+            None => (None, None, false),
+        };
+        let Some((user, settings)) = user.zip(settings) else {
+            let mut response = anonymous();
+            if stale_session {
+                response = clear_session_and_cdn_cookies(response);
+            }
+            return Ok(response);
+        };
+
+        let mut base_headers = request.headers.clone();
+        base_headers.insert("content-type".into(), "application/json".into());
+        let service_request = Request {
+            method: "GET".into(),
+            path: "/api/services".into(),
+            headers: base_headers.clone(),
+            body: Vec::new(),
+        };
+        let service_response = crate::admin::handle(self.runtime, &user.id, &service_request);
+        let service_response = if user.role == Role::Admin {
+            service_response
+        } else {
+            redact_services(service_response)
+        };
+        if service_response.status != 200 {
+            return Ok(service_response);
+        }
+        let service_body: Value =
+            serde_json::from_slice(&service_response.body).map_err(|_| AuthError::Storage)?;
+        let services = service_body["services"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let requested = request
+            .query_param("service_id")
+            .or_else(|| request.header("x-service-id").map(str::to_owned));
+        let active = services
+            .iter()
+            .find(|service| requested.as_deref() == service["service_id"].as_str())
+            .or_else(|| services.first());
+        let active_id = active
+            .and_then(|service| service["service_id"].as_str())
+            .map(str::to_owned);
+        let active_fields = active
+            .and_then(|service| service["active_log_field_ids"].as_array().cloned())
+            .unwrap_or_default();
+
+        let catalog = if let Some(service_id) = active_id.as_deref() {
+            let catalog_request = Request {
+                method: "GET".into(),
+                path: format!("/api/log-fields/catalog?service_id={service_id}"),
+                headers: base_headers,
+                body: Vec::new(),
+            };
+            let catalog_response = crate::admin::handle(self.runtime, &user.id, &catalog_request);
+            if catalog_response.status != 200 {
+                return Ok(catalog_response);
+            }
+            Some(
+                serde_json::from_slice::<Value>(&catalog_response.body)
+                    .map_err(|_| AuthError::Storage)?,
+            )
+        } else {
+            None
+        };
+        let views = active_id
+            .as_deref()
+            .map(|service_id| {
+                crate::views::list_for_role(
+                    self.runtime,
+                    service_id,
+                    user.role,
+                    crate::views::MAX_VIEWS,
+                )
+            })
+            .transpose()?
+            .unwrap_or_default();
+
+        Ok(json_response(json!({
+            "runtime_mode": "cloud",
+            "user": user_json(&user),
+            "services": services,
+            "active_service_id": active_id,
+            "active_log_field_ids": active_fields,
+            "log_fields_catalog": catalog,
+            "views": views,
+            "build_sha": env!("FLP_BUILD_SHA"),
+            "ngwaf_configured": false,
+            "fastly_bots_available": true,
+            "settings": {
+                "needs_login": false,
+                "is_remote_analyst": matches!(user.role, Role::Analyst | Role::AnalystNoPii),
+                "mask_ips": user.role == Role::AnalystNoPii,
+                "initializing": false
+            },
+            "debug_state": {
+                "query_debug_visibility": settings.query_debug_visibility,
+                "api_call_debug_visibility": settings.api_call_debug_visibility
+            }
+        })))
+    }
+
     fn auth_route(
         &self,
         auth: &AuthService<'_, S>,
@@ -1397,6 +1535,7 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
                 }
                 Ok(response)
             }
+            ("GET", "/api/bootstrap") => self.bootstrap_response(auth, request, now),
             ("POST", "/api/setup/accept") => {
                 let body: SetupAccept = parse(request)?;
                 let token = auth.accept_setup(
@@ -2157,6 +2296,7 @@ fn redact_services(mut response: Response) -> Response {
 mod tests {
     use super::*;
     use crate::state::MemoryStore;
+    use std::cell::RefCell;
     use std::collections::BTreeMap;
 
     #[test]
@@ -2275,6 +2415,7 @@ mod tests {
         complete: bool,
         service_id: Option<String>,
         service_version: Option<String>,
+        records: RefCell<BTreeMap<String, crate::admin::Record>>,
     }
 
     impl SetupStores for Platform {
@@ -2313,6 +2454,9 @@ mod tests {
         }
         fn compute_service_version(&self) -> Option<String> {
             self.service_version.clone()
+        }
+        fn admin_get(&self, key: &str) -> Result<Option<crate::admin::Record>, String> {
+            Ok(self.records.borrow().get(key).cloned())
         }
     }
 
@@ -2586,7 +2730,10 @@ mod tests {
 
     fn platform(complete: bool) -> Platform {
         Platform {
-            config: BTreeMap::from([("public_base_url".into(), "https://example.invalid".into())]),
+            config: BTreeMap::from([
+                ("public_base_url".into(), "https://example.invalid".into()),
+                ("flp_service_id".into(), "fixtureOwner".into()),
+            ]),
             secrets: BTreeMap::from([
                 ("front_key".into(), "front-test-key-never-real".into()),
                 ("session_key".into(), "s".repeat(48)),
@@ -2598,7 +2745,270 @@ mod tests {
             complete,
             service_id: None,
             service_version: None,
+            records: RefCell::new(BTreeMap::new()),
         }
+    }
+
+    fn seed_bootstrap_service(platform: &Platform) {
+        let records = &mut platform.records.borrow_mut();
+        records.insert(
+            "admin:install".into(),
+            crate::admin::Record {
+                generation: "1".into(),
+                value: json!({
+                    "service_id":"fixtureService",
+                    "job_id":null,
+                    "fence":0
+                }),
+            },
+        );
+        records.insert(
+            "svc:fixtureService".into(),
+            crate::admin::Record {
+                generation: "1".into(),
+                value: json!({
+                    "service_id":"fixtureService",
+                    "name":"Fixture",
+                    "status":"ready",
+                    "created_at":1,
+                    "updated_at":2,
+                    "config_version":1,
+                    "logging_enabled":true,
+                    "logging_endpoint_name":"FLP Cloud Logs",
+                    "log_period":60,
+                    "sample_rate":100,
+                    "edge_only":false,
+                    "custom_condition":"",
+                    "fos_bucket":"fixture-bucket",
+                    "fos_prefix":"logs",
+                    "fos_region":"us-east-1",
+                    "fos_endpoint":"us-east-1.object.fastlystorage.app",
+                    "log_fields":{
+                        "groups":["A"],
+                        "field_overrides":{},
+                        "custom_fields":[{
+                            "name":"tenant",
+                            "duckdb_type":"VARCHAR",
+                            "enabled":true,
+                            "show_in_dashboard":true,
+                            "vcl_log_expression":"PRIVATE_EXPRESSION"
+                        }]
+                    },
+                    "field_limits":{},
+                    "fastly_token_ref":"fastly_token.PRIVATE_TOKEN",
+                    "fos_access_key_ref":"fos_ak.PRIVATE_ACCESS",
+                    "fos_secret_key_ref":"fos_sk.PRIVATE_SECRET",
+                    "owner":"fixtureOwner",
+                    "bucket_adopted":false,
+                    "bucket_checked":false,
+                    "last_activated_version":null,
+                    "last_reconcile":null,
+                    "pending_job_id":null
+                }),
+            },
+        );
+    }
+
+    fn seed_bootstrap_views(platform: &Platform) {
+        platform.records.borrow_mut().insert(
+            "views:fixtureService".into(),
+            crate::admin::Record {
+                generation: "1".into(),
+                value: json!({
+                    "views":[{
+                        "id":"benign",
+                        "service_id":"fixtureService",
+                        "name":"Successful requests",
+                        "filters_json":"{\"filters\":[{\"column\":\"status\",\"mode\":\"include\",\"value\":\"200\"}]}",
+                        "created_at":"2026-11-20T00:00:00Z"
+                    },{
+                        "id":"pii",
+                        "service_id":"fixtureService",
+                        "name":"One client",
+                        "filters_json":"{\"filters\":[{\"column\":\"client_ip\",\"mode\":\"include\",\"value\":\"198.51.100.7\"}]}",
+                        "created_at":"2026-11-20T00:00:00Z"
+                    }],
+                    "updated_at":100
+                }),
+            },
+        );
+    }
+
+    fn bootstrap_request(path: &str, cookie: Option<&str>) -> Request {
+        let mut headers = BTreeMap::from([
+            ("x-flp-front-key".into(), "front-test-key-never-real".into()),
+            ("fastly-client-ip".into(), "192.0.2.1".into()),
+            ("x-flp-front-rl".into(), "1".into()),
+        ]);
+        if let Some(cookie) = cookie {
+            headers.insert("cookie".into(), cookie.into());
+        }
+        Request {
+            method: "GET".into(),
+            path: path.into(),
+            headers,
+            ..Default::default()
+        }
+    }
+
+    fn signed_bootstrap_state(role: Role) -> (MemoryStore, String) {
+        let user = User {
+            id: format!("user-{}", role.variant()),
+            display_name: "Bootstrap User".into(),
+            role,
+            credentials: vec![crate::auth::Credential {
+                id: "credential".into(),
+                public_key: vec![1],
+                sign_count: 0,
+                revoked: false,
+            }],
+            revoked: false,
+            created_by: "setup".into(),
+            created_at: 1,
+            last_login_at: None,
+        };
+        let auth_state = crate::auth::AuthState {
+            users: BTreeMap::from([(user.id.clone(), user.clone())]),
+            usage_logging: crate::auth::settings::UsageLogging {
+                query_debug_visibility: "both".into(),
+                api_call_debug_visibility: "admins".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let state = MemoryStore::default();
+        state
+            .compare_and_swap(None, &auth_state)
+            .expect("seed auth state");
+        let cookie = compute_common::crypto::seal_json(
+            b"ssssssssssssssssssssssssssssssssssssssssssssssss",
+            &json!({
+                "sub":user.id,
+                "role":role,
+                "policy_version":0,
+                "exp":100 + crate::auth::SESSION_TTL,
+                "iat":100,
+                "jti":"bootstrap-test"
+            }),
+        )
+        .expect("session cookie");
+        (state, cookie)
+    }
+
+    #[test]
+    fn bootstrap_reports_signed_out_and_stale_sessions_as_anonymous_successes() {
+        let platform = platform(true);
+        let state = MemoryStore::default();
+        let shell = Shell::new(&platform, &state, &[]);
+
+        for cookie in [None, Some("flp_session=expired; flp_cdn=stale")] {
+            let response = shell.handle(&bootstrap_request("/api/bootstrap", cookie));
+            assert_eq!(response.status, 200);
+            let body: Value = serde_json::from_slice(&response.body).unwrap();
+            assert_eq!(body["runtime_mode"], "cloud");
+            assert_eq!(body["user"], Value::Null);
+            assert_eq!(body["services"], json!([]));
+            assert_eq!(body["active_service_id"], Value::Null);
+            assert_eq!(body["settings"]["needs_login"], true);
+            if cookie.is_some() {
+                assert_eq!(response.cookies().len(), 3);
+            }
+        }
+    }
+
+    #[test]
+    fn bootstrap_returns_signed_in_service_catalog_views_and_settings() {
+        let platform = platform(true);
+        seed_bootstrap_service(&platform);
+        seed_bootstrap_views(&platform);
+        let (state, cookie) = signed_bootstrap_state(Role::Admin);
+        let shell = Shell::new(&platform, &state, &[]);
+        let response = shell.handle(&bootstrap_request(
+            "/api/bootstrap?service_id=fixtureService",
+            Some(&format!("flp_session={cookie}")),
+        ));
+        assert_eq!(response.status, 200);
+        let body: Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(body["services"][0]["service_id"], "fixtureService");
+        assert_eq!(body["active_service_id"], "fixtureService");
+        assert!(!body["active_log_field_ids"].as_array().unwrap().is_empty());
+        assert!(!body["log_fields_catalog"]["fields"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert_eq!(body["views"].as_array().unwrap().len(), 2);
+        assert_eq!(body["settings"]["needs_login"], false);
+        assert_eq!(body["ngwaf_configured"], false);
+        assert_eq!(body["fastly_bots_available"], true);
+        assert_eq!(
+            body["debug_state"],
+            json!({
+                "query_debug_visibility":"both",
+                "api_call_debug_visibility":"admins"
+            })
+        );
+    }
+
+    #[test]
+    fn bootstrap_redacts_analyst_services_and_filters_no_pii_views() {
+        let platform = platform(true);
+        seed_bootstrap_service(&platform);
+        seed_bootstrap_views(&platform);
+        let shell_cases = [(Role::Analyst, 2), (Role::AnalystNoPii, 1)];
+
+        for (role, expected_views) in shell_cases {
+            let (state, cookie) = signed_bootstrap_state(role);
+            let shell = Shell::new(&platform, &state, &[]);
+            let response = shell.handle(&bootstrap_request(
+                "/api/bootstrap",
+                Some(&format!("flp_session={cookie}")),
+            ));
+            assert_eq!(response.status, 200);
+            let body: Value = serde_json::from_slice(&response.body).unwrap();
+            let service = &body["services"][0];
+            assert_eq!(body["views"].as_array().unwrap().len(), expected_views);
+            assert!(service.get("fastly_token_ref").is_none());
+            assert!(service.get("fos_bucket").is_none());
+            assert_eq!(service["service_id"], "fixtureService");
+            assert_eq!(service["cmcd"]["enabled"], false);
+            assert!(!service["active_log_field_ids"]
+                .as_array()
+                .unwrap()
+                .is_empty());
+            assert!(!body.to_string().contains("PRIVATE_"));
+        }
+    }
+
+    #[test]
+    fn bootstrap_selects_the_requested_active_service_or_falls_back_to_first() {
+        let platform = platform(true);
+        seed_bootstrap_service(&platform);
+        let (state, cookie) = signed_bootstrap_state(Role::Admin);
+        let shell = Shell::new(&platform, &state, &[]);
+
+        for path in [
+            "/api/bootstrap?service_id=fixtureService",
+            "/api/bootstrap?service_id=unknownService",
+        ] {
+            let response = shell.handle(&bootstrap_request(
+                path,
+                Some(&format!("flp_session={cookie}")),
+            ));
+            assert_eq!(response.status, 200);
+            let body: Value = serde_json::from_slice(&response.body).unwrap();
+            assert_eq!(body["active_service_id"], "fixtureService");
+        }
+    }
+
+    #[test]
+    fn bootstrap_reports_the_build_sha() {
+        let platform = platform(true);
+        let state = MemoryStore::default();
+        let shell = Shell::new(&platform, &state, &[]);
+        let response = shell.handle(&bootstrap_request("/api/bootstrap", None));
+        assert_eq!(response.status, 200);
+        let body: Value = serde_json::from_slice(&response.body).unwrap();
+        assert!(!body["build_sha"].as_str().unwrap().is_empty());
     }
 
     #[test]
