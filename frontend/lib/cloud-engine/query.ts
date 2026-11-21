@@ -8,6 +8,7 @@
 import {
   MAX_QUERY_ROWS,
   SQLValidationError,
+  isDistinctFromOperator,
   isSimpleSelectStatement,
   stripSqlComments,
   tokenizeSql,
@@ -346,6 +347,7 @@ const REWRITER_SUBQUERY_START = new Set([
   "table",
 ]);
 const REWRITER_FROM_END = new Set([
+  "select",
   "where",
   "group",
   "having",
@@ -445,16 +447,39 @@ function rewriteSqlTableRefs(
       parenStack.length > 0 && parenStack[parenStack.length - 1].kind === "expr";
 
     if (tok.kind === "symbol" && tok.value === "(") {
-      const isSubquery =
-        nextTok?.kind === "word" && REWRITER_SUBQUERY_START.has(nextTok.lower);
-      if (isSubquery) {
+      let look = i + 1;
+      while (
+        look < tokens.length &&
+        tokens[look].kind === "symbol" &&
+        tokens[look].value === "("
+      ) {
+        look++;
+      }
+      const lookTok = look < tokens.length ? tokens[look] : null;
+      const isTrimFromCall =
+        look === i + 1 &&
+        lookTok?.kind === "word" &&
+        lookTok.lower === "from" &&
+        prevTok?.kind === "word" &&
+        (prevTok.lower === "trim" ||
+          prevTok.lower === "btrim" ||
+          prevTok.lower === "ltrim" ||
+          prevTok.lower === "rtrim");
+      const hasSubqueryHead = Boolean(
+        !isTrimFromCall &&
+          lookTok?.kind === "word" &&
+          REWRITER_SUBQUERY_START.has(lookTok.lower),
+      );
+      const isDirectSubquery = hasSubqueryHead && look === i + 1;
+
+      if (expectingTableRef && !isDirectSubquery) {
+        parenStack.push({ kind: "from_join", savedInFrom: inFromClause });
+        inFromClause = true;
+        expectingTableRef = !hasSubqueryHead;
+      } else if (hasSubqueryHead) {
         parenStack.push({ kind: "subquery", savedInFrom: inFromClause });
         inFromClause = false;
         expectingTableRef = false;
-      } else if (expectingTableRef) {
-        parenStack.push({ kind: "from_join", savedInFrom: inFromClause });
-        inFromClause = true;
-        expectingTableRef = true;
       } else {
         parenStack.push({ kind: "expr", savedInFrom: inFromClause });
         expectingTableRef = false;
@@ -475,7 +500,7 @@ function rewriteSqlTableRefs(
       if (tok.kind === "word") {
         const lower = tok.lower;
         if (
-          (lower === "from" && prevTok?.lower !== "distinct") ||
+          (lower === "from" && !isDistinctFromOperator(tokens, i)) ||
           (lower === "table" && prevTok?.value !== ".") ||
           lower === "join"
         ) {
@@ -483,13 +508,24 @@ function rewriteSqlTableRefs(
           expectingTableRef = true;
           continue;
         }
-        if ((lower === "summarize" || lower === "describe") && (i === 0 || prevTok?.value === "(")) {
+        if (
+          (lower === "summarize" || lower === "describe") &&
+          (i === 0 ||
+            prevTok?.value === "(" ||
+            (prevTok?.kind === "word" &&
+              (prevTok.lower === "union" ||
+                prevTok.lower === "all" ||
+                prevTok.lower === "name" ||
+                prevTok.lower === "intersect" ||
+                prevTok.lower === "except")))
+        ) {
           if (
             nextTok &&
             !(
               nextTok.kind === "word" &&
               (nextTok.lower === "select" ||
                 nextTok.lower === "with" ||
+                nextTok.lower === "values" ||
                 nextTok.lower === "from" ||
                 nextTok.lower === "table")
             )
@@ -683,6 +719,112 @@ export function scrubIpText(val: string): string {
   return out;
 }
 
+const DUCKDB_UA_VER_RE =
+  "\\b(Mozilla|Chrome|Chromium|CriOS|Firefox|FxiOS|Safari|Version|Edg|EdgA|EdgiOS|OPR|AppleWebKit|Gecko|Mobile)/([0-9]+)\\.([0-9]+(?:\\.[0-9]+){0,2})\\b";
+const DUCKDB_IPV4_OCTET = "(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])";
+const DUCKDB_IPV4_CORE = `${DUCKDB_IPV4_OCTET}(?:\\.${DUCKDB_IPV4_OCTET}){3}`;
+const DUCKDB_H16 = "[0-9A-Fa-f]{1,4}";
+const DUCKDB_IPV6_CORE = [
+  `(?:${DUCKDB_H16}:){6}${DUCKDB_IPV4_CORE}`,
+  `(?:${DUCKDB_H16}:){7}${DUCKDB_H16}`,
+  `(?:${DUCKDB_H16}:){1,5}:${DUCKDB_IPV4_CORE}`,
+  `::(?:${DUCKDB_H16}:){0,5}${DUCKDB_IPV4_CORE}`,
+  `(?:${DUCKDB_H16}:){1,6}:(?:${DUCKDB_H16}(?::${DUCKDB_H16}){0,5})?`,
+  `::(?:${DUCKDB_H16}(?::${DUCKDB_H16}){0,6})`,
+].join("|");
+const DUCKDB_IPV6_PAT = `(^|[^0-9A-Za-z:])(${DUCKDB_IPV6_CORE})($|[^0-9A-Za-z:.])`;
+const DUCKDB_IPV4_PAT = `(^|[^0-9.])(${DUCKDB_IPV4_CORE})($|[^0-9.])`;
+
+function buildDuckDbScrubTextExpr(colExpr: string): string {
+  let e = colExpr;
+  e = `regexp_replace(${e}, '${DUCKDB_UA_VER_RE}', '\\1/\\2\x01UA\x01\\3', 'gi')`;
+  e = `regexp_replace(${e}, '${DUCKDB_IPV6_PAT}', '\\1\x01IP\x01\\3', 'g')`;
+  e = `regexp_replace(${e}, '${DUCKDB_IPV6_PAT}', '\\1\x01IP\x01\\3', 'g')`;
+  e = `regexp_replace(${e}, '${DUCKDB_IPV4_PAT}', '\\1\x01IP\x01\\3', 'g')`;
+  e = `regexp_replace(${e}, '${DUCKDB_IPV4_PAT}', '\\1\x01IP\x01\\3', 'g')`;
+  return `replace(replace(${e}, '\x01UA\x01', '.'), '\x01IP\x01', '0.0.0.0')`;
+}
+
+function scrubBytesView(bytes: Uint8Array): Uint8Array {
+  if (bytes.byteLength === 0) return bytes;
+  try {
+    const decoded = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    const scrubbed = scrubIpText(decoded);
+    return scrubbed === decoded ? bytes : new TextEncoder().encode(scrubbed);
+  } catch {
+    return new Uint8Array(0);
+  }
+}
+
+function scrubNestedValue(val: unknown): unknown {
+  if (val == null) return val;
+  if (typeof val === "string") {
+    return val === "" ? val : scrubIpText(val);
+  }
+  if (
+    typeof val === "number" ||
+    typeof val === "boolean" ||
+    typeof val === "bigint" ||
+    val instanceof Date
+  ) {
+    return val;
+  }
+  if (val instanceof Uint8Array) {
+    return scrubBytesView(val);
+  }
+  if (ArrayBuffer.isView(val)) {
+    return scrubBytesView(new Uint8Array(val.buffer, val.byteOffset, val.byteLength));
+  }
+  if (val instanceof ArrayBuffer) {
+    return scrubBytesView(new Uint8Array(val)).buffer;
+  }
+  if (Array.isArray(val)) {
+    return val.map((item) => scrubNestedValue(item));
+  }
+  if (val instanceof Map) {
+    const outMap = new Map<unknown, unknown>();
+    for (const [k, v] of val.entries()) {
+      if (typeof k === "string") {
+        const lower = k.toLowerCase();
+        if (IP_PII_COLUMNS.has(lower) && v != null && v !== "") {
+          outMap.set(scrubIpText(k), "0.0.0.0");
+          continue;
+        }
+        if (SESSION_PII_COLUMNS.has(lower) && v != null && v !== "") {
+          outMap.set(scrubIpText(k), "[redacted]");
+          continue;
+        }
+        outMap.set(scrubIpText(k), scrubNestedValue(v));
+      } else {
+        outMap.set(scrubNestedValue(k), scrubNestedValue(v));
+      }
+    }
+    return outMap;
+  }
+  if (typeof val === "object") {
+    const maybeJson = (val as { toJSON?: unknown }).toJSON;
+    if (typeof maybeJson === "function") {
+      return scrubNestedValue((maybeJson as () => unknown).call(val));
+    }
+    const rec = val as Record<string, unknown>;
+    const outObj: Record<string, unknown> = {};
+    for (const k of Object.keys(rec)) {
+      const lower = k.toLowerCase();
+      const v = rec[k];
+      const safeKey = scrubIpText(k);
+      if (IP_PII_COLUMNS.has(lower) && v != null && v !== "") {
+        outObj[safeKey] = "0.0.0.0";
+      } else if (SESSION_PII_COLUMNS.has(lower) && v != null && v !== "") {
+        outObj[safeKey] = "[redacted]";
+      } else {
+        outObj[safeKey] = scrubNestedValue(v);
+      }
+    }
+    return outObj;
+  }
+  return val;
+}
+
 export function redactQueryRowsForPii(
   rows: Record<string, unknown>[],
   maskIps: boolean,
@@ -700,12 +842,35 @@ export function redactQueryRowsForPii(
         copy[key] !== ""
       ) {
         copy[key] = "[redacted]";
-      } else if (typeof copy[key] === "string" && copy[key] !== "") {
-        copy[key] = scrubIpText(copy[key] as string);
+      } else if (copy[key] != null) {
+        copy[key] = scrubNestedValue(copy[key]);
       }
     }
     return copy;
   });
+}
+
+function unwrapOuterBalancedParens(sql: string): string {
+  let cur = sql.trim();
+  while (cur.startsWith("(") && cur.endsWith(")")) {
+    let toks: SqlToken[];
+    try {
+      toks = tokenizeSql(cur);
+    } catch {
+      break;
+    }
+    if (
+      toks.length >= 2 &&
+      toks[0].kind === "symbol" &&
+      toks[0].value === "(" &&
+      closingParen(toks, 0) === toks.length - 1
+    ) {
+      cur = cur.slice(toks[0].end, toks[toks.length - 1].start).trim();
+    } else {
+      break;
+    }
+  }
+  return cur;
 }
 
 function mergeLeadingCtes(
@@ -713,26 +878,65 @@ function mergeLeadingCtes(
   cteDefs: string[],
   shadowSelectByTable?: ReadonlyMap<string, string>,
   targetTable?: string,
+  shadowDescribeByTable?: ReadonlyMap<string, string>,
 ): string {
   if (cteDefs.length === 0) return sqlStmt;
   const trimmed = sqlStmt.trim();
   if (shadowSelectByTable && shadowSelectByTable.size > 0 && targetTable) {
+    const showColsMatch =
+      /^SHOW\s+COLUMNS\s+FROM\s+(?:(?:"main"|main)\s*\.\s*)?([A-Za-z0-9_"]+)\s*$/i.exec(
+        trimmed,
+      );
+    if (showColsMatch) {
+      const refName = showColsMatch[1].replaceAll('"', "").toLowerCase();
+      const descSql =
+        shadowDescribeByTable?.get(refName) ??
+        (refName === "logs"
+          ? shadowDescribeByTable?.get(targetTable.toLowerCase())
+          : undefined) ??
+        shadowSelectByTable.get(refName) ??
+        (refName === "logs"
+          ? shadowSelectByTable.get(targetTable.toLowerCase())
+          : undefined);
+      if (descSql) {
+        return `DESCRIBE (${descSql})`;
+      }
+    }
+
     const sumMatch =
       /^(SUMMARIZE|DESCRIBE)\s+(?:(?:"main"|main)\s*\.\s*)?([A-Za-z0-9_"]+)\s*$/i.exec(
         trimmed,
       );
     if (sumMatch) {
+      const kw = sumMatch[1];
       const refName = sumMatch[2].replaceAll('"', "").toLowerCase();
+      const mapToUse =
+        kw.toUpperCase() === "DESCRIBE" && shadowDescribeByTable
+          ? shadowDescribeByTable
+          : shadowSelectByTable;
       const shadowSql =
+        mapToUse.get(refName) ??
+        (refName === "logs" ? mapToUse.get(targetTable.toLowerCase()) : undefined) ??
         shadowSelectByTable.get(refName) ??
         (refName === "logs"
           ? shadowSelectByTable.get(targetTable.toLowerCase())
           : undefined);
       if (shadowSql) {
-        return `${sumMatch[1]} (${shadowSql})`;
+        return `${kw} (${shadowSql})`;
       }
     }
   }
+
+  const sumSubMatch = /^(SUMMARIZE|DESCRIBE)\s+([\s\S]+)$/i.exec(trimmed);
+  if (sumSubMatch) {
+    const kw = sumSubMatch[1];
+    const unwrapped = unwrapOuterBalancedParens(sumSubMatch[2]);
+    if (/^(?:SELECT|WITH|VALUES|FROM|TABLE)\b/i.test(unwrapped)) {
+      return `${kw} (${mergeLeadingCtes(unwrapped, cteDefs)})`;
+    }
+    return `${kw} (${mergeLeadingCtes(`SELECT * FROM (${unwrapped})`, cteDefs)})`;
+  }
+
   if (/^WITH\s+RECURSIVE\b/i.test(trimmed)) {
     return `WITH RECURSIVE ${cteDefs.join(", ")}, ${trimmed.replace(/^WITH\s+RECURSIVE\s+/i, "")}`;
   }
@@ -789,9 +993,32 @@ export async function executeCloudQuery(
   );
   const targetTable = ctx.tableName ?? "requests";
   const maskIps = Boolean(ctx.maskIps || ctx.role === "analyst-no-pii");
-  const cleanedRaw = stripSqlComments(rawSql).trim().replace(/;\s*$/, "");
-  const { tableRewritten: innerSql, tokens: rawTokens, userCteAliases } =
-    rewriteSqlTableRefs(cleanedRaw, targetTable, allowedTables);
+  const effectiveAllowedSet = new Set<string>([
+    ...Array.from(allowedTables),
+    targetTable,
+  ]);
+  let innerSql: string;
+  let rawTokens: SqlToken[];
+  let userCteAliases: Set<string>;
+  try {
+    const cleanedRaw = stripSqlComments(rawSql).trim().replace(/;\s*$/, "");
+    const rewritten = rewriteSqlTableRefs(cleanedRaw, targetTable, allowedTables);
+    innerSql = rewritten.tableRewritten;
+    rawTokens = rewritten.tokens;
+    userCteAliases = rewritten.userCteAliases;
+    validateUserSql(innerSql, effectiveAllowedSet);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      status: 403,
+      body: {
+        detail: {
+          error: "sql_not_permitted",
+          message,
+        },
+      },
+    };
+  }
 
   if (maskIps && userCteAliases.size > 0) {
     const reservedCteNames = new Set<string>([
@@ -838,6 +1065,7 @@ export async function executeCloudQuery(
     if (ctx.runSql) {
       const cteDefs: string[] = [];
       const shadowSelectByTable = new Map<string, string>();
+      const shadowDescribeByTable = new Map<string, string>();
 
       if (maskIps) {
         const referencedIdents = new Set(
@@ -869,23 +1097,33 @@ export async function executeCloudQuery(
               : [];
           if (validDesc.length > 0) {
             const replacements: string[] = [];
+            const piiColIdents: string[] = [];
             for (const col of validDesc) {
               const colName = String(col.column_name);
               const colLower = colName.toLowerCase();
               const colType = String(col.column_type ?? "VARCHAR").toUpperCase();
               const colIdent = quoteSqlIdent(colName);
-              const isTextType = /CHAR|TEXT|STRING/i.test(colType);
+              const isScalarTextType =
+                /^(?:VAR)?CHAR(?:\(\d+\))?$|^(?:TEXT|STRING|BPCHAR)$/i.test(
+                  colType.trim(),
+                );
               if (IP_PII_COLUMNS.has(colLower)) {
+                piiColIdents.push(colIdent);
                 replacements.push(
-                  isTextType
+                  isScalarTextType
                     ? `'0.0.0.0' AS ${colIdent}`
                     : `CAST(NULL AS ${colType}) AS ${colIdent}`,
                 );
               } else if (SESSION_PII_COLUMNS.has(colLower)) {
+                piiColIdents.push(colIdent);
                 replacements.push(
-                  isTextType
+                  isScalarTextType
                     ? `'[redacted]' AS ${colIdent}`
                     : `CAST(NULL AS ${colType}) AS ${colIdent}`,
+                );
+              } else if (isScalarTextType) {
+                replacements.push(
+                  `${buildDuckDbScrubTextExpr(colIdent)} AS ${colIdent}`,
                 );
               }
             }
@@ -896,7 +1134,12 @@ export async function executeCloudQuery(
                 ? ` WHERE ts_ms >= ${Math.floor(ctx.since.ms)}`
                 : "";
             const tblShadowSql = `SELECT${replaceExpr} FROM main.${quoteSqlIdent(tbl)}${sinceClause}`;
+            const tblDescribeSql =
+              piiColIdents.length > 0
+                ? `SELECT * EXCLUDE (${piiColIdents.join(", ")}) FROM (${tblShadowSql})`
+                : tblShadowSql;
             shadowSelectByTable.set(tbl.toLowerCase(), tblShadowSql);
+            shadowDescribeByTable.set(tbl.toLowerCase(), tblDescribeSql);
             cteDefs.push(`${quoteSqlIdent(tbl)} AS (${tblShadowSql})`);
           }
         }
@@ -925,12 +1168,14 @@ export async function executeCloudQuery(
         cteDefs,
         shadowSelectByTable,
         targetTable,
+        shadowDescribeByTable,
       );
       const effectiveExecSql = mergeLeadingCtes(
         execSql,
         cteDefs,
         shadowSelectByTable,
         targetTable,
+        shadowDescribeByTable,
       );
       finalRewrittenSql = effectiveExplainTarget;
 

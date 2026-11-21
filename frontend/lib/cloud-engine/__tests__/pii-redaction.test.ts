@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { DuckDBAnalyticalEngine } from '../dashboard/duckdb'
-import { executeCloudQuery, getQuerySchema } from '../query'
+import { executeCloudQuery, getQuerySchema, redactQueryRowsForPii, rewriteCloudQuerySql } from '../query'
 import { handleSessionsDetail, sealSessionToken } from '../sessions'
 
 const SHARED_18_PII_KEYS = [
@@ -275,5 +275,174 @@ describe('T5-FE-05: cloud-engine executeCloudQuery shadow-masked CTE and handleS
     expect(text).not.toContain('2001:db8::dead:beef')
     expect(text).not.toContain('CANARY_SESS_')
     expect(text).toContain('Chrome/131.0.6778.85')
+  })
+
+  it('closes SEC-T5-ITER2-01..04: nested LIST/STRUCT/MAP/BLOB scrubbing, pre-query split_part/LIKE embedded-IP scrubbing, AS "distinct" rewriter parity, and SHOW COLUMNS / SUMMARIZE SELECT support under maskIps', async () => {
+    const runSql = (sql: string) => engine.executeSql(sql)
+
+    // 1. Disallowed E-string table, bare/(DESCRIBE) catalog enumeration, and AS "distinct" disallowed-table vectors return 403
+    for (const blockedSql of [
+      "SELECT e'\\'', ip FROM ops_secret -- '\nLIMIT 5",
+      'DESCRIBE',
+      'SELECT * FROM (DESCRIBE)',
+      'SELECT 1 AS "distinct" FROM \'nonexistent_probe.parquet\'',
+    ]) {
+      const r = await executeCloudQuery(
+        { sql: blockedSql },
+        { maskIps: true, tableName: 'requests', allowedTables: ['logs', 'requests'], runSql },
+      )
+      expect(r.status, blockedSql).toBe(403)
+    }
+
+    // 2. Rewriter parity on E'\'' + main.requests, AS "distinct" FROM logs, TRIM(FROM url), and multi-parenthesized subqueries
+    for (const paritySql of [
+      "SELECT E'\\'', replace(ip, '.', '_') AS raw_ip, cookie_session AS raw_sess FROM main.requests -- '\nLIMIT 5",
+      "SELECT E'x\\'' AS pad, ip AS leaked_ip, cookie_session AS leaked_sess FROM main.requests /*'*/",
+      'SELECT cookie_session AS "distinct", replace(ip, \'.\', \'_\') AS ip_u FROM logs',
+      'SELECT TRIM(FROM url) AS trimmed_url, cookie_session AS s FROM logs',
+      'WITH p AS ((SELECT cookie_session AS s FROM logs) UNION ALL SELECT cookie_session AS s FROM main.requests) SELECT * FROM p',
+    ]) {
+      const r = await executeCloudQuery(
+        { sql: paritySql },
+        { maskIps: true, tableName: 'requests', allowedTables: ['logs', 'requests'], runSql },
+      )
+      expect(r.status, paritySql).toBe(200)
+      const dumped = JSON.stringify(r.body)
+      expect(dumped, paritySql).not.toContain('CANARY_SESS_')
+      expect(dumped, paritySql).not.toContain('203_0_113')
+      expect(dumped, paritySql).not.toContain('203.0.113.')
+      expect(dumped, paritySql).not.toContain('2001:db8::dead:beef')
+    }
+
+    expect(
+      rewriteCloudQuerySql('SELECT url AS "distinct" FROM logs', 'svc_table').rewrittenSql,
+    ).toBe('SELECT url AS "distinct" FROM svc_table LIMIT 1000')
+    expect(
+      rewriteCloudQuerySql(
+        'WITH p AS ((SELECT url FROM logs) UNION ALL SELECT url FROM logs) SELECT * FROM p',
+        'svc_table',
+      ).rewrittenSql,
+    ).toBe(
+      'WITH p AS ((SELECT url FROM svc_table) UNION ALL SELECT url FROM svc_table) SELECT * FROM p LIMIT 1000',
+    )
+
+    // 3. Nested containers ([url], {'u': url}, MAP {'u': url}, encode(url)) + split_part(url, '.', 1..4) + WHERE url LIKE '%<ip>%'
+    const containerRes = await executeCloudQuery(
+      {
+        sql: "SELECT [url] AS url_list, {'u': url, 'ua': ua} AS url_struct, MAP {'u': url} AS url_map, encode(url) AS url_bytes FROM requests",
+      },
+      { maskIps: true, tableName: 'requests', allowedTables: ['logs', 'requests'], runSql },
+    )
+    expect(containerRes.status).toBe(200)
+    const containerText = JSON.stringify(containerRes.body)
+    expect(containerText).not.toContain('203.0.113.')
+    expect(containerText).not.toContain('2001:db8::dead:beef')
+    expect(containerText).toContain('Chrome/131.0.6778.85')
+    if ('data' in containerRes.body) {
+      const rawBytes = containerRes.body.data[0].url_bytes as Uint8Array
+      expect(rawBytes).toBeInstanceOf(Uint8Array)
+      const decodedBytes = new TextDecoder().decode(rawBytes)
+      expect(decodedBytes).not.toContain('203.0.113.40')
+      expect(decodedBytes).not.toContain('2001:db8::dead:beef')
+      expect(decodedBytes).toContain('0.0.0.0')
+    }
+
+    const splitRes = await executeCloudQuery(
+      {
+        sql: "SELECT split_part(url, '.', 1) AS p1, split_part(url, '.', 2) AS p2, split_part(url, '.', 3) AS p3, split_part(url, '.', 4) AS p4 FROM logs",
+      },
+      { maskIps: true, tableName: 'requests', allowedTables: ['logs', 'requests'], runSql },
+    )
+    expect(splitRes.status).toBe(200)
+    if ('data' in splitRes.body) {
+      const row = splitRes.body.data[0]
+      expect(`${row.p1}.${row.p2}.${row.p3}.${row.p4}`).not.toContain('203.0.113.40')
+      expect(String(row.p1)).not.toContain('203')
+      expect(String(row.p3)).not.toBe('113')
+    }
+
+    for (const likeProbe of [
+      "SELECT count(*) AS hit FROM requests WHERE url LIKE '%203.0.113.40%'",
+      "SELECT count(*) AS hit FROM requests WHERE url LIKE '%2001:db8::dead:beef%'",
+      "SELECT count(*) AS hit FROM requests WHERE ua LIKE '%203.0.113.40%'",
+    ]) {
+      const likeRes = await executeCloudQuery(
+        { sql: likeProbe },
+        { maskIps: true, tableName: 'requests', allowedTables: ['logs', 'requests'], runSql },
+      )
+      expect(likeRes.status, likeProbe).toBe(200)
+      if ('data' in likeRes.body) {
+        expect(Number(likeRes.body.data[0].hit), likeProbe).toBe(0)
+      }
+    }
+
+    // UA version token and ISO timestamp remain intact pre-query inside shadow CTE
+    const uaKeepRes = await executeCloudQuery(
+      {
+        sql: "SELECT count(*) AS hit, CAST(timestamp AS VARCHAR) AS ts_str FROM requests WHERE ua LIKE '%Chrome/131.0.6778.85%' GROUP BY timestamp",
+      },
+      { maskIps: true, tableName: 'requests', allowedTables: ['logs', 'requests'], runSql },
+    )
+    expect(uaKeepRes.status).toBe(200)
+    if ('data' in uaKeepRes.body) {
+      expect(Number(uaKeepRes.body.data[0].hit)).toBe(1)
+      expect(String(uaKeepRes.body.data[0].ts_str)).toContain('12:00:00')
+    }
+
+    // 4. SHOW COLUMNS FROM logs & DESCRIBE logs strip PII columns; SUMMARIZE SELECT ... executes cleanly under maskIps
+    for (const schemaSql of ['SHOW COLUMNS FROM logs', 'SHOW COLUMNS FROM main.requests', 'DESCRIBE logs']) {
+      const showRes = await executeCloudQuery(
+        { sql: schemaSql },
+        { maskIps: true, tableName: 'requests', allowedTables: ['logs', 'requests'], runSql },
+      )
+      expect(showRes.status, schemaSql).toBe(200)
+      if ('data' in showRes.body) {
+        const colNames = showRes.body.data.map((r) => String(r.column_name))
+        expect(colNames, schemaSql).toContain('url')
+        expect(colNames, schemaSql).toContain('status')
+        expect(colNames, schemaSql).not.toContain('ip')
+        expect(colNames, schemaSql).not.toContain('cookie_session')
+        expect(colNames, schemaSql).not.toContain('x-forwarded-for')
+      }
+    }
+
+    for (const sumSelectSql of [
+      'SUMMARIZE SELECT status, count(*) AS c FROM logs GROUP BY status',
+      'SUMMARIZE (SELECT ip, cookie_session, url FROM logs)',
+      'DESCRIBE SELECT status, url FROM logs',
+    ]) {
+      const sumSelRes = await executeCloudQuery(
+        { sql: sumSelectSql },
+        { maskIps: true, tableName: 'requests', allowedTables: ['logs', 'requests'], runSql },
+      )
+      expect(sumSelRes.status, sumSelectSql).toBe(200)
+      const sumText = JSON.stringify(sumSelRes.body)
+      expect(sumText, sumSelectSql).not.toContain('203.0.113.')
+      expect(sumText, sumSelectSql).not.toContain('CANARY_SESS_')
+    }
+
+    // 5. Direct redactQueryRowsForPii recursive container + undecodable binary Uint8Array scrubbing
+    const directRedacted = redactQueryRowsForPii(
+      [
+        {
+          arr: ['ip=203.0.113.40', { deep: 'v6=2001:db8::dead:beef', ua: 'Chrome/131.0.6778.85' }],
+          mp: new Map<string, unknown>([
+            ['u', '/p?ip=203.0.113.40'],
+            ['cookie_session', 'RAW_SESS'],
+          ]),
+          utf8Bytes: new TextEncoder().encode('hit 203.0.113.40 ok'),
+          badBinary: new Uint8Array([0xff, 0xfe, 0xfd, 50, 48, 51]),
+        },
+      ],
+      true,
+    )
+    expect(JSON.stringify(directRedacted[0].arr)).not.toContain('203.0.113.40')
+    expect(JSON.stringify(directRedacted[0].arr)).not.toContain('2001:db8::dead:beef')
+    expect(JSON.stringify(directRedacted[0].arr)).toContain('Chrome/131.0.6778.85')
+    const outMap = directRedacted[0].mp as Map<string, unknown>
+    expect(outMap.get('u')).toBe('/p?ip=0.0.0.0')
+    expect(outMap.get('cookie_session')).toBe('[redacted]')
+    expect(new TextDecoder().decode(directRedacted[0].utf8Bytes as Uint8Array)).toBe('hit 0.0.0.0 ok')
+    expect((directRedacted[0].badBinary as Uint8Array).byteLength).toBe(0)
   })
 })

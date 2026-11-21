@@ -238,9 +238,54 @@ export interface ValidationResult {
   elapsedMs: number;
 }
 
+const IDENT_START_RE = /[A-Za-z_\u0080-\uffff]/;
+const IDENT_CONT_RE = /[A-Za-z0-9_$\u0080-\uffff]/;
+const DOLQ_TAG_RE = /^\$(?:[A-Za-z_\u0080-\uffff][A-Za-z0-9_\u0080-\uffff]*)?\$/;
+
+function isIdentStartChar(ch: string): boolean {
+  return ch.length > 0 && IDENT_START_RE.test(ch);
+}
+
+function isIdentContChar(ch: string): boolean {
+  return ch.length > 0 && IDENT_CONT_RE.test(ch);
+}
+
 /**
- * Strip `--` line comments and `/* ... * /` block comments while preserving
- * single-quoted string literals and double-quoted identifiers.
+ * Matches PostgreSQL / DuckDB `libpg_query` (`scan.l` `{quotecontinue}`):
+ * horizontal whitespace and `--` line comments containing at least one `\n` or `\r`,
+ * followed immediately by `'`. Returns the index of the next opening `'`, or `-1`.
+ */
+function findQuoteContinuation(sql: string, pos: number): number {
+  const n = sql.length;
+  let j = pos;
+  let sawNewline = false;
+  while (j < n) {
+    const c = sql[j];
+    if (c === " " || c === "\t" || c === "\f" || c === "\v") {
+      j++;
+      continue;
+    }
+    if (c === "\n" || c === "\r") {
+      sawNewline = true;
+      j++;
+      continue;
+    }
+    if (c === "-" && j + 1 < n && sql[j + 1] === "-") {
+      j += 2;
+      while (j < n && sql[j] !== "\n" && sql[j] !== "\r") {
+        j++;
+      }
+      continue;
+    }
+    break;
+  }
+  return sawNewline && j < n && sql[j] === "'" ? j : -1;
+}
+
+/**
+ * Strip `--` line comments and nested `/* ... * /` block comments while preserving
+ * single-quoted literals, `E'...'` escape literals, `$tag$...$tag$` dollar-quoted
+ * literals, and double-quoted identifiers on exact parity with `tokenizeSql`.
  */
 export function stripSqlComments(sql: string): string {
   let out = "";
@@ -250,13 +295,89 @@ export function stripSqlComments(sql: string): string {
   while (i < n) {
     const ch = sql[i];
     const next = i + 1 < n ? sql[i + 1] : "";
+    const atWordStart = i === 0 || !isIdentContChar(sql[i - 1]);
+
+    // Reject Unicode escape literals (U&'...' / U&"...") outright
+    if (
+      atWordStart &&
+      (ch === "U" || ch === "u") &&
+      next === "&" &&
+      i + 2 < n &&
+      (sql[i + 2] === "'" || sql[i + 2] === '"')
+    ) {
+      throw new SQLValidationError(
+        "syntax_not_allowed",
+        "Unicode escape literals are not permitted in user queries.",
+      );
+    }
+
+    // PostgreSQL / DuckDB C-escape string literal (`E'...'` / `e'...'` + `{quotecontinue}`)
+    if (atWordStart && (ch === "E" || ch === "e") && next === "'") {
+      out += sql.slice(i, i + 2);
+      i += 2;
+      for (;;) {
+        let closed = false;
+        while (i < n) {
+          if (sql[i] === "\\") {
+            if (i + 1 >= n) {
+              throw new SQLValidationError(
+                "parse_error",
+                "Unterminated SQL escape string literal.",
+              );
+            }
+            out += sql[i] + sql[i + 1];
+            i += 2;
+            continue;
+          }
+          if (sql[i] === "'" && i + 1 < n && sql[i + 1] === "'") {
+            out += "''";
+            i += 2;
+            continue;
+          }
+          if (sql[i] === "'") {
+            out += "'";
+            i++;
+            closed = true;
+            break;
+          }
+          out += sql[i];
+          i++;
+        }
+        if (!closed) {
+          throw new SQLValidationError(
+            "parse_error",
+            "Unterminated SQL escape string literal.",
+          );
+        }
+        const contQuote = findQuoteContinuation(sql, i);
+        if (contQuote === -1) {
+          break;
+        }
+        while (i < contQuote) {
+          if (sql[i] === "-" && i + 1 < contQuote && sql[i + 1] === "-") {
+            i += 2;
+            while (i < contQuote && sql[i] !== "\n" && sql[i] !== "\r") {
+              i++;
+            }
+            out += " ";
+          } else {
+            out += sql[i];
+            i++;
+          }
+        }
+        out += "'";
+        i = contQuote + 1;
+      }
+      continue;
+    }
 
     // Single-quoted literal
     if (ch === "'") {
       out += ch;
       i++;
+      let closed = false;
       while (i < n) {
-        if (sql[i] === "'" && sql[i + 1] === "'") {
+        if (sql[i] === "'" && i + 1 < n && sql[i + 1] === "'") {
           out += "''";
           i += 2;
           continue;
@@ -264,20 +385,43 @@ export function stripSqlComments(sql: string): string {
         if (sql[i] === "'") {
           out += "'";
           i++;
+          closed = true;
           break;
         }
         out += sql[i];
         i++;
       }
+      if (!closed) {
+        throw new SQLValidationError("parse_error", "Unterminated SQL string literal.");
+      }
       continue;
+    }
+
+    // Dollar-quoted literal (`$$...$$` or `$tag$...$tag$`)
+    if (ch === "$" && atWordStart) {
+      const m = DOLQ_TAG_RE.exec(sql.slice(i));
+      if (m) {
+        const tag = m[0];
+        const endIdx = sql.indexOf(tag, i + tag.length);
+        if (endIdx === -1) {
+          throw new SQLValidationError(
+            "parse_error",
+            "Unterminated dollar-quoted string literal.",
+          );
+        }
+        out += sql.slice(i, endIdx + tag.length);
+        i = endIdx + tag.length;
+        continue;
+      }
     }
 
     // Double-quoted identifier
     if (ch === '"') {
       out += ch;
       i++;
+      let closed = false;
       while (i < n) {
-        if (sql[i] === '"' && sql[i + 1] === '"') {
+        if (sql[i] === '"' && i + 1 < n && sql[i + 1] === '"') {
           out += '""';
           i += 2;
           continue;
@@ -285,18 +429,22 @@ export function stripSqlComments(sql: string): string {
         if (sql[i] === '"') {
           out += '"';
           i++;
+          closed = true;
           break;
         }
         out += sql[i];
         i++;
       }
+      if (!closed) {
+        throw new SQLValidationError("parse_error", "Unterminated double-quoted identifier.");
+      }
       continue;
     }
 
-    // Line comment
+    // Line comment (`--` terminated by `\n` or `\r`, preserving newline/CR)
     if (ch === "-" && next === "-") {
       i += 2;
-      while (i < n && sql[i] !== "\n") {
+      while (i < n && sql[i] !== "\n" && sql[i] !== "\r") {
         i++;
       }
       out += " ";
@@ -308,10 +456,10 @@ export function stripSqlComments(sql: string): string {
       let depth = 1;
       i += 2;
       while (i < n && depth > 0) {
-        if (sql[i] === "/" && sql[i + 1] === "*") {
+        if (sql[i] === "/" && i + 1 < n && sql[i + 1] === "*") {
           depth++;
           i += 2;
-        } else if (sql[i] === "*" && sql[i + 1] === "/") {
+        } else if (sql[i] === "*" && i + 1 < n && sql[i + 1] === "/") {
           depth--;
           i += 2;
         } else {
@@ -322,6 +470,24 @@ export function stripSqlComments(sql: string): string {
         throw new SQLValidationError("parse_error", "Unterminated SQL block comment.");
       }
       out += " ";
+      continue;
+    }
+
+    // Scan full identifier word so `WHERE'x'` never triggers `E'x'`
+    if (isIdentStartChar(ch)) {
+      let word = ch;
+      i++;
+      while (i < n && isIdentContChar(sql[i])) {
+        word += sql[i];
+        i++;
+      }
+      if (word.toLowerCase() === "uescape") {
+        throw new SQLValidationError(
+          "syntax_not_allowed",
+          "UESCAPE is not permitted in user queries.",
+        );
+      }
+      out += word;
       continue;
     }
 
@@ -340,6 +506,28 @@ export interface SqlToken {
   end: number;
 }
 
+export function isDistinctFromOperator(
+  tokens: readonly SqlToken[],
+  i: number,
+): boolean {
+  const p1 = i >= 1 ? tokens[i - 1] : undefined;
+  if (!p1 || p1.kind !== "word" || p1.lower !== "distinct") {
+    return false;
+  }
+  const p2 = i >= 2 ? tokens[i - 2] : undefined;
+  if (!p2 || p2.kind !== "word") {
+    return false;
+  }
+  if (p2.lower === "is") {
+    return true;
+  }
+  if (p2.lower === "not") {
+    const p3 = i >= 3 ? tokens[i - 3] : undefined;
+    return Boolean(p3 && p3.kind === "word" && p3.lower === "is");
+  }
+  return false;
+}
+
 export function tokenizeSql(sql: string): SqlToken[] {
   const tokens: SqlToken[] = [];
   let i = 0;
@@ -348,30 +536,31 @@ export function tokenizeSql(sql: string): SqlToken[] {
   while (i < n) {
     const ch = sql[i];
     const next = i + 1 < n ? sql[i + 1] : "";
+    const atWordStart = i === 0 || !isIdentContChar(sql[i - 1]);
 
     if (/\s/.test(ch)) {
       i++;
       continue;
     }
 
-    // Line comment
+    // Line comment (`--` terminated by `\n` or `\r`)
     if (ch === "-" && next === "-") {
       i += 2;
-      while (i < n && sql[i] !== "\n") {
+      while (i < n && sql[i] !== "\n" && sql[i] !== "\r") {
         i++;
       }
       continue;
     }
 
-    // Block comment
+    // Block comment (nested `/* /* ... */ */`)
     if (ch === "/" && next === "*") {
       let depth = 1;
       i += 2;
       while (i < n && depth > 0) {
-        if (sql[i] === "/" && sql[i + 1] === "*") {
+        if (sql[i] === "/" && i + 1 < n && sql[i + 1] === "*") {
           depth++;
           i += 2;
-        } else if (sql[i] === "*" && sql[i + 1] === "/") {
+        } else if (sql[i] === "*" && i + 1 < n && sql[i + 1] === "/") {
           depth--;
           i += 2;
         } else {
@@ -384,36 +573,105 @@ export function tokenizeSql(sql: string): SqlToken[] {
       continue;
     }
 
-    // Single-quoted literal (or dollar-quoted)
-    if (ch === "'") {
+    // Reject Unicode escape literals (U&'...' / U&"...") outright
+    if (
+      atWordStart &&
+      (ch === "U" || ch === "u") &&
+      next === "&" &&
+      i + 2 < n &&
+      (sql[i + 2] === "'" || sql[i + 2] === '"')
+    ) {
+      throw new SQLValidationError(
+        "syntax_not_allowed",
+        "Unicode escape literals are not permitted in user queries.",
+      );
+    }
+
+    // PostgreSQL / DuckDB C-escape string literal (`E'...'` / `e'...'` + `{quotecontinue}`)
+    if (atWordStart && (ch === "E" || ch === "e") && next === "'") {
       const tokStart = i;
       let lit = "";
-      i++;
-      let closed = false;
-      while (i < n) {
-        if (sql[i] === "'" && sql[i + 1] === "'") {
-          lit += "'";
-          i += 2;
-          continue;
-        }
-        if (sql[i] === "'") {
+      i += 2;
+      for (;;) {
+        let closed = false;
+        while (i < n) {
+          if (sql[i] === "\\") {
+            if (i + 1 >= n) {
+              throw new SQLValidationError(
+                "parse_error",
+                "Unterminated SQL escape string literal.",
+              );
+            }
+            lit += sql[i + 1];
+            i += 2;
+            continue;
+          }
+          if (sql[i] === "'" && i + 1 < n && sql[i + 1] === "'") {
+            lit += "'";
+            i += 2;
+            continue;
+          }
+          if (sql[i] === "'") {
+            i++;
+            closed = true;
+            break;
+          }
+          lit += sql[i];
           i++;
-          closed = true;
+        }
+        if (!closed) {
+          throw new SQLValidationError(
+            "parse_error",
+            "Unterminated SQL escape string literal.",
+          );
+        }
+        const contQuote = findQuoteContinuation(sql, i);
+        if (contQuote === -1) {
           break;
         }
-        lit += sql[i];
-        i++;
-      }
-      if (!closed) {
-        throw new SQLValidationError("parse_error", "Unterminated SQL string literal.");
+        i = contQuote + 1;
       }
       tokens.push({ kind: "string", value: lit, lower: lit.toLowerCase(), start: tokStart, end: i });
       continue;
     }
 
-    // Dollar-quoted literal ($tag$...$tag$) — reject or parse
-    if (ch === "$") {
-      const m = sql.slice(i).match(/^\$([A-Za-z0-9_]*)\$/);
+    // Standard single-quoted literal (`'...'` + `{quotecontinue}`)
+    if (ch === "'") {
+      const tokStart = i;
+      let lit = "";
+      i++;
+      for (;;) {
+        let closed = false;
+        while (i < n) {
+          if (sql[i] === "'" && i + 1 < n && sql[i + 1] === "'") {
+            lit += "'";
+            i += 2;
+            continue;
+          }
+          if (sql[i] === "'") {
+            i++;
+            closed = true;
+            break;
+          }
+          lit += sql[i];
+          i++;
+        }
+        if (!closed) {
+          throw new SQLValidationError("parse_error", "Unterminated SQL string literal.");
+        }
+        const contQuote = findQuoteContinuation(sql, i);
+        if (contQuote === -1) {
+          break;
+        }
+        i = contQuote + 1;
+      }
+      tokens.push({ kind: "string", value: lit, lower: lit.toLowerCase(), start: tokStart, end: i });
+      continue;
+    }
+
+    // Dollar-quoted literal (`$$...$$` or `$tag$...$tag$`)
+    if (ch === "$" && atWordStart) {
+      const m = DOLQ_TAG_RE.exec(sql.slice(i));
       if (m) {
         const tokStart = i;
         const tag = m[0];
@@ -435,7 +693,7 @@ export function tokenizeSql(sql: string): SqlToken[] {
       i++;
       let closed = false;
       while (i < n) {
-        if (sql[i] === '"' && sql[i + 1] === '"') {
+        if (sql[i] === '"' && i + 1 < n && sql[i + 1] === '"') {
           ident += '"';
           i += 2;
           continue;
@@ -456,15 +714,22 @@ export function tokenizeSql(sql: string): SqlToken[] {
     }
 
     // Word / identifier
-    if (/[A-Za-z_]/.test(ch)) {
+    if (isIdentStartChar(ch)) {
       const tokStart = i;
       let word = ch;
       i++;
-      while (i < n && /[A-Za-z0-9_$]/.test(sql[i])) {
+      while (i < n && isIdentContChar(sql[i])) {
         word += sql[i];
         i++;
       }
-      tokens.push({ kind: "word", value: word, lower: word.toLowerCase(), start: tokStart, end: i });
+      const lower = word.toLowerCase();
+      if (lower === "uescape") {
+        throw new SQLValidationError(
+          "syntax_not_allowed",
+          "UESCAPE is not permitted in user queries.",
+        );
+      }
+      tokens.push({ kind: "word", value: word, lower, start: tokStart, end: i });
       continue;
     }
 
@@ -473,9 +738,17 @@ export function tokenizeSql(sql: string): SqlToken[] {
       const tokStart = i;
       let num = ch;
       i++;
-      while (i < n && /[0-9._eE+-]/.test(sql[i])) {
-        num += sql[i];
-        i++;
+      while (i < n) {
+        const c = sql[i];
+        if (/[0-9._]/.test(c)) {
+          num += c;
+          i++;
+        } else if ((c === "e" || c === "E") && i + 1 < n && /[0-9+-]/.test(sql[i + 1])) {
+          num += c + sql[i + 1];
+          i += 2;
+        } else {
+          break;
+        }
       }
       tokens.push({ kind: "symbol", value: num, lower: num.toLowerCase(), start: tokStart, end: i });
       continue;
@@ -519,9 +792,25 @@ export function validateUserSql(
     );
   }
 
+  const strippedSql = stripSqlComments(sql);
   const tokens = tokenizeSql(sql);
   if (tokens.length === 0) {
     throw new SQLValidationError("empty_sql", "SQL query must not be empty.");
+  }
+  if (strippedSql !== sql) {
+    const strippedTokens = tokenizeSql(strippedSql);
+    if (
+      strippedTokens.length !== tokens.length ||
+      tokens.some(
+        (t, idx) =>
+          t.kind !== strippedTokens[idx].kind || t.lower !== strippedTokens[idx].lower,
+      )
+    ) {
+      throw new SQLValidationError(
+        "parse_error",
+        "SQL comment boundary alters token stream.",
+      );
+    }
   }
 
   // Strip a single optional trailing semicolon; reject any semicolon before the end.
@@ -621,6 +910,7 @@ export function validateUserSql(
   }
 
   const FROM_CLAUSE_END_KEYWORDS = new Set([
+    "select",
     "where",
     "group",
     "having",
@@ -743,22 +1033,45 @@ export function validateUserSql(
     }
 
     if (tok.kind === "symbol" && tok.value === "(") {
-      const isSubquery =
-        nextTok?.kind === "word" && SUBQUERY_START_KEYWORDS.has(nextTok.lower);
-      if (isSubquery) {
+      let look = i + 1;
+      while (
+        look < effectiveLen &&
+        tokens[look].kind === "symbol" &&
+        tokens[look].value === "("
+      ) {
+        look++;
+      }
+      const lookTok = look < effectiveLen ? tokens[look] : null;
+      const isTrimFromCall =
+        look === i + 1 &&
+        lookTok?.kind === "word" &&
+        lookTok.lower === "from" &&
+        prevTok?.kind === "word" &&
+        (prevTok.lower === "trim" ||
+          prevTok.lower === "btrim" ||
+          prevTok.lower === "ltrim" ||
+          prevTok.lower === "rtrim");
+      const hasSubqueryHead = Boolean(
+        !isTrimFromCall &&
+          lookTok?.kind === "word" &&
+          SUBQUERY_START_KEYWORDS.has(lookTok.lower),
+      );
+      const isDirectSubquery = hasSubqueryHead && look === i + 1;
+
+      if (expectingTableRef && !isDirectSubquery) {
+        parenStack.push({
+          kind: "from_join",
+          savedInFrom: inFromClause,
+        });
+        inFromClause = true;
+        expectingTableRef = !hasSubqueryHead;
+      } else if (hasSubqueryHead) {
         parenStack.push({
           kind: "subquery",
           savedInFrom: inFromClause,
         });
         inFromClause = false;
         expectingTableRef = false;
-      } else if (expectingTableRef) {
-        parenStack.push({
-          kind: "from_join",
-          savedInFrom: inFromClause,
-        });
-        inFromClause = true;
-        expectingTableRef = true;
       } else {
         parenStack.push({
           kind: "expr",
@@ -770,18 +1083,25 @@ export function validateUserSql(
     }
 
     if (tok.kind === "symbol" && tok.value === ")") {
-      const frame = parenStack.pop();
-      if (frame) {
-        inFromClause = frame.savedInFrom;
-        expectingTableRef = false;
+      if (expectingTableRef) {
+        throw new SQLValidationError("parse_error", "Expected table reference.");
       }
+      const frame = parenStack.pop();
+      if (!frame) {
+        throw new SQLValidationError("parse_error", "Unbalanced closing parenthesis.");
+      }
+      inFromClause = frame.savedInFrom;
+      expectingTableRef = false;
       continue;
     }
 
     if (!inExprParen) {
       if (tok.kind === "word") {
         const lower = tok.lower;
-        if ((lower === "from" && prevTok?.lower !== "distinct") || (lower === "table" && prevTok?.value !== ".")) {
+        if (
+          (lower === "from" && !isDistinctFromOperator(tokens, i)) ||
+          (lower === "table" && prevTok?.value !== ".")
+        ) {
           inFromClause = true;
           expectingTableRef = true;
           continue;
@@ -791,10 +1111,36 @@ export function validateUserSql(
           expectingTableRef = true;
           continue;
         }
-        if ((lower === "summarize" || lower === "describe") && (i === 0 || prevTok?.value === "(")) {
+        if (
+          (lower === "summarize" || lower === "describe") &&
+          (i === 0 ||
+            prevTok?.value === "(" ||
+            (prevTok?.kind === "word" &&
+              (prevTok.lower === "union" ||
+                prevTok.lower === "all" ||
+                prevTok.lower === "name" ||
+                prevTok.lower === "intersect" ||
+                prevTok.lower === "except")))
+        ) {
           if (
-            nextTok &&
-            !(nextTok.kind === "word" && (nextTok.lower === "select" || nextTok.lower === "with" || nextTok.lower === "from" || nextTok.lower === "table"))
+            !nextTok ||
+            (nextTok.kind === "symbol" &&
+              (nextTok.value === ")" || nextTok.value === ";"))
+          ) {
+            throw new SQLValidationError(
+              "statement_not_allowed",
+              `${tok.value.toUpperCase()} requires an explicit table or query target.`,
+            );
+          }
+          if (
+            !(
+              nextTok.kind === "word" &&
+              (nextTok.lower === "select" ||
+                nextTok.lower === "with" ||
+                nextTok.lower === "values" ||
+                nextTok.lower === "from" ||
+                nextTok.lower === "table")
+            )
           ) {
             inFromClause = true;
             expectingTableRef = true;
@@ -802,10 +1148,16 @@ export function validateUserSql(
           continue;
         }
         if (inFromClause && FROM_CLAUSE_END_KEYWORDS.has(lower)) {
+          if (expectingTableRef) {
+            throw new SQLValidationError("parse_error", "Expected table reference.");
+          }
           inFromClause = false;
           expectingTableRef = false;
         }
       } else if (inFromClause && tok.kind === "symbol" && tok.value === ",") {
+        if (expectingTableRef) {
+          throw new SQLValidationError("parse_error", "Expected table reference.");
+        }
         expectingTableRef = true;
         continue;
       }
@@ -848,14 +1200,23 @@ export function validateUserSql(
         }
         validateTableObjectToken(tok, nextTok, true);
         expectingTableRef = false;
+      } else {
+        throw new SQLValidationError("parse_error", "Expected table reference.");
       }
     }
+  }
+
+  if (expectingTableRef) {
+    throw new SQLValidationError("parse_error", "Expected table reference.");
+  }
+  if (parenStack.length > 0) {
+    throw new SQLValidationError("parse_error", "Unbalanced opening parenthesis.");
   }
 
   const elapsedMs = (typeof performance !== "undefined" ? performance.now() : Date.now()) - t0;
   return {
     valid: true,
-    normalizedSql: stripSqlComments(sql).trim().replace(/;\s*$/, ""),
+    normalizedSql: strippedSql.trim().replace(/;\s*$/, ""),
     elapsedMs,
   };
 }

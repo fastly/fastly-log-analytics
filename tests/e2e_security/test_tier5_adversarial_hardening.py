@@ -629,11 +629,76 @@ def test_t5_c08_cloud_views_redteam_dupkeys_sticky_slots_columns_lambda_concat_a
                 }
             }
         ),
+        "bug-cloud-1-r3-slice-subscript-json": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT * FROM logs WHERE (_extra::JSON)['xclient_ipx'[2:10]] = '\"198.51.100.7\"'"
+                }
+            }
+        ),
+        "bug-cloud-1-r3-list-subscript-json": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT * FROM logs WHERE (_extra::JSON)[['a', 'xipx'[2:3]][2]] = '\"198.51.100.7\"'"
+                }
+            }
+        ),
+        "bug-cloud-1-r3-operator-subscript": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM logs WHERE (_extra::JSON)[1+1] IS NOT NULL"}}
+        ),
+        "bug-cloud-1-r3-wildcard-arrow": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM logs WHERE (_extra->>'$.*')::VARCHAR LIKE '%198.51.100.7%'"}}
+        ),
+        "bug-cloud-1-r3-json-contains": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": 'SELECT * FROM logs WHERE json_contains(_extra, \'{"client_ip":"198.51.100.7"}\')'
+                }
+            }
+        ),
+        "bug-cloud-1-r3-json-each": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM logs, json_each(_extra) WHERE value = '\"198.51.100.7\"'"}}
+        ),
+        "bug-cloud-1-r3-json-tree": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM logs, json_tree(_extra) WHERE value = '\"198.51.100.7\"'"}}
+        ),
+        "bug-cloud-1-r3-json-transform": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": 'SELECT * FROM logs WHERE json_transform(_extra, \'{"client_ip":"VARCHAR"}\') IS NOT NULL'
+                }
+            }
+        ),
+        "bug-cloud-1-r3-from-json": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": 'SELECT * FROM logs WHERE from_json(_extra::JSON, \'{"client_ip":"VARCHAR"}\') IS NOT NULL'
+                }
+            }
+        ),
+        "bug-cloud-1-r3-map-extract-value": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM logs WHERE map_extract_value(kv, 'client_ip') = '198.51.100.7'"}}
+        ),
+        "bug-cloud-1-r3-struct-extract-at": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM logs WHERE struct_extract_at(logs, 4) = '198.51.100.7'"}}
+        ),
+        "bug-cloud-1-r3-extra-raw-like": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM logs WHERE _extra LIKE '%198.51.100.7%'"}}
+        ),
     }
     benign_vectors: dict[str, str] = {
         "benign-columns-safe": json.dumps({"_view_extras": {"sql": "SELECT COLUMNS('^(status|url|pop)$') FROM logs"}}),
         "benign-arr-index": json.dumps({"_view_extras": {"sql": "SELECT arr[1] FROM logs"}}),
         "benign-extra-safe": json.dumps({"_view_extras": {"sql": "SELECT _extra['safe'] FROM logs"}}),
+        "benign-chained-extra-safe": json.dumps(
+            {"_view_extras": {"sql": "SELECT (_extra::JSON)['request']['headers']['safe_header'] FROM logs"}}
+        ),
+        "benign-json-contains-safe": json.dumps(
+            {"_view_extras": {"sql": 'SELECT * FROM logs WHERE json_contains(_extra, \'{"safe_header":"ok"}\')'}}
+        ),
+        "benign-json-extract-eq-pii-lit": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM logs WHERE json_extract_string(_extra, '/meta/pop') = '/ip/sid'"}}
+        ),
         "benign-4xx-pill": json.dumps(
             {
                 "status": {"mode": "include", "values": ["404", "429"]},

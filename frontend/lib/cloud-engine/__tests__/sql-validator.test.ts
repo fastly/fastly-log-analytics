@@ -1,7 +1,13 @@
 // @vitest-environment node
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { DuckDBAnalyticalEngine } from '../dashboard/duckdb'
-import { BLOCKED_FUNCTIONS, SQLValidationError, validateSqlQuery, validateUserSql } from '../sql-validator'
+import {
+  BLOCKED_FUNCTIONS,
+  SQLValidationError,
+  stripSqlComments,
+  validateSqlQuery,
+  validateUserSql,
+} from '../sql-validator'
 
 const OPERATIONAL_TABLE_FUNCTIONS = [
   'arrow_scan',
@@ -72,10 +78,48 @@ describe('T5-FE-04: cloud-engine SQL validator adversarial replacement-scan, sch
     'TABLE ops_secret',
     'FROM ops_secret SELECT *',
     'SHOW TABLES',
+    'SHOW ALL TABLES',
     'SHOW COLUMNS',
     'SHOW COLUMNS FROM ops_secret',
     'SUMMARIZE (ops_secret CROSS JOIN logs)',
     'DESCRIBE (logs JOIN ops_secret ON true)',
+    // Iteration-3 Wave-2 lexer, comment-stripper, DISTINCT, DESCRIBE, and multi-paren vectors:
+    "SELECT E'\\'', secret_col FROM ops_secret -- '\nLIMIT 5",
+    "SELECT e'\\'', secret_col FROM ops_secret -- '\nLIMIT 5",
+    "SELECT E'x\\'' AS pad, secret_col FROM ops_secret /*'*/",
+    "SELECT E'a'\n'\\'', secret_col FROM ops_secret -- '\nLIMIT 5",
+    "SELECT E'a'/*c*/\n'\\'', secret_col FROM ops_secret -- '\nLIMIT 5",
+    "VALUES (E'\\''); CREATE TABLE pwned_by_values AS SELECT secret_col FROM ops_secret; VALUES ('ok' -- '\n)",
+    "SELECT E'unterminated\\",
+    'SELECT $a$ -- /* $a$, secret_col FROM ops_secret',
+    'SELECT $1$ FROM ops_secret $1$',
+    'SELECT $tag$unterminated FROM logs',
+    'SELECT $é$ok$é$, secret_col FROM ops_secret',
+    'SELECT url FROM logs --x\r UNION ALL SELECT secret_col FROM ops_secret',
+    'SELECT /* outer /* inner */ url FROM logs',
+    "SELECT U&'\\0061' FROM logs",
+    "SELECT u&'\\0061' FROM logs",
+    'SELECT U&"url" FROM logs',
+    'SELECT u&"url" FROM logs',
+    "SELECT 'a' UESCAPE '!' FROM logs",
+    'SELECT secret_col AS "distinct" FROM ops_secret',
+    'SELECT 1 AS "distinct" FROM \'https://evil.example/exfil.parquet\'',
+    'DESCRIBE',
+    'DESCRIBE;',
+    'SUMMARIZE',
+    'SUMMARIZE;',
+    'SELECT * FROM (DESCRIBE)',
+    'SELECT * FROM (SUMMARIZE)',
+    'SELECT * FROM ()',
+    'SELECT * FROM (logs, )',
+    'SELECT * FROM logs,',
+    'SELECT * FROM logs JOIN',
+    'SELECT * FROM WHERE 1 = 1',
+    "WITH p AS ((SELECT 'a' AS s) UNION ALL SELECT secret_col FROM ops_secret) SELECT * FROM p",
+    "SELECT * FROM logs WHERE url IN ((SELECT 'a') UNION ALL SELECT * FROM 'https://evil.example/exfil.parquet')",
+    'SELECT * FROM ((SELECT 1) AS a, ops_secret AS b)',
+    'SELECT TRIM((FROM ops_secret)) FROM logs',
+    'SELECT TRIM(FROM (SELECT secret_col FROM ops_secret)) FROM logs',
     ...OPERATIONAL_TABLE_FUNCTIONS.flatMap((fn) => [
       `SELECT * FROM ${fn}()`,
       `SELECT * FROM range(1), ${fn}()`,
@@ -96,6 +140,10 @@ describe('T5-FE-04: cloud-engine SQL validator adversarial replacement-scan, sch
       'SELECT x FROM unnest([1, 2, 3]) AS t(x)',
       'SELECT * FROM range(2) AS r, logs WHERE logs.status = 200',
       'SELECT a.status, b.url FROM (logs AS a JOIN logs AS b ON (a.status = b.status))',
+      'SELECT TRIM(FROM url) AS trimmed_url FROM logs',
+      'SELECT status IS DISTINCT FROM 200 AS d1, status IS NOT DISTINCT FROM 404 AS d2 FROM logs',
+      "SELECT status FROM logs WHERE'ok'='ok'",
+      "SELECT E'safe\\'quote' AS q, E'back\\\\slash' AS bs, $é$-- keep /* me */$é$ AS dq FROM logs",
       'SUMMARIZE logs',
       'DESCRIBE logs',
     ]) {
@@ -106,5 +154,35 @@ describe('T5-FE-04: cloud-engine SQL validator adversarial replacement-scan, sch
     expect(() => validateUserSql('SHOW COLUMNS FROM logs', ['logs', 'requests'])).not.toThrow()
     expect(() => validateUserSql('SHOW COLUMNS FROM main.logs', ['logs', 'requests'])).not.toThrow()
     expect(() => validateUserSql('SHOW TABLES')).not.toThrow()
+  })
+
+  it('maintains stripSqlComments parity on dollar quotes, E-strings, CR line comments, and unclosed comments/quotes', async () => {
+    const preservedDollar = stripSqlComments(
+      'SELECT $tag$ -- keep /* inside */ $tag$ AS s, $é$/* keep */$é$ AS u /* drop */ FROM logs -- end\rWHERE status = 200',
+    )
+    expect(preservedDollar).toContain('$tag$ -- keep /* inside */ $tag$')
+    expect(preservedDollar).toContain('$é$/* keep */$é$')
+    expect(preservedDollar).not.toContain('/* drop */')
+    expect(preservedDollar).toContain('\rWHERE status = 200')
+
+    const preservedEscape = stripSqlComments("SELECT E'it\\'s -- not a comment' AS s /* cut */ FROM logs")
+    expect(preservedEscape).toContain("E'it\\'s -- not a comment'")
+    expect(preservedEscape).not.toContain('cut')
+
+    expect(() => stripSqlComments('SELECT $a$unclosed FROM logs')).toThrow(SQLValidationError)
+    expect(() => stripSqlComments("SELECT E'unclosed\\")).toThrow(SQLValidationError)
+    expect(() => stripSqlComments('SELECT /* outer /* inner */ FROM logs')).toThrow(SQLValidationError)
+    expect(() => stripSqlComments("SELECT U&'\\0061' FROM logs")).toThrow(SQLValidationError)
+
+    // Wave-2 comment-splice vectors: stripSqlComments preserves $a$...$a$ verbatim so ops_secret is never resurrected
+    const splice1 = "SELECT $a$ -- $a$ /*\n$a$, secret_col FROM ops_secret -- */ FROM logs"
+    const norm1 = validateUserSql(splice1, ['logs', 'requests']).normalizedSql
+    expect(norm1).not.toContain('ops_secret')
+    const rows1 = await engine.executeSql(norm1)
+    expect(JSON.stringify(rows1)).not.toContain('TOP_SECRET_OPS_ROW')
+
+    const splice2 = "SELECT $a$ /* $a$ FROM logs WHERE $b$ */ $a$ AS pad, secret_col FROM ops_secret -- $b$"
+    const norm2 = validateUserSql(splice2, ['logs', 'requests']).normalizedSql
+    await expect(engine.executeSql(norm2)).rejects.toThrow()
   })
 })
