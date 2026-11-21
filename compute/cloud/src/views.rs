@@ -551,103 +551,95 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
         let in_extract_key_arg = extract_stack.iter().any(|f| f.3 >= 1);
         let check_key_ctx = in_subscript || in_arrow_rhs || !extract_stack.is_empty();
 
-        // 4a. `U&'...'` / `u&'...'` Unicode-escaped string literal
-        if matches!(bytes[i], b'U' | b'u')
+        // 4. `'...'`, `E'...'` / `e'...'`, and `U&'...'` / `u&'...'` string literals,
+        //    folding ISO/IEC 9075 / DuckDB `libpg_query` adjacent single-quoted continuations
+        //    across whitespace and SQL comments (`'a'\n'b'`, `'a' -- c\n'b'`, etc.).
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum QuoteMode {
+            Standard,
+            Backslash,
+            Unicode,
+        }
+        let initial_quote_mode = if matches!(bytes[i], b'U' | b'u')
             && bytes.get(i + 1) == Some(&b'&')
             && bytes.get(i + 2) == Some(&b'\'')
         {
             i += 3;
-            let mut captured = String::new();
-            let mut closed = false;
-            while i < bytes.len() {
-                if bytes[i] == b'\'' {
-                    if bytes.get(i + 1) == Some(&b'\'') {
-                        captured.push('\'');
-                        i += 2;
-                    } else {
-                        i += 1;
-                        closed = true;
-                        break;
-                    }
-                } else if bytes[i] == b'\\' {
-                    let Some(next_i) = decode_sql_unicode_escape(bytes, i, &mut captured) else {
-                        return true;
-                    };
-                    i = next_i;
-                } else if let Some(ch) = s.get(i..).and_then(|tail| tail.chars().next()) {
-                    captured.push(ch);
-                    i += ch.len_utf8();
-                } else {
-                    return true;
-                }
-            }
-            if !closed {
-                return true;
-            }
-            if let Some(d) = columns_fn_depth {
-                if paren_depth != d
-                    || columns_arg_count > 0
-                    || columns_arg_references_pii(&captured)
-                {
-                    return true;
-                }
-                columns_arg_count = 1;
-            }
-            if (check_key_ctx || (brace_depth > 0 && next_non_ws_or_comment_is_colon(s, i)))
-                && is_pii_key_or_json_path(&captured)
-            {
-                return true;
-            }
-            if last_sig == LastSig::JsonArrow
-                && json_arrow_paren_depth.is_none()
-                && json_arrow_list_depth.is_none()
-                && next_non_ws_or_comment_is_concat_pipe(s, i)
-            {
-                return true;
-            }
-            pending_extract_fn = false;
-            pending_columns_fn = false;
-            last_sig = LastSig::Other;
-            continue;
-        }
-
-        // 4b. `E'...'` / `e'...'` escaped string literal vs standard `'...'` string literal
-        if (matches!(bytes[i], b'E' | b'e') && bytes.get(i + 1) == Some(&b'\''))
-            || bytes[i] == b'\''
-        {
-            let backslash_escapes = bytes[i] != b'\'';
-            i += if backslash_escapes { 2 } else { 1 };
-            let should_capture = check_key_ctx || columns_fn_depth.is_some() || brace_depth > 0;
+            Some(QuoteMode::Unicode)
+        } else if matches!(bytes[i], b'E' | b'e') && bytes.get(i + 1) == Some(&b'\'') {
+            i += 2;
+            Some(QuoteMode::Backslash)
+        } else if bytes[i] == b'\'' {
+            i += 1;
+            Some(QuoteMode::Standard)
+        } else {
+            None
+        };
+        if let Some(base_mode) = initial_quote_mode {
+            let should_capture = check_key_ctx
+                || columns_fn_depth.is_some()
+                || brace_depth > 0
+                || base_mode == QuoteMode::Unicode;
             let mut captured = should_capture.then(String::new);
-            let mut closed = false;
-            while i < bytes.len() {
-                if backslash_escapes && bytes[i] == b'\\' {
-                    let Some(next_i) = decode_sql_e_escape(s, i, &mut captured) else {
-                        return true;
-                    };
-                    i = next_i;
-                } else if bytes[i] == b'\'' {
-                    if bytes.get(i + 1) == Some(&b'\'') {
-                        if let Some(buf) = captured.as_mut() {
-                            buf.push('\'');
+            let mut seg_mode = base_mode;
+            loop {
+                let mut closed = false;
+                while i < bytes.len() {
+                    if bytes[i] == b'\'' {
+                        if bytes.get(i + 1) == Some(&b'\'') {
+                            if let Some(buf) = captured.as_mut() {
+                                buf.push('\'');
+                            }
+                            i += 2;
+                        } else {
+                            i += 1;
+                            closed = true;
+                            break;
                         }
-                        i += 2;
+                    } else if seg_mode == QuoteMode::Unicode && bytes[i] == b'\\' {
+                        let mut tmp = String::new();
+                        let out = captured.as_mut().unwrap_or(&mut tmp);
+                        let Some(next_i) = decode_sql_unicode_escape(bytes, i, out) else {
+                            return true;
+                        };
+                        i = next_i;
+                    } else if seg_mode == QuoteMode::Backslash && bytes[i] == b'\\' {
+                        let Some(next_i) = decode_sql_e_escape(s, i, &mut captured) else {
+                            return true;
+                        };
+                        i = next_i;
+                    } else if let Some(ch) = s.get(i..).and_then(|tail| tail.chars().next()) {
+                        if let Some(buf) = captured.as_mut() {
+                            buf.push(ch);
+                        }
+                        i += ch.len_utf8();
                     } else {
-                        i += 1;
-                        closed = true;
-                        break;
+                        return true;
                     }
-                } else if let Some(ch) = s.get(i..).and_then(|tail| tail.chars().next()) {
-                    if let Some(buf) = captured.as_mut() {
-                        buf.push(ch);
-                    }
-                    i += ch.len_utf8();
-                } else {
+                }
+                if !closed {
                     return true;
                 }
-            }
-            if !closed {
-                return true;
+                let Some(j) = skip_ws_and_comments(s, i) else {
+                    return true;
+                };
+                if bytes.get(j) == Some(&b'\'') {
+                    i = j + 1;
+                    seg_mode = base_mode;
+                } else if matches!(bytes.get(j), Some(b'E' | b'e'))
+                    && bytes.get(j + 1) == Some(&b'\'')
+                {
+                    i = j + 2;
+                    seg_mode = QuoteMode::Backslash;
+                } else if matches!(bytes.get(j), Some(b'U' | b'u'))
+                    && bytes.get(j + 1) == Some(&b'&')
+                    && bytes.get(j + 2) == Some(&b'\'')
+                {
+                    i = j + 3;
+                    seg_mode = QuoteMode::Unicode;
+                } else {
+                    break;
+                }
             }
             if let Some(lit) = captured.as_deref() {
                 if let Some(d) = columns_fn_depth {
@@ -725,7 +717,7 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
                 last_sig = LastSig::Other;
                 continue;
             }
-            if columns_fn_depth.is_some() || in_arrow_rhs || in_extract_key_arg {
+            if columns_fn_depth.is_some() || in_subscript || in_arrow_rhs || in_extract_key_arg {
                 return true;
             }
             i += 1;
@@ -741,7 +733,7 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             && bytes.get(i + 2) == Some(&b'"'))
             || matches!(bytes[i], b'"' | b'`')
         {
-            if columns_fn_depth.is_some() || in_arrow_rhs || in_extract_key_arg {
+            if columns_fn_depth.is_some() || in_subscript || in_arrow_rhs || in_extract_key_arg {
                 return true;
             }
             let unicode_escapes = matches!(bytes[i], b'U' | b'u');
@@ -835,7 +827,7 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
 
         // 8. Unquoted identifiers & hyphenated filter/header tokens
         if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' {
-            if columns_fn_depth.is_some() || in_arrow_rhs || in_extract_key_arg {
+            if columns_fn_depth.is_some() || in_subscript || in_arrow_rhs || in_extract_key_arg {
                 return true;
             }
             let start = i;
@@ -2752,6 +2744,34 @@ mod tests {
                 "bug-cloud-1-struct-fn-key",
                 r#"{"_view_extras":{"sql":"SELECT {format('{}', 'cid'): 1}"}}"#,
             ),
+            (
+                "bug-cloud-1-r2-unobf-multiline-arrow",
+                "{\"_view_extras\":{\"sql\":\"SELECT * FROM logs WHERE _extra ->> '$.request.headers.'\\n  'x-forwarded-for' = '198.51.100.7'\"}}",
+            ),
+            (
+                "bug-cloud-1-r2-newline-arrow",
+                "{\"_view_extras\":{\"sql\":\"SELECT * FROM logs WHERE _extra->>'clien'\\n't_ip' = '198.51.100.7'\"}}",
+            ),
+            (
+                "bug-cloud-1-r2-comment-newline-arrow",
+                "{\"_view_extras\":{\"sql\":\"SELECT * FROM logs WHERE _extra->>'clien' -- split\\n't_ip' = '198.51.100.7'\"}}",
+            ),
+            (
+                "bug-cloud-1-r2-newline-extract",
+                "{\"_view_extras\":{\"sql\":\"SELECT * FROM logs WHERE json_extract_string(_extra, 'clien'\\n't_ip') = '198.51.100.7'\"}}",
+            ),
+            (
+                "bug-cloud-1-r2-newline-subscript",
+                "{\"_view_extras\":{\"sql\":\"SELECT * FROM logs WHERE _extra['clien'\\n't_ip'] = '\\\"198.51.100.7\\\"'\"}}",
+            ),
+            (
+                "bug-cloud-1-r2-newline-struct",
+                "{\"_view_extras\":{\"sql\":\"SELECT {'clien'\\n't_ip': '198.51.100.7'} FROM logs\"}}",
+            ),
+            (
+                "bug-cloud-1-r2-cte-subscript-ident",
+                "{\"_view_extras\":{\"sql\":\"WITH k(c) AS (VALUES (chr(99)||chr(108)||chr(105)||chr(101)||chr(110)||chr(116)||chr(95)||chr(105)||chr(112))) SELECT * FROM logs, k WHERE _extra[c] = '\\\"198.51.100.7\\\"'\"}}",
+            ),
         ];
 
         for (case_id, payload) in blocked_vectors {
@@ -2777,6 +2797,10 @@ mod tests {
             (
                 "benign-struct-safe-key",
                 r#"{"_view_extras":{"sql":"SELECT {'safe': 1}"}}"#,
+            ),
+            (
+                "benign-multiline-safe-json-path",
+                "{\"_view_extras\":{\"sql\":\"SELECT _extra ->> '$.request.'\\n  'url' FROM logs\"}}",
             ),
         ];
 

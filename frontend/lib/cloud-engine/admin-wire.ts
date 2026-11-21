@@ -213,7 +213,7 @@ async function usage(request: Request): Promise<Response> {
   if (url.pathname.endsWith("/export")) {
     const columns = ["timestamp", "service_id", "operation_class", "operation_type", "url", "bytes", "function_name", "process_context", "estimated_cost", "count"] as const;
     const plainNumRe = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
-    const leadingCtrlOrSpaceRe = /^[\s\x00-\x1f\x7f\u200b-\u200f\u2028-\u202f\ufeff]*/u;
+    const leadingCtrlOrSpaceRe = /^[\s\x00-\x1f\x7f\u0085\u200b-\u200f\u2028-\u202f\u2060\ufeff]*/u;
     const cell = (value: unknown) => {
       if (value == null) return '""';
       if (typeof value === "number") return Number.isFinite(value) ? String(value) : '""';

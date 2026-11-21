@@ -262,6 +262,71 @@ def test_bug_hs_py_01_mask_ips_blocks_oip_origin_ip_plural_fields_and_query_filt
             "/api/origin/drilldown", json={"service_id": "svc-a", "dimension": "ip"}, headers=headers
         )
         assert r_dim_ip.status_code == 403
+        called.clear()
+
+        # SEC-T5-ITER1-01: RFC 6838 +json media types, sniffed JSON on text/plain, malformed/non-dict JSON, and duplicate params
+        for plus_ct in (
+            "application/problem+json",
+            "application/vnd.api+json; charset=utf-8",
+            "application/ld+json",
+            "text/plain",
+        ):
+            r_ct_fv = client.post(
+                "/api/dashboard/field-values",
+                content=json.dumps({"service_id": "svc-a", "field": "oip", "search": "198.51"}).encode("utf-8"),
+                headers={**headers, "Content-Type": plus_ct},
+            )
+            assert r_ct_fv.status_code == 403, f"ct={plus_ct} field=oip -> {r_ct_fv.status_code}: {r_ct_fv.text}"
+            assert r_ct_fv.json()["error"] == "pii_policy_violation"
+
+            r_ct_agg = client.post(
+                "/api/dashboard/aggregates",
+                content=json.dumps({"service_id": "svc-a", "fields": ["cookie_session", "ip"]}).encode("utf-8"),
+                headers={**headers, "Content-Type": plus_ct},
+            )
+            assert r_ct_agg.status_code == 403, f"ct={plus_ct} fields -> {r_ct_agg.status_code}: {r_ct_agg.text}"
+            assert r_ct_agg.json()["error"] == "pii_policy_violation"
+
+            r_ct_sid = client.post(
+                "/api/dashboard/aggregates?service_id=svc-a",
+                content=json.dumps({"service_id": "svc-b", "fields": ["status"]}).encode("utf-8"),
+                headers={**headers, "Content-Type": plus_ct},
+            )
+            assert r_ct_sid.status_code == 403, f"ct={plus_ct} sid -> {r_ct_sid.status_code}: {r_ct_sid.text}"
+            assert r_ct_sid.json()["error"] == "service_not_authorized"
+
+        for bad_body in (b"{bad-json", b'["service_id", "ip"]', b'"scalar"'):
+            r_bad_json = client.post(
+                "/api/dashboard/field-values?service_id=svc-a",
+                content=bad_body,
+                headers={**headers, "Content-Type": "application/problem+json"},
+            )
+            assert r_bad_json.status_code == 400, f"bad_body={bad_body!r} -> {r_bad_json.status_code}"
+            assert r_bad_json.json()["error"] == "invalid_json_body"
+
+        qf_ok = json.dumps({"url": {"mode": "include", "values": ["/ok"]}})
+        qf_pii = json.dumps({"ip": {"mode": "include", "values": ["1.2.3.4"]}})
+        r_dup_flt = client.get(
+            f"/api/services/svc-a/rum/analytics?filters={qf_ok}&filters={qf_pii}",
+            headers=headers,
+        )
+        assert r_dup_flt.status_code == 403 and r_dup_flt.json()["error"] == "pii_policy_violation"
+
+        r_dup_sid = client.post(
+            "/api/origin/drilldown?service_id=svc-a&service_id=svc-b",
+            json={"dimension": "oip"},
+            headers=headers,
+        )
+        assert r_dup_sid.status_code == 403 and r_dup_sid.json()["error"] == "service_not_authorized"
+
+        r_dup_svc = client.post(
+            "/api/origin/drilldown?service=svc-a&service=svc-b",
+            json={"dimension": "oip"},
+            headers=headers,
+        )
+        assert r_dup_svc.status_code == 403 and r_dup_svc.json()["error"] == "service_not_authorized"
+
+        assert called == []
 
     # control_room_correlate defense-in-depth check blocks client IP / session dimensions (excluding /24-merged "oip")
     fake_req = SimpleNamespace(state=SimpleNamespace(analyst_session=sess))

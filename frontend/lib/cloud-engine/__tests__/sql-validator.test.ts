@@ -55,9 +55,31 @@ describe('T5-FE-04: cloud-engine SQL validator adversarial replacement-scan, sch
     'SUMMARIZE ops_secret',
     'DESCRIBE ops_secret',
     'SELECT * FROM main.read_parquet(\'a.parquet\')',
+    'SELECT * FROM (FROM ops_secret)',
+    'SELECT * FROM (TABLE ops_secret)',
+    'SELECT * FROM (ops_secret CROSS JOIN logs)',
+    'SELECT * FROM (logs CROSS JOIN ops_secret)',
+    'SELECT * FROM (logs JOIN ops_secret ON true)',
+    'SELECT * FROM ((logs JOIN ops_secret ON true))',
+    "SELECT * FROM ('https://evil.example/exfil.parquet' CROSS JOIN logs)",
+    "SELECT * FROM (logs JOIN 'https://evil.example/exfil.parquet' ON true)",
+    "SELECT * FROM (FROM 'bound_g1_1.parquet')",
+    'WITH p AS (FROM ops_secret SELECT *) SELECT * FROM p',
+    'WITH p AS (TABLE ops_secret) SELECT * FROM p',
+    'WITH p AS (UNPIVOT ops_secret ON secret_col) SELECT * FROM p',
+    'WITH p AS (PIVOT ops_secret ON secret_col) SELECT * FROM p',
+    'SELECT secret_col FROM logs UNION ALL TABLE ops_secret',
+    'TABLE ops_secret',
+    'FROM ops_secret SELECT *',
+    'SHOW TABLES',
+    'SHOW COLUMNS',
+    'SHOW COLUMNS FROM ops_secret',
+    'SUMMARIZE (ops_secret CROSS JOIN logs)',
+    'DESCRIBE (logs JOIN ops_secret ON true)',
     ...OPERATIONAL_TABLE_FUNCTIONS.flatMap((fn) => [
       `SELECT * FROM ${fn}()`,
       `SELECT * FROM range(1), ${fn}()`,
+      `SELECT * FROM (logs CROSS JOIN ${fn}())`,
     ]),
   ])('rejects adversarial query before DuckDB execution: %s', async (sql) => {
     expect(() => validateUserSql(sql, ['logs', 'requests'])).toThrow(SQLValidationError)
@@ -73,6 +95,7 @@ describe('T5-FE-04: cloud-engine SQL validator adversarial replacement-scan, sch
       "WITH c AS (SELECT url, pop FROM logs WHERE pop = 'SJC') SELECT a.url, b.pop FROM c AS a JOIN logs AS b ON a.url = b.url",
       'SELECT x FROM unnest([1, 2, 3]) AS t(x)',
       'SELECT * FROM range(2) AS r, logs WHERE logs.status = 200',
+      'SELECT a.status, b.url FROM (logs AS a JOIN logs AS b ON (a.status = b.status))',
       'SUMMARIZE logs',
       'DESCRIBE logs',
     ]) {
@@ -80,5 +103,8 @@ describe('T5-FE-04: cloud-engine SQL validator adversarial replacement-scan, sch
       const rows = await engine.executeSql(validSql)
       expect(Array.isArray(rows)).toBe(true)
     }
+    expect(() => validateUserSql('SHOW COLUMNS FROM logs', ['logs', 'requests'])).not.toThrow()
+    expect(() => validateUserSql('SHOW COLUMNS FROM main.logs', ['logs', 'requests'])).not.toThrow()
+    expect(() => validateUserSql('SHOW TABLES')).not.toThrow()
   })
 })

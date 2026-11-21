@@ -86,6 +86,22 @@ def _header_values(headers: object, name: str) -> list[str]:
     return []
 
 
+def _query_param_values(query_params: object, name: str) -> list[str]:
+    if query_params is None:
+        return []
+    getlist = getattr(query_params, "getlist", None)
+    if callable(getlist):
+        return [str(v) for v in getlist(name)]
+    if isinstance(query_params, dict):
+        val = query_params.get(name)
+        return [str(val)] if val is not None else []
+    get_fn = getattr(query_params, "get", None)
+    if callable(get_fn):
+        val = get_fn(name)
+        return [str(val)] if val is not None else []
+    return []
+
+
 def _has_admin_gateway_header(request: Request) -> bool:
     headers = getattr(request, "headers", None)
     return bool(_header_values(headers, ADMIN_GATEWAY_HEADER) or _header_values(headers, ALT_ADMIN_GATEWAY_HEADER))
@@ -713,8 +729,10 @@ async def _strip_analyst_envelope(
 
 _BODY_INSPECT_UNSET = object()
 _BODY_INSPECT_ATTR = "_analyst_body_json"
+_BODY_PAIRS_ATTR = "_analyst_body_pairs"
 _RAW_BODY_ATTR = "_raw_body_bytes"
 _BODY_TOO_LARGE_ATTR = "_body_too_large"
+_BODY_INVALID_JSON_ATTR = "_body_invalid_json"
 
 
 def _parse_content_length(request: Request) -> int | None:
@@ -798,28 +816,84 @@ async def _inspect_request_body(request: Request) -> dict | None:
     return parsed
 
 
+def _collect_dict_pairs_recursive(value: object, out: list[tuple[str, Any]]) -> None:
+    if isinstance(value, dict):
+        for k, v in value.items():
+            out.append((str(k), v))
+    elif isinstance(value, list):
+        for item in value:
+            _collect_dict_pairs_recursive(item, out)
+
+
 async def _drain_request_body(request: Request) -> dict | None:
     method = request.method.upper()
-    if method != "POST":
+    if method not in ("POST", "PUT", "PATCH", "DELETE"):
         return None
-    ct = request.headers.get("content-type", "")
-    if "application/json" not in ct.lower():
+    ct_vals = _header_values(getattr(request, "headers", None), "content-type")
+    media_types = [v.split(";", 1)[0].strip().lower() for v in ct_vals if v.strip()]
+    if len(set(media_types)) > 1:
+        setattr(request.state, _BODY_INVALID_JSON_ATTR, True)
+        return None
+    media_type = media_types[0] if media_types else ""
+    is_explicit_json = media_type == "application/json" or media_type.endswith("+json")
+    is_sniffable_json = media_type in ("", "text/plain")
+    if not is_explicit_json and not is_sniffable_json:
         return None
     body_bytes = await _drain_raw_body_bounded(request, max_bytes=BODY_INSPECT_MAX_BYTES)
     if not body_bytes:
         return None
+    stripped = body_bytes.lstrip(b"\xef\xbb\xbf").lstrip()
+    if not stripped:
+        return None
+    if not is_explicit_json and not stripped.startswith((b"{", b"[")):
+        return None
+    root_pairs: list[tuple[str, Any]] = []
+
+    def _pairs_hook(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        nonlocal root_pairs
+        root_pairs = pairs
+        return dict(pairs)
+
     try:
-        body = json.loads(body_bytes)
-    except (json.JSONDecodeError, ValueError):
+        raw_to_parse = body_bytes if is_explicit_json else stripped
+        body = json.loads(raw_to_parse, object_pairs_hook=_pairs_hook)
+    except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+        if is_explicit_json:
+            setattr(request.state, _BODY_INVALID_JSON_ATTR, True)
         return None
-    if not isinstance(body, dict):
-        return None
-    return body
+    if isinstance(body, dict):
+        setattr(request.state, _BODY_PAIRS_ATTR, root_pairs)
+        return body
+    if isinstance(body, list):
+        if is_explicit_json:
+            setattr(request.state, _BODY_INVALID_JSON_ATTR, True)
+            return None
+        nested_pairs: list[tuple[str, Any]] = []
+        _collect_dict_pairs_recursive(body, nested_pairs)
+        setattr(request.state, _BODY_PAIRS_ATTR, nested_pairs)
+        return dict(nested_pairs) if nested_pairs else None
+    if is_explicit_json:
+        setattr(request.state, _BODY_INVALID_JSON_ATTR, True)
+    return None
+
+
+async def _body_pairs_for(request: Request) -> list[tuple[str, Any]]:
+    body = await _inspect_request_body(request)
+    pairs = getattr(request.state, _BODY_PAIRS_ATTR, None)
+    if isinstance(pairs, list):
+        return pairs
+    if isinstance(body, dict):
+        return [(str(k), v) for k, v in body.items()]
+    return []
 
 
 async def _body_service_ids(request: Request) -> list[str]:
-    body = await _inspect_request_body(request) or {}
-    return [str(v) for k in ("service_id", "service") if isinstance(v := body.get(k), (str, int)) and str(v)]
+    pairs = await _body_pairs_for(request)
+    out: list[str] = []
+    for k, v in pairs:
+        if k in ("service_id", "service") and isinstance(v, (str, int)) and not isinstance(v, bool) and str(v):
+            out.append(str(v))
+    return out
 
 
 _PII_FORBIDDEN_FILTER_COLS = SAVED_VIEW_PII_FILTER_KEYS | CMCD_SESSION_ALIAS_KEYS | frozenset({"origin_ip"})
@@ -827,15 +901,19 @@ _PII_FORBIDDEN_DIMENSION_COLS = _PII_FORBIDDEN_FILTER_COLS - frozenset({"oip"})
 
 
 async def _body_filter_keys(request: Request) -> list[str]:
-    body = await _inspect_request_body(request) or {}
-    filters = body.get("filters")
-    if isinstance(filters, dict):
-        extracted, _ = _extract_saved_view_filter_keys(filters)
-        return list({*(str(k) for k in filters), *extracted})
-    if isinstance(filters, (list, str)):
-        extracted, _ = _extract_saved_view_filter_keys(filters)
-        return list(extracted)
-    return []
+    pairs = await _body_pairs_for(request)
+    collected: set[str] = set()
+    for k, filters in pairs:
+        if k != "filters":
+            continue
+        if isinstance(filters, dict):
+            extracted, _ = _extract_saved_view_filter_keys(filters)
+            collected.update(str(fk) for fk in filters)
+            collected.update(extracted)
+        elif isinstance(filters, (list, str)):
+            extracted, _ = _extract_saved_view_filter_keys(filters)
+            collected.update(extracted)
+    return list(collected)
 
 
 async def _body_field_param(request: Request) -> str | None:
@@ -848,20 +926,18 @@ async def _body_field_param(request: Request) -> str | None:
 
 
 async def _body_field_params(request: Request) -> tuple[list[str], list[str]]:
-    body = await _inspect_request_body(request) or {}
+    pairs = await _body_pairs_for(request)
     field_keys: list[str] = []
     dim_keys: list[str] = []
-    singular_field = body.get("field")
-    if isinstance(singular_field, str) and singular_field:
-        field_keys.append(singular_field)
-    plural_fields = body.get("fields")
-    if isinstance(plural_fields, list):
-        for item in plural_fields:
-            if isinstance(item, str) and item:
-                field_keys.append(item)
-    singular_dim = body.get("dimension")
-    if isinstance(singular_dim, str) and singular_dim:
-        dim_keys.append(singular_dim)
+    for k, val in pairs:
+        if k == "field" and isinstance(val, str) and val:
+            field_keys.append(val)
+        elif k == "fields" and isinstance(val, list):
+            for item in val:
+                if isinstance(item, str) and item:
+                    field_keys.append(item)
+        elif k == "dimension" and isinstance(val, str) and val:
+            dim_keys.append(val)
     return field_keys, dim_keys
 
 
@@ -946,16 +1022,18 @@ async def _enforce_service_and_pii_scope(request: Request, session) -> JSONRespo
 
     raw_candidates: list[str] = list(_path_service_ids(request))
     for src in (
-        request.query_params.get("service"),
-        request.query_params.get("service_id"),
-        request.headers.get("x-fastly-service-id"),
-        request.headers.get("x-service-id"),
+        *_query_param_values(request.query_params, "service"),
+        *_query_param_values(request.query_params, "service_id"),
+        *_header_values(request.headers, "x-fastly-service-id"),
+        *_header_values(request.headers, "x-service-id"),
     ):
         if src:
             raw_candidates.append(src)
     body_sids = await _body_service_ids(request)
     if getattr(request.state, _BODY_TOO_LARGE_ATTR, False):
         return _error_json(413, "payload_too_large", max_bytes=BODY_INSPECT_MAX_BYTES)
+    if request.url.path.startswith("/api/") and getattr(request.state, _BODY_INVALID_JSON_ATTR, False):
+        return _error_json(400, "invalid_json_body")
     raw_candidates.extend(body_sids)
     if not raw_candidates:
         cookie_sid = _valid_cookie_service_id(request)
@@ -981,10 +1059,10 @@ async def _enforce_service_and_pii_scope(request: Request, session) -> JSONRespo
         if getattr(request.state, _BODY_TOO_LARGE_ATTR, False):
             return _error_json(413, "payload_too_large", max_bytes=BODY_INSPECT_MAX_BYTES)
         query_filter_keys: list[str] = []
-        raw_query_filters = request.query_params.get("filters")
-        if raw_query_filters:
-            qf_extracted, _ = _extract_saved_view_filter_keys(raw_query_filters)
-            query_filter_keys.extend(qf_extracted)
+        for raw_query_filters in _query_param_values(request.query_params, "filters"):
+            if raw_query_filters:
+                qf_extracted, _ = _extract_saved_view_filter_keys(raw_query_filters)
+                query_filter_keys.extend(qf_extracted)
         filter_and_field_keys = [*(await _body_filter_keys(request)), *query_filter_keys, *field_keys]
         for raw_key in filter_and_field_keys:
             col = normalize_filter_key(raw_key)

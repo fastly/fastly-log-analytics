@@ -195,6 +195,8 @@ export const BLOCKED_STATEMENT_KEYWORDS = new Set([
   "prepare",
   "execute",
   "deallocate",
+  "pivot",
+  "unpivot",
 ]);
 
 export const FORBIDDEN_KEYWORDS = BLOCKED_STATEMENT_KEYWORDS;
@@ -334,6 +336,8 @@ export interface SqlToken {
   kind: "word" | "string" | "quoted_ident" | "symbol";
   value: string;
   lower: string;
+  start: number;
+  end: number;
 }
 
 export function tokenizeSql(sql: string): SqlToken[] {
@@ -382,6 +386,7 @@ export function tokenizeSql(sql: string): SqlToken[] {
 
     // Single-quoted literal (or dollar-quoted)
     if (ch === "'") {
+      const tokStart = i;
       let lit = "";
       i++;
       let closed = false;
@@ -402,7 +407,7 @@ export function tokenizeSql(sql: string): SqlToken[] {
       if (!closed) {
         throw new SQLValidationError("parse_error", "Unterminated SQL string literal.");
       }
-      tokens.push({ kind: "string", value: lit, lower: lit.toLowerCase() });
+      tokens.push({ kind: "string", value: lit, lower: lit.toLowerCase(), start: tokStart, end: i });
       continue;
     }
 
@@ -410,20 +415,22 @@ export function tokenizeSql(sql: string): SqlToken[] {
     if (ch === "$") {
       const m = sql.slice(i).match(/^\$([A-Za-z0-9_]*)\$/);
       if (m) {
+        const tokStart = i;
         const tag = m[0];
         const endIdx = sql.indexOf(tag, i + tag.length);
         if (endIdx === -1) {
           throw new SQLValidationError("parse_error", "Unterminated dollar-quoted string literal.");
         }
         const lit = sql.slice(i + tag.length, endIdx);
-        tokens.push({ kind: "string", value: lit, lower: lit.toLowerCase() });
         i = endIdx + tag.length;
+        tokens.push({ kind: "string", value: lit, lower: lit.toLowerCase(), start: tokStart, end: i });
         continue;
       }
     }
 
     // Double-quoted identifier
     if (ch === '"') {
+      const tokStart = i;
       let ident = "";
       i++;
       let closed = false;
@@ -444,36 +451,38 @@ export function tokenizeSql(sql: string): SqlToken[] {
       if (!closed) {
         throw new SQLValidationError("parse_error", "Unterminated double-quoted identifier.");
       }
-      tokens.push({ kind: "quoted_ident", value: ident, lower: ident.toLowerCase() });
+      tokens.push({ kind: "quoted_ident", value: ident, lower: ident.toLowerCase(), start: tokStart, end: i });
       continue;
     }
 
     // Word / identifier
     if (/[A-Za-z_]/.test(ch)) {
+      const tokStart = i;
       let word = ch;
       i++;
       while (i < n && /[A-Za-z0-9_$]/.test(sql[i])) {
         word += sql[i];
         i++;
       }
-      tokens.push({ kind: "word", value: word, lower: word.toLowerCase() });
+      tokens.push({ kind: "word", value: word, lower: word.toLowerCase(), start: tokStart, end: i });
       continue;
     }
 
     // Number literal
     if (/[0-9]/.test(ch)) {
+      const tokStart = i;
       let num = ch;
       i++;
       while (i < n && /[0-9._eE+-]/.test(sql[i])) {
         num += sql[i];
         i++;
       }
-      tokens.push({ kind: "symbol", value: num, lower: num.toLowerCase() });
+      tokens.push({ kind: "symbol", value: num, lower: num.toLowerCase(), start: tokStart, end: i });
       continue;
     }
 
     // Single punctuation symbol
-    tokens.push({ kind: "symbol", value: ch, lower: ch });
+    tokens.push({ kind: "symbol", value: ch, lower: ch, start: i, end: i + 1 });
     i++;
   }
 
@@ -540,12 +549,40 @@ export function validateUserSql(
     );
   }
 
+  const allowedTableSet = allowedTables
+    ? new Set(Array.from(allowedTables, (t) => t.toLowerCase()))
+    : null;
+
   if (first.lower === "show") {
     const second = effectiveLen > 1 ? tokens[1].lower : "";
-    if (second !== "tables" && second !== "columns") {
+    if (second === "tables") {
+      if (allowedTableSet) {
+        throw new SQLValidationError(
+          "statement_not_allowed",
+          "SHOW TABLES is not permitted when table access is restricted.",
+        );
+      }
+      if (effectiveLen > 2) {
+        throw new SQLValidationError(
+          "statement_not_allowed",
+          "Unexpected tokens after SHOW TABLES.",
+        );
+      }
+    } else if (second === "columns") {
+      if (
+        effectiveLen < 4 ||
+        tokens[2].kind !== "word" ||
+        tokens[2].lower !== "from"
+      ) {
+        throw new SQLValidationError(
+          "statement_not_allowed",
+          "SHOW COLUMNS requires FROM <table>.",
+        );
+      }
+    } else {
       throw new SQLValidationError(
         "statement_not_allowed",
-        "Only SHOW TABLES and SHOW COLUMNS are permitted.",
+        "Only SHOW TABLES and SHOW COLUMNS FROM <table> are permitted.",
       );
     }
   }
@@ -583,10 +620,6 @@ export function validateUserSql(
     }
   }
 
-  const allowedTableSet = allowedTables
-    ? new Set(Array.from(allowedTables, (t) => t.toLowerCase()))
-    : null;
-
   const FROM_CLAUSE_END_KEYWORDS = new Set([
     "where",
     "group",
@@ -607,6 +640,8 @@ export function validateUserSql(
     "values",
     "summarize",
     "describe",
+    "from",
+    "table",
   ]);
 
   const checkIdentifierAndCall = (identTok: SqlToken, prev: SqlToken | null, next: SqlToken | null) => {
@@ -689,9 +724,8 @@ export function validateUserSql(
   };
 
   type ParenFrame = {
-    isSubquery: boolean;
+    kind: "subquery" | "from_join" | "expr";
     savedInFrom: boolean;
-    savedExpectingTableRef: boolean;
   };
   const parenStack: ParenFrame[] = [];
   let inFromClause = false;
@@ -702,7 +736,7 @@ export function validateUserSql(
     const nextTok = i + 1 < effectiveLen ? tokens[i + 1] : null;
     const prevTok = i > 0 ? tokens[i - 1] : null;
     const inExprParen =
-      parenStack.length > 0 && !parenStack[parenStack.length - 1].isSubquery;
+      parenStack.length > 0 && parenStack[parenStack.length - 1].kind === "expr";
 
     if (tok.kind === "word" || tok.kind === "quoted_ident") {
       checkIdentifierAndCall(tok, prevTok, nextTok);
@@ -711,15 +745,25 @@ export function validateUserSql(
     if (tok.kind === "symbol" && tok.value === "(") {
       const isSubquery =
         nextTok?.kind === "word" && SUBQUERY_START_KEYWORDS.has(nextTok.lower);
-      parenStack.push({
-        isSubquery,
-        savedInFrom: inFromClause,
-        savedExpectingTableRef: isSubquery ? false : expectingTableRef,
-      });
       if (isSubquery) {
+        parenStack.push({
+          kind: "subquery",
+          savedInFrom: inFromClause,
+        });
         inFromClause = false;
         expectingTableRef = false;
+      } else if (expectingTableRef) {
+        parenStack.push({
+          kind: "from_join",
+          savedInFrom: inFromClause,
+        });
+        inFromClause = true;
+        expectingTableRef = true;
       } else {
+        parenStack.push({
+          kind: "expr",
+          savedInFrom: inFromClause,
+        });
         expectingTableRef = false;
       }
       continue;
@@ -737,7 +781,7 @@ export function validateUserSql(
     if (!inExprParen) {
       if (tok.kind === "word") {
         const lower = tok.lower;
-        if (lower === "from" && prevTok?.lower !== "distinct") {
+        if ((lower === "from" && prevTok?.lower !== "distinct") || (lower === "table" && prevTok?.value !== ".")) {
           inFromClause = true;
           expectingTableRef = true;
           continue;
@@ -750,8 +794,7 @@ export function validateUserSql(
         if ((lower === "summarize" || lower === "describe") && (i === 0 || prevTok?.value === "(")) {
           if (
             nextTok &&
-            !(nextTok.kind === "word" && (nextTok.lower === "select" || nextTok.lower === "with" || nextTok.lower === "from")) &&
-            !(nextTok.kind === "symbol" && nextTok.value === "(")
+            !(nextTok.kind === "word" && (nextTok.lower === "select" || nextTok.lower === "with" || nextTok.lower === "from" || nextTok.lower === "table"))
           ) {
             inFromClause = true;
             expectingTableRef = true;

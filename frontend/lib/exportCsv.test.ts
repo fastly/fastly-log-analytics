@@ -24,6 +24,8 @@ describe('T5-FE-07: CSV formula-injection neutralization in exportCsv and cloud-
       '\n=1+1',
       ' =1+1',
       '\u200b=1+1',
+      '\u0085=1+1',
+      '\u2060=1+1',
       '\x01=1+1',
     ]) {
       const cell = sanitizeCsvCell(dangerous)
@@ -74,10 +76,10 @@ describe('T5-FE-07: CSV formula-injection neutralization in exportCsv and cloud-
           timestamp: Date.parse('2026-01-01T01:00:00Z'),
           op_class: 'A',
           op: '|calc',
-          dataset: ' =1+1',
+          dataset: '\u0085=1+1',
           bytes_in: 10,
           bytes_out: 20,
-          caller: '\u200b@SUM(1)',
+          caller: '\u2060@SUM(1)',
           est_cost_usd: -12.5,
           op_count: 1,
         },
@@ -97,8 +99,8 @@ describe('T5-FE-07: CSV formula-injection neutralization in exportCsv and cloud-
     expect(resp?.status).toBe(200)
     const usageCsv = await resp!.text()
     expect(usageCsv).toContain("'|calc")
-    expect(usageCsv).toContain("' =1+1")
-    expect(usageCsv).toContain("'\u200b@SUM(1)")
+    expect(usageCsv).toContain("'\u0085=1+1")
+    expect(usageCsv).toContain("'\u2060@SUM(1)")
     expect(usageCsv).toContain(',-12.5,')
   })
 })

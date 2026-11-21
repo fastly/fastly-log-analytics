@@ -596,9 +596,44 @@ def test_t5_c08_cloud_views_redteam_dupkeys_sticky_slots_columns_lambda_concat_a
         "bug-cloud-1-chr-concat": json.dumps(
             {"_view_extras": {"sql": "SELECT * FROM logs WHERE json_extract_string(_extra, chr(99) || 'id') = 's1'"}}
         ),
+        "bug-cloud-1-r2-unobf-multiline-arrow": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT * FROM logs WHERE _extra ->> '$.request.headers.'\n  'x-forwarded-for' = '198.51.100.7'"
+                }
+            }
+        ),
+        "bug-cloud-1-r2-newline-arrow": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM logs WHERE _extra->>'clien'\n't_ip' = '198.51.100.7'"}}
+        ),
+        "bug-cloud-1-r2-comment-newline-arrow": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM logs WHERE _extra->>'clien' -- split\n't_ip' = '198.51.100.7'"}}
+        ),
+        "bug-cloud-1-r2-newline-extract": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT * FROM logs WHERE json_extract_string(_extra, 'clien'\n't_ip') = '198.51.100.7'"
+                }
+            }
+        ),
+        "bug-cloud-1-r2-newline-subscript": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM logs WHERE _extra['clien'\n't_ip'] = '\"198.51.100.7\"'"}}
+        ),
+        "bug-cloud-1-r2-newline-struct": json.dumps(
+            {"_view_extras": {"sql": "SELECT {'clien'\n't_ip': '198.51.100.7'} FROM logs"}}
+        ),
+        "bug-cloud-1-r2-cte-subscript-ident": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "WITH k(c) AS (VALUES (chr(99)||chr(108)||chr(105)||chr(101)||chr(110)||chr(116)||chr(95)||chr(105)||chr(112))) SELECT * FROM logs, k WHERE _extra[c] = '\"198.51.100.7\"'"
+                }
+            }
+        ),
     }
     benign_vectors: dict[str, str] = {
         "benign-columns-safe": json.dumps({"_view_extras": {"sql": "SELECT COLUMNS('^(status|url|pop)$') FROM logs"}}),
+        "benign-arr-index": json.dumps({"_view_extras": {"sql": "SELECT arr[1] FROM logs"}}),
+        "benign-extra-safe": json.dumps({"_view_extras": {"sql": "SELECT _extra['safe'] FROM logs"}}),
         "benign-4xx-pill": json.dumps(
             {
                 "status": {"mode": "include", "values": ["404", "429"]},
@@ -1578,6 +1613,66 @@ def test_t5_hs04_py01_py03_service_pollution_non_default_tenant_and_18_pii_filte
         r_get = c_a.get(f"/api/services/svc-a/rum/analytics?filters={qf}")
         assert r_get.status_code == 403 and r_get.json()["error"] == "pii_policy_violation", key
 
+    # SEC-T5-ITER1-01: RFC 6838 +json media types, sniffed JSON on text/plain, non-dict JSON, and duplicate query/header params
+    for plus_ct in ("application/problem+json", "application/vnd.api+json", "application/ld+json", "text/plain"):
+        r_plus_fv = c_a.post(
+            "/api/dashboard/field-values?service_id=svc-a",
+            content=json.dumps({"service_id": "svc-a", "field": "oip", "search": "198.51"}).encode("utf-8"),
+            headers=analyst_a.headers({"Content-Type": plus_ct}),
+        )
+        assert r_plus_fv.status_code == 403 and r_plus_fv.json()["error"] == "pii_policy_violation", plus_ct
+
+        r_plus_csv = c_a.post(
+            "/api/dashboard/raw/csv?service_id=svc-a",
+            content=json.dumps(
+                {"service_id": "svc-a", "filters": {"ip": {"mode": "include", "values": ["203.0.113.45"]}}}
+            ).encode("utf-8"),
+            headers=analyst_a.headers({"Content-Type": plus_ct}),
+        )
+        assert r_plus_csv.status_code == 403 and r_plus_csv.json()["error"] == "pii_policy_violation", plus_ct
+
+        r_plus_agg = c_a.post(
+            "/api/dashboard/aggregates?service_id=svc-a",
+            content=json.dumps({"service_id": "svc-a", "fields": ["cookie_session", "ip"]}).encode("utf-8"),
+            headers=analyst_a.headers({"Content-Type": plus_ct}),
+        )
+        assert r_plus_agg.status_code == 403 and r_plus_agg.json()["error"] == "pii_policy_violation", plus_ct
+
+        r_plus_sid = c_a.post(
+            "/api/query?service_id=svc-a",
+            content=json.dumps({"service_id": "svc-b", "sql": "SELECT count() AS n FROM logs"}).encode("utf-8"),
+            headers=analyst_a.headers({"Content-Type": plus_ct}),
+        )
+        assert r_plus_sid.status_code == 403 and r_plus_sid.json()["error"] == "service_not_authorized", plus_ct
+
+    r_plus_bad = c_a.post(
+        "/api/dashboard/field-values?service_id=svc-a",
+        content=b'["not-a-dict"]',
+        headers=analyst_a.headers({"Content-Type": "application/problem+json"}),
+    )
+    assert r_plus_bad.status_code == 400 and r_plus_bad.json()["error"] == "invalid_json_body"
+
+    qf_safe = json.dumps({"url": {"mode": "include", "values": ["/ok"]}})
+    qf_ip = json.dumps({"ip": {"mode": "include", "values": ["1.2.3.4"]}})
+    r_dup_filters = c_a.get(f"/api/services/svc-a/rum/analytics?filters={qf_safe}&filters={qf_ip}")
+    assert r_dup_filters.status_code == 403 and r_dup_filters.json()["error"] == "pii_policy_violation"
+
+    r_dup_q_sid = c_a.get("/api/presets?service_id=svc-a&service_id=svc-b")
+    assert r_dup_q_sid.status_code == 403 and r_dup_q_sid.json()["error"] == "service_not_authorized"
+
+    r_dup_q_svc = c_a.get("/api/presets?service=svc-a&service=svc-b")
+    assert r_dup_q_svc.status_code == 403 and r_dup_q_svc.json()["error"] == "service_not_authorized"
+
+    r_dup_hdr = c_a.get(
+        "/api/presets",
+        headers=[
+            *[(k, v) for k, v in analyst_a.headers().items()],
+            ("X-Fastly-Service-Id", "svc-a"),
+            ("X-Fastly-Service-Id", "svc-b"),
+        ],
+    )
+    assert r_dup_hdr.status_code == 403 and r_dup_hdr.json()["error"] == "service_not_authorized"
+
     assert ch_recorder.calls == []
 
     # 3. Non-default svc-b Analyst succeeds on included-router paths & fla.activeServiceId=svc-b with zero svc-a leak
@@ -2134,11 +2229,26 @@ def test_t5_hs10_hs11_fe07_fe08_gateway_caddy_helm_metrics_cidrs_node_proxy_and_
             "0:0:0:0:0:ffff:7f00:1",
             "0000:0000:0000:0000:0000:ffff:0a00:0001",
             "::0:ffff:7f00:1",
+            "::7f00:1",
+            "0:0:0:0:0:0:7f00:1",
+            "00ff::1",
+            "64:ff9b::7f00:1",
+            "0064:ff9b::7f00:1",
             "ff02::1",
             "2002:7f00:1::1",
         ):
             if pub_re.search(non_public):
                 assert priv_re.search(non_public) is not None, f"{label} missed {non_public}"
+        for public_ip in (
+            "2001:4860:4860::8888",
+            "2606:4700::1",
+            "2a04:4e42::1",
+            "2400:cb00:2048:1::c629:d7a2",
+            "203.0.113.45",
+            "64.233.160.1",
+        ):
+            assert pub_re.search(public_ip) is not None, f"{label} rejected public {public_ip} in fcip_pub"
+            assert priv_re.search(public_ip) is None, f"{label} false positive on public {public_ip} in fcip_priv"
         for stripped_hdr in (
             "-X-Admin-Gateway-Token",
             "-X-FLA-Admin-Gateway",

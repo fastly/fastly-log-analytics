@@ -8,7 +8,7 @@ export function downloadBlob(blob: Blob, filename: string) {
 }
 
 const PLAIN_NUMERIC_RE = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/
-const LEADING_CTRL_OR_SPACE_RE = /^[\s\x00-\x1f\x7f\u200b-\u200f\u2028-\u202f\ufeff]*/u
+const LEADING_CTRL_OR_SPACE_RE = /^[\s\x00-\x1f\x7f\u0085\u200b-\u200f\u2028-\u202f\u2060\ufeff]*/u
 const FORMULA_TRIGGER_RE = /^[=+\-@|%]/
 
 export function sanitizeCsvCell(v: unknown, alwaysQuote = false): string {
