@@ -9,6 +9,7 @@ import {
   MAX_QUERY_ROWS,
   SQLValidationError,
   isDistinctFromOperator,
+  isNonKeywordTokenPos,
   isSimpleSelectStatement,
   stripSqlComments,
   tokenizeSql,
@@ -442,7 +443,11 @@ function rewriteSqlTableRefs(
     }
   }
 
-  type Frame = { kind: "subquery" | "from_join" | "expr"; savedInFrom: boolean };
+  type Frame = {
+    kind: "subquery" | "from_join" | "expr";
+    close: ")" | "]" | "}";
+    savedInFrom: boolean;
+  };
   const parenStack: Frame[] = [];
   let inFromClause = false;
   let expectingTableRef = false;
@@ -482,39 +487,47 @@ function rewriteSqlTableRefs(
       const isDirectSubquery = hasSubqueryHead && look === i + 1;
 
       if (expectingTableRef && !isDirectSubquery) {
-        parenStack.push({ kind: "from_join", savedInFrom: inFromClause });
+        parenStack.push({ kind: "from_join", close: ")", savedInFrom: inFromClause });
         inFromClause = true;
         expectingTableRef = !hasSubqueryHead;
       } else if (hasSubqueryHead) {
-        parenStack.push({ kind: "subquery", savedInFrom: inFromClause });
+        parenStack.push({ kind: "subquery", close: ")", savedInFrom: inFromClause });
         inFromClause = false;
         expectingTableRef = false;
       } else {
-        parenStack.push({ kind: "expr", savedInFrom: inFromClause });
+        parenStack.push({ kind: "expr", close: ")", savedInFrom: inFromClause });
         expectingTableRef = false;
       }
       continue;
     }
 
-    if (tok.kind === "symbol" && tok.value === ")") {
-      const frame = parenStack.pop();
-      if (frame) {
+    if (tok.kind === "symbol" && (tok.value === "[" || tok.value === "{")) {
+      if (!expectingTableRef) {
+        parenStack.push({
+          kind: "expr",
+          close: tok.value === "[" ? "]" : "}",
+          savedInFrom: inFromClause,
+        });
+        continue;
+      }
+    }
+
+    if (
+      tok.kind === "symbol" &&
+      (tok.value === ")" || tok.value === "]" || tok.value === "}")
+    ) {
+      if (
+        parenStack.length > 0 &&
+        parenStack[parenStack.length - 1].close === tok.value
+      ) {
+        const frame = parenStack.pop()!;
         inFromClause = frame.savedInFrom;
         expectingTableRef = false;
       }
       continue;
     }
 
-    const prevIsTypecast =
-      i >= 2 &&
-      tokens[i - 1].kind === "symbol" &&
-      tokens[i - 1].value === ":" &&
-      tokens[i - 2].kind === "symbol" &&
-      tokens[i - 2].value === ":";
-    const isNonKeywordPos =
-      (prevTok?.kind === "symbol" && prevTok.value === ".") ||
-      (prevTok?.kind === "word" && prevTok.lower === "as") ||
-      prevIsTypecast;
+    const isNonKeywordPos = isNonKeywordTokenPos(tokens, i);
 
     if (!inExprParen) {
       if (tok.kind === "word" && !isNonKeywordPos) {

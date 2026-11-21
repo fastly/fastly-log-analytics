@@ -1276,8 +1276,154 @@ def test_t5_c08_cloud_views_redteam_dupkeys_sticky_slots_columns_lambda_concat_a
         "bug-cloud-1-r8c-from-squote-logs-star-as-squote-t": json.dumps(
             {"_view_extras": {"sql": "SELECT status FROM 'logs' * AS 't' WHERE t::VARCHAR LIKE '%198.51.100.7%'"}}
         ),
+        # Wave 9 BUG-CLOUD-1-R9: AS-run parity, 1. float dot, (NOT * ...) & DISTINCT ON (NOT * ...),
+        # implicit unnamed_subquery/unnamed_query bindings, pragma_storage_info, and {} / [] depth in ON
+        "bug-cloud-1-r9-0a-as-as-from-logs-cast": json.dumps(
+            {"_view_extras": {"sql": "SELECT status AS as FROM logs WHERE logs::VARCHAR LIKE '%198.51.100.7%'"}}
+        ),
+        "bug-cloud-1-r9-0a-dot-as-from-logs-cast": json.dumps(
+            {"_view_extras": {"sql": "SELECT {'as': status}.as FROM logs WHERE logs::VARCHAR LIKE '%198.51.100.7%'"}}
+        ),
+        "bug-cloud-1-r9-0a-on-dot-as-join-logs-cast": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT t.url FROM (SELECT 200 AS \"as\") a JOIN (SELECT 200 AS y) b ON b.y = a.as JOIN logs AS t ON true WHERE t::VARCHAR LIKE '%198.51.100.7%'"
+                }
+            }
+        ),
+        "bug-cloud-1-r9-0b-float-dot-from-logs-cast": json.dumps(
+            {"_view_extras": {"sql": "SELECT 1. FROM logs WHERE logs::VARCHAR LIKE '%198.51.100.7%'"}}
+        ),
+        "bug-cloud-1-r9-0b-float-dot-ident-from-logs-cast": json.dumps(
+            {"_view_extras": {"sql": "SELECT 1._as FROM logs WHERE logs::VARCHAR LIKE '%198.51.100.7%'"}}
+        ),
+        "bug-cloud-1-r9a-paren-not-star-like-as-s": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT count(*) AS cnt FROM (SELECT (NOT * LIKE '%timestamp%') AS s FROM logs) WHERE s_1 = '198.51.100.7'"
+                }
+            }
+        ),
+        "bug-cloud-1-r9a-double-paren-not-star-like-as-s": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT count(*) AS cnt FROM (SELECT ((NOT * LIKE '%timestamp%')) AS s FROM logs) WHERE s_1 = '198.51.100.7'"
+                }
+            }
+        ),
+        "bug-cloud-1-r9a-paren-not-star-not-like-oip": json.dumps(
+            {"_view_extras": {"sql": "SELECT url, (NOT * NOT LIKE '%oi%') AS x FROM logs WHERE x = '203.0.113.9'"}}
+        ),
+        "bug-cloud-1-r9a-order-by-paren-not-star-not-like": json.dumps(
+            {"_view_extras": {"sql": "SELECT url FROM logs ORDER BY (NOT * NOT LIKE '%oi%') DESC LIMIT 1"}}
+        ),
+        "bug-cloud-1-r9a-order-by-paren-not-star-similar": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT url FROM logs ORDER BY (NOT * SIMILAR TO '(timestamp|ts_ms)') DESC LIMIT 1"
+                }
+            }
+        ),
+        "bug-cloud-1-r9a-distinct-on-not-star-like": json.dumps(
+            {"_view_extras": {"sql": "SELECT DISTINCT ON (NOT * LIKE '%oi%') url FROM logs"}}
+        ),
+        "bug-cloud-1-r9a-distinct-on-not-star-not-like": json.dumps(
+            {"_view_extras": {"sql": "SELECT DISTINCT ON (NOT * NOT LIKE '%oi%') url FROM logs"}}
+        ),
+        "bug-cloud-1-r9b-unnamed-subquery-cast": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT status FROM (SELECT * FROM logs) WHERE unnamed_subquery::VARCHAR LIKE '%198.51.100.7%'"
+                }
+            }
+        ),
+        "bug-cloud-1-r9b-quoted-unnamed-subquery-cast": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT status FROM (SELECT * FROM logs) WHERE \"unnamed_subquery\"::VARCHAR LIKE '%203.0.113.9%'"
+                }
+            }
+        ),
+        "bug-cloud-1-r9b-format-unnamed-subquery": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT status FROM (SELECT * FROM logs) WHERE format('{}', unnamed_subquery) LIKE '%sess_secret_99%'"
+                }
+            }
+        ),
+        "bug-cloud-1-r9b-unnamed-subquery2-cast": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT a FROM (SELECT 1 AS a), (SELECT * FROM logs) WHERE unnamed_subquery2::VARCHAR LIKE '%esid_secret_77%'"
+                }
+            }
+        ),
+        "bug-cloud-1-r9b-from-logs-unnamed-subquery": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT status FROM (FROM logs) WHERE unnamed_subquery::VARCHAR LIKE '%198.51.100.7%'"
+                }
+            }
+        ),
+        "bug-cloud-1-r9b-table-logs-unnamed-subquery": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT status FROM (TABLE logs) WHERE unnamed_subquery::VARCHAR LIKE '%198.51.100.7%'"
+                }
+            }
+        ),
+        "bug-cloud-1-r9b-lateral-unnamed-subquery": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT x.a FROM (SELECT 1 AS a) x, LATERAL (SELECT * FROM logs) WHERE unnamed_subquery::VARCHAR LIKE '%198.51.100.7%'"
+                }
+            }
+        ),
+        "bug-cloud-1-r9c-pragma-storage-info": json.dumps(
+            {"_view_extras": {"sql": "SELECT stats FROM pragma_storage_info('logs') WHERE stats LIKE '%198.51.1%'"}}
+        ),
+        "bug-cloud-1-r9c-on-brace-where-comma-logs-cast": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT t.url FROM (SELECT 1 AS a) x JOIN (SELECT 1 AS b) y ON {where: 1} IS NOT NULL, logs AS t WHERE t::VARCHAR LIKE '%198.51.100.7%'"
+                }
+            }
+        ),
+        "bug-cloud-1-r9c-on-listcomp-for-comma-logs-cast": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT t.url FROM (SELECT 1 AS a) x JOIN (SELECT 1 AS b) y ON [x FOR x IN [1]] IS NOT NULL, logs AS t WHERE t::VARCHAR LIKE '%198.51.100.7%'"
+                }
+            }
+        ),
     }
     benign_vectors: dict[str, str] = {
+        "benign-r9-as-as-from-logs": json.dumps(
+            {"_view_extras": {"sql": "SELECT status AS as, url FROM logs WHERE status = 200"}}
+        ),
+        "benign-r9-dot-as-as-where-from-logs": json.dumps(
+            {"_view_extras": {"sql": "SELECT {'as': status}.as AS where, url FROM logs WHERE status = 200"}}
+        ),
+        "benign-r9-float-dot-from-logs": json.dumps(
+            {"_view_extras": {"sql": "SELECT status, 1. FROM logs WHERE status = 200"}}
+        ),
+        "benign-r9-unnamed-subquery-safe-cols": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT unnamed_subquery.status, unnamed_subquery.url FROM (SELECT * FROM logs) WHERE unnamed_subquery.status = 200"
+                }
+            }
+        ),
+        "benign-r9-paren-not-expr-mult": json.dumps(
+            {"_view_extras": {"sql": "SELECT (NOT (status = 404))::INT * 2 AS x FROM logs WHERE status = 200"}}
+        ),
+        "benign-r9-on-bracket-list-eq": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT a.url FROM logs AS a JOIN logs AS b ON [a.status, 1] = [b.status, 1] WHERE a.status = 200"
+                }
+            }
+        ),
         "benign-r8-where-url-eq-ip-literal": json.dumps(
             {"_view_extras": {"sql": "SELECT status, url FROM logs WHERE url = 'ip'"}}
         ),
@@ -1398,34 +1544,53 @@ def test_t5_c08_cloud_views_redteam_dupkeys_sticky_slots_columns_lambda_concat_a
         ),
     }
 
-    for name, fjson in {**pii_vectors, **benign_vectors}.items():
-        r_save = cloud_server.request(
-            "POST",
-            "/api/views",
-            session_cookie=admin.session_cookie,
-            json_body={
-                "id": f"v-{name}",
-                "service_id": sid,
-                "name": name,
-                "filters_json": fjson,
-                "time_range_type": "relative",
-                "page": "dashboard",
-            },
-        )
-        assert r_save.status_code in {200, 201}, f"{name}: {r_save.status_code} {r_save.text}"
+    all_items = list({**pii_vectors, **benign_vectors}.items())
+    full_names: set[str] = set()
+    nopii_names: set[str] = set()
+    batch_size = 150
+    for start in range(0, len(all_items), batch_size):
+        batch = all_items[start : start + batch_size]
+        for name, fjson in batch:
+            r_save = cloud_server.request(
+                "POST",
+                "/api/views",
+                session_cookie=admin.session_cookie,
+                json_body={
+                    "id": f"v-{name}",
+                    "service_id": sid,
+                    "name": name,
+                    "filters_json": fjson,
+                    "time_range_type": "relative",
+                    "page": "dashboard",
+                },
+            )
+            assert r_save.status_code in {200, 201}, f"{name}: {r_save.status_code} {r_save.text}"
 
-    r_full = cloud_server.request("GET", f"/api/views/{sid}", session_cookie=analyst_full.session_cookie)
-    assert r_full.status_code == 200
-    full_names = {v["name"] for v in r_full.json()}
+        r_full = cloud_server.request("GET", f"/api/views/{sid}", session_cookie=analyst_full.session_cookie)
+        assert r_full.status_code == 200
+        full_names.update(v["name"] for v in r_full.json())
+
+        r_nopii = cloud_server.request("GET", f"/api/views/{sid}", session_cookie=analyst_nopii.session_cookie)
+        assert r_nopii.status_code == 200
+        assert "198.51.100.7" not in r_nopii.text
+        assert "203.0.113.9" not in r_nopii.text
+        assert "sess_secret_99" not in r_nopii.text
+        assert "esid_secret_77" not in r_nopii.text
+        nopii_names.update(v["name"] for v in r_nopii.json())
+
+        if start + batch_size < len(all_items):
+            for name, _ in batch:
+                r_del = cloud_server.request(
+                    "DELETE",
+                    f"/api/views/v-{name}?service_id={sid}",
+                    session_cookie=admin.session_cookie,
+                )
+                assert r_del.status_code == 204, f"delete {name}: {r_del.status_code} {r_del.text}"
+
     assert set(benign_vectors).issubset(full_names)
     # Note: NoDupJson may reject literal duplicate keys at save or filter time; every saved non-dup PII view is visible to full Analyst
     assert {"bug-cloud-1-lambda", "bug-cloud-1-sub-concat", "bug-cloud-1-chr-concat"}.issubset(full_names)
-
-    r_nopii = cloud_server.request("GET", f"/api/views/{sid}", session_cookie=analyst_nopii.session_cookie)
-    assert r_nopii.status_code == 200
-    nopii_names = {v["name"] for v in r_nopii.json()}
     assert nopii_names == set(benign_vectors)
-    assert "198.51.100.7" not in r_nopii.text
 
 
 def test_t5_c09_b08_cloud_auth_fail_precision_and_service_scoring_telemetry_redaction(
@@ -2214,18 +2379,33 @@ def test_t5_hs03_hs12_py08_sql_console_table_filter_parser_differentials_union_s
         "SELECT b.service_id FROM logs settings, high_scale_batch_publications AS b",
         "SELECT b.service_id FROM logs AS format, high_scale_batch_publications AS b",
         "SELECT b.service_id FROM logs format, high_scale_batch_publications AS b",
+        "SELECT name AS as FROM system.tables",
+        "SELECT service_id AS as FROM high_scale_batch_publications",
+        "SELECT c.name, a.as FROM (SELECT 1 AS as FROM logs) AS a, system.tables AS c",
+        "SELECT c.name FROM (SELECT 200 AS as FROM logs) AS a JOIN logs AS b ON b.status = a.as JOIN system.tables AS c ON true",
+        "WITH RECURSIVE ops_secret AS (SELECT 1 AS as UNION ALL SELECT secret_col FROM ops_secret) SELECT * FROM ops_secret",
+        "SELECT c.name FROM logs AS a JOIN logs AS b ON {prewhere: 1} IS NOT NULL, system.tables AS c",
+        "SELECT c.name FROM logs AS a JOIN logs AS b ON {where: 1} IS NOT NULL, system.tables AS c",
+        "SELECT c.service_id FROM logs AS a JOIN logs AS b ON {limit: 1} IS NOT NULL, high_scale_batch_publications AS c",
+        "SELECT c.service_id FROM logs AS a JOIN logs AS b ON [x FOR x IN (1)] IS NOT NULL, high_scale_batch_publications AS c",
+        "SELECT * FROM [ops_secret]",
+        "SELECT [(1]) FROM logs",
     ]
     c = _analyst_client(analyst)
     for bad_sql in adversarial_sqls:
         r_bad = c.post("/api/query", json={"service_id": "svc-a", "sql": bad_sql})
         assert r_bad.status_code in {400, 403}, f"SQL not rejected ({r_bad.status_code}): {bad_sql}"
 
-    # Benign compound leading-LPAREN subquery, sample alias, and ::union typecast on allowed table succeed
+    # Benign compound leading-LPAREN subquery, sample alias, ::union, AS as, 1., [a.status, 1], and JSON string succeed
     for benign_console_sql in (
         "SELECT status FROM logs WHERE url IN ((SELECT url FROM logs) UNION ALL SELECT url FROM logs)",
         "SELECT sample.status FROM logs AS sample WHERE sample.status = 200",
         "SELECT sample.status FROM logs sample WHERE sample.status = 200",
         "SELECT 1::union(a INT) AS u FROM logs",
+        "SELECT status, 1. FROM logs",
+        "SELECT status AS as FROM logs",
+        "SELECT a.status FROM logs AS a JOIN logs AS b ON [a.status, 1] = [b.status, 1]",
+        """SELECT '{"where": 1}' AS j FROM logs""",
     ):
         r_compound_ok = c.post(
             "/api/query",
@@ -2235,6 +2415,20 @@ def test_t5_hs03_hs12_py08_sql_console_table_filter_parser_differentials_union_s
             },
         )
         assert r_compound_ok.status_code == 200, f"{benign_console_sql} -> {r_compound_ok.text}"
+
+    masked_hs03 = provision_analyst_session(
+        service_ids=["svc-a"], mask_ips=True, email="hs03-masked@example.test", client_ip="203.0.113.99"
+    )
+    c_masked_hs03 = _analyst_client(masked_hs03)
+    ch_recorder.calls.clear()
+    r_as_as = c_masked_hs03.post(
+        "/api/query",
+        json={"service_id": "svc-a", "sql": "SELECT service_id, client_ip AS as FROM request_facts"},
+    )
+    assert r_as_as.status_code == 200, r_as_as.text
+    as_as_sql, _, as_as_settings = ch_recorder.calls[-1]
+    assert "FROM request_facts" not in as_as_sql and "_m_" in as_as_sql, as_as_sql
+    assert "_m_" in str((as_as_settings or {}).get("additional_table_filters", "")), as_as_settings
 
     # 2. Multi-branch UNION ALL rewrites pop -> custom_fields['pop'] ONLY on logs, preserving native pop on client_vitals
     ch_recorder.calls.clear()

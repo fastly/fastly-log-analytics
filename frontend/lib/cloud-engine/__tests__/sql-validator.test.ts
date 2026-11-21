@@ -310,4 +310,42 @@ describe('T5-FE-04: cloud-engine SQL validator adversarial replacement-scan, sch
       expect(rows.length, benignSql).toBe(1)
     }
   })
+
+  it('closes SEC-T5-ITER8-FE-01: enforces iterative AS-run parity and []/{} expression delimiter parity while allowing benign AS/dot/bracket/brace queries', async () => {
+    for (const blockedSql of [
+      'SELECT secret_col AS as FROM ops_secret',
+      "SELECT secret_col, {'as': 1}.as FROM ops_secret",
+      "SELECT {'as': secret_col}.as FROM ops_secret",
+      "SELECT secret_col, {'as': 1}.as AS as FROM ops_secret",
+      'SELECT secret_col, 1::as FROM ops_secret',
+      'SELECT c.secret_col FROM (SELECT 200 AS "as") AS a JOIN logs AS b ON b.status = a.as JOIN ops_secret AS c ON true',
+      "SELECT status AS as FROM main.'requests'",
+      'SELECT c.secret_col FROM logs AS a JOIN logs AS b ON [x FOR x IN [1]] IS NOT NULL, ops_secret AS c',
+      'SELECT c.secret_col FROM logs AS a JOIN logs AS b ON {where: 1} IS NOT NULL, ops_secret AS c',
+      'SELECT * FROM [ops_secret]',
+      'SELECT * FROM {ops_secret: 1}',
+      'SELECT [1) FROM logs',
+      "SELECT {'a': 1] FROM logs",
+      'SELECT [1, 2 FROM logs',
+      "SELECT {'a': 1 FROM logs",
+    ]) {
+      expect(() => validateUserSql(blockedSql, ['logs', 'requests']), blockedSql).toThrow(
+        SQLValidationError,
+      )
+      const res = validateSqlQuery(blockedSql, { allowedTables: ['logs', 'requests'] })
+      expect(res.valid, blockedSql).toBe(false)
+    }
+
+    for (const benignSql of [
+      'SELECT status AS as, url FROM logs',
+      "SELECT {'as': status}.as AS where, url FROM logs",
+      'SELECT status, 1. FROM logs',
+      'SELECT a.status FROM logs AS a JOIN logs AS b ON [a.status, 1] = [b.status, 1]',
+      "SELECT [x FOR x IN [1, 2] IF x > 0] AS xs, {'a': 1} AS st FROM logs",
+    ]) {
+      expect(() => validateUserSql(benignSql, ['logs', 'requests']), benignSql).not.toThrow()
+      const rows = await engine.executeSql(benignSql)
+      expect(rows.length, benignSql).toBe(1)
+    }
+  })
 })

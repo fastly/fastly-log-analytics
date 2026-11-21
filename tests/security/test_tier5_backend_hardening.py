@@ -1330,3 +1330,121 @@ def test_sec_t5_iter7_sql01_py01_non_keyword_contexts_numeric_boundaries_and_bar
         )
         assert len(executed) == 1, benign_hs_sql
         assert "fla_cv_m_req" in executed[0][0] and "FROM logs" not in executed[0][0], executed[0][0]
+
+
+def test_sec_t5_iter8_sql01_py01_as_run_parity_float_dot_and_bracket_brace_delimiters() -> None:
+    from backend.core.sql_validator import SQLValidationError, validate_user_sql
+    from backend.high_scale import query as hs_query
+    from backend.models.analytics import QueryRequest as DashboardQueryRequest
+
+    # 1. validate_user_sql rejects AS-shield cascades, recursive CTE AS-as, and []/{} comma-join/syntax bypasses
+    for blocked_sql in (
+        "SELECT name AS as FROM system.tables",
+        "SELECT service_id AS as FROM high_scale_batch_publications",
+        "SELECT c.name, a.as FROM (SELECT 1 AS as FROM logs) AS a, system.tables AS c",
+        "SELECT secret_col, {'as': 1}.as FROM ops_secret",
+        "SELECT {'as': secret_col}.as FROM ops_secret",
+        "SELECT secret_col, {'as': 1}.as AS as FROM ops_secret",
+        "SELECT secret_col, 1::as FROM ops_secret",
+        'SELECT c.name FROM (SELECT 200 AS "as") AS a JOIN logs AS b ON b.status = a.as JOIN system.tables AS c ON true',
+        'WITH RECURSIVE ops_secret AS (SELECT secret_col AS as FROM ops_secret UNION ALL SELECT "as" FROM ops_secret WHERE 1=0) SELECT * FROM ops_secret',
+        "WITH RECURSIVE ops_secret AS (SELECT 1 AS as UNION BY NAME SELECT secret_col FROM ops_secret) SELECT * FROM ops_secret",
+        "SELECT c.secret_col FROM logs AS a JOIN logs AS b ON [x FOR x IN [1]] IS NOT NULL, ops_secret AS c",
+        "SELECT c.secret_col FROM logs AS a JOIN logs AS b ON [x FOR x IN [1] IF x = 1] IS NOT NULL, ops_secret AS c",
+        "SELECT c.secret_col FROM logs AS a JOIN logs AS b ON {format: 1} IS NOT NULL, ops_secret AS c",
+        "SELECT c.secret_col FROM logs AS a JOIN logs AS b ON {prewhere: 1} IS NOT NULL, ops_secret AS c",
+        "SELECT c.secret_col FROM logs AS a JOIN logs AS b ON {settings: 1} IS NOT NULL, ops_secret AS c",
+        "SELECT c.secret_col FROM logs AS a JOIN logs AS b ON {where: 1} IS NOT NULL, ops_secret AS c",
+        "SELECT c.secret_col FROM logs AS a JOIN logs AS b ON {limit: 1} IS NOT NULL, ops_secret AS c",
+        "SELECT c.table_name FROM logs AS a JOIN logs AS b ON [x FOR x IN [1]] IS NOT NULL, information_schema.tables AS c",
+        "SELECT c.tablename FROM logs AS a JOIN logs AS b ON {format: 1} IS NOT NULL, pg_tables AS c",
+        "SELECT * FROM [ops_secret]",
+        "SELECT * FROM {ops_secret: 1}",
+        "SELECT [(1]) FROM logs",
+        "SELECT {a: [1, 2} FROM logs",
+        "SELECT [1, 2 FROM logs",
+        "SELECT [(SELECT secret_col FROM ops_secret)] FROM logs",
+        "SELECT {a: current_setting('threads')} FROM logs",
+    ):
+        with pytest.raises(SQLValidationError, match=".*"):
+            validate_user_sql(blocked_sql, allowed_tables={"logs"})
+
+    # 2. Benign controls on validate_user_sql MUST pass
+    for benign_sql in (
+        "SELECT status, 1. FROM logs",
+        "SELECT status AS as FROM logs",
+        "SELECT {'as': status}.as AS where FROM logs",
+        "WITH RECURSIVE r(n) AS (SELECT 1 AS as UNION ALL SELECT n + 1 FROM r WHERE n < 3) SELECT * FROM r",
+        "SELECT [x FOR x IN [1, 2] IF x > 0] FROM logs",
+        "SELECT {format: 1, replace: 2} FROM logs",
+        "SELECT a.status FROM logs AS a JOIN logs AS b ON [a.status, 1] = [b.status, 1]",
+    ):
+        assert validate_user_sql(benign_sql, allowed_tables={"logs"}).parse_tree.get("statements"), benign_sql
+
+    # 3. Live High-Scale query_endpoint enforces AS-run parity, fla_cv_m_req + additional_table_filters, and []/{} blocking
+    executed: list[tuple[str, dict[str, object]]] = []
+
+    class _StubCH:
+        _table_filters_verified = True
+
+        def execute(
+            self,
+            sql: str,
+            params: dict[str, object] | None = None,
+            *,
+            settings: dict[str, object] | None = None,
+        ) -> list[dict[str, object]]:
+            del params
+            executed.append((sql, dict(settings or {})))
+            return [{"service_id": "svc_alpha", "as": "0.0.0.0"}]
+
+    stub_ch = _StubCH()
+    hs_svc = SimpleNamespace(service_id="svc_alpha", client=stub_ch)
+
+    for hs_blocked_sql in (
+        "SELECT name AS as FROM system.tables",
+        "SELECT service_id AS as FROM high_scale_batch_publications",
+        "SELECT c.name, a.as FROM (SELECT 1 AS as FROM logs) AS a, system.tables AS c",
+        "SELECT secret_col, 1::as FROM ops_secret",
+        "SELECT c.name FROM (SELECT 200 AS as FROM logs) AS a JOIN logs AS b ON b.status = a.as JOIN system.tables AS c ON true",
+        "WITH RECURSIVE ops_secret AS (SELECT 1 AS as UNION ALL SELECT secret_col FROM ops_secret) SELECT * FROM ops_secret",
+        "SELECT c.name FROM logs AS a JOIN logs AS b ON {prewhere: 1} IS NOT NULL, system.tables AS c",
+        "SELECT c.name FROM logs AS a JOIN logs AS b ON {where: 1} IS NOT NULL, system.tables AS c",
+        "SELECT c.service_id FROM logs AS a JOIN logs AS b ON {limit: 1} IS NOT NULL, high_scale_batch_publications AS c",
+        "SELECT c.service_id FROM logs AS a JOIN logs AS b ON [x FOR x IN (1)] IS NOT NULL, high_scale_batch_publications AS c",
+        "SELECT * FROM [logs]",
+        "SELECT [(1]) FROM logs",
+    ):
+        with pytest.raises(PermissionError):
+            hs_query.query_endpoint(
+                hs_svc,
+                DashboardQueryRequest(sql=hs_blocked_sql, max_rows=10),
+                "2026-11-19T00:00:00Z",
+                "2026-11-19T01:00:00Z",
+                mask_ips=True,
+                tables={"request_facts": "fla_cv_m_req"},
+            )
+    assert executed == []
+
+    # Critical check: SELECT service_id, client_ip AS as FROM request_facts MUST rewrite to fla_cv_m_req AND set additional_table_filters!
+    for hs_benign_sql in (
+        "SELECT service_id, client_ip AS as FROM request_facts",
+        "SELECT status, 1. FROM logs",
+        "SELECT status AS as FROM logs",
+        "SELECT a.status FROM logs AS a JOIN logs AS b ON [a.status, 1] = [b.status, 1]",
+        """SELECT '{"where": 1}' AS j FROM logs""",
+    ):
+        executed.clear()
+        hs_query.query_endpoint(
+            hs_svc,
+            DashboardQueryRequest(sql=hs_benign_sql, max_rows=10),
+            "2026-11-19T00:00:00Z",
+            "2026-11-19T01:00:00Z",
+            mask_ips=True,
+            tables={"request_facts": "fla_cv_m_req"},
+        )
+        assert len(executed) == 1, hs_benign_sql
+        ran_sql, ran_settings = executed[0]
+        assert "fla_cv_m_req" in ran_sql, (hs_benign_sql, ran_sql)
+        assert "FROM request_facts" not in ran_sql and "FROM logs" not in ran_sql, (hs_benign_sql, ran_sql)
+        assert "fla_cv_m_req" in str(ran_settings.get("additional_table_filters", "")), (hs_benign_sql, ran_settings)

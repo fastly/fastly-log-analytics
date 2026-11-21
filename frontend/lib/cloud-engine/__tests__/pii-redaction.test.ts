@@ -669,4 +669,72 @@ describe('T5-FE-05: cloud-engine executeCloudQuery shadow-masked CTE and handleS
       expect(bodyStr, benignSql).not.toContain('CANARY_SESS_')
     }
   })
+
+  it('closes SEC-T5-ITER8-FE-01: blocks AS-shield cascades and {where: 1}/[x FOR x IN [1]] comma-joins on live executeCloudQuery while preserving benign AS/1./[]/{} queries with PII masked', async () => {
+    const runSql = (sql: string) => engine.executeSql(sql)
+
+    for (const blockedSql of [
+      'SELECT secret_col AS as FROM ops_secret',
+      "SELECT secret_col, {'as': 1}.as FROM ops_secret",
+      "SELECT {'as': secret_col}.as FROM ops_secret",
+      "SELECT secret_col, {'as': 1}.as AS as FROM ops_secret",
+      'SELECT c.secret_col FROM (SELECT 200 AS "as") AS a JOIN logs AS b ON b.status = a.as JOIN ops_secret AS c ON true',
+      "SELECT status AS as FROM main.'requests'",
+      'SELECT c.secret_col FROM logs AS a JOIN logs AS b ON [x FOR x IN [1]] IS NOT NULL, ops_secret AS c',
+      'SELECT c.secret_col FROM logs AS a JOIN logs AS b ON {where: 1} IS NOT NULL, ops_secret AS c',
+      'SELECT * FROM [ops_secret]',
+      'SELECT * FROM {ops_secret: 1}',
+      'SELECT [1) FROM logs',
+      "SELECT {'a': 1] FROM logs",
+    ]) {
+      const res = await executeCloudQuery(
+        { sql: blockedSql },
+        {
+          role: 'analyst-no-pii',
+          maskIps: true,
+          tableName: 'requests',
+          allowedTables: ['logs', 'requests'],
+          runSql,
+        },
+      )
+      expect(res.status, blockedSql).toBe(403)
+      expect(JSON.stringify(res.body), blockedSql).not.toContain('TOP_SECRET_CANARY')
+    }
+
+    expect(rewriteCloudQuerySql('SELECT status AS as FROM logs', 'requests').rewrittenSql).toBe(
+      'SELECT status AS as FROM requests LIMIT 1000',
+    )
+    expect(
+      rewriteCloudQuerySql("SELECT {'as': status}.as FROM logs", 'requests').rewrittenSql,
+    ).toBe("SELECT {'as': status}.as FROM requests LIMIT 1000")
+    expect(
+      rewriteCloudQuerySql(
+        'SELECT c.status FROM logs AS a JOIN logs AS b ON {where: 1} IS NOT NULL, logs AS c',
+        'requests',
+      ).rewrittenSql,
+    ).toContain(', requests AS c')
+
+    for (const benignSql of [
+      'SELECT status AS as, url, ip, cookie_session FROM logs',
+      "SELECT {'as': status}.as AS where, url, ip, cookie_session FROM logs",
+      'SELECT status, 1., ip, cookie_session FROM logs',
+      'SELECT a.status, a.ip FROM logs AS a JOIN logs AS b ON [a.status, 1] = [b.status, 1]',
+      "SELECT [x FOR x IN [1, 2] IF x > 0] AS xs, {'a': 1} AS st, ip, cookie_session FROM logs",
+    ]) {
+      const res = await executeCloudQuery(
+        { sql: benignSql },
+        {
+          role: 'analyst-no-pii',
+          maskIps: true,
+          tableName: 'requests',
+          allowedTables: ['logs', 'requests'],
+          runSql,
+        },
+      )
+      expect(res.status, benignSql).toBe(200)
+      const bodyStr = JSON.stringify(res.body)
+      expect(bodyStr, benignSql).not.toContain('203.0.113.')
+      expect(bodyStr, benignSql).not.toContain('CANARY_SESS_')
+    }
+  })
 })

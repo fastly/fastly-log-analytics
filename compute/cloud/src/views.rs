@@ -821,6 +821,7 @@ fn is_blind_pii_fn(token: &str) -> bool {
     let lower = trim_sql_ws(token).to_ascii_lowercase();
     lower.starts_with("read_")
         || lower.starts_with("parquet_")
+        || lower.starts_with("pragma_")
         || matches!(
             lower.as_str(),
             "struct_extract_at"
@@ -839,6 +840,8 @@ fn is_blind_pii_fn(token: &str) -> bool {
                 | "map_entries"
                 | "query"
                 | "query_table"
+                | "duckdb_table_sample"
+                | "summary"
                 | "json_execute_serialized_sql"
                 | "json_deserialize_sql"
                 | "json_serialize_sql"
@@ -917,6 +920,40 @@ fn is_non_call_sql_keyword(token: &str) -> bool {
             | "last"
             | "limit"
             | "offset"
+    )
+}
+
+fn is_non_subscriptable_sql_keyword(token: &str) -> bool {
+    matches!(
+        trim_sql_ws(token).to_ascii_lowercase().as_str(),
+        "select"
+            | "where"
+            | "and"
+            | "or"
+            | "not"
+            | "in"
+            | "on"
+            | "using"
+            | "case"
+            | "when"
+            | "then"
+            | "else"
+            | "having"
+            | "qualify"
+            | "by"
+            | "like"
+            | "ilike"
+            | "similar"
+            | "to"
+            | "from"
+            | "join"
+            | "union"
+            | "intersect"
+            | "except"
+            | "as"
+            | "limit"
+            | "offset"
+            | "for"
     )
 }
 
@@ -1090,6 +1127,10 @@ enum RelTok {
     },
     LParen,
     RParen,
+    LBracket,
+    RBracket,
+    LBrace,
+    RBrace,
     Comma,
     Dot,
     Colon,
@@ -1097,6 +1138,25 @@ enum RelTok {
     Semi,
     Star,
     Other,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScopeDelim {
+    Root,
+    Paren,
+    Bracket,
+    Brace,
+}
+
+fn scan_rel_digits(bytes: &[u8], start: usize) -> usize {
+    let mut i = start;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+        if i + 1 < bytes.len() && bytes[i] == b'_' && bytes[i + 1].is_ascii_digit() {
+            i += 1;
+        }
+    }
+    i
 }
 
 fn find_matching_rel_rparen(tokens: &[RelTok], open_idx: usize) -> Option<usize> {
@@ -1223,19 +1283,38 @@ fn is_non_keyword_rel_pos(tokens: &[RelTok], idx: usize) -> bool {
     if idx == 0 {
         return false;
     }
-    match tokens.get(idx - 1) {
-        Some(RelTok::Dot | RelTok::DoubleColon) => true,
-        Some(RelTok::Ident {
+    if matches!(tokens.get(idx - 1), Some(RelTok::Dot | RelTok::DoubleColon)) {
+        return true;
+    }
+    let mut r = 0usize;
+    let mut p = idx;
+    while p > 0 {
+        if let Some(RelTok::Ident {
             lower,
             quoted: false,
             ..
-        }) => lower == "as",
-        _ => false,
+        }) = tokens.get(p - 1)
+        {
+            if lower == "as" {
+                r += 1;
+                p -= 1;
+                continue;
+            }
+        }
+        break;
     }
+    if r == 0 {
+        return false;
+    }
+    if p > 0 && matches!(tokens.get(p - 1), Some(RelTok::Dot | RelTok::DoubleColon)) {
+        r -= 1;
+    }
+    r % 2 == 1
 }
 
 fn range_has_top_level_setop(tokens: &[RelTok], start: usize, end: usize) -> bool {
     let mut k = start;
+    let mut bb_depth = 0u32;
     while k < end {
         match &tokens[k] {
             RelTok::LParen => {
@@ -1244,11 +1323,20 @@ fn range_has_top_level_setop(tokens: &[RelTok], start: usize, end: usize) -> boo
                 };
                 k = rp + 1;
             }
+            RelTok::LBracket | RelTok::LBrace => {
+                bb_depth = bb_depth.saturating_add(1);
+                k += 1;
+            }
+            RelTok::RBracket | RelTok::RBrace => {
+                bb_depth = bb_depth.saturating_sub(1);
+                k += 1;
+            }
             RelTok::Ident {
                 lower,
                 quoted: false,
                 ..
-            } if matches!(lower.as_str(), "union" | "intersect" | "except")
+            } if bb_depth == 0
+                && matches!(lower.as_str(), "union" | "intersect" | "except")
                 && !is_non_keyword_rel_pos(tokens, k) =>
             {
                 return true;
@@ -1365,6 +1453,7 @@ fn star_has_unsafe_post_modifier_or_alias(
 
 #[derive(Clone, Copy)]
 struct WildcardScope {
+    delim: ScopeDelim,
     is_expr_paren: bool,
     is_distinct_on_paren: bool,
     saved_in_from: bool,
@@ -1381,6 +1470,7 @@ fn has_positional_wildcard_subquery_or_setop(
     cte_body_lparens: &std::collections::BTreeSet<usize>,
 ) -> bool {
     let mut scopes = vec![WildcardScope {
+        delim: ScopeDelim::Root,
         is_expr_paren: false,
         is_distinct_on_paren: false,
         saved_in_from: false,
@@ -1398,6 +1488,7 @@ fn has_positional_wildcard_subquery_or_setop(
     let mut idx = 0usize;
     while idx < tokens.len() {
         let cur = *scopes.last().unwrap_or(&WildcardScope {
+            delim: ScopeDelim::Root,
             is_expr_paren: false,
             is_distinct_on_paren: false,
             saved_in_from: false,
@@ -1445,6 +1536,7 @@ fn has_positional_wildcard_subquery_or_setop(
 
                 if expect_rel && !has_subquery_head {
                     scopes.push(WildcardScope {
+                        delim: ScopeDelim::Paren,
                         is_expr_paren: false,
                         is_distinct_on_paren: false,
                         saved_in_from: in_from,
@@ -1495,6 +1587,7 @@ fn has_positional_wildcard_subquery_or_setop(
                                 )
                             ));
                     scopes.push(WildcardScope {
+                        delim: ScopeDelim::Paren,
                         is_expr_paren: false,
                         is_distinct_on_paren: false,
                         saved_in_from: in_from,
@@ -1528,6 +1621,7 @@ fn has_positional_wildcard_subquery_or_setop(
                             }) if k2 == "distinct"
                         );
                     scopes.push(WildcardScope {
+                        delim: ScopeDelim::Paren,
                         is_expr_paren: true,
                         is_distinct_on_paren: is_distinct_on,
                         saved_in_from: in_from,
@@ -1544,21 +1638,60 @@ fn has_positional_wildcard_subquery_or_setop(
                 idx += 1;
                 continue;
             }
+            RelTok::LBracket | RelTok::LBrace => {
+                scopes.push(WildcardScope {
+                    delim: if matches!(tokens[idx], RelTok::LBracket) {
+                        ScopeDelim::Bracket
+                    } else {
+                        ScopeDelim::Brace
+                    },
+                    is_expr_paren: true,
+                    is_distinct_on_paren: false,
+                    saved_in_from: in_from,
+                    in_setop_branch: false,
+                    in_disallowed_wildcard_subquery: false,
+                    branch_saw_select: false,
+                    branch_saw_from: false,
+                    in_select_list: false,
+                    in_order_by: false,
+                });
+                expect_rel = false;
+                prev_rparen_was_distinct_on = false;
+                idx += 1;
+                continue;
+            }
             RelTok::RParen => {
-                if scopes.len() > 1 {
-                    if let Some(popped) = scopes.pop() {
-                        if !popped.is_expr_paren
-                            && popped.branch_saw_from
-                            && !popped.branch_saw_select
-                            && (popped.in_setop_branch || popped.in_disallowed_wildcard_subquery)
-                        {
-                            return true;
-                        }
-                        in_from = popped.saved_in_from;
-                        expect_rel = false;
-                        prev_rparen_was_distinct_on = popped.is_distinct_on_paren;
+                if scopes.len() <= 1 || scopes.last().is_some_and(|s| s.delim != ScopeDelim::Paren)
+                {
+                    return true;
+                }
+                if let Some(popped) = scopes.pop() {
+                    if !popped.is_expr_paren
+                        && popped.branch_saw_from
+                        && !popped.branch_saw_select
+                        && (popped.in_setop_branch || popped.in_disallowed_wildcard_subquery)
+                    {
+                        return true;
                     }
+                    in_from = popped.saved_in_from;
+                    expect_rel = false;
+                    prev_rparen_was_distinct_on = popped.is_distinct_on_paren;
+                }
+                idx += 1;
+                continue;
+            }
+            RelTok::RBracket | RelTok::RBrace => {
+                let expected = if matches!(tokens[idx], RelTok::RBracket) {
+                    ScopeDelim::Bracket
                 } else {
+                    ScopeDelim::Brace
+                };
+                if scopes.len() <= 1 || scopes.last().is_some_and(|s| s.delim != expected) {
+                    return true;
+                }
+                if let Some(popped) = scopes.pop() {
+                    in_from = popped.saved_in_from;
+                    expect_rel = false;
                     prev_rparen_was_distinct_on = false;
                 }
                 idx += 1;
@@ -1591,7 +1724,13 @@ fn has_positional_wildcard_subquery_or_setop(
                     && matches!(tokens.get(idx - 1), Some(RelTok::Dot))
                     && matches!(
                         tokens.get(idx - 2),
-                        Some(RelTok::Ident { .. } | RelTok::StrLit { .. } | RelTok::RParen)
+                        Some(
+                            RelTok::Ident { .. }
+                                | RelTok::StrLit { .. }
+                                | RelTok::RParen
+                                | RelTok::RBracket
+                                | RelTok::RBrace
+                        )
                     );
                 if is_qual_star {
                     if nearest_query_disallows_wildcard
@@ -1606,7 +1745,17 @@ fn has_positional_wildcard_subquery_or_setop(
                     }
                 } else if cur.is_distinct_on_paren {
                     let is_distinct_on_item_star = idx > 0
-                        && matches!(tokens.get(idx - 1), Some(RelTok::LParen | RelTok::Comma));
+                        && match &tokens[idx - 1] {
+                            RelTok::LParen | RelTok::Comma => true,
+                            RelTok::Ident {
+                                lower: kw,
+                                quoted: false,
+                                ..
+                            } if !is_non_keyword_rel_pos(tokens, idx - 1) => {
+                                matches!(kw.as_str(), "not" | "distinct" | "all")
+                            }
+                            _ => false,
+                        };
                     if is_distinct_on_item_star
                         && !is_star_cols
                         && (nearest_query_disallows_wildcard
@@ -1616,7 +1765,19 @@ fn has_positional_wildcard_subquery_or_setop(
                     }
                 } else if cur.is_expr_paren {
                     let is_paren_or_arg_star = idx > 0
-                        && matches!(tokens.get(idx - 1), Some(RelTok::LParen | RelTok::Comma));
+                        && match &tokens[idx - 1] {
+                            RelTok::LParen | RelTok::LBracket | RelTok::LBrace | RelTok::Comma => {
+                                true
+                            }
+                            RelTok::Ident {
+                                lower: kw,
+                                quoted: false,
+                                ..
+                            } if !is_non_keyword_rel_pos(tokens, idx - 1) => {
+                                matches!(kw.as_str(), "not" | "distinct" | "all")
+                            }
+                            _ => false,
+                        };
                     let is_count_star = idx >= 2
                         && matches!(tokens.get(idx - 1), Some(RelTok::LParen))
                         && matches!(
@@ -1798,6 +1959,7 @@ fn has_positional_wildcard_subquery_or_setop(
                 }
                 if *followed_by_open_paren && matches!(tokens.get(idx + 1), Some(RelTok::LParen)) {
                     scopes.push(WildcardScope {
+                        delim: ScopeDelim::Paren,
                         is_expr_paren: true,
                         is_distinct_on_paren: false,
                         saved_in_from: in_from,
@@ -1842,7 +2004,7 @@ fn has_pii_sconst_identifier(tokens: &[RelTok]) -> bool {
                             lower: prev_kw,
                             quoted: false,
                             ..
-                        }) if prev_kw == "as"
+                        }) if prev_kw == "as" && !is_non_keyword_rel_pos(tokens, idx - 1)
                     )
                     && (is_pii_identifier(lower) || is_extra_column_ident(lower))
                 {
@@ -1901,15 +2063,15 @@ fn references_whole_row_relation_struct(tokens: &[RelTok]) -> bool {
     let mut declared_relations = std::collections::BTreeSet::new();
     let mut decl_indices = std::collections::BTreeSet::new();
     let mut cte_body_lparens = std::collections::BTreeSet::new();
-    // (was_from_rel_paren, saved_in_from, is_scalar_expr_paren)
-    let mut paren_frames: Vec<(bool, bool, bool)> = Vec::new();
+    // (delim, was_from_rel_paren, saved_in_from, is_scalar_expr_paren)
+    let mut paren_frames: Vec<(ScopeDelim, bool, bool, bool)> = Vec::new();
     let mut in_from = false;
     let mut expect_rel = false;
     let mut expect_opt_alias = false;
 
     let mut idx = 0usize;
     while idx < tokens.len() {
-        let in_scalar_paren = paren_frames.last().is_some_and(|f| f.2);
+        let in_scalar_paren = paren_frames.last().is_some_and(|f| f.3);
 
         if let RelTok::Ident {
             lower,
@@ -1930,7 +2092,7 @@ fn references_whole_row_relation_struct(tokens: &[RelTok]) -> bool {
                         "union" | "all" | "distinct" | "intersect" | "except" | "name"
                     )
                 );
-            if lower == "with" && prev_allows_with {
+            if lower == "with" && prev_allows_with && !is_non_keyword_rel_pos(tokens, idx) {
                 let mut k = idx + 1;
                 if matches!(
                     tokens.get(k),
@@ -1963,7 +2125,7 @@ fn references_whole_row_relation_struct(tokens: &[RelTok]) -> bool {
                             lower: kw,
                             quoted: false,
                             ..
-                        }) if kw == "as"
+                        }) if kw == "as" && !is_non_keyword_rel_pos(tokens, after_name)
                     ) {
                         break;
                     }
@@ -2043,29 +2205,63 @@ fn references_whole_row_relation_struct(tokens: &[RelTok]) -> bool {
                         }) if matches!(kw.as_str(), "select" | "with" | "values" | "from" | "table")
                     );
                 if expect_rel && !(has_subquery_head && look == idx + 1) {
-                    paren_frames.push((true, in_from, false));
+                    paren_frames.push((ScopeDelim::Paren, true, in_from, false));
                     in_from = true;
                     expect_rel = true;
                     expect_opt_alias = false;
                 } else if has_subquery_head {
-                    paren_frames.push((expect_rel, in_from, false));
+                    paren_frames.push((ScopeDelim::Paren, expect_rel, in_from, false));
                     in_from = false;
                     expect_rel = false;
                     expect_opt_alias = false;
                 } else {
-                    paren_frames.push((false, in_from, true));
+                    paren_frames.push((ScopeDelim::Paren, false, in_from, true));
                     expect_rel = false;
                     expect_opt_alias = false;
                 }
                 idx += 1;
                 continue;
             }
+            RelTok::LBracket | RelTok::LBrace => {
+                let delim = if matches!(tokens[idx], RelTok::LBracket) {
+                    ScopeDelim::Bracket
+                } else {
+                    ScopeDelim::Brace
+                };
+                paren_frames.push((delim, false, in_from, true));
+                expect_rel = false;
+                expect_opt_alias = false;
+                idx += 1;
+                continue;
+            }
             RelTok::RParen => {
-                if let Some((was_from_rel_paren, saved_in_from, _)) = paren_frames.pop() {
-                    in_from = saved_in_from;
-                    expect_rel = false;
-                    expect_opt_alias = was_from_rel_paren;
+                let Some((delim, was_from_rel_paren, saved_in_from, _)) = paren_frames.pop() else {
+                    return true;
+                };
+                if delim != ScopeDelim::Paren {
+                    return true;
                 }
+                in_from = saved_in_from;
+                expect_rel = false;
+                expect_opt_alias = was_from_rel_paren;
+                idx += 1;
+                continue;
+            }
+            RelTok::RBracket | RelTok::RBrace => {
+                let expected = if matches!(tokens[idx], RelTok::RBracket) {
+                    ScopeDelim::Bracket
+                } else {
+                    ScopeDelim::Brace
+                };
+                let Some((delim, _, saved_in_from, _)) = paren_frames.pop() else {
+                    return true;
+                };
+                if delim != expected {
+                    return true;
+                }
+                in_from = saved_in_from;
+                expect_rel = false;
+                expect_opt_alias = false;
                 idx += 1;
                 continue;
             }
@@ -2160,7 +2356,7 @@ fn references_whole_row_relation_struct(tokens: &[RelTok]) -> bool {
                 }
                 if *followed_by_open_paren && matches!(tokens.get(idx + 1), Some(RelTok::LParen)) {
                     decl_indices.insert(idx);
-                    paren_frames.push((true, in_from, true));
+                    paren_frames.push((ScopeDelim::Paren, true, in_from, true));
                     expect_rel = false;
                     expect_opt_alias = false;
                     idx += 2;
@@ -2196,7 +2392,7 @@ fn references_whole_row_relation_struct(tokens: &[RelTok]) -> bool {
                 continue;
             }
             if let RelTok::Ident { lower, quoted, .. } = &tokens[idx] {
-                if !*quoted && lower == "as" {
+                if !*quoted && lower == "as" && !is_non_keyword_rel_pos(tokens, idx) {
                     if let Some(
                         RelTok::Ident {
                             lower: alias_lower, ..
@@ -2243,12 +2439,10 @@ fn references_whole_row_relation_struct(tokens: &[RelTok]) -> bool {
         idx += 1;
     }
 
-    if has_positional_wildcard_subquery_or_setop(tokens, &cte_body_lparens) {
+    if !paren_frames.is_empty()
+        || has_positional_wildcard_subquery_or_setop(tokens, &cte_body_lparens)
+    {
         return true;
-    }
-
-    if declared_relations.is_empty() {
-        return false;
     }
 
     for (idx, tok) in tokens.iter().enumerate() {
@@ -2258,7 +2452,17 @@ fn references_whole_row_relation_struct(tokens: &[RelTok]) -> bool {
             ..
         } = tok
         {
-            if decl_indices.contains(&idx) || !declared_relations.contains(lower) {
+            let is_implicit_subquery_rel = lower == "unnamed_subquery"
+                || lower == "unnamed_query"
+                || lower
+                    .strip_prefix("unnamed_subquery")
+                    .is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+                || lower
+                    .strip_prefix("unnamed_query")
+                    .is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()));
+            if decl_indices.contains(&idx)
+                || !(declared_relations.contains(lower) || is_implicit_subquery_rel)
+            {
                 continue;
             }
             if idx > 0
@@ -2268,7 +2472,7 @@ fn references_whole_row_relation_struct(tokens: &[RelTok]) -> bool {
                         lower: prev_kw,
                         quoted: false,
                         ..
-                    }) if prev_kw == "as"
+                    }) if prev_kw == "as" && !is_non_keyword_rel_pos(tokens, idx - 1)
                 )
             {
                 continue;
@@ -2709,7 +2913,7 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             if let Some(top) = paren_stack.last_mut() {
                 top.1 = false;
             }
-            rel_tokens.push(RelTok::Other);
+            rel_tokens.push(RelTok::LBracket);
             last_sig = LastSig::Other;
             pending_call = PendingCallKind::None;
             pending_extract_mode = None;
@@ -2738,7 +2942,7 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             if let Some(top) = paren_stack.last_mut() {
                 top.1 = false;
             }
-            rel_tokens.push(RelTok::Other);
+            rel_tokens.push(RelTok::RBracket);
             pending_call = PendingCallKind::None;
             pending_extract_mode = None;
             pending_extract_dot_chain = false;
@@ -2867,7 +3071,13 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
                 followed_by_dot,
                 followed_by_open_paren,
             });
-            last_sig = LastSig::IdentOrClose;
+            last_sig = if !is_non_keyword_rel_pos(&rel_tokens, rel_tokens.len() - 1)
+                && is_non_subscriptable_sql_keyword(token)
+            {
+                LastSig::Other
+            } else {
+                LastSig::IdentOrClose
+            };
             i = end;
             continue;
         }
@@ -2995,7 +3205,7 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             }
             brace_depth = brace_depth.saturating_add(1);
             brace_stack.push((paren_depth, bracket_depth, true));
-            rel_tokens.push(RelTok::Other);
+            rel_tokens.push(RelTok::LBrace);
             pending_call = PendingCallKind::None;
             pending_extract_mode = None;
             pending_extract_dot_chain = false;
@@ -3006,7 +3216,7 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             continue;
         }
         if bytes[i] == b'}' {
-            if in_subscript || in_arrow_rhs || in_extract_key_arg {
+            if brace_depth == 0 || in_subscript || in_arrow_rhs || in_extract_key_arg {
                 return true;
             }
             if let Some(top) = paren_stack.last_mut() {
@@ -3014,7 +3224,7 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             }
             brace_depth = brace_depth.saturating_sub(1);
             brace_stack.pop();
-            rel_tokens.push(RelTok::Other);
+            rel_tokens.push(RelTok::RBrace);
             pending_call = PendingCallKind::None;
             pending_extract_mode = None;
             pending_extract_dot_chain = false;
@@ -3055,9 +3265,22 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             if let Some(top) = paren_stack.last_mut() {
                 top.1 = false;
             }
-            i += 1;
-            while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i = scan_rel_digits(bytes, i);
+            if i < bytes.len() && bytes[i] == b'.' && bytes.get(i + 1) != Some(&b'.') {
                 i += 1;
+                if i < bytes.len() && bytes[i].is_ascii_digit() {
+                    i = scan_rel_digits(bytes, i);
+                }
+            }
+            if i < bytes.len() && matches!(bytes[i], b'e' | b'E') {
+                if i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
+                    i = scan_rel_digits(bytes, i + 1);
+                } else if i + 2 < bytes.len()
+                    && matches!(bytes[i + 1], b'+' | b'-')
+                    && bytes[i + 2].is_ascii_digit()
+                {
+                    i = scan_rel_digits(bytes, i + 2);
+                }
             }
             if last_sig == LastSig::JsonArrow
                 && json_arrow_paren_depth.is_none()
@@ -3210,6 +3433,7 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
     }
 
     bracket_depth > 0
+        || brace_depth > 0
         || columns_fn_depth.is_some()
         || references_whole_row_relation_struct(&rel_tokens)
 }
@@ -6136,6 +6360,167 @@ mod tests {
             (
                 "benign-r8-order-by-mult-desc",
                 r#"{"_view_extras":{"sql":"SELECT url FROM logs WHERE status = 200 ORDER BY status * 2 DESC"}}"#,
+            ),
+        ];
+
+        for (case_id, payload) in allowed_vectors {
+            assert!(
+                !filters_reference_pii(payload),
+                "expected {case_id} to be allowed for AnalystNoPii: {payload}"
+            );
+        }
+    }
+
+    #[test]
+    fn sec19_blocks_wave9_r9_as_parity_float_dot_paren_not_star_unnamed_subquery_pragma_and_delims()
+    {
+        let blocked_vectors = [
+            // 1. (R9-0a) Iterative AS-run parity (AS as, .as, .as AS as, ::as) before FROM / JOIN
+            (
+                "r9-0a-as-as-from-logs-cast",
+                r#"{"_view_extras":{"sql":"SELECT status AS as FROM logs WHERE logs::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r9-0a-dot-as-from-logs-cast",
+                r#"{"_view_extras":{"sql":"SELECT {'as': status}.as FROM logs WHERE logs::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r9-0a-dot-as-as-as-from-logs-cast",
+                r#"{"_view_extras":{"sql":"SELECT {'as': status}.as AS as FROM logs WHERE logs::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r9-0a-typecast-as-from-logs-cast",
+                r#"{"_view_extras":{"sql":"SELECT status, 1::as FROM logs WHERE logs::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r9-0a-on-dot-as-join-logs-cast",
+                r#"{"_view_extras":{"sql":"SELECT t.url FROM (SELECT 200 AS \"as\") a JOIN (SELECT 200 AS y) b ON b.y = a.as JOIN logs AS t ON true WHERE t::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            // 2. (R9-0b) Trailing-dot float 1. / 1._as before FROM
+            (
+                "r9-0b-float-dot-from-logs-cast",
+                r#"{"_view_extras":{"sql":"SELECT 1. FROM logs WHERE logs::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r9-0b-float-dot-ident-from-logs-cast",
+                r#"{"_view_extras":{"sql":"SELECT 1._as FROM logs WHERE logs::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            // 3. (R9-A) Parenthesized & DISTINCT ON / ORDER BY (NOT * ...)
+            (
+                "r9a-paren-not-star-like-as-s",
+                r#"{"_view_extras":{"sql":"SELECT count(*) AS cnt FROM (SELECT (NOT * LIKE '%timestamp%') AS s FROM logs) WHERE s_1 = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r9a-double-paren-not-star-like-as-s",
+                r#"{"_view_extras":{"sql":"SELECT count(*) AS cnt FROM (SELECT ((NOT * LIKE '%timestamp%')) AS s FROM logs) WHERE s_1 = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r9a-paren-not-star-not-like-oip",
+                r#"{"_view_extras":{"sql":"SELECT url, (NOT * NOT LIKE '%oi%') AS x FROM logs WHERE x = '203.0.113.9'"}}"#,
+            ),
+            (
+                "r9a-order-by-paren-not-star-not-like",
+                r#"{"_view_extras":{"sql":"SELECT url FROM logs ORDER BY (NOT * NOT LIKE '%oi%') DESC LIMIT 1"}}"#,
+            ),
+            (
+                "r9a-order-by-paren-not-star-similar",
+                r#"{"_view_extras":{"sql":"SELECT url FROM logs ORDER BY (NOT * SIMILAR TO '(timestamp|ts_ms)') DESC LIMIT 1"}}"#,
+            ),
+            (
+                "r9a-distinct-on-not-star-like",
+                r#"{"_view_extras":{"sql":"SELECT DISTINCT ON (NOT * LIKE '%oi%') url FROM logs"}}"#,
+            ),
+            (
+                "r9a-distinct-on-not-star-not-like",
+                r#"{"_view_extras":{"sql":"SELECT DISTINCT ON (NOT * NOT LIKE '%oi%') url FROM logs"}}"#,
+            ),
+            // 4. (R9-B) DuckDB implicit unaliased subquery relation bindings (unnamed_subquery / unnamed_query)
+            (
+                "r9b-unnamed-subquery-cast",
+                r#"{"_view_extras":{"sql":"SELECT status FROM (SELECT * FROM logs) WHERE unnamed_subquery::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r9b-quoted-unnamed-subquery-cast",
+                r#"{"_view_extras":{"sql":"SELECT status FROM (SELECT * FROM logs) WHERE \"unnamed_subquery\"::VARCHAR LIKE '%203.0.113.9%'"}}"#,
+            ),
+            (
+                "r9b-format-unnamed-subquery",
+                r#"{"_view_extras":{"sql":"SELECT status FROM (SELECT * FROM logs) WHERE format('{}', unnamed_subquery) LIKE '%sess_secret_99%'"}}"#,
+            ),
+            (
+                "r9b-unnamed-subquery2-cast",
+                r#"{"_view_extras":{"sql":"SELECT a FROM (SELECT 1 AS a), (SELECT * FROM logs) WHERE unnamed_subquery2::VARCHAR LIKE '%esid_secret_77%'"}}"#,
+            ),
+            (
+                "r9b-from-logs-unnamed-subquery",
+                r#"{"_view_extras":{"sql":"SELECT status FROM (FROM logs) WHERE unnamed_subquery::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r9b-table-logs-unnamed-subquery",
+                r#"{"_view_extras":{"sql":"SELECT status FROM (TABLE logs) WHERE unnamed_subquery::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r9b-lateral-unnamed-subquery",
+                r#"{"_view_extras":{"sql":"SELECT x.a FROM (SELECT 1 AS a) x, LATERAL (SELECT * FROM logs) WHERE unnamed_subquery::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r9b-unnamed-query-cast",
+                r#"{"_view_extras":{"sql":"SELECT status FROM (SELECT * FROM logs) WHERE unnamed_query::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            // 5. (R9-C) pragma_* / duckdb_table_sample / summary & []/{} expression depth in ON before comma-joins
+            (
+                "r9c-pragma-storage-info",
+                r#"{"_view_extras":{"sql":"SELECT stats FROM pragma_storage_info('logs') WHERE stats LIKE '%198.51.1%'"}}"#,
+            ),
+            (
+                "r9c-duckdb-table-sample",
+                r#"{"_view_extras":{"sql":"SELECT * FROM duckdb_table_sample('logs')"}}"#,
+            ),
+            (
+                "r9c-summary-fn",
+                r#"{"_view_extras":{"sql":"SELECT summary(status) FROM logs"}}"#,
+            ),
+            (
+                "r9c-on-brace-where-comma-logs-cast",
+                r#"{"_view_extras":{"sql":"SELECT t.url FROM (SELECT 1 AS a) x JOIN (SELECT 1 AS b) y ON {where: 1} IS NOT NULL, logs AS t WHERE t::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r9c-on-listcomp-for-comma-logs-cast",
+                r#"{"_view_extras":{"sql":"SELECT t.url FROM (SELECT 1 AS a) x JOIN (SELECT 1 AS b) y ON [x FOR x IN [1]] IS NOT NULL, logs AS t WHERE t::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+        ];
+
+        for (case_id, payload) in blocked_vectors {
+            assert!(
+                filters_reference_pii(payload),
+                "expected {case_id} to be blocked as PII-referencing: {payload}"
+            );
+        }
+
+        let allowed_vectors = [
+            (
+                "benign-r9-as-as-from-logs",
+                r#"{"_view_extras":{"sql":"SELECT status AS as, url FROM logs WHERE status = 200"}}"#,
+            ),
+            (
+                "benign-r9-dot-as-as-where-from-logs",
+                r#"{"_view_extras":{"sql":"SELECT {'as': status}.as AS where, url FROM logs WHERE status = 200"}}"#,
+            ),
+            (
+                "benign-r9-float-dot-from-logs",
+                r#"{"_view_extras":{"sql":"SELECT status, 1. FROM logs WHERE status = 200"}}"#,
+            ),
+            (
+                "benign-r9-unnamed-subquery-safe-cols",
+                r#"{"_view_extras":{"sql":"SELECT unnamed_subquery.status, unnamed_subquery.url FROM (SELECT * FROM logs) WHERE unnamed_subquery.status = 200"}}"#,
+            ),
+            (
+                "benign-r9-paren-not-expr-mult",
+                r#"{"_view_extras":{"sql":"SELECT (NOT (status = 404))::INT * 2 AS x FROM logs WHERE status = 200"}}"#,
+            ),
+            (
+                "benign-r9-on-bracket-list-eq",
+                r#"{"_view_extras":{"sql":"SELECT a.url FROM logs AS a JOIN logs AS b ON [a.status, 1] = [b.status, 1] WHERE a.status = 200"}}"#,
             ),
         ];
 

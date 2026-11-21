@@ -624,6 +624,46 @@ export function isDistinctFromOperator(
   return false;
 }
 
+function isDotOrDoubleColon(tokens: readonly SqlToken[], pos: number): boolean {
+  if (pos < 0 || pos >= tokens.length) {
+    return false;
+  }
+  const tok = tokens[pos];
+  if (tok.kind === "symbol" && tok.value === ".") {
+    return true;
+  }
+  return (
+    pos >= 1 &&
+    tok.kind === "symbol" &&
+    tok.value === ":" &&
+    tokens[pos - 1].kind === "symbol" &&
+    tokens[pos - 1].value === ":" &&
+    !(pos >= 2 && tokens[pos - 2].kind === "symbol" && tokens[pos - 2].value === ":")
+  );
+}
+
+export function isNonKeywordTokenPos(
+  tokens: readonly SqlToken[],
+  idx: number,
+): boolean {
+  if (idx <= 0) {
+    return false;
+  }
+  let r = 0;
+  let pos = idx - 1;
+  while (pos >= 0 && tokens[pos].kind === "word" && tokens[pos].lower === "as") {
+    r++;
+    pos--;
+  }
+  if (r === 0) {
+    return isDotOrDoubleColon(tokens, idx - 1);
+  }
+  if (isDotOrDoubleColon(tokens, pos)) {
+    r--;
+  }
+  return r % 2 === 1;
+}
+
 export function tokenizeSql(sql: string): SqlToken[] {
   const tokens: SqlToken[] = [];
   let i = 0;
@@ -1173,6 +1213,7 @@ export function validateUserSql(
 
   type ParenFrame = {
     kind: "subquery" | "from_join" | "expr";
+    close: ")" | "]" | "}";
     savedInFrom: boolean;
   };
   const parenStack: ParenFrame[] = [];
@@ -1256,6 +1297,7 @@ export function validateUserSql(
       if (expectingTableRef && !isDirectSubquery) {
         parenStack.push({
           kind: "from_join",
+          close: ")",
           savedInFrom: inFromClause,
         });
         inFromClause = true;
@@ -1263,6 +1305,7 @@ export function validateUserSql(
       } else if (hasSubqueryHead) {
         parenStack.push({
           kind: "subquery",
+          close: ")",
           savedInFrom: inFromClause,
         });
         inFromClause = false;
@@ -1270,6 +1313,7 @@ export function validateUserSql(
       } else {
         parenStack.push({
           kind: "expr",
+          close: ")",
           savedInFrom: inFromClause,
         });
         expectingTableRef = false;
@@ -1277,13 +1321,31 @@ export function validateUserSql(
       continue;
     }
 
-    if (tok.kind === "symbol" && tok.value === ")") {
+    if (tok.kind === "symbol" && (tok.value === "[" || tok.value === "{")) {
+      if (expectingTableRef) {
+        throw new SQLValidationError("parse_error", "Expected table reference.");
+      }
+      parenStack.push({
+        kind: "expr",
+        close: tok.value === "[" ? "]" : "}",
+        savedInFrom: inFromClause,
+      });
+      continue;
+    }
+
+    if (
+      tok.kind === "symbol" &&
+      (tok.value === ")" || tok.value === "]" || tok.value === "}")
+    ) {
       if (expectingTableRef) {
         throw new SQLValidationError("parse_error", "Expected table reference.");
       }
       const frame = parenStack.pop();
-      if (!frame) {
-        throw new SQLValidationError("parse_error", "Unbalanced closing parenthesis.");
+      if (!frame || frame.close !== tok.value) {
+        throw new SQLValidationError(
+          "parse_error",
+          "Unbalanced or mismatched closing delimiter.",
+        );
       }
       for (let c = scopedCtes.length - 1; c >= 0; c--) {
         if (scopedCtes[c].scopeDepth > parenStack.length) {
@@ -1295,16 +1357,7 @@ export function validateUserSql(
       continue;
     }
 
-    const prevIsTypecast =
-      i >= 2 &&
-      tokens[i - 1].kind === "symbol" &&
-      tokens[i - 1].value === ":" &&
-      tokens[i - 2].kind === "symbol" &&
-      tokens[i - 2].value === ":";
-    const isNonKeywordPos =
-      (prevTok?.kind === "symbol" && prevTok.value === ".") ||
-      (prevTok?.kind === "word" && prevTok.lower === "as") ||
-      prevIsTypecast;
+    const isNonKeywordPos = isNonKeywordTokenPos(tokens, i);
 
     if (!inExprParen) {
       if (tok.kind === "word" && !isNonKeywordPos) {

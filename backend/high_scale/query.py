@@ -606,7 +606,7 @@ def _code_only(sql: str) -> str:
 
 _STRING_LITERAL = re.compile(r"'(?:[^']|'')*'")
 _QUOTE_SCAN = re.compile(r"""'(?:[^']|'')*'|\"""")
-_COMMENT_OR_ESCAPE = re.compile(r"--|/\*|\*/|#|\$|`")
+_COMMENT_OR_ESCAPE = re.compile(r"--|/\*|\*/|#|\$|`|[{}]")
 _RESULT_CLAUSES = re.compile(
     r"\bSETTINGS\b|\bFORMAT\b(?!\s*\()|\bINTO\s+OUTFILE\b|\bINFILE\b|\bRECURSIVE\b"
     r"|\bTABLE\b|\bPIVOT\b|\bUNPIVOT\b|\bPIVOT_WIDER\b|\bPIVOT_LONGER\b|\bONLY\b",
@@ -657,9 +657,9 @@ _CONSOLE_SQL_LEX_RE = re.compile(
     r"|(?P<STR>'(?:''|[^'])*')"
     r'|(?P<DQUOTE>"(?:""|[^"])*"|`(?:``|[^`])*`)'
     r"|(?P<WS>\s+)"
-    r"|(?P<NUM>-?\d+(?:\.\d+)?)"
+    r"|(?P<NUM>-?\d+(?:_\d+)*(?:\.(?!\.)(?:\d+(?:_\d+)*)?)?(?:[eE][+-]?\d+(?:_\d+)*)?)"
     r"|(?P<IDENT>" + SAFE_IDENT_RE.pattern + ")"
-    r"|(?P<OP><=|>=|!=|<>|[=<>(),.\[\]*+-/;])"
+    r"|(?P<OP><=|>=|!=|<>|[=<>(),.\[\]{}*+-/;])"
     r"|(?P<OTHER>.)"
 )
 _FROM_EXIT_KEYWORDS = frozenset(
@@ -762,14 +762,40 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
     def _sig_indices(tokens: list[tuple[str, str]]) -> list[int]:
         return [i for i, (k, _) in enumerate(tokens) if k not in ("WS", "COMMENT")]
 
-    def _is_non_kw_lex_pos(tokens: list[tuple[str, str]], idx: int) -> bool:
-        p1 = next((p for p in range(idx - 1, -1, -1) if tokens[p][0] not in ("WS", "COMMENT")), None)
-        if p1 is None:
+    def _prev_sig_idx(tokens: list[tuple[str, str]], start_before: int) -> int | None:
+        for p in range(start_before - 1, -1, -1):
+            if tokens[p][0] not in ("WS", "COMMENT"):
+                return p
+        return None
+
+    def _is_dot_or_dcolon_lex(tokens: list[tuple[str, str]], pos: int | None) -> bool:
+        if pos is None or pos < 0:
             return False
-        pk, pt = tokens[p1]
-        if (pk, pt) == ("OP", ".") or (pk == "IDENT" and pt.upper() == "AS"):
+        pk, pt = tokens[pos]
+        if (pk, pt) == ("OP", "."):
             return True
-        return (pk, pt) == ("OTHER", ":") and p1 > 0 and tokens[p1 - 1] == ("OTHER", ":")
+        return (
+            (pk, pt) == ("OTHER", ":")
+            and pos >= 1
+            and tokens[pos - 1] == ("OTHER", ":")
+            and not (pos >= 2 and tokens[pos - 2] == ("OTHER", ":"))
+        )
+
+    def _is_non_kw_lex_pos(tokens: list[tuple[str, str]], idx: int) -> bool:
+        p = _prev_sig_idx(tokens, idx)
+        if p is None:
+            return False
+        if _is_dot_or_dcolon_lex(tokens, p):
+            return True
+        r = 0
+        while p is not None and tokens[p][0] == "IDENT" and tokens[p][1].upper() == "AS":
+            r += 1
+            p = _prev_sig_idx(tokens, p)
+        if r == 0:
+            return False
+        if _is_dot_or_dcolon_lex(tokens, p):
+            r -= 1
+        return (r % 2) == 1
 
     def _find_matching_paren(tokens: list[tuple[str, str]], open_idx: int) -> int:
         depth = 0
@@ -959,9 +985,9 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
         depth = 0
         while i_tok < len(tokens):
             k, t = tokens[i_tok]
-            if k == "OP" and t == "(":
+            if k == "OP" and t in ("(", "[", "{"):
                 depth += 1
-            elif k == "OP" and t == ")":
+            elif k == "OP" and t in (")", "]", "}"):
                 depth = max(0, depth - 1)
             elif (
                 depth == 0
@@ -1065,17 +1091,20 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
         while s_pos < len(sig_idxs):
             idx = sig_idxs[s_pos]
             k, t = processed[idx]
-            if k == "OP" and t == "(":
+            if k == "OP" and t in ("(", "[", "{"):
                 if depth == 0 and in_from and expect_table:
                     raise PermissionError(
                         "parenthesized non-subquery table expressions are not allowed in console queries"
                     )
-                prev_fn = processed[sig_idxs[s_pos - 1]] if s_pos > 0 else None
-                func_stack.append(prev_fn[1].upper() if prev_fn and prev_fn[0] == "IDENT" else "")
+                if t == "(":
+                    prev_fn = processed[sig_idxs[s_pos - 1]] if s_pos > 0 else None
+                    func_stack.append(prev_fn[1].upper() if prev_fn and prev_fn[0] == "IDENT" else "")
+                else:
+                    func_stack.append(t)
                 depth += 1
                 s_pos += 1
                 continue
-            if k == "OP" and t == ")":
+            if k == "OP" and t in (")", "]", "}"):
                 if func_stack:
                     func_stack.pop()
                 depth = max(0, depth - 1)
@@ -1231,7 +1260,12 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
             s_pos = sig_pos_by_idx[idx]
             prev_tok = processed[sig_idxs[s_pos - 1]] if s_pos > 0 else None
             next_tok = processed[sig_idxs[s_pos + 1]] if s_pos + 1 < len(sig_idxs) else None
-            if prev_tok is not None and prev_tok[0] == "IDENT" and prev_tok[1].upper() == "AS":
+            if (
+                prev_tok is not None
+                and prev_tok[0] == "IDENT"
+                and prev_tok[1].upper() == "AS"
+                and not _is_non_kw_lex_pos(processed, sig_idxs[s_pos - 1])
+            ):
                 rewritten_tokens.append((k, t))
                 continue
             if next_tok == ("OP", "("):

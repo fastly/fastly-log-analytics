@@ -573,7 +573,7 @@ _DOLQ_TAG_RE = re.compile(r"\$(?:[A-Za-z_\u0080-\uffff][A-Za-z0-9_\u0080-\uffff]
 
 @dataclass(slots=True)
 class _Tok:
-    kind: str  # "WORD" | "STRING" | "QIDENT" | "LPAREN" | "RPAREN" | "COMMA" | "DOT" | "SEMI" | "OTHER"
+    kind: str  # "WORD" | "STRING" | "QIDENT" | "LPAREN" | "RPAREN" | "LBRACK" | "RBRACK" | "LBRACE" | "RBRACE" | "COMMA" | "DOT" | "SEMI" | "OTHER"
     val: str
 
 
@@ -765,6 +765,26 @@ def _tokenize_sql(sql: str) -> tuple[list[_Tok] | None, str | None]:
             i += 1
             prev_was_ident_or_num = False
             continue
+        if ch == "[":
+            tokens.append(_Tok("LBRACK", "["))
+            i += 1
+            prev_was_ident_or_num = False
+            continue
+        if ch == "]":
+            tokens.append(_Tok("RBRACK", "]"))
+            i += 1
+            prev_was_ident_or_num = False
+            continue
+        if ch == "{":
+            tokens.append(_Tok("LBRACE", "{"))
+            i += 1
+            prev_was_ident_or_num = False
+            continue
+        if ch == "}":
+            tokens.append(_Tok("RBRACE", "}"))
+            i += 1
+            prev_was_ident_or_num = False
+            continue
         if ch == ",":
             tokens.append(_Tok("COMMA", ","))
             i += 1
@@ -802,7 +822,7 @@ def _tokenize_sql(sql: str) -> tuple[list[_Tok] | None, str | None]:
             j < n
             and not _is_sql_whitespace(sql[j])
             and _DISALLOWED_CTRL_OR_SEP_RE.match(sql[j]) is None
-            and sql[j] not in ("'", '"', "(", ")", ",", ".", ";", "-", "/", "$")
+            and sql[j] not in ("'", '"', "(", ")", "[", "]", "{", "}", ",", ".", ";", "-", "/", "$")
             and not _is_ident_start_char(sql[j])
             and not sql[j].isdigit()
         ):
@@ -813,16 +833,32 @@ def _tokenize_sql(sql: str) -> tuple[list[_Tok] | None, str | None]:
     return tokens, None
 
 
-def _find_matching_rparen(tokens: list[_Tok], lparen_idx: int) -> int:
-    depth = 0
-    for idx in range(lparen_idx, len(tokens)):
-        if tokens[idx].kind == "LPAREN":
-            depth += 1
-        elif tokens[idx].kind == "RPAREN":
-            depth -= 1
-            if depth == 0:
+_DELIM_PAIRS = {"LPAREN": "RPAREN", "LBRACK": "RBRACK", "LBRACE": "RBRACE"}
+_CLOSING_DELIMS = frozenset(_DELIM_PAIRS.values())
+
+
+def _find_matching_rdelim(tokens: list[_Tok], open_idx: int) -> int:
+    close_kind = _DELIM_PAIRS.get(tokens[open_idx].kind)
+    if close_kind is None:
+        return -1
+    stack: list[str] = []
+    for idx in range(open_idx, len(tokens)):
+        tk_kind = tokens[idx].kind
+        if tk_kind in _DELIM_PAIRS:
+            stack.append(_DELIM_PAIRS[tk_kind])
+        elif tk_kind in _CLOSING_DELIMS:
+            if not stack or stack[-1] != tk_kind:
+                return -1
+            stack.pop()
+            if not stack:
                 return idx
     return -1
+
+
+def _find_matching_rparen(tokens: list[_Tok], lparen_idx: int) -> int:
+    if lparen_idx < 0 or lparen_idx >= len(tokens) or tokens[lparen_idx].kind != "LPAREN":
+        return -1
+    return _find_matching_rdelim(tokens, lparen_idx)
 
 
 def _strip_outer_parens(tokens: list[_Tok]) -> list[_Tok]:
@@ -835,15 +871,28 @@ def _strip_outer_parens(tokens: list[_Tok]) -> list[_Tok]:
     return tokens
 
 
+def _is_dot_or_typecast_tok(tokens: list[_Tok], pos: int) -> bool:
+    if pos < 0:
+        return False
+    tk = tokens[pos]
+    return tk.kind == "DOT" or (tk.kind == "OTHER" and tk.val.endswith("::") and not tk.val.endswith(":::"))
+
+
 def _is_non_keyword_ident_pos(tokens: list[_Tok], idx: int) -> bool:
     if idx <= 0:
         return False
-    prev = tokens[idx - 1]
-    return (
-        prev.kind == "DOT"
-        or (prev.kind == "WORD" and prev.val.upper() == "AS")
-        or (prev.kind == "OTHER" and prev.val.endswith("::"))
-    )
+    if _is_dot_or_typecast_tok(tokens, idx - 1):
+        return True
+    r = 0
+    p = idx - 1
+    while p >= 0 and tokens[p].kind == "WORD" and tokens[p].val.upper() == "AS":
+        r += 1
+        p -= 1
+    if r == 0:
+        return False
+    if _is_dot_or_typecast_tok(tokens, p):
+        r -= 1
+    return (r % 2) == 1
 
 
 def _validate_select_syntax(tokens: list[_Tok]) -> str | None:
@@ -897,8 +946,8 @@ def _has_top_level_setop(tokens: list[_Tok]) -> bool:
     m = len(unwrapped)
     while k < m:
         tk = unwrapped[k]
-        if tk.kind == "LPAREN":
-            rp = _find_matching_rparen(unwrapped, k)
+        if tk.kind in _DELIM_PAIRS:
+            rp = _find_matching_rdelim(unwrapped, k)
             if rp == -1:
                 return True
             k = rp + 1
@@ -938,8 +987,8 @@ def _parse_recursive_cte_tokens(tokens: list[_Tok]) -> dict[str, Any]:
     last_idx = -1
     while k < m:
         tk = inner[k]
-        if tk.kind == "LPAREN":
-            rp = _find_matching_rparen(inner, k)
+        if tk.kind in _DELIM_PAIRS:
+            rp = _find_matching_rdelim(inner, k)
             if rp == -1:
                 last_union_or_except_op = ""
                 last_idx = -1
@@ -1078,8 +1127,14 @@ def _is_subquery_token_list(tokens: list[_Tok], *, enclosing_special_call: str |
     return w0 in _NON_SELECT_STATEMENTS and not (len(unwrapped) > 1 and unwrapped[1].kind == "LPAREN")
 
 
-def _scan_expr_tokens(tokens: list[_Tok], node: dict[str, Any], *, enclosing_special_call: str | None = None) -> None:
-    if _is_subquery_token_list(tokens, enclosing_special_call=enclosing_special_call):
+def _scan_expr_tokens(
+    tokens: list[_Tok],
+    node: dict[str, Any],
+    *,
+    enclosing_special_call: str | None = None,
+    allow_direct_subquery: bool = True,
+) -> None:
+    if allow_direct_subquery and _is_subquery_token_list(tokens, enclosing_special_call=enclosing_special_call):
         node["children"].append(_parse_query_tokens(_strip_outer_parens(tokens)))
         return
 
@@ -1121,6 +1176,12 @@ def _scan_expr_tokens(tokens: list[_Tok], node: dict[str, Any], *, enclosing_spe
             if rp != -1:
                 _scan_expr_tokens(tokens[i + 1 : rp], node)
                 i = rp + 1
+                continue
+        if tok.kind in ("LBRACK", "LBRACE"):
+            rb = _find_matching_rdelim(tokens, i)
+            if rb != -1:
+                _scan_expr_tokens(tokens[i + 1 : rb], node, allow_direct_subquery=False)
+                i = rb + 1
                 continue
         i += 1
 
@@ -1403,6 +1464,12 @@ def _scan_body_tokens(
                 _scan_expr_tokens(tokens[i + 1 : rp], node)
                 i = rp + 1
                 continue
+        if tok.kind in ("LBRACK", "LBRACE"):
+            rb = _find_matching_rdelim(tokens, i)
+            if rb != -1:
+                _scan_expr_tokens(tokens[i + 1 : rb], node, allow_direct_subquery=False)
+                i = rb + 1
+                continue
 
         i += 1
 
@@ -1418,27 +1485,27 @@ def _parse_single_select_node(
     if tok_err is not None or tokens is None:
         return None, None, "parse_error:SYNTAX", f"SQL parse error: {tok_err}"
 
-    # Split into statements on top-level semicolons
+    # Split into statements on top-level semicolons and enforce matched ()/[]/{} delimiters
     stmts: list[list[_Tok]] = []
     cur: list[_Tok] = []
-    depth = 0
+    delim_stack: list[str] = []
     for tok in tokens:
-        if tok.kind == "LPAREN":
-            depth += 1
+        if tok.kind in _DELIM_PAIRS:
+            delim_stack.append(_DELIM_PAIRS[tok.kind])
             cur.append(tok)
-        elif tok.kind == "RPAREN":
-            depth -= 1
-            if depth < 0:
-                return None, None, "parse_error:SYNTAX", "SQL parse error: unmatched closing parenthesis"
+        elif tok.kind in _CLOSING_DELIMS:
+            if not delim_stack or delim_stack[-1] != tok.kind:
+                return None, None, "parse_error:SYNTAX", "SQL parse error: unmatched closing delimiter"
+            delim_stack.pop()
             cur.append(tok)
-        elif tok.kind == "SEMI" and depth == 0:
+        elif tok.kind == "SEMI" and not delim_stack:
             if cur:
                 stmts.append(cur)
                 cur = []
         else:
             cur.append(tok)
-    if depth != 0:
-        return None, None, "parse_error:SYNTAX", "SQL parse error: unbalanced parentheses"
+    if delim_stack:
+        return None, None, "parse_error:SYNTAX", "SQL parse error: unbalanced delimiters"
     if cur:
         stmts.append(cur)
 
