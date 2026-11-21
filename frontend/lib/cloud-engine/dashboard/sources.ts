@@ -271,11 +271,13 @@ export async function pruneRequestCache(
     manifest.files.map((file) => keyPrefix(file.key)).filter(Boolean),
   );
   const deleted: string[] = [];
+  const filtersScope = Object.hasOwn(options, "scope");
   for (const request of await cache.keys()) {
     if (deleted.length >= maxDeletes) break;
     if (
-      options.scope !== undefined &&
-      new URL(request.url, "http://localhost").searchParams.get("scope") !== options.scope
+      filtersScope &&
+      (new URL(request.url, "http://localhost").searchParams.get("scope") ??
+        undefined) !== options.scope
     ) continue;
     const key = keyFromFileUrl(request.url);
     if (!key) continue;
@@ -1265,7 +1267,12 @@ export function browserSource(
         released = true;
         request.waiters -= 1;
         if (request.waiters === 0) {
-          if (!request.networkDone) request.controller.abort();
+          if (!request.networkDone) {
+            if (inFlightFiles.get(cacheUrl) === request) {
+              inFlightFiles.delete(cacheUrl);
+            }
+            request.controller.abort();
+          }
           if (
             request.complete &&
             inFlightFiles.get(cacheUrl) === request

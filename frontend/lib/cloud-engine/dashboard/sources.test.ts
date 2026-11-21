@@ -230,6 +230,37 @@ describe("browserSource", () => {
     expect(networkSignal?.aborted).toBe(true);
   });
 
+  it("starts fresh immediately after the last waiter aborts", async () => {
+    const abortSignals: AbortSignal[] = [];
+    const resolvers: ((response: Response) => void)[] = [];
+    const fetchMock = vi.fn(
+      (_url: string, init?: RequestInit) =>
+        new Promise<Response>((resolve, reject) => {
+          const signal = init?.signal as AbortSignal;
+          abortSignals.push(signal);
+          resolvers.push(resolve);
+          signal.addEventListener("abort", () => reject(signal.reason));
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const source = browserSource("");
+    const abort = new AbortController();
+
+    const first = source.fetchFile("retry-now", abort.signal);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    abort.abort();
+    const firstFailure = expect(first).rejects.toMatchObject({
+      name: "AbortError",
+    });
+    const retry = source.fetchFile("retry-now");
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+
+    await firstFailure;
+    resolvers[1](new Response(new Uint8Array([8])));
+    expect((await retry).cached).toBe(false);
+    expect(abortSignals[0].aborted).toBe(true);
+  });
+
   it("hands transferred bytes to the caller without keeping a memory copy", async () => {
     const fetchMock = vi.fn(async () => new Response(new Uint8Array([1])));
     vi.stubGlobal("fetch", fetchMock);
@@ -905,6 +936,31 @@ describe("pruneRequestCache", () => {
           new URL(url, "http://localhost").searchParams.get("scope"),
       ),
     ).toEqual(["session:service-b", "session:service-b"]);
+  });
+
+  it("limits explicit unscoped pruning to entries without an owner", async () => {
+    const scoped = (k: string, owner: string | null) =>
+      owner === null
+        ? fileUrl(k)
+        : `${fileUrl(k)}&scope=${encodeURIComponent(owner)}`;
+    const { cacheFor, stores } = fakeCacheStorage({
+      [CACHE_NAME]: [
+        scoped(superseded, null),
+        scoped(superseded, "session:service-a"),
+      ],
+    });
+    const cache = cacheFor(CACHE_NAME) as unknown as Cache;
+
+    expect(await pruneRequestCache(cache, manifest, ...range, {
+      scope: undefined,
+      retentionCutoffMs: 0,
+    })).toEqual([superseded]);
+    expect(
+      [...stores.get(CACHE_NAME)!.keys()].map(
+        (url) =>
+          new URL(url, "http://localhost").searchParams.get("scope"),
+      ),
+    ).toEqual(["session:service-a"]);
   });
 
   it("expires summaries and bundles by retention but never as superseded", async () => {
