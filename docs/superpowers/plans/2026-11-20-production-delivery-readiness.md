@@ -251,7 +251,7 @@ git commit -m "Bound unhashed static asset caching"
 
 **Files:**
 - Create: `frontend/scripts/check-static-budget.mjs`
-- Test: `frontend/scripts/check-static-budget.test.mjs`
+- Test: `frontend/scripts/check-static-budget.node.mjs`
 - Modify: `scripts/release_compute.py:143-147, 260-270`
 
 **Interfaces:**
@@ -286,7 +286,7 @@ Add `withBudgets` tests that assert failures for 625 KiB JS, 35 KiB CSS, and a 9
 - [ ] **Step 2: Run and verify failure**
 
 ```bash
-node --test frontend/scripts/check-static-budget.test.mjs
+node --test frontend/scripts/check-static-budget.node.mjs
 ```
 
 Expected: FAIL because `check-static-budget.mjs` does not exist.
@@ -327,7 +327,7 @@ Run the budget for every `frontend` export, including restored `web_out_ready` o
 - [ ] **Step 5: Run unit tests and the current export gate**
 
 ```bash
-node --test frontend/scripts/check-static-budget.test.mjs
+node --test frontend/scripts/check-static-budget.node.mjs
 node frontend/scripts/check-static-budget.mjs frontend/out
 ```
 
@@ -336,7 +336,7 @@ Expected: unit tests pass; the real command reports the current payload and exit
 - [ ] **Step 6: Commit**
 
 ```bash
-git add frontend/scripts/check-static-budget.mjs frontend/scripts/check-static-budget.test.mjs scripts/release_compute.py
+git add frontend/scripts/check-static-budget.mjs frontend/scripts/check-static-budget.node.mjs scripts/release_compute.py
 git commit -m "Enforce Cloud dashboard asset budget"
 ```
 
@@ -434,7 +434,7 @@ Expected: all pass.
 node --test frontend/scripts/check-static-budget.test.mjs
 npx tsc --noEmit
 npx eslint frontend/scripts/check-static-budget.mjs \
-  frontend/scripts/check-static-budget.test.mjs
+  frontend/scripts/check-static-budget.node.mjs
 ```
 
 Run from the repository root, using `--prefix frontend` where required by local Node tooling.
