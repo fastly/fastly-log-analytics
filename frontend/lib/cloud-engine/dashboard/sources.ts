@@ -250,7 +250,11 @@ export async function pruneRequestCache(
   manifest: Manifest,
   fromMs: number,
   toMs: number,
-  options: { retentionCutoffMs?: number; maxDeletes?: number } = {},
+  options: {
+    retentionCutoffMs?: number;
+    maxDeletes?: number;
+    scope?: string;
+  } = {},
 ): Promise<string[]> {
   const cutoff =
     options.retentionCutoffMs ?? Date.now() - BROWSER_CACHE_RETENTION_MS;
@@ -262,6 +266,10 @@ export async function pruneRequestCache(
   const deleted: string[] = [];
   for (const request of await cache.keys()) {
     if (deleted.length >= maxDeletes) break;
+    if (
+      options.scope !== undefined &&
+      new URL(request.url, "http://localhost").searchParams.get("scope") !== options.scope
+    ) continue;
     const key = keyFromFileUrl(request.url);
     if (!key) continue;
     const window = keyWindowMs(key);
@@ -569,11 +577,14 @@ export function browserSource(
     return rollupCachePromise;
   };
 
-  const forgetRollup = (key: string): void => {
-    const existing = memoryRollups.get(key);
+  const rollupMemoryKey = (key: string, scope?: string) =>
+    JSON.stringify([scope ?? null, key]);
+  const forgetRollup = (key: string, scope?: string): void => {
+    const memoryKey = rollupMemoryKey(key, scope);
+    const existing = memoryRollups.get(memoryKey);
     if (!existing) return;
     memoryRollupBytes -= existing.bytes;
-    memoryRollups.delete(key);
+    memoryRollups.delete(memoryKey);
   };
 
   const rememberRollup = (
@@ -581,8 +592,10 @@ export function browserSource(
     rollup: FileRollup,
     variant: string,
     bytes = estimateRollupBytes(rollup),
+    scope?: string,
   ): void => {
-    forgetRollup(key);
+    const memoryKey = rollupMemoryKey(key, scope);
+    forgetRollup(key, scope);
     if (bytes > maxMemoryRollupBytes) return;
     while (
       memoryRollups.size > 0 &&
@@ -590,9 +603,13 @@ export function browserSource(
     ) {
       const oldestKey = memoryRollups.keys().next().value;
       if (oldestKey === undefined) break;
-      forgetRollup(oldestKey);
+      const existing = memoryRollups.get(oldestKey);
+      if (existing) {
+        memoryRollupBytes -= existing.bytes;
+        memoryRollups.delete(oldestKey);
+      }
     }
-    memoryRollups.set(key, { rollup, bytes, variant });
+    memoryRollups.set(memoryKey, { rollup, bytes, variant });
     memoryRollupBytes += bytes;
   };
 
@@ -1257,14 +1274,15 @@ export function browserSource(
       }
     },
     async readRollup(key, variant = "") {
-      const inMemory = memoryRollups.get(key);
+      const rollupScope = fileScope(options);
+      const inMemory = memoryRollups.get(rollupMemoryKey(key, rollupScope));
       if (inMemory?.variant === variant) {
-        rememberRollup(key, inMemory.rollup, variant, inMemory.bytes);
+        rememberRollup(key, inMemory.rollup, variant, inMemory.bytes, rollupScope);
         return inMemory.rollup;
       }
       try {
-        if (cacheScope) {
-          const access = await opfsStore(`rollup:${variant}`).open(key);
+        if (rollupScope) {
+          const access = await opfsStore(`rollup:${rollupScope}:${variant}`).open(key);
           if (access) {
             try {
               const file = await access.handle.getFile();
@@ -1272,7 +1290,7 @@ export function browserSource(
                 new Uint8Array(await file.arrayBuffer()),
               );
               if (decoded && decoded.key === key) {
-                rememberRollup(key, decoded, variant);
+                rememberRollup(key, decoded, variant, undefined, rollupScope);
                 return decoded;
               }
             } finally {
@@ -1282,25 +1300,26 @@ export function browserSource(
         }
         const cache = await getRollupCache();
         const hit = await cache?.match(
-          scopedCacheUrl(rollupCacheUrl(baseUrl, key, variant), cacheScope),
+          scopedCacheUrl(rollupCacheUrl(baseUrl, key, variant), rollupScope),
         );
         if (!hit) return null;
         const decoded = await decodeRollup(
           new Uint8Array(await hit.arrayBuffer()),
         );
         if (!decoded || decoded.key !== key) return null;
-        rememberRollup(key, decoded, variant);
+        rememberRollup(key, decoded, variant, undefined, rollupScope);
         return decoded;
       } catch {
         return null;
       }
     },
     async writeRollup(key, rollup, variant = "") {
-      rememberRollup(key, rollup, variant);
-      if (cacheScope) {
+      const rollupScope = fileScope(options);
+      rememberRollup(key, rollup, variant, undefined, rollupScope);
+      if (rollupScope) {
         const body = await encodeRollup(rollup);
         try {
-          await opfsStore(`rollup:${variant}`).persist(
+          await opfsStore(`rollup:${rollupScope}:${variant}`).persist(
             key,
             body.byteLength,
             async () => new Response(body as BodyInit),
@@ -1315,7 +1334,7 @@ export function browserSource(
       await store(
         ROLLUP_CACHE_NAME,
         cache,
-        scopedCacheUrl(rollupCacheUrl(baseUrl, key, variant), cacheScope),
+        scopedCacheUrl(rollupCacheUrl(baseUrl, key, variant), rollupScope),
         key,
         async () => {
           const body = await encodeRollup(rollup);
@@ -1366,15 +1385,19 @@ export function browserSource(
           getRollupCache(),
         ]);
         for (const key of fileCache
-          ? await pruneRequestCache(fileCache, manifest, fromMs, toMs)
+          ? await pruneRequestCache(fileCache, manifest, fromMs, toMs, {
+              scope: fileScope(options),
+            })
           : []) {
-          forgetFile(key);
+          if (memoryFileIdentities.get(key) === fileScope(options)) forgetFile(key);
           storeIndex.forget(key);
         }
         for (const key of rollupCache
-          ? await pruneRequestCache(rollupCache, manifest, fromMs, toMs)
+          ? await pruneRequestCache(rollupCache, manifest, fromMs, toMs, {
+              scope: fileScope(options),
+            })
           : []) {
-          forgetRollup(key);
+          forgetRollup(key, fileScope(options));
         }
       } catch {
         // Pruning is best-effort and must never fail the query.

@@ -788,6 +788,22 @@ describe("pruneRequestCache", () => {
     expect(left.sort()).toEqual([live, outside, otherService].sort());
   });
 
+  it("prunes only entries owned by the current service scope", async () => {
+    const scoped = (k: string, scope: string) =>
+      `${fileUrl(k)}&scope=${encodeURIComponent(scope)}`;
+    const { cacheFor } = fakeCacheStorage({
+      [CACHE_NAME]: [scoped(superseded, "service-a"), scoped(superseded, "service-b")],
+    });
+    const cache = cacheFor(CACHE_NAME) as unknown as Cache;
+
+    expect(await pruneRequestCache(cache, manifest, ...range, {
+      scope: "service-a",
+      retentionCutoffMs: 0,
+    })).toEqual([superseded]);
+    expect((await cache.keys()).map((request) => new URL(request.url, "http://x").searchParams.get("scope")))
+      .toEqual(["service-b"]);
+  });
+
   it("expires summaries and bundles by retention but never as superseded", async () => {
     const dir = "svc/processed/summary/request/year=2026/month=10/day=";
     const bundles =
