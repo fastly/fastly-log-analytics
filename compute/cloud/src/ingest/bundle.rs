@@ -2881,7 +2881,7 @@ pub fn summary_bundle<R: Runtime>(
     let mut published_catalog: Option<super::catalog::Head> = None;
     if let Some(publication) = state.publication.as_ref() {
         match super::catalog::bundles::publish(store, publication, reserve + 1) {
-            Ok(Some(committed)) => {
+            Ok(super::catalog::bundles::PublishOutcome::Published(committed)) => {
                 published_catalog = Some(committed);
                 if publication.end - publication.start == DAY_S {
                     ctx.report.days += 1;
@@ -2891,7 +2891,20 @@ pub fn summary_bundle<R: Runtime>(
                 state.publication = None;
                 state.inventory = None;
             }
-            Ok(None) => {
+            Ok(super::catalog::bundles::PublishOutcome::Superseded {
+                head: committed,
+                reason,
+            }) => {
+                published_catalog = Some(committed);
+                runtime.admin_event(serde_json::json!({
+                    "event": "catalog.bundle_publication_superseded",
+                    "reason": reason,
+                    "start": publication.start,
+                }));
+                state.publication = None;
+                state.inventory = None;
+            }
+            Ok(super::catalog::bundles::PublishOutcome::Deferred) => {
                 ctx.report.more_pending = true;
                 return Ok(ctx.report);
             }

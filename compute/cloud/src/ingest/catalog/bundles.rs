@@ -83,14 +83,24 @@ pub fn parse(bytes: &[u8]) -> Result<Coverage, String> {
     Ok(coverage)
 }
 
+pub enum PublishOutcome {
+    /// Deferred due to call/vCPU/heap budget or CAS conflict; retry next execution.
+    Deferred,
+    /// Committed (or already committed idempotently); carries the active catalog head.
+    Published(Head),
+    /// Pending publication was superseded by a newer generation, closed hour bundle,
+    /// retirement, or retention cutoff. Carries the active catalog head for the rest of the tick.
+    Superseded { head: Head, reason: &'static str },
+}
+
 pub fn publish<R: Runtime>(
     store: &Store<'_, R>,
     coverage: &Coverage,
     reserve: u32,
-) -> Result<Option<Head>, String> {
+) -> Result<PublishOutcome, String> {
     let runtime = store.runtime;
     if runtime.admin_remaining_calls() < reserve + 6 || !admitted(store) {
-        return Ok(None);
+        return Ok(PublishOutcome::Deferred);
     }
     let record = runtime
         .admin_get(WATERMARK_KEY)?
@@ -106,7 +116,10 @@ pub fn publish<R: Runtime>(
         if (coverage.hours.is_empty() && coverage.start < cutoff)
             || coverage.hours.keys().any(|hour| *hour < cutoff)
         {
-            return Err("catalog_bundle_not_active".into());
+            return Ok(PublishOutcome::Superseded {
+                head: root,
+                reason: "retention_cutoff",
+            });
         }
     }
     let body = serde_json::to_vec(coverage).map_err(|e| e.to_string())?;
@@ -119,7 +132,10 @@ pub fn publish<R: Runtime>(
         .is_some_and(|n| n.kind == super::super::bundle::NameKind::Open);
     let is_day = !is_open && coverage.end - coverage.start == 86_400;
     if is_open && root.hour_bundles.contains_key(&coverage.start) {
-        return Err("catalog_bundle_not_active".into());
+        return Ok(PublishOutcome::Superseded {
+            head: root,
+            reason: "hour_bundle_closed",
+        });
     }
     let previous = if is_day {
         &root.day_bundles
@@ -129,16 +145,22 @@ pub fn publish<R: Runtime>(
         &root.hour_bundles
     };
     if previous.get(&coverage.start).is_some_and(|r| r.key == key) {
-        return Ok(Some(root));
+        return Ok(PublishOutcome::Published(root));
     }
     if root.bundle_retired.contains_key(&coverage.file.key) {
-        return Err("catalog_bundle_not_active".into());
+        return Ok(PublishOutcome::Superseded {
+            head: root,
+            reason: "bundle_retired",
+        });
     }
     if previous
         .get(&coverage.start)
         .is_some_and(|r| r.generation > coverage.built_generation)
     {
-        return Err("catalog_bundle_not_active".into());
+        return Ok(PublishOutcome::Superseded {
+            head: root,
+            reason: "newer_generation",
+        });
     }
     let replaced = previous
         .get(&coverage.start)
@@ -148,7 +170,7 @@ pub fn publish<R: Runtime>(
         .as_ref()
         .is_some_and(|old| old.file.key == coverage.file.key)
     {
-        return Ok(Some(root));
+        return Ok(PublishOutcome::Published(root));
     }
     let generation = root
         .generation
@@ -214,9 +236,9 @@ pub fn publish<R: Runtime>(
     let mut value = record.value;
     value["catalog"] = serde_json::to_value(&root).map_err(|e| e.to_string())?;
     if runtime.admin_cas(WATERMARK_KEY, Some(&record.generation), &value)? {
-        Ok(Some(root))
+        Ok(PublishOutcome::Published(root))
     } else {
-        Ok(None)
+        Ok(PublishOutcome::Deferred)
     }
 }
 

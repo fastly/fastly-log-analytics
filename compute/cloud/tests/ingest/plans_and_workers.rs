@@ -2148,6 +2148,66 @@ mod summary_bundles {
         );
     }
 
+    #[test]
+    fn summary_bundle_drops_superseded_publication_without_error() {
+        // Tick 1 builds an open-hour bundle and saves `state.publication` in KV `STATE_KEY`.
+        // If KV eventual consistency later serves that stale `STATE_KEY` after a newer open
+        // bundle (higher catalog generation) has already been published for the same hour,
+        // `summary_bundle` should drop the superseded publication, record an observability
+        // event, and NOT fail the cron stage with `catalog_bundle_not_active`.
+        let fake = Fake::new(BASE + 1200);
+        watermark(&fake, BASE + 1200);
+        for i in 0..8 {
+            window(&fake, BASE + i * 60, i as u32, 3);
+        }
+        let first = run(&fake);
+        assert!(first.errors.is_empty(), "tick 1 errors: {:?}", first.errors);
+        let stale_state = fake
+            .kv
+            .borrow()
+            .get(bundle::STATE_KEY)
+            .cloned()
+            .expect("bundle state saved after tick 1");
+
+        // Advance with a second open bundle so `WATERMARK_KEY` moves to a newer generation for
+        // `open_bundles[BASE]`.
+        for i in 8..16 {
+            window(&fake, BASE + i * 60, i as u32, 3);
+        }
+        watermark(&fake, BASE + 1200);
+        let second = run(&fake);
+        assert!(
+            second.errors.is_empty(),
+            "tick 2 errors: {:?}",
+            second.errors
+        );
+        let third = run(&fake);
+        assert!(third.errors.is_empty(), "tick 3 errors: {:?}", third.errors);
+
+        // Simulate another POP reading the stale `STATE_KEY` from tick 1 (holding the old
+        // `state.publication` whose `built_generation` is now behind `WATERMARK_KEY`).
+        let current_gen = fake.kv.borrow()[bundle::STATE_KEY].0;
+        fake.kv
+            .borrow_mut()
+            .insert(bundle::STATE_KEY.into(), (current_gen + 1, stale_state.1));
+        fake.events.borrow_mut().clear();
+
+        let replay = run(&fake);
+        assert!(
+            replay.errors.is_empty(),
+            "superseded publication must not fail summary_bundle: {:?}",
+            replay.errors
+        );
+        assert!(
+            fake.events
+                .borrow()
+                .iter()
+                .any(|e| e["event"] == "catalog.bundle_publication_superseded"),
+            "expected catalog.bundle_publication_superseded event, got: {:?}",
+            fake.events.borrow()
+        );
+    }
+
     fn assert_w6_layout(bytes: &[u8]) {
         use arrow_array::StringArray;
         use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
