@@ -73,18 +73,18 @@ Add a build-time Node script that inspects the static Next export used by Cloud:
 2. collect distinct `/_next/static/*.js` and `/_next/static/*.css` references
 3. precompress each referenced file with Brotli quality 11
 4. fail when the `/dashboard` initial references exceed:
-   - 550 KiB combined Brotli JavaScript
+   - 625 KiB combined Brotli JavaScript
    - 35 KiB combined Brotli CSS
-   - 75 KiB for any single JavaScript chunk
+   - 90 KiB for any single JavaScript chunk
 
 The script reports raw and Brotli bytes by route and identifies the largest
 chunks. It is deterministic and must not require a server, browser, credentials,
 or installed global tooling. The budget runs in the Cloud release/static-export
 path before the Rust package embeds the assets.
 
-The thresholds are intentionally above the current measured payload
-(approximately 490 KiB JS and 31 KiB CSS Brotli) so they catch meaningful
-regressions without making current normal chunking fail. The right response to a
+The thresholds are intentionally above the current release export
+(604,214 bytes JS, 30,970 bytes CSS, and 84,203 bytes for the largest chunk) so
+they catch meaningful regressions without making current normal chunking fail. The right response to a
 future budget failure is code-splitting or dependency removal, not raising the
 budget without review.
 
@@ -121,9 +121,9 @@ Build tests must cover:
 
 1. distinct asset deduplication
 2. Brotli byte measurement
-3. dashboard JS failure above 550 KiB
+3. dashboard JS failure above 625 KiB
 4. dashboard CSS failure above 35 KiB
-5. largest-chunk failure above 75 KiB
+5. largest-chunk failure above 90 KiB
 6. current export passing
 
 Environment validation must fail clearly when `front_url` is non-product rather

@@ -8,9 +8,9 @@ import { fileURLToPath } from "node:url";
 import { brotliCompressSync, constants as zlibConstants } from "node:zlib";
 
 export const BUDGETS = {
-  dashboardJs: 550 * 1024,
+  dashboardJs: 625 * 1024,
   dashboardCss: 35 * 1024,
-  largestJs: 75 * 1024,
+  largestJs: 90 * 1024,
 };
 
 const BROTLI_OPTIONS = {

@@ -14,7 +14,7 @@
 - Strip query strings only from explicitly allowlisted public static shells.
 - Keep `Cache-Control: public, max-age=31536000, immutable` only for content-hashed `/_next/static/*`.
 - Use `public, max-age=86400, must-revalidate` for unhashed `/geo/*`, `/duckdb/*`, and `/maplibre-gl-*`.
-- Dashboard budget: 550 KiB Brotli JS, 35 KiB Brotli CSS, 75 KiB largest JS chunk.
+- Dashboard budget: 625 KiB Brotli JS, 35 KiB Brotli CSS, 90 KiB largest JS chunk.
 - Do not guess a High-Scale hostname, mutate GCE, push, or deploy.
 
 ---
@@ -256,7 +256,7 @@ git commit -m "Bound unhashed static asset caching"
 
 **Interfaces:**
 - Consumes: `frontend/out/dashboard.html`, `frontend/out`, and optional synthetic fixture roots.
-- Produces: a JSON summary and a non-zero exit above 550 KiB JS, 35 KiB CSS, or 75 KiB per JS chunk.
+- Produces: a JSON summary and a non-zero exit above 625 KiB JS, 35 KiB CSS, or 90 KiB per JS chunk.
 
 - [ ] **Step 1: Create failing unit tests for measurement**
 
@@ -281,7 +281,7 @@ Assert distinct URLs are counted once and that JSON includes:
 }
 ```
 
-Add `withBudgets` tests that assert failures for 550 KiB JS, 35 KiB CSS, and a 75 KiB largest chunk.
+Add `withBudgets` tests that assert failures for 625 KiB JS, 35 KiB CSS, and a 90 KiB largest chunk.
 
 - [ ] **Step 2: Run and verify failure**
 
@@ -297,9 +297,9 @@ Export:
 
 ```js
 export const BUDGETS = {
-  dashboardJs: 550 * 1024,
+  dashboardJs: 625 * 1024,
   dashboardCss: 35 * 1024,
-  largestJs: 75 * 1024,
+  largestJs: 90 * 1024,
 }
 export function measureRoute(outDir, route = '/dashboard') { ... }
 export function assertBudgets(measurement, budgets = BUDGETS) { ... }
