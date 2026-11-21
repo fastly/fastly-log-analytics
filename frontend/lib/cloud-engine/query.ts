@@ -569,7 +569,15 @@ function rewriteSqlTableRefs(
           }
           continue;
         }
-        if (inFromClause && REWRITER_FROM_END.has(lower)) {
+        const isWithinGroupClause =
+          lower === "group" &&
+          i > 0 &&
+          prevTok?.kind === "word" &&
+          prevTok.lower === "within" &&
+          !isNonKeywordTokenPos(tokens, i - 1) &&
+          nextTok?.kind === "symbol" &&
+          nextTok.value === "(";
+        if (inFromClause && REWRITER_FROM_END.has(lower) && !isWithinGroupClause) {
           inFromClause = false;
           expectingTableRef = false;
         }

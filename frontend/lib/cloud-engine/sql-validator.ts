@@ -1412,7 +1412,15 @@ export function validateUserSql(
           }
           continue;
         }
-        if (inFromClause && FROM_CLAUSE_END_KEYWORDS.has(lower)) {
+        const isWithinGroupClause =
+          lower === "group" &&
+          i > 0 &&
+          prevTok?.kind === "word" &&
+          prevTok.lower === "within" &&
+          !isNonKeywordTokenPos(tokens, i - 1) &&
+          nextTok?.kind === "symbol" &&
+          nextTok.value === "(";
+        if (inFromClause && FROM_CLAUSE_END_KEYWORDS.has(lower) && !isWithinGroupClause) {
           if (expectingTableRef) {
             throw new SQLValidationError("parse_error", "Expected table reference.");
           }

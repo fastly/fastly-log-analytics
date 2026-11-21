@@ -686,6 +686,7 @@ describe('T5-FE-05: cloud-engine executeCloudQuery shadow-masked CTE and handleS
       'SELECT * FROM {ops_secret: 1}',
       'SELECT [1) FROM logs',
       "SELECT {'a': 1] FROM logs",
+      'SELECT (SELECT c.secret_col FROM logs AS x JOIN logs AS y ON mode() WITHIN GROUP (ORDER BY outer_logs.status) = 200, ops_secret AS c LIMIT 1) AS leaked FROM logs AS outer_logs',
     ]) {
       const res = await executeCloudQuery(
         { sql: blockedSql },
@@ -713,6 +714,12 @@ describe('T5-FE-05: cloud-engine executeCloudQuery shadow-masked CTE and handleS
         'requests',
       ).rewrittenSql,
     ).toContain(', requests AS c')
+    expect(
+      rewriteCloudQuerySql(
+        'SELECT (SELECT c.ip FROM logs AS x JOIN logs AS y ON mode() WITHIN GROUP (ORDER BY outer_logs.status) = 200, logs AS c LIMIT 1) AS masked_ip FROM logs AS outer_logs',
+        'requests',
+      ).rewrittenSql,
+    ).toContain(', requests AS c')
 
     for (const benignSql of [
       'SELECT status AS as, url, ip, cookie_session FROM logs',
@@ -720,6 +727,8 @@ describe('T5-FE-05: cloud-engine executeCloudQuery shadow-masked CTE and handleS
       'SELECT status, 1., ip, cookie_session FROM logs',
       'SELECT a.status, a.ip FROM logs AS a JOIN logs AS b ON [a.status, 1] = [b.status, 1]',
       "SELECT [x FOR x IN [1, 2] IF x > 0] AS xs, {'a': 1} AS st, ip, cookie_session FROM logs",
+      'SELECT (SELECT c.ip FROM logs AS x JOIN logs AS y ON mode() WITHIN GROUP (ORDER BY outer_logs.status) = 200, logs AS c LIMIT 1) AS masked_ip FROM logs AS outer_logs',
+      'SELECT a.within, count(*) AS cnt FROM (SELECT status AS within FROM logs) AS a GROUP BY within',
     ]) {
       const res = await executeCloudQuery(
         { sql: benignSql },
@@ -736,5 +745,19 @@ describe('T5-FE-05: cloud-engine executeCloudQuery shadow-masked CTE and handleS
       expect(bodyStr, benignSql).not.toContain('203.0.113.')
       expect(bodyStr, benignSql).not.toContain('CANARY_SESS_')
     }
+    const wgMaskedRes = await executeCloudQuery(
+      {
+        sql: 'SELECT (SELECT c.ip FROM logs AS x JOIN logs AS y ON mode() WITHIN GROUP (ORDER BY outer_logs.status) = 200, logs AS c LIMIT 1) AS masked_ip FROM logs AS outer_logs LIMIT 1',
+      },
+      {
+        role: 'analyst-no-pii',
+        maskIps: true,
+        tableName: 'requests',
+        allowedTables: ['logs', 'requests'],
+        runSql,
+      },
+    )
+    expect(wgMaskedRes.status).toBe(200)
+    expect(JSON.stringify(wgMaskedRes.body)).toContain('0.0.0.0')
   })
 })

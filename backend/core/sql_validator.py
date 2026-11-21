@@ -564,6 +564,64 @@ _SUBQUERY_HEAD_KEYWORDS = frozenset(
         "PIVOT_LONGER",
     }
 )
+_ON_EXPR_PREV_WORDS = frozenset(
+    {
+        "ON",
+        "AND",
+        "OR",
+        "XOR",
+        "NOT",
+        "IS",
+        "IN",
+        "GLOBAL",
+        "LIKE",
+        "ILIKE",
+        "RLIKE",
+        "REGEXP",
+        "GLOB",
+        "SIMILAR",
+        "TO",
+        "ESCAPE",
+        "BETWEEN",
+        "SYMMETRIC",
+        "ASYMMETRIC",
+        "CASE",
+        "WHEN",
+        "THEN",
+        "ELSE",
+        "DISTINCT",
+        "DIV",
+        "MOD",
+        "FROM",
+        "COLLATE",
+        "ZONE",
+        "INTERVAL",
+    }
+)
+_ON_EXPR_NEXT_WORDS = frozenset(
+    {
+        "IS",
+        "IN",
+        "BETWEEN",
+        "LIKE",
+        "ILIKE",
+        "RLIKE",
+        "REGEXP",
+        "GLOB",
+        "SIMILAR",
+        "DIV",
+        "MOD",
+        "COLLATE",
+        "WHEN",
+        "THEN",
+        "ELSE",
+        "END",
+        "AND",
+        "OR",
+        "XOR",
+    }
+)
+_FROM_FIRST_SELECT_FN_KEYWORDS = frozenset({"ANY", "ARRAY", "LEFT", "RIGHT", "FORMAT", "SAMPLE", "WINDOW"})
 _DUCKDB_UNICODE_SPACES = frozenset(
     "\u00a0\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u200b\u202f\u205f\u2060\u3000\ufeff"
 )
@@ -895,6 +953,17 @@ def _is_non_keyword_ident_pos(tokens: list[_Tok], idx: int) -> bool:
     return (r % 2) == 1
 
 
+def _is_dot_qualifier_at(tokens: list[_Tok], idx: int) -> bool:
+    return (
+        idx + 2 < len(tokens)
+        and tokens[idx + 1].kind == "DOT"
+        and (
+            tokens[idx + 2].kind in ("WORD", "QIDENT", "STRING")
+            or (tokens[idx + 2].kind == "OTHER" and tokens[idx + 2].val.startswith("*"))
+        )
+    )
+
+
 def _validate_select_syntax(tokens: list[_Tok]) -> str | None:
     """Catch malformed SELECT / WHERE clauses so invalid SQL fails closed."""
     i = 0
@@ -912,7 +981,7 @@ def _validate_select_syntax(tokens: list[_Tok]) -> str | None:
             continue
         if tok.kind == "RPAREN":
             return "unmatched closing parenthesis"
-        if tok.kind == "WORD" and not _is_non_keyword_ident_pos(tokens, i):
+        if tok.kind == "WORD" and not _is_non_keyword_ident_pos(tokens, i) and not _is_dot_qualifier_at(tokens, i):
             wu = tok.val.upper()
             if wu == "SELECT":
                 nxt = i + 1
@@ -920,6 +989,7 @@ def _validate_select_syntax(tokens: list[_Tok]) -> str | None:
                     nxt += 1
                 if nxt >= n or (
                     tokens[nxt].kind == "WORD"
+                    and not _is_dot_qualifier_at(tokens, nxt)
                     and tokens[nxt].val.upper() in ("FROM", "WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "UNION")
                 ):
                     return "empty SELECT projection list"
@@ -927,13 +997,18 @@ def _validate_select_syntax(tokens: list[_Tok]) -> str | None:
                 nxt = i + 1
                 if nxt >= n or (tokens[nxt].kind == "OTHER" and tokens[nxt].val.startswith("*")):
                     return "invalid WHERE clause"
-                if tokens[nxt].kind == "WORD" and tokens[nxt].val.upper() in (
-                    "FROM",
-                    "WHERE",
-                    "GROUP",
-                    "HAVING",
-                    "ORDER",
-                    "LIMIT",
+                if (
+                    tokens[nxt].kind == "WORD"
+                    and not _is_dot_qualifier_at(tokens, nxt)
+                    and tokens[nxt].val.upper()
+                    in (
+                        "FROM",
+                        "WHERE",
+                        "GROUP",
+                        "HAVING",
+                        "ORDER",
+                        "LIMIT",
+                    )
                 ):
                     return "empty WHERE clause"
         i += 1
@@ -1070,23 +1145,34 @@ def _parse_query_tokens(tokens: list[_Tok]) -> dict[str, Any]:
             i += 1
         cte_entries: list[dict[str, Any]] = []
         while i < n:
+            entry_start = i
             if tokens[i].kind not in ("WORD", "QIDENT"):
                 break
             cte_name = tokens[i].val
             i += 1
             if i < n and tokens[i].kind == "LPAREN":
-                rp = _find_matching_rparen(tokens, i)
-                if rp == -1:
+                rp_cols = _find_matching_rparen(tokens, i)
+                if rp_cols == -1 or not _is_valid_ident_list(tokens[i + 1 : rp_cols]):
+                    i = entry_start
                     break
-                i = rp + 1
-            if i < n and tokens[i].kind == "WORD" and tokens[i].val.upper() == "AS":
-                i += 1
+                i = rp_cols + 1
+            if (
+                i >= n
+                or tokens[i].kind != "WORD"
+                or tokens[i].val.upper() != "AS"
+                or _is_non_keyword_ident_pos(tokens, i)
+            ):
+                i = entry_start
+                break
+            i += 1
             while i < n and tokens[i].kind == "WORD" and tokens[i].val.upper() in ("MATERIALIZED", "NOT"):
                 i += 1
             if i >= n or tokens[i].kind != "LPAREN":
+                i = entry_start
                 break
             rp = _find_matching_rparen(tokens, i)
-            if rp == -1:
+            if rp == -1 or not _is_subquery_token_list(tokens[i + 1 : rp]):
+                i = entry_start
                 break
             if is_recursive:
                 cte_body = _parse_recursive_cte_tokens(tokens[i + 1 : rp])
@@ -1102,6 +1188,76 @@ def _parse_query_tokens(tokens: list[_Tok]) -> dict[str, Any]:
 
     _scan_body_tokens(tokens[i:], node)
     return node
+
+
+def _is_valid_ident_list(cols: list[_Tok]) -> bool:
+    if not cols or len(cols) % 2 == 0:
+        return False
+    return all((tc.kind in ("WORD", "QIDENT") if idx % 2 == 0 else tc.kind == "COMMA") for idx, tc in enumerate(cols))
+
+
+def _is_within_group_at(tokens: list[_Tok], idx: int) -> bool:
+    return (
+        idx > 0
+        and idx + 1 < len(tokens)
+        and tokens[idx].kind == "WORD"
+        and tokens[idx].val.upper() == "GROUP"
+        and not _is_non_keyword_ident_pos(tokens, idx)
+        and tokens[idx - 1].kind == "WORD"
+        and tokens[idx - 1].val.upper() == "WITHIN"
+        and not _is_non_keyword_ident_pos(tokens, idx - 1)
+        and tokens[idx + 1].kind == "LPAREN"
+    )
+
+
+def _is_on_expr_ident_at(tokens: list[_Tok], idx: int) -> bool:
+    if _is_dot_qualifier_at(tokens, idx):
+        return True
+    wu = tokens[idx].val.upper()
+    prev_tok = tokens[idx - 1] if idx > 0 else None
+    nxt_tok = tokens[idx + 1] if idx + 1 < len(tokens) else None
+    if prev_tok is not None:
+        if prev_tok.kind == "DOT" or (prev_tok.kind == "OTHER" and not prev_tok.val[0].isdigit()):
+            return True
+        if (
+            prev_tok.kind == "WORD"
+            and prev_tok.val.upper() in _ON_EXPR_PREV_WORDS
+            and not _is_non_keyword_ident_pos(tokens, idx - 1)
+        ):
+            return True
+    if nxt_tok is not None and nxt_tok.kind == "OTHER" and not nxt_tok.val[0].isdigit():
+        if wu == "SELECT" and nxt_tok.val in ("*", "+", "-", "~", "!"):
+            return False
+        if wu in ("WHERE", "PREWHERE", "HAVING", "QUALIFY", "LIMIT", "OFFSET") and nxt_tok.val in (
+            "+",
+            "-",
+            "~",
+            "!",
+        ):
+            return False
+        return True
+    if (
+        nxt_tok is not None
+        and nxt_tok.kind == "WORD"
+        and nxt_tok.val.upper() in _ON_EXPR_NEXT_WORDS
+        and wu not in ("SELECT", "WHERE", "PREWHERE", "HAVING", "QUALIFY")
+    ):
+        return True
+    return False
+
+
+def _can_exit_from_on_stop_kw(tokens: list[_Tok], idx: int, *, in_on_clause: bool) -> bool:
+    if _is_within_group_at(tokens, idx):
+        return False
+    if not in_on_clause:
+        return True
+    wu = tokens[idx].val.upper()
+    nxt_tok = tokens[idx + 1] if idx + 1 < len(tokens) else None
+    if wu in ("GROUP", "ORDER"):
+        return nxt_tok is not None and nxt_tok.kind == "WORD" and nxt_tok.val.upper() in ("BY", "ALL")
+    if wu == "FETCH":
+        return nxt_tok is not None and nxt_tok.kind == "WORD" and nxt_tok.val.upper() in ("FIRST", "NEXT")
+    return True
 
 
 def _is_subquery_token_list(tokens: list[_Tok], *, enclosing_special_call: str | None = None) -> bool:
@@ -1197,6 +1353,7 @@ def _scan_body_tokens(
     n = len(tokens)
     at_branch_start = not in_from
     in_sample_clause = False
+    in_on_clause = False
 
     while i < n:
         tok = tokens[i]
@@ -1222,7 +1379,9 @@ def _scan_body_tokens(
                         }
                     )
                     return
-                if wu in _NON_SELECT_STATEMENTS:
+                if wu in _NON_SELECT_STATEMENTS and not (
+                    wu in ("REPLACE", "TRUNCATE") and i + 1 < n and tokens[i + 1].kind == "LPAREN"
+                ):
                     node["children"].append(
                         {
                             "type": "DISALLOWED_SUBQUERY_STATEMENT",
@@ -1231,119 +1390,149 @@ def _scan_body_tokens(
                         }
                     )
                     return
-            if wu in ("UNION", "INTERSECT", "EXCEPT"):
-                if expect_table:
-                    node["children"].append(
-                        {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: expected table reference"}
-                    )
-                node["type"] = "SET_OPERATION_NODE"
-                in_from = False
-                expect_table = False
+            is_dot_qual = _is_dot_qualifier_at(tokens, i)
+            is_on_ident = in_on_clause and not expect_table and _is_on_expr_ident_at(tokens, i)
+            if is_dot_qual or is_on_ident:
                 in_sample_clause = False
-                i += 1
-                while i < n and tokens[i].kind == "WORD" and tokens[i].val.upper() in ("ALL", "DISTINCT", "BY", "NAME"):
+            else:
+                if wu in ("UNION", "INTERSECT", "EXCEPT"):
+                    if expect_table:
+                        node["children"].append(
+                            {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: expected table reference"}
+                        )
+                    node["type"] = "SET_OPERATION_NODE"
+                    in_from = False
+                    expect_table = False
+                    in_sample_clause = False
+                    in_on_clause = False
                     i += 1
-                at_branch_start = True
-                continue
-            if wu == "SELECT":
-                if in_from and not expect_table:
+                    while (
+                        i < n
+                        and tokens[i].kind == "WORD"
+                        and tokens[i].val.upper() in ("ALL", "DISTINCT", "BY", "NAME")
+                    ):
+                        i += 1
+                    at_branch_start = True
+                    continue
+                if wu == "SELECT":
+                    if in_from and not expect_table and not in_on_clause:
+                        nxt_tok = tokens[i + 1] if i + 1 < n else None
+                        is_fn_projection = (
+                            nxt_tok is not None
+                            and nxt_tok.kind == "WORD"
+                            and nxt_tok.val.upper() in _FROM_FIRST_SELECT_FN_KEYWORDS
+                            and i + 2 < n
+                            and tokens[i + 2].kind == "LPAREN"
+                        )
+                        is_bare_select_alias = not is_fn_projection and (
+                            nxt_tok is None
+                            or nxt_tok.kind == "COMMA"
+                            or (
+                                nxt_tok.kind == "WORD"
+                                and not _is_dot_qualifier_at(tokens, i + 1)
+                                and nxt_tok.val.upper()
+                                in (
+                                    (_JOIN_MODIFIERS - {"ALL"})
+                                    | _CLAUSE_STOP_KEYWORDS
+                                    | {"ON", "USING", "FINAL", "SELECT"}
+                                )
+                            )
+                        )
+                        if is_bare_select_alias:
+                            in_sample_clause = False
+                            at_branch_start = False
+                            i += 1
+                            continue
+                    if expect_table:
+                        node["children"].append(
+                            {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: expected table reference"}
+                        )
+                    in_from = False
+                    expect_table = False
+                    in_sample_clause = False
+                    in_on_clause = False
+                    at_branch_start = False
+                    i += 1
+                    continue
+                if (wu == "FROM" and not _is_distinct_from_op(tokens, i)) or wu == "TABLE":
+                    in_from = True
+                    expect_table = True
+                    in_sample_clause = False
+                    in_on_clause = False
+                    at_branch_start = False
+                    i += 1
+                    continue
+                if wu in _JOIN_MODIFIERS:
+                    if wu == "JOIN":
+                        in_from = True
+                        expect_table = True
+                    in_sample_clause = False
+                    in_on_clause = False
+                    at_branch_start = False
+                    i += 1
+                    continue
+                if (
+                    in_from
+                    and not expect_table
+                    and not in_on_clause
+                    and wu in ("SETTINGS", "FORMAT", "PREWHERE", "SAMPLE", "FOR")
+                ):
                     nxt_tok = tokens[i + 1] if i + 1 < n else None
-                    is_bare_select_alias = (
+                    is_bare_table_alias = (
                         nxt_tok is None
-                        or nxt_tok.kind == "COMMA"
+                        or nxt_tok.kind in ("COMMA", "LPAREN")
                         or (
                             nxt_tok.kind == "WORD"
                             and nxt_tok.val.upper()
-                            in (
-                                (_JOIN_MODIFIERS - {"ALL"}) | _CLAUSE_STOP_KEYWORDS | {"ON", "USING", "FINAL", "SELECT"}
-                            )
+                            in (_JOIN_MODIFIERS | _CLAUSE_STOP_KEYWORDS | {"ON", "USING", "FINAL", "SELECT"})
                         )
                     )
-                    if is_bare_select_alias:
-                        in_sample_clause = False
+                    if is_bare_table_alias or wu == "SAMPLE":
+                        in_sample_clause = wu == "SAMPLE" and not is_bare_table_alias
                         at_branch_start = False
                         i += 1
+                        if is_bare_table_alias and i < n and tokens[i].kind == "LPAREN":
+                            rp_alias = _find_matching_rparen(tokens, i)
+                            if rp_alias != -1:
+                                alias_cols = tokens[i + 1 : rp_alias]
+                                _scan_expr_tokens(alias_cols, node)
+                                if not _is_valid_ident_list(alias_cols):
+                                    node["children"].append(
+                                        {
+                                            "type": "PARSE_ERROR_NODE",
+                                            "message": "SQL parse error: invalid column alias list",
+                                        }
+                                    )
+                                i = rp_alias + 1
                         continue
-                if expect_table:
-                    node["children"].append(
-                        {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: expected table reference"}
-                    )
-                in_from = False
-                expect_table = False
-                in_sample_clause = False
-                at_branch_start = False
-                i += 1
-                continue
-            if (wu == "FROM" and not _is_distinct_from_op(tokens, i)) or wu == "TABLE":
-                in_from = True
-                expect_table = True
-                in_sample_clause = False
-                at_branch_start = False
-                i += 1
-                continue
-            if wu in _JOIN_MODIFIERS:
-                if wu == "JOIN":
-                    in_from = True
-                    expect_table = True
-                in_sample_clause = False
-                at_branch_start = False
-                i += 1
-                continue
-            if in_from and not expect_table and wu in ("SETTINGS", "FORMAT", "PREWHERE", "SAMPLE", "FOR"):
-                nxt_tok = tokens[i + 1] if i + 1 < n else None
-                is_bare_table_alias = (
-                    nxt_tok is None
-                    or nxt_tok.kind in ("COMMA", "LPAREN")
-                    or (
-                        nxt_tok.kind == "WORD"
-                        and nxt_tok.val.upper()
-                        in (_JOIN_MODIFIERS | _CLAUSE_STOP_KEYWORDS | {"ON", "USING", "FINAL", "SELECT"})
-                    )
-                )
-                if is_bare_table_alias or wu == "SAMPLE":
-                    in_sample_clause = wu == "SAMPLE" and not is_bare_table_alias
+                if in_from and in_sample_clause and wu == "OFFSET":
+                    in_sample_clause = False
                     at_branch_start = False
                     i += 1
-                    if is_bare_table_alias and i < n and tokens[i].kind == "LPAREN":
-                        rp_alias = _find_matching_rparen(tokens, i)
-                        if rp_alias != -1:
-                            alias_cols = tokens[i + 1 : rp_alias]
-                            _scan_expr_tokens(alias_cols, node)
-                            if not alias_cols or not all(tc.kind in ("WORD", "QIDENT", "COMMA") for tc in alias_cols):
-                                node["children"].append(
-                                    {
-                                        "type": "PARSE_ERROR_NODE",
-                                        "message": "SQL parse error: invalid column alias list",
-                                    }
-                                )
-                            i = rp_alias + 1
                     continue
-            if in_from and in_sample_clause and wu == "OFFSET":
-                in_sample_clause = False
-                at_branch_start = False
-                i += 1
-                continue
-            if wu in _CLAUSE_STOP_KEYWORDS:
-                if expect_table:
-                    node["children"].append(
-                        {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: expected table reference"}
-                    )
-                in_from = False
-                expect_table = False
-                in_sample_clause = False
-                at_branch_start = False
-                i += 1
-                continue
-            if in_from and wu in ("ON", "USING"):
-                if expect_table:
-                    node["children"].append(
-                        {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: expected table reference"}
-                    )
-                expect_table = False
-                in_sample_clause = False
-                at_branch_start = False
-                i += 1
-                continue
+                if wu in _CLAUSE_STOP_KEYWORDS and _can_exit_from_on_stop_kw(tokens, i, in_on_clause=in_on_clause):
+                    if expect_table:
+                        node["children"].append(
+                            {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: expected table reference"}
+                        )
+                    in_from = False
+                    expect_table = False
+                    in_sample_clause = False
+                    in_on_clause = False
+                    at_branch_start = False
+                    i += 1
+                    continue
+                if in_from and wu in ("ON", "USING"):
+                    if expect_table:
+                        node["children"].append(
+                            {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: expected table reference"}
+                        )
+                    expect_table = False
+                    in_sample_clause = False
+                    in_on_clause = wu == "ON"
+                    at_branch_start = False
+                    i += 1
+                    continue
 
         if in_from and tok.kind == "COMMA":
             if expect_table:
@@ -1352,6 +1541,7 @@ def _scan_body_tokens(
                 )
             expect_table = True
             in_sample_clause = False
+            in_on_clause = False
             at_branch_start = False
             i += 1
             continue

@@ -1607,3 +1607,314 @@ def test_sec_t5_iter9_py01_clickhouse_bare_for_select_final_and_sample_offset_co
         assert "fla_cv_m_req" in ran_sql, (hs_benign_sql, ran_sql)
         assert "request_facts" not in ran_sql and "FROM logs" not in ran_sql, (hs_benign_sql, ran_sql)
         assert "fla_cv_m_req" in str(ran_settings.get("additional_table_filters", "")), (hs_benign_sql, ran_settings)
+
+
+def test_sec_t5_iter10_py01_with_expression_cte_rewind_parametric_call_and_bare_set_alias() -> None:
+    from backend.core.sql_validator import SQLValidationError, validate_user_sql
+    from backend.high_scale import query as hs_query
+    from backend.models.analytics import QueryRequest as DashboardQueryRequest
+
+    for blocked_sql in (
+        "WITH coalesce((SELECT secret_meta FROM high_scale_batch_publications LIMIT 1), '') AS x SELECT x FROM logs",
+        "WITH coalesce((SELECT name FROM system.tables LIMIT 1), '') AS x SELECT x FROM logs",
+        "WITH coalesce((SELECT table_name FROM information_schema.tables LIMIT 1), '') AS x SELECT x FROM logs",
+        "WITH a AS (SELECT status FROM logs), coalesce((SELECT secret_meta FROM high_scale_batch_publications LIMIT 1), '') AS x SELECT x FROM a",
+        "SELECT * FROM (WITH coalesce((SELECT secret_meta FROM high_scale_batch_publications LIMIT 1), '') AS x SELECT x FROM logs)",
+        "WITH coalesce((SELECT secret_meta FROM high_scale_batch_publications LIMIT 1), '') SELECT status FROM logs",
+        "WITH quantile((SELECT 0.5 FROM high_scale_batch_publications LIMIT 1))(1) SELECT status FROM logs",
+        "WITH read_parquet('/etc/passwd') AS x SELECT status FROM logs",
+        "WITH c(read_parquet('/etc/passwd')) AS (SELECT 1 FROM logs) SELECT * FROM c",
+        "SELECT c.name FROM logs set, system.tables AS c",
+        "SELECT c.secret_meta FROM logs set, high_scale_batch_publications AS c",
+    ):
+        with pytest.raises(SQLValidationError):
+            validate_user_sql(blocked_sql, allowed_tables={"logs"})
+
+    for benign_sql in (
+        "WITH coalesce(url, '/') AS u SELECT u FROM logs",
+        "WITH replace(url, '/a', '/b') AS u SELECT u FROM logs",
+        "WITH c(s, u) AS (SELECT status, url FROM logs) SELECT s, u FROM c",
+        "SELECT c.url FROM logs set, logs AS c",
+    ):
+        assert validate_user_sql(benign_sql, allowed_tables={"logs"}).parse_tree.get("statements"), benign_sql
+
+    executed: list[tuple[str, dict[str, object]]] = []
+
+    class _StubCH:
+        _table_filters_verified = True
+
+        def execute(
+            self,
+            sql: str,
+            params: dict[str, object] | None = None,
+            *,
+            settings: dict[str, object] | None = None,
+        ) -> list[dict[str, object]]:
+            del params
+            executed.append((sql, dict(settings or {})))
+            return [{"service_id": "svc_alpha", "client_ip": "0.0.0.0"}]
+
+    hs_svc = SimpleNamespace(service_id="svc_alpha", client=_StubCH())
+
+    for hs_blocked_sql in (
+        "WITH coalesce((SELECT secret_meta FROM high_scale_batch_publications LIMIT 1), '') AS x SELECT x FROM logs",
+        "WITH coalesce((SELECT name FROM system.tables LIMIT 1), '') AS x SELECT x FROM logs",
+        "WITH coalesce((SELECT table_name FROM information_schema.tables LIMIT 1), '') AS x SELECT x FROM logs",
+        "WITH a AS (SELECT status FROM logs), coalesce((SELECT secret_meta FROM high_scale_batch_publications LIMIT 1), '') AS x SELECT x FROM a",
+        "SELECT * FROM (WITH coalesce((SELECT secret_meta FROM high_scale_batch_publications LIMIT 1), '') AS x SELECT x FROM logs)",
+        "WITH coalesce((SELECT secret_meta FROM high_scale_batch_publications LIMIT 1), '') SELECT status FROM logs",
+        "WITH quantile((SELECT 0.5 FROM high_scale_batch_publications LIMIT 1))(1) SELECT status FROM logs",
+        "SELECT c.name FROM logs set, system.tables AS c",
+    ):
+        with pytest.raises(PermissionError):
+            hs_query.query_endpoint(
+                hs_svc,
+                DashboardQueryRequest(sql=hs_blocked_sql, max_rows=10),
+                "2026-11-19T00:00:00Z",
+                "2026-11-19T01:00:00Z",
+                mask_ips=True,
+                tables={"request_facts": "fla_cv_m_req", "rum_vitals_facts": "fla_cv_m_vit"},
+            )
+    assert executed == []
+
+    for hs_with_rf_sql in (
+        "WITH (SELECT status FROM request_facts LIMIT 1) AS s SELECT s FROM logs",
+        "WITH coalesce((SELECT status FROM request_facts LIMIT 1), '200') AS s SELECT s FROM logs",
+        "WITH a AS (SELECT url FROM logs), coalesce((SELECT status FROM request_facts LIMIT 1), '200') AS s SELECT s, url FROM a",
+    ):
+        executed.clear()
+        hs_query.query_endpoint(
+            hs_svc,
+            DashboardQueryRequest(sql=hs_with_rf_sql, max_rows=10),
+            "2026-11-19T00:00:00Z",
+            "2026-11-19T01:00:00Z",
+            mask_ips=True,
+            tables={"request_facts": "fla_cv_m_req", "rum_vitals_facts": "fla_cv_m_vit"},
+        )
+        assert len(executed) == 1, hs_with_rf_sql
+        ran_sql, ran_settings = executed[0]
+        assert "request_facts" not in ran_sql and "FROM logs" not in ran_sql, ran_sql
+        assert ran_sql.count("fla_cv_m_req") == 2, ran_sql
+        assert "fla_cv_m_req" in str(ran_settings.get("additional_table_filters", "")), ran_settings
+
+    executed.clear()
+    hs_query.query_endpoint(
+        hs_svc,
+        DashboardQueryRequest(sql="SELECT c.pop FROM logs set, client_vitals AS c", max_rows=10),
+        "2026-11-19T00:00:00Z",
+        "2026-11-19T01:00:00Z",
+        mask_ips=True,
+        tables={"request_facts": "fla_cv_m_req", "rum_vitals_facts": "fla_cv_m_vit"},
+    )
+    assert len(executed) == 1
+    set_sql, set_settings = executed[0]
+    assert "client_vitals" not in set_sql and "FROM logs" not in set_sql, set_sql
+    assert "fla_cv_m_req" in set_sql and "fla_cv_m_vit" in set_sql, set_sql
+    set_atf = str(set_settings.get("additional_table_filters", ""))
+    assert "fla_cv_m_req" in set_atf and "fla_cv_m_vit" in set_atf, set_settings
+
+
+def test_sec_t5_iter10_join_on_keywords_and_from_first_select_fn_projections() -> None:
+    from backend.core.sql_validator import SQLValidationError, validate_user_sql
+    from backend.high_scale import query as hs_query
+    from backend.models.analytics import QueryRequest as DashboardQueryRequest
+
+    for blocked_sql in (
+        "SELECT c.name FROM logs AS a JOIN logs select ON a.url = select.url, system.tables AS c",
+        "SELECT c.secret_meta FROM logs AS a JOIN logs AS where ON a.url = where.url, high_scale_batch_publications AS c",
+        "SELECT c.name FROM logs AS a JOIN logs for ON a.url = for.url, system.tables AS c",
+        "SELECT c.secret_meta FROM logs AS a JOIN logs AS limit ON a.url = limit.url, high_scale_batch_publications AS c",
+        "SELECT c.secret_meta FROM logs AS a JOIN logs AS offset ON a.url = offset.url, high_scale_batch_publications AS c",
+        "SELECT c.secret_meta FROM logs AS a JOIN logs AS union ON a.url = union.url, high_scale_batch_publications AS c",
+        "WITH a AS (SELECT 1 AS format FROM logs) SELECT c.secret_col FROM a JOIN logs AS b ON format = 1, ops_secret AS c",
+        "SELECT c.* FROM (SELECT 1 AS format FROM logs) AS a JOIN logs AS b ON format = 1, 'secret.parquet' AS c",
+        "WITH a AS (SELECT 1 AS prewhere FROM logs) SELECT c.secret_col FROM a JOIN logs AS b ON prewhere = 1, ops_secret AS c",
+        "WITH a AS (SELECT 1 AS settings FROM logs) SELECT c.secret_col FROM a JOIN logs AS b ON settings = 1, ops_secret AS c",
+        "SELECT c.secret_meta FROM (SELECT 1 AS where FROM logs) AS a JOIN logs AS b ON where = 1, high_scale_batch_publications AS c",
+        "SELECT c.secret_meta FROM (SELECT 1 AS where FROM logs) AS a JOIN logs AS b ON 1 = where, high_scale_batch_publications AS c",
+        "SELECT c.secret_meta FROM logs AS a JOIN (SELECT toUInt8(0) AS where FROM logs) AS b ON NOT where, high_scale_batch_publications AS c",
+        "SELECT c.secret_meta FROM logs AS a JOIN (SELECT 1 AS offset FROM logs) AS b ON offset IS NOT NULL, high_scale_batch_publications AS c",
+        "SELECT c.secret_meta FROM logs AS a JOIN (SELECT 1 AS select FROM logs) AS b ON select IN (1, 2), high_scale_batch_publications AS c",
+        "SELECT c.secret_meta FROM logs AS a JOIN (SELECT 1 AS having FROM logs) AS b ON CASE WHEN having = 1 THEN 1 ELSE 0 END = 1, high_scale_batch_publications AS c",
+        "SELECT c.secret_meta FROM (SELECT 1 AS inner, 1 AS where FROM logs) AS a JOIN logs AS b ON inner = 1 AND where = 1, high_scale_batch_publications AS c",
+        "SELECT c.secret_meta FROM (SELECT 1 AS join, 1 AS where FROM logs) AS a JOIN logs AS b ON join = 1 AND where = 1, high_scale_batch_publications AS c",
+        "SELECT c.name FROM logs AS a JOIN logs select ON (a.url = select.url), system.tables AS c",
+        "SELECT c.name FROM logs AS a JOIN logs select USING (url), system.tables AS c",
+    ):
+        with pytest.raises(SQLValidationError):
+            validate_user_sql(blocked_sql, allowed_tables={"logs"})
+
+    for benign_sql in (
+        "FROM logs SELECT left(url, 3), status",
+        "FROM logs SELECT right(url, 3), status",
+        "FROM logs SELECT format('{}', url), status",
+        "FROM logs SELECT any(url), status",
+        "SELECT a.status FROM logs AS a JOIN logs AS b ON a.url = b.url WHERE a.status = 200",
+        "SELECT a.status FROM logs AS a JOIN logs AS b ON a.url = b.url WHERE NOT (a.status = 500)",
+        "SELECT a.status FROM logs AS a JOIN logs AS b ON a.url = b.url LIMIT +10",
+        "SELECT a.status, count() FROM logs AS a JOIN logs AS b ON a.url = b.url GROUP BY a.status",
+        "SELECT a.status FROM logs AS a JOIN logs AS b ON a.url = b.url ORDER BY a.status",
+        "SELECT a.status FROM logs AS a JOIN logs AS b ON a.url = b.url UNION ALL SELECT status FROM logs",
+    ):
+        assert validate_user_sql(benign_sql, allowed_tables={"logs"}).parse_tree.get("statements"), benign_sql
+
+    executed: list[tuple[str, dict[str, object]]] = []
+
+    class _StubCH:
+        _table_filters_verified = True
+
+        def execute(
+            self,
+            sql: str,
+            params: dict[str, object] | None = None,
+            *,
+            settings: dict[str, object] | None = None,
+        ) -> list[dict[str, object]]:
+            del params
+            executed.append((sql, dict(settings or {})))
+            return [{"service_id": "svc_alpha", "client_ip": "0.0.0.0"}]
+
+    hs_svc = SimpleNamespace(service_id="svc_alpha", client=_StubCH())
+
+    for hs_blocked_sql in (
+        "SELECT c.name FROM logs AS a JOIN logs select ON a.url = select.url, system.tables AS c",
+        "SELECT c.secret_meta FROM logs AS a JOIN logs AS where ON a.url = where.url, high_scale_batch_publications AS c",
+        "SELECT c.secret_meta FROM logs AS a JOIN logs for ON a.url = for.url, high_scale_batch_publications AS c",
+        "SELECT c.secret_meta FROM logs AS a JOIN logs AS union ON a.url = union.url, high_scale_batch_publications AS c",
+        "SELECT c.secret_meta FROM (SELECT 1 AS where FROM logs) AS a JOIN logs AS b ON where = 1, high_scale_batch_publications AS c",
+        "SELECT c.secret_meta FROM (SELECT 1 AS where FROM logs) AS a JOIN logs AS b ON 1 = where, high_scale_batch_publications AS c",
+        "SELECT c.secret_meta FROM logs AS a JOIN (SELECT toUInt8(0) AS where FROM logs) AS b ON NOT where, high_scale_batch_publications AS c",
+        "SELECT c.secret_meta FROM logs AS a JOIN (SELECT 1 AS select FROM logs) AS b ON select IN (1, 2), high_scale_batch_publications AS c",
+        "SELECT c.name FROM logs AS a JOIN logs select ON (a.url = select.url), system.tables AS c",
+        "SELECT c.name FROM logs AS a JOIN logs select USING (url), system.tables AS c",
+    ):
+        with pytest.raises(PermissionError):
+            hs_query.query_endpoint(
+                hs_svc,
+                DashboardQueryRequest(sql=hs_blocked_sql, max_rows=10),
+                "2026-11-19T00:00:00Z",
+                "2026-11-19T01:00:00Z",
+                mask_ips=True,
+                tables={"request_facts": "fla_cv_m_req", "rum_vitals_facts": "fla_cv_m_vit"},
+            )
+    assert executed == []
+
+    for hs_rf_sql, expected_count in (
+        (
+            "SELECT c.service_id, c.client_ip FROM logs AS a JOIN logs select ON a.url = select.url, request_facts AS c",
+            3,
+        ),
+        (
+            "SELECT c.service_id, c.client_ip FROM logs AS a JOIN logs AS union ON a.url = union.url, request_facts AS c",
+            3,
+        ),
+        (
+            "SELECT c.client_ip FROM (SELECT 1 AS where FROM logs) AS a JOIN logs AS b ON where = 1, request_facts AS c",
+            3,
+        ),
+        (
+            "SELECT c.client_ip FROM (SELECT 1 AS union FROM logs) AS a JOIN logs AS b ON union = 1, request_facts AS c",
+            3,
+        ),
+    ):
+        executed.clear()
+        hs_query.query_endpoint(
+            hs_svc,
+            DashboardQueryRequest(sql=hs_rf_sql, max_rows=10),
+            "2026-11-19T00:00:00Z",
+            "2026-11-19T01:00:00Z",
+            mask_ips=True,
+            tables={"request_facts": "fla_cv_m_req"},
+        )
+        assert len(executed) == 1, hs_rf_sql
+        ran_sql, ran_settings = executed[0]
+        assert "request_facts" not in ran_sql and "FROM logs" not in ran_sql, ran_sql
+        assert ran_sql.count("fla_cv_m_req") == expected_count, ran_sql
+        assert "fla_cv_m_req" in str(ran_settings.get("additional_table_filters", "")), ran_settings
+
+    for hs_benign_sql in (
+        "FROM logs SELECT format('{}', url), status",
+        "FROM logs SELECT any(url), status",
+        "SELECT union.status FROM logs AS union WHERE union.status = 200",
+    ):
+        executed.clear()
+        hs_query.query_endpoint(
+            hs_svc,
+            DashboardQueryRequest(sql=hs_benign_sql, max_rows=10),
+            "2026-11-19T00:00:00Z",
+            "2026-11-19T01:00:00Z",
+            mask_ips=True,
+            tables={"request_facts": "fla_cv_m_req"},
+        )
+        assert len(executed) == 1, hs_benign_sql
+        ran_sql, ran_settings = executed[0]
+        assert "fla_cv_m_req" in ran_sql and "FROM logs" not in ran_sql, ran_sql
+        assert "fla_cv_m_req" in str(ran_settings.get("additional_table_filters", "")), ran_settings
+
+
+def test_sec_t5_iter10_within_group_ordered_set_aggregate_comma_joins() -> None:
+    from backend.core.sql_validator import SQLValidationError, validate_user_sql
+    from backend.high_scale import query as hs_query
+    from backend.models.analytics import QueryRequest as DashboardQueryRequest
+
+    for blocked_sql in (
+        "SELECT (SELECT c.secret_col FROM logs AS x JOIN logs AS y ON mode() WITHIN GROUP (ORDER BY outer_logs.status) = 200, ops_secret AS c LIMIT 1) AS leaked FROM logs AS outer_logs",
+        "SELECT c.secret_meta FROM logs AS a JOIN logs AS b ON quantile(0.5) WITHIN GROUP (ORDER BY a.status) = 200, high_scale_batch_publications AS c",
+    ):
+        with pytest.raises(SQLValidationError):
+            validate_user_sql(blocked_sql, allowed_tables={"logs"})
+
+    for benign_sql in (
+        "SELECT a.within, count() FROM (SELECT status AS within FROM logs) AS a GROUP BY within",
+        "SELECT a.within, count() FROM (SELECT status AS within FROM logs) AS a JOIN logs AS b ON a.within = b.status GROUP BY a.within",
+    ):
+        assert validate_user_sql(benign_sql, allowed_tables={"logs"}).parse_tree.get("statements"), benign_sql
+
+    executed: list[tuple[str, dict[str, object]]] = []
+
+    class _StubCH:
+        _table_filters_verified = True
+
+        def execute(
+            self,
+            sql: str,
+            params: dict[str, object] | None = None,
+            *,
+            settings: dict[str, object] | None = None,
+        ) -> list[dict[str, object]]:
+            del params
+            executed.append((sql, dict(settings or {})))
+            return [{"service_id": "svc_alpha", "client_ip": "0.0.0.0"}]
+
+    hs_svc = SimpleNamespace(service_id="svc_alpha", client=_StubCH())
+
+    with pytest.raises(PermissionError):
+        hs_query.query_endpoint(
+            hs_svc,
+            DashboardQueryRequest(
+                sql="SELECT c.secret_meta FROM logs AS a JOIN logs AS b ON quantile(0.5) WITHIN GROUP (ORDER BY a.status) = 200, high_scale_batch_publications AS c",
+                max_rows=10,
+            ),
+            "2026-11-19T00:00:00Z",
+            "2026-11-19T01:00:00Z",
+            mask_ips=True,
+            tables={"request_facts": "fla_cv_m_req"},
+        )
+    assert executed == []
+
+    hs_query.query_endpoint(
+        hs_svc,
+        DashboardQueryRequest(
+            sql="SELECT c.service_id, c.client_ip FROM logs AS a JOIN logs AS b ON quantile(0.5) WITHIN GROUP (ORDER BY a.status) = 200, request_facts AS c",
+            max_rows=10,
+        ),
+        "2026-11-19T00:00:00Z",
+        "2026-11-19T01:00:00Z",
+        mask_ips=True,
+        tables={"request_facts": "fla_cv_m_req"},
+    )
+    assert len(executed) == 1
+    wg_sql, wg_settings = executed[0]
+    assert "request_facts" not in wg_sql and "FROM logs" not in wg_sql, wg_sql
+    assert wg_sql.count("fla_cv_m_req") == 3, wg_sql
+    assert "fla_cv_m_req" in str(wg_settings.get("additional_table_filters", "")), wg_settings

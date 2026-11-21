@@ -1212,6 +1212,27 @@ fn is_rel_distinct_from_op(tokens: &[RelTok], idx: usize) -> bool {
     false
 }
 
+fn is_rel_within_group_clause(tokens: &[RelTok], idx: usize) -> bool {
+    idx > 0
+        && matches!(
+            tokens.get(idx),
+            Some(RelTok::Ident {
+                lower,
+                quoted: false,
+                ..
+            }) if lower == "group" && !is_non_keyword_rel_pos(tokens, idx)
+        )
+        && matches!(
+            tokens.get(idx - 1),
+            Some(RelTok::Ident {
+                lower: prev_kw,
+                quoted: false,
+                ..
+            }) if prev_kw == "within" && !is_non_keyword_rel_pos(tokens, idx - 1)
+        )
+        && matches!(tokens.get(idx + 1), Some(RelTok::LParen))
+}
+
 fn is_from_alias_stop_keyword(lower: &str) -> bool {
     matches!(
         lower,
@@ -1917,7 +1938,8 @@ fn has_positional_wildcard_subquery_or_setop(
                         | "offset"
                         | "fetch"
                         | "into"
-                ) {
+                ) && !is_rel_within_group_clause(tokens, idx)
+                {
                     if let Some(top) = scopes.last_mut() {
                         top.in_select_list = false;
                         top.in_order_by = lower == "order";
@@ -2314,6 +2336,7 @@ fn references_whole_row_relation_struct(tokens: &[RelTok]) -> bool {
                             | "intersect"
                             | "except"
                     )
+                    && !is_rel_within_group_clause(tokens, idx)
                 {
                     in_from = false;
                     expect_rel = false;
@@ -6610,6 +6633,45 @@ mod tests {
             (
                 "benign-r10-empty-sconst-projection-and-where",
                 r#"{"_view_extras":{"sql":"SELECT '' AS empty_s, status FROM logs WHERE url != ''"}}"#,
+            ),
+        ];
+
+        for (case_id, payload) in allowed_vectors {
+            assert!(
+                !filters_reference_pii(payload),
+                "expected {case_id} to be allowed for AnalystNoPii: {payload}"
+            );
+        }
+    }
+
+    #[test]
+    fn sec19_blocks_wave11_r11_within_group_ordered_set_aggregate_comma_join_relations() {
+        let blocked_vectors = [
+            (
+                "r11-within-group-mode-comma-logs-cast-ip",
+                r#"{"_view_extras":{"sql":"SELECT min(outer_v.url) AS url FROM client_vitals AS outer_v HAVING (SELECT c::VARCHAR LIKE '%198.51.100.7%' FROM (SELECT 1 AS a) AS x JOIN (SELECT 1 AS b) AS y ON mode() WITHIN GROUP (ORDER BY outer_v.url) = '/ok', logs AS c LIMIT 1)"}}"#,
+            ),
+            (
+                "r11-within-group-percentile-comma-logs-format-oip",
+                r#"{"_view_extras":{"sql":"SELECT min(outer_v.url) AS url FROM client_vitals AS outer_v HAVING (SELECT format('{}', c) LIKE '%203.0.113.9%' FROM (SELECT 1 AS a) AS x JOIN (SELECT 1 AS b) AS y ON percentile_disc(0.5) WITHIN GROUP (ORDER BY outer_v.url) = '/ok', logs AS c LIMIT 1)"}}"#,
+            ),
+        ];
+
+        for (case_id, payload) in blocked_vectors {
+            assert!(
+                filters_reference_pii(payload),
+                "expected {case_id} to be blocked as PII-referencing: {payload}"
+            );
+        }
+
+        let allowed_vectors = [
+            (
+                "benign-r11-within-col-group-by",
+                r#"{"_view_extras":{"sql":"SELECT a.within, count(*) FROM (SELECT status AS within FROM logs) AS a GROUP BY within"}}"#,
+            ),
+            (
+                "benign-r11-on-within-col-then-group-by",
+                r#"{"_view_extras":{"sql":"SELECT a.within, count(*) FROM (SELECT status AS within FROM logs) AS a JOIN logs AS b ON a.within = b.status GROUP BY a.within"}}"#,
             ),
         ];
 

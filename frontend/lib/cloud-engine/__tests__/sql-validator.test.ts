@@ -348,4 +348,26 @@ describe('T5-FE-04: cloud-engine SQL validator adversarial replacement-scan, sch
       expect(rows.length, benignSql).toBe(1)
     }
   })
+
+  it('closes SEC-T5-ITER10-WITHIN-GROUP-01: blocks comma-joined foreign tables after WITHIN GROUP (ORDER BY ...) while allowing benign within column and GROUP BY queries', async () => {
+    for (const blockedSql of [
+      'SELECT (SELECT c.secret_col FROM logs AS x JOIN logs AS y ON mode() WITHIN GROUP (ORDER BY outer_logs.status) = 200, ops_secret AS c LIMIT 1) AS leaked FROM logs AS outer_logs',
+      "SELECT (SELECT c.* FROM logs AS x JOIN logs AS y ON percentile_disc(0.5) WITHIN GROUP (ORDER BY outer_logs.status) = 200, 'secret.parquet' AS c LIMIT 1) AS leaked FROM logs AS outer_logs",
+    ]) {
+      expect(() => validateUserSql(blockedSql, ['logs', 'requests']), blockedSql).toThrow(
+        SQLValidationError,
+      )
+      const res = validateSqlQuery(blockedSql, { allowedTables: ['logs', 'requests'] })
+      expect(res.valid, blockedSql).toBe(false)
+    }
+
+    for (const benignSql of [
+      'SELECT a.within, count(*) AS cnt FROM (SELECT status AS within FROM logs) AS a GROUP BY within',
+      'SELECT a.within, count(*) AS cnt FROM (SELECT status AS within FROM logs) AS a JOIN logs AS b ON a.within = b.status GROUP BY a.within',
+    ]) {
+      expect(() => validateUserSql(benignSql, ['logs', 'requests']), benignSql).not.toThrow()
+      const rows = await engine.executeSql(benignSql)
+      expect(rows.length, benignSql).toBeGreaterThanOrEqual(1)
+    }
+  })
 })

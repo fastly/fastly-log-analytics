@@ -1481,8 +1481,22 @@ def test_t5_c08_cloud_views_redteam_dupkeys_sticky_slots_columns_lambda_concat_a
                 }
             }
         ),
+        "bug-cloud-1-r11-within-group-comma-logs-cast-ip": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT min(outer_v.url) AS url FROM client_vitals AS outer_v HAVING (SELECT c::VARCHAR LIKE '%198.51.100.7%' FROM (SELECT 1 AS a) AS x JOIN (SELECT 1 AS b) AS y ON mode() WITHIN GROUP (ORDER BY outer_v.url) = '/ok', logs AS c LIMIT 1)"
+                }
+            }
+        ),
     }
     benign_vectors: dict[str, str] = {
+        "benign-r11-within-col-group-by": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT a.within, count(*) FROM (SELECT status AS within FROM logs) AS a GROUP BY within"
+                }
+            }
+        ),
         "benign-r10-dquote-space-dot-safe-cols": json.dumps(
             {"_view_extras": {"sql": 'SELECT " ".status, " ".url FROM logs AS " " WHERE " ".status = 200'}}
         ),
@@ -2495,13 +2509,37 @@ def test_t5_hs03_hs12_py08_sql_console_table_filter_parser_differentials_union_s
         "SELECT c.name FROM logs SAMPLE 1/10 OFFSET 1/2, system.tables AS c",
         "SELECT c.service_id, c.secret_meta FROM logs SAMPLE 1/10 OFFSET 1/2, high_scale_batch_publications AS c",
         "SELECT c.service_id, c.secret_meta FROM logs SAMPLE 0.5 OFFSET 0.1, high_scale_batch_publications AS c",
+        "WITH coalesce((SELECT secret_meta FROM high_scale_batch_publications LIMIT 1), '') AS x SELECT x FROM logs",
+        "WITH coalesce((SELECT name FROM system.tables LIMIT 1), '') AS x SELECT x FROM logs",
+        "WITH coalesce((SELECT table_name FROM information_schema.tables LIMIT 1), '') AS x SELECT x FROM logs",
+        "WITH a AS (SELECT status FROM logs), coalesce((SELECT secret_meta FROM high_scale_batch_publications LIMIT 1), '') AS x SELECT x FROM a",
+        "SELECT * FROM (WITH coalesce((SELECT secret_meta FROM high_scale_batch_publications LIMIT 1), '') AS x SELECT x FROM logs)",
+        "WITH coalesce((SELECT secret_meta FROM high_scale_batch_publications LIMIT 1), '') SELECT status FROM logs",
+        "WITH quantile((SELECT 0.5 FROM high_scale_batch_publications LIMIT 1))(1) SELECT status FROM logs",
+        "WITH read_parquet('/etc/passwd') AS x SELECT status FROM logs",
+        "WITH c(read_parquet('/etc/passwd')) AS (SELECT 1 FROM logs) SELECT * FROM c",
+        "SELECT c.name FROM logs set, system.tables AS c",
+        "SELECT c.name FROM logs AS a JOIN logs select ON a.url = select.url, system.tables AS c",
+        "SELECT c.secret_meta FROM logs AS a JOIN logs AS where ON a.url = where.url, high_scale_batch_publications AS c",
+        "SELECT c.name FROM logs AS a JOIN logs for ON a.url = for.url, system.tables AS c",
+        "SELECT c.secret_meta FROM logs AS a JOIN logs AS limit ON a.url = limit.url, high_scale_batch_publications AS c",
+        "SELECT c.secret_meta FROM logs AS a JOIN logs AS union ON a.url = union.url, high_scale_batch_publications AS c",
+        "SELECT c.secret_meta FROM (SELECT 1 AS where FROM logs) AS a JOIN logs AS b ON where = 1, high_scale_batch_publications AS c",
+        "SELECT c.secret_meta FROM (SELECT 1 AS where FROM logs) AS a JOIN logs AS b ON 1 = where, high_scale_batch_publications AS c",
+        "SELECT c.secret_meta FROM logs AS a JOIN (SELECT toUInt8(0) AS where FROM logs) AS b ON NOT where, high_scale_batch_publications AS c",
+        "SELECT c.secret_meta FROM logs AS a JOIN (SELECT 1 AS offset FROM logs) AS b ON offset IS NOT NULL, high_scale_batch_publications AS c",
+        "SELECT c.secret_meta FROM logs AS a JOIN (SELECT 1 AS select FROM logs) AS b ON select IN (1, 2), high_scale_batch_publications AS c",
+        "SELECT c.secret_meta FROM logs AS a JOIN (SELECT 1 AS having FROM logs) AS b ON CASE WHEN having = 1 THEN 1 ELSE 0 END = 1, high_scale_batch_publications AS c",
+        "SELECT c.name FROM logs AS a JOIN logs select ON (a.url = select.url), system.tables AS c",
+        "SELECT c.name FROM logs AS a JOIN logs select USING (url), system.tables AS c",
+        "SELECT c.secret_meta FROM logs AS a JOIN logs AS b ON quantile(0.5) WITHIN GROUP (ORDER BY a.status) = 200, high_scale_batch_publications AS c",
     ]
     c = _analyst_client(analyst)
     for bad_sql in adversarial_sqls:
         r_bad = c.post("/api/query", json={"service_id": "svc-a", "sql": bad_sql})
         assert r_bad.status_code in {400, 403}, f"SQL not rejected ({r_bad.status_code}): {bad_sql}"
 
-    # Benign compound leading-LPAREN subquery, sample/select/for aliases, FROM-first SELECT, SAMPLE OFFSET, AS as, 1., [a.status, 1], and JSON string succeed
+    # Benign compound leading-LPAREN subquery, sample/select/for/set aliases, FROM-first SELECT, SAMPLE OFFSET, WITH expr, AS as, 1., [a.status, 1], and JSON string succeed
     for benign_console_sql in (
         "SELECT status FROM logs WHERE url IN ((SELECT url FROM logs) UNION ALL SELECT url FROM logs)",
         "SELECT sample.status FROM logs AS sample WHERE sample.status = 200",
@@ -2509,7 +2547,18 @@ def test_t5_hs03_hs12_py08_sql_console_table_filter_parser_differentials_union_s
         "SELECT select.status FROM logs AS select WHERE select.status = 200",
         "FROM logs select, request_facts AS c SELECT c.status",
         "SELECT for.status FROM logs for WHERE for.status = 200",
+        "SELECT c.pop FROM logs set, client_vitals AS c",
+        "WITH coalesce(url, '/') AS u SELECT u FROM logs",
+        "WITH (SELECT status FROM request_facts LIMIT 1) AS s SELECT s FROM logs",
         "FROM logs SELECT status, url",
+        "FROM logs SELECT format('{}', url), status",
+        "FROM logs SELECT any(url), status",
+        "SELECT a.status FROM logs AS a JOIN logs AS b ON a.url = b.url WHERE a.status = 200",
+        "SELECT a.status FROM logs AS a JOIN logs AS b ON a.url = b.url WHERE NOT (a.status = 500)",
+        "SELECT a.status FROM logs AS a JOIN logs AS b ON a.url = b.url LIMIT +10",
+        "SELECT a.status, count() FROM logs AS a JOIN logs AS b ON a.url = b.url GROUP BY a.status",
+        "SELECT a.status FROM logs AS a JOIN logs AS b ON a.url = b.url ORDER BY a.status",
+        "SELECT a.status FROM logs AS a JOIN logs AS b ON a.url = b.url UNION ALL SELECT status FROM logs",
         "SELECT status FROM logs SAMPLE 1/10 OFFSET 1/2",
         "SELECT status FROM logs LIMIT 10 OFFSET 5",
         "SELECT 1::union(a INT) AS u FROM logs",
@@ -2556,6 +2605,32 @@ def test_t5_hs03_hs12_py08_sql_console_table_filter_parser_differentials_union_s
     assert "_m_request_facts" in str((sample_off_settings or {}).get("additional_table_filters", "")), (
         sample_off_settings
     )
+
+    for iter11_rf_sql, expected_m_count in (
+        (
+            "SELECT c.service_id, c.client_ip FROM logs AS a JOIN logs select ON a.url = select.url, request_facts AS c",
+            3,
+        ),
+        (
+            "SELECT c.client_ip FROM (SELECT 1 AS where FROM logs) AS a JOIN logs AS b ON where = 1, request_facts AS c",
+            3,
+        ),
+        (
+            "SELECT c.service_id, c.client_ip FROM logs AS a JOIN logs AS b ON quantile(0.5) WITHIN GROUP (ORDER BY a.status) = 200, request_facts AS c",
+            3,
+        ),
+        ("WITH coalesce((SELECT status FROM request_facts LIMIT 1), '200') AS s SELECT s FROM logs", 2),
+    ):
+        ch_recorder.calls.clear()
+        r_iter11_rf = c_masked_hs03.post(
+            "/api/query",
+            json={"service_id": "svc-a", "sql": iter11_rf_sql},
+        )
+        assert r_iter11_rf.status_code == 200, f"{iter11_rf_sql} -> {r_iter11_rf.text}"
+        rf_sql, _, rf_settings = ch_recorder.calls[-1]
+        assert "request_facts" not in rf_sql.replace("_m_request_facts", ""), rf_sql
+        assert rf_sql.count("_m_request_facts") == expected_m_count, rf_sql
+        assert "_m_request_facts" in str((rf_settings or {}).get("additional_table_filters", "")), rf_settings
 
     # 2. Multi-branch UNION ALL rewrites pop -> custom_fields['pop'] ONLY on logs, preserving native pop on client_vitals
     ch_recorder.calls.clear()
