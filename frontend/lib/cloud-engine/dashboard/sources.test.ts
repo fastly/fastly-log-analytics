@@ -139,6 +139,51 @@ describe("browserSource", () => {
     expect(telemetry).toHaveLength(1);
   });
 
+  it("coalesces staggered CacheStorage misses through persistence", async () => {
+    let releaseCacheMiss!: () => void;
+    let releaseStore!: () => void;
+    const cacheMiss = new Promise<void>((resolve) => {
+      releaseCacheMiss = resolve;
+    });
+    const stored = new Promise<void>((resolve) => {
+      releaseStore = resolve;
+    });
+    let matchCount = 0;
+    vi.stubGlobal("caches", {
+      open: vi.fn(async () => ({
+        match: vi.fn(async () => {
+          matchCount += 1;
+          await cacheMiss;
+          return undefined;
+        }),
+        put: vi.fn(async () => {
+          await stored;
+        }),
+      })),
+    });
+    const fetchMock = vi.fn(
+      async () => new Response(new Uint8Array([4, 5, 6])),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const source = browserSource("");
+
+    const first = source.fetchFile("staggered");
+    await vi.waitFor(() => expect(matchCount).toBe(1));
+    const second = source.fetchFile("staggered");
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(matchCount).toBe(1);
+    releaseCacheMiss();
+    expect((await first).cached).toBe(false);
+    expect((await second).cached).toBe(true);
+    const third = source.fetchFile("staggered");
+
+    expect((await third).cached).toBe(true);
+    releaseStore();
+    await stored;
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+  });
+
   it("keeps a shared file fetch alive when one waiter aborts", async () => {
     let resolveFetch!: (response: Response) => void;
     let networkSignal: AbortSignal | undefined;
@@ -802,6 +847,64 @@ describe("pruneRequestCache", () => {
     })).toEqual([superseded]);
     expect((await cache.keys()).map((request) => new URL(request.url, "http://x").searchParams.get("scope")))
       .toEqual(["service-b"]);
+  });
+
+  it("prunes owned manifest and derived identities without crossing services", async () => {
+    const { cacheFor, stores } = fakeCacheStorage({});
+    const fetchMock = vi.fn(
+      async () => new Response(new Uint8Array([1])),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const identity = JSON.stringify(["manifest", "etag", 17]);
+    const derivedIdentity = JSON.stringify(["columns", ["status", "url"]]);
+    const base = browserSource("", undefined, { cacheScope: "session" });
+
+    await Promise.all([
+      base.withOptions({ serviceId: "service-a" }).fetchFile(superseded, undefined, { identity }),
+      base.withOptions({ serviceId: "service-b" }).fetchFile(superseded, undefined, { identity }),
+    ]);
+    await Promise.all([
+      base.withOptions({ serviceId: "service-a" }).writeDerivedFile!(
+        superseded,
+        derivedIdentity,
+        new Uint8Array([2]).buffer,
+        "[]",
+      ),
+      base.withOptions({ serviceId: "service-b" }).writeDerivedFile!(
+        superseded,
+        derivedIdentity,
+        new Uint8Array([2]).buffer,
+        "[]",
+      ),
+    ]);
+    await vi.waitFor(() =>
+      expect(stores.get(CACHE_NAME)?.size).toBe(4),
+    );
+    expect(
+      [...stores.get(CACHE_NAME)!.keys()]
+        .filter(
+          (url) =>
+            new URL(url, "http://localhost").searchParams.get("scope") ===
+            "session:service-a",
+        )
+        .map(
+          (url) =>
+            new URL(url, "http://localhost").searchParams.get("identity"),
+        )
+        .sort(),
+    ).toEqual([identity, `derived:${derivedIdentity}`].sort());
+
+    const cache = cacheFor(CACHE_NAME) as unknown as Cache;
+    expect(await pruneRequestCache(cache, manifest, ...range, {
+      scope: "session:service-a",
+      retentionCutoffMs: 0,
+    })).toEqual([superseded, superseded]);
+    expect(
+      [...stores.get(CACHE_NAME)!.keys()].map(
+        (url) =>
+          new URL(url, "http://localhost").searchParams.get("scope"),
+      ),
+    ).toEqual(["session:service-b", "session:service-b"]);
   });
 
   it("expires summaries and bundles by retention but never as superseded", async () => {

@@ -100,9 +100,16 @@ export async function mapLimit<T, R>(
   return results;
 }
 
-function scopedCacheUrl(url: string, scope?: string): string {
-  if (!scope) return url;
-  return `${url}${url.includes("?") ? "&" : "?"}scope=${encodeURIComponent(scope)}`;
+function scopedCacheUrl(
+  url: string,
+  scope?: string,
+  identity?: string,
+): string {
+  if (!scope && identity === undefined) return url;
+  const params = new URLSearchParams();
+  if (scope) params.set("scope", scope);
+  if (identity !== undefined) params.set("identity", identity);
+  return `${url}${url.includes("?") ? "&" : "?"}${params}`;
 }
 
 async function manifestJson(response: Response): Promise<unknown> {
@@ -489,9 +496,10 @@ export function browserSource(
   let memoryFileBytes = 0;
   type InFlightFile = {
     controller: AbortController;
-    promise: Promise<{ bytes: ArrayBuffer; cdn: string | null }>;
+    promise: Promise<{ bytes: ArrayBuffer; cached: boolean; cdn: string | null }>;
     waiters: number;
-    settled: boolean;
+    networkDone: boolean;
+    complete: boolean;
   };
   const inFlightFiles = new Map<string, InFlightFile>();
   let fileCachePromise: Promise<Cache | null> | null = null;
@@ -702,8 +710,16 @@ export function browserSource(
     return storeQueue;
   };
 
-  const derivedCacheUrl = (key: string, identity: string) =>
-    scopedCacheUrl(`${baseUrl}${fileRequestPath(key)}`, `derived:${identity}`);
+  const derivedCacheUrl = (
+    key: string,
+    identity: string,
+    options?: BrowserSourceOptions,
+  ) =>
+    scopedCacheUrl(
+      `${baseUrl}${fileRequestPath(key)}`,
+      fileOwnerScope(options),
+      `derived:${identity}`,
+    );
 
   const sourceScope = (options?: BrowserSourceOptions) =>
     options?.serviceId
@@ -711,10 +727,24 @@ export function browserSource(
       : cacheScope ?? "browser";
   const fileScope = (options?: BrowserSourceOptions) =>
     options?.serviceId ? sourceScope(options) : cacheScope;
+  const fileOwnerScope = (options?: BrowserSourceOptions) =>
+    options?.serviceId ? sourceScope(options) : undefined;
+  const fileMemoryIdentity = (
+    options: BrowserSourceOptions | undefined,
+    identity?: string,
+  ) => JSON.stringify([fileOwnerScope(options) ?? null, identity ?? null]);
+  const fileMemoryIdentityOwnedBy = (
+    stored: string | undefined,
+    options: BrowserSourceOptions | undefined,
+  ) => {
+    if (stored === undefined) return false;
+    const decoded = JSON.parse(stored) as [unknown, unknown];
+    return decoded[0] === (fileOwnerScope(options) ?? null);
+  };
   const sourceWith = (options?: BrowserSourceOptions): BrowserFileSource => ({
     async readDerivedFile(key, identity) {
       const cache = await getFileCache();
-      const hit = await cache?.match(derivedCacheUrl(key, identity));
+      const hit = await cache?.match(derivedCacheUrl(key, identity, options));
       const byteLength = Number(hit?.headers.get(DERIVED_BYTES_HEADER));
       if (!hit || !Number.isSafeInteger(byteLength) || byteLength < 0) {
         await hit?.body?.cancel();
@@ -749,7 +779,7 @@ export function browserSource(
       const cache = await getFileCache();
       if (!cache) return;
       // Tracked through the full file's index entry so its recorded size stays the file's own.
-      await store(CACHE_NAME, cache, derivedCacheUrl(key, identity), key, async () => ({
+      await store(CACHE_NAME, cache, derivedCacheUrl(key, identity, options), key, async () => ({
         data,
         bytes: data.size,
         headers: {
@@ -1058,7 +1088,8 @@ export function browserSource(
       const reqPath = fileRequestPath(key);
       const path = fileDisplayPath(key);
       const pageLoadId = options?.getPageLoadId?.();
-      const requestScope = mode?.identity ?? fileScope(options);
+      const ownerScope = fileOwnerScope(options);
+      const requestScope = fileMemoryIdentity(options, mode?.identity);
       const inMemory = memoryFiles.get(key);
       if (inMemory && memoryFileIdentities.get(key) === requestScope) {
         if (transfer) {
@@ -1082,43 +1113,59 @@ export function browserSource(
         return { bytes: inMemory.slice(0), cached: true, cdn: null };
       }
       const url = `${baseUrl}${reqPath}`;
-      // A caller identity already carries the current scope; the one captured at creation can be stale.
-      const cacheUrl = scopedCacheUrl(url, requestScope);
-      const cacheStart =
-        typeof performance !== "undefined" ? performance.now() : Date.now();
-      const cache = await getFileCache();
-      const hit = await cache?.match(cacheUrl);
-      if (hit) {
-        const bytes = await hit.arrayBuffer();
-        storeIndex.touch(key, bytes.byteLength);
-        const cacheEnd =
-          typeof performance !== "undefined" ? performance.now() : Date.now();
-        if (!transfer) rememberFile(key, bytes, requestScope);
-        options?.onApiCall?.({
-          source: "Browser Cache",
-          method: "GET",
-          path,
-          status: 200,
-          duration_ms: Math.max(0, Math.round(cacheEnd - cacheStart)),
-          bytes: bytes.byteLength,
-          cache: "browser",
-          endpoint: "GET /api/file",
-          page_load_id: pageLoadId,
-        });
-        return { bytes: bytes.slice(0), cached: true, cdn: null };
-      }
+      const cacheUrl = scopedCacheUrl(url, ownerScope, mode?.identity);
       signal?.throwIfAborted();
-      const headers = buildRequestHeaders(
-        options,
-        limits.foldFileTelemetry ? { "X-FLP-Fold-Telemetry": "1" } : undefined,
-      );
       let inFlight = inFlightFiles.get(cacheUrl);
       const cached = inFlight !== undefined;
       if (!inFlight) {
         const controller = new AbortController();
-        const promise = (async () => {
-          await Promise.resolve();
+        const entry: InFlightFile = {
+          controller,
+          promise: undefined as unknown as InFlightFile["promise"],
+          waiters: 0,
+          networkDone: false,
+          complete: false,
+        };
+        const finish = () => {
+          if (inFlightFiles.get(cacheUrl) !== entry) return;
+          entry.complete = true;
+          if (entry.waiters === 0) inFlightFiles.delete(cacheUrl);
+        };
+        entry.promise = Promise.resolve().then(async () => {
+          const cacheStart =
+            typeof performance !== "undefined" ? performance.now() : Date.now();
           try {
+            const cache = await getFileCache();
+            const hit = await cache?.match(cacheUrl);
+            if (hit) {
+              const bytes = await hit.arrayBuffer();
+              storeIndex.touch(key, bytes.byteLength);
+              const cacheEnd =
+                typeof performance !== "undefined"
+                  ? performance.now()
+                  : Date.now();
+              if (!transfer) rememberFile(key, bytes, requestScope);
+              options?.onApiCall?.({
+                source: "Browser Cache",
+                method: "GET",
+                path,
+                status: 200,
+                duration_ms: Math.max(0, Math.round(cacheEnd - cacheStart)),
+                bytes: bytes.byteLength,
+                cache: "browser",
+                endpoint: "GET /api/file",
+                page_load_id: pageLoadId,
+              });
+              entry.networkDone = true;
+              finish();
+              return { bytes, cached: true, cdn: null };
+            }
+            const headers = buildRequestHeaders(
+              options,
+              limits.foldFileTelemetry
+                ? { "X-FLP-Fold-Telemetry": "1" }
+                : undefined,
+            );
             const start =
               typeof performance !== "undefined"
                 ? performance.now()
@@ -1184,7 +1231,7 @@ export function browserSource(
             );
             if (cache) {
               const byteLength = bytes.byteLength;
-              void store(
+              const persistence = store(
                 CACHE_NAME,
                 cache,
                 cacheUrl,
@@ -1196,27 +1243,17 @@ export function browserSource(
                 }),
                 true,
               );
+              void persistence.then(finish, finish);
             }
-            return { bytes, cdn };
-          } finally {
-            const active = inFlightFiles.get(cacheUrl);
-            if (active?.controller === controller) {
-              active.settled = true;
-            }
-            if (
-              active?.waiters === 0 &&
-              active.controller === controller
-            ) {
-              inFlightFiles.delete(cacheUrl);
-            }
+            entry.networkDone = true;
+            if (!cache) finish();
+            return { bytes, cached: false, cdn };
+          } catch (error) {
+            entry.networkDone = true;
+            finish();
+            throw error;
           }
-        })();
-        const entry: InFlightFile = {
-          controller,
-          promise,
-          waiters: 0,
-          settled: false,
-        };
+        });
         inFlightFiles.set(cacheUrl, entry);
         inFlight = entry;
       }
@@ -1228,8 +1265,11 @@ export function browserSource(
         released = true;
         request.waiters -= 1;
         if (request.waiters === 0) {
-          if (!request.settled) request.controller.abort();
-          if (inFlightFiles.get(cacheUrl) === request) {
+          if (!request.networkDone) request.controller.abort();
+          if (
+            request.complete &&
+            inFlightFiles.get(cacheUrl) === request
+          ) {
             inFlightFiles.delete(cacheUrl);
           }
         }
@@ -1251,7 +1291,7 @@ export function browserSource(
         if (!transfer) rememberFile(key, network.bytes.slice(0), requestScope);
         return {
           bytes: network.bytes.slice(0),
-          cached,
+          cached: cached || network.cached,
           cdn: network.cdn,
         };
       } finally {
@@ -1260,7 +1300,7 @@ export function browserSource(
       }
     },
     async hasFile(key) {
-      const requestScope = fileScope(options);
+      const requestScope = fileMemoryIdentity(options);
       if (
         memoryFiles.has(key) &&
         memoryFileIdentities.get(key) === requestScope
@@ -1268,7 +1308,9 @@ export function browserSource(
       try {
         const cache = await getFileCache();
         const url = `${baseUrl}${fileRequestPath(key)}`;
-        return Boolean(await cache?.match(scopedCacheUrl(url, requestScope)));
+        return Boolean(
+          await cache?.match(scopedCacheUrl(url, fileOwnerScope(options))),
+        );
       } catch {
         return false;
       }
@@ -1386,10 +1428,12 @@ export function browserSource(
         ]);
         for (const key of fileCache
           ? await pruneRequestCache(fileCache, manifest, fromMs, toMs, {
-              scope: fileScope(options),
+              scope: fileOwnerScope(options),
             })
           : []) {
-          if (memoryFileIdentities.get(key) === fileScope(options)) forgetFile(key);
+          if (fileMemoryIdentityOwnedBy(memoryFileIdentities.get(key), options)) {
+            forgetFile(key);
+          }
           storeIndex.forget(key);
         }
         for (const key of rollupCache
