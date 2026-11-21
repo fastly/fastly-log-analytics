@@ -681,6 +681,7 @@ _FROM_EXIT_KEYWORDS = frozenset(
         "FORMAT",
         "INTO",
         "SET",
+        "FOR",
     }
 )
 _JOIN_MODIFIER_KEYWORDS = frozenset(
@@ -1072,9 +1073,24 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
             if cand_s_pos >= len(sig_idxs):
                 return False
             ck, ct = processed[sig_idxs[cand_s_pos]]
-            if ck != "IDENT" or ct.upper() not in ("PREWHERE", "SAMPLE", "SETTINGS", "FORMAT"):
+            if ck != "IDENT":
                 return False
+            cu = ct.upper()
             after = processed[sig_idxs[cand_s_pos + 1]] if cand_s_pos + 1 < len(sig_idxs) else None
+            if cu == "SELECT":
+                if after is None or after == ("OP", ","):
+                    return True
+                if after[0] == "IDENT" and after[1].upper() in (_SQL_CLAUSE_STOPWORDS - {"ALL"}):
+                    if (
+                        after[1].upper() in ("ANY", "ARRAY")
+                        and cand_s_pos + 2 < len(sig_idxs)
+                        and processed[sig_idxs[cand_s_pos + 2]] == ("OP", "(")
+                    ):
+                        return False
+                    return True
+                return False
+            if cu not in ("PREWHERE", "SAMPLE", "SETTINGS", "FORMAT", "FOR"):
+                return False
             return (
                 after is None
                 or after in (("OP", ","), ("OP", "("))
@@ -1086,6 +1102,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
         func_stack: list[str] = []
         in_from = False
         expect_table = False
+        in_sample_clause = False
         depth = 0
         s_pos = 0
         while s_pos < len(sig_idxs):
@@ -1128,29 +1145,39 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 if wu in ("FROM", "JOIN"):
                     in_from = True
                     expect_table = True
+                    in_sample_clause = False
                     s_pos += 1
                     continue
                 if wu in _JOIN_MODIFIER_KEYWORDS:
                     if in_from:
                         expect_table = False
+                        in_sample_clause = False
                     s_pos += 1
                     continue
                 if in_from and not expect_table and _is_bare_clause_alias_at(s_pos):
                     table_alias_idxs.add(idx)
+                    in_sample_clause = False
                     s_pos += 1
                     continue
-                if wu in _FROM_EXIT_KEYWORDS:
+                if in_from and in_sample_clause and wu == "OFFSET":
+                    in_sample_clause = False
+                    s_pos += 1
+                    continue
+                if wu in _FROM_EXIT_KEYWORDS or (in_from and wu == "SELECT"):
                     in_from = False
                     expect_table = False
+                    in_sample_clause = False
                     s_pos += 1
                     continue
                 if in_from and wu in ("ON", "USING", "FINAL", "SAMPLE"):
                     expect_table = False
+                    in_sample_clause = wu == "SAMPLE"
                     s_pos += 1
                     continue
 
             if in_from and k == "OP" and t == ",":
                 expect_table = True
+                in_sample_clause = False
                 s_pos += 1
                 continue
 

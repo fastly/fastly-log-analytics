@@ -2370,10 +2370,8 @@ fn references_whole_row_relation_struct(tokens: &[RelTok]) -> bool {
                 continue;
             }
             if let RelTok::StrLit { lower } = &tokens[idx] {
-                if !lower.is_empty() {
-                    declared_relations.insert(lower.clone());
-                    decl_indices.insert(idx);
-                }
+                declared_relations.insert(lower.clone());
+                decl_indices.insert(idx);
                 expect_rel = false;
                 expect_opt_alias = true;
                 idx += 1;
@@ -2403,10 +2401,8 @@ fn references_whole_row_relation_struct(tokens: &[RelTok]) -> bool {
                         if matches!(tokens.get(idx + 2), Some(RelTok::LParen)) {
                             return true;
                         }
-                        if !alias_lower.is_empty() {
-                            declared_relations.insert(alias_lower.clone());
-                            decl_indices.insert(idx + 1);
-                        }
+                        declared_relations.insert(alias_lower.clone());
+                        decl_indices.insert(idx + 1);
                         expect_opt_alias = false;
                         idx += 2;
                         continue;
@@ -2425,10 +2421,8 @@ fn references_whole_row_relation_struct(tokens: &[RelTok]) -> bool {
                 if matches!(tokens.get(idx + 1), Some(RelTok::LParen)) {
                     return true;
                 }
-                if !alias_lower.is_empty() {
-                    declared_relations.insert(alias_lower.clone());
-                    decl_indices.insert(idx);
-                }
+                declared_relations.insert(alias_lower.clone());
+                decl_indices.insert(idx);
                 expect_opt_alias = false;
                 idx += 1;
                 continue;
@@ -6521,6 +6515,101 @@ mod tests {
             (
                 "benign-r9-on-bracket-list-eq",
                 r#"{"_view_extras":{"sql":"SELECT a.url FROM logs AS a JOIN logs AS b ON [a.status, 1] = [b.status, 1] WHERE a.status = 200"}}"#,
+            ),
+        ];
+
+        for (case_id, payload) in allowed_vectors {
+            assert!(
+                !filters_reference_pii(payload),
+                "expected {case_id} to be allowed for AnalystNoPii: {payload}"
+            );
+        }
+    }
+
+    #[test]
+    fn sec19_blocks_wave10_r10_whitespace_quoted_and_sconst_relation_aliases() {
+        let blocked_vectors = [
+            (
+                "r10-from-logs-as-dquote-space-ip",
+                r#"{"_view_extras":{"sql":"SELECT status, url FROM logs AS \" \" WHERE \" \"::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r10-from-logs-as-dquote-tab-oip",
+                r#"{"_view_extras":{"sql":"SELECT status, url FROM logs AS \"\t\" WHERE \"\t\"::VARCHAR LIKE '%203.0.113.9%'"}}"#,
+            ),
+            (
+                "r10-from-logs-as-dquote-zwsp-cookie",
+                r#"{"_view_extras":{"sql":"SELECT status, url FROM logs AS \"\u200b\" WHERE \"\u200b\"::VARCHAR LIKE '%sess_secret_99%'"}}"#,
+            ),
+            (
+                "r10-from-logs-as-dquote-bom-esid",
+                r#"{"_view_extras":{"sql":"SELECT status, url FROM logs AS \"\ufeff\" WHERE \"\ufeff\"::VARCHAR LIKE '%esid_secret_77%'"}}"#,
+            ),
+            (
+                "r10-from-logs-as-dquote-wj-extra",
+                r#"{"_view_extras":{"sql":"SELECT status, url FROM logs AS \"\u2060\" WHERE format('{}', \"\u2060\") LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r10-from-logs-as-squote-space-ip",
+                r#"{"_view_extras":{"sql":"SELECT status, url FROM logs AS ' ' WHERE \" \"::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r10-from-logs-as-equote-space-oip",
+                r#"{"_view_extras":{"sql":"SELECT status, url FROM logs AS E'\\x20' WHERE \" \"::VARCHAR LIKE '%203.0.113.9%'"}}"#,
+            ),
+            (
+                "r10-from-logs-as-dolq-space-esid",
+                r#"{"_view_extras":{"sql":"SELECT status, url FROM logs AS $$ $$ WHERE \" \"::VARCHAR LIKE '%esid_secret_77%'"}}"#,
+            ),
+            (
+                "r10-from-logs-bare-squote-space-ip",
+                r#"{"_view_extras":{"sql":"SELECT status, url FROM logs ' ' WHERE \" \"::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r10-from-squote-space-rel-cast",
+                r#"{"_view_extras":{"sql":"SELECT status FROM ' ' WHERE \" \"::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r10-from-subq-as-dquote-space-ip",
+                r#"{"_view_extras":{"sql":"SELECT status, url FROM (SELECT * FROM logs) AS \" \" WHERE \" \"::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r10-from-subq-as-squote-space-oip",
+                r#"{"_view_extras":{"sql":"SELECT status, url FROM (SELECT * FROM logs) AS ' ' WHERE \" \"::VARCHAR LIKE '%203.0.113.9%'"}}"#,
+            ),
+            (
+                "r10-join-logs-as-dquote-space-ip",
+                r#"{"_view_extras":{"sql":"SELECT x.a FROM (SELECT 1 AS a) x JOIN logs AS \" \" ON true WHERE \" \"::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r10-only-logs-as-dquote-space-ip",
+                r#"{"_view_extras":{"sql":"SELECT status FROM ONLY logs AS \" \" WHERE \" \"::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r10-logs-star-as-dquote-space-ip",
+                r#"{"_view_extras":{"sql":"SELECT status FROM logs * AS \" \" WHERE \" \"::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r10-vitals-as-dquote-space-cid",
+                r#"{"_view_extras":{"sql":"SELECT url FROM client_vitals AS \" \" WHERE \" \"::VARCHAR LIKE '%cid_secret_99%'"}}"#,
+            ),
+        ];
+
+        for (case_id, payload) in blocked_vectors {
+            assert!(
+                filters_reference_pii(payload),
+                "expected {case_id} to be blocked as PII-referencing: {payload}"
+            );
+        }
+
+        let allowed_vectors = [
+            (
+                "benign-r10-dquote-space-dot-safe-cols",
+                r#"{"_view_extras":{"sql":"SELECT \" \".status, \" \".url FROM logs AS \" \" WHERE \" \".status = 200"}}"#,
+            ),
+            (
+                "benign-r10-empty-sconst-projection-and-where",
+                r#"{"_view_extras":{"sql":"SELECT '' AS empty_s, status FROM logs WHERE url != ''"}}"#,
             ),
         ];
 

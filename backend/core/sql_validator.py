@@ -1196,6 +1196,7 @@ def _scan_body_tokens(
     i = 0
     n = len(tokens)
     at_branch_start = not in_from
+    in_sample_clause = False
 
     while i < n:
         tok = tokens[i]
@@ -1238,24 +1239,45 @@ def _scan_body_tokens(
                 node["type"] = "SET_OPERATION_NODE"
                 in_from = False
                 expect_table = False
+                in_sample_clause = False
                 i += 1
                 while i < n and tokens[i].kind == "WORD" and tokens[i].val.upper() in ("ALL", "DISTINCT", "BY", "NAME"):
                     i += 1
                 at_branch_start = True
                 continue
             if wu == "SELECT":
+                if in_from and not expect_table:
+                    nxt_tok = tokens[i + 1] if i + 1 < n else None
+                    is_bare_select_alias = (
+                        nxt_tok is None
+                        or nxt_tok.kind == "COMMA"
+                        or (
+                            nxt_tok.kind == "WORD"
+                            and nxt_tok.val.upper()
+                            in (
+                                (_JOIN_MODIFIERS - {"ALL"}) | _CLAUSE_STOP_KEYWORDS | {"ON", "USING", "FINAL", "SELECT"}
+                            )
+                        )
+                    )
+                    if is_bare_select_alias:
+                        in_sample_clause = False
+                        at_branch_start = False
+                        i += 1
+                        continue
                 if expect_table:
                     node["children"].append(
                         {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: expected table reference"}
                     )
                 in_from = False
                 expect_table = False
+                in_sample_clause = False
                 at_branch_start = False
                 i += 1
                 continue
             if (wu == "FROM" and not _is_distinct_from_op(tokens, i)) or wu == "TABLE":
                 in_from = True
                 expect_table = True
+                in_sample_clause = False
                 at_branch_start = False
                 i += 1
                 continue
@@ -1263,20 +1285,23 @@ def _scan_body_tokens(
                 if wu == "JOIN":
                     in_from = True
                     expect_table = True
+                in_sample_clause = False
                 at_branch_start = False
                 i += 1
                 continue
-            if in_from and not expect_table and wu in ("SETTINGS", "FORMAT", "PREWHERE", "SAMPLE"):
+            if in_from and not expect_table and wu in ("SETTINGS", "FORMAT", "PREWHERE", "SAMPLE", "FOR"):
                 nxt_tok = tokens[i + 1] if i + 1 < n else None
                 is_bare_table_alias = (
                     nxt_tok is None
                     or nxt_tok.kind in ("COMMA", "LPAREN")
                     or (
                         nxt_tok.kind == "WORD"
-                        and nxt_tok.val.upper() in (_JOIN_MODIFIERS | _CLAUSE_STOP_KEYWORDS | {"ON", "USING"})
+                        and nxt_tok.val.upper()
+                        in (_JOIN_MODIFIERS | _CLAUSE_STOP_KEYWORDS | {"ON", "USING", "FINAL", "SELECT"})
                     )
                 )
                 if is_bare_table_alias or wu == "SAMPLE":
+                    in_sample_clause = wu == "SAMPLE" and not is_bare_table_alias
                     at_branch_start = False
                     i += 1
                     if is_bare_table_alias and i < n and tokens[i].kind == "LPAREN":
@@ -1293,6 +1318,11 @@ def _scan_body_tokens(
                                 )
                             i = rp_alias + 1
                     continue
+            if in_from and in_sample_clause and wu == "OFFSET":
+                in_sample_clause = False
+                at_branch_start = False
+                i += 1
+                continue
             if wu in _CLAUSE_STOP_KEYWORDS:
                 if expect_table:
                     node["children"].append(
@@ -1300,6 +1330,7 @@ def _scan_body_tokens(
                     )
                 in_from = False
                 expect_table = False
+                in_sample_clause = False
                 at_branch_start = False
                 i += 1
                 continue
@@ -1309,6 +1340,7 @@ def _scan_body_tokens(
                         {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: expected table reference"}
                     )
                 expect_table = False
+                in_sample_clause = False
                 at_branch_start = False
                 i += 1
                 continue
@@ -1319,6 +1351,7 @@ def _scan_body_tokens(
                     {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: expected table reference"}
                 )
             expect_table = True
+            in_sample_clause = False
             at_branch_start = False
             i += 1
             continue

@@ -1396,8 +1396,99 @@ def test_t5_c08_cloud_views_redteam_dupkeys_sticky_slots_columns_lambda_concat_a
                 }
             }
         ),
+        # Wave 10 BUG-CLOUD-1-R10: whitespace-only quoted & Sconst relation/subquery aliases collapsing under trim_sql_ws
+        "bug-cloud-1-r10-from-logs-as-dquote-space-ip": json.dumps(
+            {"_view_extras": {"sql": 'SELECT status, url FROM logs AS " " WHERE " "::VARCHAR LIKE \'%198.51.100.7%\''}}
+        ),
+        "bug-cloud-1-r10-from-logs-as-dquote-tab-oip": json.dumps(
+            {"_view_extras": {"sql": 'SELECT status, url FROM logs AS "\t" WHERE "\t"::VARCHAR LIKE \'%203.0.113.9%\''}}
+        ),
+        "bug-cloud-1-r10-from-logs-as-dquote-zwsp-cookie": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": 'SELECT status, url FROM logs AS "\u200b" WHERE "\u200b"::VARCHAR LIKE \'%sess_secret_99%\''
+                }
+            }
+        ),
+        "bug-cloud-1-r10-from-logs-as-dquote-bom-esid": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": 'SELECT status, url FROM logs AS "\ufeff" WHERE "\ufeff"::VARCHAR LIKE \'%esid_secret_77%\''
+                }
+            }
+        ),
+        "bug-cloud-1-r10-from-logs-as-dquote-wj-extra": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT status, url FROM logs AS \"\u2060\" WHERE format('{}', \"\u2060\") LIKE '%198.51.100.7%'"
+                }
+            }
+        ),
+        "bug-cloud-1-r10-from-logs-as-squote-space-ip": json.dumps(
+            {"_view_extras": {"sql": "SELECT status, url FROM logs AS ' ' WHERE \" \"::VARCHAR LIKE '%198.51.100.7%'"}}
+        ),
+        "bug-cloud-1-r10-from-logs-as-equote-space-oip": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT status, url FROM logs AS E'\\x20' WHERE \" \"::VARCHAR LIKE '%203.0.113.9%'"
+                }
+            }
+        ),
+        "bug-cloud-1-r10-from-logs-as-dolq-space-esid": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT status, url FROM logs AS $$ $$ WHERE \" \"::VARCHAR LIKE '%esid_secret_77%'"
+                }
+            }
+        ),
+        "bug-cloud-1-r10-from-logs-bare-squote-space-ip": json.dumps(
+            {"_view_extras": {"sql": "SELECT status, url FROM logs ' ' WHERE \" \"::VARCHAR LIKE '%198.51.100.7%'"}}
+        ),
+        "bug-cloud-1-r10-from-squote-space-rel-cast": json.dumps(
+            {"_view_extras": {"sql": "SELECT status FROM ' ' WHERE \" \"::VARCHAR LIKE '%198.51.100.7%'"}}
+        ),
+        "bug-cloud-1-r10-from-subq-as-dquote-space-ip": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": 'SELECT status, url FROM (SELECT * FROM logs) AS " " WHERE " "::VARCHAR LIKE \'%198.51.100.7%\''
+                }
+            }
+        ),
+        "bug-cloud-1-r10-from-subq-as-squote-space-oip": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT status, url FROM (SELECT * FROM logs) AS ' ' WHERE \" \"::VARCHAR LIKE '%203.0.113.9%'"
+                }
+            }
+        ),
+        "bug-cloud-1-r10-join-logs-as-dquote-space-ip": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": 'SELECT x.a FROM (SELECT 1 AS a) x JOIN logs AS " " ON true WHERE " "::VARCHAR LIKE \'%198.51.100.7%\''
+                }
+            }
+        ),
+        "bug-cloud-1-r10-only-logs-as-dquote-space-ip": json.dumps(
+            {"_view_extras": {"sql": 'SELECT status FROM ONLY logs AS " " WHERE " "::VARCHAR LIKE \'%198.51.100.7%\''}}
+        ),
+        "bug-cloud-1-r10-logs-star-as-dquote-space-ip": json.dumps(
+            {"_view_extras": {"sql": 'SELECT status FROM logs * AS " " WHERE " "::VARCHAR LIKE \'%198.51.100.7%\''}}
+        ),
+        "bug-cloud-1-r10-vitals-as-dquote-space-cid": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": 'SELECT url FROM client_vitals AS " " WHERE " "::VARCHAR LIKE \'%cid_secret_99%\''
+                }
+            }
+        ),
     }
     benign_vectors: dict[str, str] = {
+        "benign-r10-dquote-space-dot-safe-cols": json.dumps(
+            {"_view_extras": {"sql": 'SELECT " ".status, " ".url FROM logs AS " " WHERE " ".status = 200'}}
+        ),
+        "benign-r10-empty-sconst-projection-and-where": json.dumps(
+            {"_view_extras": {"sql": "SELECT '' AS empty_s, status FROM logs WHERE url != ''"}}
+        ),
         "benign-r9-as-as-from-logs": json.dumps(
             {"_view_extras": {"sql": "SELECT status AS as, url FROM logs WHERE status = 200"}}
         ),
@@ -1576,6 +1667,7 @@ def test_t5_c08_cloud_views_redteam_dupkeys_sticky_slots_columns_lambda_concat_a
         assert "203.0.113.9" not in r_nopii.text
         assert "sess_secret_99" not in r_nopii.text
         assert "esid_secret_77" not in r_nopii.text
+        assert "cid_secret_99" not in r_nopii.text
         nopii_names.update(v["name"] for v in r_nopii.json())
 
         if start + batch_size < len(all_items):
@@ -2390,17 +2482,36 @@ def test_t5_hs03_hs12_py08_sql_console_table_filter_parser_differentials_union_s
         "SELECT c.service_id FROM logs AS a JOIN logs AS b ON [x FOR x IN (1)] IS NOT NULL, high_scale_batch_publications AS c",
         "SELECT * FROM [ops_secret]",
         "SELECT [(1]) FROM logs",
+        "SELECT c.name FROM logs for, system.tables AS c",
+        "SELECT c.name FROM logs select, system.tables AS c",
+        "SELECT c.service_id, c.secret_meta FROM logs for, high_scale_batch_publications AS c",
+        "SELECT c.service_id, c.secret_meta FROM logs select, high_scale_batch_publications AS c",
+        "SELECT c.service_id, c.secret_meta FROM logs AS a JOIN logs select ON true, high_scale_batch_publications AS c",
+        "FROM logs select, high_scale_batch_publications AS c SELECT c.secret_meta",
+        "SELECT c.secret_meta FROM logs prewhere FINAL, high_scale_batch_publications AS c",
+        "SELECT c.secret_meta FROM logs for FINAL, high_scale_batch_publications AS c",
+        "SELECT c.secret_meta FROM logs select FINAL, high_scale_batch_publications AS c",
+        "SELECT c.secret_meta FROM logs sample FINAL, high_scale_batch_publications AS c",
+        "SELECT c.name FROM logs SAMPLE 1/10 OFFSET 1/2, system.tables AS c",
+        "SELECT c.service_id, c.secret_meta FROM logs SAMPLE 1/10 OFFSET 1/2, high_scale_batch_publications AS c",
+        "SELECT c.service_id, c.secret_meta FROM logs SAMPLE 0.5 OFFSET 0.1, high_scale_batch_publications AS c",
     ]
     c = _analyst_client(analyst)
     for bad_sql in adversarial_sqls:
         r_bad = c.post("/api/query", json={"service_id": "svc-a", "sql": bad_sql})
         assert r_bad.status_code in {400, 403}, f"SQL not rejected ({r_bad.status_code}): {bad_sql}"
 
-    # Benign compound leading-LPAREN subquery, sample alias, ::union, AS as, 1., [a.status, 1], and JSON string succeed
+    # Benign compound leading-LPAREN subquery, sample/select/for aliases, FROM-first SELECT, SAMPLE OFFSET, AS as, 1., [a.status, 1], and JSON string succeed
     for benign_console_sql in (
         "SELECT status FROM logs WHERE url IN ((SELECT url FROM logs) UNION ALL SELECT url FROM logs)",
         "SELECT sample.status FROM logs AS sample WHERE sample.status = 200",
         "SELECT sample.status FROM logs sample WHERE sample.status = 200",
+        "SELECT select.status FROM logs AS select WHERE select.status = 200",
+        "FROM logs select, request_facts AS c SELECT c.status",
+        "SELECT for.status FROM logs for WHERE for.status = 200",
+        "FROM logs SELECT status, url",
+        "SELECT status FROM logs SAMPLE 1/10 OFFSET 1/2",
+        "SELECT status FROM logs LIMIT 10 OFFSET 5",
         "SELECT 1::union(a INT) AS u FROM logs",
         "SELECT status, 1. FROM logs",
         "SELECT status AS as FROM logs",
@@ -2429,6 +2540,22 @@ def test_t5_hs03_hs12_py08_sql_console_table_filter_parser_differentials_union_s
     as_as_sql, _, as_as_settings = ch_recorder.calls[-1]
     assert "FROM request_facts" not in as_as_sql and "_m_" in as_as_sql, as_as_sql
     assert "_m_" in str((as_as_settings or {}).get("additional_table_filters", "")), as_as_settings
+
+    ch_recorder.calls.clear()
+    r_sample_offset = c_masked_hs03.post(
+        "/api/query",
+        json={
+            "service_id": "svc-a",
+            "sql": "SELECT c.service_id, c.client_ip FROM logs SAMPLE 1/10 OFFSET 1/2, request_facts AS c",
+        },
+    )
+    assert r_sample_offset.status_code == 200, r_sample_offset.text
+    sample_off_sql, _, sample_off_settings = ch_recorder.calls[-1]
+    assert ", request_facts" not in sample_off_sql and "FROM request_facts" not in sample_off_sql, sample_off_sql
+    assert sample_off_sql.count("_m_request_facts") == 2, sample_off_sql
+    assert "_m_request_facts" in str((sample_off_settings or {}).get("additional_table_filters", "")), (
+        sample_off_settings
+    )
 
     # 2. Multi-branch UNION ALL rewrites pop -> custom_fields['pop'] ONLY on logs, preserving native pop on client_vitals
     ch_recorder.calls.clear()

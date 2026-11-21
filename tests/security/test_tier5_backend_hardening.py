@@ -1448,3 +1448,162 @@ def test_sec_t5_iter8_sql01_py01_as_run_parity_float_dot_and_bracket_brace_delim
         assert "fla_cv_m_req" in ran_sql, (hs_benign_sql, ran_sql)
         assert "FROM request_facts" not in ran_sql and "FROM logs" not in ran_sql, (hs_benign_sql, ran_sql)
         assert "fla_cv_m_req" in str(ran_settings.get("additional_table_filters", "")), (hs_benign_sql, ran_settings)
+
+
+def test_sec_t5_iter9_py01_clickhouse_bare_for_select_final_and_sample_offset_comma_joins() -> None:
+    from backend.core.sql_validator import SQLValidationError, validate_user_sql
+    from backend.high_scale import query as hs_query
+    from backend.models.analytics import QueryRequest as DashboardQueryRequest
+
+    # 1. validate_user_sql rejects ClickHouse bare for/select aliases, <alias> FINAL, and SAMPLE <k> OFFSET <m> comma-joins
+    for blocked_sql in (
+        "SELECT c.name FROM logs for, system.tables AS c",
+        "SELECT c.name FROM logs select, system.tables AS c",
+        "SELECT c.service_id, c.secret_meta FROM logs for, high_scale_batch_publications AS c",
+        "SELECT c.service_id, c.secret_meta FROM logs select, high_scale_batch_publications AS c",
+        "SELECT c.table_name FROM logs for, information_schema.tables AS c",
+        "SELECT c.table_name FROM logs select, information_schema.tables AS c",
+        "SELECT c.service_id, c.secret_meta FROM logs AS a JOIN logs for ON true, high_scale_batch_publications AS c",
+        "SELECT c.service_id, c.secret_meta FROM logs AS a JOIN logs select ON true, high_scale_batch_publications AS c",
+        "FROM logs select, high_scale_batch_publications AS c SELECT c.secret_meta",
+        "FROM logs for, high_scale_batch_publications AS c SELECT c.secret_meta",
+        "SELECT c.secret_meta FROM logs prewhere FINAL, high_scale_batch_publications AS c",
+        "SELECT c.secret_meta FROM logs settings FINAL, high_scale_batch_publications AS c",
+        "SELECT c.secret_meta FROM logs format FINAL, high_scale_batch_publications AS c",
+        "SELECT c.secret_meta FROM logs for FINAL, high_scale_batch_publications AS c",
+        "SELECT c.secret_meta FROM logs select FINAL, high_scale_batch_publications AS c",
+        "SELECT c.secret_meta FROM logs sample FINAL, high_scale_batch_publications AS c",
+        "SELECT c.name FROM logs SAMPLE 1/10 OFFSET 1/2, system.tables AS c",
+        "SELECT c.service_id, c.secret_meta FROM logs SAMPLE 1/10 OFFSET 1/2, high_scale_batch_publications AS c",
+        "SELECT c.service_id, c.secret_meta FROM logs SAMPLE 0.5 OFFSET 0.1, high_scale_batch_publications AS c",
+        "SELECT c.service_id, c.secret_meta FROM logs SAMPLE 10000 OFFSET 5000, high_scale_batch_publications AS c",
+        "SELECT c.service_id, c.secret_meta FROM logs FINAL SAMPLE 1/10 OFFSET 1/2, high_scale_batch_publications AS c",
+        "SELECT c.service_id, c.secret_meta FROM logs for FINAL SAMPLE 1/10 OFFSET 1/2, high_scale_batch_publications AS c",
+        "SELECT c.service_id, c.secret_meta FROM logs select FINAL SAMPLE 1/10 OFFSET 1/2, high_scale_batch_publications AS c",
+    ):
+        with pytest.raises(SQLValidationError):
+            validate_user_sql(blocked_sql, allowed_tables={"logs"})
+
+    # 2. Benign controls on validate_user_sql MUST pass
+    for benign_sql in (
+        "FROM logs SELECT status, url",
+        "FROM logs SELECT DISTINCT status, url",
+        "FROM logs SELECT ALL status, url",
+        "FROM logs SELECT (status + 1) AS next_status, url",
+        "SELECT select.status FROM logs AS select WHERE select.status = 200",
+        "FROM logs select, logs AS c SELECT select.status, c.url",
+        "SELECT for.status FROM logs for WHERE for.status = 200",
+        "SELECT status FROM logs SAMPLE 1/10 OFFSET 1/2",
+        "SELECT status FROM logs FINAL SAMPLE 1/10 OFFSET 1/2 WHERE status = 200",
+        "SELECT status FROM logs LIMIT 10 OFFSET 5",
+        "SELECT status FROM logs SAMPLE 1/10 LIMIT 10 OFFSET 5",
+    ):
+        assert validate_user_sql(benign_sql, allowed_tables={"logs"}).parse_tree.get("statements"), benign_sql
+
+    # 3. Live High-Scale query_endpoint blocks all bare for/select, <alias> FINAL, and SAMPLE OFFSET comma-joins
+    executed: list[tuple[str, dict[str, object]]] = []
+
+    class _StubCH:
+        _table_filters_verified = True
+
+        def execute(
+            self,
+            sql: str,
+            params: dict[str, object] | None = None,
+            *,
+            settings: dict[str, object] | None = None,
+        ) -> list[dict[str, object]]:
+            del params
+            executed.append((sql, dict(settings or {})))
+            return [{"service_id": "svc_alpha", "client_ip": "0.0.0.0"}]
+
+    stub_ch = _StubCH()
+    hs_svc = SimpleNamespace(service_id="svc_alpha", client=stub_ch)
+
+    for hs_blocked_sql in (
+        "SELECT c.name FROM logs for, system.tables AS c",
+        "SELECT c.name FROM logs select, system.tables AS c",
+        "SELECT c.service_id, c.secret_meta FROM logs for, high_scale_batch_publications AS c",
+        "SELECT c.service_id, c.secret_meta FROM logs select, high_scale_batch_publications AS c",
+        "SELECT c.service_id, c.secret_meta FROM logs AS a JOIN logs select ON true, high_scale_batch_publications AS c",
+        "FROM logs select, high_scale_batch_publications AS c SELECT c.secret_meta",
+        "SELECT c.secret_meta FROM logs prewhere FINAL, high_scale_batch_publications AS c",
+        "SELECT c.secret_meta FROM logs for FINAL, high_scale_batch_publications AS c",
+        "SELECT c.secret_meta FROM logs select FINAL, high_scale_batch_publications AS c",
+        "SELECT c.secret_meta FROM logs sample FINAL, high_scale_batch_publications AS c",
+        "SELECT c.name FROM logs SAMPLE 1/10 OFFSET 1/2, system.tables AS c",
+        "SELECT c.service_id, c.secret_meta FROM logs SAMPLE 1/10 OFFSET 1/2, high_scale_batch_publications AS c",
+        "SELECT c.service_id, c.secret_meta FROM logs SAMPLE 0.5 OFFSET 0.1, high_scale_batch_publications AS c",
+    ):
+        with pytest.raises(PermissionError):
+            hs_query.query_endpoint(
+                hs_svc,
+                DashboardQueryRequest(sql=hs_blocked_sql, max_rows=10),
+                "2026-11-19T00:00:00Z",
+                "2026-11-19T01:00:00Z",
+                mask_ips=True,
+                tables={"request_facts": "fla_cv_m_req", "rum_vitals_facts": "fla_cv_m_vit"},
+            )
+    assert executed == []
+
+    # 4. SAMPLE <k> OFFSET <m>, request_facts AS c MUST rewrite BOTH tables to fla_cv_m_req + additional_table_filters!
+    executed.clear()
+    hs_query.query_endpoint(
+        hs_svc,
+        DashboardQueryRequest(
+            sql="SELECT c.service_id, c.client_ip FROM logs SAMPLE 1/10 OFFSET 1/2, request_facts AS c",
+            max_rows=10,
+        ),
+        "2026-11-19T00:00:00Z",
+        "2026-11-19T01:00:00Z",
+        mask_ips=True,
+        tables={"request_facts": "fla_cv_m_req", "rum_vitals_facts": "fla_cv_m_vit"},
+    )
+    assert len(executed) == 1
+    sample_sql, sample_settings = executed[0]
+    assert "request_facts" not in sample_sql and "FROM logs" not in sample_sql, sample_sql
+    assert sample_sql.count("fla_cv_m_req") == 2, sample_sql
+    assert "fla_cv_m_req" in str(sample_settings.get("additional_table_filters", "")), sample_settings
+
+    # Cross-domain comma join after SAMPLE <k> OFFSET <m> rewrites client_vitals -> fla_cv_m_vit and scopes BOTH views
+    executed.clear()
+    hs_query.query_endpoint(
+        hs_svc,
+        DashboardQueryRequest(
+            sql="SELECT c.pop FROM logs SAMPLE 1/10 OFFSET 1/2, client_vitals AS c",
+            max_rows=10,
+        ),
+        "2026-11-19T00:00:00Z",
+        "2026-11-19T01:00:00Z",
+        mask_ips=True,
+        tables={"request_facts": "fla_cv_m_req", "rum_vitals_facts": "fla_cv_m_vit"},
+    )
+    assert len(executed) == 1
+    vit_sql, vit_settings = executed[0]
+    assert "client_vitals" not in vit_sql and "fla_cv_m_req" in vit_sql and "fla_cv_m_vit" in vit_sql, vit_sql
+    vit_atf = str(vit_settings.get("additional_table_filters", ""))
+    assert "fla_cv_m_req" in vit_atf and "fla_cv_m_vit" in vit_atf, vit_settings
+
+    # Benign High-Scale controls (FROM-first SELECT, bare select/for aliases, SAMPLE OFFSET, LIMIT OFFSET)
+    for hs_benign_sql in (
+        "FROM logs SELECT status, url",
+        "FROM logs select, request_facts AS c SELECT c.status",
+        "SELECT select.status, select.timestamp FROM logs AS select WHERE select.status = 200",
+        "SELECT for.status, for.timestamp FROM logs for WHERE for.status = 200",
+        "SELECT status FROM logs SAMPLE 1/10 OFFSET 1/2",
+        "SELECT status FROM logs LIMIT 10 OFFSET 5",
+    ):
+        executed.clear()
+        hs_query.query_endpoint(
+            hs_svc,
+            DashboardQueryRequest(sql=hs_benign_sql, max_rows=10),
+            "2026-11-19T00:00:00Z",
+            "2026-11-19T01:00:00Z",
+            mask_ips=True,
+            tables={"request_facts": "fla_cv_m_req"},
+        )
+        assert len(executed) == 1, hs_benign_sql
+        ran_sql, ran_settings = executed[0]
+        assert "fla_cv_m_req" in ran_sql, (hs_benign_sql, ran_sql)
+        assert "request_facts" not in ran_sql and "FROM logs" not in ran_sql, (hs_benign_sql, ran_sql)
+        assert "fla_cv_m_req" in str(ran_settings.get("additional_table_filters", "")), (hs_benign_sql, ran_settings)
