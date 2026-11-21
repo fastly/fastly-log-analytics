@@ -270,12 +270,19 @@ def build(root: Path, crate: str = "cloud") -> str:
                         env=environment,
                         check=True,
                     )
-                    check_static_assets(web / "out")
                 else:
                     subprocess.run(["npm", "run", "build"], cwd=web, env=environment, check=True)
                 if (web / "out").is_dir():
                     stabilize_mtimes(web / "out", cache_dir / "web-out-mtimes.json")
                     web_out_ready = True
+            if web_rel == "frontend":
+                check_static_assets(web / "out")
+                subprocess.run(
+                    ["node", "scripts/check-static-budget.mjs", "out/dashboard.html"],
+                    cwd=web,
+                    env=environment,
+                    check=True,
+                )
         subprocess.run(
             ["fastly", "compute", "build", "--metadata-disable", "--non-interactive"],
             cwd=snapshot / crate_rel,
