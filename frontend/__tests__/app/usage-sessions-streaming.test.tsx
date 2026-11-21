@@ -493,6 +493,16 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     expect(errorSpy).not.toHaveBeenCalled()
   })
 
+  test('shows a contextual loading state while Streaming prerequisites are pending', () => {
+    mockIsDataReady = false
+
+    renderWithQuery(<StreamingClient />, { queryClient })
+
+    expect(screen.getByText('Loading Active Viewers...')).toBeInTheDocument()
+    expect(screen.getByText('Loading Buffer Health...')).toBeInTheDocument()
+    expect(mockPost).not.toHaveBeenCalled()
+  })
+
   test('requests /api/cmcd/aggregates with the page window and renders the headline cards', async () => {
     mockPost.mockResolvedValue({ data: CMCD_FIXTURE } as never)
     renderWithQuery(<StreamingClient />, { queryClient })
