@@ -8,7 +8,7 @@ import { PageHeader } from '@/components/ui/confirm-dialog'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Database, HardDrive, History, FileCode, Archive, ClipboardList } from 'lucide-react'
 import { NoServiceSelected } from '@/components/ReportLayout'
-import { useBootstrapResolved } from '@/hooks/useBootstrap'
+import { useBootstrap, useBootstrapResolved } from '@/hooks/useBootstrap'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { BackfillRangeModal } from '@/components/SyncStatusBadge/SyncStatusBadge'
 import { ingestedFilesColumns } from '@/components/DataTable'
@@ -62,6 +62,7 @@ const LOG_TABS = [
 export default function LogsClient({ initialTab }: { initialTab?: string } = {}) {
   const s = useLogsPageState(initialTab)
   const queryClient = useQueryClient()
+  const { data: bootstrap } = useBootstrap()
   const bootstrapResolved = useBootstrapResolved()
   const auditColumns = useAuditColumns(s.catalogMaps)
   const cronColumns = useCronColumns()
@@ -75,6 +76,16 @@ export default function LogsClient({ initialTab }: { initialTab?: string } = {})
     )
   }
   if (!s.activeServiceId) return <Loading />
+
+  const archiveService = bootstrap?.services?.find(
+    service => service.service_id === s.activeServiceId
+  )
+  const archiveBucket = typeof archiveService?.fos_bucket === 'string'
+    ? archiveService.fos_bucket
+    : null
+  const archiveRegion = typeof archiveService?.fos_region === 'string'
+    ? archiveService.fos_region
+    : null
 
   return (
     <div className="space-y-6 min-h-[820px]">
@@ -155,6 +166,12 @@ export default function LogsClient({ initialTab }: { initialTab?: string } = {})
                 <p className="text-xs text-muted-foreground mt-1">
                   Canonical Archive Parquet batches stored in Fastly Object Storage.
                 </p>
+                {(archiveBucket || archiveRegion) && (
+                  <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                    {archiveBucket && <span>FOS bucket: <code className="font-mono text-foreground">{archiveBucket}</code></span>}
+                    {archiveRegion && <span>Region: <code className="font-mono text-foreground">{archiveRegion}</code></span>}
+                  </div>
+                )}
               </div>
               <FileBrowser type="storage" />
             </div>

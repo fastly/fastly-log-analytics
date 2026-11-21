@@ -1037,6 +1037,25 @@ describe('CronLiveLog, LogSyncSection & LogsClient', () => {
     expect(start).not.toHaveBeenCalled()
     postSpy.mockRestore()
   })
+
+  test('LogsClient shows the active service archive bucket and region', async () => {
+    useServiceStore.setState({ activeServiceId: 'test-svc' })
+    mocks.bootstrap.mockReturnValue({
+      data: {
+        services: [{
+          service_id: 'test-svc',
+          name: 'Test',
+          fos_bucket: 'archive-prod',
+          fos_region: 'eu-west-1',
+        }],
+      },
+    })
+    renderWithQuery(<LogsClient initialTab="storage" />)
+
+    expect(await screen.findByText('Archive Parquet Layout')).toBeInTheDocument()
+    expect(screen.getByText('archive-prod')).toBeInTheDocument()
+    expect(screen.getByText('eu-west-1')).toBeInTheDocument()
+  })
 })
 
 interface Row { id: number; name: string; status: number }

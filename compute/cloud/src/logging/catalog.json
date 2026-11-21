@@ -2750,7 +2750,7 @@
       "description": "Per-request IO input/output sizes and formats from Fastly-Io-Transform-Stats. Enables actual compression ratio and format conversion analysis.",
       "locked": false,
       "requires": null,
-      "note": "Enabling this group deploys additional VCL snippets to your service. All fields are null for non-IO requests.",
+      "note": "These fields require a dedicated VCL extraction snippet. Values are null for non-IO requests; ordinary field groups only change logging capture.",
       "recommended_with": [
         "A"
       ],

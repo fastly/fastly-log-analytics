@@ -1129,6 +1129,33 @@ test('LogSettingsModal navigates through wizard steps', async () => {
   await waitFor(() => expect(screen.getByText('Define Custom Log Fields')).toBeDefined())
 })
 
+test('LogSettingsModal hides computed Aggregate Metrics from field selection', async () => {
+  vi.spyOn(apiLib.client, 'GET').mockImplementation(async (url: string) => {
+    if (url.includes('/api/log-fields/catalog')) {
+      return getOk({
+        groups: [
+          { id: 'core', label: 'Core', fields: [] },
+          { id: 'METRICS', label: 'Aggregate Metrics', fields: [], locked: true, total_bytes: 0 },
+        ],
+        fields: [],
+        presets: {},
+      })
+    }
+    return getOk({ log_fields: { groups: ['core'] } })
+  })
+
+  renderWithQuery(
+    <LogSettingsModal
+      service={{ service_id: 'test-svc', name: 'Test Service' } as ServiceConfig}
+      open
+      onOpenChange={vi.fn()}
+    />,
+  )
+
+  await waitFor(() => expect(screen.getByText('Core')).toBeInTheDocument())
+  expect(screen.queryByText('Aggregate Metrics')).not.toBeInTheDocument()
+})
+
 test('LogSettingsModal shows custom fields in review step', async () => {
   const user = userEvent.setup()
   const onOpenChange = vi.fn()

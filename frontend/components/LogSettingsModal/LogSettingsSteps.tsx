@@ -324,7 +324,7 @@ export function StandardFieldsStep({
         </div>
 
         <div className="space-y-2">
-          {catalog && (catalog.groups || []).map((group) => (
+          {catalog && (catalog.groups || []).filter((group) => group.id !== 'METRICS').map((group) => (
             <CollapsibleGroup
               key={group.id || 'core'}
               group={group}
