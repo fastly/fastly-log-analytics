@@ -14,7 +14,7 @@ import { readStoreError } from "./file-store";
 
 const scope = '["https://example.test","session","service"]';
 const cacheKey = JSON.stringify([scope, "request", "raw", false]);
-const otherCacheKey = JSON.stringify([scope, "request", "raw", true]);
+const otherCacheKey = JSON.stringify(["fetch:2", "request", "raw", false]);
 const from = "2026-01-10T00:00:00.000Z";
 const to = "2026-01-11T00:00:00.000Z";
 
@@ -66,6 +66,72 @@ describe("manifest snapshots", () => {
     expect(await readManifestSnapshot(cacheKey, Date.now())).toEqual(
       snapshot(),
     );
+  });
+
+  it.each([
+    "not-json",
+    JSON.stringify([scope, "request", "summary", false]),
+    JSON.stringify([scope, "request", "raw", true]),
+    JSON.stringify([scope, "request", "raw", false, "extra"]),
+  ])("rejects non-raw-request cache scope %s", async (invalidCacheKey) => {
+    const { entries } = fakeCaches();
+    await persistManifestSnapshot(invalidCacheKey, snapshot());
+    expect(entries.get(MANIFEST_SNAPSHOT_CACHE)?.size ?? 0).toBe(0);
+
+    const url = manifestSnapshotUrl(invalidCacheKey);
+    entries.set(
+      MANIFEST_SNAPSHOT_CACHE,
+      new Map([
+        [
+          url,
+          new Response(
+            JSON.stringify({
+              formatVersion: 1,
+              cacheKey: invalidCacheKey,
+              savedAt: Date.now(),
+              snapshot: snapshot(),
+            }),
+          ),
+        ],
+      ]),
+    );
+    expect(await readManifestSnapshot(invalidCacheKey)).toBeNull();
+    expect(entries.get(MANIFEST_SNAPSHOT_CACHE)?.has(url)).toBe(false);
+  });
+
+  it.each([
+    ["kind", "hour"],
+    ["sources", 2],
+  ])("rejects raw files carrying summary-only %s", async (field, value) => {
+    const { entries } = fakeCaches();
+    const summaryFile = { ...snapshot().manifest.files[0], [field]: value };
+    const invalid = {
+      ...snapshot(),
+      manifest: { ...snapshot().manifest, files: [summaryFile] },
+    };
+
+    await persistManifestSnapshot(cacheKey, invalid);
+    expect(entries.get(MANIFEST_SNAPSHOT_CACHE)?.size ?? 0).toBe(0);
+
+    const url = manifestSnapshotUrl(cacheKey);
+    entries.set(
+      MANIFEST_SNAPSHOT_CACHE,
+      new Map([
+        [
+          url,
+          new Response(
+            JSON.stringify({
+              formatVersion: 1,
+              cacheKey,
+              savedAt: Date.now(),
+              snapshot: invalid,
+            }),
+          ),
+        ],
+      ]),
+    );
+    expect(await readManifestSnapshot(cacheKey)).toBeNull();
+    expect(entries.get(MANIFEST_SNAPSHOT_CACHE)?.has(url)).toBe(false);
   });
 
   it("rejects and removes expired, wrong-scope, incomplete, or invalid raw records", async () => {

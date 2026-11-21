@@ -38,6 +38,25 @@ function validIso(value: unknown): value is string {
   return typeof value === "string" && Number.isFinite(Date.parse(value));
 }
 
+function validCacheKey(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  let key: unknown;
+  try {
+    key = JSON.parse(value);
+  } catch {
+    return false;
+  }
+  return (
+    Array.isArray(key) &&
+    key.length === 4 &&
+    typeof key[0] === "string" &&
+    key[0].length > 0 &&
+    key[1] === "request" &&
+    key[2] === "raw" &&
+    key[3] === false
+  );
+}
+
 function validFile(
   value: unknown,
   from: string,
@@ -64,14 +83,8 @@ function validFile(
       typeof file.schema_version === "string" ||
       (typeof file.schema_version === "number" &&
         Number.isFinite(file.schema_version))) &&
-    (file.kind === undefined ||
-      file.kind === "day" ||
-      file.kind === "hour" ||
-      file.kind === "window") &&
-    (file.sources === undefined ||
-      (typeof file.sources === "number" &&
-        Number.isFinite(file.sources) &&
-        file.sources >= 0))
+    file.kind === undefined &&
+    file.sources === undefined
   );
 }
 
@@ -81,6 +94,7 @@ function parseSnapshot(
   now: number,
 ): ManifestSnapshot | null {
   if (
+    !validCacheKey(cacheKey) ||
     !Number.isFinite(now) ||
     !body ||
     typeof body !== "object" ||
