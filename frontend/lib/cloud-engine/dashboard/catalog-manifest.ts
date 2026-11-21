@@ -1,4 +1,8 @@
 import type { FetchJson, Manifest, ManifestFile, ListView } from "./manifest";
+import {
+  persistManifestSnapshot,
+  readManifestSnapshot,
+} from "./manifest-store";
 import { CARD_FIELDS, type CustomCard } from "./summaries";
 
 export const FIELD_GROUP_BY_COLUMN: Readonly<Record<string, string>> = Object.fromEntries(
@@ -507,9 +511,22 @@ async function fetchCatalogManifestUncached(
   const identity = scope(fetchJson);
   const incremental =
     (!dataset || dataset === "request") && (!view || view === "raw");
+  const persisted = incremental && !summaries;
   const startEpoch = epoch;
   const reset = requirements.get(identity)?.reset ?? 0;
-  const base = incremental ? snapshots.get(key) : undefined;
+  let base = incremental ? snapshots.get(key) : undefined;
+  if (!base && persisted) {
+    const saved = await readManifestSnapshot(key);
+    if (saved) {
+      base = {
+        from: saved.from,
+        to: saved.to,
+        generation: saved.generation,
+        manifest: saved.manifest,
+      };
+      snapshots.set(key, base);
+    }
+  }
   const budget: ManifestBudget = { bytes: 0, identities: new Set() };
   let resynced = false;
   let result: Manifest;
@@ -560,10 +577,12 @@ async function fetchCatalogManifestUncached(
       throw new ManifestRequestError(503, "catalog_head_behind");
     const current = snapshots.get(key);
     if (!current || generation >= current.generation || resynced) {
+      const snapshot = { from, to, generation, manifest: result };
       snapshots.delete(key);
-      snapshots.set(key, { from, to, generation, manifest: result });
+      snapshots.set(key, snapshot);
       while (snapshots.size > MAX_SNAPSHOTS)
         snapshots.delete(snapshots.keys().next().value!);
+      if (persisted) await persistManifestSnapshot(key, snapshot);
     }
   }
   return result;

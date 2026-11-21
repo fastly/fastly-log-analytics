@@ -22,6 +22,23 @@ function file(startMs: number, minutes = 1): ManifestFile {
   };
 }
 
+function fakeManifestCacheStorage() {
+  const entries = new Map<string, Response>();
+  const cache = {
+    match: vi.fn(async (url: string) => entries.get(url)?.clone()),
+    put: vi.fn(async (url: string, value: Response) => {
+      entries.set(url, value.clone());
+    }),
+    delete: vi.fn(async (url: string) => entries.delete(url)),
+  } as unknown as Cache;
+  const storage = {
+    open: vi.fn(async () => cache),
+    delete: vi.fn(async () => true),
+  };
+  vi.stubGlobal("caches", storage);
+  return { cache, entries, storage };
+}
+
 /** Serves every listed file overlapping the query, with the server's cache hint. */
 function server(state: {
   files: ManifestFile[];
@@ -59,7 +76,59 @@ describe("closed-hour manifest cache", () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(T0 + 6 * H);
   });
-  afterEach(() => vi.useRealTimers());
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it("hydrates a complete persisted range and uses a delta instead of re-listing", async () => {
+    fakeManifestCacheStorage();
+    const original = file(T0);
+    const entered = file(T0 + 2 * H);
+    const calls: URLSearchParams[] = [];
+    const fetchJson = Object.assign(
+      vi.fn(async (input: string) => {
+        const params = new URL(input, "http://x").searchParams;
+        calls.push(params);
+        if (!params.has("since_generation")) {
+          return {
+            files: [original],
+            next_cursor: null,
+            complete: true,
+            catalog_generation: 7,
+          };
+        }
+        expect(params.get("since_generation")).toBe("7");
+        expect(params.get("previous_from")).toBe(iso(T0));
+        expect(params.get("previous_to")).toBe(iso(T0 + 2 * H));
+        return {
+          files: [entered],
+          changes: [],
+          summary_partitions: [],
+          base_generation: 7,
+          catalog_generation: 8,
+          next_cursor: null,
+          complete: true,
+        };
+      }),
+      {
+        manifestCacheScope: () => '["session","service"]',
+      },
+    );
+
+    await fetchManifest(fetchJson, iso(T0), iso(T0 + 2 * H));
+    vi.resetModules();
+    const { fetchManifest: fetchAfterReload } = await import("./manifest");
+    calls.length = 0;
+    const result = await fetchAfterReload(
+      fetchJson,
+      iso(T0 + 60_000),
+      iso(T0 + 2 * H + 60_000),
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0].get("since_generation")).toBe("7");
+    expect(keys(result.files)).toEqual(keys([entered]));
+  });
 
   it("follows empty catalog pages and merges every page's inline summaries", async () => {
     const raw = file(T0);
