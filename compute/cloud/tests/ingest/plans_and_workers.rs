@@ -2104,6 +2104,50 @@ mod summary_bundles {
         panic!("the rotation never reached summary_bundle");
     }
 
+    #[test]
+    fn summary_bundle_tolerates_stale_watermark_read_after_publish() {
+        // An open-hour bundle is built on tick 1 and published on tick 2. Right after
+        // `catalog::bundles::publish` commits the new catalog generation to KV, Fastly KV Store
+        // eventual consistency can still serve the previous `WATERMARK_KEY` record to the same
+        // execution's subsequent `admin_get(WATERMARK_KEY)`. Building the next open bundle must
+        // carry forward the just-published catalog generation so tick 3 does not reject it with
+        // `catalog_bundle_not_active`.
+        let fake = Fake::new(BASE + 1200);
+        watermark(&fake, BASE + 1200);
+        for i in 0..8 {
+            window(&fake, BASE + i * 60, i as u32, 3);
+        }
+        let first = run(&fake);
+        assert!(first.errors.is_empty(), "tick 1 errors: {:?}", first.errors);
+        assert!(
+            first.more_pending,
+            "tick 1 should have a pending open-bundle publication"
+        );
+
+        // Add more windows in the same open hour so tick 2 builds a second open bundle right
+        // after publishing the first one.
+        for i in 8..16 {
+            window(&fake, BASE + i * 60, i as u32, 3);
+        }
+        watermark(&fake, BASE + 1200);
+        fake.stale_watermark_reads.set(1);
+
+        let second = run(&fake);
+        assert!(
+            second.errors.is_empty(),
+            "tick 2 errors: {:?}",
+            second.errors
+        );
+
+        // Tick 3 publishes the second open bundle against the now-propagated watermark.
+        let third = run(&fake);
+        assert!(
+            third.errors.is_empty(),
+            "tick 3 should not fail with catalog_bundle_not_active: {:?}",
+            third.errors
+        );
+    }
+
     fn assert_w6_layout(bytes: &[u8]) {
         use arrow_array::StringArray;
         use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;

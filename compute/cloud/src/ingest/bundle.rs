@@ -2878,9 +2878,11 @@ pub fn summary_bundle<R: Runtime>(
     // A bundle built last execution is published first, then the run goes on with the watermark
     // read after that commit. Publishing is idempotent, so a run that ends before saving the
     // state publishes the same coverage again next time.
+    let mut published_catalog: Option<super::catalog::Head> = None;
     if let Some(publication) = state.publication.as_ref() {
         match super::catalog::bundles::publish(store, publication, reserve + 1) {
-            Ok(true) => {
+            Ok(Some(committed)) => {
+                published_catalog = Some(committed);
                 if publication.end - publication.start == DAY_S {
                     ctx.report.days += 1;
                 } else {
@@ -2889,7 +2891,7 @@ pub fn summary_bundle<R: Runtime>(
                 state.publication = None;
                 state.inventory = None;
             }
-            Ok(false) => {
+            Ok(None) => {
                 ctx.report.more_pending = true;
                 return Ok(ctx.report);
             }
@@ -2915,13 +2917,27 @@ pub fn summary_bundle<R: Runtime>(
         return Ok(ctx.report);
     }
     let watermark = runtime.admin_get(WATERMARK_KEY)?;
-    ctx.catalog = super::catalog::head(
+    let fetched_catalog = super::catalog::head(
         watermark
             .as_ref()
             .map(|r| &r.value)
             .unwrap_or(&serde_json::Value::Null),
     )?;
-    ctx.report.deleted += super::catalog::bundles::cleanup(store, watermark.as_ref(), reserve + 1)?;
+    // Fastly KV reads immediately after `bundles::publish` can still serve the pre-commit
+    // watermark; keep the just-committed catalog head so any bundle built in this execution
+    // carries the new generation instead of failing `catalog_bundle_not_active` on the next tick.
+    let stale_watermark = published_catalog
+        .as_ref()
+        .is_some_and(|published| fetched_catalog.generation < published.generation);
+    ctx.catalog = if stale_watermark {
+        published_catalog.take().unwrap_or(fetched_catalog)
+    } else {
+        fetched_catalog
+    };
+    if !stale_watermark {
+        ctx.report.deleted +=
+            super::catalog::bundles::cleanup(store, watermark.as_ref(), reserve + 1)?;
+    }
     let swept_at = watermark
         .as_ref()
         .filter(|r| r.value["sweep"]["after"].as_str() == Some(""))

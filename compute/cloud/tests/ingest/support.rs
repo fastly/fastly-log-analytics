@@ -46,6 +46,10 @@ pub(super) struct Fake {
     /// Plan reads after such a write that still answer correctly before the stale one.
     pub(super) stale_plan_skip: Cell<u32>,
     pub(super) previous_plan: RefCell<Option<Record>>,
+    /// Watermark writes left whose next read answers with the record they replaced, as an
+    /// eventually consistent KV read right after `catalog::bundles::publish` does.
+    pub(super) stale_watermark_reads: Cell<u32>,
+    pub(super) previous_watermark: RefCell<Option<Record>>,
     pub(super) fail_compact_after_publish: Cell<bool>,
     pub(super) compact_conflict_after: Cell<Option<u32>>,
     pub(super) stale_compact_state: RefCell<Option<Record>>,
@@ -203,6 +207,8 @@ impl Fake {
             stale_plan_reads: Cell::new(0),
             stale_plan_skip: Cell::new(0),
             previous_plan: Default::default(),
+            stale_watermark_reads: Cell::new(0),
+            previous_watermark: Default::default(),
             fail_compact_after_publish: Cell::new(false),
             compact_conflict_after: Cell::new(None),
             stale_compact_state: Default::default(),
@@ -474,6 +480,11 @@ impl Runtime for Fake {
                 return Ok(Some(record));
             }
         }
+        if key == ingest::WATERMARK_KEY {
+            if let Some(record) = self.previous_watermark.borrow_mut().take() {
+                return Ok(Some(record));
+            }
+        }
         Ok(self.kv.borrow().get(key).map(|(g, v)| Record {
             generation: g.to_string(),
             value: v.clone(),
@@ -550,6 +561,14 @@ impl Runtime for Fake {
         if key == ingest::PLAN_KEY && self.stale_plan_reads.get() > 0 {
             self.stale_plan_reads.set(self.stale_plan_reads.get() - 1);
             *self.previous_plan.borrow_mut() = kv.get(key).map(|(g, v)| Record {
+                generation: g.to_string(),
+                value: v.clone(),
+            });
+        }
+        if key == ingest::WATERMARK_KEY && self.stale_watermark_reads.get() > 0 {
+            self.stale_watermark_reads
+                .set(self.stale_watermark_reads.get() - 1);
+            *self.previous_watermark.borrow_mut() = kv.get(key).map(|(g, v)| Record {
                 generation: g.to_string(),
                 value: v.clone(),
             });

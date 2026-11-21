@@ -87,10 +87,10 @@ pub fn publish<R: Runtime>(
     store: &Store<'_, R>,
     coverage: &Coverage,
     reserve: u32,
-) -> Result<bool, String> {
+) -> Result<Option<Head>, String> {
     let runtime = store.runtime;
     if runtime.admin_remaining_calls() < reserve + 6 || !admitted(store) {
-        return Ok(false);
+        return Ok(None);
     }
     let record = runtime
         .admin_get(WATERMARK_KEY)?
@@ -129,7 +129,7 @@ pub fn publish<R: Runtime>(
         &root.hour_bundles
     };
     if previous.get(&coverage.start).is_some_and(|r| r.key == key) {
-        return Ok(true);
+        return Ok(Some(root));
     }
     if root.bundle_retired.contains_key(&coverage.file.key) {
         return Err("catalog_bundle_not_active".into());
@@ -148,7 +148,7 @@ pub fn publish<R: Runtime>(
         .as_ref()
         .is_some_and(|old| old.file.key == coverage.file.key)
     {
-        return Ok(true);
+        return Ok(Some(root));
     }
     let generation = root
         .generation
@@ -212,8 +212,12 @@ pub fn publish<R: Runtime>(
         root.recent.drain(..root.recent.len() - REPLAY_COMMITS);
     }
     let mut value = record.value;
-    value["catalog"] = serde_json::to_value(root).map_err(|e| e.to_string())?;
-    runtime.admin_cas(WATERMARK_KEY, Some(&record.generation), &value)
+    value["catalog"] = serde_json::to_value(&root).map_err(|e| e.to_string())?;
+    if runtime.admin_cas(WATERMARK_KEY, Some(&record.generation), &value)? {
+        Ok(Some(root))
+    } else {
+        Ok(None)
+    }
 }
 
 pub fn cleanup<R: Runtime>(
