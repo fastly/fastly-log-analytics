@@ -65,6 +65,43 @@ test("Cloud origin buckets use UTC without timezone extensions", async ({
   await page.context().route("**/api/**", (route) => {
     const path = new URL(route.request().url()).pathname;
     switch (path) {
+      case "/api/bootstrap":
+        return route.fulfill({
+          json: {
+            runtime_mode: "cloud",
+            user: { id: "fixture-user", role: "admin" },
+            services: [{
+              service_id: "fixtureService",
+              name: "Fixture Service",
+              rum_enabled: false,
+              cmcd_enabled: false,
+              active_log_field_ids: [],
+            }],
+            active_service_id: "fixtureService",
+            active_log_field_ids: [],
+            log_fields_catalog: { fields: [], groups: [] },
+            views: [],
+            build_sha: "fixture-build",
+            ngwaf_configured: false,
+            fastly_bots_available: true,
+            settings: {
+              needs_login: false,
+              is_remote_analyst: false,
+              mask_ips: false,
+              initializing: false,
+            },
+            debug_state: {
+              query_debug_visibility: "disabled",
+              api_call_debug_visibility: "disabled",
+            },
+          },
+        });
+      case "/api/ingest/events":
+        return route.fulfill({
+          status: 200,
+          contentType: "text/event-stream",
+          body: "retry: 60000\n\n: current\n\n",
+        });
       case "/api/auth/session":
         return route.fulfill({
           json: { user: { id: "fixture-user", role: "admin" } },
@@ -246,6 +283,41 @@ for (const mode of ["rolling", "custom"] as const) {
     await page.context().route("**/api/**", (route) => {
       const url = new URL(route.request().url());
       switch (url.pathname) {
+        case "/api/bootstrap":
+          return route.fulfill({
+            json: {
+              runtime_mode: "cloud",
+              user: {
+                id: "catalog-user",
+                display_name: "Analyst",
+                role: "analyst",
+              },
+              services: [],
+              active_service_id: null,
+              active_log_field_ids: [],
+              log_fields_catalog: null,
+              views: [],
+              build_sha: "fixture-build",
+              ngwaf_configured: false,
+              fastly_bots_available: true,
+              settings: {
+                needs_login: false,
+                is_remote_analyst: true,
+                mask_ips: false,
+                initializing: false,
+              },
+              debug_state: {
+                query_debug_visibility: "disabled",
+                api_call_debug_visibility: "disabled",
+              },
+            },
+          });
+        case "/api/ingest/events":
+          return route.fulfill({
+            status: 200,
+            contentType: "text/event-stream",
+            body: "retry: 60000\n\n: current\n\n",
+          });
         case "/api/auth/session":
           return route.fulfill({
             json: {

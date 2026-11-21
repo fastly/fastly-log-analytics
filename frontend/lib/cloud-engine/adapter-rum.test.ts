@@ -159,20 +159,43 @@ describe("Cloud RUM native lifecycle bridge", () => {
     const jobStartedPromise = new Promise<void>((resolve) => { jobStarted = resolve; });
     const jobStep = new Promise<void>((resolve) => { completeJob = resolve; });
     let configured = false;
-    const services = vi.fn(async () =>
+    const bootstrap = vi.fn(async () =>
       Response.json({ services: [{
         service_id: "svc-1",
         rum: { ...rum, enabled: configured },
+        rum_enabled: configured,
       }] }),
     );
     const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const request = input instanceof Request
         ? input
         : new Request(new URL(String(input), "http://localhost"), init);
-      if (request.method === "GET" && request.url.endsWith("/api/auth/session")) {
-        return Response.json({ user: { id: "fixture-user", role: "admin" } });
+      if (request.method === "GET" && request.url.endsWith("/api/bootstrap")) {
+        const response = await bootstrap();
+        const body = await response.json();
+        return Response.json({
+          runtime_mode: "cloud",
+          user: { id: "fixture-user", role: "admin" },
+          ...body,
+          active_service_id: "svc-1",
+          active_log_field_ids: [],
+          log_fields_catalog: { groups: [], fields: [] },
+          views: [],
+          build_sha: "test-build",
+          ngwaf_configured: false,
+          fastly_bots_available: true,
+          settings: {
+            needs_login: false,
+            is_remote_analyst: false,
+            mask_ips: false,
+            initializing: false,
+          },
+          debug_state: {
+            query_debug_visibility: "disabled",
+            api_call_debug_visibility: "disabled",
+          },
+        });
       }
-      if (request.method === "GET" && request.url.endsWith("/api/services")) return services();
       if (request.method === "GET" && request.url.endsWith("/api/admin/services/svc-1")) {
         return Response.json({ service: { rum: { ...rum, enabled: false } }, generation: "generation-7" });
       }
@@ -208,7 +231,7 @@ describe("Cloud RUM native lifecycle bridge", () => {
     expect(await during?.json()).toMatchObject({
       services: [{ service_id: "svc-1", rum_enabled: false }],
     });
-    expect(services).toHaveBeenCalledTimes(1);
+    expect(bootstrap).toHaveBeenCalledTimes(2);
 
     completeJob();
     await mutation.text();
@@ -219,7 +242,7 @@ describe("Cloud RUM native lifecycle bridge", () => {
     expect(await after?.json()).toMatchObject({
       services: [{ service_id: "svc-1", rum_enabled: true }],
     });
-    expect(services).toHaveBeenCalledTimes(2);
+    expect(bootstrap).toHaveBeenCalledTimes(3);
   });
 
   it("does not report settings saved when native reconciliation fails", async () => {

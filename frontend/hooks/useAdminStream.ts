@@ -20,7 +20,6 @@ import {
 import { useEventStream } from './useEventStream'
 import { IS_CLOUD_MODE, isCloudMode } from '@/lib/cloud-engine/mode'
 import { observeCatalogCommit } from '@/lib/cloud-engine/dashboard/catalog-manifest'
-import { notifyDashboardCatalogChange } from '@/lib/cloud-engine/dashboard/client'
 import { browserSource } from '@/lib/cloud-engine/dashboard/sources'
 
 // ── Service & Admin Multiplex Streams ────────────────────────────────────────
@@ -119,6 +118,11 @@ function parseIngestEventFrame(raw: string): IngestEventFrame | null {
   }
 }
 
+async function notifyDashboardCatalogChanged(): Promise<void> {
+  const { notifyDashboardCatalogChange } = await import('@/lib/cloud-engine/dashboard/client')
+  notifyDashboardCatalogChange()
+}
+
 export function useHeaderBadgeStream(enabled: boolean) {
   const queryClient = useQueryClient()
   const activeServiceId = useServiceStore((s) => s.activeServiceId)
@@ -173,7 +177,7 @@ export function useHeaderBadgeStream(enabled: boolean) {
               generation,
               manifest: typeof parsed.data?.manifest === 'string' ? parsed.data.manifest : undefined,
             })
-            notifyDashboardCatalogChange()
+            void notifyDashboardCatalogChanged()
             if (parsed.event !== 'ready') {
               void queryClient.invalidateQueries({ queryKey: queryKeys.syncStatus(activeServiceId) })
             }

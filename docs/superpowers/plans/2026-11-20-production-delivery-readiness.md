@@ -251,7 +251,7 @@ git commit -m "Bound unhashed static asset caching"
 
 **Files:**
 - Create: `frontend/scripts/check-static-budget.mjs`
-- Test: `frontend/scripts/check-static-budget.test.mjs`
+- Test: `frontend/scripts/check-static-budget.node.mjs`
 - Modify: `scripts/release_compute.py:143-147, 260-270`
 
 **Interfaces:**
@@ -286,7 +286,7 @@ Add `withBudgets` tests that assert failures for 625 KiB JS, 35 KiB CSS, and a 9
 - [ ] **Step 2: Run and verify failure**
 
 ```bash
-node --test frontend/scripts/check-static-budget.test.mjs
+node --test frontend/scripts/check-static-budget.node.mjs
 ```
 
 Expected: FAIL because `check-static-budget.mjs` does not exist.
@@ -327,7 +327,7 @@ Run the budget for every `frontend` export, including restored `web_out_ready` o
 - [ ] **Step 5: Run unit tests and the current export gate**
 
 ```bash
-node --test frontend/scripts/check-static-budget.test.mjs
+node --test frontend/scripts/check-static-budget.node.mjs
 node frontend/scripts/check-static-budget.mjs frontend/out
 ```
 
@@ -336,16 +336,16 @@ Expected: unit tests pass; the real command reports the current payload and exit
 - [ ] **Step 6: Commit**
 
 ```bash
-git add frontend/scripts/check-static-budget.mjs frontend/scripts/check-static-budget.test.mjs scripts/release_compute.py
+git add frontend/scripts/check-static-budget.mjs frontend/scripts/check-static-budget.node.mjs scripts/release_compute.py
 git commit -m "Enforce Cloud dashboard asset budget"
 ```
 
 ### Task 4: Reject unrelated High-Scale front URLs
 
 **Files:**
-- Modify: `/Users/drew.michael/Projects/fastly-log-analytics-deploy-testing/fdt/envs/fla_elevation.py`
-- Test: `/Users/drew.michael/Projects/fastly-log-analytics-deploy-testing/tests/test_env_fla_elevation.py`
-- Test helper: `/Users/drew.michael/Projects/fastly-log-analytics-deploy-testing/tests/env_support.py`
+- Modify: the deploy orchestrator's High-Scale env module
+- Test: the deploy orchestrator's High-Scale env test module
+- Test helper: the deploy orchestrator's shared env support module
 
 **Interfaces:**
 - Consumes: `front_url` HTTP response status, content type, and body prefix.
@@ -377,7 +377,7 @@ Add a positive test with the FLA title or known bootstrap marker and
 
 ```bash
 perl -e 'alarm 120; exec @ARGV' uv run pytest -q -x \
-  tests/test_env_fla_elevation.py -k 'front_url or ready'
+  tests/test_env_fla_high_scale.py -k 'front_url or ready'
 ```
 
 Expected: FAIL because readiness currently checks status only.
@@ -401,7 +401,7 @@ proof. Preserve readiness support for `/health` JSON and other `ready_urls`.
 
 ```bash
 perl -e 'alarm 120; exec @ARGV' nice -n 10 uv run pytest -q -x \
-  tests/test_env_fla_elevation.py -k 'front_url or ready'
+  tests/test_env_fla_high_scale.py -k 'front_url or ready'
 ```
 
 Expected: both unrelated-document rejection and valid FLA readiness pass.
@@ -409,7 +409,7 @@ Expected: both unrelated-document rejection and valid FLA readiness pass.
 - [ ] **Step 5: Commit in deploy-testing repository**
 
 ```bash
-git add fdt/envs/fla_elevation.py tests/test_env_fla_elevation.py tests/env_support.py
+git add the High-Scale env module, its test module, and the shared env support module
 git commit -m "Reject unrelated High-Scale front URLs"
 ```
 
@@ -434,7 +434,7 @@ Expected: all pass.
 node --test frontend/scripts/check-static-budget.test.mjs
 npx tsc --noEmit
 npx eslint frontend/scripts/check-static-budget.mjs \
-  frontend/scripts/check-static-budget.test.mjs
+  frontend/scripts/check-static-budget.node.mjs
 ```
 
 Run from the repository root, using `--prefix frontend` where required by local Node tooling.
@@ -443,7 +443,7 @@ Run from the repository root, using `--prefix frontend` where required by local 
 
 ```bash
 perl -e 'alarm 180; exec @ARGV' nice -n 10 uv run pytest -q -x \
-  tests/test_env_fla_elevation.py -k 'front_url or ready'
+  tests/test_env_fla_high_scale.py -k 'front_url or ready'
 ```
 
 Expected: all pass with no live network call.
