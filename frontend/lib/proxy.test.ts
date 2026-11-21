@@ -150,7 +150,7 @@ describe('SEC-02 & SEC-10.3 frontend proxy gating and cookie hardening', () => {
     }
   })
 
-  it('SEC-T5-EXT-63EDE5786-XFF-01: stamps x-fla-frontend-proxy on wire x-forwarded-for while preserving genuine loopback and mTLS admin-gateway', () => {
+  it('SEC-T5-EXT-63EDE5786-XFF-01: stamps x-fla-frontend-proxy on external/multi-hop x-forwarded-for while preserving Next.js loopback backfill and mTLS admin-gateway', () => {
     const prevSecret = process.env.ADMIN_GATEWAY_SECRET
     const prevReq = process.env.ADMIN_GATEWAY_REQUIRED
     const nextSpy = vi.spyOn(NextResponse, 'next')
@@ -158,8 +158,8 @@ describe('SEC-02 & SEC-10.3 frontend proxy gating and cookie hardening', () => {
       delete process.env.ADMIN_GATEWAY_SECRET
       delete process.env.ADMIN_GATEWAY_REQUIRED
 
-      // 1. Unauthenticated wire-spoofed loopback X-Forwarded-For on /api/... and / page routes stamps x-fla-frontend-proxy: 1 -> admin: false
-      for (const spoofXff of ['127.0.0.1', '::1', '::ffff:127.0.0.1']) {
+      // 1. Unauthenticated external or multi-hop X-Forwarded-For on /api/... and / page routes stamps x-fla-frontend-proxy: 1 -> admin: false
+      for (const spoofXff of ['203.0.113.5', '127.0.0.1, 203.0.113.5', '127.0.0.1, ::1']) {
         for (const path of ['/api/services', '/']) {
           nextSpy.mockClear()
           const req = new NextRequest(`http://localhost:3000${path}`, {
@@ -176,24 +176,26 @@ describe('SEC-02 & SEC-10.3 frontend proxy gating and cookie hardening', () => {
         }
       }
 
-      // 2. Genuine local loopback request WITHOUT wire x-forwarded-for does NOT stamp x-fla-frontend-proxy -> remains admin: true after Next.js base-server.js ??= backfill
+      // 2. Genuine local loopback request (with or without Next.js base-server.js single-loopback XFF backfill
+      //    which runs BEFORE proxy.ts in `next start`) does NOT stamp x-fla-frontend-proxy -> remains admin: true
       for (const path of ['/api/services', '/']) {
-        nextSpy.mockClear()
-        const localReq = new NextRequest(`http://localhost:3000${path}`, {
-          headers: { host: 'localhost:3000' },
-        })
-        expect(proxy(localReq).status).toBe(200)
-        const forwarded = new Headers(
-          (nextSpy.mock.calls[0]?.[0]?.request?.headers as Headers | undefined) ?? localReq.headers,
-        )
-        expect(forwarded.get('x-fla-frontend-proxy')).toBeNull()
-        // Simulate Next.js base-server.js:604 `req.headers['x-forwarded-for'] ??= socket.remoteAddress`
-        forwarded.set('x-forwarded-for', '127.0.0.1')
-        expect(classifySsrRequest(forwarded)).toEqual({
-          admin: true,
-          gatewayAuthenticated: false,
-          refusal: null,
-        })
+        for (const xff of [undefined, '127.0.0.1', '::1', '::ffff:127.0.0.1']) {
+          nextSpy.mockClear()
+          const headers: Record<string, string> = { host: 'localhost:3000' }
+          if (xff) headers['x-forwarded-for'] = xff
+          const localReq = new NextRequest(`http://localhost:3000${path}`, { headers })
+          expect(proxy(localReq).status).toBe(200)
+          const forwarded = new Headers(
+            (nextSpy.mock.calls[0]?.[0]?.request?.headers as Headers | undefined) ?? localReq.headers,
+          )
+          expect(forwarded.get('x-fla-frontend-proxy')).toBeNull()
+          forwarded.set('x-forwarded-for', xff ?? '127.0.0.1')
+          expect(classifySsrRequest(forwarded)).toEqual({
+            admin: true,
+            gatewayAuthenticated: false,
+            refusal: null,
+          })
+        }
       }
 
       // 3. Authenticated mTLS admin-gateway request WITH wire X-Forwarded-For remains admin: true (no x-fla-frontend-proxy stamped)
@@ -229,15 +231,21 @@ describe('SEC-02 & SEC-10.3 frontend proxy gating and cookie hardening', () => {
     }
   })
 
-  it('allows single loopback x-forwarded-for on loopback /admin while gating multi-hop or external x-forwarded-for', () => {
+  it('allows single loopback x-forwarded-for on loopback /admin and /api without stamping x-fla-frontend-proxy while gating multi-hop or external x-forwarded-for', () => {
     const prevReq = process.env.ADMIN_GATEWAY_REQUIRED
+    const nextSpy = vi.spyOn(NextResponse, 'next')
     try {
       delete process.env.ADMIN_GATEWAY_REQUIRED
       for (const xff of ['127.0.0.1', '::1', '::ffff:127.0.0.1']) {
-        const req = new NextRequest('http://127.0.0.1:13004/admin', {
-          headers: { host: '127.0.0.1:13004', 'x-forwarded-for': xff },
-        })
-        expect(proxy(req).status).toBe(200)
+        for (const path of ['/admin', '/api/bootstrap']) {
+          nextSpy.mockClear()
+          const req = new NextRequest(`http://127.0.0.1:13004${path}`, {
+            headers: { host: '127.0.0.1:13004', 'x-forwarded-for': xff },
+          })
+          expect(proxy(req).status).toBe(200)
+          const forwarded = nextSpy.mock.calls[0]?.[0]?.request?.headers as Headers | undefined
+          expect(forwarded?.get('x-fla-frontend-proxy') ?? null).toBeNull()
+        }
       }
       for (const xff of ['203.0.113.5', '127.0.0.1, 203.0.113.5', '127.0.0.1, ::1']) {
         const req = new NextRequest('http://127.0.0.1:13004/admin', {
@@ -246,6 +254,7 @@ describe('SEC-02 & SEC-10.3 frontend proxy gating and cookie hardening', () => {
         expect(proxy(req).status).toBe(307)
       }
     } finally {
+      nextSpy.mockRestore()
       if (prevReq === undefined) delete process.env.ADMIN_GATEWAY_REQUIRED
       else process.env.ADMIN_GATEWAY_REQUIRED = prevReq
     }

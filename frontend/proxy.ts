@@ -219,7 +219,7 @@ export function proxy(request: NextRequest) {
 
   const gatewayAuthenticated = isGatewayAuthenticatedRequest(request)
   const stampWireForwardedProxy =
-    !gatewayAuthenticated && hasNonEmptyHeader(request.headers, 'x-forwarded-for')
+    !gatewayAuthenticated && hasExternalForwardedFor(request.headers)
 
   // Bypass CSP/gating entirely -- those exist for HTML page renders, not
   // proxied API responses. Route Handlers under app/api/[...path]/route.ts
