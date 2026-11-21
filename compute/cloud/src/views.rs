@@ -1089,6 +1089,8 @@ enum RelTok {
     RParen,
     Comma,
     Dot,
+    Colon,
+    Semi,
     Star,
     Other,
 }
@@ -1236,6 +1238,103 @@ fn range_has_top_level_setop(tokens: &[RelTok], start: usize, end: usize) -> boo
         }
     }
     false
+}
+
+fn is_star_columns_unpack(tokens: &[RelTok], star_idx: usize) -> bool {
+    !matches!(
+        star_idx.checked_sub(1).and_then(|p| tokens.get(p)),
+        Some(RelTok::Dot)
+    ) && matches!(
+        tokens.get(star_idx + 1),
+        Some(RelTok::Ident {
+            lower,
+            quoted: false,
+            ..
+        }) if lower == "columns"
+    ) && matches!(tokens.get(star_idx + 2), Some(RelTok::LParen))
+}
+
+fn is_star_preceded_by_colon(tokens: &[RelTok], star_idx: usize) -> bool {
+    let mut k = star_idx;
+    while k >= 2
+        && matches!(tokens.get(k - 1), Some(RelTok::Dot))
+        && matches!(tokens.get(k - 2), Some(RelTok::Ident { .. }))
+    {
+        k -= 2;
+    }
+    while k >= 1 && matches!(tokens.get(k - 1), Some(RelTok::LParen)) {
+        k -= 1;
+    }
+    k >= 1 && matches!(tokens.get(k - 1), Some(RelTok::Colon))
+}
+
+fn star_has_unsafe_post_modifier_or_alias(
+    tokens: &[RelTok],
+    star_idx: usize,
+    allow_sort_dir: bool,
+) -> bool {
+    let mut k = star_idx + 1;
+    while let Some(RelTok::Ident {
+        lower,
+        quoted: false,
+        ..
+    }) = tokens.get(k)
+    {
+        if matches!(lower.as_str(), "exclude" | "replace" | "rename") {
+            if matches!(tokens.get(k + 1), Some(RelTok::LParen)) {
+                let Some(rp) = find_matching_rel_rparen(tokens, k + 1) else {
+                    return true;
+                };
+                k = rp + 1;
+                continue;
+            }
+            if lower == "exclude"
+                && matches!(
+                    tokens.get(k + 1),
+                    Some(RelTok::Ident {
+                        lower: col_kw,
+                        quoted,
+                        ..
+                    }) if *quoted || !is_from_alias_stop_keyword(col_kw)
+                )
+            {
+                k += 2;
+                continue;
+            }
+            return true;
+        }
+        break;
+    }
+    match tokens.get(k) {
+        None | Some(RelTok::Comma | RelTok::RParen | RelTok::Semi) => false,
+        Some(RelTok::Ident {
+            lower,
+            quoted: false,
+            ..
+        }) => {
+            if allow_sort_dir && matches!(lower.as_str(), "asc" | "desc" | "nulls") {
+                return false;
+            }
+            !matches!(
+                lower.as_str(),
+                "from"
+                    | "where"
+                    | "group"
+                    | "having"
+                    | "window"
+                    | "qualify"
+                    | "order"
+                    | "limit"
+                    | "offset"
+                    | "fetch"
+                    | "union"
+                    | "intersect"
+                    | "except"
+                    | "into"
+            )
+        }
+        _ => true,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1433,7 +1532,23 @@ fn has_positional_wildcard_subquery_or_setop(
                 idx += 1;
                 continue;
             }
+            RelTok::Semi => {
+                if let Some(top) = scopes.last_mut() {
+                    top.in_select_list = false;
+                    top.branch_saw_select = false;
+                    top.branch_saw_from = false;
+                }
+                in_from = false;
+                expect_rel = false;
+                prev_rparen_was_distinct_on = false;
+                idx += 1;
+                continue;
+            }
             RelTok::Star => {
+                let is_star_cols = is_star_columns_unpack(tokens, idx);
+                if !is_star_cols && is_star_preceded_by_colon(tokens, idx) {
+                    return true;
+                }
                 let nearest_query_disallows_wildcard = scopes
                     .iter()
                     .rev()
@@ -1446,7 +1561,24 @@ fn has_positional_wildcard_subquery_or_setop(
                         Some(RelTok::Ident { .. } | RelTok::RParen)
                     );
                 if is_qual_star {
-                    if nearest_query_disallows_wildcard {
+                    if nearest_query_disallows_wildcard
+                        || (cur.is_expr_paren && !cur.is_distinct_on_paren)
+                        || star_has_unsafe_post_modifier_or_alias(
+                            tokens,
+                            idx,
+                            cur.is_distinct_on_paren,
+                        )
+                    {
+                        return true;
+                    }
+                } else if cur.is_distinct_on_paren {
+                    let is_distinct_on_item_star = idx > 0
+                        && matches!(tokens.get(idx - 1), Some(RelTok::LParen | RelTok::Comma));
+                    if is_distinct_on_item_star
+                        && !is_star_cols
+                        && (nearest_query_disallows_wildcard
+                            || star_has_unsafe_post_modifier_or_alias(tokens, idx, true))
+                    {
                         return true;
                     }
                 } else if cur.is_expr_paren {
@@ -1460,7 +1592,7 @@ fn has_positional_wildcard_subquery_or_setop(
                                 if fn_kw == "count" && !is_preceded_by_non_schema_dot(tokens, idx - 2)
                         )
                         && matches!(tokens.get(idx + 1), Some(RelTok::RParen));
-                    if nearest_query_disallows_wildcard && is_paren_or_arg_star && !is_count_star {
+                    if is_paren_or_arg_star && !is_count_star && !is_star_cols {
                         return true;
                     }
                 } else if cur.in_select_list {
@@ -1476,7 +1608,10 @@ fn has_positional_wildcard_subquery_or_setop(
                                 _ => false,
                             });
                     if prev_is_select_item_start
-                        && (cur.in_setop_branch || cur.in_disallowed_wildcard_subquery)
+                        && !is_star_cols
+                        && (cur.in_setop_branch
+                            || cur.in_disallowed_wildcard_subquery
+                            || star_has_unsafe_post_modifier_or_alias(tokens, idx, false))
                     {
                         return true;
                     }
@@ -1789,7 +1924,7 @@ fn references_whole_row_relation_struct(tokens: &[RelTok]) -> bool {
                 if expect_rel && !(has_subquery_head && look == idx + 1) {
                     paren_frames.push((true, in_from, false));
                     in_from = true;
-                    expect_rel = !has_subquery_head;
+                    expect_rel = true;
                     expect_opt_alias = false;
                 } else if has_subquery_head {
                     paren_frames.push((expect_rel, in_from, false));
@@ -1810,6 +1945,13 @@ fn references_whole_row_relation_struct(tokens: &[RelTok]) -> bool {
                     expect_rel = false;
                     expect_opt_alias = was_from_rel_paren;
                 }
+                idx += 1;
+                continue;
+            }
+            RelTok::Semi => {
+                in_from = false;
+                expect_rel = false;
+                expect_opt_alias = false;
                 idx += 1;
                 continue;
             }
@@ -1917,6 +2059,10 @@ fn references_whole_row_relation_struct(tokens: &[RelTok]) -> bool {
         }
 
         if expect_opt_alias {
+            if matches!(tokens[idx], RelTok::Star) {
+                idx += 1;
+                continue;
+            }
             if let RelTok::Ident { lower, quoted, .. } = &tokens[idx] {
                 if !*quoted && lower == "as" {
                     if let Some(RelTok::Ident {
@@ -1977,9 +2123,6 @@ fn references_whole_row_relation_struct(tokens: &[RelTok]) -> bool {
                     }) if prev_kw == "as"
                 )
             {
-                continue;
-            }
-            if is_preceded_by_non_schema_dot(tokens, idx) {
                 continue;
             }
             if !*followed_by_dot {
@@ -2833,7 +2976,10 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
                 top.1 = false;
             }
             if bytes.get(i + 1) == Some(&b':') {
-                i += 2;
+                while i < bytes.len() && bytes[i] == b':' {
+                    i += 1;
+                }
+                rel_tokens.push(RelTok::Other);
             } else {
                 if let Some(top) = brace_stack.last_mut() {
                     if top.0 == paren_depth && top.1 == bracket_depth {
@@ -2841,8 +2987,8 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
                     }
                 }
                 i += 1;
+                rel_tokens.push(RelTok::Colon);
             }
-            rel_tokens.push(RelTok::Other);
             pending_call = PendingCallKind::None;
             pending_extract_mode = None;
             pending_extract_dot_chain = false;
@@ -2859,6 +3005,20 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
         }
         if in_subscript || in_arrow_rhs || in_extract_key_arg {
             return true;
+        }
+        if bytes[i] == b';' {
+            if let Some(top) = paren_stack.last_mut() {
+                top.1 = false;
+            }
+            rel_tokens.push(RelTok::Semi);
+            i += 1;
+            pending_call = PendingCallKind::None;
+            pending_extract_mode = None;
+            pending_extract_dot_chain = false;
+            pending_columns_fn = false;
+            prev_was_dot = false;
+            last_sig = LastSig::Other;
+            continue;
         }
         if bytes[i] == b'*' {
             if let Some(top) = paren_stack.last_mut() {
@@ -5415,6 +5575,188 @@ mod tests {
             (
                 "benign-r6-from-only-logs-safe-cols",
                 r#"{"_view_extras":{"sql":"SELECT t.status, t.url FROM ONLY logs AS t WHERE t.status = 200"}}"#,
+            ),
+        ];
+
+        for (case_id, payload) in allowed_vectors {
+            assert!(
+                !filters_reference_pii(payload),
+                "expected {case_id} to be allowed for AnalystNoPii: {payload}"
+            );
+        }
+    }
+
+    #[test]
+    fn sec19_blocks_wave7_r7_paren_join_inheritance_star_alias_pattern_and_catalog_dot() {
+        let blocked_vectors = [
+            // 1. (RS-A) Parenthesized joined_table outer '('
+            (
+                "r7-paren-join-as-t-cast",
+                r#"{"_view_extras":{"sql":"SELECT t.status, t.url FROM ((SELECT * FROM logs) AS t CROSS JOIN (SELECT 1 AS x) AS u) WHERE t::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r7-paren-join-as-t-col-list",
+                r#"{"_view_extras":{"sql":"SELECT t.c5, t.c6 FROM ((SELECT * FROM logs) AS t(c1, c2, c3, c4, c5, c6, c7) CROSS JOIN (SELECT 1 AS x) AS u) WHERE t.c2 = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r7-paren-join-bare-t-cast",
+                r#"{"_view_extras":{"sql":"SELECT t.status, t.url FROM ((SELECT * FROM logs) t CROSS JOIN (SELECT 1 AS x) u) WHERE t::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r7-paren-join-bare-t-col-list",
+                r#"{"_view_extras":{"sql":"SELECT t.c5, t.c6 FROM ((SELECT * FROM logs) t(c1, c2, c3, c4, c5, c6, c7) CROSS JOIN (SELECT 1 AS x) u) WHERE t.c2 = '198.51.100.7'"}}"#,
+            ),
+            // 2. (RS-B) PostgreSQL/DuckDB FROM [main.]logs * [AS] t[(c1, c2)] table-inheritance suffix
+            (
+                "r7-from-logs-star-as-t-cast",
+                r#"{"_view_extras":{"sql":"SELECT status FROM logs * AS t WHERE t::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r7-from-logs-star-bare-t-cast",
+                r#"{"_view_extras":{"sql":"SELECT status FROM logs * t WHERE t::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r7-from-logs-star-as-t-cols",
+                r#"{"_view_extras":{"sql":"SELECT c1 FROM logs * AS t(c1, c2) WHERE t.c2 = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r7-from-logs-star-bare-t-cols",
+                r#"{"_view_extras":{"sql":"SELECT c1 FROM logs * t(c1, c2) WHERE t.c2 = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r7-from-main-logs-star-as-t-cast",
+                r#"{"_view_extras":{"sql":"SELECT status FROM main.logs * AS t WHERE t::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            // 3. (RS-C) StarExpression column-renaming, pattern-filtered wildcards, and <catalog>.logs::VARCHAR
+            (
+                "r7-star-as-s",
+                r#"{"_view_extras":{"sql":"SELECT * FROM (SELECT * AS s FROM logs) WHERE s_2 = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r7-star-bare-s",
+                r#"{"_view_extras":{"sql":"SELECT * FROM (SELECT * s FROM logs) WHERE s_2 = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r7-paren-star-as-s",
+                r#"{"_view_extras":{"sql":"SELECT * FROM (SELECT (*) AS s FROM logs) WHERE s_2 = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r7-paren-qual-star-as-s",
+                r#"{"_view_extras":{"sql":"SELECT * FROM (SELECT (logs.*) AS s FROM logs) WHERE s_90 LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r7-qual-star-as-s",
+                r#"{"_view_extras":{"sql":"SELECT * FROM (SELECT logs.* AS s FROM logs) WHERE s_2 = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r7-star-exclude-as-s",
+                r#"{"_view_extras":{"sql":"SELECT * FROM (SELECT * EXCLUDE (timestamp) AS s FROM logs) WHERE s_1 = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r7-star-replace-as-s",
+                r#"{"_view_extras":{"sql":"SELECT * FROM (SELECT * REPLACE (status AS status) AS s FROM logs) WHERE s_2 = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r7-prefix-colon-star",
+                r#"{"_view_extras":{"sql":"SELECT * FROM (SELECT p: * FROM logs) WHERE p_2 = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r7-quoted-prefix-colon-star",
+                r#"{"_view_extras":{"sql":"SELECT * FROM (SELECT \"p\": * FROM logs) WHERE p_2 = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r7-prefix-colon-qual-star",
+                r#"{"_view_extras":{"sql":"SELECT * FROM (SELECT p: logs.* FROM logs) WHERE p_2 = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r7-prefix-colon-paren-star",
+                r#"{"_view_extras":{"sql":"SELECT * FROM (SELECT p: (*) FROM logs) WHERE p_2 = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r7-star-like-oi",
+                r#"{"_view_extras":{"sql":"SELECT url, * LIKE '%oi%' AS x FROM logs WHERE x = '203.0.113.9'"}}"#,
+            ),
+            (
+                "r7-star-ilike-extra",
+                r#"{"_view_extras":{"sql":"SELECT url, * ILIKE '%EXTRA%' AS x FROM logs WHERE x LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r7-star-glob-ookie",
+                r#"{"_view_extras":{"sql":"SELECT url, * GLOB '*ookie*' AS x FROM logs WHERE x = 'sess_secret_99'"}}"#,
+            ),
+            (
+                "r7-star-similar-to-dge-si",
+                r#"{"_view_extras":{"sql":"SELECT url, * SIMILAR TO '.*dge_si.*' AS x FROM logs WHERE x = 'esid_secret_77'"}}"#,
+            ),
+            (
+                "r7-star-regex-tilde-oi",
+                r#"{"_view_extras":{"sql":"SELECT url, * ~ '^oi' AS x FROM logs WHERE x = '203.0.113.9'"}}"#,
+            ),
+            (
+                "r7-star-regex-bang-tilde",
+                r#"{"_view_extras":{"sql":"SELECT url, * !~ '^timestamp$' AS x FROM logs WHERE x = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r7-star-op-like-extra",
+                r#"{"_view_extras":{"sql":"SELECT url, * ~~ '%extra%' AS x FROM logs WHERE x LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r7-star-op-ilike-extra",
+                r#"{"_view_extras":{"sql":"SELECT url, * ~~* '%EXTRA%' AS x FROM logs WHERE x LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r7-qual-star-like-oi",
+                r#"{"_view_extras":{"sql":"SELECT url, logs.* LIKE '%oi%' AS x FROM logs WHERE x = '203.0.113.9'"}}"#,
+            ),
+            (
+                "r7-catalog-dot-logs-cast",
+                r#"{"_view_extras":{"sql":"SELECT url FROM catalog91.logs WHERE catalog91.logs::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r7-cte-shadow-catalog-dot-logs-cast",
+                r#"{"_view_extras":{"sql":"WITH catalog91 AS (SELECT 1 AS x) SELECT url FROM catalog91, logs WHERE catalog91.logs::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+        ];
+
+        for (case_id, payload) in blocked_vectors {
+            assert!(
+                filters_reference_pii(payload),
+                "expected {case_id} to be blocked as PII-referencing: {payload}"
+            );
+        }
+
+        let allowed_vectors = [
+            (
+                "benign-r7-paren-join-safe",
+                r#"{"_view_extras":{"sql":"SELECT t.status, t.url, u.x FROM ((SELECT * FROM logs) AS t CROSS JOIN (SELECT 1 AS x) AS u) WHERE t.status = 200"}}"#,
+            ),
+            (
+                "benign-r7-from-logs-star-safe",
+                r#"{"_view_extras":{"sql":"SELECT t.status, t.url FROM logs * AS t WHERE t.status = 200"}}"#,
+            ),
+            (
+                "benign-r7-star-exclude",
+                r#"{"_view_extras":{"sql":"SELECT * EXCLUDE (timestamp) FROM logs WHERE status = 200"}}"#,
+            ),
+            (
+                "benign-r7-star-columns-unpack",
+                r#"{"_view_extras":{"sql":"SELECT concat_ws('|', *COLUMNS('^(status|url)$')) AS s FROM logs WHERE status = 200"}}"#,
+            ),
+            (
+                "benign-r7-count-star",
+                r#"{"_view_extras":{"sql":"SELECT count(*) AS cnt FROM logs WHERE status = 200"}}"#,
+            ),
+            (
+                "benign-r7-prefix-colon-col",
+                r#"{"_view_extras":{"sql":"SELECT p: status, url FROM logs WHERE status = 200"}}"#,
+            ),
+            (
+                "benign-r7-from-first-star",
+                r#"{"_view_extras":{"sql":"FROM logs SELECT * WHERE status = 200"}}"#,
+            ),
+            (
+                "benign-r7-paren-expr-mult",
+                r#"{"_view_extras":{"sql":"SELECT (status + 1) * 2 AS x FROM logs WHERE status = 200"}}"#,
             ),
         ];
 

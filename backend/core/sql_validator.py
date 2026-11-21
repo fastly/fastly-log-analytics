@@ -892,7 +892,11 @@ def _has_top_level_setop(tokens: list[_Tok]) -> bool:
                 return True
             k = rp + 1
             continue
-        if tk.kind == "WORD" and tk.val.upper() in ("UNION", "INTERSECT", "EXCEPT"):
+        if (
+            tk.kind == "WORD"
+            and tk.val.upper() in ("UNION", "INTERSECT", "EXCEPT")
+            and not (k > 0 and unwrapped[k - 1].kind == "DOT")
+        ):
             return True
         k += 1
     return False
@@ -931,7 +935,11 @@ def _parse_recursive_cte_tokens(tokens: list[_Tok]) -> dict[str, Any]:
                 break
             k = rp + 1
             continue
-        if tk.kind == "WORD" and tk.val.upper() in ("UNION", "EXCEPT"):
+        if (
+            tk.kind == "WORD"
+            and tk.val.upper() in ("UNION", "INTERSECT", "EXCEPT")
+            and not (k > 0 and inner[k - 1].kind == "DOT")
+        ):
             last_union_or_except_op = tk.val.upper()
             last_idx = k
         k += 1
@@ -980,7 +988,7 @@ def _parse_query_tokens(tokens: list[_Tok]) -> dict[str, Any]:
                 }
             )
             return node
-        if w0 in _NON_SELECT_STATEMENTS and not (len(tokens) > 1 and tokens[1].kind == "LPAREN"):
+        if w0 in _NON_SELECT_STATEMENTS:
             node["children"].append(
                 {
                     "type": "DISALLOWED_SUBQUERY_STATEMENT",
@@ -1036,7 +1044,18 @@ def _parse_query_tokens(tokens: list[_Tok]) -> dict[str, Any]:
 
 def _is_subquery_token_list(tokens: list[_Tok], *, enclosing_special_call: str | None = None) -> bool:
     unwrapped = _strip_outer_parens(tokens)
-    if not unwrapped or unwrapped[0].kind != "WORD":
+    if not unwrapped:
+        return False
+    if unwrapped[0].kind == "LPAREN":
+        rp0 = _find_matching_rparen(unwrapped, 0)
+        if (
+            0 < rp0 < len(unwrapped) - 1
+            and unwrapped[rp0 + 1].kind == "WORD"
+            and unwrapped[rp0 + 1].val.upper() in ("UNION", "INTERSECT", "EXCEPT", "ORDER", "LIMIT", "OFFSET", "FETCH")
+        ):
+            return _is_subquery_token_list(unwrapped[1:rp0])
+        return False
+    if unwrapped[0].kind != "WORD":
         return False
     w0 = unwrapped[0].val.upper()
     if enclosing_special_call in {"trim", "btrim", "ltrim", "rtrim"} and len(unwrapped) == len(tokens) and w0 == "FROM":
@@ -1119,7 +1138,7 @@ def _scan_body_tokens(
                 )
                 i += 1
                 continue
-            if at_branch_start and not prev_is_dot and not (i + 1 < n and tokens[i + 1].kind == "LPAREN"):
+            if at_branch_start and not prev_is_dot:
                 if wu in _SHOW_REF_STATEMENTS:
                     node["children"].append(
                         {
@@ -1138,7 +1157,7 @@ def _scan_body_tokens(
                         }
                     )
                     return
-            if wu in ("UNION", "INTERSECT", "EXCEPT"):
+            if not prev_is_dot and wu in ("UNION", "INTERSECT", "EXCEPT"):
                 if expect_table:
                     node["children"].append(
                         {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: expected table reference"}
@@ -1257,13 +1276,40 @@ def _scan_body_tokens(
                         if (
                             i < n
                             and tokens[i].kind in ("WORD", "QIDENT")
-                            and tokens[i].val.upper()
-                            not in (_CLAUSE_STOP_KEYWORDS | _JOIN_MODIFIERS | {"ON", "USING", "SELECT"})
+                            and not (
+                                tokens[i].kind == "WORD"
+                                and tokens[i].val.upper()
+                                in (
+                                    _CLAUSE_STOP_KEYWORDS
+                                    | _JOIN_MODIFIERS
+                                    | {
+                                        "ON",
+                                        "USING",
+                                        "SELECT",
+                                        "PIVOT",
+                                        "UNPIVOT",
+                                        "PIVOT_WIDER",
+                                        "PIVOT_LONGER",
+                                        "TABLESAMPLE",
+                                    }
+                                )
+                            )
                         ):
                             i += 1
                             if i < n and tokens[i].kind == "LPAREN":
                                 rp_alias = _find_matching_rparen(tokens, i)
                                 if rp_alias != -1:
+                                    alias_cols = tokens[i + 1 : rp_alias]
+                                    _scan_expr_tokens(alias_cols, node)
+                                    if not alias_cols or not all(
+                                        tc.kind in ("WORD", "QIDENT", "COMMA") for tc in alias_cols
+                                    ):
+                                        node["children"].append(
+                                            {
+                                                "type": "PARSE_ERROR_NODE",
+                                                "message": "SQL parse error: invalid column alias list",
+                                            }
+                                        )
                                     i = rp_alias + 1
                         expect_table = False
                         at_branch_start = False

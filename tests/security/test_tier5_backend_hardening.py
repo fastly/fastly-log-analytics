@@ -1108,3 +1108,106 @@ def test_sec_t5_iter5_py01_py02_py03_subquery_table_from_only_pivot_and_lexer_ha
     assert "client_vitals" not in ran_sql and "FROM logs" not in ran_sql
     atf_str = str(ran_settings.get("additional_table_filters", ""))
     assert "fla_cv_m_req" in atf_str and "fla_cv_m_vit" in atf_str
+
+
+def test_sec_t5_iter6_py01_py02_compound_paren_subquery_dot_union_and_tvf_pivot_hardening() -> None:
+    from backend.core.sql_validator import SQLValidationError, validate_user_sql
+    from backend.high_scale import query as hs_query
+    from backend.models.analytics import QueryRequest as DashboardQueryRequest
+
+    # 1. (PY-A) Leading-LPAREN compound set-op / clause subqueries
+    for compound_subq_attack in (
+        "SELECT ARRAY((SELECT 'a' FROM logs WHERE 1=0) UNION ALL SELECT secret_col FROM ops_secret) AS leaked FROM logs",
+        "SELECT ((SELECT 'a') UNION ALL SELECT name FROM system.tables LIMIT 1) AS leaked FROM logs LIMIT 1",
+        "SELECT status FROM logs WHERE EXISTS ((SELECT 1 FROM logs) UNION ALL SELECT 1 FROM system.tables)",
+        "SELECT status FROM logs WHERE url IN ((SELECT url FROM logs) UNION ALL SELECT service_id FROM high_scale_batch_publications)",
+        "WITH RECURSIVE ops_secret AS (SELECT ((SELECT 'a' FROM logs WHERE 1=0) UNION ALL SELECT secret_col FROM ops_secret LIMIT 1) AS secret_col UNION ALL SELECT secret_col FROM ops_secret WHERE 1=0) SELECT * FROM ops_secret",
+        "SELECT (((SELECT 'a') ORDER BY 1) UNION ALL SELECT secret_col FROM ops_secret) AS leaked FROM logs",
+    ):
+        with pytest.raises(SQLValidationError):
+            validate_user_sql(compound_subq_attack, allowed_tables={"logs"})
+
+    # 2. (PY-B) Dot-qualified .union / .except / .intersect inside WITH RECURSIVE & query bodies
+    for dot_setop_attack in (
+        "WITH RECURSIVE ops_secret AS (SELECT ({'union': 1}).union AS u, secret_col FROM ops_secret) SELECT secret_col FROM ops_secret",
+        'WITH RECURSIVE ops_secret AS (SELECT t.union, b.secret_col FROM (SELECT 1 AS "union") t, ops_secret b) SELECT secret_col FROM ops_secret',
+        'WITH RECURSIVE ops_secret AS (SELECT t.except, b.secret_col FROM (SELECT 1 AS "except") t, ops_secret b) SELECT secret_col FROM ops_secret',
+        'WITH RECURSIVE ops_secret AS (SELECT t.intersect, b.secret_col FROM (SELECT 1 AS "intersect") t, ops_secret b) SELECT secret_col FROM ops_secret',
+    ):
+        with pytest.raises(SQLValidationError):
+            validate_user_sql(dot_setop_attack, allowed_tables={"logs"})
+
+    # 3. (PY-C) Post-TVF PIVOT / UNPIVOT / TABLESAMPLE & interior scan + at_branch_start LPAREN statement check
+    for tvf_or_branch_stmt_attack in (
+        "SELECT * FROM range(1) PIVOT (first(current_setting('threads')) FOR range IN (0))",
+        "SELECT * FROM range(1) UNPIVOT (v FOR c IN (range))",
+        "SELECT * FROM range(1) PIVOT_WIDER (first(range) FOR range IN (0))",
+        "SELECT * FROM range(1) PIVOT_LONGER (v FOR c IN (range))",
+        "SELECT * FROM range(1) TABLESAMPLE SYSTEM (50) PIVOT (first(range) FOR range IN (0))",
+        "SELECT * FROM range(1) r(current_setting('threads'))",
+        "WITH c AS (SELECT 1) DESCRIBE (ops_secret)",
+        "WITH c AS (SELECT 1) SUMMARIZE (ops_secret)",
+        "WITH c AS (SELECT 1) EXPLAIN (FORMAT JSON) SELECT * FROM logs",
+        "WITH c AS (SELECT 1) COPY (SELECT * FROM logs) TO '/tmp/x'",
+    ):
+        with pytest.raises(SQLValidationError):
+            validate_user_sql(tvf_or_branch_stmt_attack, allowed_tables={"logs"})
+
+    # 4. Benign controls on validate_user_sql (MUST pass!)
+    for benign_sql in (
+        "SELECT ((SELECT count(*) FROM logs) + 1) AS n FROM logs",
+        "SELECT status FROM logs WHERE url IN ((SELECT url FROM logs) UNION ALL SELECT url FROM logs)",
+        "SELECT ({'union': 1}).union AS u FROM logs",
+        "SELECT r.x FROM range(1) AS r(x)",
+        "SELECT r.x FROM range(1) r(x)",
+    ):
+        assert validate_user_sql(benign_sql, allowed_tables={"logs"}).parse_tree.get("statements"), benign_sql
+
+    # 5. Live High-Scale query_endpoint blocks compound leading-LPAREN set-op subqueries before ClickHouse execution
+    executed: list[tuple[str, dict[str, object]]] = []
+
+    class _StubCH:
+        _table_filters_verified = True
+
+        def execute(
+            self,
+            sql: str,
+            params: dict[str, object] | None = None,
+            *,
+            settings: dict[str, object] | None = None,
+        ) -> list[dict[str, object]]:
+            del params
+            executed.append((sql, dict(settings or {})))
+            return [{"n": 1}]
+
+    stub_ch = _StubCH()
+    hs_svc = SimpleNamespace(service_id="svc_alpha", client=stub_ch)
+    for hs_compound_attack in (
+        "SELECT ((SELECT 'a') UNION ALL SELECT name FROM system.tables LIMIT 1) AS leaked FROM logs LIMIT 1",
+        "SELECT status FROM logs WHERE EXISTS ((SELECT 1 FROM logs) UNION ALL SELECT 1 FROM system.tables)",
+        "SELECT status FROM logs WHERE url IN ((SELECT url FROM logs) UNION ALL SELECT service_id FROM high_scale_batch_publications)",
+    ):
+        with pytest.raises(PermissionError):
+            hs_query.query_endpoint(
+                hs_svc,
+                DashboardQueryRequest(sql=hs_compound_attack, max_rows=10),
+                "2026-11-19T00:00:00Z",
+                "2026-11-19T01:00:00Z",
+                mask_ips=False,
+            )
+    assert executed == []
+
+    # Benign compound IN ((SELECT ...) UNION ALL SELECT ...) on allowed table passes and rewrites logs -> fla_cv_m_req
+    hs_query.query_endpoint(
+        hs_svc,
+        DashboardQueryRequest(
+            sql="SELECT status FROM logs WHERE url IN ((SELECT url FROM logs) UNION ALL SELECT url FROM logs)",
+            max_rows=10,
+        ),
+        "2026-11-19T00:00:00Z",
+        "2026-11-19T01:00:00Z",
+        mask_ips=True,
+        tables={"request_facts": "fla_cv_m_req"},
+    )
+    assert len(executed) == 1
+    assert "fla_cv_m_req" in executed[0][0] and "FROM logs" not in executed[0][0]

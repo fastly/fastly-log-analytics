@@ -1017,8 +1017,165 @@ def test_t5_c08_cloud_views_redteam_dupkeys_sticky_slots_columns_lambda_concat_a
         ),
         "bug-cloud-1-r6-bom-nested-json": '{"custom_blob":"\\ufeff{\\"\\\\u0063lient_ip\\":\\"198.51.100.7\\"}"}',
         "bug-cloud-1-r6-zwsp-nested-json": '{"custom_blob":"\\u200b{\\"\\\\u0063lient_ip\\":\\"198.51.100.7\\"}"}',
+        # Wave 7 BUG-CLOUD-1-R7: parenthesized joined_table outer '(', FROM logs * inheritance suffix,
+        # StarExpression column-renaming / pattern-filtering, and <catalog>.logs::VARCHAR whole-row structs
+        "bug-cloud-1-r7-paren-join-as-t-cast": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT t.status, t.url FROM ((SELECT * FROM logs) AS t CROSS JOIN (SELECT 1 AS x) AS u) WHERE t::VARCHAR LIKE '%198.51.100.7%'"
+                }
+            }
+        ),
+        "bug-cloud-1-r7-paren-join-as-t-cols": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT t.c5, t.c6 FROM ((SELECT * FROM logs) AS t(c1, c2, c3, c4, c5, c6, c7) CROSS JOIN (SELECT 1 AS x) AS u) WHERE t.c2 = '198.51.100.7'"
+                }
+            }
+        ),
+        "bug-cloud-1-r7-paren-join-bare-t-cast": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT t.status, t.url FROM ((SELECT * FROM logs) t CROSS JOIN (SELECT 1 AS x) u) WHERE t::VARCHAR LIKE '%198.51.100.7%'"
+                }
+            }
+        ),
+        "bug-cloud-1-r7-paren-join-bare-t-cols": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT t.c5, t.c6 FROM ((SELECT * FROM logs) t(c1, c2, c3, c4, c5, c6, c7) CROSS JOIN (SELECT 1 AS x) u) WHERE t.c2 = '198.51.100.7'"
+                }
+            }
+        ),
+        "bug-cloud-1-r7-from-logs-star-as-t": json.dumps(
+            {"_view_extras": {"sql": "SELECT status FROM logs * AS t WHERE t::VARCHAR LIKE '%198.51.100.7%'"}}
+        ),
+        "bug-cloud-1-r7-from-logs-star-bare-t": json.dumps(
+            {"_view_extras": {"sql": "SELECT status FROM logs * t WHERE t::VARCHAR LIKE '%198.51.100.7%'"}}
+        ),
+        "bug-cloud-1-r7-from-logs-star-as-t-cols": json.dumps(
+            {"_view_extras": {"sql": "SELECT c1 FROM logs * AS t(c1, c2) WHERE t.c2 = '198.51.100.7'"}}
+        ),
+        "bug-cloud-1-r7-from-logs-star-bare-t-cols": json.dumps(
+            {"_view_extras": {"sql": "SELECT c1 FROM logs * t(c1, c2) WHERE t.c2 = '198.51.100.7'"}}
+        ),
+        "bug-cloud-1-r7-from-main-logs-star-as-t": json.dumps(
+            {"_view_extras": {"sql": "SELECT status FROM main.logs * AS t WHERE t::VARCHAR LIKE '%198.51.100.7%'"}}
+        ),
+        "bug-cloud-1-r7-star-as-s": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM (SELECT * AS s FROM logs) WHERE s_2 = '198.51.100.7'"}}
+        ),
+        "bug-cloud-1-r7-star-bare-s": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM (SELECT * s FROM logs) WHERE s_2 = '198.51.100.7'"}}
+        ),
+        "bug-cloud-1-r7-paren-star-as-s": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM (SELECT (*) AS s FROM logs) WHERE s_2 = '198.51.100.7'"}}
+        ),
+        "bug-cloud-1-r7-paren-qual-star-as-s": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM (SELECT (logs.*) AS s FROM logs) WHERE s_90 LIKE '%198.51.100.7%'"}}
+        ),
+        "bug-cloud-1-r7-qual-star-as-s": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM (SELECT logs.* AS s FROM logs) WHERE s_2 = '198.51.100.7'"}}
+        ),
+        "bug-cloud-1-r7-star-exclude-as-s": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT * FROM (SELECT * EXCLUDE (timestamp) AS s FROM logs) WHERE s_1 = '198.51.100.7'"
+                }
+            }
+        ),
+        "bug-cloud-1-r7-star-replace-as-s": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT * FROM (SELECT * REPLACE (status AS status) AS s FROM logs) WHERE s_2 = '198.51.100.7'"
+                }
+            }
+        ),
+        "bug-cloud-1-r7-prefix-colon-star": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM (SELECT p: * FROM logs) WHERE p_2 = '198.51.100.7'"}}
+        ),
+        "bug-cloud-1-r7-quoted-prefix-colon-star": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM (SELECT \"p\": * FROM logs) WHERE p_2 = '198.51.100.7'"}}
+        ),
+        "bug-cloud-1-r7-prefix-colon-qual-star": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM (SELECT p: logs.* FROM logs) WHERE p_2 = '198.51.100.7'"}}
+        ),
+        "bug-cloud-1-r7-prefix-colon-paren-star": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM (SELECT p: (*) FROM logs) WHERE p_2 = '198.51.100.7'"}}
+        ),
+        "bug-cloud-1-r7-star-like-oi": json.dumps(
+            {"_view_extras": {"sql": "SELECT url, * LIKE '%oi%' AS x FROM logs WHERE x = '203.0.113.9'"}}
+        ),
+        "bug-cloud-1-r7-star-ilike-extra": json.dumps(
+            {"_view_extras": {"sql": "SELECT url, * ILIKE '%EXTRA%' AS x FROM logs WHERE x LIKE '%198.51.100.7%'"}}
+        ),
+        "bug-cloud-1-r7-star-glob-ookie": json.dumps(
+            {"_view_extras": {"sql": "SELECT url, * GLOB '*ookie*' AS x FROM logs WHERE x = 'sess_secret_99'"}}
+        ),
+        "bug-cloud-1-r7-star-similar-to-dge-si": json.dumps(
+            {"_view_extras": {"sql": "SELECT url, * SIMILAR TO '.*dge_si.*' AS x FROM logs WHERE x = 'esid_secret_77'"}}
+        ),
+        "bug-cloud-1-r7-star-tilde-oi": json.dumps(
+            {"_view_extras": {"sql": "SELECT url, * ~ '^oi' AS x FROM logs WHERE x = '203.0.113.9'"}}
+        ),
+        "bug-cloud-1-r7-star-bang-tilde": json.dumps(
+            {"_view_extras": {"sql": "SELECT url, * !~ '^timestamp$' AS x FROM logs WHERE x = '198.51.100.7'"}}
+        ),
+        "bug-cloud-1-r7-star-op-like-extra": json.dumps(
+            {"_view_extras": {"sql": "SELECT url, * ~~ '%extra%' AS x FROM logs WHERE x LIKE '%198.51.100.7%'"}}
+        ),
+        "bug-cloud-1-r7-star-op-ilike-extra": json.dumps(
+            {"_view_extras": {"sql": "SELECT url, * ~~* '%EXTRA%' AS x FROM logs WHERE x LIKE '%198.51.100.7%'"}}
+        ),
+        "bug-cloud-1-r7-qual-star-like-oi": json.dumps(
+            {"_view_extras": {"sql": "SELECT url, logs.* LIKE '%oi%' AS x FROM logs WHERE x = '203.0.113.9'"}}
+        ),
+        "bug-cloud-1-r7-catalog-dot-logs-cast": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT url FROM catalog91.logs WHERE catalog91.logs::VARCHAR LIKE '%198.51.100.7%'"
+                }
+            }
+        ),
+        "bug-cloud-1-r7-cte-shadow-catalog-dot": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "WITH catalog91 AS (SELECT 1 AS x) SELECT url FROM catalog91, logs WHERE catalog91.logs::VARCHAR LIKE '%198.51.100.7%'"
+                }
+            }
+        ),
     }
     benign_vectors: dict[str, str] = {
+        "benign-r7-paren-join-safe": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT t.status, t.url, u.x FROM ((SELECT * FROM logs) AS t CROSS JOIN (SELECT 1 AS x) AS u) WHERE t.status = 200"
+                }
+            }
+        ),
+        "benign-r7-from-logs-star-safe": json.dumps(
+            {"_view_extras": {"sql": "SELECT t.status, t.url FROM logs * AS t WHERE t.status = 200"}}
+        ),
+        "benign-r7-star-exclude": json.dumps(
+            {"_view_extras": {"sql": "SELECT * EXCLUDE (timestamp) FROM logs WHERE status = 200"}}
+        ),
+        "benign-r7-star-columns-unpack": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT concat_ws('|', *COLUMNS('^(status|url)$')) AS s FROM logs WHERE status = 200"
+                }
+            }
+        ),
+        "benign-r7-count-star": json.dumps(
+            {"_view_extras": {"sql": "SELECT count(*) AS cnt FROM logs WHERE status = 200"}}
+        ),
+        "benign-r7-prefix-colon-col": json.dumps(
+            {"_view_extras": {"sql": "SELECT p: status, url FROM logs WHERE status = 200"}}
+        ),
+        "benign-r7-from-first-star": json.dumps({"_view_extras": {"sql": "FROM logs SELECT * WHERE status = 200"}}),
+        "benign-r7-paren-expr-mult": json.dumps(
+            {"_view_extras": {"sql": "SELECT (status + 1) * 2 AS x FROM logs WHERE status = 200"}}
+        ),
         "benign-columns-safe": json.dumps({"_view_extras": {"sql": "SELECT COLUMNS('^(status|url|pop)$') FROM logs"}}),
         "benign-r6-columns-single": json.dumps({"_view_extras": {"sql": "SELECT COLUMNS('^status$') FROM logs"}}),
         "benign-r6-subtract-and-count-star": json.dumps(
@@ -1881,11 +2038,24 @@ def test_t5_hs03_hs12_py08_sql_console_table_filter_parser_differentials_union_s
         "SELECT (FROM high_scale_batch_publications SELECT service_id LIMIT 1) AS leaked FROM logs LIMIT 1",
         "SELECT * FROM ONLY logs",
         "WITH p AS (PIVOT logs ON status) SELECT * FROM p",
+        "SELECT ((SELECT 'a') UNION ALL SELECT name FROM system.tables LIMIT 1) AS leaked FROM logs LIMIT 1",
+        "SELECT status FROM logs WHERE EXISTS ((SELECT 1 FROM logs) UNION ALL SELECT 1 FROM system.tables)",
+        "SELECT status FROM logs WHERE url IN ((SELECT url FROM logs) UNION ALL SELECT service_id FROM high_scale_batch_publications)",
     ]
     c = _analyst_client(analyst)
     for bad_sql in adversarial_sqls:
         r_bad = c.post("/api/query", json={"service_id": "svc-a", "sql": bad_sql})
         assert r_bad.status_code in {400, 403}, f"SQL not rejected ({r_bad.status_code}): {bad_sql}"
+
+    # Benign compound leading-LPAREN subquery on allowed table succeeds
+    r_compound_ok = c.post(
+        "/api/query",
+        json={
+            "service_id": "svc-a",
+            "sql": "SELECT status FROM logs WHERE url IN ((SELECT url FROM logs) UNION ALL SELECT url FROM logs)",
+        },
+    )
+    assert r_compound_ok.status_code == 200, r_compound_ok.text
 
     # 2. Multi-branch UNION ALL rewrites pop -> custom_fields['pop'] ONLY on logs, preserving native pop on client_vitals
     ch_recorder.calls.clear()
