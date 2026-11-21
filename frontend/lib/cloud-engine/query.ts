@@ -505,8 +505,19 @@ function rewriteSqlTableRefs(
       continue;
     }
 
+    const prevIsTypecast =
+      i >= 2 &&
+      tokens[i - 1].kind === "symbol" &&
+      tokens[i - 1].value === ":" &&
+      tokens[i - 2].kind === "symbol" &&
+      tokens[i - 2].value === ":";
+    const isNonKeywordPos =
+      (prevTok?.kind === "symbol" && prevTok.value === ".") ||
+      (prevTok?.kind === "word" && prevTok.lower === "as") ||
+      prevIsTypecast;
+
     if (!inExprParen) {
-      if (tok.kind === "word") {
+      if (tok.kind === "word" && !isNonKeywordPos) {
         const lower = tok.lower;
         if (
           (lower === "from" && !isDistinctFromOperator(tokens, i)) ||

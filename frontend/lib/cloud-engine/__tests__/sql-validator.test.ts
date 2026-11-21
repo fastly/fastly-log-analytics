@@ -268,4 +268,46 @@ describe('T5-FE-04: cloud-engine SQL validator adversarial replacement-scan, sch
     expect(() => validateUserSql('SELECT status FROM ONLY logs WHERE status = 200', ['logs', 'requests'])).not.toThrow()
     expect(() => validateUserSql('SELECT status FROM ONLY main.logs WHERE status = 200', ['logs', 'requests'])).not.toThrow()
   })
+
+  it('closes SEC-T5-ITER7-FE-01: blocks numeric-underscore/radix dollar-quote smuggling and non-keyword ./::/AS clause transitions while preserving valid DuckDB numbers and typecasts', async () => {
+    for (const smuggledSql of [
+      'SELECT 1_$$, (SELECT secret_col FROM ops_secret) AS leaked, 2_$$ FROM logs',
+      'SELECT 1.5_$$, (SELECT secret_col FROM ops_secret) AS leaked, 2.5_$$ FROM logs',
+      'SELECT 1e2_$$, (SELECT secret_col FROM ops_secret) AS leaked, 2e2_$$ FROM logs',
+      'SELECT 0x1$$, (SELECT secret_col FROM ops_secret) AS leaked, 0x2$$ FROM logs',
+      'SELECT 0b1$$, (SELECT secret_col FROM ops_secret) AS leaked, 0b0$$ FROM logs',
+      'SELECT 0o1$$, (SELECT secret_col FROM ops_secret) AS leaked, 0o2$$ FROM logs',
+      'SELECT 1_$t$, (SELECT secret_col FROM ops_secret) AS leaked, 2_$t$ FROM logs',
+      "SELECT 1_$$, current_setting('threads') AS leaked, 2_$$ FROM logs",
+      "SELECT 1_$$, (SELECT table_name FROM information_schema.tables WHERE table_name = 'ops_secret') AS leaked, 2_$$ FROM logs",
+      'SELECT c.secret_col FROM logs AS a JOIN logs AS b ON 1::union(x INT) IS NOT NULL, ops_secret AS c',
+      'SELECT c.secret_col FROM (SELECT 1 AS "where") AS a JOIN logs AS b ON a.where = 1, ops_secret AS c',
+      'SELECT c.secret_col FROM (SELECT 1 AS "select") AS a JOIN logs AS b ON a.select = 1, ops_secret AS c',
+      'SELECT c.secret_col FROM (SELECT 1 AS "order") AS a JOIN logs AS b ON a.order = 1, ops_secret AS c',
+      'SELECT c.secret_col FROM (SELECT 1 AS "limit") AS a JOIN logs AS b ON a.limit = 1, ops_secret AS c',
+      'SELECT c.secret_col FROM (SELECT 1 AS "qualify") AS a JOIN logs AS b ON a.qualify = 1, ops_secret AS c',
+      'SELECT c.secret_col FROM (SELECT 1 AS "union") AS a JOIN logs AS b ON a.union = 1, ops_secret AS c',
+      'SELECT c.secret_col FROM (SELECT 1 AS "except") AS a JOIN logs AS b ON a.except = 1, ops_secret AS c',
+      'SELECT c.secret_col FROM (SELECT 1 AS "intersect") AS a JOIN logs AS b ON a.intersect = 1, ops_secret AS c',
+      'SELECT b.secret_col FROM logs AS sample, ops_secret AS b',
+      'SELECT b.secret_col FROM logs sample, ops_secret AS b',
+      'SELECT b.secret_col FROM logs prewhere, ops_secret AS b',
+      'SELECT b.secret_col FROM logs settings, ops_secret AS b',
+      'SELECT b.secret_col FROM logs format, ops_secret AS b',
+    ]) {
+      expect(() => validateUserSql(smuggledSql, ['logs', 'requests']), smuggledSql).toThrow(
+        SQLValidationError,
+      )
+    }
+
+    for (const benignSql of [
+      'SELECT 1_000_000 AS n, 1.5_0e+1_0 AS f FROM logs LIMIT 1',
+      'SELECT a.where FROM (SELECT 1 AS "where") AS a JOIN logs AS b ON a.where = 1 LIMIT 1',
+      'SELECT 1::union(x INT) AS u FROM logs LIMIT 1',
+    ]) {
+      expect(() => validateUserSql(benignSql, ['logs', 'requests']), benignSql).not.toThrow()
+      const rows = await engine.executeSql(benignSql)
+      expect(rows.length, benignSql).toBe(1)
+    }
+  })
 })

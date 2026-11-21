@@ -275,42 +275,37 @@ function isIdentContChar(ch: string): boolean {
   );
 }
 
-function scanSqlNumberEnd(sql: string, start: number): number {
+function scanSqlDigits(sql: string, start: number): number {
   const n = sql.length;
-  let i = start + 1;
-  if (sql[start] === "0" && i + 1 < n) {
-    const radix = sql[i];
-    if ((radix === "x" || radix === "X") && /[0-9A-Fa-f_]/.test(sql[i + 1])) {
-      i += 2;
-      while (i < n && /[0-9A-Fa-f_]/.test(sql[i])) i++;
-      return i;
-    }
-    if ((radix === "b" || radix === "B") && /[01_]/.test(sql[i + 1])) {
-      i += 2;
-      while (i < n && /[01_]/.test(sql[i])) i++;
-      return i;
-    }
-    if ((radix === "o" || radix === "O") && /[0-7_]/.test(sql[i + 1])) {
-      i += 2;
-      while (i < n && /[0-7_]/.test(sql[i])) i++;
-      return i;
+  let i = start;
+  while (i < n && sql[i] >= "0" && sql[i] <= "9") {
+    i++;
+    if (i + 1 < n && sql[i] === "_" && sql[i + 1] >= "0" && sql[i + 1] <= "9") {
+      i++;
     }
   }
-  while (i < n) {
-    const c = sql[i];
-    if (/[0-9._]/.test(c)) {
-      i++;
-    } else if ((c === "e" || c === "E") && i + 1 < n && /[0-9]/.test(sql[i + 1])) {
-      i += 2;
+  return i;
+}
+
+function scanSqlNumberEnd(sql: string, start: number): number {
+  const n = sql.length;
+  let i = scanSqlDigits(sql, start);
+  if (i < n && sql[i] === "." && !(i + 1 < n && sql[i + 1] === ".")) {
+    i++;
+    if (i < n && sql[i] >= "0" && sql[i] <= "9") {
+      i = scanSqlDigits(sql, i);
+    }
+  }
+  if (i < n && (sql[i] === "e" || sql[i] === "E")) {
+    if (i + 1 < n && sql[i + 1] >= "0" && sql[i + 1] <= "9") {
+      i = scanSqlDigits(sql, i + 1);
     } else if (
-      (c === "e" || c === "E") &&
       i + 2 < n &&
       (sql[i + 1] === "+" || sql[i + 1] === "-") &&
-      /[0-9]/.test(sql[i + 2])
+      sql[i + 2] >= "0" &&
+      sql[i + 2] <= "9"
     ) {
-      i += 3;
-    } else {
-      break;
+      i = scanSqlDigits(sql, i + 2);
     }
   }
   return i;
@@ -1300,8 +1295,19 @@ export function validateUserSql(
       continue;
     }
 
+    const prevIsTypecast =
+      i >= 2 &&
+      tokens[i - 1].kind === "symbol" &&
+      tokens[i - 1].value === ":" &&
+      tokens[i - 2].kind === "symbol" &&
+      tokens[i - 2].value === ":";
+    const isNonKeywordPos =
+      (prevTok?.kind === "symbol" && prevTok.value === ".") ||
+      (prevTok?.kind === "word" && prevTok.lower === "as") ||
+      prevIsTypecast;
+
     if (!inExprParen) {
-      if (tok.kind === "word") {
+      if (tok.kind === "word" && !isNonKeywordPos) {
         const lower = tok.lower;
         if (
           (lower === "from" && !isDistinctFromOperator(tokens, i)) ||

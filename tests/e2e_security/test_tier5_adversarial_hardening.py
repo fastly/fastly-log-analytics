@@ -1144,8 +1144,167 @@ def test_t5_c08_cloud_views_redteam_dupkeys_sticky_slots_columns_lambda_concat_a
                 }
             }
         ),
+        "bug-cloud-1-r8a-select-as-offset-star-like": json.dumps(
+            {"_view_extras": {"sql": "SELECT 1 AS offset, url, * LIKE '%oi%' AS x FROM logs WHERE x = '203.0.113.9'"}}
+        ),
+        "bug-cloud-1-r8a-select-as-qualify-star-as-s": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT s_6 FROM (SELECT 1 AS qualify, * AS s FROM logs) sub WHERE s_1 = '198.51.100.7'"
+                }
+            }
+        ),
+        "bug-cloud-1-r8a-select-dot-where-star-like": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT a.where, logs.url, * LIKE '%oi%' AS x FROM (SELECT 1 AS \"where\") a, logs WHERE x = '203.0.113.9'"
+                }
+            }
+        ),
+        "bug-cloud-1-r8a-on-dot-where-comma-logs-cast": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT t.url FROM (SELECT 1 AS \"where\") a JOIN (SELECT 1 AS y) b ON a.where = 1, logs AS t WHERE t::VARCHAR LIKE '%198.51.100.7%'"
+                }
+            }
+        ),
+        "bug-cloud-1-r8a-on-dot-union-comma-logs-cast": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT t.url FROM (SELECT 1 AS \"union\") a JOIN (SELECT 1 AS y) b ON a.union = 1, logs AS t WHERE t::VARCHAR LIKE '%198.51.100.7%'"
+                }
+            }
+        ),
+        "bug-cloud-1-r8a-on-cast-union-comma-logs-cast": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT t.url FROM (SELECT 1 AS x) a JOIN (SELECT 1 AS y) b ON 1::union(z INT) IS NOT NULL, logs AS t WHERE t::VARCHAR LIKE '%198.51.100.7%'"
+                }
+            }
+        ),
+        "bug-cloud-1-r8a-on-dot-where-comma-logs-cols": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT t.c7 FROM (SELECT 1 AS \"where\") a JOIN (SELECT 1 AS y) b ON a.where = 1, logs AS t(c1, c2, c3, c4, c5, c6, c7, c8) WHERE t.c2 = '198.51.100.7'"
+                }
+            }
+        ),
+        "bug-cloud-1-r8b-star-rename-squote-ip": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT count(*) AS cnt FROM (SELECT * RENAME ('ip' AS safe_col) FROM logs) WHERE safe_col = '198.51.100.7'"
+                }
+            }
+        ),
+        "bug-cloud-1-r8b-star-rename-squote-extra": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT count(*) AS cnt FROM (SELECT * RENAME ('_extra' AS safe_col) FROM logs) WHERE safe_col LIKE '%198.51.100.7%'"
+                }
+            }
+        ),
+        "bug-cloud-1-r8b-star-rename-equote-ip": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": r"SELECT count(*) AS cnt FROM (SELECT * RENAME (E'\x69p' AS safe_col) FROM logs) WHERE safe_col = '198.51.100.7'"
+                }
+            }
+        ),
+        "bug-cloud-1-r8b-star-rename-dolq-ip": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT count(*) AS cnt FROM (SELECT * RENAME ($$ip$$ AS safe_col) FROM logs) WHERE safe_col = '198.51.100.7'"
+                }
+            }
+        ),
+        "bug-cloud-1-r8b-star-rename-logs-dot-squote-ip": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT count(*) AS cnt FROM (SELECT * RENAME (logs.'ip' AS safe_col) FROM logs) WHERE safe_col = '198.51.100.7'"
+                }
+            }
+        ),
+        "bug-cloud-1-r8b-not-star-like-as-s": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT count(*) AS cnt FROM (SELECT NOT * LIKE '%timestamp%' AS s FROM logs) WHERE s_1 = '198.51.100.7'"
+                }
+            }
+        ),
+        "bug-cloud-1-r8b-order-by-star-like-oi": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT url FROM logs WHERE url IN ('/a', '/b') ORDER BY * LIKE '%oi%' DESC LIMIT 1"
+                }
+            }
+        ),
+        "bug-cloud-1-r8b-order-by-comma-star-exclude-like": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT url FROM logs ORDER BY status, * EXCLUDE (timestamp) LIKE '%oi%' DESC LIMIT 1"
+                }
+            }
+        ),
+        "bug-cloud-1-r8c-natural-join-as-squote-ip": json.dumps(
+            {"_view_extras": {"sql": "SELECT status, url FROM logs NATURAL JOIN (SELECT '198.51.100.7' AS 'ip') u"}}
+        ),
+        "bug-cloud-1-r8c-natural-join-as-dolq-ip": json.dumps(
+            {"_view_extras": {"sql": "SELECT status, url FROM logs NATURAL JOIN (SELECT '198.51.100.7' AS $$ip$$) u"}}
+        ),
+        "bug-cloud-1-r8c-join-using-squote-ip": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT logs.status FROM logs JOIN (SELECT '198.51.100.7' AS 'ip') u USING ('ip')"
+                }
+            }
+        ),
+        "bug-cloud-1-r8c-from-squote-logs-cast": json.dumps(
+            {"_view_extras": {"sql": "SELECT status FROM 'logs' WHERE logs::VARCHAR LIKE '%198.51.100.7%'"}}
+        ),
+        "bug-cloud-1-r8c-from-only-paren-squote-logs-cast": json.dumps(
+            {"_view_extras": {"sql": "SELECT status FROM ONLY ('logs') WHERE logs::VARCHAR LIKE '%198.51.100.7%'"}}
+        ),
+        "bug-cloud-1-r8c-from-logs-as-squote-t-cast": json.dumps(
+            {"_view_extras": {"sql": "SELECT status FROM logs AS 't' WHERE t::VARCHAR LIKE '%198.51.100.7%'"}}
+        ),
+        "bug-cloud-1-r8c-from-logs-as-squote-t-cols": json.dumps(
+            {"_view_extras": {"sql": "SELECT c1 FROM logs AS 't'('c1', 'c2', 'c3') WHERE c3 = '198.51.100.7'"}}
+        ),
+        "bug-cloud-1-r8c-from-squote-logs-bare-t-cast": json.dumps(
+            {"_view_extras": {"sql": "SELECT status FROM 'logs' t WHERE t::VARCHAR LIKE '%198.51.100.7%'"}}
+        ),
+        "bug-cloud-1-r8c-from-squote-logs-star-as-squote-t": json.dumps(
+            {"_view_extras": {"sql": "SELECT status FROM 'logs' * AS 't' WHERE t::VARCHAR LIKE '%198.51.100.7%'"}}
+        ),
     }
     benign_vectors: dict[str, str] = {
+        "benign-r8-where-url-eq-ip-literal": json.dumps(
+            {"_view_extras": {"sql": "SELECT status, url FROM logs WHERE url = 'ip'"}}
+        ),
+        "benign-r8-select-as-safe-sconst-alias": json.dumps(
+            {"_view_extras": {"sql": "SELECT 'hello' AS 'safe_alias', status FROM logs WHERE status = 200"}}
+        ),
+        "benign-r8-select-as-union-star": json.dumps(
+            {"_view_extras": {"sql": "SELECT 1 AS union, * FROM logs WHERE status = 200"}}
+        ),
+        "benign-r8-star-exclude-paren-sconst": json.dumps(
+            {"_view_extras": {"sql": "SELECT * EXCLUDE ('timestamp') FROM logs WHERE status = 200"}}
+        ),
+        "benign-r8-star-exclude-bare-sconst": json.dumps(
+            {"_view_extras": {"sql": "SELECT * EXCLUDE 'timestamp' FROM logs WHERE status = 200"}}
+        ),
+        "benign-r8-star-rename-safe-sconst": json.dumps(
+            {"_view_extras": {"sql": "SELECT * RENAME ('url' AS req_url) FROM logs WHERE status = 200"}}
+        ),
+        "benign-r8-from-squote-logs-as-squote-t": json.dumps(
+            {"_view_extras": {"sql": "SELECT t.status, t.url FROM 'logs' AS 't' WHERE t.status = 200"}}
+        ),
+        "benign-r8-order-by-star-asc": json.dumps(
+            {"_view_extras": {"sql": "SELECT url FROM logs WHERE status = 200 ORDER BY * ASC"}}
+        ),
+        "benign-r8-order-by-mult-desc": json.dumps(
+            {"_view_extras": {"sql": "SELECT url FROM logs WHERE status = 200 ORDER BY status * 2 DESC"}}
+        ),
         "benign-r7-paren-join-safe": json.dumps(
             {
                 "_view_extras": {
@@ -2041,21 +2200,41 @@ def test_t5_hs03_hs12_py08_sql_console_table_filter_parser_differentials_union_s
         "SELECT ((SELECT 'a') UNION ALL SELECT name FROM system.tables LIMIT 1) AS leaked FROM logs LIMIT 1",
         "SELECT status FROM logs WHERE EXISTS ((SELECT 1 FROM logs) UNION ALL SELECT 1 FROM system.tables)",
         "SELECT status FROM logs WHERE url IN ((SELECT url FROM logs) UNION ALL SELECT service_id FROM high_scale_batch_publications)",
+        "SELECT c.name FROM logs AS a JOIN logs AS b ON a.where = 1, system.tables AS c",
+        "SELECT c.name FROM logs AS a JOIN logs AS b ON a.select = 1, system.tables AS c",
+        "SELECT c.name FROM logs AS a JOIN logs AS b ON a.order = 1, system.tables AS c",
+        "SELECT c.name FROM logs AS a JOIN logs AS b ON a.limit = 1, system.tables AS c",
+        "SELECT c.name FROM logs AS a JOIN logs AS b ON a.union = 1, system.tables AS c",
+        "SELECT c.name FROM logs AS a JOIN logs AS b ON 1::union(x INT) IS NOT NULL, system.tables AS c",
+        "SELECT b.service_id FROM logs AS sample, high_scale_batch_publications AS b",
+        "SELECT b.service_id FROM logs sample, high_scale_batch_publications AS b",
+        "SELECT b.service_id FROM logs AS prewhere, high_scale_batch_publications AS b",
+        "SELECT b.service_id FROM logs prewhere, high_scale_batch_publications AS b",
+        "SELECT b.service_id FROM logs AS settings, high_scale_batch_publications AS b",
+        "SELECT b.service_id FROM logs settings, high_scale_batch_publications AS b",
+        "SELECT b.service_id FROM logs AS format, high_scale_batch_publications AS b",
+        "SELECT b.service_id FROM logs format, high_scale_batch_publications AS b",
     ]
     c = _analyst_client(analyst)
     for bad_sql in adversarial_sqls:
         r_bad = c.post("/api/query", json={"service_id": "svc-a", "sql": bad_sql})
         assert r_bad.status_code in {400, 403}, f"SQL not rejected ({r_bad.status_code}): {bad_sql}"
 
-    # Benign compound leading-LPAREN subquery on allowed table succeeds
-    r_compound_ok = c.post(
-        "/api/query",
-        json={
-            "service_id": "svc-a",
-            "sql": "SELECT status FROM logs WHERE url IN ((SELECT url FROM logs) UNION ALL SELECT url FROM logs)",
-        },
-    )
-    assert r_compound_ok.status_code == 200, r_compound_ok.text
+    # Benign compound leading-LPAREN subquery, sample alias, and ::union typecast on allowed table succeed
+    for benign_console_sql in (
+        "SELECT status FROM logs WHERE url IN ((SELECT url FROM logs) UNION ALL SELECT url FROM logs)",
+        "SELECT sample.status FROM logs AS sample WHERE sample.status = 200",
+        "SELECT sample.status FROM logs sample WHERE sample.status = 200",
+        "SELECT 1::union(a INT) AS u FROM logs",
+    ):
+        r_compound_ok = c.post(
+            "/api/query",
+            json={
+                "service_id": "svc-a",
+                "sql": benign_console_sql,
+            },
+        )
+        assert r_compound_ok.status_code == 200, f"{benign_console_sql} -> {r_compound_ok.text}"
 
     # 2. Multi-branch UNION ALL rewrites pop -> custom_fields['pop'] ONLY on logs, preserving native pop on client_vitals
     ch_recorder.calls.clear()

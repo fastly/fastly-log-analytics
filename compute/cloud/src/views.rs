@@ -1085,11 +1085,15 @@ enum RelTok {
         followed_by_dot: bool,
         followed_by_open_paren: bool,
     },
+    StrLit {
+        lower: String,
+    },
     LParen,
     RParen,
     Comma,
     Dot,
     Colon,
+    DoubleColon,
     Semi,
     Star,
     Other,
@@ -1215,6 +1219,21 @@ fn is_preceded_by_non_schema_dot(tokens: &[RelTok], idx: usize) -> bool {
     true
 }
 
+fn is_non_keyword_rel_pos(tokens: &[RelTok], idx: usize) -> bool {
+    if idx == 0 {
+        return false;
+    }
+    match tokens.get(idx - 1) {
+        Some(RelTok::Dot | RelTok::DoubleColon) => true,
+        Some(RelTok::Ident {
+            lower,
+            quoted: false,
+            ..
+        }) => lower == "as",
+        _ => false,
+    }
+}
+
 fn range_has_top_level_setop(tokens: &[RelTok], start: usize, end: usize) -> bool {
     let mut k = start;
     while k < end {
@@ -1229,7 +1248,9 @@ fn range_has_top_level_setop(tokens: &[RelTok], start: usize, end: usize) -> boo
                 lower,
                 quoted: false,
                 ..
-            } if matches!(lower.as_str(), "union" | "intersect" | "except") => {
+            } if matches!(lower.as_str(), "union" | "intersect" | "except")
+                && !is_non_keyword_rel_pos(tokens, k) =>
+            {
                 return true;
             }
             _ => {
@@ -1258,7 +1279,10 @@ fn is_star_preceded_by_colon(tokens: &[RelTok], star_idx: usize) -> bool {
     let mut k = star_idx;
     while k >= 2
         && matches!(tokens.get(k - 1), Some(RelTok::Dot))
-        && matches!(tokens.get(k - 2), Some(RelTok::Ident { .. }))
+        && matches!(
+            tokens.get(k - 2),
+            Some(RelTok::Ident { .. } | RelTok::StrLit { .. })
+        )
     {
         k -= 2;
     }
@@ -1288,18 +1312,20 @@ fn star_has_unsafe_post_modifier_or_alias(
                 k = rp + 1;
                 continue;
             }
-            if lower == "exclude"
-                && matches!(
-                    tokens.get(k + 1),
+            if lower == "exclude" {
+                let is_single_exclude_col = match tokens.get(k + 1) {
+                    Some(RelTok::StrLit { .. }) => true,
                     Some(RelTok::Ident {
                         lower: col_kw,
                         quoted,
                         ..
-                    }) if *quoted || !is_from_alias_stop_keyword(col_kw)
-                )
-            {
-                k += 2;
-                continue;
+                    }) => *quoted || !is_from_alias_stop_keyword(col_kw),
+                    _ => false,
+                };
+                if is_single_exclude_col {
+                    k += 2;
+                    continue;
+                }
             }
             return true;
         }
@@ -1347,6 +1373,7 @@ struct WildcardScope {
     branch_saw_select: bool,
     branch_saw_from: bool,
     in_select_list: bool,
+    in_order_by: bool,
 }
 
 fn has_positional_wildcard_subquery_or_setop(
@@ -1362,6 +1389,7 @@ fn has_positional_wildcard_subquery_or_setop(
         branch_saw_select: false,
         branch_saw_from: false,
         in_select_list: false,
+        in_order_by: false,
     }];
     let mut in_from = false;
     let mut expect_rel = false;
@@ -1378,6 +1406,7 @@ fn has_positional_wildcard_subquery_or_setop(
             branch_saw_select: false,
             branch_saw_from: false,
             in_select_list: false,
+            in_order_by: false,
         });
 
         match &tokens[idx] {
@@ -1424,6 +1453,7 @@ fn has_positional_wildcard_subquery_or_setop(
                         branch_saw_select: true,
                         branch_saw_from: false,
                         in_select_list: false,
+                        in_order_by: false,
                     });
                     in_from = true;
                     expect_rel = true;
@@ -1473,6 +1503,7 @@ fn has_positional_wildcard_subquery_or_setop(
                         branch_saw_select: false,
                         branch_saw_from: false,
                         in_select_list: false,
+                        in_order_by: false,
                     });
                     in_from = false;
                     expect_rel = false;
@@ -1505,6 +1536,7 @@ fn has_positional_wildcard_subquery_or_setop(
                         branch_saw_select: false,
                         branch_saw_from: false,
                         in_select_list: false,
+                        in_order_by: false,
                     });
                     expect_rel = false;
                 }
@@ -1535,6 +1567,7 @@ fn has_positional_wildcard_subquery_or_setop(
             RelTok::Semi => {
                 if let Some(top) = scopes.last_mut() {
                     top.in_select_list = false;
+                    top.in_order_by = false;
                     top.branch_saw_select = false;
                     top.branch_saw_from = false;
                 }
@@ -1558,7 +1591,7 @@ fn has_positional_wildcard_subquery_or_setop(
                     && matches!(tokens.get(idx - 1), Some(RelTok::Dot))
                     && matches!(
                         tokens.get(idx - 2),
-                        Some(RelTok::Ident { .. } | RelTok::RParen)
+                        Some(RelTok::Ident { .. } | RelTok::StrLit { .. } | RelTok::RParen)
                     );
                 if is_qual_star {
                     if nearest_query_disallows_wildcard
@@ -1566,7 +1599,7 @@ fn has_positional_wildcard_subquery_or_setop(
                         || star_has_unsafe_post_modifier_or_alias(
                             tokens,
                             idx,
-                            cur.is_distinct_on_paren,
+                            cur.is_distinct_on_paren || cur.in_order_by,
                         )
                     {
                         return true;
@@ -1595,23 +1628,34 @@ fn has_positional_wildcard_subquery_or_setop(
                     if is_paren_or_arg_star && !is_count_star && !is_star_cols {
                         return true;
                     }
-                } else if cur.in_select_list {
-                    let prev_is_select_item_start = prev_rparen_was_distinct_on
-                        || (idx > 0
-                            && match &tokens[idx - 1] {
-                                RelTok::Comma => true,
-                                RelTok::Ident {
-                                    lower: kw,
-                                    quoted: false,
-                                    ..
-                                } => matches!(kw.as_str(), "select" | "distinct" | "all"),
-                                _ => false,
-                            });
-                    if prev_is_select_item_start
+                } else if !in_from {
+                    let prev_starts_bare_star = prev_rparen_was_distinct_on
+                        || idx == 0
+                        || match &tokens[idx - 1] {
+                            RelTok::Comma => cur.in_select_list || cur.in_order_by,
+                            RelTok::Ident {
+                                lower: kw,
+                                quoted: false,
+                                ..
+                            } if !is_non_keyword_rel_pos(tokens, idx - 1) => matches!(
+                                kw.as_str(),
+                                "select"
+                                    | "distinct"
+                                    | "all"
+                                    | "not"
+                                    | "by"
+                                    | "where"
+                                    | "having"
+                                    | "qualify"
+                                    | "returning"
+                            ),
+                            _ => false,
+                        };
+                    if prev_starts_bare_star
                         && !is_star_cols
                         && (cur.in_setop_branch
                             || cur.in_disallowed_wildcard_subquery
-                            || star_has_unsafe_post_modifier_or_alias(tokens, idx, false))
+                            || star_has_unsafe_post_modifier_or_alias(tokens, idx, cur.in_order_by))
                     {
                         return true;
                     }
@@ -1635,91 +1679,98 @@ fn has_positional_wildcard_subquery_or_setop(
             ..
         } = &tokens[idx]
         {
-            let prev_is_dot = idx > 0 && matches!(tokens.get(idx - 1), Some(RelTok::Dot));
-            if lower == "select" {
-                if let Some(top) = scopes.last_mut() {
-                    top.branch_saw_select = true;
-                    top.in_select_list = true;
+            if !is_non_keyword_rel_pos(tokens, idx) {
+                if lower == "select" {
+                    if let Some(top) = scopes.last_mut() {
+                        top.branch_saw_select = true;
+                        top.in_select_list = true;
+                        top.in_order_by = false;
+                    }
+                    in_from = false;
+                    expect_rel = false;
+                    idx += 1;
+                    continue;
                 }
-                in_from = false;
-                expect_rel = false;
-                idx += 1;
-                continue;
-            }
-            if lower == "from" && !is_rel_distinct_from_op(tokens, idx) {
-                if let Some(top) = scopes.last_mut() {
-                    top.in_select_list = false;
-                    top.branch_saw_from = true;
+                if lower == "from" && !is_rel_distinct_from_op(tokens, idx) {
+                    if let Some(top) = scopes.last_mut() {
+                        top.in_select_list = false;
+                        top.in_order_by = false;
+                        top.branch_saw_from = true;
+                    }
+                    in_from = true;
+                    expect_rel = true;
+                    idx += 1;
+                    continue;
                 }
-                in_from = true;
-                expect_rel = true;
-                idx += 1;
-                continue;
-            }
-            if lower == "join" {
-                if let Some(top) = scopes.last_mut() {
-                    top.in_select_list = false;
+                if lower == "join" {
+                    if let Some(top) = scopes.last_mut() {
+                        top.in_select_list = false;
+                        top.in_order_by = false;
+                    }
+                    in_from = true;
+                    expect_rel = true;
+                    idx += 1;
+                    continue;
                 }
-                in_from = true;
-                expect_rel = true;
-                idx += 1;
-                continue;
-            }
-            if lower == "table" && !prev_is_dot {
-                if cur.in_setop_branch || cur.in_disallowed_wildcard_subquery {
-                    return true;
+                if lower == "table" {
+                    if cur.in_setop_branch || cur.in_disallowed_wildcard_subquery {
+                        return true;
+                    }
+                    if let Some(top) = scopes.last_mut() {
+                        top.in_select_list = false;
+                        top.in_order_by = false;
+                    }
+                    in_from = true;
+                    expect_rel = true;
+                    idx += 1;
+                    continue;
                 }
-                if let Some(top) = scopes.last_mut() {
-                    top.in_select_list = false;
+                if matches!(lower.as_str(), "union" | "intersect" | "except") {
+                    if cur.branch_saw_from
+                        && !cur.branch_saw_select
+                        && (cur.in_setop_branch || cur.in_disallowed_wildcard_subquery)
+                    {
+                        return true;
+                    }
+                    if let Some(top) = scopes.last_mut() {
+                        top.in_setop_branch = true;
+                        top.in_select_list = false;
+                        top.in_order_by = false;
+                        top.branch_saw_select = false;
+                        top.branch_saw_from = false;
+                    }
+                    in_from = false;
+                    expect_rel = false;
+                    idx += 1;
+                    continue;
                 }
-                in_from = true;
-                expect_rel = true;
-                idx += 1;
-                continue;
-            }
-            if matches!(lower.as_str(), "union" | "intersect" | "except") {
-                if cur.branch_saw_from
-                    && !cur.branch_saw_select
-                    && (cur.in_setop_branch || cur.in_disallowed_wildcard_subquery)
-                {
-                    return true;
+                if matches!(
+                    lower.as_str(),
+                    "where"
+                        | "group"
+                        | "having"
+                        | "window"
+                        | "qualify"
+                        | "order"
+                        | "limit"
+                        | "offset"
+                        | "fetch"
+                        | "into"
+                ) {
+                    if let Some(top) = scopes.last_mut() {
+                        top.in_select_list = false;
+                        top.in_order_by = lower == "order";
+                    }
+                    in_from = false;
+                    expect_rel = false;
+                    idx += 1;
+                    continue;
                 }
-                if let Some(top) = scopes.last_mut() {
-                    top.in_setop_branch = true;
-                    top.in_select_list = false;
-                    top.branch_saw_select = false;
-                    top.branch_saw_from = false;
+                if in_from && matches!(lower.as_str(), "on" | "using") {
+                    expect_rel = false;
+                    idx += 1;
+                    continue;
                 }
-                in_from = false;
-                expect_rel = false;
-                idx += 1;
-                continue;
-            }
-            if matches!(
-                lower.as_str(),
-                "where"
-                    | "group"
-                    | "having"
-                    | "window"
-                    | "qualify"
-                    | "order"
-                    | "limit"
-                    | "offset"
-                    | "fetch"
-                    | "into"
-            ) {
-                if let Some(top) = scopes.last_mut() {
-                    top.in_select_list = false;
-                }
-                in_from = false;
-                expect_rel = false;
-                idx += 1;
-                continue;
-            }
-            if in_from && matches!(lower.as_str(), "on" | "using") {
-                expect_rel = false;
-                idx += 1;
-                continue;
             }
         }
 
@@ -1755,6 +1806,7 @@ fn has_positional_wildcard_subquery_or_setop(
                         branch_saw_select: false,
                         branch_saw_from: false,
                         in_select_list: false,
+                        in_order_by: false,
                     });
                     expect_rel = false;
                     idx += 2;
@@ -1779,7 +1831,73 @@ fn has_positional_wildcard_subquery_or_setop(
     })
 }
 
+fn has_pii_sconst_identifier(tokens: &[RelTok]) -> bool {
+    for (idx, tok) in tokens.iter().enumerate() {
+        match tok {
+            RelTok::StrLit { lower } => {
+                if idx > 0
+                    && matches!(
+                        tokens.get(idx - 1),
+                        Some(RelTok::Ident {
+                            lower: prev_kw,
+                            quoted: false,
+                            ..
+                        }) if prev_kw == "as"
+                    )
+                    && (is_pii_identifier(lower) || is_extra_column_ident(lower))
+                {
+                    return true;
+                }
+            }
+            RelTok::Ident {
+                lower,
+                quoted: false,
+                ..
+            } if !is_non_keyword_rel_pos(tokens, idx) => {
+                let lp_opt = if lower == "rename" {
+                    matches!(tokens.get(idx + 1), Some(RelTok::LParen)).then_some(idx + 1)
+                } else if lower == "using" {
+                    if matches!(tokens.get(idx + 1), Some(RelTok::LParen)) {
+                        Some(idx + 1)
+                    } else if matches!(
+                        tokens.get(idx + 1),
+                        Some(RelTok::Ident {
+                            lower: k_kw,
+                            quoted: false,
+                            ..
+                        }) if k_kw == "key"
+                    ) && matches!(tokens.get(idx + 2), Some(RelTok::LParen))
+                    {
+                        Some(idx + 2)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some(lp_idx) = lp_opt {
+                    let Some(rp_idx) = find_matching_rel_rparen(tokens, lp_idx) else {
+                        return true;
+                    };
+                    for inner_tok in &tokens[lp_idx + 1..rp_idx] {
+                        if let RelTok::StrLit { lower: inner_lit } = inner_tok {
+                            if is_pii_identifier(inner_lit) || is_extra_column_ident(inner_lit) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 fn references_whole_row_relation_struct(tokens: &[RelTok]) -> bool {
+    if has_pii_sconst_identifier(tokens) {
+        return true;
+    }
     let mut declared_relations = std::collections::BTreeSet::new();
     let mut decl_indices = std::collections::BTreeSet::new();
     let mut cte_body_lparens = std::collections::BTreeSet::new();
@@ -1824,9 +1942,12 @@ fn references_whole_row_relation_struct(tokens: &[RelTok]) -> bool {
                 ) {
                     k += 1;
                 }
-                while let Some(RelTok::Ident {
-                    lower: cte_name, ..
-                }) = tokens.get(k)
+                while let Some(
+                    RelTok::Ident {
+                        lower: cte_name, ..
+                    }
+                    | RelTok::StrLit { lower: cte_name },
+                ) = tokens.get(k)
                 {
                     let mut after_name = k + 1;
                     let has_col_alias_list = matches!(tokens.get(after_name), Some(RelTok::LParen));
@@ -1969,46 +2090,47 @@ fn references_whole_row_relation_struct(tokens: &[RelTok]) -> bool {
             ..
         } = &tokens[idx]
         {
-            let prev_is_dot = idx > 0 && matches!(tokens.get(idx - 1), Some(RelTok::Dot));
-            if (lower == "from" && !is_rel_distinct_from_op(tokens, idx))
-                || lower == "join"
-                || (lower == "table" && !prev_is_dot)
-            {
-                in_from = true;
-                expect_rel = true;
-                expect_opt_alias = false;
-                idx += 1;
-                continue;
-            }
-            if in_from
-                && matches!(
-                    lower.as_str(),
-                    "select"
-                        | "where"
-                        | "group"
-                        | "having"
-                        | "window"
-                        | "qualify"
-                        | "order"
-                        | "limit"
-                        | "offset"
-                        | "fetch"
-                        | "union"
-                        | "intersect"
-                        | "except"
-                )
-            {
-                in_from = false;
-                expect_rel = false;
-                expect_opt_alias = false;
-                idx += 1;
-                continue;
-            }
-            if in_from && matches!(lower.as_str(), "on" | "using") {
-                expect_rel = false;
-                expect_opt_alias = false;
-                idx += 1;
-                continue;
+            if !is_non_keyword_rel_pos(tokens, idx) {
+                if (lower == "from" && !is_rel_distinct_from_op(tokens, idx))
+                    || lower == "join"
+                    || lower == "table"
+                {
+                    in_from = true;
+                    expect_rel = true;
+                    expect_opt_alias = false;
+                    idx += 1;
+                    continue;
+                }
+                if in_from
+                    && matches!(
+                        lower.as_str(),
+                        "select"
+                            | "where"
+                            | "group"
+                            | "having"
+                            | "window"
+                            | "qualify"
+                            | "order"
+                            | "limit"
+                            | "offset"
+                            | "fetch"
+                            | "union"
+                            | "intersect"
+                            | "except"
+                    )
+                {
+                    in_from = false;
+                    expect_rel = false;
+                    expect_opt_alias = false;
+                    idx += 1;
+                    continue;
+                }
+                if in_from && matches!(lower.as_str(), "on" | "using") {
+                    expect_rel = false;
+                    expect_opt_alias = false;
+                    idx += 1;
+                    continue;
+                }
             }
         }
 
@@ -2051,6 +2173,16 @@ fn references_whole_row_relation_struct(tokens: &[RelTok]) -> bool {
                 idx += 1;
                 continue;
             }
+            if let RelTok::StrLit { lower } = &tokens[idx] {
+                if !lower.is_empty() {
+                    declared_relations.insert(lower.clone());
+                    decl_indices.insert(idx);
+                }
+                expect_rel = false;
+                expect_opt_alias = true;
+                idx += 1;
+                continue;
+            }
             if !matches!(tokens[idx], RelTok::Dot) {
                 expect_rel = false;
             }
@@ -2065,15 +2197,20 @@ fn references_whole_row_relation_struct(tokens: &[RelTok]) -> bool {
             }
             if let RelTok::Ident { lower, quoted, .. } = &tokens[idx] {
                 if !*quoted && lower == "as" {
-                    if let Some(RelTok::Ident {
-                        lower: alias_lower, ..
-                    }) = tokens.get(idx + 1)
+                    if let Some(
+                        RelTok::Ident {
+                            lower: alias_lower, ..
+                        }
+                        | RelTok::StrLit { lower: alias_lower },
+                    ) = tokens.get(idx + 1)
                     {
                         if matches!(tokens.get(idx + 2), Some(RelTok::LParen)) {
                             return true;
                         }
-                        declared_relations.insert(alias_lower.clone());
-                        decl_indices.insert(idx + 1);
+                        if !alias_lower.is_empty() {
+                            declared_relations.insert(alias_lower.clone());
+                            decl_indices.insert(idx + 1);
+                        }
                         expect_opt_alias = false;
                         idx += 2;
                         continue;
@@ -2088,6 +2225,17 @@ fn references_whole_row_relation_struct(tokens: &[RelTok]) -> bool {
                     idx += 1;
                     continue;
                 }
+            } else if let RelTok::StrLit { lower: alias_lower } = &tokens[idx] {
+                if matches!(tokens.get(idx + 1), Some(RelTok::LParen)) {
+                    return true;
+                }
+                if !alias_lower.is_empty() {
+                    declared_relations.insert(alias_lower.clone());
+                    decl_indices.insert(idx);
+                }
+                expect_opt_alias = false;
+                idx += 1;
+                continue;
             }
             expect_opt_alias = false;
         }
@@ -2254,11 +2402,7 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             None
         };
         if let Some(base_mode) = initial_quote_mode {
-            let should_capture = check_key_ctx
-                || columns_fn_depth.is_some()
-                || brace_depth > 0
-                || base_mode == QuoteMode::Unicode;
-            let mut captured = should_capture.then(String::new);
+            let mut captured = Some(String::new());
             let mut seg_mode = base_mode;
             loop {
                 let mut closed = false;
@@ -2353,7 +2497,9 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             if let Some(top) = paren_stack.last_mut() {
                 top.1 = false;
             }
-            rel_tokens.push(RelTok::Other);
+            rel_tokens.push(RelTok::StrLit {
+                lower: trim_sql_ws(captured.as_deref().unwrap_or_default()).to_lowercase(),
+            });
             pending_call = PendingCallKind::None;
             pending_extract_mode = None;
             pending_extract_dot_chain = false;
@@ -2420,7 +2566,9 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
                 if let Some(top) = paren_stack.last_mut() {
                     top.1 = false;
                 }
-                rel_tokens.push(RelTok::Other);
+                rel_tokens.push(RelTok::StrLit {
+                    lower: trim_sql_ws(body).to_lowercase(),
+                });
                 pending_call = PendingCallKind::None;
                 pending_extract_mode = None;
                 pending_extract_dot_chain = false;
@@ -2976,10 +3124,15 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
                 top.1 = false;
             }
             if bytes.get(i + 1) == Some(&b':') {
-                while i < bytes.len() && bytes[i] == b':' {
-                    i += 1;
+                if bytes.get(i + 2) == Some(&b':') {
+                    while i < bytes.len() && bytes[i] == b':' {
+                        i += 1;
+                    }
+                    rel_tokens.push(RelTok::Other);
+                } else {
+                    i += 2;
+                    rel_tokens.push(RelTok::DoubleColon);
                 }
-                rel_tokens.push(RelTok::Other);
             } else {
                 if let Some(top) = brace_stack.last_mut() {
                     if top.0 == paren_depth && top.1 == bracket_depth {
@@ -5757,6 +5910,232 @@ mod tests {
             (
                 "benign-r7-paren-expr-mult",
                 r#"{"_view_extras":{"sql":"SELECT (status + 1) * 2 AS x FROM logs WHERE status = 200"}}"#,
+            ),
+        ];
+
+        for (case_id, payload) in allowed_vectors {
+            assert!(
+                !filters_reference_pii(payload),
+                "expected {case_id} to be allowed for AnalystNoPii: {payload}"
+            );
+        }
+    }
+
+    #[test]
+    fn sec19_blocks_wave8_r8_non_kw_contexts_star_rename_not_order_by_and_sconst_identifiers() {
+        let blocked_vectors = [
+            // 1. (RS-8A) Non-keyword ., ::, and AS resetting in_select_list or in_from
+            (
+                "r8a-select-as-offset-star-like",
+                r#"{"_view_extras":{"sql":"SELECT 1 AS offset, url, * LIKE '%oi%' AS x FROM logs WHERE x = '203.0.113.9'"}}"#,
+            ),
+            (
+                "r8a-select-as-qualify-star-as-s",
+                r#"{"_view_extras":{"sql":"SELECT s_6 FROM (SELECT 1 AS qualify, * AS s FROM logs) sub WHERE s_1 = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r8a-select-dot-where-star-like",
+                r#"{"_view_extras":{"sql":"SELECT a.where, logs.url, * LIKE '%oi%' AS x FROM (SELECT 1 AS \"where\") a, logs WHERE x = '203.0.113.9'"}}"#,
+            ),
+            (
+                "r8a-on-dot-where-comma-logs-cast",
+                r#"{"_view_extras":{"sql":"SELECT t.url FROM (SELECT 1 AS \"where\") a JOIN (SELECT 1 AS y) b ON a.where = 1, logs AS t WHERE t::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r8a-on-dot-union-comma-logs-cast",
+                r#"{"_view_extras":{"sql":"SELECT t.url FROM (SELECT 1 AS \"union\") a JOIN (SELECT 1 AS y) b ON a.union = 1, logs AS t WHERE t::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r8a-on-cast-union-comma-logs-cast",
+                r#"{"_view_extras":{"sql":"SELECT t.url FROM (SELECT 1 AS x) a JOIN (SELECT 1 AS y) b ON 1::union(z INT) IS NOT NULL, logs AS t WHERE t::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r8a-on-dot-where-comma-logs-cols",
+                r#"{"_view_extras":{"sql":"SELECT t.c7 FROM (SELECT 1 AS \"where\") a JOIN (SELECT 1 AS y) b ON a.where = 1, logs AS t(c1, c2, c3, c4, c5, c6, c7, c8) WHERE t.c2 = '198.51.100.7'"}}"#,
+            ),
+            // 2. (RS-8B) * RENAME (<Sconst>), prefix-NOT * LIKE ..., and ORDER BY * LIKE ...
+            (
+                "r8b-star-rename-squote-ip",
+                r#"{"_view_extras":{"sql":"SELECT count(*) AS cnt FROM (SELECT * RENAME ('ip' AS safe_col) FROM logs) WHERE safe_col = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r8b-star-rename-squote-oip",
+                r#"{"_view_extras":{"sql":"SELECT count(*) AS cnt FROM (SELECT * RENAME ('oip' AS safe_col) FROM logs) WHERE safe_col = '203.0.113.9'"}}"#,
+            ),
+            (
+                "r8b-star-rename-squote-cookie",
+                r#"{"_view_extras":{"sql":"SELECT count(*) AS cnt FROM (SELECT * RENAME ('cookie_session' AS safe_col) FROM logs) WHERE safe_col = 'sess_secret_99'"}}"#,
+            ),
+            (
+                "r8b-star-rename-squote-esid",
+                r#"{"_view_extras":{"sql":"SELECT count(*) AS cnt FROM (SELECT * RENAME ('edge_sid' AS safe_col) FROM logs) WHERE safe_col = 'esid_secret_77'"}}"#,
+            ),
+            (
+                "r8b-star-rename-squote-extra",
+                r#"{"_view_extras":{"sql":"SELECT count(*) AS cnt FROM (SELECT * RENAME ('_extra' AS safe_col) FROM logs) WHERE safe_col LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r8b-qual-star-rename-squote-ip",
+                r#"{"_view_extras":{"sql":"SELECT count(*) AS cnt FROM (SELECT logs.* RENAME ('ip' AS safe_col) FROM logs) WHERE safe_col = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r8b-star-rename-equote-ip",
+                r#"{"_view_extras":{"sql":"SELECT count(*) AS cnt FROM (SELECT * RENAME (E'\\x69p' AS safe_col) FROM logs) WHERE safe_col = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r8b-star-rename-dolq-ip",
+                r#"{"_view_extras":{"sql":"SELECT count(*) AS cnt FROM (SELECT * RENAME ($$ip$$ AS safe_col) FROM logs) WHERE safe_col = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r8b-star-rename-multiline-ip",
+                r#"{"_view_extras":{"sql":"SELECT count(*) AS cnt FROM (SELECT * RENAME ('i'\n'p' AS safe_col) FROM logs) WHERE safe_col = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r8b-star-rename-logs-dot-squote-ip",
+                r#"{"_view_extras":{"sql":"SELECT count(*) AS cnt FROM (SELECT * RENAME (logs.'ip' AS safe_col) FROM logs) WHERE safe_col = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r8b-distinct-on-star-rename-ip",
+                r#"{"_view_extras":{"sql":"SELECT DISTINCT ON (* RENAME ('ip' AS safe_col)) url FROM logs"}}"#,
+            ),
+            (
+                "r8b-not-star-like-as-s",
+                r#"{"_view_extras":{"sql":"SELECT count(*) AS cnt FROM (SELECT NOT * LIKE '%timestamp%' AS s FROM logs) WHERE s_1 = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r8b-order-by-star-like-oi",
+                r#"{"_view_extras":{"sql":"SELECT url FROM logs WHERE url IN ('/a', '/b') ORDER BY * LIKE '%oi%' DESC LIMIT 1"}}"#,
+            ),
+            (
+                "r8b-order-by-star-ilike-extra",
+                r#"{"_view_extras":{"sql":"SELECT url FROM logs ORDER BY * ILIKE '%EXTRA%' DESC LIMIT 1"}}"#,
+            ),
+            (
+                "r8b-order-by-star-glob-ookie",
+                r#"{"_view_extras":{"sql":"SELECT url FROM logs ORDER BY * GLOB '*ookie*' DESC LIMIT 1"}}"#,
+            ),
+            (
+                "r8b-order-by-star-tilde-ip",
+                r#"{"_view_extras":{"sql":"SELECT url FROM logs ORDER BY * ~ '^ip$' DESC LIMIT 1"}}"#,
+            ),
+            (
+                "r8b-order-by-comma-star-exclude-like",
+                r#"{"_view_extras":{"sql":"SELECT url FROM logs ORDER BY status, * EXCLUDE (timestamp) LIKE '%oi%' DESC LIMIT 1"}}"#,
+            ),
+            // 3. (RS-8C) DuckDB Sconst identifiers in AS <Sconst>, USING (<Sconst>), and FROM/ONLY relation & alias clauses
+            (
+                "r8c-natural-join-as-squote-ip",
+                r#"{"_view_extras":{"sql":"SELECT status, url FROM logs NATURAL JOIN (SELECT '198.51.100.7' AS 'ip') u"}}"#,
+            ),
+            (
+                "r8c-natural-join-as-dolq-ip",
+                r#"{"_view_extras":{"sql":"SELECT status, url FROM logs NATURAL JOIN (SELECT '198.51.100.7' AS $$ip$$) u"}}"#,
+            ),
+            (
+                "r8c-natural-join-as-equote-ip",
+                r#"{"_view_extras":{"sql":"SELECT status, url FROM logs NATURAL JOIN (SELECT '198.51.100.7' AS E'\\x69p') u"}}"#,
+            ),
+            (
+                "r8c-natural-join-as-multiline-ip",
+                r#"{"_view_extras":{"sql":"SELECT status, url FROM logs NATURAL JOIN (SELECT '198.51.100.7' AS 'i'\n'p') u"}}"#,
+            ),
+            (
+                "r8c-natural-join-vitals-as-squote-cid",
+                r#"{"_view_extras":{"sql":"SELECT url FROM client_vitals NATURAL JOIN (SELECT 'cid_secret_99' AS 'cid') u"}}"#,
+            ),
+            (
+                "r8c-join-using-squote-ip",
+                r#"{"_view_extras":{"sql":"SELECT logs.status FROM logs JOIN (SELECT '198.51.100.7' AS 'ip') u USING ('ip')"}}"#,
+            ),
+            (
+                "r8c-asof-join-using-squote-ip",
+                r#"{"_view_extras":{"sql":"SELECT logs.status FROM logs ASOF JOIN (SELECT now() AS timestamp, '198.51.100.7' AS 'ip') u USING (timestamp, 'ip')"}}"#,
+            ),
+            (
+                "r8c-from-squote-logs-cast",
+                r#"{"_view_extras":{"sql":"SELECT status FROM 'logs' WHERE logs::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r8c-from-only-squote-logs-cast",
+                r#"{"_view_extras":{"sql":"SELECT status FROM ONLY 'logs' WHERE logs::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r8c-from-only-paren-squote-logs-cast",
+                r#"{"_view_extras":{"sql":"SELECT status FROM ONLY ('logs') WHERE logs::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r8c-from-logs-as-squote-t-cast",
+                r#"{"_view_extras":{"sql":"SELECT status FROM logs AS 't' WHERE t::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r8c-from-logs-as-dolq-t-cast",
+                r#"{"_view_extras":{"sql":"SELECT status FROM logs AS $$t$$ WHERE t::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r8c-from-subquery-as-squote-t-cast",
+                r#"{"_view_extras":{"sql":"SELECT status FROM (SELECT * FROM logs) AS 't' WHERE t::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r8c-from-logs-as-squote-t-cols",
+                r#"{"_view_extras":{"sql":"SELECT c1 FROM logs AS 't'('c1', 'c2', 'c3') WHERE c3 = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r8c-from-squote-logs-bare-t-cast",
+                r#"{"_view_extras":{"sql":"SELECT status FROM 'logs' t WHERE t::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r8c-from-squote-logs-bare-t-cols",
+                r#"{"_view_extras":{"sql":"SELECT t.c1 FROM 'logs' t(c1, c2, c3) WHERE t.c3 = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r8c-from-squote-logs-star-as-squote-t",
+                r#"{"_view_extras":{"sql":"SELECT status FROM 'logs' * AS 't' WHERE t::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+        ];
+
+        for (case_id, payload) in blocked_vectors {
+            assert!(
+                filters_reference_pii(payload),
+                "expected {case_id} to be blocked as PII-referencing: {payload}"
+            );
+        }
+
+        let allowed_vectors = [
+            (
+                "benign-r8-where-url-eq-ip-literal",
+                r#"{"_view_extras":{"sql":"SELECT status, url FROM logs WHERE url = 'ip'"}}"#,
+            ),
+            (
+                "benign-r8-select-as-safe-sconst-alias",
+                r#"{"_view_extras":{"sql":"SELECT 'hello' AS 'safe_alias', status FROM logs WHERE status = 200"}}"#,
+            ),
+            (
+                "benign-r8-select-as-union-star",
+                r#"{"_view_extras":{"sql":"SELECT 1 AS union, * FROM logs WHERE status = 200"}}"#,
+            ),
+            (
+                "benign-r8-star-exclude-paren-sconst",
+                r#"{"_view_extras":{"sql":"SELECT * EXCLUDE ('timestamp') FROM logs WHERE status = 200"}}"#,
+            ),
+            (
+                "benign-r8-star-exclude-bare-sconst",
+                r#"{"_view_extras":{"sql":"SELECT * EXCLUDE 'timestamp' FROM logs WHERE status = 200"}}"#,
+            ),
+            (
+                "benign-r8-star-rename-safe-sconst",
+                r#"{"_view_extras":{"sql":"SELECT * RENAME ('url' AS req_url) FROM logs WHERE status = 200"}}"#,
+            ),
+            (
+                "benign-r8-from-squote-logs-as-squote-t",
+                r#"{"_view_extras":{"sql":"SELECT t.status, t.url FROM 'logs' AS 't' WHERE t.status = 200"}}"#,
+            ),
+            (
+                "benign-r8-order-by-star-asc",
+                r#"{"_view_extras":{"sql":"SELECT url FROM logs WHERE status = 200 ORDER BY * ASC"}}"#,
+            ),
+            (
+                "benign-r8-order-by-mult-desc",
+                r#"{"_view_extras":{"sql":"SELECT url FROM logs WHERE status = 200 ORDER BY status * 2 DESC"}}"#,
             ),
         ];
 

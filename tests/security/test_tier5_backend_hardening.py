@@ -1211,3 +1211,122 @@ def test_sec_t5_iter6_py01_py02_compound_paren_subquery_dot_union_and_tvf_pivot_
     )
     assert len(executed) == 1
     assert "fla_cv_m_req" in executed[0][0] and "FROM logs" not in executed[0][0]
+
+
+def test_sec_t5_iter7_sql01_py01_non_keyword_contexts_numeric_boundaries_and_bare_aliases() -> None:
+    from backend.core.sql_validator import SQLValidationError, validate_user_sql
+    from backend.high_scale import query as hs_query
+    from backend.models.analytics import QueryRequest as DashboardQueryRequest
+
+    # 1. (PY-01a) Numeric-boundary aliases (1_union, 0x1union, etc.) & AS union / ::union inside WITH RECURSIVE
+    for rec_attack in (
+        "WITH RECURSIVE ops_secret AS (SELECT 1 AS union, secret_col FROM ops_secret) SELECT secret_col FROM ops_secret",
+        "WITH RECURSIVE ops_secret AS (SELECT 1::union(a INT), secret_col FROM ops_secret) SELECT secret_col FROM ops_secret",
+        "WITH RECURSIVE ops_secret AS (SELECT 1_union, secret_col FROM ops_secret) SELECT secret_col FROM ops_secret",
+        "WITH RECURSIVE ops_secret AS (SELECT 1.5_union, secret_col FROM ops_secret) SELECT secret_col FROM ops_secret",
+        "WITH RECURSIVE ops_secret AS (SELECT 1e2_union, secret_col FROM ops_secret) SELECT secret_col FROM ops_secret",
+        "WITH RECURSIVE ops_secret AS (SELECT 0x1union, secret_col FROM ops_secret) SELECT secret_col FROM ops_secret",
+        "WITH RECURSIVE ops_secret AS (SELECT 0b1union, secret_col FROM ops_secret) SELECT secret_col FROM ops_secret",
+        "WITH RECURSIVE ops_secret AS (SELECT 0o1union, secret_col FROM ops_secret) SELECT secret_col FROM ops_secret",
+    ):
+        with pytest.raises(SQLValidationError):
+            validate_user_sql(rec_attack, allowed_tables={"logs"})
+
+    # 2. (SQL-01) Non-keyword ., ::, AS, Sconst table refs, and bare/AS sample/prewhere/settings/format aliases
+    for sql01_attack in (
+        "SELECT c.name FROM logs AS a JOIN logs AS b ON a.where = 1, system.tables AS c",
+        "SELECT c.name FROM logs AS a JOIN logs AS b ON a.select = 1, system.tables AS c",
+        "SELECT c.name FROM logs AS a JOIN logs AS b ON a.order = 1, system.tables AS c",
+        "SELECT c.name FROM logs AS a JOIN logs AS b ON a.limit = 1, system.tables AS c",
+        "SELECT c.name FROM logs AS a JOIN logs AS b ON a.union = 1, system.tables AS c",
+        "SELECT c.name FROM logs AS a JOIN logs AS b ON 1::union(x INT) IS NOT NULL, system.tables AS c",
+        "SELECT b.service_id FROM logs AS sample, high_scale_batch_publications AS b",
+        "SELECT b.service_id FROM logs sample, high_scale_batch_publications AS b",
+        "SELECT b.service_id FROM logs AS prewhere, high_scale_batch_publications AS b",
+        "SELECT b.service_id FROM logs prewhere, high_scale_batch_publications AS b",
+        "SELECT b.service_id FROM logs AS settings, high_scale_batch_publications AS b",
+        "SELECT b.service_id FROM logs settings, high_scale_batch_publications AS b",
+        "SELECT b.service_id FROM logs AS format, high_scale_batch_publications AS b",
+        "SELECT b.service_id FROM logs format, high_scale_batch_publications AS b",
+        "SELECT b.service_id FROM logs sample(status), high_scale_batch_publications AS b",
+        "SELECT secret_col FROM 'ops_secret'",
+        "SELECT b.secret_col FROM logs AS a JOIN 'ops_secret' AS b ON true",
+    ):
+        with pytest.raises(SQLValidationError):
+            validate_user_sql(sql01_attack, allowed_tables={"logs"})
+
+    # 3. Benign controls on validate_user_sql MUST pass
+    for benign_sql in (
+        "WITH RECURSIVE r(n, x) AS (SELECT 1, 2 FROM logs LIMIT 1 UNION ALL SELECT n + 1, 3 AS except FROM r WHERE n < 3) SELECT * FROM r",
+        "SELECT 1_000_000 AS union FROM logs",
+        "SELECT s.status FROM logs AS sample(status)",
+        "SELECT sample.status FROM logs AS sample WHERE sample.status = 200",
+        "SELECT sample.status FROM logs sample WHERE sample.status = 200",
+        "SELECT 1::union(a INT) AS u FROM logs",
+        'SELECT a.where FROM (SELECT 1 AS "where") AS a JOIN logs AS b ON a.where = 1 LIMIT 1',
+    ):
+        assert validate_user_sql(benign_sql, allowed_tables={"logs"}).parse_tree.get("statements"), benign_sql
+
+    # 4. Live High-Scale query_endpoint blocks all SQL-01 comma-join bypasses before ClickHouse execution
+    executed: list[tuple[str, dict[str, object]]] = []
+
+    class _StubCH:
+        _table_filters_verified = True
+
+        def execute(
+            self,
+            sql: str,
+            params: dict[str, object] | None = None,
+            *,
+            settings: dict[str, object] | None = None,
+        ) -> list[dict[str, object]]:
+            del params
+            executed.append((sql, dict(settings or {})))
+            return [{"n": 1}]
+
+    stub_ch = _StubCH()
+    hs_svc = SimpleNamespace(service_id="svc_alpha", client=stub_ch)
+    for hs_sql01_attack in (
+        "SELECT c.name FROM logs AS a JOIN logs AS b ON a.where = 1, system.tables AS c",
+        "SELECT c.name FROM logs AS a JOIN logs AS b ON a.select = 1, system.tables AS c",
+        "SELECT c.name FROM logs AS a JOIN logs AS b ON a.order = 1, system.tables AS c",
+        "SELECT c.name FROM logs AS a JOIN logs AS b ON a.limit = 1, system.tables AS c",
+        "SELECT c.name FROM logs AS a JOIN logs AS b ON a.union = 1, system.tables AS c",
+        "SELECT c.name FROM logs AS a JOIN logs AS b ON 1::union(x INT) IS NOT NULL, system.tables AS c",
+        "SELECT b.service_id FROM logs AS sample, high_scale_batch_publications AS b",
+        "SELECT b.service_id FROM logs sample, high_scale_batch_publications AS b",
+        "SELECT b.service_id FROM logs AS prewhere, high_scale_batch_publications AS b",
+        "SELECT b.service_id FROM logs prewhere, high_scale_batch_publications AS b",
+        "SELECT b.service_id FROM logs AS settings, high_scale_batch_publications AS b",
+        "SELECT b.service_id FROM logs settings, high_scale_batch_publications AS b",
+        "SELECT b.service_id FROM logs AS format, high_scale_batch_publications AS b",
+        "SELECT b.service_id FROM logs format, high_scale_batch_publications AS b",
+    ):
+        with pytest.raises(PermissionError):
+            hs_query.query_endpoint(
+                hs_svc,
+                DashboardQueryRequest(sql=hs_sql01_attack, max_rows=10),
+                "2026-11-19T00:00:00Z",
+                "2026-11-19T01:00:00Z",
+                mask_ips=False,
+            )
+    assert executed == []
+
+    # Benign High-Scale controls (AS sample, bare sample, 1::union, ON a.where = 1, logs AS c) rewrite & scope cleanly
+    for benign_hs_sql in (
+        "SELECT sample.status FROM logs AS sample WHERE sample.status = 200",
+        "SELECT sample.status FROM logs sample WHERE sample.status = 200",
+        "SELECT 1::union(a INT) AS u FROM logs",
+        "SELECT c.status FROM (SELECT 1 AS where FROM logs) AS a JOIN logs AS b ON a.where = 1, logs AS c WHERE b.status = 200",
+    ):
+        executed.clear()
+        hs_query.query_endpoint(
+            hs_svc,
+            DashboardQueryRequest(sql=benign_hs_sql, max_rows=10),
+            "2026-11-19T00:00:00Z",
+            "2026-11-19T01:00:00Z",
+            mask_ips=True,
+            tables={"request_facts": "fla_cv_m_req"},
+        )
+        assert len(executed) == 1, benign_hs_sql
+        assert "fla_cv_m_req" in executed[0][0] and "FROM logs" not in executed[0][0], executed[0][0]

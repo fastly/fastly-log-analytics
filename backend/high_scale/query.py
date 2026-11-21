@@ -762,6 +762,15 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
     def _sig_indices(tokens: list[tuple[str, str]]) -> list[int]:
         return [i for i, (k, _) in enumerate(tokens) if k not in ("WS", "COMMENT")]
 
+    def _is_non_kw_lex_pos(tokens: list[tuple[str, str]], idx: int) -> bool:
+        p1 = next((p for p in range(idx - 1, -1, -1) if tokens[p][0] not in ("WS", "COMMENT")), None)
+        if p1 is None:
+            return False
+        pk, pt = tokens[p1]
+        if (pk, pt) == ("OP", ".") or (pk == "IDENT" and pt.upper() == "AS"):
+            return True
+        return (pk, pt) == ("OTHER", ":") and p1 > 0 and tokens[p1 - 1] == ("OTHER", ":")
+
     def _find_matching_paren(tokens: list[tuple[str, str]], open_idx: int) -> int:
         depth = 0
         for idx in range(open_idx, len(tokens)):
@@ -954,7 +963,12 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 depth += 1
             elif k == "OP" and t == ")":
                 depth = max(0, depth - 1)
-            elif depth == 0 and k == "IDENT" and t.upper() in ("UNION", "INTERSECT", "EXCEPT"):
+            elif (
+                depth == 0
+                and k == "IDENT"
+                and t.upper() in ("UNION", "INTERSECT", "EXCEPT")
+                and not _is_non_kw_lex_pos(tokens, i_tok)
+            ):
                 sep: list[tuple[str, str]] = [tokens[i_tok]]
                 j = i_tok + 1
                 while j < len(tokens) and tokens[j][0] in ("WS", "COMMENT"):
@@ -1027,6 +1041,20 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
             i += 1
 
         sig_idxs = _sig_indices(processed)
+
+        def _is_bare_clause_alias_at(cand_s_pos: int) -> bool:
+            if cand_s_pos >= len(sig_idxs):
+                return False
+            ck, ct = processed[sig_idxs[cand_s_pos]]
+            if ck != "IDENT" or ct.upper() not in ("PREWHERE", "SAMPLE", "SETTINGS", "FORMAT"):
+                return False
+            after = processed[sig_idxs[cand_s_pos + 1]] if cand_s_pos + 1 < len(sig_idxs) else None
+            return (
+                after is None
+                or after in (("OP", ","), ("OP", "("))
+                or (after[0] == "IDENT" and after[1].upper() in _SQL_CLAUSE_STOPWORDS)
+            )
+
         table_token_idxs: dict[int, str] = {}
         table_alias_idxs: set[int] = set()
         func_stack: list[str] = []
@@ -1066,7 +1094,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 s_pos += 1
                 continue
 
-            if k == "IDENT":
+            if k == "IDENT" and not _is_non_kw_lex_pos(processed, idx):
                 wu = t.upper()
                 if wu in ("FROM", "JOIN"):
                     in_from = True
@@ -1076,6 +1104,10 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 if wu in _JOIN_MODIFIER_KEYWORDS:
                     if in_from:
                         expect_table = False
+                    s_pos += 1
+                    continue
+                if in_from and not expect_table and _is_bare_clause_alias_at(s_pos):
+                    table_alias_idxs.add(idx)
                     s_pos += 1
                     continue
                 if wu in _FROM_EXIT_KEYWORDS:
@@ -1117,7 +1149,10 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                     elif (
                         a_pos < len(sig_idxs)
                         and processed[sig_idxs[a_pos]][0] == "IDENT"
-                        and processed[sig_idxs[a_pos]][1].upper() not in _SQL_CLAUSE_STOPWORDS
+                        and (
+                            processed[sig_idxs[a_pos]][1].upper() not in _SQL_CLAUSE_STOPWORDS
+                            or _is_bare_clause_alias_at(a_pos)
+                        )
                     ):
                         a_idx = sig_idxs[a_pos]
                         table_alias_idxs.add(a_idx)
@@ -1164,7 +1199,10 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                     elif (
                         a_pos < len(sig_idxs)
                         and processed[sig_idxs[a_pos]][0] == "IDENT"
-                        and processed[sig_idxs[a_pos]][1].upper() not in _SQL_CLAUSE_STOPWORDS
+                        and (
+                            processed[sig_idxs[a_pos]][1].upper() not in _SQL_CLAUSE_STOPWORDS
+                            or _is_bare_clause_alias_at(a_pos)
+                        )
                     ):
                         a_idx = sig_idxs[a_pos]
                         table_alias_idxs.add(a_idx)

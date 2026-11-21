@@ -73,12 +73,15 @@ describe('T5-FE-05: cloud-engine executeCloudQuery shadow-masked CTE and handleS
     await engine.executeSql(
       "INSERT INTO main.client_vitals VALUES ('2026-11-20T12:00:00Z'::TIMESTAMPTZ, 'CANARY_RUM_CID_789', 'CANARY_RUM_SID_012', '/home')",
     )
+    await engine.executeSql('CREATE OR REPLACE TABLE main.ops_secret (secret_col VARCHAR)')
+    await engine.executeSql("INSERT INTO main.ops_secret VALUES ('TOP_SECRET_CANARY')")
   })
 
   afterAll(async () => {
     await engine.executeSql('DROP VIEW IF EXISTS main.logs')
     await engine.executeSql('DROP TABLE IF EXISTS main.requests')
     await engine.executeSql('DROP TABLE IF EXISTS main.client_vitals')
+    await engine.executeSql('DROP TABLE IF EXISTS main.ops_secret')
     await engine.reset()
   })
 
@@ -582,6 +585,88 @@ describe('T5-FE-05: cloud-engine executeCloudQuery shadow-masked CTE and handleS
       const onlyLogsText = JSON.stringify(onlyLogsRes.body)
       expect(onlyLogsText, allowedOnlySql).not.toContain('203.0.113.')
       expect(onlyLogsText, allowedOnlySql).not.toContain('CANARY_SESS_')
+    }
+  })
+
+  it('closes SEC-T5-ITER7-FE-01: blocks numeric-underscore/radix dollar-quote smuggling and non-keyword ./::/AS comma-joins while masking main.requests PII', async () => {
+    const runSql = (sql: string) => engine.executeSql(sql)
+
+    for (const blockedSql of [
+      'SELECT 1_$$, (SELECT secret_col FROM ops_secret) AS leaked, 2_$$ FROM logs',
+      'SELECT 1.5_$$, (SELECT secret_col FROM ops_secret) AS leaked, 2.5_$$ FROM logs',
+      'SELECT 1e2_$$, (SELECT secret_col FROM ops_secret) AS leaked, 2e2_$$ FROM logs',
+      'SELECT 0x1$$, (SELECT secret_col FROM ops_secret) AS leaked, 0x2$$ FROM logs',
+      'SELECT 0b1$$, (SELECT secret_col FROM ops_secret) AS leaked, 0b0$$ FROM logs',
+      'SELECT 0o1$$, (SELECT secret_col FROM ops_secret) AS leaked, 0o2$$ FROM logs',
+      'SELECT 1_$t$, (SELECT secret_col FROM ops_secret) AS leaked, 2_$t$ FROM logs',
+      "SELECT 1_$$, current_setting('threads') AS leaked, 2_$$ FROM logs",
+      "SELECT 1_$$, (SELECT table_name FROM information_schema.tables WHERE table_name = 'ops_secret') AS leaked, 2_$$ FROM logs",
+      'SELECT c.secret_col FROM logs AS a JOIN logs AS b ON 1::union(x INT) IS NOT NULL, ops_secret AS c',
+      'SELECT c.secret_col FROM (SELECT 1 AS "where") AS a JOIN logs AS b ON a.where = 1, ops_secret AS c',
+      'SELECT c.secret_col FROM (SELECT 1 AS "select") AS a JOIN logs AS b ON a.select = 1, ops_secret AS c',
+      'SELECT c.secret_col FROM (SELECT 1 AS "order") AS a JOIN logs AS b ON a.order = 1, ops_secret AS c',
+      'SELECT c.secret_col FROM (SELECT 1 AS "limit") AS a JOIN logs AS b ON a.limit = 1, ops_secret AS c',
+      'SELECT c.secret_col FROM (SELECT 1 AS "qualify") AS a JOIN logs AS b ON a.qualify = 1, ops_secret AS c',
+      'SELECT c.secret_col FROM (SELECT 1 AS "union") AS a JOIN logs AS b ON a.union = 1, ops_secret AS c',
+    ]) {
+      const res = await executeCloudQuery(
+        { sql: blockedSql },
+        {
+          role: 'analyst-no-pii',
+          maskIps: true,
+          tableName: 'requests',
+          allowedTables: ['logs', 'requests'],
+          runSql,
+        },
+      )
+      expect(res.status, blockedSql).toBe(403)
+      expect(JSON.stringify(res.body), blockedSql).not.toContain('TOP_SECRET_CANARY')
+    }
+
+    for (const maskedDolqSql of [
+      "SELECT 1_$$, (SELECT reverse(ip) || '|' || reverse(cookie_session) FROM main.requests LIMIT 1) AS raw_pii, 2_$$ FROM logs",
+      "SELECT 0x1$$, (SELECT reverse(ip) || '|' || reverse(cookie_session) FROM main.requests LIMIT 1) AS raw_pii, 0x2$$ FROM logs",
+    ]) {
+      const res = await executeCloudQuery(
+        { sql: maskedDolqSql },
+        {
+          role: 'analyst-no-pii',
+          maskIps: true,
+          tableName: 'requests',
+          allowedTables: ['logs', 'requests'],
+          runSql,
+        },
+      )
+      expect(res.status, maskedDolqSql).toBe(200)
+      const bodyStr = JSON.stringify(res.body)
+      expect(bodyStr, maskedDolqSql).not.toContain('04.311.0.302')
+      expect(bodyStr, maskedDolqSql).not.toContain('CANARY_SESS_')
+      expect(bodyStr, maskedDolqSql).not.toContain('_SSES_YRANAC')
+      if ('data' in res.body) {
+        expect(res.body.data[0].raw_pii, maskedDolqSql).toBe('0.0.0.0|]detcader[')
+      }
+    }
+
+    for (const benignSql of [
+      'SELECT 1_000_000 AS n, 1.5_0e+1_0 AS f FROM logs LIMIT 1',
+      'SELECT a.where FROM (SELECT 1 AS "where") AS a JOIN logs AS b ON a.where = 1 LIMIT 1',
+      'SELECT 1::union(x INT) AS u FROM logs LIMIT 1',
+      'SELECT c.ip, c.cookie_session FROM (SELECT 1 AS "where") AS a JOIN logs AS b ON a.where = 1, main.requests AS c LIMIT 1',
+    ]) {
+      const res = await executeCloudQuery(
+        { sql: benignSql },
+        {
+          role: 'analyst-no-pii',
+          maskIps: true,
+          tableName: 'requests',
+          allowedTables: ['logs', 'requests'],
+          runSql,
+        },
+      )
+      expect(res.status, benignSql).toBe(200)
+      const bodyStr = JSON.stringify(res.body)
+      expect(bodyStr, benignSql).not.toContain('203.0.113.')
+      expect(bodyStr, benignSql).not.toContain('CANARY_SESS_')
     }
   })
 })

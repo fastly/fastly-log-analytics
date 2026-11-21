@@ -248,6 +248,14 @@ def _check_table_reference(
             service_id,
         )
     name_lower = table_name.lower()
+    if not name_lower:
+        _reject(
+            original_sql,
+            "parse_error:SYNTAX",
+            "SQL parse error: empty table reference",
+            session_id,
+            service_id,
+        )
     if blocked_pfx := next((p for p in _BLOCKED_TABLE_PREFIXES if name_lower.startswith(p)), None):
         _reject(
             original_sql,
@@ -595,36 +603,28 @@ def _is_ident_cont_char(ch: str) -> bool:
     )
 
 
+def _scan_sql_digits(sql: str, start: int) -> int:
+    n = len(sql)
+    i = start
+    while i < n and sql[i].isascii() and sql[i].isdigit():
+        i += 1
+        if i + 1 < n and sql[i] == "_" and sql[i + 1].isascii() and sql[i + 1].isdigit():
+            i += 1
+    return i
+
+
 def _scan_sql_number_end(sql: str, start: int) -> int:
     n = len(sql)
-    i = start + 1
-    if sql[start] == "0" and i + 1 < n:
-        radix = sql[i]
-        if radix in ("x", "X") and (sql[i + 1].isdigit() or sql[i + 1] in "abcdefABCDEF_"):
-            i += 2
-            while i < n and (sql[i].isdigit() or sql[i] in "abcdefABCDEF_"):
-                i += 1
-            return i
-        if radix in ("b", "B") and sql[i + 1] in "01_":
-            i += 2
-            while i < n and sql[i] in "01_":
-                i += 1
-            return i
-        if radix in ("o", "O") and sql[i + 1] in "01234567_":
-            i += 2
-            while i < n and sql[i] in "01234567_":
-                i += 1
-            return i
-    while i < n:
-        c = sql[i]
-        if c.isdigit() or c in "._":
-            i += 1
-        elif c in ("e", "E") and i + 1 < n and sql[i + 1].isdigit():
-            i += 2
-        elif c in ("e", "E") and i + 2 < n and sql[i + 1] in ("+", "-") and sql[i + 2].isdigit():
-            i += 3
-        else:
-            break
+    i = _scan_sql_digits(sql, start)
+    if i < n and sql[i] == "." and not (i + 1 < n and sql[i + 1] == "."):
+        i += 1
+        if i < n and sql[i].isascii() and sql[i].isdigit():
+            i = _scan_sql_digits(sql, i)
+    if i < n and sql[i] in ("e", "E"):
+        if i + 1 < n and sql[i + 1].isascii() and sql[i + 1].isdigit():
+            i = _scan_sql_digits(sql, i + 1)
+        elif i + 2 < n and sql[i + 1] in ("+", "-") and sql[i + 2].isascii() and sql[i + 2].isdigit():
+            i = _scan_sql_digits(sql, i + 2)
     return i
 
 
@@ -835,6 +835,17 @@ def _strip_outer_parens(tokens: list[_Tok]) -> list[_Tok]:
     return tokens
 
 
+def _is_non_keyword_ident_pos(tokens: list[_Tok], idx: int) -> bool:
+    if idx <= 0:
+        return False
+    prev = tokens[idx - 1]
+    return (
+        prev.kind == "DOT"
+        or (prev.kind == "WORD" and prev.val.upper() == "AS")
+        or (prev.kind == "OTHER" and prev.val.endswith("::"))
+    )
+
+
 def _validate_select_syntax(tokens: list[_Tok]) -> str | None:
     """Catch malformed SELECT / WHERE clauses so invalid SQL fails closed."""
     i = 0
@@ -852,7 +863,7 @@ def _validate_select_syntax(tokens: list[_Tok]) -> str | None:
             continue
         if tok.kind == "RPAREN":
             return "unmatched closing parenthesis"
-        if tok.kind == "WORD":
+        if tok.kind == "WORD" and not _is_non_keyword_ident_pos(tokens, i):
             wu = tok.val.upper()
             if wu == "SELECT":
                 nxt = i + 1
@@ -895,7 +906,7 @@ def _has_top_level_setop(tokens: list[_Tok]) -> bool:
         if (
             tk.kind == "WORD"
             and tk.val.upper() in ("UNION", "INTERSECT", "EXCEPT")
-            and not (k > 0 and unwrapped[k - 1].kind == "DOT")
+            and not _is_non_keyword_ident_pos(unwrapped, k)
         ):
             return True
         k += 1
@@ -938,7 +949,7 @@ def _parse_recursive_cte_tokens(tokens: list[_Tok]) -> dict[str, Any]:
         if (
             tk.kind == "WORD"
             and tk.val.upper() in ("UNION", "INTERSECT", "EXCEPT")
-            and not (k > 0 and inner[k - 1].kind == "DOT")
+            and not _is_non_keyword_ident_pos(inner, k)
         ):
             last_union_or_except_op = tk.val.upper()
             last_idx = k
@@ -958,6 +969,8 @@ def _parse_recursive_cte_tokens(tokens: list[_Tok]) -> dict[str, Any]:
         not right_tokens
         or (right_tokens[0].kind == "WORD" and right_tokens[0].val.upper() == "BY")
         or _has_top_level_setop(right_tokens)
+        or not _is_subquery_token_list(inner[:last_idx])
+        or not _is_subquery_token_list(right_tokens)
     ):
         body = _parse_query_tokens(inner)
         body["type"] = "RECURSIVE_CTE_NODE"
@@ -1077,7 +1090,7 @@ def _scan_expr_tokens(tokens: list[_Tok], node: dict[str, Any], *, enclosing_spe
         if (
             tok.kind == "WORD"
             and tok.val.upper() in ("PIVOT", "UNPIVOT", "PIVOT_WIDER", "PIVOT_LONGER")
-            and not (i > 0 and tokens[i - 1].kind == "DOT")
+            and not _is_non_keyword_ident_pos(tokens, i)
         ):
             wu = tok.val.upper()
             node["children"].append(
@@ -1125,10 +1138,9 @@ def _scan_body_tokens(
 
     while i < n:
         tok = tokens[i]
-        if tok.kind == "WORD":
+        if tok.kind == "WORD" and not _is_non_keyword_ident_pos(tokens, i):
             wu = tok.val.upper()
-            prev_is_dot = i > 0 and tokens[i - 1].kind == "DOT"
-            if not prev_is_dot and wu in ("PIVOT", "UNPIVOT", "PIVOT_WIDER", "PIVOT_LONGER"):
+            if wu in ("PIVOT", "UNPIVOT", "PIVOT_WIDER", "PIVOT_LONGER"):
                 node["children"].append(
                     {
                         "type": "DISALLOWED_SUBQUERY_STATEMENT",
@@ -1138,7 +1150,7 @@ def _scan_body_tokens(
                 )
                 i += 1
                 continue
-            if at_branch_start and not prev_is_dot:
+            if at_branch_start:
                 if wu in _SHOW_REF_STATEMENTS:
                     node["children"].append(
                         {
@@ -1157,7 +1169,7 @@ def _scan_body_tokens(
                         }
                     )
                     return
-            if not prev_is_dot and wu in ("UNION", "INTERSECT", "EXCEPT"):
+            if wu in ("UNION", "INTERSECT", "EXCEPT"):
                 if expect_table:
                     node["children"].append(
                         {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: expected table reference"}
@@ -1180,7 +1192,7 @@ def _scan_body_tokens(
                 at_branch_start = False
                 i += 1
                 continue
-            if (wu == "FROM" and not _is_distinct_from_op(tokens, i)) or (wu == "TABLE" and not prev_is_dot):
+            if (wu == "FROM" and not _is_distinct_from_op(tokens, i)) or wu == "TABLE":
                 in_from = True
                 expect_table = True
                 at_branch_start = False
@@ -1193,6 +1205,33 @@ def _scan_body_tokens(
                 at_branch_start = False
                 i += 1
                 continue
+            if in_from and not expect_table and wu in ("SETTINGS", "FORMAT", "PREWHERE", "SAMPLE"):
+                nxt_tok = tokens[i + 1] if i + 1 < n else None
+                is_bare_table_alias = (
+                    nxt_tok is None
+                    or nxt_tok.kind in ("COMMA", "LPAREN")
+                    or (
+                        nxt_tok.kind == "WORD"
+                        and nxt_tok.val.upper() in (_JOIN_MODIFIERS | _CLAUSE_STOP_KEYWORDS | {"ON", "USING"})
+                    )
+                )
+                if is_bare_table_alias or wu == "SAMPLE":
+                    at_branch_start = False
+                    i += 1
+                    if is_bare_table_alias and i < n and tokens[i].kind == "LPAREN":
+                        rp_alias = _find_matching_rparen(tokens, i)
+                        if rp_alias != -1:
+                            alias_cols = tokens[i + 1 : rp_alias]
+                            _scan_expr_tokens(alias_cols, node)
+                            if not alias_cols or not all(tc.kind in ("WORD", "QIDENT", "COMMA") for tc in alias_cols):
+                                node["children"].append(
+                                    {
+                                        "type": "PARSE_ERROR_NODE",
+                                        "message": "SQL parse error: invalid column alias list",
+                                    }
+                                )
+                            i = rp_alias + 1
+                    continue
             if wu in _CLAUSE_STOP_KEYWORDS:
                 if expect_table:
                     node["children"].append(
@@ -1255,7 +1294,7 @@ def _scan_body_tokens(
             if tok.kind in ("WORD", "QIDENT"):
                 parts = [tok.val]
                 j = i + 1
-                while j + 1 < n and tokens[j].kind == "DOT" and tokens[j + 1].kind in ("WORD", "QIDENT"):
+                while j + 1 < n and tokens[j].kind == "DOT" and tokens[j + 1].kind in ("WORD", "QIDENT", "STRING"):
                     parts.append(tokens[j + 1].val)
                     j += 2
                 if j < n and tokens[j].kind == "LPAREN":
