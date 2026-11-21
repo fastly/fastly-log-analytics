@@ -398,39 +398,48 @@ function rewriteSqlTableRefs(
     ...(extraAllowedTables ? Array.from(extraAllowedTables, (t) => t.toLowerCase()) : []),
   ]);
 
-  // Extract all user-defined CTE aliases (`WITH [RECURSIVE] name[(...)] AS (...)`, `, name AS (...)`)
+  // Extract all user-defined CTE aliases across all query/subquery WITH blocks
   const userCteAliases = new Set<string>();
-  let inWithList = false;
   for (let i = 0; i < tokens.length; i++) {
     const tok = tokens[i];
-    if (tok.kind === "word" && (tok.lower === "with" || tok.lower === "recursive")) {
-      inWithList = true;
+    if (
+      tok.kind !== "word" ||
+      tok.lower !== "with" ||
+      !(
+        i === 0 ||
+        tokens[i - 1]?.value === "(" ||
+        (i === 1 && (tokens[0].lower === "summarize" || tokens[0].lower === "describe"))
+      )
+    ) {
       continue;
     }
-    if (!inWithList) continue;
-    if (tok.kind === "word" || tok.kind === "quoted_ident") {
-      let afterName = i + 1;
-      if (tokens[afterName]?.kind === "symbol" && tokens[afterName].value === "(") {
-        afterName = closingParen(tokens, afterName) + 1;
-      }
-      if (tokens[afterName]?.kind === "word" && tokens[afterName].lower === "as") {
-        let bodyOpen = afterName + 1;
-        if (tokens[bodyOpen]?.kind === "word" && tokens[bodyOpen].lower === "not") bodyOpen++;
-        if (tokens[bodyOpen]?.kind === "word" && tokens[bodyOpen].lower === "materialized") bodyOpen++;
-        if (tokens[bodyOpen]?.kind === "symbol" && tokens[bodyOpen].value === "(") {
-          userCteAliases.add(tok.lower);
-          const closeIdx = closingParen(tokens, bodyOpen);
-          if (tokens[closeIdx + 1]?.kind === "symbol" && tokens[closeIdx + 1].value === ",") {
-            i = closeIdx + 1;
-            continue;
-          }
-          inWithList = false;
-          i = closeIdx;
-          continue;
-        }
-      }
+    let k = i + 1;
+    if (tokens[k]?.kind === "word" && tokens[k].lower === "recursive") {
+      k++;
     }
-    inWithList = false;
+    while (k < tokens.length) {
+      const nameTok = tokens[k];
+      if (nameTok.kind !== "word" && nameTok.kind !== "quoted_ident") break;
+      let afterName = k + 1;
+      if (tokens[afterName]?.kind === "symbol" && tokens[afterName].value === "(") {
+        const colClose = closingParen(tokens, afterName);
+        if (colClose >= tokens.length) break;
+        afterName = colClose + 1;
+      }
+      if (!(tokens[afterName]?.kind === "word" && tokens[afterName].lower === "as")) break;
+      let bodyOpen = afterName + 1;
+      if (tokens[bodyOpen]?.kind === "word" && tokens[bodyOpen].lower === "not") bodyOpen++;
+      if (tokens[bodyOpen]?.kind === "word" && tokens[bodyOpen].lower === "materialized") bodyOpen++;
+      if (!(tokens[bodyOpen]?.kind === "symbol" && tokens[bodyOpen].value === "(")) break;
+      userCteAliases.add(nameTok.lower);
+      const closeIdx = closingParen(tokens, bodyOpen);
+      if (closeIdx >= tokens.length) break;
+      if (tokens[closeIdx + 1]?.kind === "symbol" && tokens[closeIdx + 1].value === ",") {
+        k = closeIdx + 2;
+        continue;
+      }
+      break;
+    }
   }
 
   type Frame = { kind: "subquery" | "from_join" | "expr"; savedInFrom: boolean };
@@ -515,6 +524,7 @@ function rewriteSqlTableRefs(
             (prevTok?.kind === "word" &&
               (prevTok.lower === "union" ||
                 prevTok.lower === "all" ||
+                prevTok.lower === "distinct" ||
                 prevTok.lower === "name" ||
                 prevTok.lower === "intersect" ||
                 prevTok.lower === "except")))
@@ -904,7 +914,7 @@ function mergeLeadingCtes(
     }
 
     const sumMatch =
-      /^(SUMMARIZE|DESCRIBE)\s+(?:(?:"main"|main)\s*\.\s*)?([A-Za-z0-9_"]+)\s*$/i.exec(
+      /^(SUMMARIZE|DESCRIBE)\s+(?:TABLE\s+)?(?:(?:"main"|main)\s*\.\s*)?([A-Za-z0-9_"]+)\s*$/i.exec(
         trimmed,
       );
     if (sumMatch) {
@@ -1080,6 +1090,12 @@ export async function executeCloudQuery(
           if (al !== "logs" && !seenLower.has(al) && referencedIdents.has(al)) {
             seenLower.add(al);
             tablesToShadow.push(allowed);
+          }
+        }
+        for (const rumTbl of ["client_vitals", "client_errors"]) {
+          if (!seenLower.has(rumTbl) && referencedIdents.has(rumTbl)) {
+            seenLower.add(rumTbl);
+            tablesToShadow.push(rumTbl);
           }
         }
 

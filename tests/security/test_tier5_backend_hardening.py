@@ -949,3 +949,23 @@ def test_bug_gw_02_and_admin_gateway_caddy_header_hygiene() -> None:
         assert stripped in admin_gw and admin_gw.index(stripped) < inject_idx, stripped
     assert "request>headers>X-Admin-Gateway-Token delete" in admin_gw
     assert "request>headers>X-FLA-Admin-Gateway delete" in admin_gw
+
+
+def test_recursive_cte_anchor_cannot_shadow_disallowed_base_table() -> None:
+    from backend.core.sql_validator import SQLValidationError, validate_user_sql
+
+    for attack_sql in (
+        "WITH RECURSIVE ops_secret AS (SELECT * FROM ops_secret UNION ALL SELECT * FROM ops_secret WHERE 1=0) SELECT * FROM ops_secret",
+        "WITH RECURSIVE ops_secret AS (SELECT * FROM ops_secret) SELECT * FROM ops_secret",
+        "WITH RECURSIVE ops_secret AS ((SELECT * FROM ops_secret UNION ALL SELECT 1) UNION ALL SELECT * FROM ops_secret WHERE 1=0) SELECT * FROM ops_secret",
+        "WITH RECURSIVE ops_secret AS (SELECT 1 INTERSECT SELECT * FROM ops_secret) SELECT * FROM ops_secret",
+    ):
+        with pytest.raises(SQLValidationError) as exc_info:
+            validate_user_sql(attack_sql, allowed_tables={"logs"})
+        assert exc_info.value.reason == "catalog_blocklist:foreign_table"
+
+    res = validate_user_sql(
+        "WITH RECURSIVE r AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM r WHERE n < 5) SELECT * FROM r",
+        allowed_tables={"logs"},
+    )
+    assert res.parse_tree.get("statements")

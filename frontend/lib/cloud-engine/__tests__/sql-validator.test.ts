@@ -120,6 +120,50 @@ describe('T5-FE-04: cloud-engine SQL validator adversarial replacement-scan, sch
     'SELECT * FROM ((SELECT 1) AS a, ops_secret AS b)',
     'SELECT TRIM((FROM ops_secret)) FROM logs',
     'SELECT TRIM(FROM (SELECT secret_col FROM ops_secret)) FROM logs',
+    // Iteration-4 Wave-3 Unicode space (StripUnicodeSpaces), control char, keyword, catalog, and CTE-scoping vectors:
+    'SELECT secret_col FROM\u200bops_secret',
+    'SELECT secret_col FROM\u2060ops_secret',
+    'SELECT secret_col FROM\ufeffops_secret',
+    'SELECT secret_col FROM\u00a0ops_secret',
+    "SELECT current_setting\u200b('threads') FROM logs",
+    "SELECT E'a'\u00a0\n'\\'' AS pad, secret_col FROM ops_secret WHERE 'x' != E'\\''",
+    "SELECT E'a'\u200b\n'\\'' AS pad, secret_col FROM ops_secret WHERE 'x' != E'\\''",
+    "SELECT 1,\u00a0$a$'$a$ AS a, secret_col FROM ops_secret WHERE $b$'$b$ != $b$y$b$",
+    "SELECT 1e'\\'', (SELECT secret_col FROM ops_secret LIMIT 1) AS leaked -- '\nFROM logs",
+    "SELECT $1e'\\'', (SELECT secret_col FROM ops_secret LIMIT 1) AS leaked -- '\nFROM logs",
+    'SELECT status\vFROM logs',
+    'SELECT status\u1680FROM logs',
+    'SELECT status\u2028FROM logs',
+    'SELECT status\x01FROM logs',
+    'WITH p AS (PIVOT_LONGER memory.main.requests ON status) SELECT * FROM p',
+    'WITH p AS (PIVOT_WIDER memory.main.requests ON status) SELECT * FROM p',
+    'WITH p AS (PIVOT_LONGER ops_secret ON secret_col) SELECT * FROM p',
+    'WITH p AS (PIVOT_WIDER ops_secret ON secret_col) SELECT * FROM p',
+    "WITH p AS (PIVOT_LONGER 'https://evil.example/exfil.parquet' ON x) SELECT * FROM p",
+    'SELECT * FROM memory.main.logs',
+    'SELECT * FROM "memory"."main"."logs"',
+    'SELECT * FROM memory.logs',
+    'SELECT memory.logs.status FROM logs',
+    'SELECT "memory"."logs"."status" FROM logs',
+    'SELECT ARRAY(SHOW TABLES) AS all_tbls',
+    "SELECT status FROM logs WHERE 'ops_secret' IN (SHOW TABLES)",
+    'SELECT status FROM logs WHERE EXISTS (SHOW ops_secret)',
+    'SELECT status FROM logs WHERE EXISTS (DESC ops_secret)',
+    'SELECT status FROM logs WHERE EXISTS (DESC)',
+    'DESC logs',
+    'SELECT * FROM (DESCRIBE logs)',
+    'SELECT * FROM (SUMMARIZE logs)',
+    'WITH d AS (DESCRIBE logs) SELECT * FROM d',
+    'SELECT * FROM logs UNION DISTINCT DESCRIBE ops_secret',
+    'SELECT secret_col FROM ops_secret WINDOW w AS (), ops_secret AS ()',
+    'SELECT client_id FROM client_vitals WINDOW w AS (), client_vitals AS ()',
+    'WITH ops_secret AS (SELECT secret_col FROM ops_secret) SELECT * FROM ops_secret',
+    'WITH a AS (SELECT secret_col FROM ops_secret), ops_secret AS (SELECT 1) SELECT * FROM a',
+    'WITH RECURSIVE ops_secret AS (SELECT secret_col FROM ops_secret UNION ALL SELECT secret_col FROM ops_secret WHERE 1=0) SELECT * FROM ops_secret',
+    'SELECT secret_col, (WITH ops_secret AS (SELECT 1) SELECT * FROM ops_secret) AS dummy FROM ops_secret',
+    'SELECT secret_col FROM ops_secret WHERE 1 = (WITH ops_secret AS (SELECT 1) SELECT * FROM ops_secret)',
+    "SELECT secret_col FROM ops_secret UNION ALL (WITH ops_secret AS (SELECT 'x' AS secret_col) SELECT secret_col FROM ops_secret)",
+    "(WITH ops_secret AS (SELECT 'x' AS secret_col) SELECT secret_col FROM ops_secret) UNION ALL SELECT secret_col FROM ops_secret",
     ...OPERATIONAL_TABLE_FUNCTIONS.flatMap((fn) => [
       `SELECT * FROM ${fn}()`,
       `SELECT * FROM range(1), ${fn}()`,
@@ -144,6 +188,13 @@ describe('T5-FE-04: cloud-engine SQL validator adversarial replacement-scan, sch
       'SELECT status IS DISTINCT FROM 200 AS d1, status IS NOT DISTINCT FROM 404 AS d2 FROM logs',
       "SELECT status FROM logs WHERE'ok'='ok'",
       "SELECT E'safe\\'quote' AS q, E'back\\\\slash' AS bs, $é$-- keep /* me */$é$ AS dq FROM logs",
+      'WITH c1 AS (SELECT status, url FROM logs), c2 AS (SELECT * FROM c1) SELECT * FROM c2 ORDER BY status DESC',
+      'WITH c(x) AS (SELECT status FROM logs) SELECT x FROM c',
+      'WITH c AS MATERIALIZED (SELECT status FROM logs), d AS NOT MATERIALIZED (SELECT * FROM c) SELECT * FROM d',
+      'SELECT status, count(*) OVER w AS n FROM logs WINDOW w AS (PARTITION BY status)',
+      "SELECT 1 AS a1e, 'ok' AS s FROM logs WHERE'ok'='ok'",
+      'SELECT $\u00a0$ok$\u00a0$ AS s, status\u00a0FROM\u200blogs',
+      'DESCRIBE TABLE logs',
       'SUMMARIZE logs',
       'DESCRIBE logs',
     ]) {
@@ -173,6 +224,13 @@ describe('T5-FE-04: cloud-engine SQL validator adversarial replacement-scan, sch
     expect(() => stripSqlComments("SELECT E'unclosed\\")).toThrow(SQLValidationError)
     expect(() => stripSqlComments('SELECT /* outer /* inner */ FROM logs')).toThrow(SQLValidationError)
     expect(() => stripSqlComments("SELECT U&'\\0061' FROM logs")).toThrow(SQLValidationError)
+    expect(() => stripSqlComments('SELECT status\vFROM logs')).toThrow(SQLValidationError)
+
+    const unicodeSpaceStripped = stripSqlComments(
+      'SELECT $\u00a0$keep$\u00a0$ AS dq, status\u00a0FROM\u200blogs\u2060WHERE\ufeffstatus = 200',
+    )
+    expect(unicodeSpaceStripped).toContain('$\u00a0$keep$\u00a0$')
+    expect(unicodeSpaceStripped).toContain('status FROM logs WHERE status = 200')
 
     // Wave-2 comment-splice vectors: stripSqlComments preserves $a$...$a$ verbatim so ops_secret is never resurrected
     const splice1 = "SELECT $a$ -- $a$ /*\n$a$, secret_col FROM ops_secret -- */ FROM logs"

@@ -445,4 +445,87 @@ describe('T5-FE-05: cloud-engine executeCloudQuery shadow-masked CTE and handleS
     expect(new TextDecoder().decode(directRedacted[0].utf8Bytes as Uint8Array)).toBe('hit 0.0.0.0 ok')
     expect((directRedacted[0].badBinary as Uint8Array).byteLength).toBe(0)
   })
+
+  it('closes SEC-T5-ITER3-01..03 & Unicode-space differentials: nested subquery WITH collisions, DESCRIBE TABLE PII column stripping, and WINDOW/PIVOT/SHOW/Unicode-ws isolation under maskIps', async () => {
+    const runSql = (sql: string) => engine.executeSql(sql)
+
+    // 1. Nested subquery WITH colliding with reserved/protected tables inside an outer WITH body is rejected with 403
+    for (const nestedCollisionSql of [
+      "WITH outer_cte AS (SELECT * FROM (WITH requests AS (SELECT 'LEAK' AS ip) SELECT * FROM requests)) SELECT * FROM outer_cte",
+      'WITH outer_cte AS (SELECT * FROM logs WHERE EXISTS (WITH "logs" AS (SELECT 1) SELECT * FROM "logs")) SELECT * FROM outer_cte',
+      'WITH outer_cte AS (SELECT * FROM (WITH client_vitals AS (SELECT 1 AS x) SELECT * FROM client_vitals)) SELECT * FROM outer_cte',
+      'WITH outer_cte AS (SELECT * FROM (WITH client_errors AS (SELECT 1 AS x) SELECT * FROM client_errors)) SELECT * FROM outer_cte',
+    ]) {
+      const r = await executeCloudQuery(
+        { sql: nestedCollisionSql },
+        { maskIps: true, tableName: 'requests', allowedTables: ['logs', 'requests'], runSql },
+      )
+      expect(r.status, nestedCollisionSql).toBe(403)
+    }
+
+    // 2. DESCRIBE TABLE logs / DESCRIBE TABLE main.requests strips PII column names under maskIps: true
+    for (const descTableSql of ['DESCRIBE TABLE logs', 'DESCRIBE TABLE main.requests', 'DESCRIBE TABLE "requests"']) {
+      const descRes = await executeCloudQuery(
+        { sql: descTableSql },
+        { maskIps: true, tableName: 'requests', allowedTables: ['logs', 'requests'], runSql },
+      )
+      expect(descRes.status, descTableSql).toBe(200)
+      if ('data' in descRes.body) {
+        const colNames = descRes.body.data.map((r) => String(r.column_name))
+        expect(colNames, descTableSql).toContain('url')
+        expect(colNames, descTableSql).toContain('status')
+        expect(colNames, descTableSql).not.toContain('ip')
+        expect(colNames, descTableSql).not.toContain('cookie_session')
+        expect(colNames, descTableSql).not.toContain('x-forwarded-for')
+      }
+    }
+
+    // 3. Wave-3 PIVOT_LONGER/PIVOT_WIDER, memory catalog, WINDOW fake-CTE, self/sibling/subquery CTE, and subquery SHOW/DESC/DESCRIBE all return 403
+    for (const wave3BlockedSql of [
+      'WITH p AS (PIVOT_LONGER memory.main.requests ON cookie_session) SELECT value AS leaked_sess FROM p',
+      'WITH p AS (PIVOT_WIDER memory.main.requests ON cookie_session) SELECT * FROM p',
+      'SELECT client_id AS leaked_cid, session_id AS leaked_sid FROM client_vitals WINDOW w AS (), client_vitals AS ()',
+      'WITH client_vitals AS (SELECT client_id FROM client_vitals) SELECT * FROM client_vitals',
+      'WITH a AS (SELECT client_id FROM client_vitals), client_vitals AS (SELECT 1) SELECT * FROM a',
+      'SELECT client_id, (WITH client_vitals AS (SELECT 1) SELECT * FROM client_vitals) FROM client_vitals',
+      'SELECT ARRAY(SHOW TABLES) AS all_tbls',
+      "SELECT status FROM logs WHERE 'client_vitals' IN (SHOW TABLES)",
+      'SELECT status FROM logs WHERE EXISTS (DESC client_vitals)',
+      'SELECT * FROM (DESCRIBE logs)',
+      'SELECT * FROM (SUMMARIZE logs)',
+      "SELECT E'a'\u00a0\n'\\'' AS pad, client_id FROM client_vitals WHERE 'x' != E'\\''",
+      "SELECT 1,\u00a0$a$'$a$ AS a, client_id FROM client_vitals WHERE $b$'$b$ != $b$y$b$",
+    ]) {
+      const r = await executeCloudQuery(
+        { sql: wave3BlockedSql },
+        { maskIps: true, tableName: 'requests', allowedTables: ['logs', 'requests'], runSql },
+      )
+      expect(r.status, wave3BlockedSql).toBe(403)
+    }
+
+    // 4. Unicode ZWSP/NBSP around main.requests still rewrites and masks all PII columns cleanly
+    const unicodeMaskedRes = await executeCloudQuery(
+      { sql: "SELECT replace(ip, '.', '_') AS raw_ip, cookie_session AS s FROM\u200bmain.requests" },
+      { maskIps: true, tableName: 'requests', allowedTables: ['logs', 'requests'], runSql },
+    )
+    expect(unicodeMaskedRes.status).toBe(200)
+    const unicodeText = JSON.stringify(unicodeMaskedRes.body)
+    expect(unicodeText).not.toContain('203_0_113')
+    expect(unicodeText).not.toContain('CANARY_SESS_')
+
+    // 5. Benign chained WITH CTEs, ORDER BY ... DESC, and WINDOW clauses execute cleanly with PII masked
+    for (const benignSql of [
+      'WITH c1 AS (SELECT status, ip, cookie_session FROM logs), c2 AS (SELECT * FROM c1) SELECT * FROM c2 ORDER BY status DESC',
+      'SELECT status, count(*) OVER w AS n FROM logs WINDOW w AS (PARTITION BY status)',
+    ]) {
+      const okRes = await executeCloudQuery(
+        { sql: benignSql },
+        { maskIps: true, tableName: 'requests', allowedTables: ['logs', 'requests'], runSql },
+      )
+      expect(okRes.status, benignSql).toBe(200)
+      const okText = JSON.stringify(okRes.body)
+      expect(okText, benignSql).not.toContain('203.0.113.')
+      expect(okText, benignSql).not.toContain('CANARY_SESS_')
+    }
+  })
 })

@@ -685,6 +685,87 @@ def test_t5_c08_cloud_views_redteam_dupkeys_sticky_slots_columns_lambda_concat_a
         "bug-cloud-1-r3-extra-raw-like": json.dumps(
             {"_view_extras": {"sql": "SELECT * FROM logs WHERE _extra LIKE '%198.51.100.7%'"}}
         ),
+        "bug-cloud-1-r4-zwsp-quote-cont": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM logs WHERE _extra->>'clien'\u200b\n't_ip' = '198.51.100.7'"}}
+        ),
+        "bug-cloud-1-r4-bom-blind-fn": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM logs WHERE row_to_json\ufeff(logs)::VARCHAR LIKE '%198.51.100.7%'"}}
+        ),
+        "bug-cloud-1-r4-root-dollar-arrow": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM logs WHERE (_extra->>'$') LIKE '%198.51.100.7%'"}}
+        ),
+        "bug-cloud-1-r4-root-empty-arrow": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM logs WHERE (_extra->>'') LIKE '%198.51.100.7%'"}}
+        ),
+        "bug-cloud-1-r4-json-contains-u-esc": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": r'SELECT * FROM logs WHERE json_contains(_extra, \'{"\u0063lient_ip":"198.51.100.7"}\')'
+                }
+            }
+        ),
+        "bug-cloud-1-r4-json-object-wrap": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT * FROM logs WHERE json_object('safe', _extra)->>'safe' LIKE '%198.51.100.7%'"
+                }
+            }
+        ),
+        "bug-cloud-1-r4-struct-pack-wrap": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT * FROM logs WHERE struct_pack(safe := _extra)['safe'] LIKE '%198.51.100.7%'"
+                }
+            }
+        ),
+        "bug-cloud-1-r4-json-array-int-arrow": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM logs WHERE (json_array(_extra)->>0) LIKE '%198.51.100.7%'"}}
+        ),
+        "bug-cloud-1-r4-case-in-extract-arg0": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT * FROM logs WHERE json_extract_string(CASE WHEN contains(_extra, '198.51.100.7') THEN '{\"safe\":\"1\"}' ELSE '{}' END, '$.safe') = '1'"
+                }
+            }
+        ),
+        "bug-cloud-1-r4-dot-map-extract-concat": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT * FROM logs WHERE kv.map_extract_value('clien' || 't_ip') = '198.51.100.7'"
+                }
+            }
+        ),
+        "bug-cloud-1-r4-query-dynamic-sql": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT * FROM query('SELECT * FROM logs WHERE ' || chr(99) || 'lient_ip = ''198.51.100.7''')"
+                }
+            }
+        ),
+        "bug-cloud-1-r4-map-contains-value": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM logs WHERE map_contains_value(kv, '198.51.100.7')"}}
+        ),
+        "bug-cloud-1-r4-positional-hash-col": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM logs WHERE #2 = '198.51.100.7'"}}
+        ),
+        "bug-cloud-1-r4-unpivot-logs": json.dumps(
+            {"_view_extras": {"sql": "UNPIVOT logs ON (* EXCLUDE (timestamp)) INTO NAME col VALUE val"}}
+        ),
+        "bug-cloud-1-r4-logs-cast-varchar": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM logs WHERE logs::VARCHAR LIKE '%198.51.100.7%'"}}
+        ),
+        "bug-cloud-1-r4-alias-cast-varchar": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM logs AS t WHERE CAST(t AS VARCHAR) LIKE '%198.51.100.7%'"}}
+        ),
+        "bug-cloud-1-r4-cte-row-struct": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "WITH x AS (SELECT * FROM logs) SELECT * FROM x WHERE x::VARCHAR LIKE '%198.51.100.7%'"
+                }
+            }
+        ),
+        "bug-cloud-1-r4-json-map-extra": json.dumps({"_extra": {"mode": "include", "values": ["198.51.100.7"]}}),
+        "bug-cloud-1-r4-json-kv-extra": json.dumps({"_extra": "198.51.100.7"}),
     }
     benign_vectors: dict[str, str] = {
         "benign-columns-safe": json.dumps({"_view_extras": {"sql": "SELECT COLUMNS('^(status|url|pop)$') FROM logs"}}),
@@ -698,6 +779,12 @@ def test_t5_c08_cloud_views_redteam_dupkeys_sticky_slots_columns_lambda_concat_a
         ),
         "benign-json-extract-eq-pii-lit": json.dumps(
             {"_view_extras": {"sql": "SELECT * FROM logs WHERE json_extract_string(_extra, '/meta/pop') = '/ip/sid'"}}
+        ),
+        "benign-r4-alias-qualified-cols": json.dumps(
+            {"_view_extras": {"sql": "SELECT t.status, logs.url FROM logs AS t WHERE t.status = 200"}}
+        ),
+        "benign-r4-dot-chain-safe": json.dumps(
+            {"_view_extras": {"sql": "SELECT (_extra->'headers').json_extract_string('safe_header') FROM logs"}}
         ),
         "benign-4xx-pill": json.dumps(
             {

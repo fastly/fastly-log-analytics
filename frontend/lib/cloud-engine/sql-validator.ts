@@ -161,6 +161,7 @@ export const BLOCKED_SCHEMAS = new Set([
   "duckdb",
   "temp",
   "system",
+  "memory",
 ]);
 
 export const BLOCKED_STATEMENT_KEYWORDS = new Set([
@@ -197,6 +198,9 @@ export const BLOCKED_STATEMENT_KEYWORDS = new Set([
   "deallocate",
   "pivot",
   "unpivot",
+  "pivot_wider",
+  "pivot_longer",
+  "recursive",
 ]);
 
 export const FORBIDDEN_KEYWORDS = BLOCKED_STATEMENT_KEYWORDS;
@@ -238,16 +242,78 @@ export interface ValidationResult {
   elapsedMs: number;
 }
 
+const DUCKDB_UNICODE_SPACE_RE = /[\u00a0\u2000-\u200b\u202f\u205f\u2060\u3000\ufeff]/;
+const DISALLOWED_SQL_CTRL_OR_SEP_RE =
+  /[\x00-\x08\x0b\x0e-\x1f\x7f-\x9f\u1680\u180e\u2028\u2029]/;
 const IDENT_START_RE = /[A-Za-z_\u0080-\uffff]/;
 const IDENT_CONT_RE = /[A-Za-z0-9_$\u0080-\uffff]/;
 const DOLQ_TAG_RE = /^\$(?:[A-Za-z_\u0080-\uffff][A-Za-z0-9_\u0080-\uffff]*)?\$/;
 
+function isSqlHorizSpace(ch: string): boolean {
+  return ch === " " || ch === "\t" || ch === "\f" || DUCKDB_UNICODE_SPACE_RE.test(ch);
+}
+
+function isSqlWhitespace(ch: string): boolean {
+  return ch === "\n" || ch === "\r" || isSqlHorizSpace(ch);
+}
+
 function isIdentStartChar(ch: string): boolean {
-  return ch.length > 0 && IDENT_START_RE.test(ch);
+  return (
+    ch.length > 0 &&
+    !isSqlWhitespace(ch) &&
+    !DISALLOWED_SQL_CTRL_OR_SEP_RE.test(ch) &&
+    IDENT_START_RE.test(ch)
+  );
 }
 
 function isIdentContChar(ch: string): boolean {
-  return ch.length > 0 && IDENT_CONT_RE.test(ch);
+  return (
+    ch.length > 0 &&
+    !isSqlWhitespace(ch) &&
+    !DISALLOWED_SQL_CTRL_OR_SEP_RE.test(ch) &&
+    IDENT_CONT_RE.test(ch)
+  );
+}
+
+function scanSqlNumberEnd(sql: string, start: number): number {
+  const n = sql.length;
+  let i = start + 1;
+  if (sql[start] === "0" && i + 1 < n) {
+    const radix = sql[i];
+    if ((radix === "x" || radix === "X") && /[0-9A-Fa-f_]/.test(sql[i + 1])) {
+      i += 2;
+      while (i < n && /[0-9A-Fa-f_]/.test(sql[i])) i++;
+      return i;
+    }
+    if ((radix === "b" || radix === "B") && /[01_]/.test(sql[i + 1])) {
+      i += 2;
+      while (i < n && /[01_]/.test(sql[i])) i++;
+      return i;
+    }
+    if ((radix === "o" || radix === "O") && /[0-7_]/.test(sql[i + 1])) {
+      i += 2;
+      while (i < n && /[0-7_]/.test(sql[i])) i++;
+      return i;
+    }
+  }
+  while (i < n) {
+    const c = sql[i];
+    if (/[0-9._]/.test(c)) {
+      i++;
+    } else if ((c === "e" || c === "E") && i + 1 < n && /[0-9]/.test(sql[i + 1])) {
+      i += 2;
+    } else if (
+      (c === "e" || c === "E") &&
+      i + 2 < n &&
+      (sql[i + 1] === "+" || sql[i + 1] === "-") &&
+      /[0-9]/.test(sql[i + 2])
+    ) {
+      i += 3;
+    } else {
+      break;
+    }
+  }
+  return i;
 }
 
 /**
@@ -261,7 +327,7 @@ function findQuoteContinuation(sql: string, pos: number): number {
   let sawNewline = false;
   while (j < n) {
     const c = sql[j];
-    if (c === " " || c === "\t" || c === "\f" || c === "\v") {
+    if (isSqlHorizSpace(c)) {
       j++;
       continue;
     }
@@ -291,11 +357,26 @@ export function stripSqlComments(sql: string): string {
   let out = "";
   let i = 0;
   const n = sql.length;
+  let prevTokenWasIdent = false;
 
   while (i < n) {
     const ch = sql[i];
     const next = i + 1 < n ? sql[i + 1] : "";
-    const atWordStart = i === 0 || !isIdentContChar(sql[i - 1]);
+    const atWordStart = !prevTokenWasIdent;
+
+    if (isSqlWhitespace(ch)) {
+      out += DUCKDB_UNICODE_SPACE_RE.test(ch) ? " " : ch;
+      i++;
+      prevTokenWasIdent = false;
+      continue;
+    }
+
+    if (DISALLOWED_SQL_CTRL_OR_SEP_RE.test(ch)) {
+      throw new SQLValidationError(
+        "parse_error",
+        "Query contains unsupported control or separator characters.",
+      );
+    }
 
     // Reject Unicode escape literals (U&'...' / U&"...") outright
     if (
@@ -360,6 +441,9 @@ export function stripSqlComments(sql: string): string {
               i++;
             }
             out += " ";
+          } else if (DUCKDB_UNICODE_SPACE_RE.test(sql[i])) {
+            out += " ";
+            i++;
           } else {
             out += sql[i];
             i++;
@@ -368,6 +452,7 @@ export function stripSqlComments(sql: string): string {
         out += "'";
         i = contQuote + 1;
       }
+      prevTokenWasIdent = false;
       continue;
     }
 
@@ -394,6 +479,7 @@ export function stripSqlComments(sql: string): string {
       if (!closed) {
         throw new SQLValidationError("parse_error", "Unterminated SQL string literal.");
       }
+      prevTokenWasIdent = false;
       continue;
     }
 
@@ -411,6 +497,7 @@ export function stripSqlComments(sql: string): string {
         }
         out += sql.slice(i, endIdx + tag.length);
         i = endIdx + tag.length;
+        prevTokenWasIdent = false;
         continue;
       }
     }
@@ -438,6 +525,7 @@ export function stripSqlComments(sql: string): string {
       if (!closed) {
         throw new SQLValidationError("parse_error", "Unterminated double-quoted identifier.");
       }
+      prevTokenWasIdent = false;
       continue;
     }
 
@@ -448,6 +536,7 @@ export function stripSqlComments(sql: string): string {
         i++;
       }
       out += " ";
+      prevTokenWasIdent = false;
       continue;
     }
 
@@ -470,10 +559,11 @@ export function stripSqlComments(sql: string): string {
         throw new SQLValidationError("parse_error", "Unterminated SQL block comment.");
       }
       out += " ";
+      prevTokenWasIdent = false;
       continue;
     }
 
-    // Scan full identifier word so `WHERE'x'` never triggers `E'x'`
+    // Scan full identifier word so `WHERE'x'` and `a1e'x'` never trigger `E'x'`
     if (isIdentStartChar(ch)) {
       let word = ch;
       i++;
@@ -488,11 +578,22 @@ export function stripSqlComments(sql: string): string {
         );
       }
       out += word;
+      prevTokenWasIdent = true;
+      continue;
+    }
+
+    // Number literal (monolithic parity with `tokenizeSql`)
+    if (/[0-9]/.test(ch)) {
+      const numEnd = scanSqlNumberEnd(sql, i);
+      out += sql.slice(i, numEnd);
+      i = numEnd;
+      prevTokenWasIdent = false;
       continue;
     }
 
     out += ch;
     i++;
+    prevTokenWasIdent = false;
   }
 
   return out;
@@ -532,15 +633,24 @@ export function tokenizeSql(sql: string): SqlToken[] {
   const tokens: SqlToken[] = [];
   let i = 0;
   const n = sql.length;
+  let prevTokenWasIdent = false;
 
   while (i < n) {
     const ch = sql[i];
     const next = i + 1 < n ? sql[i + 1] : "";
-    const atWordStart = i === 0 || !isIdentContChar(sql[i - 1]);
+    const atWordStart = !prevTokenWasIdent;
 
-    if (/\s/.test(ch)) {
+    if (isSqlWhitespace(ch)) {
       i++;
+      prevTokenWasIdent = false;
       continue;
+    }
+
+    if (DISALLOWED_SQL_CTRL_OR_SEP_RE.test(ch)) {
+      throw new SQLValidationError(
+        "parse_error",
+        "Query contains unsupported control or separator characters.",
+      );
     }
 
     // Line comment (`--` terminated by `\n` or `\r`)
@@ -549,6 +659,7 @@ export function tokenizeSql(sql: string): SqlToken[] {
       while (i < n && sql[i] !== "\n" && sql[i] !== "\r") {
         i++;
       }
+      prevTokenWasIdent = false;
       continue;
     }
 
@@ -570,6 +681,7 @@ export function tokenizeSql(sql: string): SqlToken[] {
       if (depth > 0) {
         throw new SQLValidationError("parse_error", "Unterminated SQL block comment.");
       }
+      prevTokenWasIdent = false;
       continue;
     }
 
@@ -632,6 +744,7 @@ export function tokenizeSql(sql: string): SqlToken[] {
         i = contQuote + 1;
       }
       tokens.push({ kind: "string", value: lit, lower: lit.toLowerCase(), start: tokStart, end: i });
+      prevTokenWasIdent = false;
       continue;
     }
 
@@ -666,6 +779,7 @@ export function tokenizeSql(sql: string): SqlToken[] {
         i = contQuote + 1;
       }
       tokens.push({ kind: "string", value: lit, lower: lit.toLowerCase(), start: tokStart, end: i });
+      prevTokenWasIdent = false;
       continue;
     }
 
@@ -682,6 +796,7 @@ export function tokenizeSql(sql: string): SqlToken[] {
         const lit = sql.slice(i + tag.length, endIdx);
         i = endIdx + tag.length;
         tokens.push({ kind: "string", value: lit, lower: lit.toLowerCase(), start: tokStart, end: i });
+        prevTokenWasIdent = false;
         continue;
       }
     }
@@ -710,6 +825,7 @@ export function tokenizeSql(sql: string): SqlToken[] {
         throw new SQLValidationError("parse_error", "Unterminated double-quoted identifier.");
       }
       tokens.push({ kind: "quoted_ident", value: ident, lower: ident.toLowerCase(), start: tokStart, end: i });
+      prevTokenWasIdent = false;
       continue;
     }
 
@@ -730,33 +846,25 @@ export function tokenizeSql(sql: string): SqlToken[] {
         );
       }
       tokens.push({ kind: "word", value: word, lower, start: tokStart, end: i });
+      prevTokenWasIdent = true;
       continue;
     }
 
     // Number literal
     if (/[0-9]/.test(ch)) {
       const tokStart = i;
-      let num = ch;
-      i++;
-      while (i < n) {
-        const c = sql[i];
-        if (/[0-9._]/.test(c)) {
-          num += c;
-          i++;
-        } else if ((c === "e" || c === "E") && i + 1 < n && /[0-9+-]/.test(sql[i + 1])) {
-          num += c + sql[i + 1];
-          i += 2;
-        } else {
-          break;
-        }
-      }
+      const numEnd = scanSqlNumberEnd(sql, i);
+      const num = sql.slice(tokStart, numEnd);
+      i = numEnd;
       tokens.push({ kind: "symbol", value: num, lower: num.toLowerCase(), start: tokStart, end: i });
+      prevTokenWasIdent = false;
       continue;
     }
 
     // Single punctuation symbol
     tokens.push({ kind: "symbol", value: ch, lower: ch, start: i, end: i + 1 });
     i++;
+    prevTokenWasIdent = false;
   }
 
   return tokens;
@@ -888,26 +996,81 @@ export function validateUserSql(
     }
   }
 
-  // Collect CTE aliases defined via `WITH name AS (` or `, name AS (`
-  const cteAliases = new Set<string>();
-  for (let i = 0; i < effectiveLen - 2; i++) {
-    const prev = i > 0 ? tokens[i - 1] : null;
-    const curr = tokens[i];
-    const next1 = tokens[i + 1];
-    const next2 = tokens[i + 2];
-    if (
-      prev &&
-      ((prev.kind === "word" && (prev.lower === "with" || prev.lower === "recursive")) ||
-        (prev.kind === "symbol" && prev.value === ",")) &&
-      (curr.kind === "word" || curr.kind === "quoted_ident") &&
-      next1.kind === "word" &&
-      next1.lower === "as" &&
-      next2.kind === "symbol" &&
-      next2.value === "("
-    ) {
-      cteAliases.add(curr.lower);
+  type ScopedCteEntry = {
+    nameLower: string;
+    activateAfterTokenIdx: number;
+    scopeDepth: number;
+  };
+  const scopedCtes: ScopedCteEntry[] = [];
+
+  const findMatchingCloseParen = (openIdx: number): number => {
+    let depth = 0;
+    for (let p = openIdx; p < effectiveLen; p++) {
+      if (tokens[p].kind === "symbol" && tokens[p].value === "(") {
+        depth++;
+      } else if (tokens[p].kind === "symbol" && tokens[p].value === ")") {
+        depth--;
+        if (depth === 0) return p;
+      }
     }
-  }
+    return -1;
+  };
+
+  const registerWithCtes = (withIdx: number, scopeDepth: number) => {
+    let k = withIdx + 1;
+    while (k < effectiveLen) {
+      const cteNameTok = tokens[k];
+      if (
+        (cteNameTok.kind !== "word" && cteNameTok.kind !== "quoted_ident") ||
+        (cteNameTok.kind === "word" && cteNameTok.lower === "recursive")
+      ) {
+        break;
+      }
+      k++;
+      if (k < effectiveLen && tokens[k].kind === "symbol" && tokens[k].value === "(") {
+        const colClose = findMatchingCloseParen(k);
+        if (colClose === -1) break;
+        k = colClose + 1;
+      }
+      if (!(k < effectiveLen && tokens[k].kind === "word" && tokens[k].lower === "as")) {
+        break;
+      }
+      k++;
+      if (k < effectiveLen && tokens[k].kind === "word" && tokens[k].lower === "not") {
+        k++;
+      }
+      if (k < effectiveLen && tokens[k].kind === "word" && tokens[k].lower === "materialized") {
+        k++;
+      }
+      if (!(k < effectiveLen && tokens[k].kind === "symbol" && tokens[k].value === "(")) {
+        break;
+      }
+      const bodyClose = findMatchingCloseParen(k);
+      if (bodyClose === -1) break;
+      scopedCtes.push({
+        nameLower: cteNameTok.lower,
+        activateAfterTokenIdx: bodyClose,
+        scopeDepth,
+      });
+      if (
+        bodyClose + 1 < effectiveLen &&
+        tokens[bodyClose + 1].kind === "symbol" &&
+        tokens[bodyClose + 1].value === ","
+      ) {
+        k = bodyClose + 2;
+        continue;
+      }
+      break;
+    }
+  };
+
+  const isCteInScope = (lower: string, tokenIdx: number, currentDepth: number): boolean =>
+    scopedCtes.some(
+      (entry) =>
+        entry.nameLower === lower &&
+        tokenIdx > entry.activateAfterTokenIdx &&
+        entry.scopeDepth <= currentDepth,
+    );
 
   const FROM_CLAUSE_END_KEYWORDS = new Set([
     "select",
@@ -928,8 +1091,6 @@ export function validateUserSql(
     "select",
     "with",
     "values",
-    "summarize",
-    "describe",
     "from",
     "table",
   ]);
@@ -979,6 +1140,8 @@ export function validateUserSql(
     objTok: SqlToken,
     afterObj: SqlToken | null,
     allowCte: boolean,
+    tokenIdx: number,
+    currentDepth: number,
   ) => {
     const lower = objTok.lower;
     if (objTok.value.includes("/") || objTok.value.includes("\\") || objTok.value.includes(".")) {
@@ -1004,7 +1167,7 @@ export function validateUserSql(
     } else if (
       allowedTableSet &&
       !allowedTableSet.has(lower) &&
-      !(allowCte && cteAliases.has(lower))
+      !(allowCte && isCteInScope(lower, tokenIdx, currentDepth))
     ) {
       throw new SQLValidationError(
         "table_not_allowed",
@@ -1030,6 +1193,43 @@ export function validateUserSql(
 
     if (tok.kind === "word" || tok.kind === "quoted_ident") {
       checkIdentifierAndCall(tok, prevTok, nextTok);
+    }
+
+    if (tok.kind === "word") {
+      if (
+        i > 0 &&
+        (tok.lower === "show" || tok.lower === "describe" || tok.lower === "summarize")
+      ) {
+        throw new SQLValidationError(
+          "statement_not_allowed",
+          `${tok.value.toUpperCase()} is only permitted as a top-level statement.`,
+        );
+      }
+      if (
+        tok.lower === "desc" &&
+        (i === 0 ||
+          prevTok?.value === "(" ||
+          (prevTok?.kind === "word" &&
+            (prevTok.lower === "union" ||
+              prevTok.lower === "all" ||
+              prevTok.lower === "distinct" ||
+              prevTok.lower === "name" ||
+              prevTok.lower === "intersect" ||
+              prevTok.lower === "except")))
+      ) {
+        throw new SQLValidationError(
+          "statement_not_allowed",
+          "DESC statement shorthand is not permitted; use top-level DESCRIBE <table>.",
+        );
+      }
+      if (
+        tok.lower === "with" &&
+        (i === 0 ||
+          prevTok?.value === "(" ||
+          (i === 1 && (tokens[0].lower === "summarize" || tokens[0].lower === "describe")))
+      ) {
+        registerWithCtes(i, parenStack.length);
+      }
     }
 
     if (tok.kind === "symbol" && tok.value === "(") {
@@ -1090,6 +1290,11 @@ export function validateUserSql(
       if (!frame) {
         throw new SQLValidationError("parse_error", "Unbalanced closing parenthesis.");
       }
+      for (let c = scopedCtes.length - 1; c >= 0; c--) {
+        if (scopedCtes[c].scopeDepth > parenStack.length) {
+          scopedCtes.splice(c, 1);
+        }
+      }
       inFromClause = frame.savedInFrom;
       expectingTableRef = false;
       continue;
@@ -1118,6 +1323,7 @@ export function validateUserSql(
             (prevTok?.kind === "word" &&
               (prevTok.lower === "union" ||
                 prevTok.lower === "all" ||
+                prevTok.lower === "distinct" ||
                 prevTok.lower === "name" ||
                 prevTok.lower === "intersect" ||
                 prevTok.lower === "except")))
@@ -1193,12 +1399,12 @@ export function validateUserSql(
             );
           }
           checkIdentifierAndCall(objTok, nextTok, afterObj);
-          validateTableObjectToken(objTok, afterObj, false);
+          validateTableObjectToken(objTok, afterObj, false, i + 2, parenStack.length);
           i += 2;
           expectingTableRef = false;
           continue;
         }
-        validateTableObjectToken(tok, nextTok, true);
+        validateTableObjectToken(tok, nextTok, true, i, parenStack.length);
         expectingTableRef = false;
       } else {
         throw new SQLValidationError("parse_error", "Expected table reference.");

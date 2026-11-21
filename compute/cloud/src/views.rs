@@ -149,9 +149,33 @@ fn is_pii_key_exact(candidate: &str) -> bool {
 
 const MAX_JSON_DEPTH: usize = 16;
 
+fn is_sql_unicode_ws(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '\u{200b}' | '\u{2060}' | '\u{feff}')
+}
+
+fn trim_sql_ws(s: &str) -> &str {
+    s.trim_matches(is_sql_unicode_ws)
+}
+
+fn is_extra_column_ident(raw: &str) -> bool {
+    let trimmed = trim_sql_ws(raw)
+        .trim_start_matches(['+', '-', '!', '$'])
+        .trim_matches(|c| matches!(c, '"' | '\'' | '`' | '[' | ']' | '{' | '}'));
+    if trimmed.eq_ignore_ascii_case("_extra") {
+        return true;
+    }
+    trimmed
+        .split(['.', ':', '[', ']', '{', '}', ','])
+        .any(|seg| {
+            let s = trim_sql_ws(seg)
+                .trim_start_matches(['+', '-', '!', '$'])
+                .trim_matches(|c| matches!(c, '"' | '\'' | '`' | '[' | ']' | '{' | '}'));
+            s.eq_ignore_ascii_case("_extra")
+        })
+}
+
 fn is_pii_identifier(raw: &str) -> bool {
-    let trimmed = raw
-        .trim()
+    let trimmed = trim_sql_ws(raw)
         .trim_start_matches(['+', '-', '!', '$'])
         .trim_matches(|c| matches!(c, '"' | '\'' | '`' | '[' | ']' | '{' | '}'));
     if is_pii_key_exact(trimmed) {
@@ -160,19 +184,99 @@ fn is_pii_identifier(raw: &str) -> bool {
     trimmed
         .split(['.', ':', '[', ']', '{', '}', ','])
         .any(|segment| {
-            let seg = segment
-                .trim()
+            let seg = trim_sql_ws(segment)
                 .trim_start_matches(['+', '-', '!', '$'])
                 .trim_matches(|c| matches!(c, '"' | '\'' | '`' | '[' | ']' | '{' | '}'));
             !seg.is_empty() && is_pii_key_exact(seg)
         })
 }
 
-fn is_pii_key_or_json_path(raw: &str) -> bool {
-    if raw.contains('*') || raw.contains('?') || is_pii_identifier(raw) {
+fn decode_rfc8259_escapes(raw: &str) -> Option<String> {
+    let bytes = raw.as_bytes();
+    let mut out = String::with_capacity(raw.len());
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        if bytes[idx] != b'\\' {
+            let ch = raw.get(idx..)?.chars().next()?;
+            out.push(ch);
+            idx += ch.len_utf8();
+            continue;
+        }
+        let esc = *bytes.get(idx + 1)?;
+        match esc {
+            b'"' => {
+                out.push('"');
+                idx += 2;
+            }
+            b'\\' => {
+                out.push('\\');
+                idx += 2;
+            }
+            b'/' => {
+                out.push('/');
+                idx += 2;
+            }
+            b'b' => {
+                out.push('\x08');
+                idx += 2;
+            }
+            b'f' => {
+                out.push('\x0c');
+                idx += 2;
+            }
+            b'n' => {
+                out.push('\n');
+                idx += 2;
+            }
+            b'r' => {
+                out.push('\r');
+                idx += 2;
+            }
+            b't' => {
+                out.push('\t');
+                idx += 2;
+            }
+            b'u' => {
+                let hex_hi = std::str::from_utf8(bytes.get(idx + 2..idx + 6)?).ok()?;
+                let hi = u16::from_str_radix(hex_hi, 16).ok()?;
+                if (0xD800..=0xDBFF).contains(&hi) {
+                    if bytes.get(idx + 6) != Some(&b'\\') || bytes.get(idx + 7) != Some(&b'u') {
+                        return None;
+                    }
+                    let hex_lo = std::str::from_utf8(bytes.get(idx + 8..idx + 12)?).ok()?;
+                    let lo = u16::from_str_radix(hex_lo, 16).ok()?;
+                    if !(0xDC00..=0xDFFF).contains(&lo) {
+                        return None;
+                    }
+                    let cp = 0x10000 + ((u32::from(hi - 0xD800)) << 10) + u32::from(lo - 0xDC00);
+                    out.push(char::from_u32(cp)?);
+                    idx += 12;
+                } else if (0xDC00..=0xDFFF).contains(&hi) {
+                    return None;
+                } else {
+                    out.push(char::from_u32(u32::from(hi))?);
+                    idx += 6;
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+fn check_single_key_or_json_path(raw: &str) -> bool {
+    let trimmed = trim_sql_ws(raw);
+    if trimmed.is_empty()
+        || matches!(trimmed, "$" | "/" | "{}" | "[]")
+        || trimmed.ends_with('.')
+        || trimmed.contains("..")
+        || !trimmed.bytes().any(|b| b.is_ascii_alphabetic())
+    {
         return true;
     }
-    let trimmed = raw.trim();
+    if raw.contains('*') || raw.contains('?') || is_pii_identifier(trimmed) {
+        return true;
+    }
     if trimmed.starts_with('/') {
         return trimmed.split('/').any(|seg| {
             if seg.is_empty() {
@@ -185,6 +289,21 @@ fn is_pii_key_or_json_path(raw: &str) -> bool {
                         .split('/')
                         .any(|sub| !sub.is_empty() && is_pii_identifier(sub)))
         });
+    }
+    false
+}
+
+fn is_pii_key_or_json_path(raw: &str) -> bool {
+    if check_single_key_or_json_path(raw) {
+        return true;
+    }
+    if raw.contains('\\') {
+        let Some(decoded) = decode_rfc8259_escapes(raw) else {
+            return true;
+        };
+        if check_single_key_or_json_path(&decoded) {
+            return true;
+        }
     }
     false
 }
@@ -377,7 +496,7 @@ fn skip_ws_and_comments(s: &str, mut i: usize) -> Option<usize> {
         }
         if bytes[i] >= 0x80 {
             if let Some(ch) = s.get(i..).and_then(|tail| tail.chars().next()) {
-                if ch.is_whitespace() {
+                if is_sql_unicode_ws(ch) {
                     i += ch.len_utf8();
                     continue;
                 }
@@ -490,7 +609,7 @@ fn is_extract_fn_name(token: &str) -> bool {
 
 fn is_blind_pii_fn(token: &str) -> bool {
     matches!(
-        token.trim().to_ascii_lowercase().as_str(),
+        trim_sql_ws(token).to_ascii_lowercase().as_str(),
         "struct_extract_at"
             | "json_each"
             | "json_tree"
@@ -502,7 +621,109 @@ fn is_blind_pii_fn(token: &str) -> bool {
             | "struct_values"
             | "map_values"
             | "map_entries"
+            | "query"
+            | "query_table"
+            | "json_execute_serialized_sql"
+            | "json_deserialize_sql"
+            | "json_serialize_sql"
+            | "json_serialize_plan"
+            | "map_contains_value"
+            | "map_keys"
+            | "struct_indexof"
+            | "struct_position"
+            | "struct_keys"
+            | "remap_struct"
+            | "struct_insert"
+            | "struct_update"
+            | "struct_concat"
+            | "json_pretty"
+            | "json_group_array"
+            | "json_group_object"
+            | "json_group_structure"
+            | "json_structure"
     )
+}
+
+fn is_blocked_sql_keyword(token: &str) -> bool {
+    matches!(
+        trim_sql_ws(token).to_ascii_lowercase().as_str(),
+        "uescape" | "pivot" | "unpivot" | "pivot_wider" | "pivot_longer"
+    )
+}
+
+fn is_safe_json_cast_fn(token: &str) -> bool {
+    matches!(
+        trim_sql_ws(token).to_ascii_lowercase().as_str(),
+        "cast" | "try_cast" | "json" | "json_parse"
+    )
+}
+
+fn is_non_call_sql_keyword(token: &str) -> bool {
+    matches!(
+        trim_sql_ws(token).to_ascii_lowercase().as_str(),
+        "select"
+            | "distinct"
+            | "all"
+            | "where"
+            | "and"
+            | "or"
+            | "not"
+            | "xor"
+            | "is"
+            | "on"
+            | "using"
+            | "when"
+            | "then"
+            | "else"
+            | "having"
+            | "qualify"
+            | "group"
+            | "order"
+            | "by"
+            | "partition"
+            | "over"
+            | "filter"
+            | "between"
+            | "like"
+            | "ilike"
+            | "similar"
+            | "to"
+            | "from"
+            | "join"
+            | "union"
+            | "intersect"
+            | "except"
+            | "as"
+            | "asc"
+            | "desc"
+            | "nulls"
+            | "first"
+            | "last"
+            | "limit"
+            | "offset"
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ParenKind {
+    PlainGroup,
+    SafeJsonCast,
+    ExtractFn,
+    OtherFn,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PendingCallKind {
+    None,
+    SafeJsonCast,
+    ExtractFn,
+    OtherFn,
+}
+
+fn starts_with_sql_string_key(s: &str, pos: usize) -> bool {
+    let bytes = s.as_bytes();
+    matches!(bytes.get(pos), Some(b'\'' | b'$'))
+        || (matches!(bytes.get(pos), Some(b'E' | b'e')) && bytes.get(pos + 1) == Some(&b'\''))
 }
 
 fn read_json_type_ident(s: &str, k: usize) -> Option<usize> {
@@ -527,7 +748,7 @@ fn read_json_type_ident(s: &str, k: usize) -> Option<usize> {
                 m += 1;
             }
         }
-        if !closed || !tbuf.trim().eq_ignore_ascii_case("json") {
+        if !closed || !trim_sql_ws(&tbuf).eq_ignore_ascii_case("json") {
             return None;
         }
         return Some(m);
@@ -539,9 +760,18 @@ fn read_json_type_ident(s: &str, k: usize) -> Option<usize> {
     (m > k && s[k..m].eq_ignore_ascii_case("json")).then_some(m)
 }
 
-fn extra_is_safely_extracted(s: &str, after_ident: usize, in_extract_container_arg: bool) -> bool {
+struct ExtraExtractCtx<'a> {
+    paren_stack: &'a [(ParenKind, bool)],
+    extract_stack: &'a [(u32, u32, u32, u32)],
+    bracket_depth: u32,
+    brace_depth: u32,
+    case_depth: u32,
+}
+
+fn extra_is_safely_extracted(s: &str, after_ident: usize, ctx: &ExtraExtractCtx<'_>) -> bool {
     let bytes = s.as_bytes();
     let mut pos = after_ident;
+    let mut unconsumed = ctx.paren_stack.len();
     loop {
         let Some(j) = skip_ws_and_comments(s, pos) else {
             return false;
@@ -562,6 +792,13 @@ fn extra_is_safely_extracted(s: &str, after_ident: usize, in_extract_container_a
                 .get(j + 2)
                 .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
         {
+            if unconsumed == 0 {
+                return false;
+            }
+            let (frame_kind, trivial_prefix) = ctx.paren_stack[unconsumed - 1];
+            if frame_kind != ParenKind::SafeJsonCast || !trivial_prefix {
+                return false;
+            }
             let Some(k) = skip_ws_and_comments(s, j + 2) else {
                 return false;
             };
@@ -574,31 +811,504 @@ fn extra_is_safely_extracted(s: &str, after_ident: usize, in_extract_container_a
             if bytes.get(close_idx) != Some(&b')') {
                 return false;
             }
+            unconsumed -= 1;
             pos = close_idx + 1;
             continue;
         }
         if bytes.get(j) == Some(&b')') {
+            if unconsumed == 0 {
+                return false;
+            }
+            let (frame_kind, trivial_prefix) = ctx.paren_stack[unconsumed - 1];
+            if !trivial_prefix
+                || !matches!(frame_kind, ParenKind::PlainGroup | ParenKind::SafeJsonCast)
+            {
+                return false;
+            }
+            unconsumed -= 1;
             pos = j + 1;
             continue;
         }
-        if in_extract_container_arg && bytes.get(j) == Some(&b',') {
-            return true;
+        if bytes.get(j) == Some(&b',') {
+            if ctx.case_depth != 0 || unconsumed == 0 {
+                return false;
+            }
+            let (frame_kind, trivial_prefix) = ctx.paren_stack[unconsumed - 1];
+            if frame_kind != ParenKind::ExtractFn || !trivial_prefix {
+                return false;
+            }
+            let eff_paren_depth = u32::try_from(unconsumed).unwrap_or(u32::MAX);
+            return ctx.extract_stack.last().is_some_and(|f| {
+                f.0 == eff_paren_depth
+                    && f.1 == ctx.bracket_depth
+                    && f.2 == ctx.brace_depth
+                    && f.3 == 0
+            });
         }
         if matches!(bytes.get(j), Some(b'-' | b'#')) && bytes.get(j + 1) == Some(&b'>') {
-            return true;
+            let after_arrow = if bytes.get(j + 2) == Some(&b'>') {
+                j + 3
+            } else {
+                j + 2
+            };
+            return skip_ws_and_comments(s, after_arrow)
+                .is_some_and(|m| starts_with_sql_string_key(s, m));
         }
         if bytes.get(j) == Some(&b'[') {
             return skip_ws_and_comments(s, j + 1)
-                .is_some_and(|m| !bytes.get(m).is_some_and(u8::is_ascii_digit));
+                .is_some_and(|m| starts_with_sql_string_key(s, m));
         }
         return false;
     }
 }
 
+enum RelTok {
+    Ident {
+        lower: String,
+        quoted: bool,
+        followed_by_dot: bool,
+        followed_by_open_paren: bool,
+    },
+    LParen,
+    RParen,
+    Comma,
+    Dot,
+    Other,
+}
+
+fn find_matching_rel_rparen(tokens: &[RelTok], open_idx: usize) -> Option<usize> {
+    let mut depth = 0u32;
+    for (idx, tok) in tokens.iter().enumerate().skip(open_idx) {
+        match tok {
+            RelTok::LParen => depth = depth.saturating_add(1),
+            RelTok::RParen => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(idx);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn is_rel_distinct_from_op(tokens: &[RelTok], idx: usize) -> bool {
+    let Some(RelTok::Ident {
+        lower: p1,
+        quoted: false,
+        ..
+    }) = idx.checked_sub(1).and_then(|p| tokens.get(p))
+    else {
+        return false;
+    };
+    if p1 != "distinct" {
+        return false;
+    }
+    let Some(RelTok::Ident {
+        lower: p2,
+        quoted: false,
+        ..
+    }) = idx.checked_sub(2).and_then(|p| tokens.get(p))
+    else {
+        return false;
+    };
+    if p2 == "is" {
+        return true;
+    }
+    if p2 == "not" {
+        return matches!(
+            idx.checked_sub(3).and_then(|p| tokens.get(p)),
+            Some(RelTok::Ident {
+                lower: p3,
+                quoted: false,
+                ..
+            }) if p3 == "is"
+        );
+    }
+    false
+}
+
+fn is_from_alias_stop_keyword(lower: &str) -> bool {
+    matches!(
+        lower,
+        "where"
+            | "group"
+            | "having"
+            | "window"
+            | "qualify"
+            | "order"
+            | "limit"
+            | "offset"
+            | "fetch"
+            | "union"
+            | "intersect"
+            | "except"
+            | "on"
+            | "using"
+            | "join"
+            | "inner"
+            | "left"
+            | "right"
+            | "full"
+            | "outer"
+            | "cross"
+            | "natural"
+            | "semi"
+            | "anti"
+            | "positional"
+            | "asof"
+            | "sample"
+            | "tablesample"
+            | "lateral"
+            | "pivot"
+            | "unpivot"
+            | "pivot_wider"
+            | "pivot_longer"
+            | "select"
+            | "set"
+            | "values"
+            | "into"
+            | "returning"
+            | "for"
+    )
+}
+
+fn references_whole_row_relation_struct(tokens: &[RelTok]) -> bool {
+    let mut declared_relations = std::collections::BTreeSet::new();
+    let mut decl_indices = std::collections::BTreeSet::new();
+    // (was_from_rel_paren, saved_in_from, is_scalar_expr_paren)
+    let mut paren_frames: Vec<(bool, bool, bool)> = Vec::new();
+    let mut in_from = false;
+    let mut expect_rel = false;
+    let mut expect_opt_alias = false;
+
+    let mut idx = 0usize;
+    while idx < tokens.len() {
+        let in_scalar_paren = paren_frames.last().is_some_and(|f| f.2);
+
+        if let RelTok::Ident {
+            lower,
+            quoted: false,
+            ..
+        } = &tokens[idx]
+        {
+            if lower == "with" && (idx == 0 || matches!(tokens.get(idx - 1), Some(RelTok::LParen)))
+            {
+                let mut k = idx + 1;
+                if matches!(
+                    tokens.get(k),
+                    Some(RelTok::Ident {
+                        lower: kw,
+                        quoted: false,
+                        ..
+                    }) if kw == "recursive"
+                ) {
+                    k += 1;
+                }
+                while let Some(RelTok::Ident {
+                    lower: cte_name, ..
+                }) = tokens.get(k)
+                {
+                    let mut after_name = k + 1;
+                    if matches!(tokens.get(after_name), Some(RelTok::LParen)) {
+                        let Some(col_close) = find_matching_rel_rparen(tokens, after_name) else {
+                            break;
+                        };
+                        after_name = col_close + 1;
+                    }
+                    if !matches!(
+                        tokens.get(after_name),
+                        Some(RelTok::Ident {
+                            lower: kw,
+                            quoted: false,
+                            ..
+                        }) if kw == "as"
+                    ) {
+                        break;
+                    }
+                    let mut body_open = after_name + 1;
+                    if matches!(
+                        tokens.get(body_open),
+                        Some(RelTok::Ident {
+                            lower: kw,
+                            quoted: false,
+                            ..
+                        }) if kw == "not"
+                    ) {
+                        body_open += 1;
+                    }
+                    if matches!(
+                        tokens.get(body_open),
+                        Some(RelTok::Ident {
+                            lower: kw,
+                            quoted: false,
+                            ..
+                        }) if kw == "materialized"
+                    ) {
+                        body_open += 1;
+                    }
+                    if !matches!(tokens.get(body_open), Some(RelTok::LParen)) {
+                        break;
+                    }
+                    let Some(body_close) = find_matching_rel_rparen(tokens, body_open) else {
+                        break;
+                    };
+                    declared_relations.insert(cte_name.clone());
+                    decl_indices.insert(k);
+                    if matches!(tokens.get(body_close + 1), Some(RelTok::Comma)) {
+                        k = body_close + 2;
+                        continue;
+                    }
+                    break;
+                }
+            }
+        }
+
+        match &tokens[idx] {
+            RelTok::LParen => {
+                let mut look = idx + 1;
+                while matches!(tokens.get(look), Some(RelTok::LParen)) {
+                    look += 1;
+                }
+                let is_trim_from = look == idx + 1
+                    && matches!(
+                        tokens.get(look),
+                        Some(RelTok::Ident {
+                            lower: kw,
+                            quoted: false,
+                            ..
+                        }) if kw == "from"
+                    )
+                    && idx > 0
+                    && matches!(
+                        tokens.get(idx - 1),
+                        Some(RelTok::Ident {
+                            lower: fn_kw,
+                            quoted: false,
+                            ..
+                        }) if matches!(fn_kw.as_str(), "trim" | "btrim" | "ltrim" | "rtrim")
+                    );
+                let has_subquery_head = !is_trim_from
+                    && matches!(
+                        tokens.get(look),
+                        Some(RelTok::Ident {
+                            lower: kw,
+                            quoted: false,
+                            ..
+                        }) if matches!(kw.as_str(), "select" | "with" | "values" | "from" | "table")
+                    );
+                if expect_rel && !(has_subquery_head && look == idx + 1) {
+                    paren_frames.push((true, in_from, false));
+                    in_from = true;
+                    expect_rel = !has_subquery_head;
+                    expect_opt_alias = false;
+                } else if has_subquery_head {
+                    paren_frames.push((expect_rel, in_from, false));
+                    in_from = false;
+                    expect_rel = false;
+                    expect_opt_alias = false;
+                } else {
+                    paren_frames.push((false, in_from, true));
+                    expect_rel = false;
+                    expect_opt_alias = false;
+                }
+                idx += 1;
+                continue;
+            }
+            RelTok::RParen => {
+                if let Some((was_from_rel_paren, saved_in_from, _)) = paren_frames.pop() {
+                    in_from = saved_in_from;
+                    expect_rel = false;
+                    expect_opt_alias = was_from_rel_paren;
+                }
+                idx += 1;
+                continue;
+            }
+            _ => {}
+        }
+
+        if in_scalar_paren {
+            idx += 1;
+            continue;
+        }
+
+        if let RelTok::Ident {
+            lower,
+            quoted: false,
+            ..
+        } = &tokens[idx]
+        {
+            let prev_is_dot = idx > 0 && matches!(tokens.get(idx - 1), Some(RelTok::Dot));
+            if (lower == "from" && !is_rel_distinct_from_op(tokens, idx))
+                || lower == "join"
+                || (lower == "table" && !prev_is_dot)
+            {
+                in_from = true;
+                expect_rel = true;
+                expect_opt_alias = false;
+                idx += 1;
+                continue;
+            }
+            if in_from
+                && matches!(
+                    lower.as_str(),
+                    "select"
+                        | "where"
+                        | "group"
+                        | "having"
+                        | "window"
+                        | "qualify"
+                        | "order"
+                        | "limit"
+                        | "offset"
+                        | "fetch"
+                        | "union"
+                        | "intersect"
+                        | "except"
+                        | "set"
+                )
+            {
+                in_from = false;
+                expect_rel = false;
+                expect_opt_alias = false;
+                idx += 1;
+                continue;
+            }
+            if in_from && matches!(lower.as_str(), "on" | "using") {
+                expect_rel = false;
+                expect_opt_alias = false;
+                idx += 1;
+                continue;
+            }
+        }
+
+        if in_from && matches!(tokens[idx], RelTok::Comma) {
+            expect_rel = true;
+            expect_opt_alias = false;
+            idx += 1;
+            continue;
+        }
+
+        if expect_rel {
+            if let RelTok::Ident {
+                lower,
+                quoted,
+                followed_by_dot,
+                followed_by_open_paren,
+            } = &tokens[idx]
+            {
+                if !*quoted && lower == "lateral" {
+                    idx += 1;
+                    continue;
+                }
+                if *followed_by_dot {
+                    decl_indices.insert(idx);
+                    idx += 1;
+                    continue;
+                }
+                if *followed_by_open_paren {
+                    if let Some(rp) = find_matching_rel_rparen(tokens, idx + 1) {
+                        expect_rel = false;
+                        expect_opt_alias = true;
+                        idx = rp + 1;
+                        continue;
+                    }
+                }
+                declared_relations.insert(lower.clone());
+                decl_indices.insert(idx);
+                expect_rel = false;
+                expect_opt_alias = true;
+                idx += 1;
+                continue;
+            }
+            if !matches!(tokens[idx], RelTok::Dot) {
+                expect_rel = false;
+            }
+            idx += 1;
+            continue;
+        }
+
+        if expect_opt_alias {
+            if let RelTok::Ident { lower, quoted, .. } = &tokens[idx] {
+                if !*quoted && lower == "as" {
+                    if let Some(RelTok::Ident {
+                        lower: alias_lower, ..
+                    }) = tokens.get(idx + 1)
+                    {
+                        declared_relations.insert(alias_lower.clone());
+                        decl_indices.insert(idx + 1);
+                        expect_opt_alias = false;
+                        if matches!(tokens.get(idx + 2), Some(RelTok::LParen)) {
+                            if let Some(rp) = find_matching_rel_rparen(tokens, idx + 2) {
+                                idx = rp + 1;
+                                continue;
+                            }
+                        }
+                        idx += 2;
+                        continue;
+                    }
+                } else if *quoted || !is_from_alias_stop_keyword(lower) {
+                    declared_relations.insert(lower.clone());
+                    decl_indices.insert(idx);
+                    expect_opt_alias = false;
+                    if matches!(tokens.get(idx + 1), Some(RelTok::LParen)) {
+                        if let Some(rp) = find_matching_rel_rparen(tokens, idx + 1) {
+                            idx = rp + 1;
+                            continue;
+                        }
+                    }
+                    idx += 1;
+                    continue;
+                }
+            }
+            expect_opt_alias = false;
+        }
+
+        idx += 1;
+    }
+
+    if declared_relations.is_empty() {
+        return false;
+    }
+
+    for (idx, tok) in tokens.iter().enumerate() {
+        if let RelTok::Ident {
+            lower,
+            followed_by_dot,
+            ..
+        } = tok
+        {
+            if decl_indices.contains(&idx) || *followed_by_dot {
+                continue;
+            }
+            if idx > 0 && matches!(tokens.get(idx - 1), Some(RelTok::Dot)) {
+                continue;
+            }
+            if idx > 0
+                && matches!(
+                    tokens.get(idx - 1),
+                    Some(RelTok::Ident {
+                        lower: prev_kw,
+                        quoted: false,
+                        ..
+                    }) if prev_kw == "as"
+                )
+            {
+                continue;
+            }
+            if declared_relations.contains(lower) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Single-pass `O(N)` DuckDB/PostgreSQL SQL & filter-expression lexical scanner.
 /// Fails closed (`true`) on unterminated comments, quotes, escapes, `UESCAPE`, or brackets.
 fn sql_or_filter_references_pii(text: &str) -> bool {
-    let s = text.trim();
+    let s = trim_sql_ws(text);
     if s.is_empty() {
         return false;
     }
@@ -607,6 +1317,12 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
     let mut bracket_depth = 0u32;
     let mut brace_depth = 0u32;
     let mut paren_depth = 0u32;
+    let mut case_depth = 0u32;
+    let mut paren_stack: Vec<(ParenKind, bool)> = Vec::new();
+    let mut pending_call = PendingCallKind::None;
+    let mut pending_extract_dot_chain = false;
+    let mut prev_was_dot = false;
+    let mut rel_tokens: Vec<RelTok> = Vec::new();
     let mut subscript_depths: Vec<u32> = Vec::new();
     let mut brace_stack: Vec<(u32, u32, bool)> = Vec::new();
     let mut pending_extract_fn = false;
@@ -626,7 +1342,7 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
         }
         if bytes[i] >= 0x80 {
             if let Some(ch) = s.get(i..).and_then(|tail| tail.chars().next()) {
-                if ch.is_whitespace() {
+                if is_sql_unicode_ws(ch) {
                     i += ch.len_utf8();
                     continue;
                 }
@@ -787,8 +1503,15 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             {
                 return true;
             }
+            if let Some(top) = paren_stack.last_mut() {
+                top.1 = false;
+            }
+            rel_tokens.push(RelTok::Other);
+            pending_call = PendingCallKind::None;
             pending_extract_fn = false;
+            pending_extract_dot_chain = false;
             pending_columns_fn = false;
+            prev_was_dot = false;
             last_sig = LastSig::Other;
             continue;
         }
@@ -842,8 +1565,15 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
                     return true;
                 }
                 i = after;
+                if let Some(top) = paren_stack.last_mut() {
+                    top.1 = false;
+                }
+                rel_tokens.push(RelTok::Other);
+                pending_call = PendingCallKind::None;
                 pending_extract_fn = false;
+                pending_extract_dot_chain = false;
                 pending_columns_fn = false;
+                prev_was_dot = false;
                 last_sig = LastSig::Other;
                 continue;
             }
@@ -851,8 +1581,15 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
                 return true;
             }
             i += 1;
+            if let Some(top) = paren_stack.last_mut() {
+                top.1 = false;
+            }
+            rel_tokens.push(RelTok::Other);
+            pending_call = PendingCallKind::None;
             pending_extract_fn = false;
+            pending_extract_dot_chain = false;
             pending_columns_fn = false;
+            prev_was_dot = false;
             last_sig = LastSig::Other;
             continue;
         }
@@ -893,28 +1630,59 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
                     return true;
                 }
             }
-            if !closed || is_pii_identifier(&ident_buf) {
+            if !closed || is_pii_identifier(&ident_buf) || is_blocked_sql_keyword(&ident_buf) {
                 return true;
             }
-            if is_blind_pii_fn(&ident_buf) && next_non_ws_or_comment_is_open_paren(s, i) {
+            let followed_by_dot =
+                skip_ws_and_comments(s, i).is_some_and(|j| bytes.get(j) == Some(&b'.'));
+            let followed_by_open_paren = next_non_ws_or_comment_is_open_paren(s, i);
+            if is_blind_pii_fn(&ident_buf) && followed_by_open_paren {
                 return true;
             }
-            if ident_buf.trim().eq_ignore_ascii_case("_extra")
-                && !extra_is_safely_extracted(
-                    s,
-                    i,
-                    !extract_stack.is_empty() && !in_extract_key_arg,
-                )
+            let ident_trimmed = trim_sql_ws(&ident_buf);
+            let extra_ctx = ExtraExtractCtx {
+                paren_stack: &paren_stack,
+                extract_stack: &extract_stack,
+                bracket_depth,
+                brace_depth,
+                case_depth,
+            };
+            if ident_trimmed.eq_ignore_ascii_case("_extra")
+                && !extra_is_safely_extracted(s, i, &extra_ctx)
             {
                 return true;
             }
             if (in_subscript || in_brace_key)
-                && (is_dynamic_key_fn(&ident_buf) || next_non_ws_or_comment_is_open_paren(s, i))
+                && (is_dynamic_key_fn(&ident_buf) || followed_by_open_paren)
             {
                 return true;
             }
+            let was_dot = prev_was_dot;
+            prev_was_dot = false;
+            let preserves_trivial_prefix = ident_trimmed.eq_ignore_ascii_case("_extra")
+                || followed_by_dot
+                || (!was_dot && followed_by_open_paren && is_safe_json_cast_fn(ident_trimmed));
+            if !preserves_trivial_prefix {
+                if let Some(top) = paren_stack.last_mut() {
+                    top.1 = false;
+                }
+            }
             pending_extract_fn = is_extract_fn_name(&ident_buf);
-            pending_columns_fn = ident_buf.trim().eq_ignore_ascii_case("columns");
+            pending_extract_dot_chain = pending_extract_fn && was_dot;
+            pending_call = if pending_extract_fn {
+                PendingCallKind::ExtractFn
+            } else if !was_dot && is_safe_json_cast_fn(ident_trimmed) {
+                PendingCallKind::SafeJsonCast
+            } else {
+                PendingCallKind::OtherFn
+            };
+            pending_columns_fn = ident_trimmed.eq_ignore_ascii_case("columns");
+            rel_tokens.push(RelTok::Ident {
+                lower: ident_trimmed.to_ascii_lowercase(),
+                quoted: true,
+                followed_by_dot,
+                followed_by_open_paren,
+            });
             last_sig = LastSig::IdentOrClose;
             continue;
         }
@@ -938,9 +1706,16 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             if last_sig == LastSig::IdentOrClose {
                 subscript_depths.push(bracket_depth);
             }
+            if let Some(top) = paren_stack.last_mut() {
+                top.1 = false;
+            }
+            rel_tokens.push(RelTok::Other);
             last_sig = LastSig::Other;
+            pending_call = PendingCallKind::None;
             pending_extract_fn = false;
+            pending_extract_dot_chain = false;
             pending_columns_fn = false;
+            prev_was_dot = false;
             i += 1;
             continue;
         }
@@ -960,8 +1735,15 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
                 subscript_depths.pop();
             }
             bracket_depth -= 1;
+            if let Some(top) = paren_stack.last_mut() {
+                top.1 = false;
+            }
+            rel_tokens.push(RelTok::Other);
+            pending_call = PendingCallKind::None;
             pending_extract_fn = false;
+            pending_extract_dot_chain = false;
             pending_columns_fn = false;
+            prev_was_dot = false;
             last_sig = LastSig::IdentOrClose;
             i += 1;
             continue;
@@ -1000,34 +1782,68 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
                 }
             }
             let token = &s[start..end];
-            if is_pii_identifier(token) {
+            if is_pii_identifier(token) || is_blocked_sql_keyword(token) {
                 return true;
             }
             if token.contains('-') && token.split('-').any(is_pii_key_exact) {
                 return true;
             }
-            if token.eq_ignore_ascii_case("uescape") {
+            let followed_by_dot =
+                skip_ws_and_comments(s, end).is_some_and(|j| bytes.get(j) == Some(&b'.'));
+            let followed_by_open_paren = next_non_ws_or_comment_is_open_paren(s, end);
+            if is_blind_pii_fn(token) && followed_by_open_paren {
                 return true;
             }
-            if is_blind_pii_fn(token) && next_non_ws_or_comment_is_open_paren(s, end) {
-                return true;
+            if token.eq_ignore_ascii_case("case") {
+                case_depth = case_depth.saturating_add(1);
+            } else if token.eq_ignore_ascii_case("end") {
+                case_depth = case_depth.saturating_sub(1);
             }
+            let extra_ctx = ExtraExtractCtx {
+                paren_stack: &paren_stack,
+                extract_stack: &extract_stack,
+                bracket_depth,
+                brace_depth,
+                case_depth,
+            };
             if token.eq_ignore_ascii_case("_extra")
-                && !extra_is_safely_extracted(
-                    s,
-                    end,
-                    !extract_stack.is_empty() && !in_extract_key_arg,
-                )
+                && !extra_is_safely_extracted(s, end, &extra_ctx)
             {
                 return true;
             }
             if (in_subscript || in_brace_key)
-                && (is_dynamic_key_fn(token) || next_non_ws_or_comment_is_open_paren(s, end))
+                && (is_dynamic_key_fn(token) || followed_by_open_paren)
             {
                 return true;
             }
+            let was_dot = prev_was_dot;
+            prev_was_dot = false;
+            let preserves_trivial_prefix = token.eq_ignore_ascii_case("_extra")
+                || followed_by_dot
+                || (!was_dot && followed_by_open_paren && is_safe_json_cast_fn(token));
+            if !preserves_trivial_prefix {
+                if let Some(top) = paren_stack.last_mut() {
+                    top.1 = false;
+                }
+            }
             pending_extract_fn = is_extract_fn_name(token);
+            pending_extract_dot_chain = pending_extract_fn && was_dot;
+            pending_call = if pending_extract_fn {
+                PendingCallKind::ExtractFn
+            } else if !was_dot && is_safe_json_cast_fn(token) {
+                PendingCallKind::SafeJsonCast
+            } else if !was_dot && is_non_call_sql_keyword(token) {
+                PendingCallKind::None
+            } else {
+                PendingCallKind::OtherFn
+            };
             pending_columns_fn = token.eq_ignore_ascii_case("columns");
+            rel_tokens.push(RelTok::Ident {
+                lower: token.to_ascii_lowercase(),
+                quoted: false,
+                followed_by_dot,
+                followed_by_open_paren,
+            });
             last_sig = LastSig::IdentOrClose;
             i = end;
             continue;
@@ -1039,8 +1855,13 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
                 columns_fn_depth = None;
                 columns_arg_count = 0;
                 paren_depth = paren_depth.saturating_sub(1);
+                let _ = paren_stack.pop();
+                rel_tokens.push(RelTok::RParen);
+                pending_call = PendingCallKind::None;
                 pending_extract_fn = false;
+                pending_extract_dot_chain = false;
                 pending_columns_fn = false;
+                prev_was_dot = false;
                 last_sig = LastSig::IdentOrClose;
                 i += 1;
                 continue;
@@ -1050,9 +1871,29 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
 
         // 10. Parens, braces, JSON arrows (`->`, `->>`, `#>`, `#>>`) & other punctuation/digits
         if bytes[i] == b'(' {
+            if matches!(
+                pending_call,
+                PendingCallKind::ExtractFn | PendingCallKind::OtherFn
+            ) {
+                if let Some(top) = paren_stack.last_mut() {
+                    top.1 = false;
+                }
+            }
+            let pkind = match pending_call {
+                PendingCallKind::None => ParenKind::PlainGroup,
+                PendingCallKind::SafeJsonCast => ParenKind::SafeJsonCast,
+                PendingCallKind::ExtractFn => ParenKind::ExtractFn,
+                PendingCallKind::OtherFn => ParenKind::OtherFn,
+            };
+            paren_stack.push((pkind, true));
             paren_depth = paren_depth.saturating_add(1);
             if pending_extract_fn {
-                extract_stack.push((paren_depth, bracket_depth, brace_depth, 0));
+                extract_stack.push((
+                    paren_depth,
+                    bracket_depth,
+                    brace_depth,
+                    u32::from(pending_extract_dot_chain),
+                ));
             }
             if pending_columns_fn && columns_fn_depth.is_none() {
                 columns_fn_depth = Some(paren_depth);
@@ -1061,8 +1902,12 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             if last_sig == LastSig::JsonArrow && json_arrow_paren_depth.is_none() {
                 json_arrow_paren_depth = Some(paren_depth);
             }
+            rel_tokens.push(RelTok::LParen);
+            pending_call = PendingCallKind::None;
             pending_extract_fn = false;
+            pending_extract_dot_chain = false;
             pending_columns_fn = false;
+            prev_was_dot = false;
             last_sig = LastSig::Other;
             i += 1;
             continue;
@@ -1081,9 +1926,36 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
                 }
             }
             paren_depth = paren_depth.saturating_sub(1);
+            let _ = paren_stack.pop();
+            if let Some(top) = paren_stack.last_mut() {
+                top.1 = false;
+            }
+            rel_tokens.push(RelTok::RParen);
+            pending_call = PendingCallKind::None;
             pending_extract_fn = false;
+            pending_extract_dot_chain = false;
             pending_columns_fn = false;
+            prev_was_dot = false;
             last_sig = LastSig::IdentOrClose;
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'.' {
+            if in_subscript || in_arrow_rhs || in_extract_key_arg {
+                return true;
+            }
+            if last_sig != LastSig::IdentOrClose {
+                if let Some(top) = paren_stack.last_mut() {
+                    top.1 = false;
+                }
+            }
+            rel_tokens.push(RelTok::Dot);
+            prev_was_dot = true;
+            pending_call = PendingCallKind::None;
+            pending_extract_fn = false;
+            pending_extract_dot_chain = false;
+            pending_columns_fn = false;
+            last_sig = LastSig::Other;
             i += 1;
             continue;
         }
@@ -1091,10 +1963,17 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             if in_subscript || in_arrow_rhs || in_extract_key_arg {
                 return true;
             }
+            if let Some(top) = paren_stack.last_mut() {
+                top.1 = false;
+            }
             brace_depth = brace_depth.saturating_add(1);
             brace_stack.push((paren_depth, bracket_depth, true));
+            rel_tokens.push(RelTok::Other);
+            pending_call = PendingCallKind::None;
             pending_extract_fn = false;
+            pending_extract_dot_chain = false;
             pending_columns_fn = false;
+            prev_was_dot = false;
             last_sig = LastSig::Other;
             i += 1;
             continue;
@@ -1103,10 +1982,17 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             if in_subscript || in_arrow_rhs || in_extract_key_arg {
                 return true;
             }
+            if let Some(top) = paren_stack.last_mut() {
+                top.1 = false;
+            }
             brace_depth = brace_depth.saturating_sub(1);
             brace_stack.pop();
+            rel_tokens.push(RelTok::Other);
+            pending_call = PendingCallKind::None;
             pending_extract_fn = false;
+            pending_extract_dot_chain = false;
             pending_columns_fn = false;
+            prev_was_dot = false;
             last_sig = LastSig::IdentOrClose;
             i += 1;
             continue;
@@ -1115,17 +2001,30 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             if in_subscript || in_arrow_rhs || in_extract_key_arg {
                 return true;
             }
+            if let Some(top) = paren_stack.last_mut() {
+                top.1 = false;
+            }
             i += if bytes.get(i + 2) == Some(&b'>') {
                 3
             } else {
                 2
             };
+            rel_tokens.push(RelTok::Other);
+            pending_call = PendingCallKind::None;
             pending_extract_fn = false;
+            pending_extract_dot_chain = false;
             pending_columns_fn = false;
+            prev_was_dot = false;
             last_sig = LastSig::JsonArrow;
             continue;
         }
+        if bytes[i] == b'#' {
+            return true;
+        }
         if bytes[i].is_ascii_digit() {
+            if let Some(top) = paren_stack.last_mut() {
+                top.1 = false;
+            }
             i += 1;
             while i < bytes.len() && bytes[i].is_ascii_digit() {
                 i += 1;
@@ -1137,8 +2036,12 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             {
                 return true;
             }
+            rel_tokens.push(RelTok::Other);
+            pending_call = PendingCallKind::None;
             pending_extract_fn = false;
+            pending_extract_dot_chain = false;
             pending_columns_fn = false;
+            prev_was_dot = false;
             last_sig = LastSig::Other;
             continue;
         }
@@ -1148,6 +2051,9 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
                 || (json_arrow_paren_depth.is_some() && json_arrow_list_depth.is_none())
             {
                 return true;
+            }
+            if let Some(top) = paren_stack.last_mut() {
+                top.1 = false;
             }
             if let Some(top) = extract_stack.last_mut() {
                 if top.0 == paren_depth && top.1 == bracket_depth && top.2 == brace_depth {
@@ -1159,15 +2065,22 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
                     top.2 = true;
                 }
             }
+            rel_tokens.push(RelTok::Comma);
             i += 1;
+            pending_call = PendingCallKind::None;
             pending_extract_fn = false;
+            pending_extract_dot_chain = false;
             pending_columns_fn = false;
+            prev_was_dot = false;
             last_sig = LastSig::Other;
             continue;
         }
         if bytes[i] == b':' {
             if in_subscript || in_arrow_rhs || in_extract_key_arg {
                 return true;
+            }
+            if let Some(top) = paren_stack.last_mut() {
+                top.1 = false;
             }
             if bytes.get(i + 1) == Some(&b':') {
                 i += 2;
@@ -1179,8 +2092,12 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
                 }
                 i += 1;
             }
+            rel_tokens.push(RelTok::Other);
+            pending_call = PendingCallKind::None;
             pending_extract_fn = false;
+            pending_extract_dot_chain = false;
             pending_columns_fn = false;
+            prev_was_dot = false;
             last_sig = LastSig::Other;
             continue;
         }
@@ -1194,16 +2111,25 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
             return true;
         }
 
+        if let Some(top) = paren_stack.last_mut() {
+            top.1 = false;
+        }
+        rel_tokens.push(RelTok::Other);
         i += s
             .get(i..)
             .and_then(|tail| tail.chars().next())
             .map_or(1, char::len_utf8);
+        pending_call = PendingCallKind::None;
         pending_extract_fn = false;
+        pending_extract_dot_chain = false;
         pending_columns_fn = false;
+        prev_was_dot = false;
         last_sig = LastSig::Other;
     }
 
-    bracket_depth > 0 || columns_fn_depth.is_some()
+    bracket_depth > 0
+        || columns_fn_depth.is_some()
+        || references_whole_row_relation_struct(&rel_tokens)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1372,7 +2298,7 @@ fn is_valid_column_selector_ident(raw: &str) -> bool {
     {
         return false;
     }
-    !is_pii_identifier(st) && !is_reserved_filter_key(st)
+    !is_pii_identifier(st) && !is_extra_column_ident(st) && !is_reserved_filter_key(st)
 }
 
 fn is_valid_column_map_key(raw_key: &str) -> bool {
@@ -1389,7 +2315,9 @@ fn is_valid_column_map_key(raw_key: &str) -> bool {
     {
         return false;
     }
-    !is_pii_identifier(raw_key) && !is_reserved_filter_key(raw_key)
+    !is_pii_identifier(raw_key)
+        && !is_extra_column_ident(raw_key)
+        && !is_reserved_filter_key(raw_key)
 }
 
 fn is_json_scalar(v: &Value) -> bool {
@@ -1599,7 +2527,7 @@ fn column_filter_map_references_pii(
         return true;
     }
     child_map.iter().any(|(ck, cv)| {
-        if is_pii_identifier(ck) {
+        if is_pii_identifier(ck) || is_extra_column_ident(ck) {
             return true;
         }
         let ck_lower = ck.trim().to_ascii_lowercase();
@@ -1637,7 +2565,7 @@ fn value_references_pii(
                 && object_allows_literal_value_suppression(map);
 
             map.iter().any(|(k, v)| {
-                if is_pii_identifier(k) {
+                if is_pii_identifier(k) || is_extra_column_ident(k) {
                     return true;
                 }
                 let key_norm = k.trim().to_ascii_lowercase();
@@ -1704,7 +2632,9 @@ fn value_references_pii(
             })
         }
         Value::String(s) => {
-            if slot == FilterSlot::FieldSelector && is_pii_identifier(s) {
+            if slot == FilterSlot::FieldSelector
+                && (is_pii_identifier(s) || is_extra_column_ident(s))
+            {
                 return true;
             }
             let t = s.trim();
@@ -3015,6 +3945,163 @@ mod tests {
                 "bug-cloud-1-r3-select-raw-extra",
                 r#"{"_view_extras":{"sql":"SELECT _extra FROM logs"}}"#,
             ),
+            // BUG-CLOUD-1-R4: Unicode spaces, root/escaped JSON paths, _extra paren wrappers, dot-chain extractors, blind/dynamic fns, #N/PIVOT/UNPIVOT, whole-row structs, and JSON _extra keys
+            (
+                "bug-cloud-1-r4-zwsp-quote-cont",
+                "{\"_view_extras\":{\"sql\":\"SELECT * FROM logs WHERE _extra->>'clien'\\u200b\\n't_ip' = '198.51.100.7'\"}}",
+            ),
+            (
+                "bug-cloud-1-r4-wj-quote-cont",
+                "{\"_view_extras\":{\"sql\":\"SELECT * FROM logs WHERE _extra->>'clien'\\u2060\\n't_ip' = '198.51.100.7'\"}}",
+            ),
+            (
+                "bug-cloud-1-r4-bom-blind-fn",
+                "{\"_view_extras\":{\"sql\":\"SELECT * FROM logs WHERE row_to_json\\ufeff(logs)::VARCHAR LIKE '%198.51.100.7%'\"}}",
+            ),
+            (
+                "bug-cloud-1-r4-root-dollar-arrow",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE (_extra->>'$') LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "bug-cloud-1-r4-root-sarrow",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE (_extra->'$')::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "bug-cloud-1-r4-root-dollar-fn",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE json_extract_string(_extra, '$') LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "bug-cloud-1-r4-root-empty-arrow",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE (_extra->>'') LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "bug-cloud-1-r4-root-slash-ptr",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE (_extra->>'/') LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "bug-cloud-1-r4-pos-jsonpath",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE (_extra->>'$[0]') LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "bug-cloud-1-r4-json-contains-u-esc",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE json_contains(_extra, '{\"\\u0063lient_ip\":\"198.51.100.7\"}')"}}"#,
+            ),
+            (
+                "bug-cloud-1-r4-json-transform-u-esc",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE json_transform(_extra, '{\"\\u0063lient_ip\":\"VARCHAR\"}') IS NOT NULL"}}"#,
+            ),
+            (
+                "bug-cloud-1-r4-from-json-u-esc",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE from_json(_extra::JSON, '{\"\\u0063lient_ip\":\"VARCHAR\"}') IS NOT NULL"}}"#,
+            ),
+            (
+                "bug-cloud-1-r4-json-object-wrap",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE json_object('safe', _extra)->>'safe' LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "bug-cloud-1-r4-struct-pack-wrap",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE struct_pack(safe := _extra)['safe'] LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "bug-cloud-1-r4-json-array-int-arrow",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE (json_array(_extra)->>0) LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "bug-cloud-1-r4-position-in-extra-wrap",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE struct_pack(ok := POSITION('198.51.100.7' IN _extra))['ok'] > 0"}}"#,
+            ),
+            (
+                "bug-cloud-1-r4-case-in-extract-arg0",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE json_extract_string(CASE WHEN contains(_extra, '198.51.100.7') THEN '{\"safe\":\"1\"}' ELSE '{}' END, '$.safe') = '1'"}}"#,
+            ),
+            (
+                "bug-cloud-1-r4-if-in-extract-arg0",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE json_extract_string(if(contains(_extra, '198.51.100.7'), '{\"a\":\"1\"}', '{}'), '$.a') = '1'"}}"#,
+            ),
+            (
+                "bug-cloud-1-r4-dot-map-extract-concat",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE kv.map_extract_value('clien' || 't_ip') = '198.51.100.7'"}}"#,
+            ),
+            (
+                "bug-cloud-1-r4-dot-json-extract-concat",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE (_extra->'request'->'headers').json_extract_string('x-forwar' || 'ded-for') = '198.51.100.7'"}}"#,
+            ),
+            (
+                "bug-cloud-1-r4-dot-cte-ident",
+                r#"{"_view_extras":{"sql":"WITH k(c) AS (VALUES ('ip')) SELECT * FROM logs, k WHERE kv.map_extract_value(c) = '198.51.100.7'"}}"#,
+            ),
+            (
+                "bug-cloud-1-r4-query-dynamic-sql",
+                r#"{"_view_extras":{"sql":"SELECT * FROM query('SELECT * FROM logs WHERE ' || chr(99) || 'lient_ip = ''198.51.100.7''')"}}"#,
+            ),
+            (
+                "bug-cloud-1-r4-json-exec-serialized",
+                r#"{"_view_extras":{"sql":"SELECT * FROM json_execute_serialized_sql('{\"statements\":[]}')"}}"#,
+            ),
+            (
+                "bug-cloud-1-r4-map-contains-value",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE map_contains_value(kv, '198.51.100.7')"}}"#,
+            ),
+            (
+                "bug-cloud-1-r4-json-pretty-extra",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE json_pretty(_extra) LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "bug-cloud-1-r4-positional-hash-col",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE #2 = '198.51.100.7'"}}"#,
+            ),
+            (
+                "bug-cloud-1-r4-unpivot-logs",
+                r#"{"_view_extras":{"sql":"UNPIVOT logs ON (* EXCLUDE (timestamp)) INTO NAME col VALUE val"}}"#,
+            ),
+            (
+                "bug-cloud-1-r4-pivot-logs",
+                r#"{"_view_extras":{"sql":"PIVOT logs ON status USING first(url)"}}"#,
+            ),
+            (
+                "bug-cloud-1-r4-pivot-longer",
+                r#"{"_view_extras":{"sql":"WITH p AS (PIVOT_LONGER logs ON url) SELECT * FROM p"}}"#,
+            ),
+            (
+                "bug-cloud-1-r4-logs-cast-varchar",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE logs::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "bug-cloud-1-r4-alias-cast-varchar",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs AS t WHERE CAST(t AS VARCHAR) LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "bug-cloud-1-r4-format-logs-struct",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE format('{}', logs) LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "bug-cloud-1-r4-json-logs-struct",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE json(logs)::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "bug-cloud-1-r4-list-logs-struct",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE [logs]::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "bug-cloud-1-r4-select-logs-struct",
+                r#"{"_view_extras":{"sql":"SELECT logs FROM logs"}}"#,
+            ),
+            (
+                "bug-cloud-1-r4-cte-row-struct",
+                r#"{"_view_extras":{"sql":"WITH x AS (SELECT * FROM logs) SELECT * FROM x WHERE x::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "bug-cloud-1-r4-subquery-alias-struct",
+                r#"{"_view_extras":{"sql":"SELECT * FROM (SELECT * FROM logs) sub WHERE sub::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "bug-cloud-1-r4-json-map-extra",
+                r#"{"_extra":{"mode":"include","values":["198.51.100.7"]}}"#,
+            ),
+            (
+                "bug-cloud-1-r4-json-kv-extra",
+                r#"{"_extra":"198.51.100.7"}"#,
+            ),
         ];
 
         for (case_id, payload) in blocked_vectors {
@@ -3068,6 +4155,30 @@ mod tests {
             (
                 "benign-multiline-safe-json-path",
                 "{\"_view_extras\":{\"sql\":\"SELECT _extra ->> '$.request.'\\n  'url' FROM logs\"}}",
+            ),
+            (
+                "benign-r4-alias-qualified-cols",
+                r#"{"_view_extras":{"sql":"SELECT t.status, logs.url FROM logs AS t WHERE t.status = 200"}}"#,
+            ),
+            (
+                "benign-r4-cte-safe-cols",
+                r#"{"_view_extras":{"sql":"WITH safe_cte AS (SELECT status, url FROM logs) SELECT safe_cte.status, url FROM safe_cte WHERE status = 200"}}"#,
+            ),
+            (
+                "benign-r4-dot-chain-safe",
+                r#"{"_view_extras":{"sql":"SELECT (_extra->'headers').json_extract_string('safe_header') FROM logs"}}"#,
+            ),
+            (
+                "benign-r4-cast-extra-json-safe",
+                r#"{"_view_extras":{"sql":"SELECT CAST(_extra AS JSON)['safe_header'] FROM logs"}}"#,
+            ),
+            (
+                "benign-r4-bare-logs-pill",
+                r#"{"filters":[{"column":"url","mode":"include","value":"logs"}]}"#,
+            ),
+            (
+                "benign-r4-trim-from-url",
+                r#"{"_view_extras":{"sql":"SELECT TRIM(FROM url) FROM logs WHERE url = '/ok'"}}"#,
             ),
         ];
 
