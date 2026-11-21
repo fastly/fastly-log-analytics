@@ -901,7 +901,6 @@ async function handleCloudRequestInner(
   if (stage && isNativeCloudRoute(request.method, path)) {
     if (path === "/api/bootstrap") {
       return withLoading(stage, async () => {
-        resetCloudMetadataCache();
         const response = await fetch(`${url.pathname}${url.search}`, {
           headers: request.headers,
           credentials: "include",

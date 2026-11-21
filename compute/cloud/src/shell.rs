@@ -2947,7 +2947,7 @@ mod tests {
         let (state, cookie) = signed_bootstrap_state(Role::Admin);
         let shell = Shell::new(&platform, &state, &[]);
         let response = shell.handle(&bootstrap_request(
-        "/api/bootstrap",
+            "/api/bootstrap",
             Some(&format!("flp_session={cookie}")),
         ));
         assert_eq!(response.status, 200);
