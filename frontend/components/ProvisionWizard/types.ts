@@ -1,5 +1,5 @@
 import type React from 'react'
-import { SERVICE_DEFAULTS } from '@/lib/serviceDefaults'
+import { SERVICE_DEFAULTS, type SnapshotIntervalMinutes } from '@/lib/serviceDefaults'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
 import type { useMutation, useQueryClient } from '@tanstack/react-query'
 import type { Service } from '@/stores/filterStore'
@@ -57,6 +57,7 @@ export interface ProvisionConfig {
   cdn_secret: string
   enable_cron_sync: boolean
   delete_after: boolean
+  snapshot_interval_minutes: SnapshotIntervalMinutes
   log_fields: LogFieldsConfig
   ngwaf_workspace_id: string
   cmcd_enabled: boolean
@@ -92,6 +93,7 @@ export const INITIAL_CONFIG: ProvisionConfig = {
   cdn_secret: "",
   enable_cron_sync: true,
   delete_after: true,
+  snapshot_interval_minutes: SERVICE_DEFAULTS.snapshotIntervalMinutes,
   log_fields: { groups: [], custom_fields: [], field_overrides: {} },
   ngwaf_workspace_id: "",
   cmcd_enabled: false,

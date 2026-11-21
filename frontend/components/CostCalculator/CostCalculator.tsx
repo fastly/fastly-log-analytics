@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation'
 import { flexRender, useTable } from '@tanstack/react-table'
 import { basicTableFeatures, type BasicColumnDef } from '@/lib/table'
 import { cn, buildServiceHref, formatBytes, formatUSD } from "@/lib/utils"
+import { SNAPSHOT_INTERVAL_LABELS, SNAPSHOT_INTERVAL_OPTIONS } from '@/lib/serviceDefaults'
 import { useServiceStore } from '@/stores/filterStore'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -146,8 +147,34 @@ export function Inputs({ s, r, set }: InputsProps) {
         <Row label='Log file period (seconds)' tooltip="How often Fastly closes and uploads a log file. Controlled by the Fastly logging configuration.">
           <NumInput value={s.logPeriod} onChange={set('logPeriod')} min={1} />
         </Row>
-        <Row label='Raw objects per archive batch' tooltip="Upper bound of source objects per archive artifact (HIGH_SCALE_PAGE_SIZE, default 100). Quiet services archive about one object per page. Each page costs 3 writes (artifact, manifest, commit marker) and 3 verification reads.">
-          <NumInput value={s.archiveBatchObjects} onChange={set('archiveBatchObjects')} min={1} max={500} />
+        <Row
+          label='Cloud snapshot interval'
+          tooltip="How often Elevation flushes consolidated FOS Parquet archives and meta/dr_state.json DR state snapshots. Raw logs remain in FOS until archived plus a 15-minute grace period for zero data loss."
+        >
+          <div className='inline-flex items-center gap-0.5 p-0.5 bg-muted/80 rounded-md' role='group' aria-label='Cloud snapshot interval'>
+            {SNAPSHOT_INTERVAL_OPTIONS.map((mins) => {
+              const selected = s.snapshotIntervalMinutes === mins
+              return (
+                <button
+                  key={mins}
+                  type='button'
+                  aria-pressed={selected}
+                  onClick={() => set('snapshotIntervalMinutes')(mins)}
+                  className={cn(
+                    'px-2 py-1 text-xs font-medium rounded transition-all',
+                    selected
+                      ? 'bg-background text-foreground shadow-sm font-semibold'
+                      : 'text-muted-foreground hover:text-foreground hover:bg-background/50',
+                  )}
+                >
+                  {SNAPSHOT_INTERVAL_LABELS[mins]}
+                </button>
+              )
+            })}
+          </div>
+        </Row>
+        <Row label='Raw objects per archive batch' tooltip="Upper bound of source objects per consolidated archive flush (HIGH_SCALE_SNAPSHOT_MAX_OBJECTS, default 500). Quiet services flush once per snapshot interval. Each flush costs 3 writes (Parquet artifact, manifest, commit marker) and 3 verification reads.">
+          <NumInput value={s.archiveBatchObjects} onChange={set('archiveBatchObjects')} min={1} max={2000} />
         </Row>
         <Row label='Average bytes per log line' tooltip="The average uncompressed bytes per request based on your selected fields. Compressed ~15× with ZSTD (.zst) in Object Storage and ~4× in Parquet.">
           <NumInput value={s.bytesPerLine} onChange={set('bytesPerLine')} min={1} />
@@ -167,7 +194,7 @@ export function Inputs({ s, r, set }: InputsProps) {
         <Row label='RUM retention (days)' tooltip="The service's RUM retention, which can differ from the request retention. It sizes RUM storage and the RUM archive artifacts.">
           <NumInput value={s.rumRetentionDays} onChange={set('rumRetentionDays')} min={1} />
         </Row>
-        <Row label='Auto-delete raw .zst logs after ingest' tooltip="Delete raw .zst log files once they are archived to FOS Parquet and published to ClickHouse. They are still billed for the FOS minimum 30 days, but this prevents redundant long-term storage.">
+        <Row label='Auto-delete raw .zst logs after ingest' tooltip="Delete raw .zst log files after their consolidated archive checkpoint commits plus a 15-minute grace window (steady-state window = snapshot interval + 15m). Objects are still billed for the FOS minimum 30 days, but this prevents redundant long-term storage.">
           <Switch aria-label="Auto-delete raw .zst logs after ingest" checked={s.deleteLogs} onCheckedChange={set('deleteLogs')} />
         </Row>
       </div>
@@ -205,7 +232,7 @@ const OPS_SECTIONS = [
       ['Archive batch publish (Parquet + manifest + marker)', '3 ops/batch'],
       ['List during sync (per 1,000 objects)', '1 op/page'],
       ['Manual log checks (LIST)', '1 op/check'],
-      ['Admin sync state to FOS', '1 op/sync'],
+      ['DR state snapshot (meta/dr_state.json)', '1 op/snapshot'],
     ],
   },
   {
@@ -444,6 +471,7 @@ export function Results({ s, r, observedStorageGbHours }: ResultsProps) {
             ['Est. volume / month (.zst compressed)', formatBytes(r.totalGzBytesPerMonth)],
             ['Log files written / month', fmtN(Math.round(r.logFilesPerMonth))],
             ['Archive Parquet batches pushed to FOS / month', fmtN(Math.round(r.parquetFilesPerMonth))],
+            ['DR state snapshots / month', fmtN(Math.round(r.drStateSnapshotsPerMonth))],
             ['Billed footprint (30d min)', fmtN(Math.round(r.objectsBilled)) + ' objects'],
             ['Syncs / month', fmtN(Math.round(r.syncsPerMonth))],
             ...(s.rumBeaconsDay > 0 ? [
@@ -499,7 +527,7 @@ export function CostCalculator({ prefillData, prefillNote, observedStorageGbHour
       <Results s={s} r={r} observedStorageGbHours={observedStorageGbHours} />
 
       <p className='text-xs text-muted-foreground leading-relaxed'>
-        * Estimates assume ~{RAW_LOG_COMPRESSION_RATIO}× ZSTD compression for raw JSON logs (.zst), ~4× compression of log JSON to Parquet (ZSTD), and client-side RUM beacon batching. Storage is billed in GB-hours;
+        * Estimates assume ~{RAW_LOG_COMPRESSION_RATIO}× ZSTD compression for raw JSON logs (.zst), ~4× compression of log JSON to Parquet (ZSTD), and client-side RUM beacon batching. Consolidated FOS archive flushes and DR state snapshots (meta/dr_state.json) run on the configured snapshot interval, keeping raw logs in FOS for snapshot interval + 15m grace before auto-delete. Storage is billed in GB-hours;
         the calculator converts to GB-months (1 month = 720 hours). Each object is billed for a minimum
         of {s.minDays} days regardless of when it is deleted. Analytical queries execute against ClickHouse, so interactive dashboard reads do not incur FOS Class B operations. Actual usage may vary.
       </p>

@@ -1957,3 +1957,355 @@ def test_start_cron_run_retries_on_deadlock_and_rolls_back():
 
     assert run_id > 0
     assert delete_attempts == 2
+
+
+# ── F5: Postgres DR State Snapshot (meta/dr_state.json) ──────────────────────
+
+
+@pytest.mark.no_postgres
+def test_dr_state_key_construction():
+    from backend.core.metadata.base import get_dr_state_key
+
+    assert get_dr_state_key({"prefix": ""}) == "meta/dr_state.json"
+    assert get_dr_state_key({"prefix": "/customer1/"}) == "customer1/meta/dr_state.json"
+
+
+@pytest.mark.no_postgres
+def test_strip_secrets_recursive_and_non_mutating():
+    from backend.core.metadata.base import strip_secrets
+
+    original = {
+        "service_id": "svc1",
+        "fos_bucket": "my-bucket",
+        "fos_access_key_id": "AK_SECRET",
+        "fos_secret_access_key": "SK_SECRET",
+        "fastly_api_key": "FASTLY_SECRET",
+        "cdn_secret": "CDN_SECRET",
+        "rum": {"enabled": True, "cid_salt": "keep-salt-123"},
+        "scoring": {
+            "enabled": True,
+            "scoring_keys_store_id": "store-id-keep",
+            "request_secret": "REQ_SECRET",
+        },
+        "nested_list": [
+            {"name": "ok", "auth_token": "TOK_SECRET", "userPassword": "PW_SECRET"},
+        ],
+    }
+    snapshot = json.loads(json.dumps(original))
+    cleaned = strip_secrets(original)
+
+    # Original input is never mutated
+    assert original == snapshot
+    # Non-secret keys are preserved
+    assert cleaned["service_id"] == "svc1"
+    assert cleaned["fos_bucket"] == "my-bucket"
+    assert cleaned["rum"]["cid_salt"] == "keep-salt-123"
+    assert cleaned["scoring"]["scoring_keys_store_id"] == "store-id-keep"
+    assert cleaned["nested_list"] == [{"name": "ok"}]
+    # Secret keys are stripped
+    for forbidden in ("fos_access_key_id", "fos_secret_access_key", "fastly_api_key", "cdn_secret"):
+        assert forbidden not in cleaned
+    assert "request_secret" not in cleaned["scoring"]
+
+
+@pytest.mark.no_postgres
+@pytest.mark.security_regression
+def test_export_dr_state_sentinel_secrets_never_leak():
+    """Hard security invariant: zero sentinel secrets may ever appear in meta/dr_state.json."""
+    from backend.core.metadata.base import DR_STATE_SCHEMA_VERSION, export_dr_state
+
+    sentinels = [
+        "SENTINEL_FOS_ACCESS_KEY",
+        "SENTINEL_FOS_ACCESS_KEY_ID",
+        "SENTINEL_FOS_SECRET_ACCESS_KEY",
+        "SENTINEL_FOS_SECRET_KEY",
+        "SENTINEL_FASTLY_API_KEY",
+        "SENTINEL_CDN_SECRET",
+        "SENTINEL_ADMIN_TOKEN",
+        "SENTINEL_REQUEST_SECRET",
+        "SENTINEL_SCORING_REQUEST_SECRET",
+        "SENTINEL_AES_KEY_HEX",
+        "SENTINEL_TEMP_ADMIN_ACCESS",
+        "SENTINEL_TEMP_ADMIN_SECRET",
+        "SENTINEL_NESTED_PASSWORD",
+        "SENTINEL_NESTED_PASSCODE",
+        "SENTINEL_NESTED_API_KEY",
+        "SENTINEL_NESTED_PRIVATE_KEY",
+        "SENTINEL_NESTED_CREDENTIAL",
+        "SENTINEL_LIST_TOKEN",
+        "SENTINEL_CHANNEL_SECRET",
+    ]
+    fake_cfg = {
+        "service_id": "svc-sec",
+        "name": "Secure Site",
+        "fos_bucket": "dr-bucket",
+        "fos_region": "us-east-1",
+        "fos_access_key": sentinels[0],
+        "fos_access_key_id": sentinels[1],
+        "fos_secret_access_key": sentinels[2],
+        "fos_secret_key": sentinels[3],
+        "fastly_api_key": sentinels[4],
+        "cdn_secret": sentinels[5],
+        "admin_token": sentinels[6],
+        "scoring_request_secret": sentinels[8],
+        "aes_key_hex": sentinels[9],
+        "provisioning": {
+            "cron_sync": {"enabled": True, "snapshot_interval_minutes": 30},
+            "temp_admin_access_key": sentinels[10],
+            "temp_admin_secret_key": sentinels[11],
+        },
+        "scoring": {
+            "enabled": True,
+            "request_secret": sentinels[7],
+            "scoring_keys_store_id": "ks_123",
+        },
+        "nested": {
+            "db_password": sentinels[12],
+            "login_passcode": sentinels[13],
+            "vendor_api_key": sentinels[14],
+            "tls_private_key": sentinels[15],
+            "oauth_credential": sentinels[16],
+            "items": [{"bearer_token": sentinels[17], "keep": "yes"}],
+        },
+    }
+    fake_alerts = [
+        {
+            "id": 1,
+            "service_id": "svc-sec",
+            "name": "High 5xx",
+            "webhook_url": "https://hooks.example.com/alert",
+            "channels": [
+                {"type": "slack", "url": "https://hooks.slack.com/x", "config": {"signing_secret": sentinels[18]}}
+            ],
+        }
+    ]
+    fake_views = [{"id": 1, "service_id": "svc-sec", "name": "Prod Errors", "filters_json": "{}"}]
+    fake_labels = [{"id": 1, "service_id": "svc-sec", "sid": "sess1", "label": "bot"}]
+    fake_audit = [
+        {"timestamp": "2026-11-20T00:00:00Z", "source_name": "svc-sec", "event_type": "provision", "details": {}}
+    ]
+
+    s3 = MagicMock()
+    captured: dict = {}
+
+    def _put(**kwargs):
+        captured["bucket"] = kwargs["Bucket"]
+        captured["key"] = kwargs["Key"]
+        captured["body_bytes"] = kwargs["Body"]
+
+    s3.put_object.side_effect = _put
+
+    with (
+        patch("backend.core.metadata.base.get_source_for_service", return_value=_src()),
+        patch("backend.core.metadata.base._get_fos_client", return_value=s3),
+        patch("backend.core.metadata.base.svcconfig.load_config", return_value=fake_cfg),
+        patch("backend.core.metadata.list_views", return_value=fake_views),
+        patch("backend.core.metadata.list_alerts", return_value=fake_alerts) as mock_list_alerts,
+        patch("backend.scoring.list_labels", return_value=fake_labels),
+        patch("backend.core.metadata.export_audit", return_value=fake_audit),
+    ):
+        result = export_dr_state("svc-sec")
+
+    assert result is not None
+    # Alerts MUST be scoped to filter_service_id=service_id to prevent cross-service leakage
+    mock_list_alerts.assert_called_once_with("svc-sec", filter_service_id="svc-sec")
+    assert captured["key"] == "meta/dr_state.json"
+    raw_text = captured["body_bytes"].decode("utf-8")
+    for sentinel in sentinels:
+        assert sentinel not in raw_text, f"SECRET LEAKED INTO meta/dr_state.json: {sentinel}"
+
+    parsed = json.loads(raw_text)
+    assert parsed["schema_version"] == DR_STATE_SCHEMA_VERSION
+    assert parsed["service_id"] == "svc-sec"
+    assert "exported_at" in parsed
+    assert parsed["service_config"]["fos_bucket"] == "dr-bucket"
+    assert parsed["service_config"]["provisioning"]["cron_sync"]["snapshot_interval_minutes"] == 30
+    assert parsed["views"] == fake_views
+    assert len(parsed["alerts"]) == 1 and parsed["alerts"][0]["name"] == "High 5xx"
+    assert parsed["scoring_labels"] == fake_labels
+    assert parsed["audit_logs"] == fake_audit
+
+
+@pytest.mark.no_postgres
+def test_export_dr_state_serializes_datetime_and_uuid_and_swallows_errors():
+    import uuid
+    from datetime import UTC, datetime
+
+    from backend.core.metadata.base import export_dr_state
+
+    s3 = MagicMock()
+    captured: list[bytes] = []
+    s3.put_object.side_effect = lambda **kw: captured.append(kw["Body"])
+
+    with (
+        patch("backend.core.metadata.base.get_source_for_service", return_value=_src()),
+        patch("backend.core.metadata.base._get_fos_client", return_value=s3),
+        patch("backend.core.metadata.base.svcconfig.load_config", return_value={"service_id": "svc-dt"}),
+        patch("backend.core.metadata.list_views", return_value=[]),
+        patch(
+            "backend.core.metadata.list_alerts",
+            return_value=[{"id": uuid.uuid4(), "created_at": datetime(2026, 11, 20, 12, 0, tzinfo=UTC)}],
+        ),
+        patch("backend.scoring.list_labels", return_value=[]),
+        patch("backend.core.metadata.export_audit", return_value=[]),
+    ):
+        res = export_dr_state("svc-dt")
+    assert res is not None and len(captured) == 1
+    parsed = json.loads(captured[0].decode("utf-8"))
+    assert parsed["alerts"][0]["created_at"].startswith("2026-11-20T12:00:00")
+
+    # Missing source returns None without raising
+    with patch("backend.core.metadata.base.get_source_for_service", return_value=None):
+        assert export_dr_state("svc-missing") is None
+
+    # S3 error is swallowed and returns None
+    s3.put_object.side_effect = RuntimeError("fos down")
+    with (
+        patch("backend.core.metadata.base.get_source_for_service", return_value=_src()),
+        patch("backend.core.metadata.base._get_fos_client", return_value=s3),
+        patch("backend.core.metadata.base.svcconfig.load_config", return_value={"service_id": "svc-err"}),
+        patch("backend.core.metadata.list_views", return_value=[]),
+        patch("backend.core.metadata.list_alerts", return_value=[]),
+        patch("backend.scoring.list_labels", return_value=[]),
+        patch("backend.core.metadata.export_audit", return_value=[]),
+    ):
+        assert export_dr_state("svc-err") is None
+
+
+@pytest.mark.no_postgres
+def test_read_dr_state_direct_s3_and_missing_key():
+    from backend.core.metadata.base import read_dr_state
+
+    s3 = MagicMock()
+    payload = {"schema_version": 1, "service_id": "svc1", "views": []}
+    body = MagicMock()
+    body.read.return_value = json.dumps(payload).encode("utf-8")
+    s3.get_object.return_value = {"Body": body}
+
+    src = {"bucket": "my-bkt", "prefix": "pfx"}
+    assert read_dr_state(src, s3_client=s3) == payload
+    s3.get_object.assert_called_once_with(Bucket="my-bkt", Key="pfx/meta/dr_state.json")
+
+    class _NoSuchKey(Exception):
+        pass
+
+    s3.exceptions.NoSuchKey = _NoSuchKey
+    s3.get_object.side_effect = _NoSuchKey("gone")
+    assert read_dr_state(src, s3_client=s3) is None
+
+
+@pytest.mark.no_postgres
+def test_cdn_vcl_bypasses_cache_for_dr_state_json():
+    from backend.core.fastly.client import load_vcl
+
+    vcl = load_vcl()
+    assert "/meta/(admin_state|dr_state)\\.json$" in vcl
+
+
+@pytest.mark.no_postgres
+def test_scheduler_registers_dr_state_sync_on_snapshot_interval():
+    from backend.cron.scheduler.runner import TASK_MAP, Scheduler
+
+    assert TASK_MAP["dr_state_sync"] == "dr_state_sync"
+    sched = Scheduler()
+    cfg = {
+        "service_id": "svc-sched",
+        "name": "Sched Svc",
+        "fos_bucket": "bkt",
+        "fos_region": "us-east-1",
+        "fos_access_key_id": "ak",
+        "fos_secret_access_key": "sk",
+        "provisioning": {"cron_sync": {"enabled": True, "snapshot_interval_minutes": 30}},
+    }
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.fos_client.get_source_for_service", return_value={"name": "svc-sched", "bucket": "bkt"}),
+        patch("backend.core.fos_client.is_configured", return_value=True),
+        patch("backend.cron.scheduler.runner.dev_mode_no_crons", return_value=False),
+    ):
+        sched._sync_jobs()
+    job = sched.get_job("dr_state_sync_svc-sched")
+    assert job is not None
+    assert job.trigger.interval.total_seconds() == 30 * 60
+
+
+@pytest.mark.no_postgres
+def test_strip_secrets_handles_http_headers_and_camelcase_without_false_positives():
+    import copy
+
+    from backend.core.metadata.state_sync import strip_secrets
+
+    secret_keys = [
+        "X-Api-Key",
+        "x-fastly-key",
+        "Set-Cookie",
+        "Proxy-Authorization",
+        "Authorization",
+        "Cookie",
+        "apiKey",
+        "accessKey",
+        "privateKey",
+        "secretKey",
+        "fastlyApiKey",
+        "APIKey",
+        "HMACKey",
+        "AESKeyHex",
+        "session_cookie",
+        "bearer_header",
+        "hmac_key_v2",
+        "signing_key_pem",
+    ]
+    sentinels = {k: f"SENTINEL_VAL_{i}" for i, k in enumerate(secret_keys)}
+
+    payload = {
+        "webhook_url": "https://hooks.example.com/alert",
+        "scoring_keys_store_id": "store-123",
+        "fos_key_id": "key-id-meta",
+        "temp_admin_key_id": "temp-id-meta",
+        "rum": {"cid_salt": "salt-ok"},
+        "bucket": "my-bucket",
+        "region": "us-east-1",
+        "prefix": "logs/",
+        "log_fields": {"groups": ["A", "B"]},
+        "object_key": "raw/2026/file.log",
+        "auth_method": "passkey",
+        "channel_config": {
+            "url": "https://notify.example.com",
+            "headers": {
+                "Content-Type": "application/json",
+                "X-Api-Key": sentinels["X-Api-Key"],
+                "x-fastly-key": sentinels["x-fastly-key"],
+                "Set-Cookie": sentinels["Set-Cookie"],
+                "Proxy-Authorization": sentinels["Proxy-Authorization"],
+                "Authorization": sentinels["Authorization"],
+                "Cookie": sentinels["Cookie"],
+            },
+        },
+        "nested": {
+            k: v
+            for k, v in sentinels.items()
+            if k not in {"X-Api-Key", "x-fastly-key", "Set-Cookie", "Proxy-Authorization", "Authorization", "Cookie"}
+        },
+    }
+    original = copy.deepcopy(payload)
+
+    cleaned = strip_secrets(payload)
+    assert payload == original  # unmutated
+
+    dumped = json.dumps(cleaned)
+    for k, sentinel in sentinels.items():
+        assert sentinel not in dumped, f"Secret under {k!r} leaked into stripped output"
+
+    # All legitimate non-secret fields preserved verbatim
+    assert cleaned["webhook_url"] == "https://hooks.example.com/alert"
+    assert cleaned["scoring_keys_store_id"] == "store-123"
+    assert cleaned["fos_key_id"] == "key-id-meta"
+    assert cleaned["temp_admin_key_id"] == "temp-id-meta"
+    assert cleaned["rum"] == {"cid_salt": "salt-ok"}
+    assert cleaned["bucket"] == "my-bucket"
+    assert cleaned["region"] == "us-east-1"
+    assert cleaned["prefix"] == "logs/"
+    assert cleaned["log_fields"] == {"groups": ["A", "B"]}
+    assert cleaned["object_key"] == "raw/2026/file.log"
+    assert cleaned["auth_method"] == "passkey"
+    assert cleaned["channel_config"]["headers"] == {"Content-Type": "application/json"}

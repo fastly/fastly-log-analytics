@@ -227,7 +227,15 @@ vi.mock('@/lib/utils', async (importOriginal) => ({
     range: [start, end],
   }),
 }))
-vi.mock('@/components/SSEModal', () => ({ ControlledSSEModal: () => null, SSEModal: () => null, SSEProgressView: () => null, SSEExecutionSection: () => null, SSEDialogFooter: () => null }))
+vi.mock('@/components/SSEModal', () => ({
+  ControlledSSEModal: () => null,
+  SSEModal: () => null,
+  SSEProgressView: () => null,
+  SSEExecutionSection: () => null,
+  SSEDialogFooter: () => null,
+  SSEActionDialogShell: ({ open, children, confirmButton }: { open?: boolean; children?: React.ReactNode; confirmButton?: React.ReactNode }) =>
+    open ? <div>{children}{confirmButton}</div> : null,
+}))
 vi.mock('@/components/SyncStatusBadge/SyncStatusBadge', async (importOriginal) => ({ ...(await importOriginal<typeof import('@/components/SyncStatusBadge/SyncStatusBadge')>()), BackfillRangeModal: () => null }))
 vi.mock('@/components/ReportLayout', async (importOriginal) => ({ ...(await importOriginal<typeof import('@/components/ReportLayout')>()), NoServiceSelected: () => null }))
 
@@ -245,7 +253,7 @@ import { DiagnosticsPanel } from '@/app/admin/_sections/OperationsOverview'
 import { server } from '@/__tests__/helpers/msw/handlers'
 import { client, getApiBase, getPageLoadId } from '@/lib/api'
 import { setCloudModeRuntime } from '@/lib/cloud-engine/mode'
-import { LogSyncSection } from '@/components/CronSettingsModal/CronSettingsModal'
+import { CronSettingsModal, LogSyncSection } from '@/components/CronSettingsModal/CronSettingsModal'
 import LogsClient, { CronLiveLog, QuickActionsBar, SchemaTab, CRON_EXPLANATIONS, CRON_DISPLAY_NAMES, CRON_GROUPS } from '@/app/logs/_sections/LogsClient'
 import { DataTable, DataTableReadonly, DateTimeCell, FilterValueCell, buildDashboardFilterUrl, makeLatencyColumns, type LatencyRow } from '@/components/DataTable'
 import { BotSourcesPanel } from '@/app/control-room/_sections/ControlRoomClient'
@@ -935,12 +943,13 @@ describe('CronLiveLog, LogSyncSection & LogsClient', () => {
     expect(onDone).toHaveBeenCalledTimes(1)
   })
 
-  test('LogSyncSection polling mode selector, RUM disabled banner, and Enable RUM Beacon Sync switch', async () => {
+  test('LogSyncSection polling mode selector, snapshot interval selector, RUM disabled banner, and Enable RUM Beacon Sync switch', async () => {
     mocks.useRealSelect = true
     const user = userEvent.setup()
-    const setPollingMode = vi.fn(), setRumSyncEnabled = vi.fn()
+    const setPollingMode = vi.fn(), setSnapshotIntervalMinutes = vi.fn(), setRumSyncEnabled = vi.fn()
     const baseProps = {
       syncEnabled: true, setSyncEnabled: vi.fn(), pollingMode: 'regular' as const, setPollingMode,
+      snapshotIntervalMinutes: '5', setSnapshotIntervalMinutes,
       deleteAfter: false, setDeleteAfter: vi.fn(), dataRetention: '30', setDataRetention: vi.fn(),
       syncLogEnabled: true, setSyncLogEnabled: vi.fn(),
       syncRetention: '7', setSyncRetention: vi.fn(), syncFreqLabel: 'every 2 minutes', isAnalyst: false,
@@ -952,6 +961,12 @@ describe('CronLiveLog, LogSyncSection & LogsClient', () => {
     await user.click(screen.getByRole('combobox', { name: 'Discovery Polling Mode' }))
     await user.click(await screen.findByRole('option', { name: 'Adaptive' }))
     expect(setPollingMode).toHaveBeenCalledWith('adaptive')
+    await user.click(screen.getByRole('combobox', { name: 'Cloud Snapshot Interval' }))
+    for (const label of ['5m', '15m', '30m', '1h', '6h', '24h']) {
+      expect(await screen.findByRole('option', { name: label })).toBeInTheDocument()
+    }
+    await user.click(screen.getByRole('option', { name: '1h' }))
+    expect(setSnapshotIntervalMinutes).toHaveBeenCalledWith('60')
     expect(screen.getByText(/Real User Monitoring is not currently enabled on Fastly edge/)).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Configure RUM' })).toHaveAttribute('href', '/admin/rum?service=test-service-123')
     rerender(<LogSyncSection {...baseProps} rumEnabled={true} rumSyncEnabled={false} setRumSyncEnabled={setRumSyncEnabled} serviceId="test-service-123" />)
@@ -959,6 +974,40 @@ describe('CronLiveLog, LogSyncSection & LogsClient', () => {
     expect(rumSwitch).toHaveAttribute('aria-checked', 'false')
     await user.click(rumSwitch)
     expect(setRumSyncEnabled).toHaveBeenCalledWith(true, expect.anything())
+  })
+
+  test('CronSettingsModal initializes snapshot_interval_minutes and posts numeric value on save', async () => {
+    mocks.useRealSelect = true
+    const user = userEvent.setup()
+    sseState.status = 'idle'
+    sseState.start.mockClear()
+    const svc = {
+      service_id: 'svc-snap',
+      name: 'Snap Service',
+      log_period: 60,
+      cron_sync: {
+        enabled: true,
+        delete_after: true,
+        polling_mode: 'adaptive' as const,
+        snapshot_interval_minutes: 30 as const,
+        log_enabled: true,
+        log_retention_days: 30,
+        data_retention_days: 30,
+        rum_retention_days: 30,
+      },
+    } as never
+    renderWithQuery(<CronSettingsModal service={svc} open={true} onOpenChange={vi.fn()} />)
+    const trigger = screen.getByRole('combobox', { name: 'Cloud Snapshot Interval' })
+    expect(trigger).toHaveTextContent('30m')
+    await user.click(trigger)
+    await user.click(await screen.findByRole('option', { name: '6h' }))
+    await user.click(screen.getByRole('button', { name: 'Save Changes' }))
+    expect(sseState.start).toHaveBeenCalledWith(
+      '/api/services/svc-snap/cron-settings',
+      expect.objectContaining({
+        cron_sync: expect.objectContaining({ snapshot_interval_minutes: 360 }),
+      }),
+    )
   })
 
   test('LogsClient mounts in cron mode, QuickActionsBar handles failures, and sync tasks are registered', async () => {
@@ -1586,11 +1635,18 @@ describe('FilterBar, ActiveFiltersBanner, AddFilterDialogContent & FilterValueCe
       expect(container.querySelector('button')).toBeNull()
     })
 
-    it('still allows filtering by oip (origin IP) when masking', () => {
+    it('also renders oip (origin IP) as plain text (no filter menu) when masking while keeping non-PII fields interactive', () => {
       mocks.maskIps.mockReturnValue(true)
-      render(<FilterValueCell filters={[{ column: 'oip', value: '151.101.1.51' }]} />)
+      const { container, unmount } = render(
+        <FilterValueCell filters={[{ column: 'oip', value: '151.101.1.51' }]} />,
+      )
+      expect(screen.getByText('151.101.1.51')).toBeInTheDocument()
+      expect(container.querySelector('button')).toBeNull()
+      unmount()
+
+      render(<FilterValueCell filters={[{ column: 'pop', value: 'JFK' }]} />)
       expect(
-        screen.getByRole('button', { name: /Filter actions for 151.101.1.51/i }),
+        screen.getByRole('button', { name: /Filter actions for JFK/i }),
       ).toBeInTheDocument()
     })
   })
@@ -2200,7 +2256,7 @@ describe('TimeSeriesChart, ScorerSeries, PlotlyChart, TrafficChart, CardGrid, Fi
       expect(urlRowButton.className).toMatch(/\bpl-4\.5\b/)
     })
 
-    it('disables drill-down on `ip` when masking while keeping `oip` clickable', () => {
+    it('disables drill-down on `ip` and `oip` when masking while keeping non-PII fields clickable', () => {
       mocks.maskIps.mockReturnValue(true)
       const onRowClick = vi.fn()
       const { unmount } = render(
@@ -2212,9 +2268,16 @@ describe('TimeSeriesChart, ScorerSeries, PlotlyChart, TrafficChart, CardGrid, Fi
       expect(screen.queryByRole('button', { name: /filter to/i })).toBeNull()
       unmount()
 
-      render(<TopTenTable title="Top Origin IPs" field="oip" data={{ total: 1, top: [{ value: '151.101.1.51', count: 9 }] }} onRowClick={onRowClick} />)
-      fireEvent.click(screen.getByRole('button', { name: /filter to 151.101.1.51/i }))
-      expect(onRowClick).toHaveBeenCalledWith('oip', '151.101.1.51')
+      const { unmount: unmountOip } = render(
+        <TopTenTable title="Top Origin IPs" field="oip" data={{ total: 1, top: [{ value: '151.101.1.xxx', count: 9 }] }} onRowClick={onRowClick} />,
+      )
+      expect(screen.getByText('151.101.1.xxx')).toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: /filter to/i })).toBeNull()
+      unmountOip()
+
+      render(<TopTenTable title="Top POPs" field="pop" data={{ total: 1, top: [{ value: 'JFK', count: 9 }] }} onRowClick={onRowClick} />)
+      fireEvent.click(screen.getByRole('button', { name: /filter to JFK/i }))
+      expect(onRowClick).toHaveBeenCalledWith('pop', 'JFK')
     })
 
     it('copies CSV to clipboard, escapes formula-injection payloads, mounts NotLoggedIndicator, and colors deltas', async () => {

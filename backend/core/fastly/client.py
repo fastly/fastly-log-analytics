@@ -296,8 +296,8 @@ sub vcl_recv {
   );
   set req.url = querystring.sort(req.url);
 
-  # Never cache admin_state.json — it changes on every mutation
-  if (req.url.path ~ "/meta/admin_state\\.json$") {
+  # Never cache admin_state.json or dr_state.json — they change on mutations/snapshots
+  if (req.url.path ~ "/meta/(admin_state|dr_state)\\.json$") {
     return(pass);
   }
 

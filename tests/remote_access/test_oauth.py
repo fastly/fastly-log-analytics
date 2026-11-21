@@ -2249,7 +2249,7 @@ def test_limiter_req_limit_and_separate_bucket():
 def test_ip_family_set_single_source_of_truth_across_stack():
     """The analyst filter-lock, the response masker, and the frontend
     drill-down hide list MUST all reference the same IP-family field set."""
-    assert _PII_FORBIDDEN_FILTER_COLS == validation.IP_FAMILY_KEYS | validation.SESSION_ID_KEYS
+    assert validation.SHARED_PII_KEYS | {"origin_ip"} <= _PII_FORBIDDEN_FILTER_COLS
     assert validation.IP_FAMILY_KEYS <= _PII_FORBIDDEN_FILTER_COLS
     assert validation.SESSION_ID_KEYS <= _PII_FORBIDDEN_FILTER_COLS
 

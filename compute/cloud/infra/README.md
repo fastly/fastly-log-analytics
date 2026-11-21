@@ -74,6 +74,15 @@ Use `--secret-store-id` instead of name discovery when needed. Without `--apply`
 these commands only describe the operation. Rotation replaces `admin_setup_hash`;
 it never resets users, sessions or other secrets.
 
+## Disaster recovery
+
+See [`docs/disaster-recovery.md`](../../../docs/disaster-recovery.md) for the full runbook covering both recovery modes:
+
+- **Mode A (services deleted, stores survive)**: `uv run compute/cloud/infra/provision.py recover --mode relink --name <install> --inventory <path> --apply`, followed by `make cloud-deploy NAME=<install>`.
+- **Mode B (Compute services and KV Store lost, FOS bucket survives)**: bootstrap and deploy a fresh install, complete `/setup`, then run `uv run compute/cloud/infra/provision.py recover --mode fos --base-url https://<install>.global.ssl.fastly.net --service-id <sid> --bucket <bucket> --region <region> --apply` (or use **Recover from FOS** in `/admin`).
+
+Both commands default to dry-run (`"writes": false`) and read credentials only from environment variables or `getpass` prompts.
+
 ## Update front VCL
 
 ```sh

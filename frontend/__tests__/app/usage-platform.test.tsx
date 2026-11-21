@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { PlatformUsageCards } from '@/app/usage/_sections/PlatformUsageCards'
 import { UsageStatCards, type StorageUsageData } from '@/app/usage/_sections/UsageStatCards'
@@ -198,5 +198,21 @@ describe('observed Platform usage', () => {
     expect(screen.getByText(/Measured · Fastly Platform \(account-wide\).*1\.00 GB-months/)).toBeInTheDocument()
     expect(screen.getByText('Total Estimated Monthly Cost').parentElement?.nextElementSibling?.textContent)
       .not.toBe(reference)
+  })
+
+  it('lets users switch the Elevation Cloud snapshot interval and updates DR state snapshots and total cost', () => {
+    render(<CostCalculator />)
+    const group = screen.getByRole('group', { name: 'Cloud snapshot interval' })
+    const btn5m = within(group).getByRole('button', { name: '5m' })
+    const btn1h = within(group).getByRole('button', { name: '1h' })
+    expect(btn5m).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByText('DR state snapshots / month').nextElementSibling?.textContent).toBe('8.6K')
+    const total5m = screen.getByText('Total Estimated Monthly Cost').parentElement?.nextElementSibling?.textContent
+
+    fireEvent.click(btn1h)
+    expect(btn1h).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByText('DR state snapshots / month').nextElementSibling?.textContent).toBe('720')
+    const total1h = screen.getByText('Total Estimated Monthly Cost').parentElement?.nextElementSibling?.textContent
+    expect(total1h).not.toBe(total5m)
   })
 })

@@ -544,7 +544,7 @@ fn shield_ticks_manual_trigger_fos_manifest_and_audit_logs_end_to_end() {
         .adapter
         .object_keys("fos-fixture-logs")
         .iter()
-        .all(|k| !k.starts_with("meta/")));
+        .all(|k| !k.starts_with("meta/cron-runs/")));
 
     // 4. Manual trigger via POST /api/cron-runs/trigger -> writes meta/cron-runs/... JSON to FOS.
     let trigger_req = Request {

@@ -6,6 +6,7 @@ import hashlib
 import logging
 import re
 import time
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from typing import Any, NoReturn
 
@@ -161,7 +162,7 @@ def validate_user_sql(
     parser_con: Any | None = None,
     session_id: str | None = None,
     service_id: str | None = None,
-    allowed_tables: frozenset[str] | None = None,
+    allowed_tables: AbstractSet[str] | None = None,
 ) -> ValidationResult:
     if not isinstance(sql, str):
         _reject(sql, "input_type", "SQL must be a string", session_id, service_id)
@@ -180,7 +181,8 @@ def validate_user_sql(
     parsed, _node, err_code, err_msg = _parse_single_select_node(sql, parser_con)
     if err_code is not None or parsed is None:
         _reject(sql, err_code or "parse_error", err_msg or "SQL parse error", session_id, service_id)
-    _walk_and_validate(parsed, sql, session_id, service_id, allowed_tables=allowed_tables)
+    normalized_allowed = frozenset(t.lower() for t in allowed_tables) if allowed_tables is not None else None
+    _walk_and_validate(parsed, sql, session_id, service_id, allowed_tables=normalized_allowed)
     elapsed_ms = (time.monotonic() - t0) * 1000
     if elapsed_ms > 50:
         logger.warning(
@@ -307,14 +309,66 @@ def _walk_and_validate(
                 n = q.get("node") if isinstance(q, dict) else None
                 is_recursive = isinstance(n, dict) and n.get("type") == "RECURSIVE_CTE_NODE"
                 if val is not None:
-                    _walk_and_validate(
-                        val,
-                        original_sql,
-                        session_id,
-                        service_id,
-                        allowed_tables=allowed_tables,
-                        cte_aliases=(cte_aliases | alias_fs) if is_recursive else cte_aliases,
-                    )
+                    if is_recursive and isinstance(n, dict):
+                        setop_target: dict[str, Any] | None = None
+                        if "left" in n and "right" in n and str(n.get("setop_type", "UNION")).upper() == "UNION":
+                            setop_target = n
+                        else:
+                            inner_q = n.get("query")
+                            inner_n = inner_q.get("node") if isinstance(inner_q, dict) else None
+                            if (
+                                isinstance(inner_n, dict)
+                                and inner_n.get("type") == "SET_OPERATION_NODE"
+                                and "left" in inner_n
+                                and "right" in inner_n
+                                and str(inner_n.get("setop_type", "UNION")).upper() == "UNION"
+                            ):
+                                setop_target = inner_n
+                        if setop_target is not None:
+                            _walk_and_validate(
+                                setop_target["left"],
+                                original_sql,
+                                session_id,
+                                service_id,
+                                allowed_tables=allowed_tables,
+                                cte_aliases=cte_aliases,
+                            )
+                            _walk_and_validate(
+                                setop_target["right"],
+                                original_sql,
+                                session_id,
+                                service_id,
+                                allowed_tables=allowed_tables,
+                                cte_aliases=cte_aliases | alias_fs,
+                            )
+                            for k_rem, v_rem in n.items():
+                                if k_rem not in ("left", "right", "query"):
+                                    _walk_and_validate(
+                                        v_rem,
+                                        original_sql,
+                                        session_id,
+                                        service_id,
+                                        allowed_tables=allowed_tables,
+                                        cte_aliases=cte_aliases,
+                                    )
+                        else:
+                            _walk_and_validate(
+                                val,
+                                original_sql,
+                                session_id,
+                                service_id,
+                                allowed_tables=allowed_tables,
+                                cte_aliases=cte_aliases,
+                            )
+                    else:
+                        _walk_and_validate(
+                            val,
+                            original_sql,
+                            session_id,
+                            service_id,
+                            allowed_tables=allowed_tables,
+                            cte_aliases=cte_aliases,
+                        )
                 cte_aliases = cte_aliases | alias_fs
         if node.get("type") == "BASE_TABLE" or "table_name" in node:
             _check_table_reference(
@@ -622,6 +676,47 @@ def _validate_select_syntax(tokens: list[_Tok]) -> str | None:
     return None
 
 
+def _parse_recursive_cte_tokens(tokens: list[_Tok]) -> dict[str, Any]:
+    inner = _strip_outer_parens(tokens)
+    k = 0
+    m = len(inner)
+    union_idx = -1
+    while k < m:
+        tk = inner[k]
+        if tk.kind == "LPAREN":
+            rp = _find_matching_rparen(inner, k)
+            if rp == -1:
+                break
+            k = rp + 1
+            continue
+        if tk.kind == "WORD" and tk.val.upper() == "UNION":
+            union_idx = k
+            break
+        if tk.kind == "WORD" and tk.val.upper() in ("INTERSECT", "EXCEPT"):
+            break
+        k += 1
+
+    if union_idx == -1:
+        body = _parse_query_tokens(inner)
+        body["type"] = "RECURSIVE_CTE_NODE"
+        return body
+
+    after_union = union_idx + 1
+    while (
+        after_union < m
+        and inner[after_union].kind == "WORD"
+        and inner[after_union].val.upper() in ("ALL", "DISTINCT", "BY", "NAME")
+    ):
+        after_union += 1
+
+    return {
+        "type": "RECURSIVE_CTE_NODE",
+        "setop_type": "UNION",
+        "left": _parse_query_tokens(inner[:union_idx]),
+        "right": _parse_query_tokens(inner[after_union:]),
+    }
+
+
 def _parse_query_tokens(tokens: list[_Tok]) -> dict[str, Any]:
     tokens = _strip_outer_parens(tokens)
     node: dict[str, Any] = {"type": "SELECT_NODE", "children": []}
@@ -656,9 +751,10 @@ def _parse_query_tokens(tokens: list[_Tok]) -> dict[str, Any]:
             rp = _find_matching_rparen(tokens, i)
             if rp == -1:
                 break
-            cte_body = _parse_query_tokens(tokens[i + 1 : rp])
             if is_recursive:
-                cte_body["type"] = "RECURSIVE_CTE_NODE"
+                cte_body = _parse_recursive_cte_tokens(tokens[i + 1 : rp])
+            else:
+                cte_body = _parse_query_tokens(tokens[i + 1 : rp])
             cte_entries.append({"key": cte_name, "value": {"query": {"node": cte_body}}})
             i = rp + 1
             if i < n and tokens[i].kind == "COMMA":

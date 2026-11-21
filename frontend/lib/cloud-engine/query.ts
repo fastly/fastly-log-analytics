@@ -8,6 +8,7 @@
 import {
   MAX_QUERY_ROWS,
   SQLValidationError,
+  isDistinctFromOperator,
   isSimpleSelectStatement,
   stripSqlComments,
   tokenizeSql,
@@ -99,13 +100,32 @@ export const DEFAULT_SCHEMA_COLUMNS: readonly QuerySchemaColumn[] = [
   { column: "cookie_session", type: "VARCHAR" },
 ];
 
-const IP_PII_COLUMNS = new Set(["ip", "client_ip", "oip", "xff"]);
-const SESSION_PII_COLUMNS = new Set([
-  "edge_sid",
-  "cmcd_sid",
+export const IP_PII_COLUMNS = new Set([
+  "ip",
+  "client_ip",
+  "c_ip",
+  "ip_address",
+  "remote_addr",
+  "oip",
+  "origin_ip",
+  "xff",
+  "x-forwarded-for",
+  "x_forwarded_for",
+  "true-client-ip",
+  "true_client_ip",
+  "fastly-client-ip",
+  "fastly_client_ip",
+]);
+export const SESSION_PII_COLUMNS = new Set([
   "cookie_session",
   "cid",
+  "client_id",
+  "edge_sid",
+  "sid",
+  "session_id",
+  "cmcd_sid",
   "cmcd_cid",
+  "cmcd_session",
 ]);
 
 /**
@@ -287,6 +307,11 @@ export function getQueryPresets(
   ];
 }
 
+function isPiiSchemaColumn(rawName: string): boolean {
+  const norm = rawName.trim().toLowerCase();
+  return IP_PII_COLUMNS.has(norm) || SESSION_PII_COLUMNS.has(norm);
+}
+
 export function getQuerySchema(
   serviceId: string,
   maskIps = false,
@@ -296,7 +321,12 @@ export function getQuerySchema(
     ? [...customColumns]
     : [...DEFAULT_SCHEMA_COLUMNS];
   const schema = maskIps
-    ? base.filter((col) => col.column !== "cookie_session")
+    ? base.filter((col) => {
+        const name = String(
+          col.column ?? (col as unknown as { name?: string }).name ?? "",
+        );
+        return !isPiiSchemaColumn(name);
+      })
     : base;
   return {
     source: serviceId || "logs",
@@ -305,6 +335,284 @@ export function getQuerySchema(
     debug_queries: [],
     debug_calls: [],
   };
+}
+
+const REWRITER_SUBQUERY_START = new Set([
+  "select",
+  "with",
+  "values",
+  "summarize",
+  "describe",
+  "from",
+  "table",
+]);
+const REWRITER_FROM_END = new Set([
+  "select",
+  "where",
+  "group",
+  "having",
+  "window",
+  "qualify",
+  "order",
+  "limit",
+  "offset",
+  "fetch",
+  "union",
+  "intersect",
+  "except",
+]);
+
+function formatSqlTableIdent(name: string): string {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? name : quoteSqlIdent(name);
+}
+
+/**
+ * Token-aware SQL rewriter using `tokenizeSql` character spans so string literals
+ * (`'FROM main.requests'`) and comments are never altered:
+ * - Strips optional `main.` / `"main".` schema prefixes before known/allowed tables.
+ * - Rewrites table-position `logs` / `"logs"` (and quoted `targetTable`) to `targetTable`.
+ */
+function rewriteSqlTableRefs(
+  cleanedSql: string,
+  targetTable: string,
+  extraAllowedTables?: Iterable<string>,
+): { tableRewritten: string; tokens: SqlToken[]; userCteAliases: Set<string> } {
+  let tokens: SqlToken[];
+  try {
+    tokens = tokenizeSql(cleanedSql);
+  } catch {
+    return { tableRewritten: cleanedSql, tokens: [], userCteAliases: new Set() };
+  }
+  if (tokens.length === 0) {
+    return { tableRewritten: cleanedSql, tokens: [], userCteAliases: new Set() };
+  }
+
+  const targetLower = targetTable.toLowerCase();
+  const targetRef = formatSqlTableIdent(targetTable);
+  const knownTables = new Set<string>([
+    "logs",
+    "requests",
+    "client_vitals",
+    "client_errors",
+    targetLower,
+    ...(extraAllowedTables ? Array.from(extraAllowedTables, (t) => t.toLowerCase()) : []),
+  ]);
+
+  // Extract all user-defined CTE aliases across all query/subquery WITH blocks
+  const userCteAliases = new Set<string>();
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i];
+    if (
+      tok.kind !== "word" ||
+      tok.lower !== "with" ||
+      !(
+        i === 0 ||
+        tokens[i - 1]?.value === "(" ||
+        (i === 1 && (tokens[0].lower === "summarize" || tokens[0].lower === "describe"))
+      )
+    ) {
+      continue;
+    }
+    let k = i + 1;
+    if (tokens[k]?.kind === "word" && tokens[k].lower === "recursive") {
+      k++;
+    }
+    while (k < tokens.length) {
+      const nameTok = tokens[k];
+      if (nameTok.kind !== "word" && nameTok.kind !== "quoted_ident") break;
+      let afterName = k + 1;
+      if (tokens[afterName]?.kind === "symbol" && tokens[afterName].value === "(") {
+        const colClose = closingParen(tokens, afterName);
+        if (colClose >= tokens.length) break;
+        afterName = colClose + 1;
+      }
+      if (!(tokens[afterName]?.kind === "word" && tokens[afterName].lower === "as")) break;
+      let bodyOpen = afterName + 1;
+      if (tokens[bodyOpen]?.kind === "word" && tokens[bodyOpen].lower === "not") bodyOpen++;
+      if (tokens[bodyOpen]?.kind === "word" && tokens[bodyOpen].lower === "materialized") bodyOpen++;
+      if (!(tokens[bodyOpen]?.kind === "symbol" && tokens[bodyOpen].value === "(")) break;
+      userCteAliases.add(nameTok.lower);
+      const closeIdx = closingParen(tokens, bodyOpen);
+      if (closeIdx >= tokens.length) break;
+      if (tokens[closeIdx + 1]?.kind === "symbol" && tokens[closeIdx + 1].value === ",") {
+        k = closeIdx + 2;
+        continue;
+      }
+      break;
+    }
+  }
+
+  type Frame = { kind: "subquery" | "from_join" | "expr"; savedInFrom: boolean };
+  const parenStack: Frame[] = [];
+  let inFromClause = false;
+  let expectingTableRef = false;
+  const edits: Array<{ start: number; end: number; text: string }> = [];
+
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i];
+    const nextTok = i + 1 < tokens.length ? tokens[i + 1] : null;
+    const prevTok = i > 0 ? tokens[i - 1] : null;
+    const inExprParen =
+      parenStack.length > 0 && parenStack[parenStack.length - 1].kind === "expr";
+
+    if (tok.kind === "symbol" && tok.value === "(") {
+      let look = i + 1;
+      while (
+        look < tokens.length &&
+        tokens[look].kind === "symbol" &&
+        tokens[look].value === "("
+      ) {
+        look++;
+      }
+      const lookTok = look < tokens.length ? tokens[look] : null;
+      const isTrimFromCall =
+        look === i + 1 &&
+        lookTok?.kind === "word" &&
+        lookTok.lower === "from" &&
+        prevTok?.kind === "word" &&
+        (prevTok.lower === "trim" ||
+          prevTok.lower === "btrim" ||
+          prevTok.lower === "ltrim" ||
+          prevTok.lower === "rtrim");
+      const hasSubqueryHead = Boolean(
+        !isTrimFromCall &&
+          lookTok?.kind === "word" &&
+          REWRITER_SUBQUERY_START.has(lookTok.lower),
+      );
+      const isDirectSubquery = hasSubqueryHead && look === i + 1;
+
+      if (expectingTableRef && !isDirectSubquery) {
+        parenStack.push({ kind: "from_join", savedInFrom: inFromClause });
+        inFromClause = true;
+        expectingTableRef = !hasSubqueryHead;
+      } else if (hasSubqueryHead) {
+        parenStack.push({ kind: "subquery", savedInFrom: inFromClause });
+        inFromClause = false;
+        expectingTableRef = false;
+      } else {
+        parenStack.push({ kind: "expr", savedInFrom: inFromClause });
+        expectingTableRef = false;
+      }
+      continue;
+    }
+
+    if (tok.kind === "symbol" && tok.value === ")") {
+      const frame = parenStack.pop();
+      if (frame) {
+        inFromClause = frame.savedInFrom;
+        expectingTableRef = false;
+      }
+      continue;
+    }
+
+    if (!inExprParen) {
+      if (tok.kind === "word") {
+        const lower = tok.lower;
+        if (
+          (lower === "from" && !isDistinctFromOperator(tokens, i)) ||
+          (lower === "table" && prevTok?.value !== ".") ||
+          lower === "join"
+        ) {
+          inFromClause = true;
+          expectingTableRef = true;
+          continue;
+        }
+        if (
+          (lower === "summarize" || lower === "describe") &&
+          (i === 0 ||
+            prevTok?.value === "(" ||
+            (prevTok?.kind === "word" &&
+              (prevTok.lower === "union" ||
+                prevTok.lower === "all" ||
+                prevTok.lower === "distinct" ||
+                prevTok.lower === "name" ||
+                prevTok.lower === "intersect" ||
+                prevTok.lower === "except")))
+        ) {
+          if (
+            nextTok &&
+            !(
+              nextTok.kind === "word" &&
+              (nextTok.lower === "select" ||
+                nextTok.lower === "with" ||
+                nextTok.lower === "values" ||
+                nextTok.lower === "from" ||
+                nextTok.lower === "table")
+            )
+          ) {
+            inFromClause = true;
+            expectingTableRef = true;
+          }
+          continue;
+        }
+        if (inFromClause && REWRITER_FROM_END.has(lower)) {
+          inFromClause = false;
+          expectingTableRef = false;
+        }
+      } else if (inFromClause && tok.kind === "symbol" && tok.value === ",") {
+        expectingTableRef = true;
+        continue;
+      }
+    }
+
+    if (expectingTableRef && tok.kind === "word" && tok.lower === "lateral") {
+      continue;
+    }
+
+    // Strip `main.` / `"main".` before any known/allowed table anywhere outside strings/comments
+    if (
+      (tok.kind === "word" || tok.kind === "quoted_ident") &&
+      tok.lower === "main" &&
+      prevTok?.value !== "." &&
+      nextTok?.kind === "symbol" &&
+      nextTok.value === "." &&
+      i + 2 < tokens.length
+    ) {
+      const objTok = tokens[i + 2];
+      const afterObj = i + 3 < tokens.length ? tokens[i + 3] : null;
+      if (
+        (objTok.kind === "word" || objTok.kind === "quoted_ident") &&
+        knownTables.has(objTok.lower) &&
+        !(afterObj?.kind === "symbol" && afterObj.value === "(")
+      ) {
+        const mapped =
+          objTok.lower === "logs" || objTok.lower === targetLower
+            ? targetRef
+            : formatSqlTableIdent(objTok.value);
+        edits.push({ start: tok.start, end: objTok.end, text: mapped });
+        i += 2;
+        if (expectingTableRef) {
+          expectingTableRef = false;
+        }
+        continue;
+      }
+    }
+
+    if (
+      expectingTableRef &&
+      (tok.kind === "word" || tok.kind === "quoted_ident") &&
+      !(nextTok?.kind === "symbol" && (nextTok.value === "." || nextTok.value === "("))
+    ) {
+      if (tok.lower === "logs" || tok.lower === targetLower) {
+        edits.push({ start: tok.start, end: tok.end, text: targetRef });
+      } else if (tok.kind === "quoted_ident" && knownTables.has(tok.lower)) {
+        edits.push({ start: tok.start, end: tok.end, text: formatSqlTableIdent(tok.value) });
+      }
+      expectingTableRef = false;
+    }
+  }
+
+  if (edits.length === 0) {
+    return { tableRewritten: cleanedSql, tokens, userCteAliases };
+  }
+  let out = "";
+  let cursor = 0;
+  for (const edit of edits) {
+    out += cleanedSql.slice(cursor, edit.start) + edit.text;
+    cursor = edit.end;
+  }
+  out += cleanedSql.slice(cursor);
+  return { tableRewritten: out, tokens, userCteAliases };
 }
 
 /**
@@ -316,12 +624,10 @@ export function rewriteCloudQuerySql(
   sql: string,
   targetTable = "requests",
   defaultLimit = 1000,
+  allowedTables?: Iterable<string>,
 ): { rewrittenSql: string; hasExplicitLimit: boolean } {
   const cleaned = stripSqlComments(sql).trim().replace(/;\s*$/, "");
-  const tableRewritten = cleaned.replace(
-    /\b(FROM|JOIN|SUMMARIZE|DESCRIBE)\s+(?:"logs"|logs|"requests"|requests)\b/gi,
-    (_m, kw: string) => `${kw} ${targetTable}`,
-  );
+  const { tableRewritten } = rewriteSqlTableRefs(cleaned, targetTable, allowedTables);
   const hasExplicitLimit = /\bLIMIT\s+\d+/i.test(tableRewritten);
   if (isSimpleSelectStatement(tableRewritten) && !hasExplicitLimit) {
     return {
@@ -333,6 +639,200 @@ export function rewriteCloudQuerySql(
     rewrittenSql: tableRewritten,
     hasExplicitLimit,
   };
+}
+
+const UA_PROD_VER_RE =
+  /\b(?:Mozilla|Chrome|Chromium|CriOS|Firefox|FxiOS|Safari|Version|Edg|EdgA|EdgiOS|OPR|AppleWebKit|Gecko|Mobile)\/\d+(?:\.\d+){1,3}\b/gi;
+const EMBEDDED_IPV4_RE = /(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])/g;
+const EMBEDDED_IPV6_RE =
+  /(?<![A-Fa-f0-9:])(?:(?:[A-Fa-f0-9]{1,4}:){1,6}:?(?:\d{1,3}\.){3}\d{1,3}|::(?:[A-Fa-f0-9]{1,4}:){0,5}(?:\d{1,3}\.){3}\d{1,3}|[A-Fa-f0-9]{1,4}(?::[A-Fa-f0-9]{1,4}){2,7}|(?:[A-Fa-f0-9]{1,4}:){1,6}:(?:[A-Fa-f0-9]{1,4}(?::[A-Fa-f0-9]{1,4}){0,5})?|::(?:[A-Fa-f0-9]{1,4}(?::[A-Fa-f0-9]{1,4}){0,6}))(?![A-Fa-f0-9:])/g;
+
+function parseIpv4Octets(cand: string): [number, number, number, number] | null {
+  const parts = cand.split(".");
+  if (parts.length !== 4) return null;
+  const nums: number[] = [];
+  for (const p of parts) {
+    if (!(p === "0" || (/^[1-9]\d{0,2}$/.test(p) && Number(p) <= 255))) {
+      return null;
+    }
+    nums.push(Number(p));
+  }
+  return nums as [number, number, number, number];
+}
+
+function parseIpv6Groups(cand: string): number[] | null {
+  if (
+    (cand.startsWith(":") && !cand.startsWith("::")) ||
+    (cand.endsWith(":") && !cand.endsWith("::"))
+  ) {
+    return null;
+  }
+  const doubleColonParts = cand.split("::");
+  if (doubleColonParts.length > 2) return null;
+
+  const parseSide = (side: string, allowTrailingV4: boolean): number[] | null => {
+    if (side === "") return [];
+    const segs = side.split(":");
+    const out: number[] = [];
+    for (let idx = 0; idx < segs.length; idx++) {
+      const seg = segs[idx];
+      if (allowTrailingV4 && idx === segs.length - 1 && seg.includes(".")) {
+        const octets = parseIpv4Octets(seg);
+        if (!octets) return null;
+        out.push((octets[0] << 8) | octets[1], (octets[2] << 8) | octets[3]);
+      } else {
+        if (!/^[0-9A-Fa-f]{1,4}$/.test(seg)) return null;
+        out.push(Number.parseInt(seg, 16));
+      }
+    }
+    return out;
+  };
+
+  if (doubleColonParts.length === 1) {
+    const groups = parseSide(doubleColonParts[0], true);
+    return groups && groups.length === 8 ? groups : null;
+  }
+  const left = parseSide(doubleColonParts[0], false);
+  const right = parseSide(doubleColonParts[1], true);
+  if (!left || !right || left.length + right.length >= 8) return null;
+  const zeros = new Array<number>(8 - left.length - right.length).fill(0);
+  return [...left, ...zeros, ...right];
+}
+
+export function scrubIpText(val: string): string {
+  if (!val || (!val.includes(".") && !val.includes(":"))) return val;
+  const uaSpans: Array<[number, number]> = [];
+  UA_PROD_VER_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = UA_PROD_VER_RE.exec(val)) !== null) {
+    uaSpans.push([m.index, m.index + m[0].length]);
+  }
+  const inUa = (start: number, end: number) =>
+    uaSpans.some(([s, e]) => s <= start && end <= e);
+
+  let out = val;
+  if (out.includes(":")) {
+    out = out.replace(EMBEDDED_IPV6_RE, (cand) => {
+      const groups = parseIpv6Groups(cand);
+      if (!groups) return cand;
+      return "0.0.0.0";
+    });
+  }
+  if (out.includes(".")) {
+    out = out.replace(EMBEDDED_IPV4_RE, (cand, offset: number) => {
+      if (inUa(offset, offset + cand.length)) return cand;
+      const octets = parseIpv4Octets(cand);
+      if (!octets) return cand;
+      return "0.0.0.0";
+    });
+  }
+  return out;
+}
+
+const DUCKDB_UA_VER_RE =
+  "\\b(Mozilla|Chrome|Chromium|CriOS|Firefox|FxiOS|Safari|Version|Edg|EdgA|EdgiOS|OPR|AppleWebKit|Gecko|Mobile)/([0-9]+)\\.([0-9]+(?:\\.[0-9]+){0,2})\\b";
+const DUCKDB_IPV4_OCTET = "(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])";
+const DUCKDB_IPV4_CORE = `${DUCKDB_IPV4_OCTET}(?:\\.${DUCKDB_IPV4_OCTET}){3}`;
+const DUCKDB_H16 = "[0-9A-Fa-f]{1,4}";
+const DUCKDB_IPV6_CORE = [
+  `(?:${DUCKDB_H16}:){6}${DUCKDB_IPV4_CORE}`,
+  `(?:${DUCKDB_H16}:){7}${DUCKDB_H16}`,
+  `(?:${DUCKDB_H16}:){1,5}:${DUCKDB_IPV4_CORE}`,
+  `::(?:${DUCKDB_H16}:){0,5}${DUCKDB_IPV4_CORE}`,
+  `(?:${DUCKDB_H16}:){1,6}:(?:${DUCKDB_H16}(?::${DUCKDB_H16}){0,5})?`,
+  `::(?:${DUCKDB_H16}(?::${DUCKDB_H16}){0,6})`,
+].join("|");
+const DUCKDB_IPV6_PAT = `(^|[^0-9A-Za-z:])(${DUCKDB_IPV6_CORE})($|[^0-9A-Za-z:.])`;
+const DUCKDB_IPV4_PAT = `(^|[^0-9.])(${DUCKDB_IPV4_CORE})($|[^0-9.])`;
+
+function buildDuckDbScrubTextExpr(colExpr: string): string {
+  let e = colExpr;
+  e = `regexp_replace(${e}, '${DUCKDB_UA_VER_RE}', '\\1/\\2\x01UA\x01\\3', 'gi')`;
+  e = `regexp_replace(${e}, '${DUCKDB_IPV6_PAT}', '\\1\x01IP\x01\\3', 'g')`;
+  e = `regexp_replace(${e}, '${DUCKDB_IPV6_PAT}', '\\1\x01IP\x01\\3', 'g')`;
+  e = `regexp_replace(${e}, '${DUCKDB_IPV4_PAT}', '\\1\x01IP\x01\\3', 'g')`;
+  e = `regexp_replace(${e}, '${DUCKDB_IPV4_PAT}', '\\1\x01IP\x01\\3', 'g')`;
+  return `replace(replace(${e}, '\x01UA\x01', '.'), '\x01IP\x01', '0.0.0.0')`;
+}
+
+function scrubBytesView(bytes: Uint8Array): Uint8Array {
+  if (bytes.byteLength === 0) return bytes;
+  try {
+    const decoded = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    const scrubbed = scrubIpText(decoded);
+    return scrubbed === decoded ? bytes : new TextEncoder().encode(scrubbed);
+  } catch {
+    return new Uint8Array(0);
+  }
+}
+
+function scrubNestedValue(val: unknown): unknown {
+  if (val == null) return val;
+  if (typeof val === "string") {
+    return val === "" ? val : scrubIpText(val);
+  }
+  if (
+    typeof val === "number" ||
+    typeof val === "boolean" ||
+    typeof val === "bigint" ||
+    val instanceof Date
+  ) {
+    return val;
+  }
+  if (val instanceof Uint8Array) {
+    return scrubBytesView(val);
+  }
+  if (ArrayBuffer.isView(val)) {
+    return scrubBytesView(new Uint8Array(val.buffer, val.byteOffset, val.byteLength));
+  }
+  if (val instanceof ArrayBuffer) {
+    return scrubBytesView(new Uint8Array(val)).buffer;
+  }
+  if (Array.isArray(val)) {
+    return val.map((item) => scrubNestedValue(item));
+  }
+  if (val instanceof Map) {
+    const outMap = new Map<unknown, unknown>();
+    for (const [k, v] of val.entries()) {
+      if (typeof k === "string") {
+        const lower = k.toLowerCase();
+        if (IP_PII_COLUMNS.has(lower) && v != null && v !== "") {
+          outMap.set(scrubIpText(k), "0.0.0.0");
+          continue;
+        }
+        if (SESSION_PII_COLUMNS.has(lower) && v != null && v !== "") {
+          outMap.set(scrubIpText(k), "[redacted]");
+          continue;
+        }
+        outMap.set(scrubIpText(k), scrubNestedValue(v));
+      } else {
+        outMap.set(scrubNestedValue(k), scrubNestedValue(v));
+      }
+    }
+    return outMap;
+  }
+  if (typeof val === "object") {
+    const maybeJson = (val as { toJSON?: unknown }).toJSON;
+    if (typeof maybeJson === "function") {
+      return scrubNestedValue((maybeJson as () => unknown).call(val));
+    }
+    const rec = val as Record<string, unknown>;
+    const outObj: Record<string, unknown> = {};
+    for (const k of Object.keys(rec)) {
+      const lower = k.toLowerCase();
+      const v = rec[k];
+      const safeKey = scrubIpText(k);
+      if (IP_PII_COLUMNS.has(lower) && v != null && v !== "") {
+        outObj[safeKey] = "0.0.0.0";
+      } else if (SESSION_PII_COLUMNS.has(lower) && v != null && v !== "") {
+        outObj[safeKey] = "[redacted]";
+      } else {
+        outObj[safeKey] = scrubNestedValue(v);
+      }
+    }
+    return outObj;
+  }
+  return val;
 }
 
 export function redactQueryRowsForPii(
@@ -352,10 +852,108 @@ export function redactQueryRowsForPii(
         copy[key] !== ""
       ) {
         copy[key] = "[redacted]";
+      } else if (copy[key] != null) {
+        copy[key] = scrubNestedValue(copy[key]);
       }
     }
     return copy;
   });
+}
+
+function unwrapOuterBalancedParens(sql: string): string {
+  let cur = sql.trim();
+  while (cur.startsWith("(") && cur.endsWith(")")) {
+    let toks: SqlToken[];
+    try {
+      toks = tokenizeSql(cur);
+    } catch {
+      break;
+    }
+    if (
+      toks.length >= 2 &&
+      toks[0].kind === "symbol" &&
+      toks[0].value === "(" &&
+      closingParen(toks, 0) === toks.length - 1
+    ) {
+      cur = cur.slice(toks[0].end, toks[toks.length - 1].start).trim();
+    } else {
+      break;
+    }
+  }
+  return cur;
+}
+
+function mergeLeadingCtes(
+  sqlStmt: string,
+  cteDefs: string[],
+  shadowSelectByTable?: ReadonlyMap<string, string>,
+  targetTable?: string,
+  shadowDescribeByTable?: ReadonlyMap<string, string>,
+): string {
+  if (cteDefs.length === 0) return sqlStmt;
+  const trimmed = sqlStmt.trim();
+  if (shadowSelectByTable && shadowSelectByTable.size > 0 && targetTable) {
+    const showColsMatch =
+      /^SHOW\s+COLUMNS\s+FROM\s+(?:(?:"main"|main)\s*\.\s*)?([A-Za-z0-9_"]+)\s*$/i.exec(
+        trimmed,
+      );
+    if (showColsMatch) {
+      const refName = showColsMatch[1].replaceAll('"', "").toLowerCase();
+      const descSql =
+        shadowDescribeByTable?.get(refName) ??
+        (refName === "logs"
+          ? shadowDescribeByTable?.get(targetTable.toLowerCase())
+          : undefined) ??
+        shadowSelectByTable.get(refName) ??
+        (refName === "logs"
+          ? shadowSelectByTable.get(targetTable.toLowerCase())
+          : undefined);
+      if (descSql) {
+        return `DESCRIBE (${descSql})`;
+      }
+    }
+
+    const sumMatch =
+      /^(SUMMARIZE|DESCRIBE)\s+(?:TABLE\s+)?(?:(?:"main"|main)\s*\.\s*)?([A-Za-z0-9_"]+)\s*$/i.exec(
+        trimmed,
+      );
+    if (sumMatch) {
+      const kw = sumMatch[1];
+      const refName = sumMatch[2].replaceAll('"', "").toLowerCase();
+      const mapToUse =
+        kw.toUpperCase() === "DESCRIBE" && shadowDescribeByTable
+          ? shadowDescribeByTable
+          : shadowSelectByTable;
+      const shadowSql =
+        mapToUse.get(refName) ??
+        (refName === "logs" ? mapToUse.get(targetTable.toLowerCase()) : undefined) ??
+        shadowSelectByTable.get(refName) ??
+        (refName === "logs"
+          ? shadowSelectByTable.get(targetTable.toLowerCase())
+          : undefined);
+      if (shadowSql) {
+        return `${kw} (${shadowSql})`;
+      }
+    }
+  }
+
+  const sumSubMatch = /^(SUMMARIZE|DESCRIBE)\s+([\s\S]+)$/i.exec(trimmed);
+  if (sumSubMatch) {
+    const kw = sumSubMatch[1];
+    const unwrapped = unwrapOuterBalancedParens(sumSubMatch[2]);
+    if (/^(?:SELECT|WITH|VALUES|FROM|TABLE)\b/i.test(unwrapped)) {
+      return `${kw} (${mergeLeadingCtes(unwrapped, cteDefs)})`;
+    }
+    return `${kw} (${mergeLeadingCtes(`SELECT * FROM (${unwrapped})`, cteDefs)})`;
+  }
+
+  if (/^WITH\s+RECURSIVE\b/i.test(trimmed)) {
+    return `WITH RECURSIVE ${cteDefs.join(", ")}, ${trimmed.replace(/^WITH\s+RECURSIVE\s+/i, "")}`;
+  }
+  if (/^WITH\b/i.test(trimmed)) {
+    return `WITH ${cteDefs.join(", ")}, ${trimmed.replace(/^WITH\s+/i, "")}`;
+  }
+  return `WITH ${cteDefs.join(", ")} ${trimmed}`;
 }
 
 /**
@@ -404,36 +1002,208 @@ export async function executeCloudQuery(
     Math.min(Number(req.max_rows ?? 1000), MAX_QUERY_ROWS),
   );
   const targetTable = ctx.tableName ?? "requests";
-  const { rewrittenSql, hasExplicitLimit } = rewriteCloudQuerySql(
-    rawSql,
+  const maskIps = Boolean(ctx.maskIps || ctx.role === "analyst-no-pii");
+  const effectiveAllowedSet = new Set<string>([
+    ...Array.from(allowedTables),
     targetTable,
-    maxRows,
-  );
+  ]);
+  let innerSql: string;
+  let rawTokens: SqlToken[];
+  let userCteAliases: Set<string>;
+  try {
+    const cleanedRaw = stripSqlComments(rawSql).trim().replace(/;\s*$/, "");
+    const rewritten = rewriteSqlTableRefs(cleanedRaw, targetTable, allowedTables);
+    innerSql = rewritten.tableRewritten;
+    rawTokens = rewritten.tokens;
+    userCteAliases = rewritten.userCteAliases;
+    validateUserSql(innerSql, effectiveAllowedSet);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      status: 403,
+      body: {
+        detail: {
+          error: "sql_not_permitted",
+          message,
+        },
+      },
+    };
+  }
+
+  if (maskIps && userCteAliases.size > 0) {
+    const reservedCteNames = new Set<string>([
+      "logs",
+      "requests",
+      "client_vitals",
+      "client_errors",
+      targetTable.toLowerCase(),
+      ...Array.from(allowedTables, (t) => t.toLowerCase()),
+    ]);
+    for (const cteName of userCteAliases) {
+      if (reservedCteNames.has(cteName)) {
+        return {
+          status: 403,
+          body: {
+            detail: {
+              error: "sql_not_permitted",
+              message: `CTE alias '${cteName}' collides with a protected table name.`,
+            },
+          },
+        };
+      }
+    }
+  }
+
+  const hasExplicitLimit = /\bLIMIT\s+\d+/i.test(innerSql);
+  const rewrittenSql =
+    isSimpleSelectStatement(innerSql) && !hasExplicitLimit
+      ? `${innerSql} LIMIT ${maxRows}`
+      : innerSql;
 
   const execSql =
     isSimpleSelectStatement(rewrittenSql) && hasExplicitLimit
       ? `SELECT * FROM (${rewrittenSql}) AS _q LIMIT ${maxRows + 1}`
       : isSimpleSelectStatement(rewrittenSql)
-        ? `SELECT * FROM (${ stripSqlComments(rawSql).trim().replace(/;\s*$/, "").replace(/\b(FROM|JOIN)\s+(?:"logs"|logs)\b/gi, `$1 ${targetTable}`) }) AS _q LIMIT ${maxRows + 1}`
+        ? `SELECT * FROM (${innerSql}) AS _q LIMIT ${maxRows + 1}`
         : rewrittenSql;
-
-  const maskIps = Boolean(ctx.maskIps || ctx.role === "analyst-no-pii");
-  const scope = ctx.since
-    ? `WITH ${quoteSqlIdent(ctx.since.table)} AS (SELECT * FROM main.${quoteSqlIdent(ctx.since.table)} WHERE ts_ms >= ${Math.floor(ctx.since.ms)}) `
-    : "";
 
   try {
     let fetchedRows: Record<string, unknown>[] = [];
     let explainPlan: string | null = null;
+    let finalRewrittenSql = rewrittenSql;
 
     if (ctx.runSql) {
+      const cteDefs: string[] = [];
+      const shadowSelectByTable = new Map<string, string>();
+      const shadowDescribeByTable = new Map<string, string>();
+
+      if (maskIps) {
+        const referencedIdents = new Set(
+          rawTokens
+            .filter((t) => t.kind === "word" || t.kind === "quoted_ident")
+            .map((t) => t.lower),
+        );
+        const tablesToShadow: string[] = [targetTable];
+        const seenLower = new Set<string>([targetTable.toLowerCase()]);
+        for (const allowed of allowedTables) {
+          const al = allowed.toLowerCase();
+          if (al !== "logs" && !seenLower.has(al) && referencedIdents.has(al)) {
+            seenLower.add(al);
+            tablesToShadow.push(allowed);
+          }
+        }
+        for (const rumTbl of ["client_vitals", "client_errors"]) {
+          if (!seenLower.has(rumTbl) && referencedIdents.has(rumTbl)) {
+            seenLower.add(rumTbl);
+            tablesToShadow.push(rumTbl);
+          }
+        }
+
+        for (const tbl of tablesToShadow) {
+          const describeTarget =
+            tbl === "requests" ? "requests" : `main.${quoteSqlIdent(tbl)}`;
+          const descRows = await ctx
+            .runSql(`DESCRIBE SELECT * FROM ${describeTarget} LIMIT 0`)
+            .catch(() => []);
+          const validDesc =
+            Array.isArray(descRows) &&
+            descRows.length > 0 &&
+            typeof descRows[0]?.column_name === "string"
+              ? descRows
+              : [];
+          if (validDesc.length > 0) {
+            const replacements: string[] = [];
+            const piiColIdents: string[] = [];
+            for (const col of validDesc) {
+              const colName = String(col.column_name);
+              const colLower = colName.toLowerCase();
+              const colType = String(col.column_type ?? "VARCHAR").toUpperCase();
+              const colIdent = quoteSqlIdent(colName);
+              const isScalarTextType =
+                /^(?:VAR)?CHAR(?:\(\d+\))?$|^(?:TEXT|STRING|BPCHAR)$/i.test(
+                  colType.trim(),
+                );
+              if (IP_PII_COLUMNS.has(colLower)) {
+                piiColIdents.push(colIdent);
+                replacements.push(
+                  isScalarTextType
+                    ? `'0.0.0.0' AS ${colIdent}`
+                    : `CAST(NULL AS ${colType}) AS ${colIdent}`,
+                );
+              } else if (SESSION_PII_COLUMNS.has(colLower)) {
+                piiColIdents.push(colIdent);
+                replacements.push(
+                  isScalarTextType
+                    ? `'[redacted]' AS ${colIdent}`
+                    : `CAST(NULL AS ${colType}) AS ${colIdent}`,
+                );
+              } else if (isScalarTextType) {
+                replacements.push(
+                  `${buildDuckDbScrubTextExpr(colIdent)} AS ${colIdent}`,
+                );
+              }
+            }
+            const replaceExpr =
+              replacements.length > 0 ? ` * REPLACE (${replacements.join(", ")})` : " *";
+            const sinceClause =
+              ctx.since && ctx.since.table === tbl
+                ? ` WHERE ts_ms >= ${Math.floor(ctx.since.ms)}`
+                : "";
+            const tblShadowSql = `SELECT${replaceExpr} FROM main.${quoteSqlIdent(tbl)}${sinceClause}`;
+            const tblDescribeSql =
+              piiColIdents.length > 0
+                ? `SELECT * EXCLUDE (${piiColIdents.join(", ")}) FROM (${tblShadowSql})`
+                : tblShadowSql;
+            shadowSelectByTable.set(tbl.toLowerCase(), tblShadowSql);
+            shadowDescribeByTable.set(tbl.toLowerCase(), tblDescribeSql);
+            cteDefs.push(`${quoteSqlIdent(tbl)} AS (${tblShadowSql})`);
+          }
+        }
+
+        if (
+          targetTable.toLowerCase() !== "logs" &&
+          shadowSelectByTable.has(targetTable.toLowerCase()) &&
+          !shadowSelectByTable.has("logs") &&
+          referencedIdents.has("logs")
+        ) {
+          cteDefs.push(`"logs" AS (SELECT * FROM ${quoteSqlIdent(targetTable)})`);
+        }
+      }
+
+      if (
+        ctx.since &&
+        !(maskIps && shadowSelectByTable.has(ctx.since.table.toLowerCase()))
+      ) {
+        cteDefs.push(
+          `${quoteSqlIdent(ctx.since.table)} AS (SELECT * FROM main.${quoteSqlIdent(ctx.since.table)} WHERE ts_ms >= ${Math.floor(ctx.since.ms)})`,
+        );
+      }
+
+      const effectiveExplainTarget = mergeLeadingCtes(
+        rewrittenSql,
+        cteDefs,
+        shadowSelectByTable,
+        targetTable,
+        shadowDescribeByTable,
+      );
+      const effectiveExecSql = mergeLeadingCtes(
+        execSql,
+        cteDefs,
+        shadowSelectByTable,
+        targetTable,
+        shadowDescribeByTable,
+      );
+      finalRewrittenSql = effectiveExplainTarget;
+
       if (req.explain) {
-        const planRows = await ctx.runSql(`EXPLAIN ${scope}${rewrittenSql}`);
+        const planRows = await ctx.runSql(`EXPLAIN ${effectiveExplainTarget}`);
         explainPlan = planRows
           .map((r) => Object.values(r).join(" "))
           .join("\n");
       }
-      fetchedRows = await ctx.runSql(`${scope}${execSql}`);
+      fetchedRows = await ctx.runSql(effectiveExecSql);
+    } else if (ctx.since) {
+      finalRewrittenSql = `WITH ${quoteSqlIdent(ctx.since.table)} AS (SELECT * FROM main.${quoteSqlIdent(ctx.since.table)} WHERE ts_ms >= ${Math.floor(ctx.since.ms)}) ${rewrittenSql}`;
     }
 
     const truncated = fetchedRows.length > maxRows;
@@ -452,7 +1222,7 @@ export async function executeCloudQuery(
 
     const debugEntry = {
       engine: "DuckDB-Wasm",
-      sql: `${scope}${rewrittenSql}`,
+      sql: finalRewrittenSql,
       duration_ms: elapsedMs,
     };
 

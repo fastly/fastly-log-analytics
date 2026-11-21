@@ -22,6 +22,7 @@ from backend.core.request_context import ServiceId, require_admin, require_servi
 from backend.core.share_db import (
     PII_IP_KEYS,
     SESSION_ID_KEYS,
+    _canon_pii_key,
     apply_pii_policy,
     is_saved_view_pii_key,
     mask_ip,
@@ -480,7 +481,14 @@ async def control_room_correlate(
     state = getattr(request, "state", None)
     analyst_session = getattr(state, "analyst_session", None)
     should_mask_ips = mask_ips_for(analyst_session)
-    if should_mask_ips and body.dimension.strip().lower() in SESSION_ID_KEYS:
+    raw_dim_lc = body.dimension.strip().lower()
+    canon_dim = _canon_pii_key(body.dimension)
+    if (
+        should_mask_ips
+        and raw_dim_lc != "oip"
+        and canon_dim != "oip"
+        and (raw_dim_lc in SESSION_ID_KEYS or is_saved_view_pii_key(body.dimension) or canon_dim == "origin_ip")
+    ):
         raise HTTPException(
             status_code=403,
             detail=make_error(
@@ -498,7 +506,11 @@ async def control_room_correlate(
         )
 
     col = field_def.code
-    if should_mask_ips and col in SESSION_ID_KEYS:
+    if (
+        should_mask_ips
+        and col != "oip"
+        and (col in SESSION_ID_KEYS or is_saved_view_pii_key(col) or _canon_pii_key(col) == "origin_ip")
+    ):
         raise HTTPException(
             status_code=403,
             detail=make_error(

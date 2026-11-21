@@ -164,4 +164,93 @@ describe('SEC-02 apiSsrProxy trust-boundary header sanitization', () => {
       await server.close()
     }
   })
+
+  it('T5-FE-01: preserves mTLS admin-gateway auth when Caddy appends X-Forwarded-For, refuses co-occurring public markers, and forwards sanitized XFF in ssrUpstreamGet', async () => {
+    const secret = 'g'.repeat(40)
+    process.env.ADMIN_GATEWAY_SECRET = secret
+    process.env.ADMIN_GATEWAY_REQUIRED = '1'
+
+    // 1. Valid mTLS admin-gateway request carrying Caddy's X-Forwarded-For stays admin
+    expect(
+      classifySsrRequest(
+        new Headers({
+          host: 'admin.internal.example.com',
+          'x-admin-gateway-token': secret,
+          'x-forwarded-for': '10.20.30.40',
+        }),
+      ),
+    ).toEqual({ admin: true, gatewayAuthenticated: true, refusal: null })
+
+    // 2. Co-occurring public/analyst marker with X-Admin-Gateway-Token is refused
+    for (const marker of [
+      'x-proxied-by-caddy',
+      'x-fla-public-gateway',
+      'x-fla-frontend-proxy',
+      'x-remote-analyst',
+    ]) {
+      const spoofed = classifySsrRequest(
+        new Headers({
+          host: 'admin.internal.example.com',
+          'x-admin-gateway-token': secret,
+          [marker]: '1',
+        }),
+      )
+      expect(spoofed.admin).toBe(false)
+      expect(spoofed.gatewayAuthenticated).toBe(false)
+      expect(spoofed.refusal).toBe('invalid admin gateway credential')
+    }
+
+    let seenHeaders: IncomingMessage['headers'] = {}
+    const server = await withUpstreamServer((req, res) => {
+      seenHeaders = req.headers
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end('{"ok":true}')
+    })
+
+    try {
+      // 3. proxyUpstreamRequest for mTLS admin-gateway with XFF forwards token + XFF and NO analyst markers
+      const mtlsReq = new Request('https://admin.internal.example.com/api/bootstrap', {
+        headers: {
+          host: 'admin.internal.example.com',
+          'x-admin-gateway-token': secret,
+          'x-forwarded-for': '10.20.30.40',
+        },
+      })
+      const mtlsRes = await proxyUpstreamRequest(mtlsReq)
+      expect(mtlsRes.status).toBe(200)
+      expect(seenHeaders['x-admin-gateway-token']).toBe(secret)
+      expect(seenHeaders['x-forwarded-for']).toBe('10.20.30.40')
+      expect(seenHeaders['x-remote-analyst']).toBeUndefined()
+      expect(seenHeaders['x-fla-frontend-proxy']).toBeUndefined()
+
+      // 4. ssrUpstreamGet behind Caddy forwards sanitized X-Forwarded-For
+      registerSsrHeaders({
+        cookies: () => ({ toString: () => 'analyst_session_id=abcdefghijklmnop1234', get: () => undefined }),
+        headers: () =>
+          new Headers({
+            host: 'share.example.com',
+            'x-proxied-by-caddy': '1',
+            'x-forwarded-for': '127.0.0.1, 203.0.113.50',
+            'user-agent': 'AnalystSSR/1.0',
+          }),
+      })
+      seenHeaders = {}
+      const ssrRes = await ssrUpstreamGet({ path: '/api/bootstrap', logPrefix: 't5' })
+      expect(ssrRes?.statusCode).toBe(200)
+      expect(seenHeaders['x-forwarded-for']).toBe('203.0.113.50')
+
+      // 5. Direct loopback ssrUpstreamGet drops spoofed X-Forwarded-For
+      delete process.env.ADMIN_GATEWAY_REQUIRED
+      registerSsrHeaders({
+        cookies: () => ({ toString: () => '', get: () => undefined }),
+        headers: () => new Headers({ host: 'localhost:3000' }),
+      })
+      seenHeaders = {}
+      const localRes = await ssrUpstreamGet({ path: '/api/bootstrap', logPrefix: 't5-local' })
+      expect(localRes?.statusCode).toBe(200)
+      expect(seenHeaders['x-forwarded-for']).toBeUndefined()
+    } finally {
+      await server.close()
+    }
+  })
 })

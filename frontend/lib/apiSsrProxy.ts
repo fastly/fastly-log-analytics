@@ -362,6 +362,7 @@ export function classifySsrRequest(headerBag: Pick<Headers, "get">): {
   const gatewayAuthenticated =
     !proxiedByCaddy &&
     !hasNonEmptyHeader(headerBag, "x-fla-frontend-proxy") &&
+    !hasNonEmptyHeader(headerBag, "x-remote-analyst") &&
     gatewaySecret.length >= 32 &&
     timingSafeStringEqual(gatewayToken || "", gatewaySecret);
   let refusal: string | null = null;
@@ -376,14 +377,18 @@ export function classifySsrRequest(headerBag: Pick<Headers, "get">): {
         headerBag.get("origin")?.toLowerCase() !== `https://${inboundHost?.toLowerCase()}`))
   ) {
     refusal = "cross-origin admin gateway request";
-  } else if (hasExternalProxyEvidence) {
+  } else if (!gatewayAuthenticated && hasExternalProxyEvidence) {
     return { admin: false, gatewayAuthenticated: false, refusal: null };
   } else if (process.env.ADMIN_GATEWAY_REQUIRED === "1" && !gatewayAuthenticated) {
     refusal = "authenticated admin gateway required";
   } else if (!gatewayAuthenticated && (!inboundHost || !isLoopbackHost(inboundHost))) {
     refusal = `no X-Proxied-By-Caddy marker and non-loopback/absent Host=${inboundHost ?? "<none>"}`;
   }
-  return { admin: !refusal && !hasExternalProxyEvidence, gatewayAuthenticated: !refusal && gatewayAuthenticated, refusal };
+  return {
+    admin: !refusal && (gatewayAuthenticated || !hasExternalProxyEvidence),
+    gatewayAuthenticated: !refusal && gatewayAuthenticated,
+    refusal,
+  };
 }
 
 export interface SSRUpstreamResponse {
@@ -486,6 +491,10 @@ export async function ssrUpstreamGet({
       for (const [key, value] of Object.entries(extraHeaders)) {
         if (!trustHeaders.has(key.toLowerCase())) upstreamHeaders[key] = value;
       }
+    }
+    if (proxiedByCaddy || gatewayAuthenticated) {
+      const sanitizedXff = sanitizeForwardedFor(headerBag.get("x-forwarded-for"));
+      if (sanitizedXff) upstreamHeaders["X-Forwarded-For"] = sanitizedXff;
     }
     if (gatewayAuthenticated) {
       upstreamHeaders["X-Admin-Gateway-Token"] = gatewaySecret;

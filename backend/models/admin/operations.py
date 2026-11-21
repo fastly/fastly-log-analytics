@@ -6,6 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from backend.core.service_defaults import DEFAULT_SNAPSHOT_INTERVAL_MINUTES
 from backend.models.common.base import BaseResponse, PassthroughModel
 
 # ── POP locations admin ────────────────────────────────────────────────────
@@ -158,6 +159,7 @@ class _PrefillRatesBase(_BillingRatesMixin, BaseResponse):
     delete_after: bool = True
     log_retention_days: int = 30
     rum_retention_days: int = 30
+    snapshot_interval_minutes: int = DEFAULT_SNAPSHOT_INTERVAL_MINUTES
     avg_nodes_per_flush: int | None = None
     min_billed_days: int | None = None
     billing_zone: str | None = "MBZ200"

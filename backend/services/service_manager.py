@@ -8,7 +8,10 @@ from typing import Any
 import backend.utils.dir_size as _dir_size_mod
 from backend import config as svcconfig
 from backend.core import fos_client as _db
-from backend.core.service_defaults import DEFAULT_LOG_PERIOD_SECONDS
+from backend.core.service_defaults import (
+    DEFAULT_LOG_PERIOD_SECONDS,
+    DEFAULT_SNAPSHOT_INTERVAL_MINUTES,
+)
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 from backend.utils.dir_size import (
@@ -86,6 +89,22 @@ def get_enriched_services(active_service_id: str | None = None) -> list[dict[str
             except (ValueError, TypeError):
                 rum_lp = None
 
+        raw_cron_sync = prov.get("cron_sync")
+        if isinstance(raw_cron_sync, dict):
+            cron_sync_out = {
+                **raw_cron_sync,
+                "snapshot_interval_minutes": svcconfig.resolve_snapshot_interval_minutes(cfg),
+            }
+        else:
+            cron_sync_out = {
+                "enabled": True,
+                "interval_mins": 2,
+                "log_enabled": True,
+                "log_retention_days": 7,
+                "delete_after": True,
+                "snapshot_interval_minutes": DEFAULT_SNAPSHOT_INTERVAL_MINUTES,
+            }
+
         result.append(
             {
                 "service_id": sid,
@@ -101,16 +120,7 @@ def get_enriched_services(active_service_id: str | None = None) -> list[dict[str
                 "is_active": sid == active_service_id,
                 "cron_stats": cron_stats,
                 "status": cached_status,
-                "cron_sync": prov.get(
-                    "cron_sync",
-                    {
-                        "enabled": True,
-                        "interval_mins": 2,
-                        "log_enabled": True,
-                        "log_retention_days": 7,
-                        "delete_after": True,
-                    },
-                ),
+                "cron_sync": cron_sync_out,
                 "cron_ngwaf": prov.get(
                     "cron_ngwaf", {"interval_mins": 15, "log_enabled": True, "log_retention_days": 7}
                 ),

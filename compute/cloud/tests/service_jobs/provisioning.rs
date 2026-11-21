@@ -603,7 +603,7 @@ fn adopted_bucket_protects_unrelated_objects_and_whole_bucket_deletion() {
     assert_eq!(result.status, 409);
     assert_eq!(
         platform.adapter.object_keys("fos-fixture-logs"),
-        ["unrelated/customer-data"]
+        ["meta/cloud_dr_state.json", "unrelated/customer-data"]
     );
 }
 
@@ -1591,7 +1591,7 @@ fn superseded_teardown_cannot_delete_data_after_loading_service_before_lease() {
         let rejected = paused.join().unwrap();
         assert_eq!(
             platform.adapter.object_keys("fos-fixture-logs"),
-            vec![object]
+            vec!["meta/cloud_dr_state.json", object]
         );
         assert_eq!(rejected["job"]["status"], "failed");
         assert_eq!(rejected["job"]["error"], "service_changed_rerun");
@@ -1599,7 +1599,7 @@ fn superseded_teardown_cannot_delete_data_after_loading_service_before_lease() {
     });
     assert_eq!(
         platform.adapter.object_keys("fos-fixture-logs"),
-        vec![object]
+        vec!["meta/cloud_dr_state.json", object]
     );
     assert_eq!(platform.service()["service"]["status"], "torn_down");
 }

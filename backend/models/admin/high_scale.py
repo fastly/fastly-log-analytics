@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from backend.models.admin.health_and_sync import MAX_PAGE_SIZE
 from backend.models.common.base import (
@@ -326,3 +326,60 @@ class NgwafStatusResponse(WireSafeModel):
 class RdnsStatsResponse(WireSafeModel):
     ok: bool
     stats: JsonDict | None = None
+
+
+class HighScaleRestoreFromFosRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    service_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    bucket: str = Field(min_length=1, max_length=255)
+    region: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9-]+$")
+    prefix: str = Field(default="", max_length=512)
+    archive_prefix: str = Field(default="high-scale/archive", max_length=512)
+    fastly_api_key: str | None = None
+    fos_access_key: str | None = None
+    fos_secret_key: str | None = None
+    restore_serving_state: bool = True
+
+    @field_validator("region", mode="before")
+    @classmethod
+    def _strip_region(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+    @model_validator(mode="after")
+    def _validate_credentials(self) -> Self:
+        self.bucket = self.bucket.strip()
+        self.region = self.region.strip()
+        self.prefix = self.prefix.strip()
+        self.archive_prefix = self.archive_prefix.strip()
+        if not self.bucket:
+            raise ValueError("bucket must not be blank")
+        if not self.region:
+            raise ValueError("region must not be blank")
+
+        api_key = (self.fastly_api_key or "").strip()
+        ak = (self.fos_access_key or "").strip()
+        sk = (self.fos_secret_key or "").strip()
+        if bool(ak) != bool(sk):
+            raise ValueError("fos_access_key and fos_secret_key must both be provided together")
+        if not api_key and not (ak and sk):
+            raise ValueError("provide fastly_api_key or both fos_access_key and fos_secret_key")
+
+        self.fastly_api_key = api_key or None
+        self.fos_access_key = ak or None
+        self.fos_secret_key = sk or None
+        return self
+
+
+class HighScaleRestoreFromFosResponse(BaseModel):
+    status: Literal["ok"] = "ok"
+    service_id: str
+    dr_state_restored: bool
+    views_restored: int
+    alerts_restored: int
+    scoring_labels_restored: int
+    audit_logs_restored: int
+    manifests_registered: int
+    domains_rebuilt: dict[str, dict[str, Any]]

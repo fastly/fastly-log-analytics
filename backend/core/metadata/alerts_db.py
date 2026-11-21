@@ -6,6 +6,7 @@ import json
 import uuid
 from typing import Annotated, Any
 
+from fastapi import HTTPException
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 from backend.core.metadata.admin_state import _JsonList, _JsonOptList
@@ -85,6 +86,12 @@ def save_alert(service_id: str, alert) -> dict:
     """Insert or update an alert. Returns {id, status}."""
     con = get_con(service_id)
     alert_id = alert.id or str(uuid.uuid4())
+    existing = con.execute("SELECT service_id FROM alerts WHERE id = ?", (alert_id,)).fetchone()
+    if existing is not None and str(existing["service_id"]) != str(service_id):
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "conflict", "message": "Alert ID belongs to another service."},
+        )
     con.execute(
         """
         INSERT INTO alerts (id, service_id, name, category, metric, evaluation_type,
@@ -92,7 +99,6 @@ def save_alert(service_id: str, alert) -> dict:
             webhook_url, enabled, evaluation_scope, channels_json, zscore_threshold, baseline_period_days)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
-            service_id = excluded.service_id,
             name = excluded.name,
             category = excluded.category,
             metric = excluded.metric,

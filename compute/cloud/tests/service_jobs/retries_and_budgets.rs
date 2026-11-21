@@ -885,7 +885,7 @@ fn slow_fos_step_completes(method: &'static str, step: &str) {
         if method == "HEAD" {
             assert_eq!(
                 platform.adapter.object_keys("fos-fixture-logs"),
-                vec!["customer/preserve.gz"]
+                vec!["customer/preserve.gz", "meta/cloud_dr_state.json"]
             );
         } else if method == "GET" {
             assert!(platform.adapter.object_keys("fos-fixture-logs").is_empty());
@@ -1251,7 +1251,10 @@ fn rum_provision_reconcile_and_teardown_manage_backend_dictionary_fos_assets_and
         .adapter
         .resources("fixtureService", "logging/fos")
         .is_empty());
-    assert!(platform.adapter.object_keys("fos-fixture-logs").is_empty());
+    assert_eq!(
+        platform.adapter.object_keys("fos-fixture-logs"),
+        vec!["meta/cloud_dr_state.json"]
+    );
 }
 
 #[test]

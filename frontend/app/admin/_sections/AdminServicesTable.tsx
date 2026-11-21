@@ -2,11 +2,11 @@
 import React, { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useRouter } from 'next/navigation'
-import { AlertCircle, Bot, ChevronDown, Eraser, ExternalLink, Eye, KeyRound, Play, Plus, Settings, Settings2, Trash2 } from 'lucide-react'
+import { AlertCircle, Bot, ChevronDown, Eraser, ExternalLink, Eye, KeyRound, Play, Plus, RotateCcw, Settings, Settings2, Trash2 } from 'lucide-react'
 import type { ColumnDef } from '@/lib/table'
 import type { ServiceConfig } from '@/types/api'
 import { client, extractApiError, unwrapClient, queryKeys } from '@/lib/api'
-import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
+import { IS_CLOUD_MODE, isCloudMode } from '@/lib/cloud-engine/mode'
 import { cn, formatCount, panelDialogContent, panelDialogFooter, panelDialogHeaderSolid } from '@/lib/utils'
 import { formatDuration } from '@/lib/format'
 import { SERVICE_DEFAULTS } from '@/lib/serviceDefaults'
@@ -15,6 +15,7 @@ import { cronCacheBust } from '@/hooks/useSSE'
 import { useServiceStore } from '@/stores/filterStore'
 import { DataTableReadonly as DataTable } from '@/components/DataTable'
 import { ProvisionWizard } from '@/components/ProvisionWizard/ProvisionWizard'
+import { RestoreFromFosDialog } from '@/components/RestoreFromFosDialog'
 import { DeleteDataDialog, TeardownDialog } from '@/components/TeardownDialog'
 import { CronSettingsModal } from '@/components/CronSettingsModal/CronSettingsModal'
 import { LogSettingsModal } from '@/components/LogSettingsModal/LogSettingsModal'
@@ -283,7 +284,9 @@ export function ServicesTable() {
   const [deleteDataService, setDeleteDataService] = useState<ServiceConfig | null>(null)
   const [credentialsService, setCredentialsService] = useState<ServiceConfig | null>(null)
   const [wizardOpen, setWizardOpen] = useState(false)
+  const [restoreOpen, setRestoreOpen] = useState(false)
   const [ngwafService, setNgwafService] = useState<ServiceConfig | null>(null)
+  const cloudMode = IS_CLOUD_MODE || isCloudMode()
 
   const openCredentials = React.useCallback((service: ServiceConfig) => setCredentialsService(service), [])
   const switchToService = React.useCallback((id: string) => {
@@ -315,8 +318,13 @@ export function ServicesTable() {
         <div className="flex items-center justify-between gap-4">
           <div className="flex items-center gap-4">
             <h2 className="text-xl font-semibold tracking-tight">Service Management</h2>
-            {(!IS_CLOUD_MODE || (services?.services?.length ?? 0) === 0) && (
-              <Button size="sm" onClick={() => setWizardOpen(true)}><Plus className="h-4 w-4 mr-1" /> Add Service</Button>
+            {(!cloudMode || (services?.services?.length ?? 0) === 0) && (
+              <div className="flex items-center gap-2">
+                <Button size="sm" onClick={() => setWizardOpen(true)}><Plus className="h-4 w-4 mr-1" /> Add Service</Button>
+                <Button size="sm" variant="outline" data-testid="restore-from-fos-btn" onClick={() => setRestoreOpen(true)}>
+                  <RotateCcw className="h-4 w-4 mr-1" /> {cloudMode ? 'Recover from FOS' : 'Restore from FOS'}
+                </Button>
+              </div>
             )}
           </div>
           <Button size="sm" variant="outline" data-testid="admin-overview-refresh-btn" onClick={handleRefreshAll} disabled={isFetching}>Refresh Status</Button>
@@ -330,10 +338,18 @@ export function ServicesTable() {
           </Alert>
         )}
         <div data-testid="services-table-container" className={`border rounded-lg bg-card shadow-sm overflow-hidden min-h-[244px] transition-opacity ${isRefreshing ? 'opacity-40 pointer-events-none' : ''}`}>
-          <DataTable columns={columns} data={services?.services || []} isLoading={isLoading} searchKey="name" emptyMessage="No services yet" emptyHint="Add a service to get started." />
+          <DataTable columns={columns} data={services?.services || []} isLoading={isLoading} searchKey="name" emptyMessage="No services yet" emptyHint="Add a service or restore one from Fastly Object Storage." />
         </div>
       </div>
       <ProvisionWizard open={wizardOpen} onOpenChange={setWizardOpen} />
+      <RestoreFromFosDialog
+        open={restoreOpen}
+        onOpenChange={setRestoreOpen}
+        onRestored={(id) => {
+          setRestoreOpen(false)
+          switchToService(id)
+        }}
+      />
       {cronService && <CronSettingsModal service={cronService} open={!!cronService} onOpenChange={(open) => !open && setCronService(null)} />}
       {settingsService && <LogSettingsModal service={settingsService} open={!!settingsService} onOpenChange={(open) => !open && setSettingsService(null)} />}
       <TeardownDialog service={teardownService} open={!!teardownService} onOpenChange={(open) => !open && setTeardownService(null)} onComplete={() => {

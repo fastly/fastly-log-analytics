@@ -1192,6 +1192,20 @@ def sessions_endpoint(req: SessionsRequest, ctx: RequestContext = Depends(build_
         return SessionsResponse.with_telemetry(**result)
 
 
+def _scrub_string_leaves(obj: object) -> object:
+    from backend.core.share_db import scrub_ip_text
+
+    if isinstance(obj, str):
+        return scrub_ip_text(obj) if obj and obj != "[redacted]" else obj
+    if isinstance(obj, dict):
+        return {k: _scrub_string_leaves(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_scrub_string_leaves(v) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(_scrub_string_leaves(v) for v in obj)
+    return obj
+
+
 @sessions_router.post("/detail", response_model=SessionDetailResponse)
 @query_errors()
 def sessions_detail(req: SessionDetailRequest, ctx: RequestContext = Depends(build_request_context)):
@@ -1222,6 +1236,12 @@ def sessions_detail(req: SessionDetailRequest, ctx: RequestContext = Depends(bui
         from backend.high_scale.sessions import sessions_detail as hs_detail
 
         res = hs_detail(require_high_scale(ctx), req, start_time, end_time, ip, ja4)
+        if mask_ips_for(ctx.analyst_session):
+            from backend.core.share_db import apply_pii_policy
+
+            res = apply_pii_policy(dict(res), {"mask_ips": True})
+            if isinstance(res.get("data"), list):
+                res["data"] = _scrub_string_leaves(res["data"])
         return SessionDetailResponse.with_telemetry(**res)
 
 

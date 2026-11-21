@@ -296,6 +296,11 @@ def write_service_config(state: dict):
         def _int_opt(key: str, default: int, *, sub: dict = cron_sync_in) -> int:
             return int(state.get(key, sub.get(key, default)))
 
+        raw_snap = state.get("snapshot_interval_minutes", cron_sync_in.get("snapshot_interval_minutes"))
+        if raw_snap is None:
+            raw_snap = (existing_cfg.get("provisioning") or {}).get("cron_sync", {}).get("snapshot_interval_minutes")
+        snap_interval = svcconfig.resolve_snapshot_interval_minutes(None, raw_snap)
+
         cfg["provisioning"] = {
             "endpoint_name": prov_in.get("endpoint_name", "Fastly Object Storage Logs"),
             "cdn_service_id": state.get("cdn_service_id", prov_in.get("cdn_service_id", "")),
@@ -314,6 +319,7 @@ def write_service_config(state: dict):
                 "data_retention_days": _int_opt("data_retention_days", 30),
                 "rum_retention_days": _int_opt("rum_retention_days", 30),
                 "cache_retention_days": _int_opt("cache_retention_days", 90),
+                "snapshot_interval_minutes": snap_interval,
             },
             "temp_admin_key_id": state.get("temp_admin_key_id", prov_in.get("temp_admin_key_id")),
         }

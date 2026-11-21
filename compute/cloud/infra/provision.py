@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-# /// script
-# requires-python = ">=3.12"
-# dependencies = []
-# ///
 """CLI-only installation of the app shell; FOS provisioning belongs to Goal 2."""
 
 from __future__ import annotations
@@ -22,6 +18,7 @@ import subprocess
 import sys
 import tarfile
 import time
+import urllib.parse
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -879,6 +876,507 @@ def _all_resources(api: Any, path: str) -> list[dict[str, Any]]:
         seen.add(cursor)
 
 
+def _list_services(api: Any) -> list[dict[str, Any]]:
+    existing_services: list[dict[str, Any]] = []
+    page = 1
+    while True:
+        found = api.request("GET", f"/service?page={page}&per_page=100")
+        existing_services.extend(found)
+        if len(found) < 100:
+            break
+        page += 1
+    return existing_services
+
+
+def _validate_store_id(kind: str, store_id: str | None) -> None:
+    if store_id is not None and not re.fullmatch(r"[a-zA-Z0-9_-]+", store_id):
+        raise ValueError(f"Invalid {kind} store ID")
+
+
+def _resolve_store(
+    api: Any,
+    kind: str,
+    expected_name: str,
+    explicit_id: str | None,
+) -> dict[str, str]:
+    endpoint = _stores.STORE_ENDPOINTS[kind]
+    if explicit_id is not None:
+        _validate_store_id(kind, explicit_id)
+        remote = api.request("GET", f"{endpoint}/{explicit_id}")
+        if not isinstance(remote, dict):
+            raise APIError(f"Unexpected {kind} store response")
+        return {
+            "id": str(remote.get("id") or explicit_id),
+            "name": str(remote.get("name") or expected_name),
+        }
+    matching = [
+        store
+        for store in _all_resources(api, endpoint)
+        if store.get("name") == expected_name and not store.get("deleted_at")
+    ]
+    if len(matching) != 1:
+        raise ValueError(f"Expected exactly one {kind} store named {expected_name}; supply --{kind}-store-id")
+    return {"id": str(matching[0]["id"]), "name": str(matching[0]["name"])}
+
+
+def _latest_version(api: Any, service_id: str) -> tuple[int, bool]:
+    versions = api.request("GET", f"/service/{service_id}/version")
+    if not isinstance(versions, list) or not versions:
+        raise APIError(f"Service {service_id} has no versions")
+    latest = max(versions, key=lambda item: int(item["number"]))
+    number = int(latest["number"])
+    immutable = latest.get("active") in (True, 1, "1", "true") or latest.get("locked") in (
+        True,
+        1,
+        "1",
+        "true",
+    )
+    return number, immutable
+
+
+def _ensure_draft_version(api: Any, service_id: str) -> int:
+    number, immutable = _latest_version(api, service_id)
+    if immutable:
+        cloned = api.request("PUT", f"/service/{service_id}/version/{number}/clone")
+        return int(cloned["number"])
+    return number
+
+
+def _normalize_origin(base_url: str) -> str:
+    raw = base_url.strip()
+    parsed = urllib.parse.urlsplit(raw)
+    if parsed.scheme != "https":
+        raise ValueError("Base URL must use https://")
+    if (
+        parsed.username
+        or parsed.password
+        or "@" in parsed.netloc
+        or parsed.query
+        or "?" in raw
+        or parsed.fragment
+        or "#" in raw
+    ):
+        raise ValueError("Base URL must be an origin without credentials, query, or fragment")
+    if parsed.path not in ("", "/"):
+        raise ValueError("Base URL must be an origin without a path")
+    host = domain(parsed.hostname or "")
+    port = parsed.port
+    if port is not None and port != 443:
+        return f"https://{host}:{port}"
+    return f"https://{host}"
+
+
+def _normalize_session_cookie(raw: str) -> str:
+    value = raw.strip()
+    if value.startswith("flp_session="):
+        value = value[len("flp_session=") :].strip()
+    if not value or any(ch in value for ch in ("\r", "\n", ";")):
+        raise ValueError("Invalid admin session cookie")
+    return value
+
+
+def _config_items_map(raw: Any) -> dict[str, str]:
+    items = raw["data"] if isinstance(raw, dict) and isinstance(raw.get("data"), list) else raw
+    if not isinstance(items, list):
+        return {}
+    out: dict[str, str] = {}
+    for item in items:
+        if isinstance(item, dict) and "item_key" in item and "item_value" in item:
+            out[str(item["item_key"])] = str(item["item_value"])
+    return out
+
+
+def recover_relink(
+    api: Any,
+    plan: dict[str, Any],
+    inventory_path: Path,
+    *,
+    api_token: str,
+    kv_store_id: str | None = None,
+    secret_store_id: str | None = None,
+    config_store_id: str | None = None,
+    rate_limiting: bool | None = None,
+) -> dict[str, Any]:
+    """Mode A recovery: recreate missing services and relink surviving KV, Secret, and Config stores."""
+    if not api_token:
+        raise ValueError("A Fastly API token is required before recovery")
+    if not inventory_path.parent.is_dir():
+        raise ValueError("Inventory parent directory must already exist")
+    _validate_store_id("secret", secret_store_id)
+    _validate_store_id("config", config_store_id)
+    _validate_store_id("kv", kv_store_id)
+
+    stores = {
+        "secret": _resolve_store(api, "secret", plan["stores"]["secret"], secret_store_id),
+        "config": _resolve_store(api, "config", plan["stores"]["config"], config_store_id),
+        "kv": _resolve_store(api, "kv", plan["stores"]["kv"], kv_store_id),
+    }
+
+    existing_services = {svc["name"]: svc for svc in _list_services(api) if not svc.get("deleted_at")}
+
+    # Pre-flight validate all surviving services and required front dictionaries before any writes.
+    for role in ("compute", "worker"):
+        expected_name = plan["services"][role]
+        remote = existing_services.get(expected_name)
+        if remote is not None and remote.get("type") != "wasm":
+            raise ValueError(f"Surviving {role} service {expected_name} is not a Compute service")
+
+    front_name = plan["services"]["front"]
+    front_remote = existing_services.get(front_name)
+    surviving_front_ver: int | None = None
+    surviving_front_dicts: dict[str, dict[str, str]] = {}
+    if front_remote is None:
+        if rate_limiting is None:
+            raise ValueError("Front service must be recreated; supply --erl-service-id or --no-erl")
+        lint_front(rate_limiting)
+    else:
+        if front_remote.get("type") != "vcl":
+            raise ValueError(f"Surviving front service {front_name} is not a VCL service")
+        front_id = front_remote["id"]
+        surviving_front_ver, _ = _latest_version(api, front_id)
+        dicts = api.request("GET", f"/service/{front_id}/version/{surviving_front_ver}/dictionary")
+        by_name = {
+            entry["name"]: entry
+            for entry in (dicts if isinstance(dicts, list) else [])
+            if isinstance(entry, dict) and "name" in entry
+        }
+        for dict_role, (dict_name, _private) in DICTIONARIES.items():
+            matched = by_name.get(dict_name)
+            if not matched:
+                raise ValueError(f"Surviving front service {front_name} is missing required dictionary {dict_name}")
+            surviving_front_dicts[dict_role] = {"id": matched["id"], "name": dict_name}
+        if rate_limiting is None:
+            detected = account_has_rate_limiting(api, front_id)
+            rate_limiting = bool(detected) if detected is not None else False
+
+    inventory: dict[str, Any] = {
+        "install_name": plan["install_name"],
+        "services": {},
+        "stores": stores,
+        "dictionaries": {},
+        "rate_limiting": bool(rate_limiting),
+        "activated": False,
+        "admin_code_issued": True,
+    }
+    _save(inventory_path, inventory)
+
+    recreated_services: list[str] = []
+    reused_services: list[str] = []
+
+    for role in ("compute", "worker"):
+        expected_name = plan["services"][role]
+        remote = existing_services.get(expected_name)
+        if remote is None:
+            created = api.request(
+                "POST",
+                "/service",
+                {"name": expected_name, "type": "wasm"},
+                form=True,
+            )
+            sid = created["id"]
+            inventory["services"][role] = {
+                "id": sid,
+                "name": expected_name,
+                "version": 1,
+                "domain": plan["domains"][role],
+            }
+            _save(inventory_path, inventory)
+            api.request(
+                "POST",
+                f"/service/{sid}/version/1/domain",
+                {"name": plan["domains"][role]},
+                form=True,
+            )
+            for kind, link_name in LINKS.items():
+                api.request(
+                    "POST",
+                    f"/service/{sid}/version/1/resource",
+                    {"name": link_name, "resource_id": stores[kind]["id"]},
+                    form=True,
+                )
+            for fields in plan["backends"][role]:
+                api.request("POST", f"/service/{sid}/version/1/backend", fields, form=True)
+            recreated_services.append(role)
+        else:
+            if remote.get("type") != "wasm":
+                raise ValueError(f"Surviving {role} service {expected_name} is not a Compute service")
+            sid = remote["id"]
+            ver, _ = _latest_version(api, sid)
+            resources = api.request("GET", f"/service/{sid}/version/{ver}/resource")
+            by_name = {
+                entry["name"]: entry
+                for entry in (resources if isinstance(resources, list) else [])
+                if isinstance(entry, dict) and "name" in entry
+            }
+            missing_or_wrong = [
+                (kind, link_name)
+                for kind, link_name in LINKS.items()
+                if link_name not in by_name or by_name[link_name].get("resource_id") != stores[kind]["id"]
+            ]
+            if missing_or_wrong:
+                ver = _ensure_draft_version(api, sid)
+                draft_resources = api.request("GET", f"/service/{sid}/version/{ver}/resource")
+                draft_by_name = {
+                    entry["name"]: entry
+                    for entry in (draft_resources if isinstance(draft_resources, list) else [])
+                    if isinstance(entry, dict) and "name" in entry
+                }
+                for kind, link_name in missing_or_wrong:
+                    existing_link = draft_by_name.get(link_name)
+                    if existing_link and existing_link.get("id"):
+                        api.request(
+                            "DELETE",
+                            f"/service/{sid}/version/{ver}/resource/{existing_link['id']}",
+                        )
+                    api.request(
+                        "POST",
+                        f"/service/{sid}/version/{ver}/resource",
+                        {"name": link_name, "resource_id": stores[kind]["id"]},
+                        form=True,
+                    )
+                prepare_storage_backends(
+                    api,
+                    f"/service/{sid}/version/{ver}",
+                    plan["domains"]["front"],
+                )
+            inventory["services"][role] = {
+                "id": sid,
+                "name": expected_name,
+                "version": ver,
+                "domain": plan["domains"][role],
+            }
+            _save(inventory_path, inventory)
+            reused_services.append(role)
+
+    if front_remote is None:
+        created = api.request(
+            "POST",
+            "/service",
+            {"name": front_name, "type": "vcl"},
+            form=True,
+        )
+        front_id = created["id"]
+        inventory["services"]["front"] = {
+            "id": front_id,
+            "name": front_name,
+            "version": 1,
+            "domain": plan["domains"]["front"],
+        }
+        _save(inventory_path, inventory)
+        front_prefix = f"/service/{front_id}/version/1"
+        api.request(
+            "POST",
+            front_prefix + "/domain",
+            {"name": plan["domains"]["front"]},
+            form=True,
+        )
+        for dict_role, (dict_name, private) in DICTIONARIES.items():
+            created_dict = api.request(
+                "POST",
+                front_prefix + "/dictionary",
+                {"name": dict_name, "write_only": "true" if private else "false"},
+                form=True,
+            )
+            inventory["dictionaries"][dict_role] = {"id": created_dict["id"], "name": dict_name}
+            _save(inventory_path, inventory)
+        for name, expression, priority in (
+            ("flp_app", APP_CONDITION, "20"),
+            ("flp_tick", TICK_CONDITION, "10"),
+            ("flp_clock_never", "false", "1"),
+        ):
+            api.request(
+                "POST",
+                front_prefix + "/condition",
+                {
+                    "name": name,
+                    "type": "REQUEST",
+                    "statement": expression,
+                    "priority": priority,
+                },
+                form=True,
+            )
+        for healthcheck in (plan["healthcheck"], plan["flush_healthcheck"]):
+            api.request("POST", front_prefix + "/healthcheck", healthcheck, form=True)
+        for fields in plan["backends"]["front"]:
+            api.request("POST", front_prefix + "/backend", fields, form=True)
+
+        # Secret Store is write-only: rotate only front_key & cdn_key so new front matches surviving secrets.
+        front_key = secrets.token_urlsafe(48)
+        cdn_key = secrets.token_urlsafe(48)
+        put_secret(api, stores["secret"]["id"], "front_key", front_key)
+        put_secret(api, stores["secret"]["id"], "cdn_key", cdn_key)
+        front_auth_id = inventory["dictionaries"]["front_auth"]["id"]
+        api.request(
+            "PUT",
+            f"/service/{front_id}/dictionary/{front_auth_id}/item/front_key",
+            {"item_value": front_key},
+            form=True,
+        )
+        api.request(
+            "PUT",
+            f"/service/{front_id}/dictionary/{front_auth_id}/item/cdn_key",
+            {"item_value": cdn_key},
+            form=True,
+        )
+        api.request(
+            "PUT",
+            f"/service/{front_id}/dictionary/{front_auth_id}/item/auth_epoch",
+            {"item_value": "0"},
+            form=True,
+        )
+        api.request(
+            "POST",
+            front_prefix + "/vcl",
+            {"name": "main", "main": "true", "content": load_vcl(bool(rate_limiting))},
+            form=True,
+        )
+        validation = api.request("GET", front_prefix + "/validate")
+        if validation.get("status") != "ok":
+            raise APIError("Front draft validation failed; no version was activated")
+        recreated_services.append("front")
+    else:
+        front_id = front_remote["id"]
+        assert surviving_front_ver is not None
+        inventory["dictionaries"].update(surviving_front_dicts)
+        inventory["services"]["front"] = {
+            "id": front_id,
+            "name": front_name,
+            "version": surviving_front_ver,
+            "domain": plan["domains"]["front"],
+        }
+        _save(inventory_path, inventory)
+        reused_services.append("front")
+
+    config_store_endpoint = f"{_stores.STORE_ENDPOINTS['config']}/{stores['config']['id']}"
+    existing_config = _config_items_map(api.request("GET", config_store_endpoint + "/items"))
+    config_updates: dict[str, str] = {
+        "install_name": plan["install_name"],
+        "public_base_url": plan["public_base_url"],
+        "flp_service_id": inventory["services"]["compute"]["id"],
+        "worker_service_id": inventory["services"]["worker"]["id"],
+        "front_service_id": front_id,
+        "worker_host": plan["domains"]["worker"],
+        "compute_host": plan["domains"]["compute"],
+        "secret_store_id": stores["secret"]["id"],
+        "config_store_id": stores["config"]["id"],
+        "kv_store_id": stores["kv"]["id"],
+        "front_auth_dictionary_id": inventory["dictionaries"]["front_auth"]["id"],
+        "buckets_dictionary_id": inventory["dictionaries"]["buckets"]["id"],
+        "credentials_dictionary_id": inventory["dictionaries"]["credentials"]["id"],
+    }
+    for key, default_val in plan["config_defaults"].items():
+        if key not in existing_config:
+            config_updates[key] = default_val
+    for key, value in config_updates.items():
+        api.request(
+            "PUT",
+            f"{config_store_endpoint}/item/{key}",
+            {"item_value": value},
+            form=True,
+        )
+
+    inventory["configured"] = True
+    _save(inventory_path, inventory)
+    next_steps = [f"make cloud-deploy NAME={plan['install_name']}"]
+    if "front" in recreated_services:
+        next_steps.append(
+            "Run Reconcile in Admin UI after deploy to repopulate per-service FOS dictionaries and region backend on the new Front VCL service"
+        )
+    return {
+        "mode": "relink",
+        "inventory": inventory,
+        "recreated_services": recreated_services,
+        "reused_services": reused_services,
+        "front_keys_rotated": "front" in recreated_services,
+        "next_steps": next_steps,
+    }
+
+
+def recover_fos(
+    base_url: str,
+    *,
+    service_id: str,
+    fos_bucket: str,
+    fos_region: str,
+    api_token: str,
+    admin_cookie: str,
+    fos_prefix: str = "",
+    fos_access_key: str | None = None,
+    fos_secret_key: str | None = None,
+    transport: httpx.BaseTransport | None = None,
+    timeout: float = 90.0,
+) -> dict[str, Any]:
+    """Mode B recovery: invoke POST /api/admin/provision/recover on a fresh Cloud install."""
+    origin = _normalize_origin(base_url)
+    cookie_value = _normalize_session_cookie(admin_cookie)
+    if not service_id.strip():
+        raise ValueError("--service-id is required")
+    if not fos_bucket.strip():
+        raise ValueError("--bucket is required")
+    if fos_region not in FOS_REGIONS:
+        raise ValueError(f"Unsupported FOS region: {fos_region}")
+    if not api_token:
+        raise ValueError("FASTLY_API_TOKEN is required")
+    if bool(fos_access_key) != bool(fos_secret_key):
+        raise ValueError("Both FOS_ACCESS_KEY and FOS_SECRET_KEY are required together")
+
+    payload: dict[str, Any] = {
+        "token": api_token,
+        "service_id": service_id.strip(),
+        "fos_bucket": fos_bucket.strip(),
+        "fos_region": fos_region,
+    }
+    if fos_prefix:
+        payload["fos_prefix"] = fos_prefix
+    if fos_access_key and fos_secret_key:
+        payload["fos_access_key"] = fos_access_key
+        payload["fos_secret_key"] = fos_secret_key
+
+    path = "/api/admin/provision/recover"
+    started = time.monotonic()
+    status: int | None = None
+    error_type: str | None = None
+    try:
+        with _http_client(timeout=timeout, transport=transport) as client:
+            response = client.post(
+                origin + path,
+                headers={
+                    "Origin": origin,
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "Cookie": f"flp_session={cookie_value}",
+                },
+                json=payload,
+            )
+            status = response.status_code
+            if status >= 400:
+                error_type = f"http_{status}"
+                raise APIError(f"Cloud POST {path} returned {status}")
+            data = response.json()
+            if not isinstance(data, dict):
+                error_type = "invalid_json"
+                raise APIError(f"Cloud POST {path} returned unexpected response")
+            return data
+    except APIError:
+        raise
+    except (httpx.HTTPError, TimeoutError, OSError, json.JSONDecodeError) as err:
+        error_type = type(err).__name__
+        raise APIError(f"Cloud POST {path} failed") from None
+    finally:
+        LOG.info(
+            json.dumps(
+                {
+                    "event": "flp.recover_fos",
+                    "method": "POST",
+                    "path": path,
+                    "status": status,
+                    "duration_ms": round((time.monotonic() - started) * 1000, 1),
+                    "error_type": error_type,
+                }
+            )
+        )
+
+
 def bootstrap(
     api: Any,
     plan: dict[str, Any],
@@ -895,14 +1393,7 @@ def bootstrap(
         raise ValueError("Inventory already exists; refuse to rotate a running install")
     if not inventory_path.parent.is_dir():
         raise ValueError("Inventory parent directory must already exist")
-    existing_services = []
-    page = 1
-    while True:
-        found = api.request("GET", f"/service?page={page}&per_page=100")
-        existing_services.extend(found)
-        if len(found) < 100:
-            break
-        page += 1
+    existing_services = _list_services(api)
     for existing in existing_services:
         if existing["name"] in plan["services"].values():
             raise ValueError("A named install service already exists; refusing adoption")
@@ -1105,6 +1596,39 @@ def main(argv: list[str] | None = None) -> int:
                 action="store_true",
                 help="Show structured HTTP diagnostics",
             )
+    recover = subcommands.add_parser(
+        "recover",
+        help="Recover from accidental service deletion (relink) or full KV loss (fos)",
+    )
+    recover.add_argument("--mode", choices=("relink", "fos"), required=True)
+    recover.add_argument("--name", default="flp")
+    recover.add_argument("--public-host")
+    recover.add_argument("--compute-host")
+    recover.add_argument("--worker-host")
+    recover.add_argument("--inventory", type=Path)
+    recover.add_argument("--dry-run", action="store_true")
+    recover.add_argument("--apply", action="store_true")
+    recover.add_argument("--kv-store-id")
+    recover.add_argument("--secret-store-id")
+    recover.add_argument("--config-store-id")
+    recover.add_argument("--erl-service-id", action="append", default=[])
+    recover.add_argument("--no-erl", action="store_true")
+    recover.add_argument(
+        "--base-url",
+        help="Target Cloud install origin, e.g. https://flp.global.ssl.fastly.net",
+    )
+    recover.add_argument("--service-id", help="Monitored Fastly VCL service ID to recover")
+    recover.add_argument(
+        "--bucket",
+        help="FOS bucket name containing meta/cloud_dr_state.json and processed/",
+    )
+    recover.add_argument("--region", help="FOS region (e.g. us-east-1)")
+    recover.add_argument("--prefix", default="", help="Optional FOS key prefix")
+    recover.add_argument(
+        "--use-fos-keys",
+        action="store_true",
+        help="Read fallback FOS_ACCESS_KEY and FOS_SECRET_KEY from env/prompt instead of minting via Fastly API",
+    )
     args = parser.parse_args(argv)
     log_level = LOG.level
     if args.command == "admin-reset":
@@ -1188,6 +1712,110 @@ def main(argv: list[str] | None = None) -> int:
                 args.package,
                 args.name,
                 announce=print_setup_code,
+            )
+            print(json.dumps(result, indent=2))
+            return 0
+        if args.command == "recover":
+            if args.dry_run and args.apply:
+                raise ValueError("--dry-run and --apply are mutually exclusive")
+            if args.mode == "relink":
+                _validate_store_id("kv", args.kv_store_id)
+                _validate_store_id("secret", args.secret_store_id)
+                _validate_store_id("config", args.config_store_id)
+                plan = resource_plan(
+                    args.name,
+                    public_host=args.public_host,
+                    compute_host=args.compute_host,
+                    worker_host=args.worker_host,
+                )
+                if not args.apply:
+                    print(
+                        json.dumps(
+                            {
+                                "mode": "relink",
+                                "action": "recreate missing services and relink surviving stores",
+                                "plan": plan,
+                                "kv_store_id": args.kv_store_id,
+                                "secret_store_id": args.secret_store_id,
+                                "config_store_id": args.config_store_id,
+                                "writes": False,
+                            },
+                            indent=2,
+                        )
+                    )
+                    return 0
+                if args.inventory is None:
+                    raise ValueError("--apply requires --inventory for partial-resource recovery")
+                deploy_token = _credential("FASTLY_API_TOKEN", "Local deploy token: ")
+                api = FastlyAPI(deploy_token)
+                erl: bool | None
+                if args.no_erl:
+                    erl = False
+                elif args.erl_service_id:
+                    erl = account_has_rate_limiting(api, *args.erl_service_id)
+                else:
+                    erl = None
+                result = recover_relink(
+                    api,
+                    plan,
+                    args.inventory,
+                    api_token=deploy_token,
+                    kv_store_id=args.kv_store_id,
+                    secret_store_id=args.secret_store_id,
+                    config_store_id=args.config_store_id,
+                    rate_limiting=erl,
+                )
+                print(json.dumps(result, indent=2))
+                return 0
+            # Mode B: --mode fos
+            base_url = args.base_url
+            if not base_url and args.inventory is not None:
+                inv = json.loads(args.inventory.read_text())
+                front_domain = inv.get("services", {}).get("front", {}).get("domain")
+                if front_domain:
+                    base_url = f"https://{front_domain}"
+            if not base_url:
+                raise ValueError("--mode fos requires --base-url or --inventory")
+            origin = _normalize_origin(base_url)
+            if not args.service_id or not args.bucket or not args.region:
+                raise ValueError("--mode fos requires --service-id, --bucket, and --region")
+            if args.region not in FOS_REGIONS:
+                raise ValueError(f"Unsupported FOS region: {args.region}")
+            if not args.apply:
+                print(
+                    json.dumps(
+                        {
+                            "mode": "fos",
+                            "action": "POST /api/admin/provision/recover",
+                            "base_url": origin,
+                            "service_id": args.service_id,
+                            "fos_bucket": args.bucket,
+                            "fos_region": args.region,
+                            "fos_prefix": args.prefix,
+                            "use_fos_keys": bool(args.use_fos_keys),
+                            "writes": False,
+                        },
+                        indent=2,
+                    )
+                )
+                return 0
+            api_token = _credential("FASTLY_API_TOKEN", "Fastly API token: ")
+            admin_cookie = _credential("FLP_ADMIN_COOKIE", "Admin session cookie (flp_session): ")
+            fos_ak = None
+            fos_sk = None
+            if args.use_fos_keys:
+                fos_ak = _credential("FOS_ACCESS_KEY", "FOS access key: ")
+                fos_sk = _credential("FOS_SECRET_KEY", "FOS secret key: ")
+            result = recover_fos(
+                origin,
+                service_id=args.service_id,
+                fos_bucket=args.bucket,
+                fos_region=args.region,
+                api_token=api_token,
+                admin_cookie=admin_cookie,
+                fos_prefix=args.prefix,
+                fos_access_key=fos_ak,
+                fos_secret_key=fos_sk,
             )
             print(json.dumps(result, indent=2))
             return 0

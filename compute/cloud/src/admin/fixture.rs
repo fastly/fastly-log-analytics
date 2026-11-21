@@ -565,13 +565,25 @@ impl FixtureAdapter {
             .remove(name)
     }
     pub fn seed_object(&self, bucket: &str, key: &str) {
+        self.seed_object_bytes(bucket, key, vec![1]);
+    }
+    pub fn seed_object_bytes(&self, bucket: &str, key: &str, body: Vec<u8>) {
         self.state
             .lock()
             .expect("fixture lock")
             .buckets
             .entry(bucket.into())
             .or_default()
-            .insert(key.into(), vec![1]);
+            .insert(key.into(), body);
+    }
+    pub fn seed_fos_key(&self, access_key: &str, secret_key: &str, bucket: &str) {
+        self.state.lock().expect("fixture lock").keys.push(json!({
+            "access_key": access_key,
+            "secret_key": secret_key,
+            "permission": "read-write-objects",
+            "description": format!("seeded-{bucket}"),
+            "buckets": [bucket],
+        }));
     }
     pub fn object_keys(&self, bucket: &str) -> Vec<String> {
         self.state

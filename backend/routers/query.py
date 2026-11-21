@@ -161,7 +161,14 @@ def query_schema_endpoint(
         schema = list(_FALLBACK_SCHEMA_COLUMNS)
 
     if mask_ips_for(ctx.analyst_session):
-        schema = [col for col in schema if col.get("column") != "cookie_session"]
+        from backend.core.share_db import is_saved_view_pii_key
+
+        schema = [
+            col
+            for col in schema
+            if not is_saved_view_pii_key(str(col.get("name") or col.get("column") or ""))
+            and str(col.get("name") or col.get("column") or "").strip().lower() != "origin_ip"
+        ]
 
     return {
         "source": name,

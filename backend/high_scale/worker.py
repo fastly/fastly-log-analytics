@@ -8,7 +8,7 @@ import random
 import time
 from argparse import ArgumentParser
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from threading import Event, Thread
 from typing import TYPE_CHECKING, Any
@@ -144,6 +144,8 @@ class HighScaleWorkerLoop:
         service_weights: Mapping[str, int] | None = None,
         publication_retry_interval_seconds: float = 30.0,
         publication_retry_limit: int = 4,
+        snapshot_interval_loader: Callable[[str], int] | None = None,
+        archive_flush_check_interval_seconds: float = 10.0,
     ) -> None:
         if coordinators is not None:
             resolved_coordinators = coordinators
@@ -182,6 +184,9 @@ class HighScaleWorkerLoop:
         self._publication_retry_interval_seconds = publication_retry_interval_seconds
         self._publication_retry_limit = publication_retry_limit
         self._last_publication_retry: float | None = None
+        self._snapshot_interval_loader = snapshot_interval_loader or self._default_snapshot_interval_minutes
+        self._archive_flush_check_interval_seconds = max(0.0, float(archive_flush_check_interval_seconds))
+        self._last_archive_flush_check: float | None = None
         pair_list = tuple((service_id, domain) for service_id in resolved_service_ids for domain in domains)
         self._selector = FairPageSelector(
             pair_list,
@@ -202,10 +207,45 @@ class HighScaleWorkerLoop:
                 results.append(WorkerPageResult(service_id, domain, None, exc))
             else:
                 results.append(WorkerPageResult(service_id, domain, page))
+        self._run_archive_flushes()
         self._run_publication_retries()
         self._run_deletion_sweeps()
         self._run_system_cleanups()
         return tuple(results)
+
+    @staticmethod
+    def _default_snapshot_interval_minutes(service_id: str) -> int:
+        try:
+            cfg = app_config.load_config(service_id)
+        except Exception:
+            cfg = None
+        return app_config.resolve_snapshot_interval_minutes(cfg)
+
+    def _run_archive_flushes(self) -> None:
+        now = time.monotonic()
+        if (
+            self._last_archive_flush_check is not None
+            and now - self._last_archive_flush_check < self._archive_flush_check_interval_seconds
+        ):
+            return
+        self._last_archive_flush_check = now
+        for service_id, coordinator in self._coordinators:
+            flush_fn = getattr(coordinator, "flush_archive_snapshot", None)
+            if flush_fn is None:
+                continue
+            interval_mins = self._snapshot_interval_loader(service_id)
+            for domain in self._domains:
+                try:
+                    flush_fn(
+                        service_id=service_id,
+                        domain=domain,
+                        snapshot_interval_minutes=interval_mins,
+                    )
+                except Exception:
+                    _worker_logger.exception(
+                        "high-scale archive snapshot flush failed",
+                        extra={"service_id": service_id, "domain": domain},
+                    )
 
     def _run_publication_retries(self) -> None:
         now = time.monotonic()
@@ -363,6 +403,12 @@ def build_worker_from_environment(worker_suffix: str = "") -> HighScaleWorkerLoo
     deletion_enabled = os.getenv("HIGH_SCALE_DELETION_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
     deletion_sweep_limit = int(os.getenv("HIGH_SCALE_DELETION_SWEEP_LIMIT", "100"))
     deletion_grace = int(os.getenv("HIGH_SCALE_DELETION_GRACE_SECONDS", "900"))
+    defer_archive_flush = os.getenv("HIGH_SCALE_DEFER_ARCHIVE_FLUSH", "1").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     archive_prefix = os.getenv("HIGH_SCALE_ARCHIVE_PREFIX", "high-scale/archive")
     coordinators: list[HighScaleWorkerCoordinator] = []
     sweepers: list[HighScaleDeletionSweeper | None] = []
@@ -385,6 +431,7 @@ def build_worker_from_environment(worker_suffix: str = "") -> HighScaleWorkerLoo
             worker_id=worker_id,
             lease_seconds=lease_seconds,
             deletion_grace_seconds=deletion_grace,
+            defer_archive_flush=defer_archive_flush,
         )
         coordinators.append(
             HighScaleWorkerCoordinator(

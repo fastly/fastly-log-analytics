@@ -102,3 +102,103 @@ def test_usage_historical_consumers_select_platform_metrics_fields(monkeypatch):
     assert calls[1][0] == "cdn-svc" and calls[1][4] == ("bandwidth", "requests")
     assert calls[2][0] == "logging-svc"
     assert calls[2][4] == ("requests", *fastly_client.FASTLY_LOG_FIELDS)
+
+
+@pytest.mark.no_postgres
+def test_prefill_rates_and_prefill_include_snapshot_interval_minutes(monkeypatch):
+    source = config.config_to_source({"service_id": "snap-svc", "cdn_service_id": "cdn-svc"})
+    monkeypatch.setattr(config, "load_usage_logging_config", lambda: {})
+    monkeypatch.setattr(config, "get_status", lambda *args: {"edge_ratio": 75})
+    monkeypatch.setattr(metadata, "get_node_count_avg", lambda *args: None)
+    monkeypatch.setattr(metadata, "get_rum_beacons_avg_per_day", lambda *args: None)
+    monkeypatch.setattr(usage, "get_fastly_api_key", lambda service_id: None)
+
+    # Default (no config) -> 5 minutes
+    monkeypatch.setattr(config, "load_config", lambda *args: None)
+    rates_default = usage.prefill_rates(source)
+    assert rates_default.snapshot_interval_minutes == 5
+    full_default = asyncio.run(usage.prefill(source))
+    assert full_default.snapshot_interval_minutes == 5
+
+    # Configured custom interval -> 60 minutes
+    monkeypatch.setattr(
+        config,
+        "load_config",
+        lambda *args: {
+            "service_id": "snap-svc",
+            "provisioning": {"cron_sync": {"snapshot_interval_minutes": 60, "delete_after": True}},
+        },
+    )
+    rates_custom = usage.prefill_rates(source)
+    assert rates_custom.snapshot_interval_minutes == 60
+    full_custom = asyncio.run(usage.prefill(source))
+    assert full_custom.snapshot_interval_minutes == 60
+
+
+@pytest.mark.no_postgres
+@pytest.mark.parametrize(
+    "cfg",
+    [
+        None,
+        "bad",
+        {"provisioning": None},
+        {"provisioning": "bad"},
+        {"provisioning": {"cron_sync": None}},
+        {"provisioning": {"cron_sync": "bad"}},
+        *[
+            {"provisioning": {"cron_sync": {"snapshot_interval_minutes": v}}}
+            for v in (
+                float("inf"),
+                float("-inf"),
+                float("nan"),
+                True,
+                False,
+                15.9,
+                60.5,
+                1440.1,
+                0,
+                -5,
+                10,
+                "5m",
+                [],
+                {},
+            )
+        ],
+    ],
+)
+def test_resolve_snapshot_interval_minutes_handles_malformed_configs_and_numerics(cfg):
+    assert config.resolve_snapshot_interval_minutes(cfg) == 5
+
+
+@pytest.mark.no_postgres
+def test_resolve_snapshot_interval_minutes_requested_edge_and_valid_values():
+    for bad in (float("inf"), float("-inf"), float("nan"), True, False, 15.9, 60.5):
+        assert config.resolve_snapshot_interval_minutes({}, requested=bad) == 5  # type: ignore[arg-type]
+
+    for valid, expected in ((5, 5), (15, 15), (30, 30), (60, 60), (360, 360), (1440, 1440), (15.0, 15), ("30", 30)):
+        assert config.resolve_snapshot_interval_minutes({}, requested=valid) == expected  # type: ignore[arg-type]
+
+
+@pytest.mark.no_postgres
+@pytest.mark.parametrize(
+    "bad_cfg",
+    [
+        {
+            "service_id": "s",
+            "log_period": 60,
+            "provisioning": {"cron_sync": {"snapshot_interval_minutes": float("inf")}},
+        },
+        {"service_id": "s", "log_period": 60, "provisioning": None},
+    ],
+)
+def test_prefill_rates_survives_inf_and_null_provisioning_blocks(monkeypatch, bad_cfg):
+    source = config.config_to_source({"service_id": "s", "cdn_service_id": "cdn-svc"})
+    monkeypatch.setattr(config, "load_config", lambda *args: bad_cfg)
+    monkeypatch.setattr(config, "get_status", lambda *args: {})
+    monkeypatch.setattr(config, "load_usage_logging_config", lambda: {})
+    monkeypatch.setattr(metadata, "get_node_count_avg", lambda *args: None)
+    monkeypatch.setattr(metadata, "get_rum_beacons_avg_per_day", lambda *args: None)
+
+    rates = usage.prefill_rates(source)
+    assert rates.snapshot_interval_minutes == 5
+    assert rates.log_period_seconds == 60

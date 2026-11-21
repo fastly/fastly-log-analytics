@@ -120,6 +120,14 @@ def get_service_id(
                     return resolved_cookie
 
     active_sid = svcconfig.get_active_service_id()
+    analyst_session = getattr(getattr(request, "state", None), "analyst_session", None)
+    if analyst_session is not None:
+        allowed_sids = [s for s in (analyst_session.service_ids or []) if _is_valid_service_id(s)]
+        if active_sid not in set(allowed_sids):
+            for cand_sid in allowed_sids:
+                if svcconfig.load_config(cand_sid):
+                    return cand_sid
+            return allowed_sids[0] if allowed_sids else None
     return active_sid if _is_valid_service_id(active_sid) else None
 
 

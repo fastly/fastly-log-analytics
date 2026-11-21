@@ -11,8 +11,10 @@ import re
 import secrets
 import sys
 import time
+from collections.abc import MutableMapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from urllib.parse import urlparse
 
 from fastapi import HTTPException, Request, Response
@@ -20,7 +22,14 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
 from backend.core import share_db
-from backend.core.share_db import EXTRA_IP_PII_KEYS, IP_FAMILY_KEYS, SESSION_ID_KEYS, _canon_pii_key
+from backend.core.share_db import (
+    CMCD_SESSION_ALIAS_KEYS,
+    EXTRA_IP_PII_KEYS,
+    SAVED_VIEW_PII_FILTER_KEYS,
+    _canon_pii_key,
+    _extract_saved_view_filter_keys,
+    is_saved_view_pii_key,
+)
 from backend.utils.auth import (
     ANALYST_PENDING_SESSION_COOKIE,
     ANALYST_SESSION_COOKIE,
@@ -71,6 +80,22 @@ def _header_values(headers: object, name: str) -> list[str]:
         target = name.lower()
         return [str(v) for k, v in headers.items() if str(k).lower() == target]
     get_fn = getattr(headers, "get", None)
+    if callable(get_fn):
+        val = get_fn(name)
+        return [str(val)] if val is not None else []
+    return []
+
+
+def _query_param_values(query_params: object, name: str) -> list[str]:
+    if query_params is None:
+        return []
+    getlist = getattr(query_params, "getlist", None)
+    if callable(getlist):
+        return [str(v) for v in getlist(name)]
+    if isinstance(query_params, dict):
+        val = query_params.get(name)
+        return [str(val)] if val is not None else []
+    get_fn = getattr(query_params, "get", None)
     if callable(get_fn):
         val = get_fn(name)
         return [str(val)] if val is not None else []
@@ -540,24 +565,48 @@ def _is_blocked_path(path: str) -> bool:
 
 _PATH_SERVICE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^/api/services/([^/]+)(?:/|$)"),
+    re.compile(r"^/api/high-scale/services/([^/]+)(?:/|$)"),
+    re.compile(r"^/api/query/schema/([^/]+)(?:/|$)"),
     re.compile(r"^/api/alerts/([^/]+)(?:/|$)"),
     re.compile(r"^/api/views/([^/]+)(?:/|$)"),
 )
 
 
+def _match_route_service_ids(routes: object, scope: MutableMapping[str, Any]) -> list[str]:
+    from starlette.routing import Match
+
+    for route in routes:  # type: ignore[attr-defined]
+        eff_ctxs = getattr(route, "effective_route_contexts", None)
+        if callable(eff_ctxs):
+            for cand in eff_ctxs():
+                match, child_scope = cand.matches(scope)
+                if match == Match.FULL:
+                    path_params = child_scope.get("path_params", {})
+                    out = [path_params[k] for k in ("service_id", "service") if k in path_params]
+                    if out:
+                        return out
+            continue
+        sub_routes = getattr(route, "routes", None)
+        if sub_routes:
+            nested = _match_route_service_ids(sub_routes, scope)
+            if nested:
+                return nested
+        match, child_scope = route.matches(scope)
+        if match == Match.FULL:
+            path_params = child_scope.get("path_params", {})
+            out = [path_params[k] for k in ("service_id", "service") if k in path_params]
+            if out:
+                return out
+            break
+    return []
+
+
 def _path_service_ids(request: Request) -> list[str]:
     routes = getattr(getattr(getattr(request, "app", None), "router", None), "routes", None)
     if routes:
-        from starlette.routing import Match
-
-        for route in routes:
-            match, child_scope = route.matches(request.scope)
-            if match == Match.FULL:
-                path_params = child_scope.get("path_params", {})
-                out = [path_params[k] for k in ("service_id", "service") if k in path_params]
-                if out:
-                    return out
-                break
+        matched = _match_route_service_ids(routes, request.scope)
+        if matched:
+            return matched
     path = request.url.path
     return [m.group(1) for pat in _PATH_SERVICE_PATTERNS if (m := pat.match(path))]
 
@@ -680,8 +729,10 @@ async def _strip_analyst_envelope(
 
 _BODY_INSPECT_UNSET = object()
 _BODY_INSPECT_ATTR = "_analyst_body_json"
+_BODY_PAIRS_ATTR = "_analyst_body_pairs"
 _RAW_BODY_ATTR = "_raw_body_bytes"
 _BODY_TOO_LARGE_ATTR = "_body_too_large"
+_BODY_INVALID_JSON_ATTR = "_body_invalid_json"
 
 
 def _parse_content_length(request: Request) -> int | None:
@@ -765,37 +816,104 @@ async def _inspect_request_body(request: Request) -> dict | None:
     return parsed
 
 
+def _collect_dict_pairs_recursive(value: object, out: list[tuple[str, Any]]) -> None:
+    if isinstance(value, dict):
+        for k, v in value.items():
+            out.append((str(k), v))
+    elif isinstance(value, list):
+        for item in value:
+            _collect_dict_pairs_recursive(item, out)
+
+
 async def _drain_request_body(request: Request) -> dict | None:
     method = request.method.upper()
-    if method != "POST":
+    if method not in ("POST", "PUT", "PATCH", "DELETE"):
         return None
-    ct = request.headers.get("content-type", "")
-    if "application/json" not in ct.lower():
+    ct_vals = _header_values(getattr(request, "headers", None), "content-type")
+    media_types = [v.split(";", 1)[0].strip().lower() for v in ct_vals if v.strip()]
+    if len(set(media_types)) > 1:
+        setattr(request.state, _BODY_INVALID_JSON_ATTR, True)
+        return None
+    media_type = media_types[0] if media_types else ""
+    is_explicit_json = media_type == "application/json" or media_type.endswith("+json")
+    is_sniffable_json = media_type in ("", "text/plain")
+    if not is_explicit_json and not is_sniffable_json:
         return None
     body_bytes = await _drain_raw_body_bounded(request, max_bytes=BODY_INSPECT_MAX_BYTES)
     if not body_bytes:
         return None
+    stripped = body_bytes.lstrip(b"\xef\xbb\xbf").lstrip()
+    if not stripped:
+        return None
+    if not is_explicit_json and not stripped.startswith((b"{", b"[")):
+        return None
+    root_pairs: list[tuple[str, Any]] = []
+
+    def _pairs_hook(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        nonlocal root_pairs
+        root_pairs = pairs
+        return dict(pairs)
+
     try:
-        body = json.loads(body_bytes)
-    except (json.JSONDecodeError, ValueError):
+        raw_to_parse = body_bytes if is_explicit_json else stripped
+        body = json.loads(raw_to_parse, object_pairs_hook=_pairs_hook)
+    except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+        if is_explicit_json:
+            setattr(request.state, _BODY_INVALID_JSON_ATTR, True)
         return None
-    if not isinstance(body, dict):
-        return None
-    return body
+    if isinstance(body, dict):
+        setattr(request.state, _BODY_PAIRS_ATTR, root_pairs)
+        return body
+    if isinstance(body, list):
+        if is_explicit_json:
+            setattr(request.state, _BODY_INVALID_JSON_ATTR, True)
+            return None
+        nested_pairs: list[tuple[str, Any]] = []
+        _collect_dict_pairs_recursive(body, nested_pairs)
+        setattr(request.state, _BODY_PAIRS_ATTR, nested_pairs)
+        return dict(nested_pairs) if nested_pairs else None
+    if is_explicit_json:
+        setattr(request.state, _BODY_INVALID_JSON_ATTR, True)
+    return None
+
+
+async def _body_pairs_for(request: Request) -> list[tuple[str, Any]]:
+    body = await _inspect_request_body(request)
+    pairs = getattr(request.state, _BODY_PAIRS_ATTR, None)
+    if isinstance(pairs, list):
+        return pairs
+    if isinstance(body, dict):
+        return [(str(k), v) for k, v in body.items()]
+    return []
 
 
 async def _body_service_ids(request: Request) -> list[str]:
-    body = await _inspect_request_body(request) or {}
-    return [str(v) for k in ("service_id", "service") if isinstance(v := body.get(k), (str, int)) and str(v)]
+    pairs = await _body_pairs_for(request)
+    out: list[str] = []
+    for k, v in pairs:
+        if k in ("service_id", "service") and isinstance(v, (str, int)) and not isinstance(v, bool) and str(v):
+            out.append(str(v))
+    return out
 
 
-_PII_FORBIDDEN_FILTER_COLS = IP_FAMILY_KEYS | SESSION_ID_KEYS
+_PII_FORBIDDEN_FILTER_COLS = SAVED_VIEW_PII_FILTER_KEYS | CMCD_SESSION_ALIAS_KEYS | frozenset({"origin_ip"})
+_PII_FORBIDDEN_DIMENSION_COLS = _PII_FORBIDDEN_FILTER_COLS - frozenset({"oip"})
 
 
 async def _body_filter_keys(request: Request) -> list[str]:
-    body = await _inspect_request_body(request) or {}
-    filters = body.get("filters")
-    return [str(k) for k in filters] if isinstance(filters, dict) else []
+    pairs = await _body_pairs_for(request)
+    collected: set[str] = set()
+    for k, filters in pairs:
+        if k != "filters":
+            continue
+        if isinstance(filters, dict):
+            extracted, _ = _extract_saved_view_filter_keys(filters)
+            collected.update(str(fk) for fk in filters)
+            collected.update(extracted)
+        elif isinstance(filters, (list, str)):
+            extracted, _ = _extract_saved_view_filter_keys(filters)
+            collected.update(extracted)
+    return list(collected)
 
 
 async def _body_field_param(request: Request) -> str | None:
@@ -805,6 +923,22 @@ async def _body_field_param(request: Request) -> str | None:
         if isinstance(val, str) and val:
             return val
     return None
+
+
+async def _body_field_params(request: Request) -> tuple[list[str], list[str]]:
+    pairs = await _body_pairs_for(request)
+    field_keys: list[str] = []
+    dim_keys: list[str] = []
+    for k, val in pairs:
+        if k == "field" and isinstance(val, str) and val:
+            field_keys.append(val)
+        elif k == "fields" and isinstance(val, list):
+            for item in val:
+                if isinstance(item, str) and item:
+                    field_keys.append(item)
+        elif k == "dimension" and isinstance(val, str) and val:
+            dim_keys.append(val)
+    return field_keys, dim_keys
 
 
 _static_limiter = _StaticAssetLimiter()
@@ -884,20 +1018,28 @@ _EXTRA_FORBIDDEN_FILTER_COLS = EXTRA_IP_PII_KEYS
 
 async def _enforce_service_and_pii_scope(request: Request, session) -> JSONResponse | None:
     from backend import config as svcconfig
+    from backend.core.request_context import _valid_cookie_service_id
 
     raw_candidates: list[str] = list(_path_service_ids(request))
     for src in (
-        request.query_params.get("service"),
-        request.query_params.get("service_id"),
-        request.headers.get("x-fastly-service-id"),
-        request.headers.get("x-service-id"),
+        *_query_param_values(request.query_params, "service"),
+        *_query_param_values(request.query_params, "service_id"),
+        *_header_values(request.headers, "x-fastly-service-id"),
+        *_header_values(request.headers, "x-service-id"),
     ):
         if src:
             raw_candidates.append(src)
     body_sids = await _body_service_ids(request)
     if getattr(request.state, _BODY_TOO_LARGE_ATTR, False):
         return _error_json(413, "payload_too_large", max_bytes=BODY_INSPECT_MAX_BYTES)
+    if request.url.path.startswith("/api/") and getattr(request.state, _BODY_INVALID_JSON_ATTR, False):
+        return _error_json(400, "invalid_json_body")
     raw_candidates.extend(body_sids)
+    if not raw_candidates:
+        cookie_sid = _valid_cookie_service_id(request)
+        if cookie_sid:
+            raw_candidates.append(cookie_sid)
+    caller_supplied = bool(raw_candidates)
     cdn_map = svcconfig.get_cdn_service_id_map() if raw_candidates else {}
     resolved_candidates = [cand if svcconfig.load_config(cand) else cdn_map.get(cand, cand) for cand in raw_candidates]
     if not resolved_candidates:
@@ -909,15 +1051,20 @@ async def _enforce_service_and_pii_scope(request: Request, session) -> JSONRespo
         return _error_json(403, "service_not_authorized", service="")
     for eff in resolved_candidates:
         if not eff or eff not in allowed_services:
-            return _error_json(403, "service_not_authorized", service=eff or "")
+            return _error_json(403, "service_not_authorized", service=(eff or "") if caller_supplied else "")
     if session.pii_policy.get("mask_ips"):
         from backend.repositories.utils.filters import normalize_filter_key
 
-        dim = await _body_field_param(request)
+        field_keys, dim_keys = await _body_field_params(request)
         if getattr(request.state, _BODY_TOO_LARGE_ATTR, False):
             return _error_json(413, "payload_too_large", max_bytes=BODY_INSPECT_MAX_BYTES)
-        raw_keys = [*(await _body_filter_keys(request)), *((dim,) if dim is not None else ())]
-        for raw_key in raw_keys:
+        query_filter_keys: list[str] = []
+        for raw_query_filters in _query_param_values(request.query_params, "filters"):
+            if raw_query_filters:
+                qf_extracted, _ = _extract_saved_view_filter_keys(raw_query_filters)
+                query_filter_keys.extend(qf_extracted)
+        filter_and_field_keys = [*(await _body_filter_keys(request)), *query_filter_keys, *field_keys]
+        for raw_key in filter_and_field_keys:
             col = normalize_filter_key(raw_key)
             canon = _canon_pii_key(raw_key)
             if (
@@ -925,6 +1072,18 @@ async def _enforce_service_and_pii_scope(request: Request, session) -> JSONRespo
                 or col in _EXTRA_FORBIDDEN_FILTER_COLS
                 or canon in _PII_FORBIDDEN_FILTER_COLS
                 or canon in _EXTRA_FORBIDDEN_FILTER_COLS
+                or is_saved_view_pii_key(raw_key)
+            ):
+                return _error_json(403, "pii_policy_violation", field=col)
+        for raw_dim in dim_keys:
+            col = normalize_filter_key(raw_dim)
+            canon = _canon_pii_key(raw_dim)
+            if (
+                col in _PII_FORBIDDEN_DIMENSION_COLS
+                or col in _EXTRA_FORBIDDEN_FILTER_COLS
+                or canon in _PII_FORBIDDEN_DIMENSION_COLS
+                or canon in _EXTRA_FORBIDDEN_FILTER_COLS
+                or (col != "oip" and canon != "oip" and is_saved_view_pii_key(raw_dim))
             ):
                 return _error_json(403, "pii_policy_violation", field=col)
     return None

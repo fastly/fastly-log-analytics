@@ -153,6 +153,18 @@ describe('ReviewStep (ExecuteStep)', () => {
     renderWithQuery(<ExecuteStep s={makeReviewState({ catalog: undefined, isLoadingCatalog: true, estimatedBytes: 0 })} />)
     expect(screen.getByText(/Loading fields/i)).toBeInTheDocument()
   })
+
+  it('shows Cloud Snapshot Interval in Elevation mode and omits it in Cloud mode', () => {
+    const { rerender } = renderWithQuery(
+      <ExecuteStep s={makeReviewState({ config: { ...INITIAL_CONFIG, snapshot_interval_minutes: 60 } })} />,
+    )
+    expect(screen.getByText('Cloud Snapshot Interval')).toBeInTheDocument()
+    expect(screen.getByText('1h')).toBeInTheDocument()
+
+    setCloudModeRuntime(true)
+    rerender(<ExecuteStep s={makeReviewState({ config: { ...INITIAL_CONFIG, snapshot_interval_minutes: 60 } })} />)
+    expect(screen.queryByText('Cloud Snapshot Interval')).not.toBeInTheDocument()
+  })
 })
 
 describe('useWizardState catalog fetching', () => {

@@ -1463,3 +1463,561 @@ def test_bootstrap_seeds_auth_epoch_zero_and_deploy_leaves_epoch_untouched(packa
     deploy_api = SyntheticDeployAPI()
     provision.deploy(deploy_api, inventory_path, package, "team-a")
     assert not any(path.endswith("/item/auth_epoch") for _, path, *_ in deploy_api.calls)
+
+
+class SyntheticRecoverAPI:
+    """Synthetic Fastly API supporting surviving stores/services for Mode A relink tests."""
+
+    def __init__(
+        self,
+        *,
+        services: list[dict] | None = None,
+        stores: dict[str, list[dict]] | None = None,
+        versions: dict[str, list[dict]] | None = None,
+        resources: dict[tuple[str, int], list[dict]] | None = None,
+        dictionaries: dict[tuple[str, int], list[dict]] | None = None,
+        config_items: list[dict] | None = None,
+    ) -> None:
+        self.calls: list[tuple[str, str, object, bool]] = []
+        self.services = list(services or [])
+        self.stores = stores or {}
+        self.versions = {k: list(v) for k, v in (versions or {}).items()}
+        self.resources = {k: list(v) for k, v in (resources or {}).items()}
+        self.dictionaries = {k: list(v) for k, v in (dictionaries or {}).items()}
+        self.config_items = list(config_items or [])
+        self._created_seq = 0
+
+    def request(self, method, path, payload=None, *, form=False):
+        self.calls.append((method, path, payload, form))
+        if method == "GET":
+            if path.startswith("/service?"):
+                return list(self.services) if "page=1&" in path else []
+            if path.endswith("/validate"):
+                return {"status": "ok"}
+            for kind, endpoint in provision._stores.STORE_ENDPOINTS.items():
+                if path == endpoint:
+                    return {"data": list(self.stores.get(kind, []))}
+                if path.startswith(endpoint + "/") and path.endswith("/items"):
+                    return list(self.config_items)
+                if path.startswith(endpoint + "/"):
+                    store_id = path.split("/")[-1]
+                    for item in self.stores.get(kind, []):
+                        if item["id"] == store_id:
+                            return item
+                    raise provision.APIError(f"Fastly GET {path} returned 404")
+            m = re.fullmatch(r"/service/([^/]+)/version", path)
+            if m:
+                return list(self.versions.get(m.group(1), [{"number": 1, "active": True}]))
+            m = re.fullmatch(r"/service/([^/]+)/version/(\d+)/resource", path)
+            if m:
+                return list(self.resources.get((m.group(1), int(m.group(2))), []))
+            m = re.fullmatch(r"/service/([^/]+)/version/(\d+)/dictionary", path)
+            if m:
+                return list(self.dictionaries.get((m.group(1), int(m.group(2))), []))
+            m = re.fullmatch(r"/service/([^/]+)/version/(\d+)/backend", path)
+            if m:
+                return []
+            if path.endswith("/generated_vcl"):
+                return {"content": ""}
+            return []
+        if method == "PUT":
+            m = re.fullmatch(r"/service/([^/]+)/version/(\d+)/clone", path)
+            if m:
+                sid = m.group(1)
+                ver = int(m.group(2))
+                new_ver = ver + 1
+                self.versions.setdefault(sid, []).append({"number": new_ver, "active": False})
+                self.resources[(sid, new_ver)] = list(self.resources.get((sid, ver), []))
+                return {"number": new_ver}
+            return {}
+        if method == "POST":
+            if path == "/service":
+                self._created_seq += 1
+                return {"id": f"{payload['name']}-new-{self._created_seq}"}
+            if path.endswith("/dictionary"):
+                return {"id": f"{payload['name']}-new-dict"}
+            return {}
+        return {}
+
+
+def _surviving_stores(name: str = "team-a") -> dict[str, list[dict]]:
+    return {
+        "secret": [{"id": f"{name}-secret-surviving", "name": f"{name}_secrets"}],
+        "config": [{"id": f"{name}-config-surviving", "name": f"{name}_config"}],
+        "kv": [{"id": f"{name}-kv-surviving", "name": f"{name}_state"}],
+    }
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["recover", "--mode", "relink", "--name", "team-a"],
+        [
+            "recover",
+            "--mode",
+            "fos",
+            "--base-url",
+            "https://team-a.global.ssl.fastly.net",
+            "--service-id",
+            "svc123",
+            "--bucket",
+            "my-bucket",
+            "--region",
+            "us-east-1",
+        ],
+    ],
+)
+def test_recover_dry_run_requires_no_credentials_and_makes_no_writes(
+    argv: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.delenv("FASTLY_API_TOKEN", raising=False)
+    monkeypatch.delenv("FASTLY_API_KEY", raising=False)
+    monkeypatch.delenv("FLP_ADMIN_COOKIE", raising=False)
+    monkeypatch.setattr(provision.getpass, "getpass", lambda _prompt="": pytest.fail("must not prompt on dry-run"))
+    monkeypatch.setattr(
+        provision,
+        "HTTP_TRANSPORT",
+        httpx.MockTransport(lambda _req: pytest.fail("must not make HTTP calls on dry-run")),
+    )
+    assert provision.main(argv) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    data = json.loads(captured.out)
+    assert data["writes"] is False
+
+
+def test_recover_relink_recreates_deleted_compute_and_worker_preserving_front_and_stores(
+    inventory_path: Path,
+) -> None:
+    api = SyntheticRecoverAPI(
+        services=[{"id": "front-surviving", "name": "team-a-front", "type": "vcl"}],
+        stores=_surviving_stores("team-a"),
+        versions={"front-surviving": [{"number": 4, "active": True}]},
+        dictionaries={
+            ("front-surviving", 4): [
+                {"id": "dict-auth-old", "name": "flp_front_auth"},
+                {"id": "dict-buckets-old", "name": "flp_fos_buckets"},
+                {"id": "dict-creds-old", "name": "flp_fos_credentials"},
+            ]
+        },
+        config_items=[{"item_key": "window_s", "item_value": "300"}],
+    )
+    result = provision.recover_relink(
+        api,
+        provision.resource_plan("team-a"),
+        inventory_path,
+        api_token="sentinel-token-relink",
+    )
+    assert result["recreated_services"] == ["compute", "worker"]
+    assert result["reused_services"] == ["front"]
+    assert result["front_keys_rotated"] is False
+    inv = result["inventory"]
+    assert inv["configured"] is True
+    assert inv["activated"] is False
+    assert inv["admin_code_issued"] is True
+    assert inv["services"]["front"]["id"] == "front-surviving"
+    assert inv["dictionaries"]["front_auth"]["id"] == "dict-auth-old"
+
+    created_services = [
+        payload["name"] for method, path, payload, _ in api.calls if method == "POST" and path == "/service"
+    ]
+    assert created_services == ["team-a", "team-a-worker"]
+
+    # Zero secret writes because front survived.
+    assert not any(method == "PUT" and path.endswith("/secrets") for method, path, *_ in api.calls)
+
+    # Both recreated services link all 3 surviving stores.
+    links = [
+        (path, payload) for method, path, payload, _ in api.calls if method == "POST" and path.endswith("/resource")
+    ]
+    assert len(links) == 6
+    assert all(
+        entry["resource_id"] in {"team-a-secret-surviving", "team-a-config-surviving", "team-a-kv-surviving"}
+        for _, entry in links
+    )
+
+    # Config store updated with new service IDs while preserving custom window_s="300".
+    config_puts = {
+        path.split("/item/")[-1]: payload["item_value"]
+        for method, path, payload, _ in api.calls
+        if method == "PUT" and "/resources/stores/config/" in path and "/item/" in path
+    }
+    assert config_puts["flp_service_id"] == inv["services"]["compute"]["id"]
+    assert config_puts["worker_service_id"] == inv["services"]["worker"]["id"]
+    assert config_puts["front_service_id"] == "front-surviving"
+    assert config_puts["front_auth_dictionary_id"] == "dict-auth-old"
+    assert "window_s" not in config_puts  # preserved existing custom value
+
+    saved = inventory_path.read_text()
+    assert "sentinel-token-relink" not in saved
+
+
+def test_recover_relink_recreates_deleted_front_and_rotates_front_keys_only(
+    inventory_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stores = _surviving_stores("team-a")
+    full_links = [
+        {"id": "l1", "name": "flp_secrets", "resource_id": stores["secret"][0]["id"]},
+        {"id": "l2", "name": "flp_config", "resource_id": stores["config"][0]["id"]},
+        {"id": "l3", "name": "flp_state", "resource_id": stores["kv"][0]["id"]},
+    ]
+    api = SyntheticRecoverAPI(
+        services=[
+            {"id": "compute-surviving", "name": "team-a", "type": "wasm"},
+            {"id": "worker-surviving", "name": "team-a-worker", "type": "wasm"},
+        ],
+        stores=stores,
+        versions={
+            "compute-surviving": [{"number": 2, "active": True}],
+            "worker-surviving": [{"number": 3, "active": True}],
+        },
+        resources={
+            ("compute-surviving", 2): full_links,
+            ("worker-surviving", 3): full_links,
+        },
+    )
+    result = provision.recover_relink(
+        api,
+        provision.resource_plan("team-a"),
+        inventory_path,
+        api_token="sentinel-front-token",
+        rate_limiting=False,
+    )
+    assert result["recreated_services"] == ["front"]
+    assert result["reused_services"] == ["compute", "worker"]
+    assert result["front_keys_rotated"] is True
+
+    secret_writes = {
+        payload["name"]: base64.b64decode(payload["secret"]).decode()
+        for method, path, payload, _ in api.calls
+        if method == "PUT" and path.endswith("/secrets")
+    }
+    assert set(secret_writes) == {"front_key", "cdn_key"}
+
+    dict_writes = {
+        path.split("/item/")[-1]: payload["item_value"]
+        for method, path, payload, _ in api.calls
+        if method == "PUT" and "/dictionary/" in path and "/item/" in path
+    }
+    assert dict_writes["front_key"] == secret_writes["front_key"]
+    assert dict_writes["cdn_key"] == secret_writes["cdn_key"]
+    assert dict_writes["auth_epoch"] == "0"
+
+    saved = inventory_path.read_text()
+    for secret in ("sentinel-front-token", secret_writes["front_key"], secret_writes["cdn_key"]):
+        assert secret not in saved
+        assert secret not in caplog.text
+
+
+def test_recover_relink_repairs_broken_store_links_on_surviving_compute_service(
+    inventory_path: Path,
+) -> None:
+    stores = _surviving_stores("team-a")
+    api = SyntheticRecoverAPI(
+        services=[
+            {"id": "compute-surviving", "name": "team-a", "type": "wasm"},
+            {"id": "worker-surviving", "name": "team-a-worker", "type": "wasm"},
+            {"id": "front-surviving", "name": "team-a-front", "type": "vcl"},
+        ],
+        stores=stores,
+        versions={
+            "compute-surviving": [{"number": 5, "active": True}],
+            "worker-surviving": [{"number": 2, "active": True}],
+            "front-surviving": [{"number": 3, "active": True}],
+        },
+        resources={
+            ("compute-surviving", 5): [
+                {"id": "l1", "name": "flp_secrets", "resource_id": stores["secret"][0]["id"]},
+                {"id": "l2", "name": "flp_config", "resource_id": stores["config"][0]["id"]},
+                # flp_state missing!
+            ],
+            ("worker-surviving", 2): [
+                {"id": "l1", "name": "flp_secrets", "resource_id": stores["secret"][0]["id"]},
+                {"id": "l2", "name": "flp_config", "resource_id": stores["config"][0]["id"]},
+                {"id": "l3", "name": "flp_state", "resource_id": stores["kv"][0]["id"]},
+            ],
+        },
+        dictionaries={
+            ("front-surviving", 3): [
+                {"id": "d1", "name": "flp_front_auth"},
+                {"id": "d2", "name": "flp_fos_buckets"},
+                {"id": "d3", "name": "flp_fos_credentials"},
+            ]
+        },
+    )
+    result = provision.recover_relink(
+        api,
+        provision.resource_plan("team-a"),
+        inventory_path,
+        api_token="api-token",
+    )
+    assert result["inventory"]["services"]["compute"]["version"] == 6
+    assert any(
+        method == "PUT" and path == "/service/compute-surviving/version/5/clone" for method, path, *_ in api.calls
+    )
+    assert any(
+        method == "POST"
+        and path == "/service/compute-surviving/version/6/resource"
+        and payload == {"name": "flp_state", "resource_id": stores["kv"][0]["id"]}
+        for method, path, payload, _ in api.calls
+    )
+
+
+def test_recover_relink_errors_when_store_missing_or_front_needs_erl_choice(
+    inventory_path: Path,
+) -> None:
+    missing_kv_api = SyntheticRecoverAPI(
+        stores={
+            "secret": [{"id": "s1", "name": "team-a_secrets"}],
+            "config": [{"id": "c1", "name": "team-a_config"}],
+            "kv": [],
+        }
+    )
+    with pytest.raises(ValueError, match="--kv-store-id"):
+        provision.recover_relink(
+            missing_kv_api,
+            provision.resource_plan("team-a"),
+            inventory_path,
+            api_token="api-token",
+            rate_limiting=False,
+        )
+    assert not any(method in {"POST", "PUT", "DELETE"} for method, *_ in missing_kv_api.calls)
+
+    missing_front_api = SyntheticRecoverAPI(stores=_surviving_stores("team-a"))
+    with pytest.raises(ValueError, match="--no-erl"):
+        provision.recover_relink(
+            missing_front_api,
+            provision.resource_plan("team-a"),
+            inventory_path,
+            api_token="api-token",
+            rate_limiting=None,
+        )
+    assert not any(method in {"POST", "PUT", "DELETE"} for method, *_ in missing_front_api.calls)
+
+
+def test_recover_fos_posts_with_origin_json_cookie_and_returns_response(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "service_id": "svc123",
+                "source": "dr_state",
+                "views_restored": 2,
+                "catalog_generation": 7,
+                "front_synced": True,
+            },
+        )
+
+    monkeypatch.setattr(provision, "HTTP_TRANSPORT", httpx.MockTransport(handler))
+    monkeypatch.setenv("FASTLY_API_TOKEN", "sentinel-fastly-token")
+    monkeypatch.setenv("FLP_ADMIN_COOKIE", "flp_session=sentinel-session-cookie")
+
+    rc = provision.main(
+        [
+            "recover",
+            "--mode",
+            "fos",
+            "--base-url",
+            "https://team-a.global.ssl.fastly.net",
+            "--service-id",
+            "svc123",
+            "--bucket",
+            "my-bucket",
+            "--region",
+            "us-east-1",
+            "--prefix",
+            "prod/",
+            "--apply",
+        ]
+    )
+    assert rc == 0
+    assert len(seen) == 1
+    req = seen[0]
+    assert req.method == "POST"
+    assert str(req.url) == "https://team-a.global.ssl.fastly.net/api/admin/provision/recover"
+    assert req.headers["origin"] == "https://team-a.global.ssl.fastly.net"
+    assert req.headers["content-type"].startswith("application/json")
+    assert req.headers["cookie"] == "flp_session=sentinel-session-cookie"
+    body = json.loads(req.content)
+    assert body == {
+        "token": "sentinel-fastly-token",
+        "service_id": "svc123",
+        "fos_bucket": "my-bucket",
+        "fos_region": "us-east-1",
+        "fos_prefix": "prod/",
+    }
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["ok"] is True
+    for secret in ("sentinel-fastly-token", "sentinel-session-cookie"):
+        assert secret not in captured.out
+        assert secret not in captured.err
+        assert secret not in caplog.text
+
+
+def test_recover_fos_error_redacts_body_token_and_cookie(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def failing(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            401,
+            text="unauthorized sentinel-fastly-token sentinel-session-cookie",
+        )
+
+    monkeypatch.setattr(provision, "HTTP_TRANSPORT", httpx.MockTransport(failing))
+    monkeypatch.setenv("FASTLY_API_TOKEN", "sentinel-fastly-token")
+    monkeypatch.setenv("FLP_ADMIN_COOKIE", "sentinel-session-cookie")
+
+    rc = provision.main(
+        [
+            "recover",
+            "--mode",
+            "fos",
+            "--base-url",
+            "https://team-a.global.ssl.fastly.net",
+            "--service-id",
+            "svc123",
+            "--bucket",
+            "my-bucket",
+            "--region",
+            "us-east-1",
+            "--apply",
+        ]
+    )
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "401" in captured.err
+    for secret in ("sentinel-fastly-token", "sentinel-session-cookie"):
+        assert secret not in captured.out
+        assert secret not in captured.err
+        assert secret not in caplog.text
+
+
+def test_recover_fos_derives_base_url_from_inventory_and_rejects_http_url(
+    inventory_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    inventory_path.write_text(json.dumps({"services": {"front": {"domain": "team-inv.global.ssl.fastly.net"}}}))
+    rc = provision.main(
+        [
+            "recover",
+            "--mode",
+            "fos",
+            "--inventory",
+            str(inventory_path),
+            "--service-id",
+            "svc123",
+            "--bucket",
+            "my-bucket",
+            "--region",
+            "us-east-1",
+        ]
+    )
+    assert rc == 0
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["base_url"] == "https://team-inv.global.ssl.fastly.net"
+    assert plan["writes"] is False
+
+    monkeypatch.setattr(
+        provision,
+        "HTTP_TRANSPORT",
+        httpx.MockTransport(lambda _req: pytest.fail("http:// must be rejected before network call")),
+    )
+    rc_bad = provision.main(
+        [
+            "recover",
+            "--mode",
+            "fos",
+            "--base-url",
+            "http://insecure.example",
+            "--service-id",
+            "svc123",
+            "--bucket",
+            "my-bucket",
+            "--region",
+            "us-east-1",
+        ]
+    )
+    assert rc_bad == 1
+    assert "https://" in capsys.readouterr().err
+
+
+def test_recover_relink_rejects_invalid_store_id_before_network_and_in_dry_run(
+    inventory_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    api = SyntheticRecoverAPI(stores=_surviving_stores("team-a"))
+    with pytest.raises(ValueError, match="Invalid kv store ID"):
+        provision.recover_relink(
+            api,
+            provision.resource_plan("team-a"),
+            inventory_path,
+            api_token="api-token",
+            kv_store_id="../evil",
+            rate_limiting=False,
+        )
+    assert api.calls == []
+    assert not inventory_path.exists()
+
+    rc = provision.main(["recover", "--mode", "relink", "--name", "team-a", "--kv-store-id", "../evil"])
+    assert rc == 1
+    assert "Invalid kv store ID" in capsys.readouterr().err
+
+
+def test_recover_relink_missing_front_dictionary_fails_before_any_mutations(
+    inventory_path: Path,
+) -> None:
+    api = SyntheticRecoverAPI(
+        stores=_surviving_stores("team-a"),
+        services=[{"id": "front-surviving", "name": "team-a-front", "type": "vcl"}],
+        versions={"front-surviving": [{"number": 3, "active": True, "locked": True}]},
+        dictionaries={
+            ("front-surviving", 3): [
+                {"id": "d-auth", "name": "flp_front_auth"},
+                {"id": "d-buckets", "name": "flp_fos_buckets"},
+                # Missing flp_fos_credentials
+            ]
+        },
+    )
+    with pytest.raises(ValueError, match="flp_fos_credentials"):
+        provision.recover_relink(
+            api,
+            provision.resource_plan("team-a"),
+            inventory_path,
+            api_token="api-token",
+            rate_limiting=False,
+        )
+    assert not any(method in {"POST", "PUT", "DELETE"} for method, *_ in api.calls)
+    assert not inventory_path.exists()
+
+
+def test_recover_latest_version_and_normalize_origin_edge_cases() -> None:
+    class _FakeVersionAPI:
+        def request(self, _method: str, _path: str) -> list[dict[str, object]]:
+            return [{"number": 7, "active": "0", "locked": "false"}]
+
+    ver, immutable = provision._latest_version(_FakeVersionAPI(), "svc-1")
+    assert ver == 7
+    assert immutable is False
+
+    for bad_url in (
+        "https://@flp.example.com",
+        "https://flp.example.com?",
+        "https://flp.example.com#",
+    ):
+        with pytest.raises(ValueError, match="without credentials, query, or fragment"):
+            provision._normalize_origin(bad_url)

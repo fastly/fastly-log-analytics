@@ -1178,6 +1178,36 @@ describe("incurredCost", () => {
     expect(summary.overhead.classA).toBe(4);
     expect(summary.overhead.classB).toBe(4);
   });
+
+  it("counts event-driven meta/cloud_dr_state.json pq_ops PUTs in totals, telemetryOps, and pq_ops storage", () => {
+    const summary = summarizeUsage({
+      ...fixtureUsageInput,
+      settings,
+      rows: {
+        fos_usage: [
+          {
+            ...fixtureUsageInput.rows.fos_usage[0],
+            timestamp: FIXTURE_NOW - 30_000,
+            op: "PUT",
+            op_class: "A",
+            op_count: 2,
+            bytes_in: 4_096,
+            bytes_out: 0,
+            bytes_deleted: 0,
+            dataset: "pq_ops",
+            caller: "api:/api/admin/services/svc-1",
+          },
+        ],
+        api_telemetry: [],
+        cron_runs: [],
+        cron_ticks: [],
+      },
+    });
+    expect(summary.totals.classA).toBe(2);
+    expect(summary.telemetryOps?.classA).toBe(2);
+    expect(summary.bytesWritten).toBe(4_096);
+    expect(summary.storage.datasets.find((d) => d.dataset === "pq_ops")?.bytes).toBe(4_096);
+  });
 });
 
 describe("deriveFosUsageFromCronRuns summary bundles", () => {

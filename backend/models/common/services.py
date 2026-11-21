@@ -7,6 +7,10 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 
 from backend.core.catalog import VALID_NAME_RE
+from backend.core.service_defaults import (
+    DEFAULT_SNAPSHOT_INTERVAL_MINUTES,
+    SnapshotIntervalMinutes,
+)
 from backend.models.common.base import BaseResponse, PassthroughModel, WireSafeModel
 
 
@@ -101,11 +105,13 @@ class CronSettingsPartial(BaseModel):
     keep_snapshot_days: int | None = None
     expire_interval_mins: int | None = None
     delete_after: bool | None = None
+    snapshot_interval_minutes: SnapshotIntervalMinutes | None = None
 
 
 class ServiceCronSync(CronSettingsPartial):
     enabled: bool
     polling_mode: Literal["regular", "adaptive"] = "adaptive"
+    snapshot_interval_minutes: SnapshotIntervalMinutes = DEFAULT_SNAPSHOT_INTERVAL_MINUTES
 
 
 class ServiceCronNgwaf(BaseModel):

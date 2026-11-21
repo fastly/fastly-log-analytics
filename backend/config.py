@@ -956,6 +956,40 @@ def resolve_raw_delete_after(cfg: dict | None, requested: bool | None = None) ->
     return bool((cfg or {}).get("provisioning", {}).get("cron_sync", {}).get("delete_after", True))
 
 
+def resolve_snapshot_interval_minutes(cfg: dict | None, requested: int | None = None) -> int:
+    """Resolve the effective snapshot_interval_minutes (5, 15, 30, 60, 360, 1440; default 5)."""
+    from backend.core.service_defaults import (
+        DEFAULT_SNAPSHOT_INTERVAL_MINUTES,
+        VALID_SNAPSHOT_INTERVAL_MINUTES,
+    )
+
+    raw: Any = requested
+    if raw is None:
+        prov = cfg.get("provisioning") if isinstance(cfg, dict) else None
+        cron_sync = prov.get("cron_sync") if isinstance(prov, dict) else None
+        raw = cron_sync.get("snapshot_interval_minutes") if isinstance(cron_sync, dict) else None
+
+    if raw is None or isinstance(raw, bool):
+        return DEFAULT_SNAPSHOT_INTERVAL_MINUTES
+    if isinstance(raw, float):
+        if not math.isfinite(raw) or not raw.is_integer():
+            return DEFAULT_SNAPSHOT_INTERVAL_MINUTES
+        val = int(raw)
+    elif isinstance(raw, int):
+        val = raw
+    elif isinstance(raw, str):
+        try:
+            val = int(raw.strip())
+        except ValueError:
+            return DEFAULT_SNAPSHOT_INTERVAL_MINUTES
+    else:
+        return DEFAULT_SNAPSHOT_INTERVAL_MINUTES
+
+    if val in VALID_SNAPSHOT_INTERVAL_MINUTES:
+        return val
+    return DEFAULT_SNAPSHOT_INTERVAL_MINUTES
+
+
 def service_id_from_source(
     source: dict | None,
     service_id: str | None = None,

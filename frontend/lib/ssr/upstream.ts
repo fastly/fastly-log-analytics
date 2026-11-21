@@ -371,6 +371,8 @@ export function seedDehydratedState(key: QueryKey, data: unknown): DehydratedSta
 export const firstParam = (v: string | string[] | undefined): string | undefined =>
   Array.isArray(v) ? v[0] : v
 
+const SERVICE_ID_RE = /^[A-Za-z0-9_-]{1,64}$/
+
 function resolveServerServiceId(
   params: { service?: string | string[] },
   bootstrap:
@@ -383,7 +385,7 @@ function resolveServerServiceId(
   options?: { fallbackFirstService?: boolean },
 ): string | undefined {
   const urlServiceId = firstParam(params.service)
-  if (urlServiceId) return urlServiceId
+  if (urlServiceId && SERVICE_ID_RE.test(urlServiceId)) return urlServiceId
   if (bootstrap?.active_service_id) return bootstrap.active_service_id
   if (options?.fallbackFirstService) {
     const first = bootstrap?.services?.[0]
@@ -398,7 +400,7 @@ export async function resolvePageServiceId(
   options?: { fallbackFirstService?: boolean },
 ): Promise<string | undefined> {
   const urlServiceId = firstParam(params.service)
-  if (urlServiceId) return urlServiceId
+  if (urlServiceId && SERVICE_ID_RE.test(urlServiceId)) return urlServiceId
   const bootstrap = await fetchBootstrapServerSide()
   return resolveServerServiceId(params, bootstrap, options)
 }

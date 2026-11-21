@@ -423,6 +423,7 @@ EXTRA_IP_PII_KEYS = frozenset(
     }
 )
 SESSION_ID_KEYS = frozenset({"cookie_session", "cid", "client_id", "edge_sid", "sid", "session_id"})
+CMCD_SESSION_ALIAS_KEYS = frozenset({"cmcd_session", "cmcd_sid", "cmcd_cid"})
 PII_IP_KEYS = IP_FAMILY_KEYS | EXTRA_IP_PII_KEYS | frozenset({"oip"})
 PII_SESSION_KEYS = SESSION_ID_KEYS
 SAVED_VIEW_PII_FILTER_KEYS = PII_IP_KEYS | PII_SESSION_KEYS
@@ -432,6 +433,7 @@ _NONWORD_UNDERSCORE_RE = re.compile(r"[^\w]+")
 _FILTER_NUM_SUFFIX_RE = re.compile(r"_\d+$")
 _PII_IP_NONWORD_KEYS = frozenset(_NONWORD_RE.sub("", k) for k in PII_IP_KEYS)
 _PII_SESSION_NONWORD_KEYS = frozenset(_NONWORD_RE.sub("", k) for k in PII_SESSION_KEYS)
+_CMCD_SESSION_ALIAS_NONWORD_KEYS = frozenset(_NONWORD_RE.sub("", k) for k in CMCD_SESSION_ALIAS_KEYS)
 _MAYBE_IP_RE = re.compile(r"[0-9A-Fa-f:.]+")
 _BRACKET_PII_KEY_RE = re.compile(r"\[['\"`]?([^'\"`\]]+)['\"`]?\]")
 _IDENT_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_\-]*")
@@ -516,7 +518,12 @@ def _classify_saved_view_pii_key(key: str) -> str | None:
         for form in _pii_candidate_forms(cand):
             if not form:
                 continue
-            if form in PII_SESSION_KEYS or form in _PII_SESSION_NONWORD_KEYS:
+            if (
+                form in PII_SESSION_KEYS
+                or form in _PII_SESSION_NONWORD_KEYS
+                or form in CMCD_SESSION_ALIAS_KEYS
+                or form in _CMCD_SESSION_ALIAS_NONWORD_KEYS
+            ):
                 return "session"
             if form in PII_IP_KEYS or form in _PII_IP_NONWORD_KEYS:
                 matched_ip = True
@@ -1465,6 +1472,20 @@ class _BackupPayloadModel(BaseModel):
     share_settings: list[dict[str, Any]] = Field(default_factory=list)
 
 
+_IMPORTABLE_SHARE_SETTINGS_KEYS = frozenset(
+    {
+        MAX_CONCURRENT_ANALYST_SESSIONS_KEY,
+        SHARE_AUDIT_RETENTION_DAYS_KEY,
+        SHARING_ENABLED_KEY,
+        SHARING_PUBLIC_ENDPOINT_KEY,
+        "idle_timeout_minutes",
+        "max_session_hours",
+        "query_debug_visibility",
+        "api_call_debug_visibility",
+    }
+)
+
+
 def import_backup(blob: bytes, passphrase: str, *, mode: str = "skip-collisions", con: Any = None) -> dict:
     if not blob.startswith(b"FOSBACKUP\x01"):
         raise ValueError("not a recognised backup envelope")
@@ -1480,18 +1501,19 @@ def import_backup(blob: bytes, passphrase: str, *, mode: str = "skip-collisions"
     if payload.schema_version > LATEST_VERSION:
         raise ValueError(f"backup schema_version {payload.schema_version} is newer than this build's {LATEST_VERSION}")
     con = con or get_global_share_con()
-    existing_by_email = {
-        r["email"].lower(): r["id"]
-        for r in con.execute("SELECT id, email FROM remote_invites WHERE revoked=0").fetchall()
-    }
+    all_existing = con.execute("SELECT id, email, revoked FROM remote_invites").fetchall()
+    existing_ids = {r["id"]: r["email"] for r in all_existing}
+    existing_by_email = {r["email"].lower(): r["id"] for r in all_existing if not r["revoked"]}
     inserted = skipped = merged = 0
     with con:
         for inv in payload.invites:
+            if not inv.id or not inv.id.strip():
+                raise ValueError("invite id is required in backup payload")
             email_lc = inv.email.lower()
-            collision_id = existing_by_email.get(email_lc)
+            collision_id = existing_by_email.get(email_lc) or (inv.id if inv.id in existing_ids else None)
             if collision_id is not None:
                 if mode == "abort":
-                    raise ValueError(f"email collision on import: {email_lc}")
+                    raise ValueError(f"email collision on import: {email_lc or inv.id}")
                 if mode == "merge-services-on-collision":
                     for r in payload.invite_services:
                         if r["invite_id"] == inv.id:
@@ -1509,6 +1531,16 @@ def import_backup(blob: bytes, passphrase: str, *, mode: str = "skip-collisions"
             except (InvalidNameError, InvalidEmailError):
                 skipped += 1
                 continue
+            parse_ip_whitelist(inv.ip_whitelist)
+            try:
+                raw_policy = json.loads(inv.pii_policy)
+            except (ValueError, TypeError) as exc:
+                raise ValueError("invalid pii_policy JSON in backup") from exc
+            if not isinstance(raw_policy, dict) or not isinstance(raw_policy.get("mask_ips", False), bool):
+                raise ValueError("pii_policy.mask_ips must be a boolean")
+            canon_policy = validate_pii_policy(raw_policy)
+            row_dict = inv.model_dump()
+            row_dict["pii_policy"] = json.dumps(canon_policy, separators=(",", ":"))
             con.execute(
                 """INSERT INTO remote_invites
                     (id, name, email, passcode, expires_at, ip_whitelist, pii_policy,
@@ -1516,8 +1548,11 @@ def import_backup(blob: bytes, passphrase: str, *, mode: str = "skip-collisions"
                      revoked, tos_accepted_at, tos_version, allow_concurrent_sessions,
                      auth_method, oauth_provider, oauth_subject)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                tuple(inv.model_dump().values()),
+                tuple(row_dict.values()),
             )
+            existing_ids[inv.id] = inv.email
+            if not inv.revoked:
+                existing_by_email[email_lc] = inv.id
             for r in payload.invite_services:
                 if r["invite_id"] == inv.id:
                     con.execute(
@@ -1526,10 +1561,14 @@ def import_backup(blob: bytes, passphrase: str, *, mode: str = "skip-collisions"
                     )
             inserted += 1
         for s in payload.share_settings:
-            con.execute(
-                "INSERT INTO share_settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (s["key"], s["value"]),
-            )
+            s_key = s.get("key") if isinstance(s, dict) else None
+            s_val = s.get("value") if isinstance(s, dict) else None
+            if isinstance(s_key, str) and s_key in _IMPORTABLE_SHARE_SETTINGS_KEYS and isinstance(s_val, str):
+                con.execute(
+                    "INSERT INTO share_settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (s_key, s_val),
+                )
+    _SETTINGS_CACHE.clear()
     return {"inserted": inserted, "skipped": skipped, "merged": merged}
 
 

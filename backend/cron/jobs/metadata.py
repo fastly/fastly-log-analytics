@@ -697,6 +697,17 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
             run.fail(f"Alerts evaluation failed: {e}", error_message=err_msg, files_downloaded=0, rows_ingested=0)
 
 
+def _run_dr_state_sync(service_id: str) -> None:
+    """Export non-secret Postgres DR state snapshot to ``meta/dr_state.json``."""
+    from backend.cron.scheduler.lifecycle import dev_mode_no_crons
+
+    if dev_mode_no_crons():
+        return
+    from backend.core.metadata.base import export_dr_state
+
+    export_dr_state(service_id)
+
+
 _DELEGATED_EXPORTS: dict[str, str] = {
     "DEFAULT_PREWARM_IDLE_MINUTES": "backend.cron.jobs.insights_prewarmer",
     "_INGEST_TASKS": "backend.cron.jobs.insights_prewarmer",

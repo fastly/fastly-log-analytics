@@ -26,7 +26,7 @@ import { ACTIVE_SERVICE_COOKIE } from './lib/utils'
 //     understand nonces — modern browsers honouring CSP3 ignore it in
 //     the presence of a nonce.
 
-const ANALYST_BLOCKED_PREFIXES = ['/admin', '/alerts', '/usage', '/high-scale']
+const ANALYST_BLOCKED_PREFIXES = ['/admin', '/alerts', '/usage', '/high-scale', '/logs']
 const PROXIED_BY_CADDY_HEADER = 'x-proxied-by-caddy'
 const PUBLIC_GATEWAY_HEADER = 'x-fla-public-gateway'
 const FRONTEND_PROXY_HEADER = 'x-fla-frontend-proxy'
@@ -50,18 +50,66 @@ function readCookieValue(request: NextRequest, name: string): string | null {
   return null
 }
 
-function isTruthyProxyHeader(val: string | null): boolean {
-  if (!val) return false
-  const normalized = val.trim().toLowerCase()
-  return normalized === '1' || normalized === 'true'
+function hasNonEmptyHeader(headers: Headers, name: string): boolean {
+  const val = headers.get(name)
+  return Boolean(val && val.trim() !== '')
 }
 
-function isProxiedPublicRequest(request: NextRequest): boolean {
+function isLoopbackHost(host: string): boolean {
+  const bare = host.startsWith('[') ? host.slice(1, host.indexOf(']')) : host.split(':', 1)[0]
+  const lc = bare.toLowerCase()
+  return lc === 'localhost' || lc === '127.0.0.1' || lc === '::1'
+}
+
+function timingSafeStringEqual(a: string, b: string): boolean {
+  const enc = new TextEncoder()
+  const ba = enc.encode(a)
+  const bb = enc.encode(b)
+  if (ba.byteLength !== bb.byteLength) return false
+  let diff = 0
+  for (let i = 0; i < ba.byteLength; i++) diff |= ba[i] ^ bb[i]
+  return diff === 0
+}
+
+function shouldGateAdminRequest(request: NextRequest): boolean {
+  const { headers } = request
+  const isPublicMarker =
+    hasNonEmptyHeader(headers, PROXIED_BY_CADDY_HEADER) ||
+    hasNonEmptyHeader(headers, PUBLIC_GATEWAY_HEADER) ||
+    hasNonEmptyHeader(headers, FRONTEND_PROXY_HEADER) ||
+    hasNonEmptyHeader(headers, 'x-remote-analyst')
+
+  const effectiveHost =
+    headers.get('host') || request.nextUrl?.host || (request.url ? new URL(request.url).host : '')
+  const gatewayToken = headers.get('x-admin-gateway-token') ?? headers.get('x-fla-admin-gateway')
+  const gatewaySecret = process.env.ADMIN_GATEWAY_SECRET || ''
+  const crossOrigin =
+    headers.get('sec-fetch-site') === 'cross-site' ||
+    (headers.get('origin') !== null &&
+      headers.get('origin')?.toLowerCase() !== `https://${effectiveHost.toLowerCase()}`)
+  const gatewayAuthenticated =
+    !isPublicMarker &&
+    Boolean(effectiveHost) &&
+    !crossOrigin &&
+    gatewaySecret.length >= 32 &&
+    timingSafeStringEqual(gatewayToken || '', gatewaySecret)
+
+  if (gatewayAuthenticated) return false
+
+  const hasExternalProxyHeaders =
+    hasNonEmptyHeader(headers, 'x-forwarded-for') ||
+    hasNonEmptyHeader(headers, 'fastly-client-ip') ||
+    hasNonEmptyHeader(headers, 'true-client-ip') ||
+    hasNonEmptyHeader(headers, 'x-real-ip') ||
+    hasNonEmptyHeader(headers, 'forwarded')
+
   return (
-    isTruthyProxyHeader(request.headers.get(PROXIED_BY_CADDY_HEADER)) ||
-    isTruthyProxyHeader(request.headers.get(PUBLIC_GATEWAY_HEADER)) ||
-    isTruthyProxyHeader(request.headers.get(FRONTEND_PROXY_HEADER)) ||
-    isTruthyProxyHeader(request.headers.get('x-remote-analyst'))
+    isPublicMarker ||
+    hasExternalProxyHeaders ||
+    gatewayToken !== null ||
+    process.env.ADMIN_GATEWAY_REQUIRED === '1' ||
+    !effectiveHost ||
+    !isLoopbackHost(effectiveHost)
   )
 }
 
@@ -148,14 +196,17 @@ export function proxy(request: NextRequest) {
     return NextResponse.next()
   }
 
+  const rawPathname = request.url ? new URL(request.url).pathname : pathname
   const contentType = request.headers.get('content-type') || ''
   const isServerAction = request.headers.has('next-action') || (request.method === 'POST' && contentType.toLowerCase().includes('multipart/form-data'))
-  const isDataRequest = pathname.startsWith('/_next/data/') && ANALYST_BLOCKED_PREFIXES.some(p => pathname.endsWith(`${p}.json`) || pathname.includes(`${p}/`))
+  const isDataRequest =
+    (pathname.startsWith('/_next/data/') && ANALYST_BLOCKED_PREFIXES.some(p => pathname.endsWith(`${p}.json`) || pathname.includes(`${p}/`))) ||
+    (rawPathname.startsWith('/_next/data/') && ANALYST_BLOCKED_PREFIXES.some(p => rawPathname.endsWith(`${p}.json`) || rawPathname.includes(`${p}/`)))
 
   const isGatedPath = ANALYST_BLOCKED_PREFIXES.some(p => pathname === p || pathname.startsWith(`${p}/`)) || isServerAction || isDataRequest
 
   if (isGatedPath) {
-    if (isProxiedPublicRequest(request)) {
+    if (shouldGateAdminRequest(request)) {
       if (isServerAction || isDataRequest) {
         // Empty 403 body — no CSP needed.
         return new NextResponse(null, { status: 403 })

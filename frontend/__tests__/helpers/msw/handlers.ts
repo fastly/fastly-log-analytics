@@ -157,6 +157,17 @@ export const handlers = [
   post('/api/high-scale/services/:service_id/exports', { export_id: 'export-default', service_id: 'svc-default', status: 'queued' }),
   get('/api/high-scale/services/:service_id/exports/:export_id', { export_id: 'export-default', service_id: 'svc-default', status: 'queued' }),
   post('/api/high-scale/services/:service_id/exports/:export_id/cancel', { export_id: 'export-default', service_id: 'svc-default', status: 'cancelled', cancelled: true }),
+  post('/api/high-scale/restore-from-fos', {
+    status: 'ok',
+    service_id: 'svc-default',
+    dr_state_restored: true,
+    views_restored: 0,
+    alerts_restored: 0,
+    scoring_labels_restored: 0,
+    audit_logs_restored: 0,
+    manifests_registered: 0,
+    domains_rebuilt: {},
+  }),
   http.get(url('/api/admin/clickhouse/status'), ({ request }) =>
     HttpResponse.json({
       service_id: new URL(request.url).searchParams.get('service_id') ?? 'svc-default',

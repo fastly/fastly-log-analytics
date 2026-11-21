@@ -12,7 +12,7 @@ const wizardBody = {
   token: "fastly-token-sentinel", service_id: "svc-1", service_name: "Demo", endpoint_name: "fla-logs",
   fos_region: "us-east", fos_bucket_name: "demo-bucket", fos_prefix: "logs/", sample_rate: "100", edge_only: true,
   custom_condition: "", log_period: "60", rum_log_period: "300", cdn_service_name: "demo-cdn", cdn_shield: "",
-  enable_cron_sync: true, delete_after: true, log_retention_days: 30, rum_retention_days: 30,
+  enable_cron_sync: true, delete_after: true, snapshot_interval_minutes: 60, log_retention_days: 30, rum_retention_days: 30,
   log_fields: JSON.stringify({ groups: ["A"], field_overrides: {} }), cmcd_enabled: true, cmcd_mode: "headers",
   cmcd_version: 2, logging_enabled: true, rum_enabled: false, rum_custom_condition: "", faro_version: null,
   cdn_url: "https://demo.global.ssl.fastly.net",
@@ -23,7 +23,7 @@ afterEach(() => vi.unstubAllGlobals());
 describe("Cloud provisioning bridge", () => {
   it("drops self-hosted-only keys and folds flat cmcd keys into Cloud's shape", () => {
     const body = cloudProvisionBody(wizardBody);
-    for (const key of ["cdn_service_name", "cdn_shield", "cdn_url", "enable_cron_sync", "cmcd_enabled", "cmcd_mode", "cmcd_version"]) {
+    for (const key of ["cdn_service_name", "cdn_shield", "cdn_url", "enable_cron_sync", "snapshot_interval_minutes", "cmcd_enabled", "cmcd_mode", "cmcd_version"]) {
       expect(body).not.toHaveProperty(key);
     }
     expect(body).toMatchObject({
@@ -40,7 +40,7 @@ describe("Cloud provisioning bridge", () => {
       const path = new URL(request.url).pathname;
       if (path === "/api/provision/execute") {
         posted = await request.json() as Record<string, unknown>;
-        if ("cdn_service_name" in posted || "cmcd_enabled" in posted) return Response.json({ error: "invalid_input" }, { status: 400 });
+        if ("cdn_service_name" in posted || "cmcd_enabled" in posted || "snapshot_interval_minutes" in posted) return Response.json({ error: "invalid_input" }, { status: 400 });
         return Response.json({ job: { id: "job-2", status: "pending" } });
       }
       if (path === "/api/admin/jobs/job-2/step") return Response.json({ job: { id: "job-2", status: "complete" } });

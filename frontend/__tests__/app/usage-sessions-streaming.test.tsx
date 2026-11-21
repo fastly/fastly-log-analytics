@@ -250,7 +250,7 @@ let errorSpy: ReturnType<typeof spyOnConsoleError>
 function makePrefill(overrides: Partial<PrefillResponse>): PrefillResponse {
   return {
     _is_cached: false, data_days: 7, sample_rate: 100, edge_only: false,
-    delete_after: false, log_retention_days: 90, rum_retention_days: 90, billing_zone: null, ...overrides,
+    delete_after: false, snapshot_interval_minutes: 5, log_retention_days: 90, rum_retention_days: 90, billing_zone: null, ...overrides,
   }
 }
 
@@ -577,21 +577,50 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
       expect(prefilled.bytesPerLine).toBe(expectedBpl)
     })
 
-    test('sizes the Archive Parquet tier from the measured per-artifact and per-row bytes and batches busy services', () => {
+    test('sizes the Archive Parquet tier from snapshot_interval_minutes and batches busy services', () => {
       const defaults = calculate(DEFAULTS)
       const archive = defaults.storageTiers.find(t => t.label === 'Archive Parquet')
       expect(archive?.gbMonths).toBeGreaterThan(0)
-      // Defaults: a 10 s period gives 8640 log files/day, 2 per 20 s archive tick, so each page batches 2 objects
-      // and costs 3 reads on top of one read per raw file.
+      // Defaults: a 10 s period gives 8640 log files/day; 5m (300 s) snapshot window batches 30 objects/page
+      // (288 pages/day), each costing 3 reads on top of one read per raw file.
+      const snapshotSeconds = DEFAULTS.snapshotIntervalMinutes * 60
       const filesPerDay = (86400 / DEFAULTS.logPeriod) * DEFAULTS.logNodes
-      const pagesPerDay = Math.ceil(filesPerDay / Math.min(DEFAULTS.archiveBatchObjects, (filesPerDay * 20) / 86400))
-      expect(pagesPerDay).toBe(filesPerDay / 2)
+      const pagesPerDay = Math.ceil(filesPerDay / Math.min(DEFAULTS.archiveBatchObjects, (filesPerDay * snapshotSeconds) / 86400))
+      expect(pagesPerDay).toBe(288)
       expect(defaults.classBPerMonth).toBeCloseTo((filesPerDay + pagesPerDay * 3) * 30, 6)
       const busy = calculate({ ...DEFAULTS, logNodes: 60 })
       const busyFiles = (86400 / DEFAULTS.logPeriod) * 60
-      const busyPages = Math.ceil(busyFiles / Math.min(DEFAULTS.archiveBatchObjects, (busyFiles * 20) / 86400))
+      const busyPages = Math.ceil(busyFiles / Math.min(DEFAULTS.archiveBatchObjects, (busyFiles * snapshotSeconds) / 86400))
       expect(busy.parquetFilesPerMonth).toBeCloseTo(busyPages * 30, 6)
       expect(busyPages).toBeLessThan(busyFiles)
+    })
+
+    test('PREFILL applies snapshot_interval_minutes and longer intervals reduce archive/DR ops while lengthening raw-log steady-state window', () => {
+      const prefilled = reducer(DEFAULTS, {
+        type: 'PREFILL',
+        prefill: makePrefill({ snapshot_interval_minutes: 60 }),
+      })
+      expect(prefilled.snapshotIntervalMinutes).toBe(60)
+
+      const at5m = calculate({ ...DEFAULTS, snapshotIntervalMinutes: 5, deleteLogs: true })
+      const at60m = calculate({ ...DEFAULTS, snapshotIntervalMinutes: 60, deleteLogs: true })
+      const at24h = calculate({ ...DEFAULTS, snapshotIntervalMinutes: 1440, deleteLogs: true })
+
+      expect(at5m.drStateSnapshotsPerMonth).toBe(8640)
+      expect(at60m.drStateSnapshotsPerMonth).toBe(720)
+      expect(at24h.drStateSnapshotsPerMonth).toBe(30)
+
+      expect(at60m.parquetFilesPerMonth).toBeLessThan(at5m.parquetFilesPerMonth)
+      expect(at60m.classAPerMonth).toBeLessThan(at5m.classAPerMonth)
+      expect(at60m.classBPerMonth).toBeLessThan(at5m.classBPerMonth)
+
+      // Raw logs stay in FOS for snapshotIntervalMinutes + 15m grace when deleteLogs is true
+      // At 24h (1440m + 15m = 24.25h) with minDays=0, raw-log steady-state GB-months is > at 5m (20m = 1/3h)
+      const noMin5m = calculate({ ...DEFAULTS, snapshotIntervalMinutes: 5, deleteLogs: true, minDays: 0 })
+      const noMin24h = calculate({ ...DEFAULTS, snapshotIntervalMinutes: 1440, deleteLogs: true, minDays: 0 })
+      const raw5m = noMin5m.storageTiers.find((t) => t.label === 'Raw logs')!.gbMonths
+      const raw24h = noMin24h.storageTiers.find((t) => t.label === 'Raw logs')!.gbMonths
+      expect(raw24h / raw5m).toBeCloseTo((1440 + 15) / (5 + 15), 5)
     })
 
     test('PREFILL takes the service retention settings; 0 means keep forever', () => {

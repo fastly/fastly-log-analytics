@@ -69,6 +69,15 @@ pub fn is_scoring_snippet_name(name: &str) -> bool {
     scoring_snippet_names().contains(&name)
 }
 
+pub fn valid_matrix_version(v: &str) -> bool {
+    !v.is_empty()
+        && v.len() <= 64
+        && !matches!(v, "index" | "." | "..")
+        && !v.contains("..")
+        && v.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+}
+
 pub fn scoring_custom_fields() -> Vec<Value> {
     vec![
         json!({
@@ -2364,7 +2373,7 @@ pub fn route(
             }
             let version = matrix["version"]
                 .as_str()
-                .filter(|v| !v.is_empty() && v.len() <= 64 && !v.contains('/'))
+                .filter(|v| valid_matrix_version(v))
                 .ok_or_else(|| Error::new(400, "invalid_matrix_version"))?
                 .to_owned();
             let (record, mut service) = load_service(context, sid)?;
@@ -2402,7 +2411,9 @@ pub fn route(
             if versions.len() > MAX_MATRIX_HISTORY {
                 let creds = fos::credentials(context, &service)?;
                 for old in versions.drain(MAX_MATRIX_HISTORY..) {
-                    if let Some(old_ver) = old["version"].as_str() {
+                    if let Some(old_ver) =
+                        old["version"].as_str().filter(|v| valid_matrix_version(v))
+                    {
                         let _ = fos::delete_object(
                             context,
                             &service,
@@ -2463,10 +2474,11 @@ pub fn route(
         ("POST", ["matrix", "versions", "restore"]) => {
             require_confirm(query)?;
             let input: Value = body(request)?;
-            let version = required(&input, "version")?.to_owned();
-            if version.contains('/') || version.contains("..") {
-                return Err(Error::new(400, "invalid_matrix_version"));
-            }
+            let version = input["version"]
+                .as_str()
+                .filter(|v| valid_matrix_version(v))
+                .ok_or_else(|| Error::new(400, "invalid_matrix_version"))?
+                .to_owned();
             let (record, mut service) = load_service(context, sid)?;
             let mut sc = require_scoring_enabled(&service)?.clone();
             let token = resolve_brokered_token(context, &service, None)?;
