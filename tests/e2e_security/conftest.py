@@ -622,6 +622,12 @@ def run_falco_test(
     extra_files: dict[str, str] | None = None,
 ) -> FalcoResult:
     """Run `falco test -json` on temporary main.vcl + suite.test.vcl."""
+    all_vcl = main_vcl + "\n".join((extra_files or {}).values())
+    if "if (!req.is_ssl" in all_vcl:
+        test_vcl = test_vcl.replace(
+            'testing.call_subroutine("vcl_recv");',
+            'testing.inject_variable("req.is_ssl", true);\n  testing.call_subroutine("vcl_recv");',
+        )
     with tempfile.TemporaryDirectory(prefix="fla-e2e-falco-test-") as tmp:
         tmpdir = Path(tmp)
         main_path = tmpdir / "main.vcl"
