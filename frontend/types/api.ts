@@ -96,7 +96,9 @@ export type ServiceConfig = components['schemas']['ServiceConfig']
 
 export type LogFieldsConfig = components['schemas']['LogFieldsConfig']
 
-export type BootstrapResponse = components['schemas']['BootstrapResponse']
+export type BootstrapResponse = components['schemas']['BootstrapResponse'] & {
+  build_sha?: string
+}
 
 export type DashboardTableData = components['schemas']['FieldAggregate']
 
