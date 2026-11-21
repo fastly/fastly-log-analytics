@@ -657,7 +657,7 @@ _CONSOLE_SQL_LEX_RE = re.compile(
     r"|(?P<STR>'(?:''|[^'])*')"
     r'|(?P<DQUOTE>"(?:""|[^"])*"|`(?:``|[^`])*`)'
     r"|(?P<WS>\s+)"
-    r"|(?P<NUM>-?\d+(?:_\d+)*(?:\.(?!\.)(?:\d+(?:_\d+)*)?)?(?:[eE][+-]?\d+(?:_\d+)*)?)"
+    r'|(?P<NUM>-?(?:\d+(?:_\d+)*(?:\.(?!\.)(?:\d+(?:_\d+)*)?)?|(?<![A-Za-z0-9_)\]}"\'`])\.\d+(?:_\d+)*)(?:[eE][+-]?\d+(?:_\d+)*)?)'
     r"|(?P<IDENT>" + SAFE_IDENT_RE.pattern + ")"
     r"|(?P<OP><=|>=|!=|<>|[=<>(),.\[\]{}*+-/;])"
     r"|(?P<OTHER>.)"
@@ -776,44 +776,26 @@ _ON_EXPR_NEXT_WORDS = frozenset(
         "XOR",
     }
 )
-_AS_OPERAND_PREFIX_WORDS = (
-    _FROM_EXIT_KEYWORDS
-    | _JOIN_MODIFIER_KEYWORDS
-    | frozenset(
-        {
-            "JOIN",
-            "SELECT",
-            "DISTINCT",
-            "WITH",
-            "FROM",
-            "ON",
-            "USING",
-            "BY",
-            "AND",
-            "OR",
-            "XOR",
-            "NOT",
-            "IS",
-            "IN",
-            "LIKE",
-            "ILIKE",
-            "RLIKE",
-            "REGEXP",
-            "GLOB",
-            "SIMILAR",
-            "TO",
-            "ESCAPE",
-            "BETWEEN",
-            "CASE",
-            "WHEN",
-            "THEN",
-            "ELSE",
-            "DIV",
-            "MOD",
-            "COLLATE",
-            "INTERVAL",
-        }
-    )
+_AS_CLAUSE_OPENING_WORDS = frozenset(
+    {
+        "SELECT",
+        "WITH",
+        "WHERE",
+        "PREWHERE",
+        "HAVING",
+        "QUALIFY",
+        "LIMIT",
+        "OFFSET",
+        "BY",
+        "VALUES",
+        "RETURN",
+        "SET",
+        "FROM",
+        "JOIN",
+        "TABLE",
+        "INTO",
+        "USING",
+    }
 )
 _SQL_INTERVAL_UNITS = frozenset(
     {
@@ -843,6 +825,13 @@ _SQL_INTERVAL_UNITS = frozenset(
 )
 _ON_OPERATOR_CONTEXT_WORDS = frozenset(
     {
+        "SELECT",
+        "DISTINCT",
+        "ALL",
+        "WHERE",
+        "PREWHERE",
+        "HAVING",
+        "QUALIFY",
         "ON",
         "AND",
         "OR",
@@ -931,13 +920,72 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
             and not (pos >= 2 and tokens[pos - 2] == ("OTHER", ":"))
         )
 
-    def _cannot_end_aliasable_lex(tokens: list[tuple[str, str]], pos: int | None) -> bool:
+    def _cannot_end_aliasable_lex(tokens: list[tuple[str, str]], pos: int | None, r: int, after_as_idx: int) -> bool:
         if pos is None or pos < 0 or _is_dot_or_dcolon_lex(tokens, pos):
             return True
         pk, pt = tokens[pos]
         if pk == "OTHER" or (pk == "OP" and pt not in (")", "]", "}")):
             return True
-        return pk == "IDENT" and pt.upper() in _AS_OPERAND_PREFIX_WORDS and not _is_non_kw_lex_pos(tokens, pos)
+        if pk != "IDENT" or _is_non_kw_lex_pos(tokens, pos):
+            return False
+        wu = pt.upper()
+        after_sig = tokens[after_as_idx] if after_as_idx < len(tokens) else None
+        if wu == "CASE":
+            return after_sig is not None and after_sig[0] == "IDENT" and after_sig[1].upper() == "WHEN"
+        if wu == "NOT":
+            if r == 2 and (
+                after_sig is None
+                or after_sig in (("OP", ","), ("OP", ")"), ("OP", ";"))
+                or (
+                    after_sig[0] == "IDENT"
+                    and (after_sig[1].upper() in _FROM_EXIT_KEYWORDS or after_sig[1].upper() in ("FROM", "JOIN"))
+                )
+            ):
+                return False
+            return True
+        if wu == "INTERVAL":
+            return (
+                (r % 2) == 1
+                and after_sig is not None
+                and after_sig[0] == "IDENT"
+                and after_sig[1].upper() in _SQL_INTERVAL_UNITS
+            )
+        sig_list = _sig_indices(tokens)
+        try:
+            s_pos = sig_list.index(pos)
+        except ValueError:
+            return False
+        if _is_lex_prev_word_operator(tokens, s_pos, sig_list, after_sig):
+            return True
+        if wu in ("DISTINCT", "ALL"):
+            return (
+                s_pos >= 1
+                and tokens[sig_list[s_pos - 1]][0] == "IDENT"
+                and tokens[sig_list[s_pos - 1]][1].upper() in ("SELECT", "UNION", "INTERSECT", "EXCEPT")
+                and not _is_non_kw_lex_pos(tokens, sig_list[s_pos - 1])
+            )
+        if wu in _AS_CLAUSE_OPENING_WORDS:
+            if s_pos == 0:
+                return True
+            prev_idx = sig_list[s_pos - 1]
+            prev_k, prev_t = tokens[prev_idx]
+            if prev_k == "OTHER" or (prev_k == "OP" and prev_t not in (")", "]", "}", ";")):
+                return False
+            if prev_k == "IDENT" and not _is_non_kw_lex_pos(tokens, prev_idx):
+                pw = prev_t.upper()
+                if pw in ("SELECT", "FROM", "JOIN", "TABLE"):
+                    return False
+                if pw in ("DISTINCT", "ALL"):
+                    is_setop_mod = (
+                        s_pos >= 2
+                        and tokens[sig_list[s_pos - 2]][0] == "IDENT"
+                        and tokens[sig_list[s_pos - 2]][1].upper() in ("UNION", "INTERSECT", "EXCEPT")
+                        and not _is_non_kw_lex_pos(tokens, sig_list[s_pos - 2])
+                    )
+                    if not is_setop_mod:
+                        return False
+            return True
+        return False
 
     def _is_non_kw_lex_pos(tokens: list[tuple[str, str]], idx: int) -> bool:
         p = _prev_sig_idx(tokens, idx)
@@ -951,7 +999,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
             p = _prev_sig_idx(tokens, p)
         if r == 0:
             return False
-        if _cannot_end_aliasable_lex(tokens, p):
+        if _cannot_end_aliasable_lex(tokens, p, r, idx):
             r -= 1
         return (r % 2) == 1
 
@@ -987,7 +1035,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
             and (
                 tokens[sig_list[s_pos + 2]][0] in ("IDENT", "DQUOTE", "STR")
                 or tokens[sig_list[s_pos + 2]] == ("OP", "*")
-                or (tokens[sig_list[s_pos + 2]][0] == "NUM" and not tokens[sig_list[s_pos + 2]][1].startswith("-"))
+                or (tokens[sig_list[s_pos + 2]][0] == "NUM" and tokens[sig_list[s_pos + 2]][1][0].isdigit())
             )
         )
 
@@ -1391,11 +1439,13 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 is_top_on_ident = (
                     split_in_on
                     and not split_expect_table
-                    and (wu_top in _FROM_EXIT_KEYWORDS or wu_top in ("SELECT", "FROM"))
+                    and (wu_top in _FROM_EXIT_KEYWORDS or wu_top in ("SELECT", "FROM", "JOIN", "TABLE"))
                     and _is_lex_on_expr_ident(tokens, s_pos_top, top_sig)
                 )
                 if not is_top_dot and not is_top_within and not is_top_on_ident:
-                    if wu_top in ("UNION", "INTERSECT", "EXCEPT"):
+                    if wu_top in ("UNION", "INTERSECT", "EXCEPT") and _is_lex_multi_token_post_on_exit(
+                        tokens, s_pos_top, top_sig
+                    ):
                         sep: list[tuple[str, str]] = [tokens[i_tok]]
                         j = i_tok + 1
                         while j < len(tokens) and tokens[j][0] in ("WS", "COMMENT"):
@@ -1624,7 +1674,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                     or (
                         in_on_clause
                         and not expect_table
-                        and (wu in _FROM_EXIT_KEYWORDS or wu in ("SELECT", "FROM"))
+                        and (wu in _FROM_EXIT_KEYWORDS or wu in ("SELECT", "FROM", "JOIN", "TABLE"))
                         and _is_lex_on_expr_ident(processed, s_pos, sig_idxs)
                     )
                     or _is_lex_within_group(processed, s_pos, sig_idxs)
@@ -1745,6 +1795,8 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                         branch_canonicals.add(canonical_name)
                         alias_domains[low_tbl] = item_doms
                         alias_domains[mapped_name.lower()] = item_doms
+                    elif low_tbl == "as" and not _is_non_kw_lex_pos(processed, idx):
+                        raise PermissionError("SQL parse error: expected table reference")
                     a_pos = s_pos + 1
                     if (
                         a_pos < len(sig_idxs)

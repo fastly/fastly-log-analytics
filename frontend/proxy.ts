@@ -30,9 +30,59 @@ const ANALYST_BLOCKED_PREFIXES = ['/admin', '/alerts', '/usage', '/high-scale', 
 const PROXIED_BY_CADDY_HEADER = 'x-proxied-by-caddy'
 const PUBLIC_GATEWAY_HEADER = 'x-fla-public-gateway'
 const FRONTEND_PROXY_HEADER = 'x-fla-frontend-proxy'
+const RAW_SOCKET_UNTRUSTED_HEADER = 'x-fla-raw-untrusted'
+const RAW_SOCKET_SECRET_SYM = Symbol.for('fla.rawSocketProxySecret')
 const ANALYST_SESSION_COOKIE = 'analyst_session_id'
 const SERVICE_ID_RE = /^[A-Za-z0-9_-]{1,64}$/
 const PLAUSIBLE_SESSION_RE = /^[A-Za-z0-9_-]{16,128}$/
+const STRICT_LOOPBACK_IPV4_RE = /^127(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/
+const EXPANDED_IPV6_LOOPBACK_RE = /^(?:0{1,4}:){7}0{0,3}1$/
+const MAPPED_IPV6_PREFIX_RE = /^(?:::ffff:|(?:0{1,4}:){5}ffff:)/
+const MAPPED_HEX_LOOPBACK_RE = /^7f[0-9a-f]{2}:[0-9a-f]{1,4}$/
+
+let cachedLoopbackBlockList: import('node:net').BlockList | null | undefined
+
+function getLoopbackBlockList(): import('node:net').BlockList | null {
+  if (cachedLoopbackBlockList !== undefined) return cachedLoopbackBlockList
+  const netMod =
+    typeof process !== 'undefined' && typeof process.getBuiltinModule === 'function'
+      ? (process.getBuiltinModule('node:net') as typeof import('node:net') | undefined)
+      : undefined
+  if (!netMod?.BlockList) {
+    cachedLoopbackBlockList = null
+    return null
+  }
+  const bl = new netMod.BlockList()
+  bl.addSubnet('127.0.0.0', 8, 'ipv4')
+  bl.addSubnet('::1', 128, 'ipv6')
+  bl.addSubnet('::ffff:127.0.0.0', 104, 'ipv6')
+  cachedLoopbackBlockList = bl
+  return bl
+}
+
+function isLoopbackIpLiteral(ip: string): boolean {
+  const candidate = ip.trim()
+  if (!candidate) return false
+  const netMod =
+    typeof process !== 'undefined' && typeof process.getBuiltinModule === 'function'
+      ? (process.getBuiltinModule('node:net') as typeof import('node:net') | undefined)
+      : undefined
+  const bl = getLoopbackBlockList()
+  if (netMod?.isIP && bl) {
+    const ver = netMod.isIP(candidate)
+    if (ver === 4) return bl.check(candidate, 'ipv4')
+    if (ver === 6) return bl.check(candidate, 'ipv6')
+    return false
+  }
+  const lc = candidate.toLowerCase()
+  if (STRICT_LOOPBACK_IPV4_RE.test(lc)) return true
+  if (lc === '::1' || EXPANDED_IPV6_LOOPBACK_RE.test(lc)) return true
+  if (MAPPED_IPV6_PREFIX_RE.test(lc)) {
+    const tail = lc.replace(MAPPED_IPV6_PREFIX_RE, '')
+    return STRICT_LOOPBACK_IPV4_RE.test(tail) || MAPPED_HEX_LOOPBACK_RE.test(tail)
+  }
+  return false
+}
 
 function readCookieValue(request: NextRequest, name: string): string | null {
   if (request.cookies?.get) {
@@ -71,7 +121,15 @@ function timingSafeStringEqual(a: string, b: string): boolean {
   return diff === 0
 }
 
-function isGatewayAuthenticatedRequest(request: NextRequest): boolean {
+function isRawSocketUntrustedRequest(headers: Headers): boolean {
+  const secret = (globalThis as Record<symbol, unknown>)[RAW_SOCKET_SECRET_SYM]
+  if (typeof secret !== 'string' || secret.length < 32) return false
+  const val = headers.get(RAW_SOCKET_UNTRUSTED_HEADER)
+  return Boolean(val && timingSafeStringEqual(val.trim(), secret))
+}
+
+function isGatewayAuthenticatedRequest(request: NextRequest, rawSocketUntrusted = false): boolean {
+  if (rawSocketUntrusted) return false
   const { headers } = request
   const isPublicMarker =
     hasNonEmptyHeader(headers, PROXIED_BY_CADDY_HEADER) ||
@@ -96,13 +154,6 @@ function isGatewayAuthenticatedRequest(request: NextRequest): boolean {
   )
 }
 
-function isLoopbackIpLiteral(ip: string): boolean {
-  const lc = ip.trim().toLowerCase()
-  if (/^[0:]+1$/.test(lc)) return true
-  const v4 = lc.startsWith('::ffff:') ? lc.slice(7) : lc
-  return v4 === '127.0.0.1' || v4.startsWith('127.') || v4 === '7f00:1'
-}
-
 function hasExternalForwardedFor(headers: Headers): boolean {
   const raw = headers.get('x-forwarded-for')
   if (!raw || raw.trim() === '') return false
@@ -113,8 +164,8 @@ function hasExternalForwardedFor(headers: Headers): boolean {
   return trimmed.includes(',') || !isLoopbackIpLiteral(trimmed)
 }
 
-function shouldGateAdminRequest(request: NextRequest): boolean {
-  if (isGatewayAuthenticatedRequest(request)) return false
+function shouldGateAdminRequest(request: NextRequest, rawSocketUntrusted = false): boolean {
+  if (isGatewayAuthenticatedRequest(request, rawSocketUntrusted)) return false
 
   const { headers } = request
   const isPublicMarker =
@@ -134,6 +185,7 @@ function shouldGateAdminRequest(request: NextRequest): boolean {
     hasNonEmptyHeader(headers, 'forwarded')
 
   return (
+    rawSocketUntrusted ||
     isPublicMarker ||
     hasExternalProxyHeaders ||
     gatewayToken !== null ||
@@ -217,9 +269,13 @@ export function proxy(request: NextRequest) {
     return new NextResponse(null, { status: 204 })
   }
 
-  const gatewayAuthenticated = isGatewayAuthenticatedRequest(request)
+  const rawSocketUntrusted = isRawSocketUntrustedRequest(request.headers)
+  const gatewayAuthenticated = isGatewayAuthenticatedRequest(request, rawSocketUntrusted)
   const stampWireForwardedProxy =
-    !gatewayAuthenticated && hasExternalForwardedFor(request.headers)
+    !gatewayAuthenticated &&
+    (rawSocketUntrusted ||
+      hasNonEmptyHeader(request.headers, FRONTEND_PROXY_HEADER) ||
+      hasExternalForwardedFor(request.headers))
 
   // Bypass CSP/gating entirely -- those exist for HTML page renders, not
   // proxied API responses. Route Handlers under app/api/[...path]/route.ts
@@ -227,9 +283,17 @@ export function proxy(request: NextRequest) {
   // and graceful SSE/disconnect handling (avoiding Next's internal httpxy
   // rewrite proxy which logs unhandled ECONNRESET on socket close).
   if (API_PROXY_PREFIXES.some(p => pathname.startsWith(p))) {
-    if (stampWireForwardedProxy) {
+    if (
+      stampWireForwardedProxy ||
+      request.headers.has(RAW_SOCKET_UNTRUSTED_HEADER) ||
+      request.headers.has(FRONTEND_PROXY_HEADER)
+    ) {
       const requestHeaders = new Headers(request.headers)
-      requestHeaders.set(FRONTEND_PROXY_HEADER, '1')
+      requestHeaders.delete(RAW_SOCKET_UNTRUSTED_HEADER)
+      requestHeaders.delete(FRONTEND_PROXY_HEADER)
+      if (stampWireForwardedProxy) {
+        requestHeaders.set(FRONTEND_PROXY_HEADER, '1')
+      }
       return NextResponse.next({ request: { headers: requestHeaders } })
     }
     return NextResponse.next()
@@ -245,7 +309,7 @@ export function proxy(request: NextRequest) {
   const isGatedPath = ANALYST_BLOCKED_PREFIXES.some(p => pathname === p || pathname.startsWith(`${p}/`)) || isServerAction || isDataRequest
 
   if (isGatedPath) {
-    if (shouldGateAdminRequest(request)) {
+    if (shouldGateAdminRequest(request, rawSocketUntrusted)) {
       if (isServerAction || isDataRequest) {
         // Empty 403 body — no CSP needed.
         return new NextResponse(null, { status: 403 })
@@ -260,11 +324,18 @@ export function proxy(request: NextRequest) {
   // Static assets are skipped (no scripts to nonce on a font / chunk
   // download).
   if (STATIC_PATH_RE.test(pathname)) {
+    if (request.headers.has(RAW_SOCKET_UNTRUSTED_HEADER)) {
+      const requestHeaders = new Headers(request.headers)
+      requestHeaders.delete(RAW_SOCKET_UNTRUSTED_HEADER)
+      return NextResponse.next({ request: { headers: requestHeaders } })
+    }
     return NextResponse.next()
   }
 
   const nonce = btoa(crypto.randomUUID())
   const requestHeaders = new Headers(request.headers)
+  requestHeaders.delete(RAW_SOCKET_UNTRUSTED_HEADER)
+  requestHeaders.delete(FRONTEND_PROXY_HEADER)
   requestHeaders.set('x-nonce', nonce)
   if (stampWireForwardedProxy) {
     requestHeaders.set(FRONTEND_PROXY_HEADER, '1')

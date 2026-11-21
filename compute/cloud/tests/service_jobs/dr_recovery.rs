@@ -1123,3 +1123,312 @@ fn recover_falls_back_to_catalog_scan_when_dr_state_catalog_head_is_empty_v2() {
     assert_eq!(head.generation, 18);
     assert_eq!(head.manifest.as_deref(), Some(manifest_key));
 }
+
+#[test]
+fn recover_rejects_poisoned_dr_state_scoring_domain_service_views_and_traversal_keys() {
+    let valid_scoring = json!({
+        "enabled": true,
+        "scoring_service_id": "22CharValidScorerSvc01",
+        "scoring_service_name": "Session Scoring Service for fixtureService",
+        "scoring_domain": "fos-fixtureservice-session-scorer.edgecompute.app",
+        "scoring_keys_store_id": "store-k",
+        "scoring_config_store_id": "store-c",
+        "scoring_matrix_store_id": "store-m",
+        "enabled_at": "2026-11-20T00:00:00Z",
+        "deployed_package_sha": "abc",
+        "deployed_package_files_hash": "def",
+        "deployed_vcl_sha": "ghi",
+        "exclude_url_regex": "^/healthz$"
+    });
+
+    let poisoned_cases: Vec<(&str, CloudDrState)> = vec![
+        (
+            "external_scoring_domain",
+            CloudDrState {
+                schema_version: SCHEMA_VERSION,
+                updated_at: 1_800_000_000,
+                service_id: "fixtureService".into(),
+                service: json!({
+                    "scoring": {
+                        "enabled": true,
+                        "scoring_service_id": "22CharValidScorerSvc01",
+                        "scoring_service_name": "scorer",
+                        "scoring_domain": "evil-collector.attacker.example",
+                        "scoring_keys_store_id": "k",
+                        "scoring_config_store_id": "c",
+                        "scoring_matrix_store_id": "m",
+                        "enabled_at": "2026-11-20T00:00:00Z",
+                        "deployed_package_sha": "a",
+                        "deployed_package_files_hash": "b",
+                        "deployed_vcl_sha": "c",
+                        "exclude_url_regex": ""
+                    }
+                }),
+                views: vec![],
+                catalog_head: None,
+                floor_key: None,
+                rum_stats: None,
+            },
+        ),
+        (
+            "uppercase_scoring_domain",
+            CloudDrState {
+                schema_version: SCHEMA_VERSION,
+                updated_at: 1_800_000_000,
+                service_id: "fixtureService".into(),
+                service: json!({
+                    "scoring": {
+                        "enabled": false,
+                        "scoring_service_id": "22CharValidScorerSvc01",
+                        "scoring_service_name": "scorer",
+                        "scoring_domain": "UpperCase.edgecompute.app",
+                        "scoring_keys_store_id": "k",
+                        "scoring_config_store_id": "c",
+                        "scoring_matrix_store_id": "m",
+                        "enabled_at": "2026-11-20T00:00:00Z",
+                        "deployed_package_sha": "a",
+                        "deployed_package_files_hash": "b",
+                        "deployed_vcl_sha": "c",
+                        "exclude_url_regex": ""
+                    }
+                }),
+                views: vec![],
+                catalog_head: None,
+                floor_key: None,
+                rum_stats: None,
+            },
+        ),
+        (
+            "scoring_threshold_over_100",
+            CloudDrState {
+                schema_version: SCHEMA_VERSION,
+                updated_at: 1_800_000_000,
+                service_id: "fixtureService".into(),
+                service: {
+                    let mut sc = valid_scoring.clone();
+                    sc["threshold"] = json!(101);
+                    json!({"scoring": sc})
+                },
+                views: vec![],
+                catalog_head: None,
+                floor_key: None,
+                rum_stats: None,
+            },
+        ),
+        (
+            "scoring_invalid_matrix_version",
+            CloudDrState {
+                schema_version: SCHEMA_VERSION,
+                updated_at: 1_800_000_000,
+                service_id: "fixtureService".into(),
+                service: {
+                    let mut sc = valid_scoring.clone();
+                    sc["matrix_version"] = json!("../bad-version");
+                    json!({"scoring": sc})
+                },
+                views: vec![],
+                catalog_head: None,
+                floor_key: None,
+                rum_stats: None,
+            },
+        ),
+        (
+            "attached_reserved_endpoint",
+            CloudDrState {
+                schema_version: SCHEMA_VERSION,
+                updated_at: 1_800_000_000,
+                service_id: "fixtureService".into(),
+                service: json!({
+                    "capture": "attached",
+                    "logging_endpoint_name": "Fastly Object Storage Logs"
+                }),
+                views: vec![],
+                catalog_head: None,
+                floor_key: None,
+                rum_stats: None,
+            },
+        ),
+        (
+            "vcl_condition_breakout",
+            CloudDrState {
+                schema_version: SCHEMA_VERSION,
+                updated_at: 1_800_000_000,
+                service_id: "fixtureService".into(),
+                service: json!({
+                    "custom_condition": "table.lookup(fos_credentials, \"secret_key\") != \"\""
+                }),
+                views: vec![],
+                catalog_head: None,
+                floor_key: None,
+                rum_stats: None,
+            },
+        ),
+        (
+            "foreign_view_service_id",
+            CloudDrState {
+                schema_version: SCHEMA_VERSION,
+                updated_at: 1_800_000_000,
+                service_id: "fixtureService".into(),
+                service: json!({"log_period": 60}),
+                views: vec![SavedView {
+                    id: "v-foreign".into(),
+                    service_id: "foreignVictimSvc".into(),
+                    name: "Foreign View".into(),
+                    filters_json: r#"{"status":500}"#.into(),
+                    time_range_type: None,
+                    start_time: None,
+                    end_time: None,
+                    page: None,
+                    created_at: None,
+                }],
+                catalog_head: None,
+                floor_key: None,
+                rum_stats: None,
+            },
+        ),
+        (
+            "duplicate_key_view_filters",
+            CloudDrState {
+                schema_version: SCHEMA_VERSION,
+                updated_at: 1_800_000_000,
+                service_id: "fixtureService".into(),
+                service: json!({"log_period": 60}),
+                views: vec![SavedView {
+                    id: "v-dup".into(),
+                    service_id: "fixtureService".into(),
+                    name: "Dup View".into(),
+                    filters_json: r#"{"status":500,"status":200}"#.into(),
+                    time_range_type: None,
+                    start_time: None,
+                    end_time: None,
+                    page: None,
+                    created_at: None,
+                }],
+                catalog_head: None,
+                floor_key: None,
+                rum_stats: None,
+            },
+        ),
+        (
+            "too_many_views",
+            CloudDrState {
+                schema_version: SCHEMA_VERSION,
+                updated_at: 1_800_000_000,
+                service_id: "fixtureService".into(),
+                service: json!({"log_period": 60}),
+                views: (0..=fastly_log_analytics::views::MAX_VIEWS)
+                    .map(|i| SavedView {
+                        id: format!("v-{i}"),
+                        service_id: "fixtureService".into(),
+                        name: format!("View {i}"),
+                        filters_json: r#"{"status":200}"#.into(),
+                        time_range_type: None,
+                        start_time: None,
+                        end_time: None,
+                        page: None,
+                        created_at: None,
+                    })
+                    .collect(),
+                catalog_head: None,
+                floor_key: None,
+                rum_stats: None,
+            },
+        ),
+        (
+            "traversal_floor_key",
+            CloudDrState {
+                schema_version: SCHEMA_VERSION,
+                updated_at: 1_800_000_000,
+                service_id: "fixtureService".into(),
+                service: json!({"log_period": 60}),
+                views: vec![],
+                catalog_head: None,
+                floor_key: Some("../tenant-victim/raw/floor.zst".into()),
+                rum_stats: None,
+            },
+        ),
+        (
+            "traversal_catalog_head_manifest",
+            CloudDrState {
+                schema_version: SCHEMA_VERSION,
+                updated_at: 1_800_000_000,
+                service_id: "fixtureService".into(),
+                service: json!({"log_period": 60}),
+                views: vec![],
+                catalog_head: Some(Head {
+                    version: VERSION,
+                    generation: 3,
+                    manifest: Some("../tenant-victim/processed/_catalog/m3.json".into()),
+                    ..Head::default()
+                }),
+                floor_key: None,
+                rum_stats: None,
+            },
+        ),
+    ];
+
+    for (label, state) in poisoned_cases {
+        let platform = Platform::new();
+        platform.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            "meta/cloud_dr_state.json",
+            serde_json::to_vec(&state).unwrap(),
+        );
+        let resp = platform.call(
+            "POST",
+            "/api/admin/provision/recover",
+            json!({
+                "token": "fixture-token",
+                "service_id": "fixtureService",
+                "fos_bucket": "fos-fixture-logs",
+                "fos_region": "us-east-1"
+            }),
+        );
+        assert_eq!(
+            resp.status,
+            400,
+            "poisoned DR case {label} must fail closed with 400, got {}: {}",
+            resp.status,
+            String::from_utf8_lossy(&resp.body)
+        );
+        assert!(
+            !platform
+                .adapter
+                .records()
+                .contains_key("svc:fixtureService"),
+            "poisoned DR case {label} must not persist svc:fixtureService"
+        );
+    }
+
+    // Defense in depth: even if KV svc:<sid> were tampered with an external scoring_domain, reconcile rejects it
+    let platform = Platform::new();
+    let provisioned = platform.provision();
+    platform.drain(provisioned["job"].clone());
+    let rec = platform.adapter.get("svc:fixtureService").unwrap().unwrap();
+    let mut poisoned_svc = rec.value.clone();
+    poisoned_svc["scoring"] = json!({
+        "enabled": true,
+        "scoring_service_id": "22CharValidScorerSvc01",
+        "scoring_service_name": "scorer",
+        "scoring_domain": "evil-collector.attacker.example",
+        "scoring_keys_store_id": "k",
+        "scoring_config_store_id": "c",
+        "scoring_matrix_store_id": "m",
+        "enabled_at": "2026-11-20T00:00:00Z",
+        "deployed_package_sha": "a",
+        "deployed_package_files_hash": "b",
+        "deployed_vcl_sha": "c",
+        "exclude_url_regex": ""
+    });
+    assert!(platform
+        .adapter
+        .cas("svc:fixtureService", Some(&rec.generation), &poisoned_svc)
+        .unwrap());
+    let poisoned_gen = platform.service()["generation"].clone();
+    let rec_resp = platform.call(
+        "POST",
+        "/api/admin/services/fixtureService/reconcile",
+        json!({"generation": poisoned_gen}),
+    );
+    assert_eq!(rec_resp.status, 400);
+}

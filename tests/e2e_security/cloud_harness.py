@@ -1302,6 +1302,109 @@ fn main() {
             )
             .expect("desired_scoring_snippets");
 
+            // 10. BUG-CLOUD-DR-01: Poisoned FOS cloud_dr_state.json validation in POST /api/admin/provision/recover
+            let mut dr_recover_statuses = BTreeMap::new();
+            for (dr_case, dr_payload) in [
+                (
+                    "external_scoring_domain",
+                    json!({
+                        "schema_version": 1,
+                        "updated_at": 1_800_000_000u64,
+                        "service_id": "fixtureService",
+                        "service": {
+                            "scoring": {
+                                "enabled": true,
+                                "scoring_service_id": "22CharValidScorerSvc01",
+                                "scoring_service_name": "scorer",
+                                "scoring_domain": "evil-collector.attacker.example",
+                                "scoring_keys_store_id": "k",
+                                "scoring_config_store_id": "c",
+                                "scoring_matrix_store_id": "m",
+                                "enabled_at": "2026-11-20T00:00:00Z",
+                                "deployed_package_sha": "a",
+                                "deployed_package_files_hash": "b",
+                                "deployed_vcl_sha": "c",
+                                "exclude_url_regex": ""
+                            }
+                        },
+                        "views": []
+                    }),
+                ),
+                (
+                    "attached_reserved_endpoint",
+                    json!({
+                        "schema_version": 1,
+                        "updated_at": 1_800_000_000u64,
+                        "service_id": "fixtureService",
+                        "service": {
+                            "capture": "attached",
+                            "logging_endpoint_name": "Fastly Object Storage Logs"
+                        },
+                        "views": []
+                    }),
+                ),
+                (
+                    "foreign_view_service_id",
+                    json!({
+                        "schema_version": 1,
+                        "updated_at": 1_800_000_000u64,
+                        "service_id": "fixtureService",
+                        "service": {"log_period": 60},
+                        "views": [{
+                            "id": "v-foreign",
+                            "service_id": "foreignVictimSvc",
+                            "name": "Foreign",
+                            "filters_json": "{\"status\":500}"
+                        }]
+                    }),
+                ),
+                (
+                    "traversal_floor_key",
+                    json!({
+                        "schema_version": 1,
+                        "updated_at": 1_800_000_000u64,
+                        "service_id": "fixtureService",
+                        "service": {"log_period": 60},
+                        "views": [],
+                        "floor_key": "../tenant-victim/raw/floor.zst"
+                    }),
+                ),
+                (
+                    "valid_dr_state",
+                    json!({
+                        "schema_version": 1,
+                        "updated_at": 1_800_000_000u64,
+                        "service_id": "fixtureService",
+                        "service": {"log_period": 120},
+                        "views": [{
+                            "id": "v-ok",
+                            "service_id": "fixtureService",
+                            "name": "Valid View",
+                            "filters_json": "{\"status\":200}"
+                        }],
+                        "floor_key": "raw/2026/floor.zst"
+                    }),
+                ),
+            ] {
+                let dr_rt = EpochTestRuntime::new(origin, setup_code, front_key, cdn_key);
+                dr_rt.admin.seed_object_bytes(
+                    "fos-fixture-logs",
+                    "meta/cloud_dr_state.json",
+                    serde_json::to_vec(&dr_payload).unwrap(),
+                );
+                let (st, _) = dr_rt.admin_call(
+                    "POST",
+                    "/api/admin/provision/recover",
+                    json!({
+                        "token": "fixture-token",
+                        "service_id": "fixtureService",
+                        "fos_bucket": "fos-fixture-logs",
+                        "fos_region": "us-east-1"
+                    }),
+                );
+                dr_recover_statuses.insert(dr_case.to_owned(), st);
+            }
+
             println!(
                 "{}",
                 serde_json::to_string(&json!({
@@ -1327,6 +1430,7 @@ fn main() {
                     "scoring_settings_text": sc_settings.to_string(),
                     "scoring_backend": scoring_backend,
                     "scoring_snippets": scoring_snippets,
+                    "dr_recover_statuses": dr_recover_statuses,
                 }))
                 .unwrap()
             );

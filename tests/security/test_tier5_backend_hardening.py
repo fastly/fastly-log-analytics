@@ -2069,3 +2069,122 @@ def test_sec_t5_iter12_as_parity_global_not_in_on_join_skip_union_split_and_tupl
             tables={"request_facts": "fla_cv_m_req"},
         )
         assert len(executed) == 1, hs_benign_sql
+
+
+def test_sec_t5_iter13_contextual_as_prefix_leading_dot_float_and_on_join_table_fp() -> None:
+    from backend.core.sql_validator import SQLValidationError, validate_user_sql
+    from backend.high_scale import query as hs_query
+    from backend.models.analytics import QueryRequest as DashboardQueryRequest
+
+    # 1. Contextual AS-prefix attacks (AT TIME ZONE as [r=1] and <sample|format|to|escape|interval|window|limit> AS as [r=2]) blocked
+    for blocked_sql in (
+        "WITH 'UTC' AS as SELECT secret_col, toDateTime(0) AT TIME ZONE as FROM ops_secret",
+        "WITH 1 AS sample SELECT secret_col, sample AS as FROM ops_secret",
+        "WITH 1 AS format SELECT secret_col, format AS as FROM ops_secret",
+        "WITH 1 AS to SELECT secret_col, to AS as FROM ops_secret",
+        "WITH 1 AS escape SELECT secret_col, escape AS as FROM ops_secret",
+        "WITH 1 AS interval SELECT secret_col, interval AS as FROM ops_secret",
+        "WITH 1 AS window SELECT secret_col, window AS as FROM ops_secret",
+        "WITH 1 AS limit SELECT secret_col, limit AS as FROM ops_secret",
+        "WITH a AS (SELECT 1 AS sample FROM logs) SELECT t.c FROM a, LATERAL (SELECT col_val AS c, sample AS as FROM ops_secret) AS t(c, z)",
+        "WITH a AS (SELECT 1 AS format FROM logs) SELECT t.c FROM a, LATERAL (SELECT col_val AS c, format AS as FROM ops_secret) AS t(c, z)",
+        "SELECT secret_col, .5 AS as FROM ops_secret",
+        "WITH a AS (SELECT 1 AS zone FROM logs) SELECT c.secret_col FROM a JOIN logs AS b ON 1 = zone JOIN ops_secret AS c ON 1 = 1",
+    ):
+        with pytest.raises(SQLValidationError):
+            validate_user_sql(blocked_sql, allowed_tables={"logs"})
+
+    # 2. Benign controls: leading-dot float .5, ON a.status = join/table, AT TIME ZONE as on allowed table, sample AS as on allowed table
+    for benign_sql in (
+        "FROM logs SELECT .5, url",
+        "SELECT .5 AS half, .25e2 AS quarter_hundred, url FROM logs",
+        "WITH 'UTC' AS as SELECT url, toDateTime(0) AT TIME ZONE as FROM logs",
+        "WITH a AS (SELECT 1 AS sample, url FROM logs) SELECT url, sample AS as FROM a",
+        "WITH b AS (SELECT 200 AS join FROM logs) SELECT a.status, a.url FROM logs AS a JOIN b ON a.status = join ORDER BY a.url",
+        "WITH b AS (SELECT 200 AS table FROM logs) SELECT a.status, a.url FROM logs AS a JOIN b ON a.status = table ORDER BY a.url",
+        "SELECT status FROM (SELECT tuple(1) AS where, 200 AS status FROM logs) AS s WHERE where.1 = 1",
+        "SELECT union.1 FROM (SELECT tuple(200) AS union FROM logs) AS u",
+    ):
+        assert validate_user_sql(benign_sql, allowed_tables={"logs"}).parse_tree.get("statements"), benign_sql
+
+    executed: list[tuple[str, dict[str, object]]] = []
+
+    class _StubCH:
+        _table_filters_verified = True
+
+        def execute(
+            self,
+            sql: str,
+            params: dict[str, object] | None = None,
+            *,
+            settings: dict[str, object] | None = None,
+        ) -> list[dict[str, object]]:
+            del params
+            executed.append((sql, dict(settings or {})))
+            return [{"service_id": "svc_alpha", "url": "/ok"}]
+
+    hs_svc = SimpleNamespace(service_id="svc_alpha", client=_StubCH())
+
+    for hs_blocked_sql in (
+        "WITH 'UTC' AS as SELECT secret_meta, toDateTime(0) AT TIME ZONE as FROM high_scale_batch_publications",
+        "WITH 1 AS sample SELECT secret_meta, sample AS as FROM high_scale_batch_publications",
+        "WITH 1 AS format SELECT secret_meta, format AS as FROM high_scale_batch_publications",
+        "WITH 1 AS to SELECT secret_meta, to AS as FROM high_scale_batch_publications",
+        "WITH 1 AS escape SELECT secret_meta, escape AS as FROM high_scale_batch_publications",
+        "WITH 1 AS interval SELECT secret_meta, interval AS as FROM high_scale_batch_publications",
+        "WITH 1 AS window SELECT secret_meta, window AS as FROM high_scale_batch_publications",
+        "WITH 1 AS limit SELECT secret_meta, limit AS as FROM high_scale_batch_publications",
+    ):
+        with pytest.raises(PermissionError):
+            hs_query.query_endpoint(
+                hs_svc,
+                DashboardQueryRequest(sql=hs_blocked_sql, max_rows=10),
+                "2026-11-19T00:00:00Z",
+                "2026-11-19T01:00:00Z",
+                mask_ips=True,
+                tables={"request_facts": "fla_cv_m_req"},
+            )
+    assert executed == []
+
+    # Verify request_facts is rewritten and scoped (never left raw!) for AT TIME ZONE as and sample/to AS as
+    for rf_sql in (
+        "WITH 'UTC' AS as SELECT service_id, url, toDateTime(0) AT TIME ZONE as FROM request_facts",
+        "WITH 1 AS sample SELECT service_id, url, sample AS as FROM request_facts",
+        "WITH 1 AS to SELECT service_id, url, to AS as FROM request_facts",
+    ):
+        executed.clear()
+        hs_query.query_endpoint(
+            hs_svc,
+            DashboardQueryRequest(sql=rf_sql, max_rows=10),
+            "2026-11-19T00:00:00Z",
+            "2026-11-19T01:00:00Z",
+            mask_ips=True,
+            tables={"request_facts": "fla_cv_m_req"},
+        )
+        assert len(executed) == 1, rf_sql
+        ran_sql, ran_settings = executed[0]
+        assert "request_facts" not in ran_sql and "fla_cv_m_req" in ran_sql, ran_sql
+        assert "fla_cv_m_req" in str(ran_settings.get("additional_table_filters", "")), ran_settings
+
+    # Benign High-Scale .5 and ON 200 = join controls (+ _rewrite_console_sql_with_canonicals on ON 200 = table)
+    for hs_benign in (
+        "FROM logs SELECT .5, url",
+        "WITH b AS (SELECT 200 AS join FROM logs) SELECT a.status, a.url FROM logs AS a JOIN b ON a.status = join ORDER BY a.url",
+    ):
+        executed.clear()
+        hs_query.query_endpoint(
+            hs_svc,
+            DashboardQueryRequest(sql=hs_benign, max_rows=10),
+            "2026-11-19T00:00:00Z",
+            "2026-11-19T01:00:00Z",
+            mask_ips=True,
+            tables={"request_facts": "fla_cv_m_req"},
+        )
+        assert len(executed) == 1, hs_benign
+
+    rewritten_tbl, tbl_canons = hs_query._rewrite_console_sql_with_canonicals(
+        "WITH b AS (SELECT 200 AS table FROM logs) SELECT a.status, a.url FROM logs AS a JOIN b ON a.status = table ORDER BY a.url",
+        svc_table="logs_svc_alpha",
+        names={"request_facts": "fla_cv_m_req"},
+    )
+    assert "fla_cv_m_req" in rewritten_tbl and tbl_canons == {"request_facts"}, rewritten_tbl

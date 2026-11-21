@@ -175,7 +175,7 @@ fn desired(
                 sc.enforce_status_code,
             )?;
             snippets.extend(scoring_snippets);
-            backends.push(super::scoring::desired_scoring_backend(&sc.scoring_domain));
+            backends.push(super::scoring::checked_scoring_backend(&sc.scoring_domain)?);
             if !conditions
                 .iter()
                 .any(|c| c["name"] == "fastly_log_analytics_false")

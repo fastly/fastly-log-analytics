@@ -3838,7 +3838,7 @@ impl<'de> serde::de::Deserialize<'de> for NoDupJson {
     }
 }
 
-fn json_has_duplicate_keys(raw: &str) -> bool {
+pub(crate) fn json_has_duplicate_keys(raw: &str) -> bool {
     serde_json::from_str::<NoDupJson>(raw).is_err()
 }
 

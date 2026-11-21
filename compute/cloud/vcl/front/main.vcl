@@ -12,6 +12,8 @@ ratecounter auth_challenge_rc {}
 
 sub vcl_recv {
   if (!req.is_ssl && req.url.path !~ "^/_tick$|^/_flush$") {
+    unset req.http.x-flp-fos-service;
+    unset req.http.x-flp-api-file;
     error 801 "Force TLS";
   }
   if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {
@@ -506,13 +508,15 @@ sub vcl_deliver {
 
 sub vcl_error {
   if (obj.status == 801) {
-    if (!req.http.Host || req.http.Host !~ "^[A-Za-z0-9.-]+(:[0-9]{1,5})?$") {
+    unset req.http.x-flp-fos-service;
+    unset req.http.x-flp-api-file;
+    if (!req.http.Host || req.http.Host !~ "^[A-Za-z0-9.-]+(:[0-9]{1,5})?$" || req.url !~ "^/") {
       set obj.status = 400;
       set obj.response = "Bad Request";
       synthetic {""};
       return(deliver);
     }
-    set obj.http.Location = "https://" req.http.Host regsub(req.url, "^/+", "/");
+    set obj.http.Location = "https://" req.http.Host "/" regsub(req.url, "^[/\\\\]+", "");
     set obj.status = 308;
     set obj.response = "Permanent Redirect";
     synthetic {""};

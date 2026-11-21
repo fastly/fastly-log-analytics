@@ -3,6 +3,7 @@
     "app/api",
     "app/js",
     "proxy.ts",
+    "instrumentation.ts",
     "lib/proxy.test.ts",
     "app/high-scale",
     "app/admin/clickhouse",

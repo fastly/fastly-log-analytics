@@ -621,43 +621,26 @@ _ON_EXPR_NEXT_WORDS = frozenset(
         "XOR",
     }
 )
-_AS_OPERAND_PREFIX_WORDS = (
-    _CLAUSE_STOP_KEYWORDS
-    | _JOIN_MODIFIERS
-    | frozenset(
-        {
-            "SELECT",
-            "DISTINCT",
-            "WITH",
-            "FROM",
-            "ON",
-            "USING",
-            "BY",
-            "AND",
-            "OR",
-            "XOR",
-            "NOT",
-            "IS",
-            "IN",
-            "LIKE",
-            "ILIKE",
-            "RLIKE",
-            "REGEXP",
-            "GLOB",
-            "SIMILAR",
-            "TO",
-            "ESCAPE",
-            "BETWEEN",
-            "CASE",
-            "WHEN",
-            "THEN",
-            "ELSE",
-            "DIV",
-            "MOD",
-            "COLLATE",
-            "INTERVAL",
-        }
-    )
+_AS_CLAUSE_OPENING_WORDS = frozenset(
+    {
+        "SELECT",
+        "WITH",
+        "WHERE",
+        "PREWHERE",
+        "HAVING",
+        "QUALIFY",
+        "LIMIT",
+        "OFFSET",
+        "BY",
+        "VALUES",
+        "RETURN",
+        "SET",
+        "FROM",
+        "JOIN",
+        "TABLE",
+        "INTO",
+        "USING",
+    }
 )
 _SQL_INTERVAL_UNITS = frozenset(
     {
@@ -687,6 +670,13 @@ _SQL_INTERVAL_UNITS = frozenset(
 )
 _ON_OPERATOR_CONTEXT_WORDS = frozenset(
     {
+        "SELECT",
+        "DISTINCT",
+        "ALL",
+        "WHERE",
+        "PREWHERE",
+        "HAVING",
+        "QUALIFY",
         "ON",
         "AND",
         "OR",
@@ -768,6 +758,21 @@ def _scan_sql_number_end(sql: str, start: int) -> int:
         i += 1
         if i < n and sql[i].isascii() and sql[i].isdigit():
             i = _scan_sql_digits(sql, i)
+    if i < n and sql[i] in ("e", "E"):
+        if i + 1 < n and sql[i + 1].isascii() and sql[i + 1].isdigit():
+            i = _scan_sql_digits(sql, i + 1)
+        elif i + 2 < n and sql[i + 1] in ("+", "-") and sql[i + 2].isascii() and sql[i + 2].isdigit():
+            i = _scan_sql_digits(sql, i + 2)
+    return i
+
+
+def _is_num_tok_val(val: str) -> bool:
+    return bool(val) and (val[0].isdigit() or (len(val) >= 2 and val[0] == "." and val[1].isdigit()))
+
+
+def _scan_sql_leading_dot_float_end(sql: str, dot_idx: int) -> int:
+    n = len(sql)
+    i = _scan_sql_digits(sql, dot_idx + 1)
     if i < n and sql[i] in ("e", "E"):
         if i + 1 < n and sql[i + 1].isascii() and sql[i + 1].isdigit():
             i = _scan_sql_digits(sql, i + 1)
@@ -939,6 +944,18 @@ def _tokenize_sql(sql: str) -> tuple[list[_Tok] | None, str | None]:
             prev_was_ident_or_num = False
             continue
         if ch == ".":
+            if (
+                not prev_was_ident_or_num
+                and (not tokens or tokens[-1].kind not in ("RPAREN", "RBRACK", "RBRACE", "QIDENT"))
+                and i + 1 < n
+                and sql[i + 1].isascii()
+                and sql[i + 1].isdigit()
+            ):
+                num_end = _scan_sql_leading_dot_float_end(sql, i)
+                tokens.append(_Tok("OTHER", sql[i:num_end]))
+                i = num_end
+                prev_was_ident_or_num = True
+                continue
             tokens.append(_Tok("DOT", "."))
             i += 1
             prev_was_ident_or_num = False
@@ -1026,17 +1043,70 @@ def _is_dot_or_typecast_tok(tokens: list[_Tok], pos: int) -> bool:
     return tk.kind == "DOT" or (tk.kind == "OTHER" and tk.val.endswith("::") and not tk.val.endswith(":::"))
 
 
-def _cannot_end_aliasable_tok(tokens: list[_Tok], pos: int) -> bool:
+def _cannot_end_aliasable_tok(tokens: list[_Tok], pos: int, r: int, after_as_idx: int) -> bool:
     if pos < 0 or _is_dot_or_typecast_tok(tokens, pos):
         return True
     tk = tokens[pos]
     if tk.kind in ("COMMA", "SEMI", "LPAREN", "LBRACK", "LBRACE"):
         return True
-    if tk.kind == "OTHER" and not tk.val[0].isdigit():
+    if tk.kind == "OTHER" and not _is_num_tok_val(tk.val):
         return True
-    return (
-        tk.kind == "WORD" and tk.val.upper() in _AS_OPERAND_PREFIX_WORDS and not _is_non_keyword_ident_pos(tokens, pos)
-    )
+    if tk.kind != "WORD" or _is_non_keyword_ident_pos(tokens, pos):
+        return False
+    wu = tk.val.upper()
+    after_tok = tokens[after_as_idx] if after_as_idx < len(tokens) else None
+    if wu == "CASE":
+        return after_tok is not None and after_tok.kind == "WORD" and after_tok.val.upper() == "WHEN"
+    if wu == "NOT":
+        if r == 2 and (
+            after_tok is None
+            or after_tok.kind in ("COMMA", "RPAREN", "SEMI")
+            or (
+                after_tok.kind == "WORD"
+                and (after_tok.val.upper() in _CLAUSE_STOP_KEYWORDS or after_tok.val.upper() in ("FROM", "JOIN"))
+            )
+        ):
+            return False
+        return True
+    if wu == "INTERVAL":
+        return (
+            (r % 2) == 1
+            and after_tok is not None
+            and after_tok.kind == "WORD"
+            and after_tok.val.upper() in _SQL_INTERVAL_UNITS
+        )
+    if _is_prev_word_operator_at(tokens, pos, after_tok):
+        return True
+    if wu in ("DISTINCT", "ALL"):
+        return (
+            pos >= 1
+            and tokens[pos - 1].kind == "WORD"
+            and tokens[pos - 1].val.upper() in ("SELECT", "UNION", "INTERSECT", "EXCEPT")
+            and not _is_non_keyword_ident_pos(tokens, pos - 1)
+        )
+    if wu in _AS_CLAUSE_OPENING_WORDS:
+        if pos == 0:
+            return True
+        prev = tokens[pos - 1]
+        if prev.kind in ("COMMA", "LPAREN", "LBRACK", "LBRACE", "DOT") or (
+            prev.kind == "OTHER" and not _is_num_tok_val(prev.val)
+        ):
+            return False
+        if prev.kind == "WORD" and not _is_non_keyword_ident_pos(tokens, pos - 1):
+            pw = prev.val.upper()
+            if pw in ("SELECT", "FROM", "JOIN", "TABLE"):
+                return False
+            if pw in ("DISTINCT", "ALL"):
+                is_setop_mod = (
+                    pos >= 2
+                    and tokens[pos - 2].kind == "WORD"
+                    and tokens[pos - 2].val.upper() in ("UNION", "INTERSECT", "EXCEPT")
+                    and not _is_non_keyword_ident_pos(tokens, pos - 2)
+                )
+                if not is_setop_mod:
+                    return False
+        return True
+    return False
 
 
 def _is_non_keyword_ident_pos(tokens: list[_Tok], idx: int) -> bool:
@@ -1051,7 +1121,7 @@ def _is_non_keyword_ident_pos(tokens: list[_Tok], idx: int) -> bool:
         p -= 1
     if r == 0:
         return False
-    if _cannot_end_aliasable_tok(tokens, p):
+    if _cannot_end_aliasable_tok(tokens, p, r, idx):
         r -= 1
     return (r % 2) == 1
 
@@ -1091,7 +1161,7 @@ def _validate_select_syntax(tokens: list[_Tok]) -> str | None:
             tok.kind == "WORD"
             and not _is_non_keyword_ident_pos(tokens, i)
             and not _is_dot_qualifier_at(tokens, i)
-            and not (i > 0 and tokens[i - 1].kind == "OTHER" and not tokens[i - 1].val[0].isdigit())
+            and not (i > 0 and tokens[i - 1].kind == "OTHER" and not _is_num_tok_val(tokens[i - 1].val))
         ):
             wu = tok.val.upper()
             if wu == "SELECT":
@@ -1327,7 +1397,7 @@ def _is_on_operator_tok_at(tokens: list[_Tok], pos: int) -> bool:
     tk = tokens[pos]
     if tk.kind in ("COMMA", "SEMI", "LPAREN", "LBRACK", "LBRACE", "DOT"):
         return True
-    if tk.kind == "OTHER" and not tk.val[0].isdigit():
+    if tk.kind == "OTHER" and not _is_num_tok_val(tk.val):
         return True
     return (
         tk.kind == "WORD"
@@ -1430,11 +1500,11 @@ def _is_on_expr_ident_at(tokens: list[_Tok], idx: int) -> bool:
     prev_tok = tokens[idx - 1] if idx > 0 else None
     nxt_tok = tokens[idx + 1] if idx + 1 < len(tokens) else None
     if prev_tok is not None:
-        if prev_tok.kind == "DOT" or (prev_tok.kind == "OTHER" and not prev_tok.val[0].isdigit()):
+        if prev_tok.kind == "DOT" or (prev_tok.kind == "OTHER" and not _is_num_tok_val(prev_tok.val)):
             return True
         if prev_tok.kind == "WORD" and _is_prev_word_operator_at(tokens, idx - 1, nxt_tok):
             return True
-    if nxt_tok is not None and nxt_tok.kind == "OTHER" and not nxt_tok.val[0].isdigit():
+    if nxt_tok is not None and nxt_tok.kind == "OTHER" and not _is_num_tok_val(nxt_tok.val):
         if wu == "SELECT" and nxt_tok.val in ("*", "+", "-", "~", "!"):
             return False
         if wu in ("WHERE", "PREWHERE", "HAVING", "QUALIFY", "LIMIT", "OFFSET") and nxt_tok.val in (
@@ -1610,7 +1680,7 @@ def _scan_body_tokens(
             is_on_ident = (
                 in_on_clause
                 and not expect_table
-                and (wu in _CLAUSE_STOP_KEYWORDS or wu in ("SELECT", "FROM"))
+                and (wu in _CLAUSE_STOP_KEYWORDS or wu in ("SELECT", "FROM", "JOIN", "TABLE"))
                 and _is_on_expr_ident_at(tokens, i)
             )
             if is_dot_qual or is_on_ident:

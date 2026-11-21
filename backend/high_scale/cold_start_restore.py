@@ -174,6 +174,40 @@ def _row_service_id(row: Any) -> str:
         return str(row["service_id"])
 
 
+def _row_service_and_sid(row: Any) -> tuple[str, str]:
+    if isinstance(row, Mapping):
+        return str(row["service_id"]), str(row["sid"])
+    try:
+        return str(row[0]), str(row[1])
+    except (KeyError, IndexError, TypeError):
+        return str(row["service_id"]), str(row["sid"])
+
+
+def _deterministic_dr_uuid(table: str, service_id: str, orig_id: str, attempt: int = 0) -> str:
+    suffix = f":{attempt}" if attempt > 0 else ""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"fla-dr:{table}:{service_id}:{orig_id}{suffix}"))
+
+
+def _resolve_dr_pk_id(con: Any, table: str, service_id: str, raw_id: Any, fallback_seed: str) -> str:
+    if table not in {"views", "alerts"}:
+        raise ValueError(f"unsupported DR table: {table}")
+    orig_id = str(raw_id or "").strip()
+    seed = orig_id or fallback_seed
+    candidate = orig_id or _deterministic_dr_uuid(table, service_id, seed)
+    sql = (
+        "SELECT service_id FROM views WHERE id = ?"
+        if table == "views"
+        else "SELECT service_id FROM alerts WHERE id = ?"
+    )
+    existing = con.execute(sql, (candidate,)).fetchone()
+    attempt = 0
+    while existing is not None and _row_service_id(existing) != service_id:
+        candidate = _deterministic_dr_uuid(table, service_id, seed, attempt)
+        existing = con.execute(sql, (candidate,)).fetchone()
+        attempt += 1
+    return candidate
+
+
 def _validate_restored_webhook_url(url: str) -> str:
     try:
         return validate_webhook_url_syntax(url)
@@ -268,10 +302,7 @@ def _restore_views(con: Any, service_id: str, views: Any) -> int:
         name = str(row.get("name") or "").strip()
         if not name:
             continue
-        view_id = str(row.get("id") or uuid.uuid4())
-        existing = con.execute("SELECT service_id FROM views WHERE id = ?", (view_id,)).fetchone()
-        if existing is not None and _row_service_id(existing) != service_id:
-            view_id = str(uuid.uuid4())
+        view_id = _resolve_dr_pk_id(con, "views", service_id, row.get("id"), f"view:{name}")
         raw_filters = row.get("filters_json")
         if isinstance(raw_filters, str):
             filters_json = raw_filters
@@ -324,10 +355,7 @@ def _restore_alerts(con: Any, service_id: str, alerts: Any) -> int:
             continue
         if row.get("threshold") is None or row.get("window_min") is None:
             continue
-        alert_id = str(row.get("id") or uuid.uuid4())
-        existing = con.execute("SELECT service_id FROM alerts WHERE id = ?", (alert_id,)).fetchone()
-        if existing is not None and _row_service_id(existing) != service_id:
-            alert_id = str(uuid.uuid4())
+        alert_id = _resolve_dr_pk_id(con, "alerts", service_id, row.get("id"), f"alert:{name}:{metric}:{operator}")
 
         raw_webhook_url = row.get("webhook_url")
         if raw_webhook_url is not None and str(raw_webhook_url).strip() != "":
@@ -439,10 +467,19 @@ def _restore_scoring_labels(con: Any, service_id: str, labels: Any) -> int:
         label = str(row.get("label") or "").strip()
         if not sid or label not in scoring.ALLOWED_LABELS:
             continue
-        label_id = str(row.get("id") or uuid.uuid4())
-        existing = con.execute("SELECT service_id FROM scoring_labels WHERE id = ?", (label_id,)).fetchone()
-        if existing is not None and _row_service_id(existing) != service_id:
-            label_id = str(uuid.uuid4())
+        orig_label_id = str(row.get("id") or "").strip()
+        seed = orig_label_id or f"sid:{sid}"
+        label_id = orig_label_id or _deterministic_dr_uuid("scoring_labels", service_id, seed)
+        existing = con.execute("SELECT service_id, sid FROM scoring_labels WHERE id = ?", (label_id,)).fetchone()
+        attempt = 0
+        while existing is not None:
+            existing_service_id, existing_sid = _row_service_and_sid(existing)
+            if existing_service_id == service_id and existing_sid == sid:
+                break
+            remint_seed = seed if attempt == 0 else f"{seed}:{sid}"
+            label_id = _deterministic_dr_uuid("scoring_labels", service_id, remint_seed, attempt)
+            existing = con.execute("SELECT service_id, sid FROM scoring_labels WHERE id = ?", (label_id,)).fetchone()
+            attempt += 1
         now_iso = datetime.now(UTC).isoformat()
         created_at = row.get("created_at") or now_iso
         updated_at = row.get("updated_at") or created_at
@@ -460,6 +497,7 @@ def _restore_scoring_labels(con: Any, service_id: str, labels: Any) -> int:
                 sample_ua = excluded.sample_ua,
                 sample_url = excluded.sample_url,
                 updated_at = excluded.updated_at
+            WHERE scoring_labels.service_id = excluded.service_id
             """,
             (
                 label_id,

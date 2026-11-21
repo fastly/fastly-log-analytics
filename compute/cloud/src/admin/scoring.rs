@@ -554,6 +554,29 @@ pub fn desired_scoring_snippets(
     ])
 }
 
+pub fn valid_scoring_domain(domain: &str) -> bool {
+    if domain.len() > 253 {
+        return false;
+    }
+    let Some(label) = domain.strip_suffix(".edgecompute.app") else {
+        return false;
+    };
+    let bytes = label.as_bytes();
+    (2..=63).contains(&bytes.len())
+        && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
+        && (bytes[bytes.len() - 1].is_ascii_lowercase() || bytes[bytes.len() - 1].is_ascii_digit())
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+}
+
+pub fn checked_scoring_backend(scoring_domain: &str) -> Result<Value, Error> {
+    if !valid_scoring_domain(scoring_domain) {
+        return Err(Error::new(400, "invalid_scoring_domain"));
+    }
+    Ok(desired_scoring_backend(scoring_domain))
+}
+
 pub fn desired_scoring_backend(scoring_domain: &str) -> Value {
     json!({
         "name": SCORING_BACKEND_API_NAME,

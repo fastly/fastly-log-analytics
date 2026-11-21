@@ -57,6 +57,70 @@ sub https_redirect_normalizes_leading_slashes_and_rejects_malformed_host {
   assert.equal(obj.status, 308);
   assert.equal(obj.http.Location, "https://logs.example.com/dashboard?q=1");
   assert.state(deliver);
+
+  unset obj.http.Location;
+  set obj.status = 801;
+  set req.url = "/\evil.example/path";
+  set req.http.Host = "logs.example.com";
+  testing.call_subroutine("vcl_error");
+  assert.equal(obj.status, 308);
+  assert.equal(obj.http.Location, "https://logs.example.com/evil.example/path");
+  assert.state(deliver);
+
+  unset obj.http.Location;
+  set obj.status = 801;
+  set req.url = "///\evil.example/path";
+  set req.http.Host = "logs.example.com";
+  testing.call_subroutine("vcl_error");
+  assert.equal(obj.status, 308);
+  assert.equal(obj.http.Location, "https://logs.example.com/evil.example/path");
+  assert.state(deliver);
+
+  unset obj.http.Location;
+  set obj.status = 801;
+  set req.url = "@evil.example/path";
+  set req.http.Host = "logs.example.com";
+  testing.call_subroutine("vcl_error");
+  assert.equal(obj.status, 400);
+  assert.equal(obj.response, "Bad Request");
+  assert.is_notset(obj.http.Location);
+  assert.state(deliver);
+
+  unset obj.http.Location;
+  set obj.status = 801;
+  set req.url = "*";
+  set req.http.Host = "logs.example.com";
+  testing.call_subroutine("vcl_error");
+  assert.equal(obj.status, 400);
+  assert.equal(obj.response, "Bad Request");
+  assert.is_notset(obj.http.Location);
+  assert.state(deliver);
+
+  unset obj.http.Location;
+  set obj.status = 801;
+  set req.url = "/dashboard";
+  set req.http.Host = "logs.example.com";
+  set req.http.x-flp-fos-service = "spoofed";
+  set req.http.x-flp-api-file = "1";
+  testing.call_subroutine("vcl_error");
+  assert.equal(obj.status, 308);
+  assert.is_notset(req.http.x-flp-fos-service);
+  assert.is_notset(req.http.x-flp-api-file);
+  assert.state(deliver);
+}
+
+
+// @scope: recv
+sub http_redirect_scrubs_spoofed_fos_headers_before_error_801 {
+  testing.inject_variable("req.is_ssl", false);
+  set req.url = "/usage?service=fixture";
+  set req.http.Host = "flp.example";
+  set req.http.x-flp-fos-service = "spoofed";
+  set req.http.x-flp-api-file = "1";
+  testing.call_subroutine("vcl_recv");
+  assert.is_notset(req.http.x-flp-fos-service);
+  assert.is_notset(req.http.x-flp-api-file);
+  assert.error(801);
 }
 
 

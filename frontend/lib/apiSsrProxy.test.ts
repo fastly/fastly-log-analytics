@@ -263,7 +263,17 @@ describe('SEC-02 apiSsrProxy trust-boundary header sanitization', () => {
         refusal: null,
       })
     }
-    for (const xff of ['203.0.113.5', '127.0.0.1, 203.0.113.5', '127.0.0.1, ::1']) {
+    for (const xff of [
+      '203.0.113.5',
+      '127.0.0.1, 203.0.113.5',
+      '127.0.0.1, ::1',
+      '203.0.113.5:54321',
+      '[2001:db8::1]',
+      'unknown',
+      '127.evil.example',
+      '127.0.0.1:8080',
+      '0001',
+    ]) {
       expect(classifySsrRequest(new Headers({ host: '127.0.0.1:13004', 'x-forwarded-for': xff }))).toEqual({
         admin: false,
         gatewayAuthenticated: false,

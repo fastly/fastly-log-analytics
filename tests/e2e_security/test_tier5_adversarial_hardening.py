@@ -217,6 +217,14 @@ def test_t5_c02_c03_b10_cloud_scoring_managed_field_8br_schema_and_matrix_versio
     versions = res["matrix_versions"]["versions"]
     assert len(versions) == 1 and versions[0]["version"] == "2027-01-15-v1"
 
+    # BUG-CLOUD-DR-01: Poisoned FOS cloud_dr_state.json rejected with 400 while valid dr_state succeeds (200)
+    dr_st = res["dr_recover_statuses"]
+    assert dr_st["external_scoring_domain"] == 400
+    assert dr_st["attached_reserved_endpoint"] == 400
+    assert dr_st["foreign_view_service_id"] == 400
+    assert dr_st["traversal_floor_key"] == 400
+    assert dr_st["valid_dr_state"] == 200
+
 
 def test_t5_c04_c12_cloud_disabled_rum_faro_cdn_shield_reconcile_cookie_and_fos_guards(
     cloud_server: CloudTestServer,
@@ -1897,12 +1905,40 @@ sub test_error_801_collapses_leading_slashes_and_rejects_bad_or_missing_host {{
 
     plain_http_vcl = """
 // @scope: recv
-sub test_plain_http_recv_triggers_error_801 {
+sub test_plain_http_recv_triggers_error_801_and_scrubs_fos_headers {
   testing.inject_variable("req.is_ssl", false);
   set req.method = "GET";
   set req.url = "/dashboard";
+  set req.http.x-flp-fos-service = "spoofed";
+  set req.http.x-flp-api-file = "1";
   testing.call_subroutine("vcl_recv");
+  assert.is_notset(req.http.x-flp-fos-service);
+  assert.is_notset(req.http.x-flp-api-file);
   assert.error(801);
+}
+
+// @scope: error
+sub test_plain_http_801_error_collapses_backslashes_rejects_non_slash_and_scrubs_fos {
+  set obj.status = 801;
+  set req.url = "/\\evil.example/path";
+  set req.http.Host = "logs.example.com";
+  set req.http.x-flp-fos-service = "spoofed";
+  set req.http.x-flp-api-file = "1";
+  testing.call_subroutine("vcl_error");
+  assert.equal(obj.status, 308);
+  assert.equal(obj.http.Location, "https://logs.example.com/evil.example/path");
+  assert.is_notset(req.http.x-flp-fos-service);
+  assert.is_notset(req.http.x-flp-api-file);
+  assert.state(deliver);
+
+  unset obj.http.Location;
+  set obj.status = 801;
+  set req.url = "@evil.example/path";
+  set req.http.Host = "logs.example.com";
+  testing.call_subroutine("vcl_error");
+  assert.equal(obj.status, 400);
+  assert.is_notset(obj.http.Location);
+  assert.state(deliver);
 }
 """
     res_plain_http = run_falco_test(
@@ -2592,6 +2628,10 @@ def test_t5_hs03_hs12_py08_sql_console_table_filter_parser_differentials_union_s
         "SELECT c.secret_meta FROM (SELECT 1 AS zone FROM logs) AS a JOIN logs AS b ON 1 = zone JOIN high_scale_batch_publications AS c ON 1 = 1",
         "SELECT c.secret_meta FROM (SELECT 1 AS escape FROM logs) AS a JOIN logs AS b ON 1 = escape JOIN high_scale_batch_publications AS c ON 1 = 1",
         "SELECT c.secret_meta FROM (SELECT 1 AS global FROM logs) AS a JOIN logs AS b ON 1 = global JOIN high_scale_batch_publications AS c ON 1 = 1",
+        "WITH 'UTC' AS as SELECT secret_meta, toDateTime(0) AT TIME ZONE as FROM high_scale_batch_publications",
+        "WITH 1 AS sample SELECT secret_meta, sample AS as FROM high_scale_batch_publications",
+        "WITH 1 AS format SELECT secret_meta, format AS as FROM high_scale_batch_publications",
+        "WITH 1 AS to SELECT secret_meta, to AS as FROM high_scale_batch_publications",
     ]
     c = _analyst_client(analyst)
     for bad_sql in adversarial_sqls:
@@ -2631,6 +2671,8 @@ def test_t5_hs03_hs12_py08_sql_console_table_filter_parser_differentials_union_s
         "SELECT union.1 FROM (SELECT tuple(200) AS union FROM logs) AS u",
         "SELECT a.status FROM logs AS a JOIN logs AS b ON [a.status, 1] = [b.status, 1]",
         """SELECT '{"where": 1}' AS j FROM logs""",
+        "FROM logs SELECT .5, url",
+        "WITH b AS (SELECT 200 AS join FROM logs) SELECT a.status, a.url FROM logs AS a JOIN b ON a.status = join ORDER BY a.url",
     ):
         r_compound_ok = c.post(
             "/api/query",
@@ -3530,9 +3572,23 @@ def test_t5_py05_py06_py07_proxies_export_crlf_pk_hijack_and_share_backup_harden
             },
         )
         assert r_csr_ok.status_code == 200, r_csr_ok.text
+        # Re-running restore-from-fos on svc-b with cross-tenant PK collision is deterministic/idempotent (0 duplicates)
+        r_csr_ok_2 = adm.post(
+            "/api/high-scale/restore-from-fos",
+            json={
+                "service_id": "svc-b",
+                "bucket": "fos-restore-svcb",
+                "region": "us-east-1",
+                "fos_access_key": "ak-b",
+                "fos_secret_key": "sk-b",
+                "restore_serving_state": False,
+            },
+        )
+        assert r_csr_ok_2.status_code == 200, r_csr_ok_2.text
         assert [v["name"] for v in adm.get("/api/views/svc-a").json()] == ["Tenant A View"]
         assert [a["name"] for a in adm.get("/api/alerts/svc-a").json()["data"]] == ["Tenant A Alert"]
         assert [v["name"] for v in adm.get("/api/views/svc-b").json()] == ["Restored B View"]
+        assert [a["name"] for a in adm.get("/api/alerts/svc-b").json()["data"]] == ["Restored B Alert"]
 
         for bad_csr_req in (
             {
@@ -3794,6 +3850,46 @@ if (!proxyTs.includes("'x-forwarded-for'") || !proxyTs.includes('FRONTEND_PROXY_
 const proxyStampMatches = proxyTs.match(/set\\(FRONTEND_PROXY_HEADER,\\s*'1'\\)/g) || [];
 if (proxyStampMatches.length < 2) {
   throw new Error('proxy.ts missing dual API + page wire x-forwarded-for FRONTEND_PROXY_HEADER stamp');
+}
+const apiSsrProxyTs = fs.readFileSync('frontend/lib/apiSsrProxy.ts', 'utf8');
+if (!fs.existsSync('frontend/lib/rawSocketGuard.ts') || !fs.existsSync('frontend/instrumentation.ts')) {
+  throw new Error('missing frontend/lib/rawSocketGuard.ts or frontend/instrumentation.ts');
+}
+if (!proxyTs.includes('isRawSocketUntrustedRequest')) {
+  throw new Error('proxy.ts missing isRawSocketUntrustedRequest check');
+}
+const rawGuardMod = await import('./frontend/lib/rawSocketGuard.ts');
+if (!apiSsrProxyTs.includes('isLoopbackIpLiteral') || !apiSsrProxyTs.includes('isRawSocketUntrustedRequest')) {
+  throw new Error('apiSsrProxy.ts must import isLoopbackIpLiteral and isRawSocketUntrustedRequest from rawSocketGuard');
+}
+for (const nonIp of ['203.0.113.5:54321', '[2001:db8::1]', 'unknown', '127.evil.example', '127.0.0.1:8080', '0001']) {
+  if (rawGuardMod.isLoopbackIpLiteral(nonIp) !== false) {
+    throw new Error(`rawSocketGuard.isLoopbackIpLiteral accepted non-IP: ${nonIp}`);
+  }
+}
+for (const validLoop of ['127.0.0.1', '127.0.0.5', '::1', '::ffff:127.0.0.1', '0:0:0:0:0:ffff:7f00:1']) {
+  if (rawGuardMod.isLoopbackIpLiteral(validLoop) !== true) {
+    throw new Error(`rawSocketGuard.isLoopbackIpLiteral rejected loopback: ${validLoop}`);
+  }
+}
+rawGuardMod.installRawSocketProxyGuard();
+const http = await import('node:http');
+let seenLocalUntrusted = null;
+let seenWireSpoofUntrusted = null;
+const srv = http.createServer((req, res) => {
+  const untrusted = rawGuardMod.isRawSocketUntrustedRequest({ get: (k) => req.headers[k.toLowerCase()] ?? null });
+  if (req.url === '/local') seenLocalUntrusted = untrusted;
+  if (req.url === '/spoof') seenWireSpoofUntrusted = untrusted;
+  res.writeHead(200);
+  res.end('ok');
+});
+await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+const p = srv.address().port;
+await fetch(`http://127.0.0.1:${p}/local`);
+await fetch(`http://127.0.0.1:${p}/spoof`, { headers: { 'x-forwarded-for': '127.0.0.1', 'x-fla-raw-untrusted': 'forged' } });
+await new Promise((r) => srv.close(r));
+if (seenLocalUntrusted !== false || seenWireSpoofUntrusted !== true) {
+  throw new Error(`rawSocketGuard mismatch: local=${seenLocalUntrusted} spoof=${seenWireSpoofUntrusted}`);
 }
 console.log('NODE_PROXY_AND_CSV_PARITY_OK');
 """,

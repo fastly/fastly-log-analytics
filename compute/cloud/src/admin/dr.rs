@@ -283,22 +283,150 @@ fn bootstrap_service(owner_id: String, input: &RecoverInput, now: u64) -> Servic
     }
 }
 
+fn safe_dr_object_key(key: &str, required_prefix: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 512
+        && key.starts_with(required_prefix)
+        && !key.contains("..")
+        && !key.contains('\\')
+        && !key.chars().any(char::is_control)
+}
+
+fn validate_dr_scoring(sc: &ScoringConfig) -> Result<(), Error> {
+    if !super::valid_service_id(&sc.scoring_service_id)
+        || !super::scoring::valid_scoring_domain(&sc.scoring_domain)
+        || sc.scoring_service_name.chars().count() > 200
+        || sc.scoring_service_name.chars().any(char::is_control)
+        || super::scoring::recv_snippet(Some(&sc.exclude_url_regex)).is_err()
+        || sc.threshold.is_some_and(|t| t > 100)
+        || sc
+            .matrix_version
+            .as_deref()
+            .is_some_and(|v| !super::scoring::valid_matrix_version(v))
+    {
+        return Err(Error::new(400, "invalid_dr_scoring_config"));
+    }
+    Ok(())
+}
+
+fn validate_dr_views(
+    views: &mut [crate::views::SavedView],
+    expected_service_id: &str,
+) -> Result<(), Error> {
+    if views.len() > crate::views::MAX_VIEWS {
+        return Err(Error::new(400, "invalid_dr_views"));
+    }
+    for view in views {
+        if view.service_id != expected_service_id {
+            return Err(Error::new(400, "invalid_dr_views"));
+        }
+        let id_chars = view.id.chars().count();
+        if !(1..=200).contains(&id_chars) || view.id.chars().any(char::is_control) {
+            return Err(Error::new(400, "invalid_dr_views"));
+        }
+        let trimmed_name = view.name.trim().to_owned();
+        let name_chars = trimmed_name.chars().count();
+        if !(1..=120).contains(&name_chars) || trimmed_name.chars().any(char::is_control) {
+            return Err(Error::new(400, "invalid_dr_views"));
+        }
+        view.name = trimmed_name;
+        if view.filters_json.len() > 32 * 1024
+            || view.filters_json.contains('\0')
+            || serde_json::from_str::<Value>(&view.filters_json).is_err()
+            || crate::views::json_has_duplicate_keys(&view.filters_json)
+        {
+            return Err(Error::new(400, "invalid_dr_views"));
+        }
+        for opt in [
+            &view.time_range_type,
+            &view.start_time,
+            &view.end_time,
+            &view.page,
+            &view.created_at,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if opt.chars().count() > 200 || opt.chars().any(char::is_control) {
+                return Err(Error::new(400, "invalid_dr_views"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_dr_catalog_head(head: &crate::ingest::catalog::Head, scope: &str) -> Result<(), Error> {
+    let catalog_prefix = format!("{scope}processed/_catalog/");
+    let processed_prefix = format!("{scope}processed/");
+    if head
+        .manifest
+        .as_deref()
+        .is_some_and(|key| !safe_dr_object_key(key, &catalog_prefix))
+    {
+        return Err(Error::new(400, "invalid_dr_catalog_head"));
+    }
+    for ev in &head.recent {
+        if ev.cursor.chars().any(char::is_control)
+            || ev
+                .manifest
+                .as_deref()
+                .is_some_and(|key| !safe_dr_object_key(key, &catalog_prefix))
+        {
+            return Err(Error::new(400, "invalid_dr_catalog_head"));
+        }
+    }
+    for key in head.days.values() {
+        if !safe_dr_object_key(key, &catalog_prefix) {
+            return Err(Error::new(400, "invalid_dr_catalog_head"));
+        }
+    }
+    for map in [&head.hour_bundles, &head.open_bundles, &head.day_bundles] {
+        for r in map.values() {
+            if !safe_dr_object_key(&r.key, &catalog_prefix) {
+                return Err(Error::new(400, "invalid_dr_catalog_head"));
+            }
+        }
+    }
+    for key in head.bundle_retired.keys() {
+        if !safe_dr_object_key(key, &processed_prefix) {
+            return Err(Error::new(400, "invalid_dr_catalog_head"));
+        }
+    }
+    if let Some(ref commit) = head.last_compaction {
+        for f in &commit.files {
+            if !safe_dr_object_key(&f.key, &processed_prefix) {
+                return Err(Error::new(400, "invalid_dr_catalog_head"));
+            }
+        }
+        for key in &commit.replaces {
+            if !safe_dr_object_key(key, &processed_prefix) {
+                return Err(Error::new(400, "invalid_dr_catalog_head"));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn hydrate_service(
     raw: Value,
     fallback: &Service,
     owner_id: &str,
     input: &RecoverInput,
     now: u64,
-) -> Service {
-    let mut base = serialize(fallback).unwrap_or_else(|_| json!({}));
-    if let (Some(base_map), Some(raw_map)) = (base.as_object_mut(), raw.as_object()) {
+) -> Result<Service, Error> {
+    let Some(raw_map) = raw.as_object() else {
+        return Err(Error::new(400, "invalid_dr_service"));
+    };
+    let mut base = serialize(fallback)?;
+    if let Some(base_map) = base.as_object_mut() {
         for (k, v) in raw_map {
             if !k.starts_with('_') && !STRIPPED_SERVICE_FIELDS.contains(&k.as_str()) {
                 base_map.insert(k.clone(), v.clone());
             }
         }
     }
-    let mut service: Service = serde_json::from_value(base).unwrap_or_else(|_| fallback.clone());
+    let mut service: Service =
+        serde_json::from_value(base).map_err(|_| Error::new(400, "invalid_dr_service"))?;
     service.service_id = input.service_id.clone();
     service.owner = owner_id.to_owned();
     service.fastly_token_ref = format!("fastly_token.{}", input.service_id);
@@ -320,7 +448,7 @@ fn hydrate_service(
     if matches!(service.wire_format.as_str(), "" | "json") {
         service.wire_format = "array".into();
     }
-    service
+    Ok(service)
 }
 
 fn scan_catalog_head(
@@ -558,7 +686,29 @@ pub(super) fn recover(
 
     let (service, views, mut catalog_head, floor_key, rum_stats, mut source) =
         if let Some(dr_state) = parsed_dr {
-            let service = hydrate_service(dr_state.service, &fallback_svc, &owner_id, &input, now);
+            let mut service =
+                hydrate_service(dr_state.service, &fallback_svc, &owner_id, &input, now)?;
+            if let Some(ref sc) = service.scoring {
+                validate_dr_scoring(sc)?;
+            }
+            let prev_snapshot = service.clone();
+            super::reconcile_system_fields(&mut service, Some(&prev_snapshot))?;
+            super::validate_service(
+                &service,
+                Some(&prev_snapshot),
+                crate::ingest::window_seconds(context.runtime),
+            )?;
+            let mut views = dr_state.views;
+            validate_dr_views(&mut views, &input.service_id)?;
+            let scope = crate::ingest::scope(&service);
+            if let Some(ref fk) = dr_state.floor_key {
+                if !safe_dr_object_key(fk, &format!("{scope}raw/")) {
+                    return Err(Error::new(400, "invalid_dr_floor_key"));
+                }
+            }
+            if let Some(ref head) = dr_state.catalog_head {
+                validate_dr_catalog_head(head, &scope)?;
+            }
             let valid_head = dr_state.catalog_head.filter(|h| {
                 (h.generation > 0 || h.manifest.is_some() || !h.days.is_empty())
                     && serde_json::to_value(h).ok().is_some_and(|v| {
@@ -567,7 +717,7 @@ pub(super) fn recover(
             });
             (
                 service,
-                dr_state.views,
+                views,
                 valid_head,
                 dr_state.floor_key,
                 dr_state.rum_stats,

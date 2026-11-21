@@ -1,4 +1,5 @@
 import type { IncomingMessage } from "node:http";
+import { isLoopbackIpLiteral, isRawSocketUntrustedRequest } from "@/lib/rawSocketGuard";
 import { DEBUG_RESPONSES_COOKIE } from "@/lib/utils";
 
 // ── Server-Side Upstream Proxy & SSR Transport ────────────────────────────────
@@ -20,6 +21,7 @@ const STRIPPED_FORWARDED_HEADERS = new Set([
   "forwarded",
   "x-remote-analyst",
   "x-fla-frontend-proxy",
+  "x-fla-raw-untrusted",
   "x-admin-gateway-token",
   "x-fla-admin-gateway",
   "x-forwarded-for",
@@ -28,39 +30,6 @@ const STRIPPED_FORWARDED_HEADERS = new Set([
 ]);
 const IDEMPOTENT_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 const SSR_TIMEOUT_MS = 5000;
-
-let cachedLoopbackBlockList: import("node:net").BlockList | null | undefined;
-
-function getLoopbackBlockList(): import("node:net").BlockList | null {
-  if (cachedLoopbackBlockList !== undefined) return cachedLoopbackBlockList;
-  const netMod = process.getBuiltinModule("node:net") as typeof import("node:net") | undefined;
-  if (!netMod?.BlockList) {
-    cachedLoopbackBlockList = null;
-    return null;
-  }
-  const bl = new netMod.BlockList();
-  bl.addSubnet("127.0.0.0", 8, "ipv4");
-  bl.addSubnet("::1", 128, "ipv6");
-  bl.addSubnet("::ffff:127.0.0.0", 104, "ipv6");
-  cachedLoopbackBlockList = bl;
-  return bl;
-}
-
-function isLoopbackIpLiteral(ip: string): boolean {
-  const candidate = ip.trim();
-  const netMod = process.getBuiltinModule("node:net") as typeof import("node:net") | undefined;
-  const bl = getLoopbackBlockList();
-  if (netMod?.isIP && bl) {
-    const ver = netMod.isIP(candidate);
-    if (ver === 4) return bl.check(candidate, "ipv4");
-    if (ver === 6) return bl.check(candidate, "ipv6");
-    return true;
-  }
-  const lc = candidate.toLowerCase();
-  if (/^[0:]+1$/.test(lc)) return true;
-  const v4 = lc.startsWith("::ffff:") ? lc.slice(7) : lc;
-  return v4 === "127.0.0.1" || v4.startsWith("127.") || v4 === "7f00:1";
-}
 
 function sanitizeForwardedFor(raw: string | null): string | null {
   if (!raw) return null;
@@ -357,8 +326,10 @@ export function classifySsrRequest(headerBag: Pick<Headers, "get">): {
   const proxiedByCaddy =
     hasNonEmptyHeader(headerBag, "x-proxied-by-caddy") ||
     hasNonEmptyHeader(headerBag, "x-fla-public-gateway");
+  const rawSocketUntrusted = isRawSocketUntrustedRequest(headerBag);
   const hasExternalProxyEvidence =
     proxiedByCaddy ||
+    rawSocketUntrusted ||
     hasNonEmptyHeader(headerBag, "x-fla-frontend-proxy") ||
     hasNonEmptyHeader(headerBag, "x-remote-analyst") ||
     hasExternalForwardedFor(headerBag) ||
@@ -371,6 +342,7 @@ export function classifySsrRequest(headerBag: Pick<Headers, "get">): {
   const gatewaySecret = process.env.ADMIN_GATEWAY_SECRET || "";
   const gatewayAuthenticated =
     !proxiedByCaddy &&
+    !rawSocketUntrusted &&
     !hasNonEmptyHeader(headerBag, "x-fla-frontend-proxy") &&
     !hasNonEmptyHeader(headerBag, "x-remote-analyst") &&
     gatewaySecret.length >= 32 &&

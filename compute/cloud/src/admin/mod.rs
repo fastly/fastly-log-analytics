@@ -251,6 +251,11 @@ fn route(
                 {
                     return Err(Error::new(400, "invalid_rum_settings"));
                 }
+                if let Some(ref sc) = service.scoring {
+                    if sc.enabled && !scoring::valid_scoring_domain(&sc.scoring_domain) {
+                        return Err(Error::new(400, "invalid_scoring_domain"));
+                    }
+                }
             }
             let job = new_job(
                 context,

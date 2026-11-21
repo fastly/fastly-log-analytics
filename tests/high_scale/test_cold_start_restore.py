@@ -2064,3 +2064,98 @@ def test_restore_validates_bucket_and_prefix_and_clears_bootstrap_cache() -> Non
     )
     assert CacheRegistry is not None
     assert bootstrap_mod._bootstrap_cache.get("__test_stale__") is None
+
+
+@pytest.mark.no_postgres
+@pytest.mark.security_regression
+def test_restore_deterministic_uuid5_idempotency_and_same_service_scoring_label_sid_change() -> None:
+    con = _make_sqlite_metadata_db()
+    s3 = _FakeS3Client()
+
+    # 1. Seed svc_a with ("view-1", "alert-1", "lbl-1") and sid="sid-initial"
+    dr_a = _sample_dr_state("svc_a")
+    dr_a["scoring_labels"][0]["id"] = "lbl-1"
+    dr_a["scoring_labels"][0]["sid"] = "sid-initial"
+    dr_a["scoring_labels"][0]["label"] = "bad"
+    s3.put_object(Bucket="bkt-a", Key="meta/dr_state.json", Body=json.dumps(dr_a).encode("utf-8"))
+
+    restore_from_fos(
+        service_id="svc_a",
+        bucket="bkt-a",
+        region="us-east-1",
+        fos_access_key="ak-a",
+        fos_secret_key="sk-a",
+        restore_serving_state=False,
+        s3_client=s3,
+        archive=ArchivePublication(InMemoryObjectStore()),
+        control=_InMemoryControlPlane(),
+        metadata_con=con,
+        save_config_fn=lambda _sid, _cfg: None,
+        clear_fos_client_fn=lambda _sid: None,
+        ensure_pg_schema_fn=lambda: True,
+        now=NOW,
+    )
+
+    # 2. Same-service restore on svc_a where scoring_labels reuses id="lbl-1" for a DIFFERENT sid="sid-new"
+    dr_a_sid_change = _sample_dr_state("svc_a")
+    dr_a_sid_change["scoring_labels"][0]["id"] = "lbl-1"
+    dr_a_sid_change["scoring_labels"][0]["sid"] = "sid-new"
+    dr_a_sid_change["scoring_labels"][0]["label"] = "good"
+    s3.put_object(Bucket="bkt-a", Key="meta/dr_state.json", Body=json.dumps(dr_a_sid_change).encode("utf-8"))
+
+    res_a2 = restore_from_fos(
+        service_id="svc_a",
+        bucket="bkt-a",
+        region="us-east-1",
+        fos_access_key="ak-a",
+        fos_secret_key="sk-a",
+        restore_serving_state=False,
+        s3_client=s3,
+        archive=ArchivePublication(InMemoryObjectStore()),
+        control=_InMemoryControlPlane(),
+        metadata_con=con,
+        save_config_fn=lambda _sid, _cfg: None,
+        clear_fos_client_fn=lambda _sid: None,
+        ensure_pg_schema_fn=lambda: True,
+        now=NOW,
+    )
+    assert res_a2.scoring_labels_restored == 1
+    a_labels = {
+        row["sid"]: (row["id"], row["label"])
+        for row in con.execute("SELECT id, sid, label FROM scoring_labels WHERE service_id = 'svc_a'").fetchall()
+    }
+    assert a_labels["sid-initial"] == ("lbl-1", "bad")
+    assert "sid-new" in a_labels and a_labels["sid-new"][0] != "lbl-1" and a_labels["sid-new"][1] == "good"
+
+    # 3. Cross-service restore on svc_b colliding on "view-1", "alert-1", "lbl-1" run TWICE must be 100% idempotent (0 duplicates)
+    dr_b = _sample_dr_state("svc_b")
+    dr_b["views"][0]["name"] = "Svc B Run 1"
+    dr_b["alerts"][0]["name"] = "Svc B Alert Run 1"
+    s3.put_object(Bucket="bkt-b", Key="meta/dr_state.json", Body=json.dumps(dr_b).encode("utf-8"))
+    for run_no in (1, 2):
+        dr_b["views"][0]["name"] = f"Svc B Run {run_no}"
+        dr_b["alerts"][0]["name"] = f"Svc B Alert Run {run_no}"
+        s3.put_object(Bucket="bkt-b", Key="meta/dr_state.json", Body=json.dumps(dr_b).encode("utf-8"))
+        restore_from_fos(
+            service_id="svc_b",
+            bucket="bkt-b",
+            region="us-east-1",
+            fos_access_key="ak-b",
+            fos_secret_key="sk-b",
+            restore_serving_state=False,
+            s3_client=s3,
+            archive=ArchivePublication(InMemoryObjectStore()),
+            control=_InMemoryControlPlane(),
+            metadata_con=con,
+            save_config_fn=lambda _sid, _cfg: None,
+            clear_fos_client_fn=lambda _sid: None,
+            ensure_pg_schema_fn=lambda: True,
+            now=NOW,
+        )
+
+    b_views = con.execute("SELECT id, name FROM views WHERE service_id = 'svc_b'").fetchall()
+    b_alerts = con.execute("SELECT id, name FROM alerts WHERE service_id = 'svc_b'").fetchall()
+    b_labels = con.execute("SELECT id, sid FROM scoring_labels WHERE service_id = 'svc_b'").fetchall()
+    assert len(b_views) == 1 and b_views[0]["name"] == "Svc B Run 2"
+    assert len(b_alerts) == 1 and b_alerts[0]["name"] == "Svc B Alert Run 2"
+    assert len(b_labels) == 1
