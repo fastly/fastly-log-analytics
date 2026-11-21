@@ -356,6 +356,52 @@
         }
       }
     },
+    "/api/admin/provision/recover": {
+      "post": {
+        "summary": "Cold-start recover a Cloud service from Fastly Object Storage",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ProvisionRecoverInput" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Recovered service summary",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ProvisionRecoverResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/provision/recover": {
+      "post": {
+        "summary": "Cold-start recover a Cloud service from Fastly Object Storage (alias)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ProvisionRecoverInput" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Recovered service summary",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ProvisionRecoverResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/admin/jobs/{job_id}": {
       "parameters": [
         {
@@ -4574,6 +4620,55 @@
           },
           "compaction": { "$ref": "#/components/schemas/CompactionSetting" },
           "log_fields": { "$ref": "#/components/schemas/CaptureFields" }
+        }
+      },
+      "ProvisionRecoverInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["token", "service_id", "fos_bucket", "fos_region"],
+        "properties": {
+          "token": { "type": "string", "writeOnly": true },
+          "service_id": { "type": "string" },
+          "fos_bucket": { "type": "string" },
+          "fos_region": {
+            "type": "string",
+            "enum": [
+              "us-east-1",
+              "us-west",
+              "us-central-1",
+              "eu-central-1",
+              "eu-south-1",
+              "eu-west-1",
+              "uk-east-1",
+              "jp-central-1",
+              "au-east-1"
+            ]
+          },
+          "fos_prefix": { "type": "string", "default": "" },
+          "fos_access_key": { "type": "string", "writeOnly": true },
+          "fos_secret_key": { "type": "string", "writeOnly": true }
+        }
+      },
+      "ProvisionRecoverResponse": {
+        "type": "object",
+        "required": [
+          "ok",
+          "service_id",
+          "source",
+          "views_restored",
+          "catalog_generation",
+          "front_synced"
+        ],
+        "properties": {
+          "ok": { "type": "boolean" },
+          "service_id": { "type": "string" },
+          "source": {
+            "type": "string",
+            "enum": ["dr_state", "catalog_scan", "minimal"]
+          },
+          "views_restored": { "type": "integer", "minimum": 0 },
+          "catalog_generation": { "type": ["integer", "null"] },
+          "front_synced": { "type": "boolean" }
         }
       },
       "InstalledService": {

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from datetime import datetime
 from typing import Any
@@ -22,6 +23,7 @@ from backend.core.share_db import (
     mask_ip_or_chain,
     scrub_ip_text,
 )
+from backend.high_scale import cold_start_restore
 from backend.high_scale._common import raw_query_producer
 from backend.high_scale.aggregate_query import (
     DEFAULT_AGGREGATE_DIMENSIONS,
@@ -63,6 +65,8 @@ from backend.models.admin import (
     HighScaleQueryResponse,
     HighScaleRequestFactRequest,
     HighScaleRequestFactResponse,
+    HighScaleRestoreFromFosRequest,
+    HighScaleRestoreFromFosResponse,
     HighScaleRumFactResponse,
     QueryResponseMetadataResponse,
     ServingWatermarkResponse,
@@ -815,6 +819,71 @@ def cancel_query_job(
         raise HTTPException(status_code=404, detail=make_error("historical_job_not_found", "Historical job not found"))
     cancelled = jobs.cancel(job_id)
     return HighScaleHistoricalJobCancelResponse.with_telemetry(job_id=job_id, cancelled=cancelled)
+
+
+_restore_logger = logging.getLogger(__name__)
+
+
+@high_scale_router.post(
+    "/restore-from-fos",
+    response_model=HighScaleRestoreFromFosResponse,
+    dependencies=[Depends(require_admin)],
+)
+def restore_from_fos_endpoint(
+    req: HighScaleRestoreFromFosRequest,
+) -> HighScaleRestoreFromFosResponse:
+    secrets_to_hide = (req.fastly_api_key, req.fos_access_key, req.fos_secret_key)
+    pending_http_exc: HTTPException | None = None
+    result: cold_start_restore.ColdStartRestoreResult | None = None
+    try:
+        result = cold_start_restore.restore_from_fos(
+            service_id=req.service_id,
+            bucket=req.bucket,
+            region=req.region,
+            prefix=req.prefix,
+            archive_prefix=req.archive_prefix,
+            fastly_api_key=req.fastly_api_key,
+            fos_access_key=req.fos_access_key,
+            fos_secret_key=req.fos_secret_key,
+            restore_serving_state=req.restore_serving_state,
+        )
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        safe_msg = cold_start_restore.scrub_secrets(str(exc), secrets_to_hide)
+        _restore_logger.warning("Cold-start restore validation error for %s: %s", req.service_id, safe_msg)
+        pending_http_exc = HTTPException(
+            status_code=400,
+            detail=make_error("restore_from_fos_invalid", safe_msg),
+        )
+    except Exception as exc:
+        safe_msg = cold_start_restore.scrub_secrets(str(exc), secrets_to_hide)
+        _restore_logger.error(
+            "Cold-start restore failed for %s (%s): %s",
+            req.service_id,
+            type(exc).__name__,
+            safe_msg,
+        )
+        pending_http_exc = HTTPException(
+            status_code=500,
+            detail=make_error("restore_from_fos_failed", f"Cold-start restore failed: {safe_msg}"),
+        )
+
+    if pending_http_exc is not None:
+        raise pending_http_exc
+    assert result is not None
+
+    return HighScaleRestoreFromFosResponse(
+        status="ok",
+        service_id=result.service_id,
+        dr_state_restored=result.dr_state_restored,
+        views_restored=result.views_restored,
+        alerts_restored=result.alerts_restored,
+        scoring_labels_restored=result.scoring_labels_restored,
+        audit_logs_restored=result.audit_logs_restored,
+        manifests_registered=result.manifests_registered,
+        domains_rebuilt=result.domains_rebuilt,
+    )
 
 
 router = high_scale_router

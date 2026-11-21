@@ -33,6 +33,7 @@ describe('Cloud cost calculator', () => {
   it('labels missing measurements as reference assumptions and recalculates what-if traffic', () => {
     render(<CloudCostCalculator />)
     expect(screen.getByText(/Unavailable measurements retain/)).toBeInTheDocument()
+    expect(screen.getByText(/meta\/cloud_dr_state\.json/)).toBeInTheDocument()
     expect(screen.getAllByText('Reference')).toHaveLength(8)
     const total = screen.getByText('Total Estimated Monthly Cost').parentElement?.nextElementSibling
     const initial = total?.textContent

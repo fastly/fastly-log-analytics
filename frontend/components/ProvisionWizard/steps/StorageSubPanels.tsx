@@ -2,7 +2,14 @@
 
 import React from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { allowedLogPeriods, effectiveLogPeriod } from '@/lib/serviceDefaults'
+import {
+  allowedLogPeriods,
+  effectiveLogPeriod,
+  normalizeSnapshotInterval,
+  SNAPSHOT_INTERVAL_LABELS,
+  SNAPSHOT_INTERVAL_SELECT_OPTIONS,
+  type SnapshotIntervalMinutes,
+} from '@/lib/serviceDefaults'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -463,6 +470,29 @@ export function AutomationSection({ config, selectedServiceId, update }: Storage
       </div>
 
       <div className={cn("p-4 border rounded-md bg-muted/5 space-y-4 transition-opacity", syncDisabledClass)}>
+        <div className="space-y-1.5 max-w-sm">
+          <LabelWithInfo
+            label="Cloud Snapshot Interval"
+            info="How often Elevation flushes consolidated Parquet archives and DR state snapshots to FOS. Raw logs stay in FOS until archived (+15m grace) for zero data loss."
+          />
+          <Select
+            value={String(config.snapshot_interval_minutes)}
+            onValueChange={(v) => v && update("snapshot_interval_minutes", normalizeSnapshotInterval(Number(v)))}
+          >
+            <SelectTrigger aria-label="Cloud Snapshot Interval" className="h-8 text-xs">
+              <SelectValue>
+                {(val) => SNAPSHOT_INTERVAL_LABELS[Number(val) as SnapshotIntervalMinutes] || `${val}m`}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              {SNAPSHOT_INTERVAL_SELECT_OPTIONS.map((o) => (
+                <SelectItem key={o.value} value={o.value} className="text-xs">
+                  {o.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
         <div>
           <LabelWithInfo
             label="Data Retention Policy"

@@ -639,6 +639,152 @@ def test_expiry_tuning_fields_round_trip():
     assert out["keep_snapshot_days"] == 3 and out["expire_interval_mins"] == 30
 
 
+@pytest.mark.no_postgres
+@pytest.mark.parametrize("interval", [5, 15, 30, 60, 360, 1440])
+def test_snapshot_interval_minutes_accepts_all_valid_values(interval: int):
+    model = CronSettingsPartial(snapshot_interval_minutes=interval)  # type: ignore[arg-type]
+    assert model.snapshot_interval_minutes == interval
+
+
+@pytest.mark.no_postgres
+@pytest.mark.parametrize("bad_interval", [0, 1, 10, -5, 1441])
+def test_snapshot_interval_minutes_rejects_invalid_values(bad_interval: int):
+    with pytest.raises(ValidationError, match="snapshot_interval_minutes"):
+        CronSettingsPartial(snapshot_interval_minutes=bad_interval)  # type: ignore[arg-type]
+
+
+@pytest.mark.no_postgres
+def test_service_cron_sync_defaults_snapshot_interval_minutes_to_5():
+    from backend.models.common.services import ServiceCronSync
+
+    sync = ServiceCronSync(enabled=True)
+    assert sync.snapshot_interval_minutes == 5
+
+
+@pytest.mark.no_postgres
+def test_cron_settings_endpoint_persists_and_validates_snapshot_interval_minutes():
+    out = _post(
+        {"cron_sync": {"snapshot_interval_minutes": 60}},
+        {"enabled": True, "interval_seconds": 30, "delete_after": True},
+    )
+    assert out["snapshot_interval_minutes"] == 60
+    assert out["delete_after"] is True and out["enabled"] is True
+
+    # Partial update to unrelated field preserves snapshot_interval_minutes
+    out2 = _post(
+        {"cron_sync": {"enabled": False}},
+        {"enabled": True, "snapshot_interval_minutes": 360},
+    )
+    assert out2["enabled"] is False and out2["snapshot_interval_minutes"] == 360
+
+    # Invalid interval returns HTTP 422
+    cfg = {"service_id": "svc1", "name": "Test", "provisioning": {"cron_sync": {"enabled": True}}}
+    with _mutate_cfg_ctx(cfg):
+        resp = TestClient(app).post(
+            "/api/services/svc1/cron-settings",
+            json={"cron_sync": {"snapshot_interval_minutes": 10}},
+        )
+    assert resp.status_code == 422
+
+
+@pytest.mark.no_postgres
+def test_get_enriched_services_normalizes_legacy_and_custom_snapshot_interval():
+    from backend.services.service_manager import get_enriched_services
+
+    legacy_cfg = {
+        "service_id": "svc_legacy",
+        "name": "Legacy",
+        "provisioning": {"cron_sync": {"enabled": True, "delete_after": True}},
+    }
+    custom_cfg = {
+        "service_id": "svc_custom",
+        "name": "Custom",
+        "provisioning": {"cron_sync": {"enabled": True, "snapshot_interval_minutes": 60}},
+    }
+    with (
+        patch("backend.services.service_manager.svcconfig.list_configs", return_value=[legacy_cfg, custom_cfg]),
+        patch(
+            "backend.services.service_manager.svcconfig.refresh_all_service_names",
+            return_value={"svc_legacy": "Legacy", "svc_custom": "Custom"},
+        ),
+        patch("backend.services.service_manager.svcconfig.get_status", return_value={}),
+        patch("backend.services.service_manager._get_dir_stats", return_value=(0, 0)),
+    ):
+        services = get_enriched_services()
+    by_id = {s["service_id"]: s for s in services}
+    assert by_id["svc_legacy"]["cron_sync"]["snapshot_interval_minutes"] == 5
+    assert by_id["svc_custom"]["cron_sync"]["snapshot_interval_minutes"] == 60
+
+
+@pytest.mark.no_postgres
+def test_write_service_config_persists_and_preserves_snapshot_interval_minutes():
+    from backend import config as svcconfig
+    from backend.provision.orchestrator import write_service_config
+
+    write_service_config(
+        {
+            "logging_service_id": "svc_snap_1",
+            "name": "SnapSvc",
+            "fos_region": "us-east-1",
+            "fos_bucket_name": "bucket",
+            "snapshot_interval_minutes": 60,
+        }
+    )
+    cfg = svcconfig.load_config("svc_snap_1")
+    assert cfg is not None
+    assert cfg["provisioning"]["cron_sync"]["snapshot_interval_minutes"] == 60
+
+    # Re-writing without snapshot_interval_minutes preserves 60
+    write_service_config(
+        {
+            "logging_service_id": "svc_snap_1",
+            "name": "SnapSvc",
+            "fos_region": "us-east-1",
+            "fos_bucket_name": "bucket",
+        }
+    )
+    cfg2 = svcconfig.load_config("svc_snap_1")
+    assert cfg2 is not None
+    assert cfg2["provisioning"]["cron_sync"]["snapshot_interval_minutes"] == 60
+
+    # New service without snapshot_interval_minutes defaults to 5
+    write_service_config(
+        {
+            "logging_service_id": "svc_snap_2",
+            "name": "SnapSvc2",
+            "fos_region": "us-east-1",
+            "fos_bucket_name": "bucket",
+        }
+    )
+    cfg3 = svcconfig.load_config("svc_snap_2")
+    assert cfg3 is not None
+    assert cfg3["provisioning"]["cron_sync"]["snapshot_interval_minutes"] == 5
+
+
+@pytest.mark.no_postgres
+def test_provision_models_validate_snapshot_interval_minutes():
+    from backend.models.common.provision import ProvisionConfigRequest, ProvisionExecuteRequest
+
+    req = ProvisionExecuteRequest(token="tok", service_id="svc1", fos_bucket_name="bkt")
+    assert req.snapshot_interval_minutes == 5
+    req_custom = ProvisionExecuteRequest(
+        token="tok", service_id="svc1", fos_bucket_name="bkt", snapshot_interval_minutes=360
+    )
+    assert req_custom.snapshot_interval_minutes == 360
+    with pytest.raises(ValidationError, match="snapshot_interval_minutes"):
+        ProvisionExecuteRequest(
+            token="tok",
+            service_id="svc1",
+            fos_bucket_name="bkt",
+            snapshot_interval_minutes=12,  # type: ignore[arg-type]
+        )
+
+    cfg_req = ProvisionConfigRequest(snapshot_interval_minutes=1440)
+    assert cfg_req.snapshot_interval_minutes == 1440
+    with pytest.raises(ValidationError, match="snapshot_interval_minutes"):
+        ProvisionConfigRequest(snapshot_interval_minutes=99)  # type: ignore[arg-type]
+
+
 # ── Viewer Key Generation ──
 _FAKE_CFG = {
     "service_id": "svc123",

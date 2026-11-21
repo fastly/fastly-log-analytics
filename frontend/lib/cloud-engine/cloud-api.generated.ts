@@ -480,6 +480,86 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/provision/recover": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cold-start recover a Cloud service from Fastly Object Storage */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ProvisionRecoverInput"];
+                };
+            };
+            responses: {
+                /** @description Recovered service summary */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ProvisionRecoverResponse"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/provision/recover": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cold-start recover a Cloud service from Fastly Object Storage (alias) */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ProvisionRecoverInput"];
+                };
+            };
+            responses: {
+                /** @description Recovered service summary */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ProvisionRecoverResponse"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/jobs/{job_id}": {
         parameters: {
             query?: never;
@@ -2815,6 +2895,26 @@ export interface components {
             rum_retention_days: number;
             compaction?: components["schemas"]["CompactionSetting"];
             log_fields?: components["schemas"]["CaptureFields"];
+        };
+        ProvisionRecoverInput: {
+            token: string;
+            service_id: string;
+            fos_bucket: string;
+            /** @enum {string} */
+            fos_region: "us-east-1" | "us-west" | "us-central-1" | "eu-central-1" | "eu-south-1" | "eu-west-1" | "uk-east-1" | "jp-central-1" | "au-east-1";
+            /** @default  */
+            fos_prefix: string;
+            fos_access_key?: string;
+            fos_secret_key?: string;
+        };
+        ProvisionRecoverResponse: {
+            ok: boolean;
+            service_id: string;
+            /** @enum {string} */
+            source: "dr_state" | "catalog_scan" | "minimal";
+            views_restored: number;
+            catalog_generation: number | null;
+            front_synced: boolean;
         };
         InstalledService: {
             service_id: string;

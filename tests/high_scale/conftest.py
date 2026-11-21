@@ -73,6 +73,7 @@ class HighScaleLedger:
                 archive_manifest_id TEXT,
                 archive_owner_epoch INTEGER,
                 last_error TEXT,
+                updated_at INTEGER,
                 UNIQUE (service_id, object_key)
             )
             """
@@ -301,6 +302,46 @@ class HighScaleLedger:
     def source(self, service_id: str, object_key: str) -> SourceObject | None:
         return self._get(_object_id(service_id, object_key))
 
+    def unarchived_appended_summary(self, service_id: str, domain: str) -> tuple[int, int, datetime | None]:
+        row = self._con.execute(
+            """
+            SELECT COUNT(*), COALESCE(SUM(size_bytes), 0), MIN(updated_at)
+            FROM source_objects
+            WHERE service_id = ? AND domain = ? AND status = 'appended' AND archive_manifest_id IS NULL
+            """,
+            (service_id, domain),
+        ).fetchone()
+        if not row or not row[0]:
+            return (0, 0, None)
+        oldest = datetime.fromtimestamp(int(row[2]), tz=UTC) if row[2] is not None else None
+        return (int(row[0]), int(row[1]), oldest)
+
+    def unarchived_appended_sources(
+        self,
+        service_id: str,
+        domain: str,
+        *,
+        limit: int = 500,
+        max_bytes: int | None = None,
+    ) -> tuple[SourceObject, ...]:
+        rows = self._con.execute(
+            """
+            SELECT * FROM source_objects
+            WHERE service_id = ? AND domain = ? AND status = 'appended' AND archive_manifest_id IS NULL
+            ORDER BY object_key LIMIT ?
+            """,
+            (service_id, domain, max(1, int(limit))),
+        ).fetchall()
+        selected: list[SourceObject] = []
+        running_bytes = 0
+        for row in rows:
+            src = self._row_to_source(row)
+            if max_bytes is not None and selected and running_bytes + src.size_bytes > max_bytes:
+                break
+            selected.append(src)
+            running_bytes += src.size_bytes
+        return tuple(selected)
+
     def _transition(
         self,
         service_id: str,
@@ -314,8 +355,8 @@ class HighScaleLedger:
         if current.lease_generation != lease_generation or current.status not in allowed_from | {target_status}:
             raise ValueError(f"cannot transition {current.status} to {target_status}")
         self._con.execute(
-            "UPDATE source_objects SET status = ? WHERE object_id = ?",
-            (target_status, object_id),
+            "UPDATE source_objects SET status = ?, updated_at = ? WHERE object_id = ?",
+            (target_status, int(datetime.now(UTC).timestamp()), object_id),
         )
         self._con.commit()
         return self._require(object_id)

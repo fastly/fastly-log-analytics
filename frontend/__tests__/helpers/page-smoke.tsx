@@ -199,7 +199,7 @@ export const FULL_CONFIG: ProvisionConfig = {
   fos_prefix: 'logs/', fos_access_key: 'AK', fos_secret_key: 'SK', sample_rate: 1, edge_only: true,
   custom_condition: '', log_period: 60, rum_log_period: 300, cdn_service_name: 'My CDN',
   cdn_prefix: 'mycdn', cdn_shield: 'iad-va-us', cdn_url: '', cdn_secret: '', enable_cron_sync: true,
-  delete_after: false,
+  delete_after: false, snapshot_interval_minutes: 5,
   log_fields: { groups: [], field_overrides: {} }, ngwaf_workspace_id: '', cmcd_enabled: false,
   cmcd_mode: 'query_string', cmcd_version: 1, logging_enabled: true, rum_enabled: false,
   log_retention_days: 30, rum_retention_days: 30,

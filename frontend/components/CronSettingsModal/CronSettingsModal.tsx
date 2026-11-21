@@ -10,7 +10,7 @@ import { SSEActionDialogShell, SSEExecutionSection } from '@/components/SSEModal
 import { Button } from '@/components/ui/button'
 import { useOpenGeneration, useSSE } from '@/hooks/useSSE'
 import { queryKeys } from "@/lib/api"
-import { SERVICE_DEFAULTS } from '@/lib/serviceDefaults'
+import { SERVICE_DEFAULTS, normalizeSnapshotInterval } from '@/lib/serviceDefaults'
 import type { ServiceConfig } from '@/types/api'
 import {
   SYNC_INTERVAL_OPTIONS,
@@ -37,6 +37,7 @@ interface CronSettingsModalProps {
 const cronSettingsSchema = z.object({
   syncIntervalMins: z.string(),
   pollingMode: z.enum(['regular', 'adaptive']),
+  snapshotIntervalMinutes: z.enum(['5', '15', '30', '60', '360', '1440']),
   syncEnabled: z.boolean(),
   deleteAfter: z.boolean(),
   syncLogEnabled: z.boolean(),
@@ -62,6 +63,9 @@ function initialSettings(service: ServiceConfig | null): CronSettingsFormValues 
   return {
     syncIntervalMins: String(service?.cron_sync?.interval_mins ?? 2),
     pollingMode: service?.cron_sync?.polling_mode ?? 'adaptive',
+    snapshotIntervalMinutes: String(
+      normalizeSnapshotInterval(service?.cron_sync?.snapshot_interval_minutes),
+    ) as CronSettingsFormValues['snapshotIntervalMinutes'],
     syncEnabled: service?.cron_sync?.enabled ?? false,
     deleteAfter: service?.cron_sync?.delete_after ?? false,
     syncLogEnabled: service?.cron_sync?.log_enabled !== false,
@@ -93,7 +97,7 @@ function CronSettingsModalBody({ service, open, onOpenChange }: CronSettingsModa
   const {
     syncEnabled, deleteAfter, syncLogEnabled, syncRetention, dataRetention,
     rumRetention, ngwafInterval, ngwafLogEnabled, ngwafRetention, pollingMode,
-    rumSyncEnabled, rumLogPeriod, rumDeleteAfter,
+    snapshotIntervalMinutes, rumSyncEnabled, rumLogPeriod, rumDeleteAfter,
   } = useWatch({ control }) as CronSettingsFormValues
   const bind = <K extends keyof CronSettingsFormValues>(key: K) => (v: CronSettingsFormValues[K]) =>
     setValue(key, v as PathValue<CronSettingsFormValues, K>, { shouldDirty: true })
@@ -105,6 +109,7 @@ function CronSettingsModalBody({ service, open, onOpenChange }: CronSettingsModa
         enabled: syncEnabled,
         delete_after: deleteAfter,
         polling_mode: pollingMode,
+        snapshot_interval_minutes: Number(snapshotIntervalMinutes),
         log_enabled: syncLogEnabled,
         log_retention_days: parseInt(syncRetention),
         data_retention_days: parseInt(dataRetention),
@@ -179,6 +184,8 @@ function CronSettingsModalBody({ service, open, onOpenChange }: CronSettingsModa
             setSyncEnabled={bind('syncEnabled')}
             pollingMode={pollingMode}
             setPollingMode={bind('pollingMode')}
+            snapshotIntervalMinutes={snapshotIntervalMinutes}
+            setSnapshotIntervalMinutes={v => bind('snapshotIntervalMinutes')(v as CronSettingsFormValues['snapshotIntervalMinutes'])}
             deleteAfter={deleteAfter}
             setDeleteAfter={bind('deleteAfter')}
             dataRetention={dataRetention}

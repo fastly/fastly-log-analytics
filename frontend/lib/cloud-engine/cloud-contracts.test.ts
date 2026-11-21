@@ -23,6 +23,10 @@ type GeneratedFlushResult =
   paths["/api/admin/logs/flush"]["post"]["responses"]["200"]["content"]["application/json"];
 type GeneratedSweepResult =
   paths["/api/admin/logs/sweep"]["post"]["responses"]["200"]["content"]["application/json"];
+type GeneratedProvisionRecoverInput = components["schemas"]["ProvisionRecoverInput"];
+type GeneratedProvisionRecoverResponse = components["schemas"]["ProvisionRecoverResponse"];
+type GeneratedProvisionRecoverPathResponse =
+  paths["/api/admin/provision/recover"]["post"]["responses"]["200"]["content"]["application/json"];
 
 describe("Cloud wire contract parity", () => {
   it("pins replaced Cloud wire types to cloud-api.generated.ts", () => {
@@ -30,6 +34,10 @@ describe("Cloud wire contract parity", () => {
     expectTypeOf<HistoryJob>().toEqualTypeOf<GeneratedLogHistoryJob>();
     expectTypeOf<FlushResult>().toEqualTypeOf<GeneratedFlushResult>();
     expectTypeOf<SweepResult>().toEqualTypeOf<GeneratedSweepResult>();
+    expectTypeOf<GeneratedProvisionRecoverResponse>().toEqualTypeOf<GeneratedProvisionRecoverPathResponse>();
+    expectTypeOf<GeneratedProvisionRecoverInput["fos_region"]>().toEqualTypeOf<
+      "us-east-1" | "us-west" | "us-central-1" | "eu-central-1" | "eu-south-1" | "eu-west-1" | "uk-east-1" | "jp-central-1" | "au-east-1"
+    >();
   });
 
   describe("DeleteDataStatus", () => {

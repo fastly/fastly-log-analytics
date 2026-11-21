@@ -14,6 +14,7 @@ import { hydrateRoot } from 'react-dom/client'
 import { QueryClientProvider } from '@tanstack/react-query'
 import type { PlotlyLayout, PlotlyTrace } from '@/types/api'
 import { useServiceStore } from '@/stores/filterStore'
+import { setCloudModeRuntime } from '@/lib/cloud-engine/mode'
 
 let mockSearchParamsString = 'service=svc-test'
 let mockScoringSubcomponents = false
@@ -310,6 +311,34 @@ test('ServicesTable renders services, manual Refresh Status trigger, and Delete 
   expect(deleteDataItem.compareDocumentPosition(screen.getByText('Teardown Service')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   await user.click(deleteDataItem)
   expect(await screen.findByText('Delete Data: Production Edge CDN')).toBeInTheDocument()
+})
+
+test('ServicesTable shows Restore/Recover from FOS when 0 services exist in Elevation and Cloud modes, and hides in Cloud when a service exists', async () => {
+  try {
+    setCloudModeRuntime(false)
+    server.use(http.get(`${API_BASE}/api/services`, () => HttpResponse.json({ services: [] })))
+    const { unmount } = renderWithQuery(<ServicesTable />, { queryClient: createTestQueryClient({ queries: { staleTime: 0 } }) })
+    await waitFor(() => expect(screen.getByTestId('restore-from-fos-btn')).toBeInTheDocument())
+    expect(screen.getByTestId('restore-from-fos-btn')).toHaveTextContent('Restore from FOS')
+    unmount()
+
+    setCloudModeRuntime(true)
+    const { unmount: unmountCloudEmpty } = renderWithQuery(<ServicesTable />, { queryClient: createTestQueryClient({ queries: { staleTime: 0 } }) })
+    await waitFor(() => expect(screen.getByTestId('restore-from-fos-btn')).toBeInTheDocument())
+    expect(screen.getByTestId('restore-from-fos-btn')).toHaveTextContent('Recover from FOS')
+    unmountCloudEmpty()
+
+    server.use(
+      http.get(`${API_BASE}/api/services`, () =>
+        HttpResponse.json({ services: [{ service_id: 'cloud-1', name: 'Cloud Site', fos_bucket: 'cloud-bkt' }] }),
+      ),
+    )
+    renderWithQuery(<ServicesTable />, { queryClient: createTestQueryClient({ queries: { staleTime: 0 } }) })
+    await waitFor(() => expect(screen.getByText('Cloud Site')).toBeInTheDocument())
+    expect(screen.queryByTestId('restore-from-fos-btn')).not.toBeInTheDocument()
+  } finally {
+    setCloudModeRuntime(false)
+  }
 })
 
 const evidence = {

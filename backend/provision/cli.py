@@ -23,7 +23,11 @@ from typing import Any
 import typer
 from rich.console import Console
 
-from backend.core.service_defaults import DEFAULT_LOG_PERIOD_SECONDS
+from backend.core.service_defaults import (
+    DEFAULT_LOG_PERIOD_SECONDS,
+    DEFAULT_SNAPSHOT_INTERVAL_MINUTES,
+    VALID_SNAPSHOT_INTERVAL_MINUTES,
+)
 
 # ── Rich Consoles & ANSI colour helpers (folded from utils.py) ───────────────
 _stdout = Console(highlight=False, markup=False, soft_wrap=True)
@@ -354,6 +358,10 @@ def wizard(args) -> dict:
         "delete_after": not getattr(args, "disable_delete_after", False) if delete_after else False,
         "enable_cron_sync": not getattr(args, "disable_cron_sync", False),
         "log_retention_days": getattr(args, "log_retention_days", 30) or 30,
+        "snapshot_interval_minutes": _validate_snapshot_interval_minutes(
+            getattr(args, "snapshot_interval_minutes", DEFAULT_SNAPSHOT_INTERVAL_MINUTES)
+        )
+        or DEFAULT_SNAPSHOT_INTERVAL_MINUTES,
         "log_fields": log_fields_cfg,
     }
 
@@ -694,6 +702,62 @@ def handle_list_fields(args):
 # into a SimpleNamespace, and delegates to the matching handler.
 # ────────────────────────────────────────────────────────────────────────────
 
+
+def _validate_snapshot_interval_minutes(value: int | None) -> int | None:
+    if value is not None and (
+        isinstance(value, bool) or not isinstance(value, int) or value not in VALID_SNAPSHOT_INTERVAL_MINUTES
+    ):
+        allowed = ", ".join(str(v) for v in VALID_SNAPSHOT_INTERVAL_MINUTES)
+        raise typer.BadParameter(f"snapshot_interval_minutes must be one of: {allowed} (got {value})")
+    return value
+
+
+def handle_set_snapshot_interval(args) -> None:
+    from backend import config as svcconfig
+
+    interval = _validate_snapshot_interval_minutes(args.snapshot_interval_minutes)
+    assert interval is not None
+
+    service_id = getattr(args, "service_id", None)
+    if not service_id:
+        configs = svcconfig.list_configs()
+        if len(configs) == 1:
+            service_id = configs[0].get("service_id", "")
+        elif len(configs) == 0:
+            fail("No configured services found. Pass --service-id.")
+            sys.exit(1)
+        else:
+            ids = ", ".join(str(c.get("service_id", "")) for c in configs)
+            fail(f"Multiple services configured ({ids}). Pass --service-id.")
+            sys.exit(1)
+
+    if not svcconfig.load_config(service_id):
+        fail(f"Service config not found: {service_id}")
+        sys.exit(1)
+
+    def _mutate(cfg: dict[str, Any]) -> None:
+        prov = cfg.get("provisioning")
+        if not isinstance(prov, dict):
+            prov = {}
+            cfg["provisioning"] = prov
+        cron_sync = prov.get("cron_sync")
+        if not isinstance(cron_sync, dict):
+            cron_sync = {}
+            prov["cron_sync"] = cron_sync
+        cron_sync["snapshot_interval_minutes"] = interval
+
+    svcconfig.mutate_config(service_id, _mutate)
+
+    try:
+        from backend.provision.orchestrator import _sync_crontab
+
+        _sync_crontab()
+    except Exception:
+        pass
+
+    ok(f"Updated snapshot_interval_minutes={interval} for service {service_id}")
+
+
 app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
@@ -719,6 +783,12 @@ def cmd_provision(
     disable_delete_after: bool = typer.Option(False, "--disable-delete-after"),
     disable_cron_sync: bool = typer.Option(False, "--disable-cron-sync"),
     log_retention_days: int = typer.Option(30, "--log-retention-days"),
+    snapshot_interval_minutes: int = typer.Option(
+        DEFAULT_SNAPSHOT_INTERVAL_MINUTES,
+        "--snapshot-interval-minutes",
+        callback=_validate_snapshot_interval_minutes,
+        help="Cloud snapshot interval in minutes (5, 15, 30, 60, 360, 1440).",
+    ),
     preset: str | None = typer.Option(None, "--preset"),
     enable_group: list[str] | None = typer.Option(None, "--enable-group"),
     disable_group: list[str] | None = typer.Option(None, "--disable-group"),
@@ -742,6 +812,7 @@ def cmd_provision(
         disable_delete_after=disable_delete_after,
         disable_cron_sync=disable_cron_sync,
         log_retention_days=log_retention_days,
+        snapshot_interval_minutes=snapshot_interval_minutes,
         preset=preset,
         enable_group=enable_group,
         disable_group=disable_group,
@@ -878,6 +949,23 @@ def cmd_list_groups(
 @app.command("list-fields", help="List the log-field catalog (diagnostic).")
 def cmd_list_fields():
     handle_list_fields(SimpleNamespace())
+
+
+@app.command("set-snapshot-interval", help="Set cloud snapshot interval (minutes) for a service.")
+def cmd_set_snapshot_interval(
+    snapshot_interval_minutes: int = typer.Option(
+        ...,
+        "--snapshot-interval-minutes",
+        callback=_validate_snapshot_interval_minutes,
+        help="Cloud snapshot interval in minutes (5, 15, 30, 60, 360, 1440).",
+    ),
+    service_id: str | None = typer.Option(None, "--service-id", help="Target Fastly service ID."),
+):
+    args = SimpleNamespace(
+        service_id=service_id,
+        snapshot_interval_minutes=snapshot_interval_minutes,
+    )
+    handle_set_snapshot_interval(args)
 
 
 def main() -> None:

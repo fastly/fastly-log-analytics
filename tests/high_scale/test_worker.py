@@ -473,3 +473,34 @@ def test_bounded_worker_run_closes_the_metadata_pool_it_opened(
         assert worker.main() == 0
     assert len(opened) == 1 and opened[0].closed
     assert pg_pool._pool is None
+
+
+@pytest.mark.no_postgres
+def test_worker_loop_runs_archive_flushes_with_configured_interval_and_isolates_errors() -> None:
+    flush_calls: list[tuple[str, str, int]] = []
+
+    class _FlushingCoordinator:
+        def run_page(self, *, service_id: str, domain: str):
+            return MagicMock()
+
+        def flush_archive_snapshot(self, *, service_id: str, domain: str, snapshot_interval_minutes: int = 5):
+            flush_calls.append((service_id, domain, snapshot_interval_minutes))
+            if domain == "rum_vitals":
+                raise RuntimeError("transient flush failure")
+
+    loop = HighScaleWorkerLoop(
+        coordinator=_FlushingCoordinator(),  # type: ignore[arg-type]
+        service_ids=("svc-a",),
+        domains=("request", "rum_vitals", "rum_errors"),
+        interval_seconds=0.0,
+        snapshot_interval_loader=lambda sid: 60 if sid == "svc-a" else 5,
+        archive_flush_check_interval_seconds=0.0,
+    )
+    results = loop.run_once()
+    assert len(results) == 3
+    # All 3 domains attempted with configured interval=60 despite rum_vitals error
+    assert flush_calls == [
+        ("svc-a", "request", 60),
+        ("svc-a", "rum_vitals", 60),
+        ("svc-a", "rum_errors", 60),
+    ]

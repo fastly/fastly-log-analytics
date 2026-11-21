@@ -968,6 +968,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/high-scale/restore-from-fos": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Restore From Fos Endpoint */
+        post: operations["restore_from_fos_endpoint_api_high_scale_restore_from_fos_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/insights": {
         parameters: {
             query?: never;
@@ -7607,6 +7624,8 @@ export interface components {
             expire_interval_mins?: number | null;
             /** Delete After */
             delete_after?: boolean | null;
+            /** Snapshot Interval Minutes */
+            snapshot_interval_minutes?: (5 | 15 | 30 | 60 | 360 | 1440) | null;
         };
         /** CurrentStorageResponse */
         CurrentStorageResponse: {
@@ -8855,6 +8874,65 @@ export interface components {
             metadata: components["schemas"]["QueryResponseMetadataResponse"];
             /** Next Cursor */
             next_cursor: string | null;
+        };
+        /** HighScaleRestoreFromFosRequest */
+        HighScaleRestoreFromFosRequest: {
+            /** Service Id */
+            service_id: string;
+            /** Bucket */
+            bucket: string;
+            /** Region */
+            region: string;
+            /**
+             * Prefix
+             * @default
+             */
+            prefix: string;
+            /**
+             * Archive Prefix
+             * @default high-scale/archive
+             */
+            archive_prefix: string;
+            /** Fastly Api Key */
+            fastly_api_key?: string | null;
+            /** Fos Access Key */
+            fos_access_key?: string | null;
+            /** Fos Secret Key */
+            fos_secret_key?: string | null;
+            /**
+             * Restore Serving State
+             * @default true
+             */
+            restore_serving_state: boolean;
+        };
+        /** HighScaleRestoreFromFosResponse */
+        HighScaleRestoreFromFosResponse: {
+            /**
+             * Status
+             * @default ok
+             * @constant
+             */
+            status: "ok";
+            /** Service Id */
+            service_id: string;
+            /** Dr State Restored */
+            dr_state_restored: boolean;
+            /** Views Restored */
+            views_restored: number;
+            /** Alerts Restored */
+            alerts_restored: number;
+            /** Scoring Labels Restored */
+            scoring_labels_restored: number;
+            /** Audit Logs Restored */
+            audit_logs_restored: number;
+            /** Manifests Registered */
+            manifests_registered: number;
+            /** Domains Rebuilt */
+            domains_rebuilt: {
+                [key: string]: {
+                    [key: string]: unknown;
+                };
+            };
         };
         /**
          * HighScaleRetentionRecommendationResponse
@@ -14287,6 +14365,11 @@ export interface components {
              * @default 30
              */
             rum_retention_days: number;
+            /**
+             * Snapshot Interval Minutes
+             * @default 5
+             */
+            snapshot_interval_minutes: number;
             /** Avg Nodes Per Flush */
             avg_nodes_per_flush?: number | null;
         };
@@ -14363,6 +14446,11 @@ export interface components {
              * @default 30
              */
             rum_retention_days: number;
+            /**
+             * Snapshot Interval Minutes
+             * @default 5
+             */
+            snapshot_interval_minutes: number;
             /** Avg Nodes Per Flush */
             avg_nodes_per_flush?: number | null;
             /** Requests Per Day */
@@ -14471,6 +14559,8 @@ export interface components {
             delete_after?: boolean | null;
             /** Log Retention Days */
             log_retention_days?: number | null;
+            /** Snapshot Interval Minutes */
+            snapshot_interval_minutes?: (5 | 15 | 30 | 60 | 360 | 1440) | null;
             /** Log Fields */
             log_fields?: string | {
                 [key: string]: unknown;
@@ -14579,6 +14669,12 @@ export interface components {
              * @default 30
              */
             rum_retention_days: number;
+            /**
+             * Snapshot Interval Minutes
+             * @default 5
+             * @enum {integer}
+             */
+            snapshot_interval_minutes: 5 | 15 | 30 | 60 | 360 | 1440;
             /** Log Fields */
             log_fields?: string | null;
             /**
@@ -17257,6 +17353,12 @@ export interface components {
             expire_interval_mins?: number | null;
             /** Delete After */
             delete_after?: boolean | null;
+            /**
+             * Snapshot Interval Minutes
+             * @default 5
+             * @enum {integer}
+             */
+            snapshot_interval_minutes: 5 | 15 | 30 | 60 | 360 | 1440;
         };
         /**
          * ServiceScopePayload
@@ -25719,6 +25821,111 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HighScaleHistoricalJobCancelResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    restore_from_fos_endpoint_api_high_scale_restore_from_fos_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HighScaleRestoreFromFosRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HighScaleRestoreFromFosResponse"];
                 };
             };
             /** @description Bad request */

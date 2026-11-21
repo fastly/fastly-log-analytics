@@ -191,6 +191,8 @@ describe("Cloud endpoint bridges", () => {
     ).sort();
     expect(NATIVE_ROUTES.flatMap(([methods, path]) => methods.split(",").map((method) => `${method} ${path}`)).sort()).toEqual(declared);
     expect(isNativeCloudRoute("POST", "/api/admin/invites/fixture/revoke")).toBe(true);
+    expect(isNativeCloudRoute("POST", "/api/admin/provision/recover")).toBe(true);
+    expect(isNativeCloudRoute("POST", "/api/provision/recover")).toBe(true);
     expect(isNativeCloudRoute("DELETE", "/api/admin/invites/fixture/revoke")).toBe(false);
     expect(isNativeCloudRoute("POST", "/api/admin/services/fixture/unknown")).toBe(false);
   });

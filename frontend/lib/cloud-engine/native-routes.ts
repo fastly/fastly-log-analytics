@@ -5,6 +5,8 @@ export const NATIVE_ROUTES: ReadonlyArray<readonly [string, string]> = [
   ["POST", "/api/provision/services"],
   ["POST", "/api/provision/validate"],
   ["POST", "/api/provision/execute"],
+  ["POST", "/api/admin/provision/recover"],
+  ["POST", "/api/provision/recover"],
   ["GET,POST", "/api/admin/services/{service_id}/delete-data"],
   ["POST", "/api/admin/services/{service_id}/delete-data/cancel"],
   ["POST", "/api/admin/services/{service_id}/reconcile"],

@@ -186,6 +186,9 @@ export const DEFAULT_INPUTS: EstimateInputs = {
  *
  * Idle ingest dispatches write 2 KV keys each (`cron:state` and the outbox bucket) and run once
  * per 300 s period, 288 a day (`an_idle_tick_is_read_dominated_and_over_reports_its_kv_ops`).
+ * Fixed daily `fosClassAPerDay`, `kvClassBPerDay`, and `fixedStoredGb` also cover event-driven
+ * Cloud DR state snapshots (`meta/cloud_dr_state.json`, classified under `pq_ops`), written when
+ * service settings or saved views change and folded automatically into measured `fos_usage`.
  */
 export const DEFAULT_UNITS: UnitCosts = {
   appRequestsPerDay: 62_000,
@@ -527,12 +530,14 @@ export function estimateMonthly(
       id: "storage",
       label: "Object Storage",
       detail: `${gb(storedGb)} GB-months`,
+      help: "Includes raw logs, processed Parquet, and fixed pq_ops storage (telemetry plus event-driven meta/cloud_dr_state.json DR snapshots).",
       usd: storedGb * rates.storage_rate_per_gb_month,
     },
     {
       id: "ops",
       label: "Storage operations",
       detail: `A ${count(classA)} · B ${count(classB)}`,
+      help: "Includes ingest/compaction reads and writes plus fixed Class A ops such as event-driven meta/cloud_dr_state.json DR snapshots (measured from fos_usage when usage logging is enabled).",
       usd:
         (classA / 1000) * rates.class_a_rate_per_1k +
         (classB / 10_000) * rates.class_b_rate_per_10k,

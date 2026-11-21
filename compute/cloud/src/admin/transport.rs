@@ -401,6 +401,11 @@ impl<'a, R: Runtime> Context<'a, R> {
         }
         Ok(())
     }
+    pub fn remaining_calls(&self) -> u32 {
+        24u32
+            .saturating_sub(self.calls.get())
+            .min(self.runtime.admin_remaining_calls())
+    }
     fn charge(&self) -> Result<(), Error> {
         self.check()?;
         self.calls.set(self.calls.get() + 1);

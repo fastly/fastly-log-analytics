@@ -7,7 +7,16 @@ import { failure } from "./engine-utils";
 
 type RunJob = (jobId: string, signal: AbortSignal) => Response;
 
-const SELF_HOSTED_ONLY = new Set(["cdn_service_name", "cdn_service_id", "cdn_shield", "cdn_url", "cdn_prefix", "enable_cron_sync", "ngwaf_workspace_id"]);
+const SELF_HOSTED_ONLY = new Set([
+  "cdn_service_name",
+  "cdn_service_id",
+  "cdn_shield",
+  "cdn_url",
+  "cdn_prefix",
+  "enable_cron_sync",
+  "snapshot_interval_minutes",
+  "ngwaf_workspace_id",
+]);
 
 function optionalNumber(value: unknown): number | undefined {
   if (value === null || value === undefined || value === "") return undefined;

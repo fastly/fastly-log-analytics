@@ -215,7 +215,7 @@ impl Default for UsageAgg {
 }
 
 fn dataset_of(path: &str) -> &'static str {
-    if path.contains("processed/ops/") {
+    if path.contains("processed/ops/") || path.contains("meta/") {
         "pq_ops"
     } else if path.contains("processed/rum/") {
         "pq_rum"
@@ -1082,7 +1082,7 @@ pub fn stats_field_buckets(body: &Value, field: &str) -> Result<StatsBuckets, St
 #[cfg(test)]
 mod billing_tests {
     use super::{
-        build_platform_usage_response, daily_totals, fetch_platform_aggregate_metrics,
+        build_platform_usage_response, daily_totals, dataset_of, fetch_platform_aggregate_metrics,
         fetch_platform_entity_metrics, platform_compute, platform_geography, platform_ngwaf,
         platform_storage, record_billing_field, sum_stats_field, UsageAgg, BILLING_FIELDS,
     };
@@ -1090,6 +1090,25 @@ mod billing_tests {
     use crate::auth::settings::UsageLogging;
     use serde_json::json;
     use std::cell::Cell;
+
+    #[test]
+    fn dataset_of_classifies_meta_as_pq_ops() {
+        assert_eq!(dataset_of("meta/cloud_dr_state.json"), "pq_ops");
+        assert_eq!(dataset_of("tenant/meta/cloud_dr_state.json"), "pq_ops");
+        assert_eq!(dataset_of("processed/ops/usage.parquet"), "pq_ops");
+        assert_eq!(dataset_of("processed/rum/a.parquet"), "pq_rum");
+        assert_eq!(dataset_of("processed/request/a.parquet"), "pq_request");
+        assert_eq!(dataset_of("raw/rum/a.zst"), "raw_rum");
+        assert_eq!(dataset_of("raw/request/a.zst"), "raw_request");
+
+        let agg = UsageAgg::default();
+        agg.set_caller("admin:dr_state");
+        agg.record_fos("PUT", "meta/cloud_dr_state.json", "", Some(200), 1, 512, 0);
+        let rows = agg.drain_rows(&UsageLogging::default());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["dataset"], "pq_ops");
+        assert_eq!(rows[0]["op_class"], "A");
+    }
 
     #[test]
     fn geography_sums_regions_and_shares() {

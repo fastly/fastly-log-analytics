@@ -839,7 +839,14 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
                 let Some(service) = service else {
                     return Ok(error(409, "No active service is provisioned."));
                 };
-                return crate::views::handle(self.runtime, &service.service_id, user.role, request);
+                let response =
+                    crate::views::handle(self.runtime, &service.service_id, user.role, request)?;
+                if matches!(request.method.as_str(), "POST" | "PUT" | "DELETE")
+                    && (200..300).contains(&response.status)
+                {
+                    crate::admin::dr::sync_best_effort(self.runtime, &service);
+                }
+                return Ok(response);
             }
             let admin_page = is_admin_page_path(path);
             let scoring_api = path.starts_with("/api/services/") && path.contains("/scoring/");

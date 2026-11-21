@@ -227,7 +227,15 @@ vi.mock('@/lib/utils', async (importOriginal) => ({
     range: [start, end],
   }),
 }))
-vi.mock('@/components/SSEModal', () => ({ ControlledSSEModal: () => null, SSEModal: () => null, SSEProgressView: () => null, SSEExecutionSection: () => null, SSEDialogFooter: () => null }))
+vi.mock('@/components/SSEModal', () => ({
+  ControlledSSEModal: () => null,
+  SSEModal: () => null,
+  SSEProgressView: () => null,
+  SSEExecutionSection: () => null,
+  SSEDialogFooter: () => null,
+  SSEActionDialogShell: ({ open, children, confirmButton }: { open?: boolean; children?: React.ReactNode; confirmButton?: React.ReactNode }) =>
+    open ? <div>{children}{confirmButton}</div> : null,
+}))
 vi.mock('@/components/SyncStatusBadge/SyncStatusBadge', async (importOriginal) => ({ ...(await importOriginal<typeof import('@/components/SyncStatusBadge/SyncStatusBadge')>()), BackfillRangeModal: () => null }))
 vi.mock('@/components/ReportLayout', async (importOriginal) => ({ ...(await importOriginal<typeof import('@/components/ReportLayout')>()), NoServiceSelected: () => null }))
 
@@ -245,7 +253,7 @@ import { DiagnosticsPanel } from '@/app/admin/_sections/OperationsOverview'
 import { server } from '@/__tests__/helpers/msw/handlers'
 import { client, getApiBase, getPageLoadId } from '@/lib/api'
 import { setCloudModeRuntime } from '@/lib/cloud-engine/mode'
-import { LogSyncSection } from '@/components/CronSettingsModal/CronSettingsModal'
+import { CronSettingsModal, LogSyncSection } from '@/components/CronSettingsModal/CronSettingsModal'
 import LogsClient, { CronLiveLog, QuickActionsBar, SchemaTab, CRON_EXPLANATIONS, CRON_DISPLAY_NAMES, CRON_GROUPS } from '@/app/logs/_sections/LogsClient'
 import { DataTable, DataTableReadonly, DateTimeCell, FilterValueCell, buildDashboardFilterUrl, makeLatencyColumns, type LatencyRow } from '@/components/DataTable'
 import { BotSourcesPanel } from '@/app/control-room/_sections/ControlRoomClient'
@@ -935,12 +943,13 @@ describe('CronLiveLog, LogSyncSection & LogsClient', () => {
     expect(onDone).toHaveBeenCalledTimes(1)
   })
 
-  test('LogSyncSection polling mode selector, RUM disabled banner, and Enable RUM Beacon Sync switch', async () => {
+  test('LogSyncSection polling mode selector, snapshot interval selector, RUM disabled banner, and Enable RUM Beacon Sync switch', async () => {
     mocks.useRealSelect = true
     const user = userEvent.setup()
-    const setPollingMode = vi.fn(), setRumSyncEnabled = vi.fn()
+    const setPollingMode = vi.fn(), setSnapshotIntervalMinutes = vi.fn(), setRumSyncEnabled = vi.fn()
     const baseProps = {
       syncEnabled: true, setSyncEnabled: vi.fn(), pollingMode: 'regular' as const, setPollingMode,
+      snapshotIntervalMinutes: '5', setSnapshotIntervalMinutes,
       deleteAfter: false, setDeleteAfter: vi.fn(), dataRetention: '30', setDataRetention: vi.fn(),
       syncLogEnabled: true, setSyncLogEnabled: vi.fn(),
       syncRetention: '7', setSyncRetention: vi.fn(), syncFreqLabel: 'every 2 minutes', isAnalyst: false,
@@ -952,6 +961,12 @@ describe('CronLiveLog, LogSyncSection & LogsClient', () => {
     await user.click(screen.getByRole('combobox', { name: 'Discovery Polling Mode' }))
     await user.click(await screen.findByRole('option', { name: 'Adaptive' }))
     expect(setPollingMode).toHaveBeenCalledWith('adaptive')
+    await user.click(screen.getByRole('combobox', { name: 'Cloud Snapshot Interval' }))
+    for (const label of ['5m', '15m', '30m', '1h', '6h', '24h']) {
+      expect(await screen.findByRole('option', { name: label })).toBeInTheDocument()
+    }
+    await user.click(screen.getByRole('option', { name: '1h' }))
+    expect(setSnapshotIntervalMinutes).toHaveBeenCalledWith('60')
     expect(screen.getByText(/Real User Monitoring is not currently enabled on Fastly edge/)).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Configure RUM' })).toHaveAttribute('href', '/admin/rum?service=test-service-123')
     rerender(<LogSyncSection {...baseProps} rumEnabled={true} rumSyncEnabled={false} setRumSyncEnabled={setRumSyncEnabled} serviceId="test-service-123" />)
@@ -959,6 +974,40 @@ describe('CronLiveLog, LogSyncSection & LogsClient', () => {
     expect(rumSwitch).toHaveAttribute('aria-checked', 'false')
     await user.click(rumSwitch)
     expect(setRumSyncEnabled).toHaveBeenCalledWith(true, expect.anything())
+  })
+
+  test('CronSettingsModal initializes snapshot_interval_minutes and posts numeric value on save', async () => {
+    mocks.useRealSelect = true
+    const user = userEvent.setup()
+    sseState.status = 'idle'
+    sseState.start.mockClear()
+    const svc = {
+      service_id: 'svc-snap',
+      name: 'Snap Service',
+      log_period: 60,
+      cron_sync: {
+        enabled: true,
+        delete_after: true,
+        polling_mode: 'adaptive' as const,
+        snapshot_interval_minutes: 30 as const,
+        log_enabled: true,
+        log_retention_days: 30,
+        data_retention_days: 30,
+        rum_retention_days: 30,
+      },
+    } as never
+    renderWithQuery(<CronSettingsModal service={svc} open={true} onOpenChange={vi.fn()} />)
+    const trigger = screen.getByRole('combobox', { name: 'Cloud Snapshot Interval' })
+    expect(trigger).toHaveTextContent('30m')
+    await user.click(trigger)
+    await user.click(await screen.findByRole('option', { name: '6h' }))
+    await user.click(screen.getByRole('button', { name: 'Save Changes' }))
+    expect(sseState.start).toHaveBeenCalledWith(
+      '/api/services/svc-snap/cron-settings',
+      expect.objectContaining({
+        cron_sync: expect.objectContaining({ snapshot_interval_minutes: 360 }),
+      }),
+    )
   })
 
   test('LogsClient mounts in cron mode, QuickActionsBar handles failures, and sync tasks are registered', async () => {

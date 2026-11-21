@@ -11032,6 +11032,127 @@
         }
       }
     },
+    "/api/high-scale/restore-from-fos": {
+      "post": {
+        "tags": [
+          "high-scale"
+        ],
+        "summary": "Restore From Fos Endpoint",
+        "operationId": "restore_from_fos_endpoint_api_high_scale_restore_from_fos_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HighScaleRestoreFromFosRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HighScaleRestoreFromFosResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/insights": {
       "post": {
         "tags": [
@@ -54038,6 +54159,25 @@
               }
             ],
             "title": "Delete After"
+          },
+          "snapshot_interval_minutes": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "enum": [
+                  5,
+                  15,
+                  30,
+                  60,
+                  360,
+                  1440
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snapshot Interval Minutes"
           }
         },
         "type": "object",
@@ -57271,6 +57411,146 @@
           "next_cursor"
         ],
         "title": "HighScaleRequestFactResponse"
+      },
+      "HighScaleRestoreFromFosRequest": {
+        "properties": {
+          "service_id": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Service Id"
+          },
+          "bucket": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Bucket"
+          },
+          "region": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[a-z0-9-]+$",
+            "title": "Region"
+          },
+          "prefix": {
+            "type": "string",
+            "maxLength": 512,
+            "title": "Prefix",
+            "default": ""
+          },
+          "archive_prefix": {
+            "type": "string",
+            "maxLength": 512,
+            "title": "Archive Prefix",
+            "default": "high-scale/archive"
+          },
+          "fastly_api_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fastly Api Key"
+          },
+          "fos_access_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fos Access Key"
+          },
+          "fos_secret_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fos Secret Key"
+          },
+          "restore_serving_state": {
+            "type": "boolean",
+            "title": "Restore Serving State",
+            "default": true
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "service_id",
+          "bucket",
+          "region"
+        ],
+        "title": "HighScaleRestoreFromFosRequest"
+      },
+      "HighScaleRestoreFromFosResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "ok",
+            "title": "Status",
+            "default": "ok"
+          },
+          "service_id": {
+            "type": "string",
+            "title": "Service Id"
+          },
+          "dr_state_restored": {
+            "type": "boolean",
+            "title": "Dr State Restored"
+          },
+          "views_restored": {
+            "type": "integer",
+            "title": "Views Restored"
+          },
+          "alerts_restored": {
+            "type": "integer",
+            "title": "Alerts Restored"
+          },
+          "scoring_labels_restored": {
+            "type": "integer",
+            "title": "Scoring Labels Restored"
+          },
+          "audit_logs_restored": {
+            "type": "integer",
+            "title": "Audit Logs Restored"
+          },
+          "manifests_registered": {
+            "type": "integer",
+            "title": "Manifests Registered"
+          },
+          "domains_rebuilt": {
+            "additionalProperties": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "object",
+            "title": "Domains Rebuilt"
+          }
+        },
+        "type": "object",
+        "required": [
+          "service_id",
+          "dr_state_restored",
+          "views_restored",
+          "alerts_restored",
+          "scoring_labels_restored",
+          "audit_logs_restored",
+          "manifests_registered",
+          "domains_rebuilt"
+        ],
+        "title": "HighScaleRestoreFromFosResponse"
       },
       "HighScaleRetentionRecommendationResponse": {
         "properties": {
@@ -73388,6 +73668,11 @@
             "title": "Rum Retention Days",
             "default": 30
           },
+          "snapshot_interval_minutes": {
+            "type": "integer",
+            "title": "Snapshot Interval Minutes",
+            "default": 5
+          },
           "avg_nodes_per_flush": {
             "anyOf": [
               {
@@ -73587,6 +73872,11 @@
             "type": "integer",
             "title": "Rum Retention Days",
             "default": 30
+          },
+          "snapshot_interval_minutes": {
+            "type": "integer",
+            "title": "Snapshot Interval Minutes",
+            "default": 5
           },
           "avg_nodes_per_flush": {
             "anyOf": [
@@ -74026,6 +74316,25 @@
             ],
             "title": "Log Retention Days"
           },
+          "snapshot_interval_minutes": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "enum": [
+                  5,
+                  15,
+                  30,
+                  60,
+                  360,
+                  1440
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snapshot Interval Minutes"
+          },
           "log_fields": {
             "anyOf": [
               {
@@ -74287,6 +74596,19 @@
             "type": "integer",
             "title": "Rum Retention Days",
             "default": 30
+          },
+          "snapshot_interval_minutes": {
+            "type": "integer",
+            "enum": [
+              5,
+              15,
+              30,
+              60,
+              360,
+              1440
+            ],
+            "title": "Snapshot Interval Minutes",
+            "default": 5
           },
           "log_fields": {
             "anyOf": [
@@ -82671,6 +82993,19 @@
               }
             ],
             "title": "Delete After"
+          },
+          "snapshot_interval_minutes": {
+            "type": "integer",
+            "enum": [
+              5,
+              15,
+              30,
+              60,
+              360,
+              1440
+            ],
+            "title": "Snapshot Interval Minutes",
+            "default": 5
           }
         },
         "type": "object",

@@ -315,6 +315,7 @@ const SERVICELESS_PATH_PREFIXES = [
   "/api/admin/debug-settings",
   "/api/admin/usage-logging",
   "/api/provision",
+  "/api/high-scale/restore-from-fos",
   "/api/log-fields/catalog",
   "/api/admin/health-snapshot",
   "/api/admin/system-metrics",

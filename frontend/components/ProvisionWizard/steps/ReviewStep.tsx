@@ -20,6 +20,7 @@ import {
   Zap,
 } from 'lucide-react'
 import { cn, copyToClipboard, formatBytes, REGION_LABELS, SHIELD_LABELS } from '@/lib/utils'
+import { SNAPSHOT_INTERVAL_LABELS, type SnapshotIntervalMinutes } from '@/lib/serviceDefaults'
 import {
   estimateLogFieldBytesPerLine,
   evaluateLogFieldPresetSummary,
@@ -201,6 +202,17 @@ export function ExecuteStep({ s }: { s: WizardState }) {
                       value={<StatusCheckIcon enabled={enabled} />}
                     />
                   ))}
+                  {!cloud && (
+                    <ReviewItem
+                      variant="between"
+                      label="Cloud Snapshot Interval"
+                      className={cn(!syncEnabled && "text-muted-foreground")}
+                      value={
+                        SNAPSHOT_INTERVAL_LABELS[config.snapshot_interval_minutes as SnapshotIntervalMinutes] ??
+                        `${config.snapshot_interval_minutes}m`
+                      }
+                    />
+                  )}
                   {config.logging_enabled !== false && (
                     <ReviewItem
                       variant="between"

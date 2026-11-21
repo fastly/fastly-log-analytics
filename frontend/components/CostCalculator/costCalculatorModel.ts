@@ -26,7 +26,7 @@ const ARCHIVE_BYTES_PER_ROW = 419
 const RUM_ARCHIVE_FIXED_BYTES = 22_500
 const RUM_ARCHIVE_BYTES_PER_ROW = 350
 const ARCHIVE_RETENTION_MARGIN_DAYS = 1
-const ARCHIVE_TICK_SECONDS = 20
+const ARCHIVE_DELETION_GRACE_MINUTES = 15
 // ZSTD compresses structured, repetitive NDJSON edge logs by ~15× (~33% smaller than gzip's ~10×).
 export const RAW_LOG_COMPRESSION_RATIO = 15
 // Batched RUM beacons share page/session metadata and compress to ~128 B per metric row in ZSTD Parquet (~512 B raw / 4).
@@ -52,6 +52,7 @@ export interface CalcState {
   retentionDays: number
   rumRetentionDays: number
   deleteLogs: boolean
+  snapshotIntervalMinutes: number
   archiveBatchObjects: number
   rateA: number
   rateB: number
@@ -74,7 +75,8 @@ export const DEFAULTS: CalcState = {
   logsChecksPerDay: 2,
   cdnEnabled: true, retentionDays: SERVICE_DEFAULTS.logRetentionDays, rumRetentionDays: SERVICE_DEFAULTS.rumRetentionDays,
   deleteLogs: true,
-  archiveBatchObjects: 100,
+  snapshotIntervalMinutes: SERVICE_DEFAULTS.snapshotIntervalMinutes,
+  archiveBatchObjects: 500,
   rateA: 0.005, rateB: 0.001, rateStorage: 0.02, rateEgress: 0.12, minDays: 30,
   billingZone: 'MBZ200',
 }
@@ -129,6 +131,7 @@ export function reducer(state: CalcState, action: CalcAction): CalcState {
         rumBeaconsDay: p.rum_beacons_per_day ?? state.rumBeaconsDay,
         ...(p.edge_only != null && { edgeOnly: p.edge_only }),
         ...(p.delete_after != null && { deleteLogs: p.delete_after }),
+        ...(p.snapshot_interval_minutes != null && { snapshotIntervalMinutes: p.snapshot_interval_minutes }),
         ...(p.log_retention_days != null && { retentionDays: p.log_retention_days || KEEP_FOREVER_DAYS }),
         ...(p.rum_retention_days != null && { rumRetentionDays: p.rum_retention_days || KEEP_FOREVER_DAYS }),
         ...(p.class_a_rate_per_1k != null && { rateA: p.class_a_rate_per_1k }),
@@ -160,6 +163,7 @@ export interface CalcResults {
   totalCost: number
   logFilesPerMonth: number
   parquetFilesPerMonth: number
+  drStateSnapshotsPerMonth: number
   syncsPerMonth: number
   logFilesPerSync: number
   reqDayEffective: number
@@ -217,28 +221,38 @@ export function calculate(s: CalcState): CalcResults {
   const logFilesPerSync = logFilesPerDay / syncsPerDay
 
   const minChargeHours = s.minDays * 24
-  // Stateless ingest worker archives each page of raw objects as one Parquet artifact plus a manifest and a commit marker.
-  const objectsPerTick = (logFilesPerDay * ARCHIVE_TICK_SECONDS) / 86400
-  const archivePagesPerDay = Math.ceil(logFilesPerDay / Math.min(Math.max(1, s.archiveBatchObjects), Math.max(1, objectsPerTick)))
+  const snapshotMinutes = Math.max(1, s.snapshotIntervalMinutes)
+  const snapshotSeconds = snapshotMinutes * 60
+  // Ingest worker flushes one consolidated Parquet archive + manifest + commit marker per domain
+  // on snapshot_interval_minutes (or earlier if archiveBatchObjects is reached).
+  const objectsPerSnapshot = (logFilesPerDay * snapshotSeconds) / 86400
+  const archivePagesPerDay = Math.ceil(
+    logFilesPerDay / Math.min(Math.max(1, s.archiveBatchObjects), Math.max(1, objectsPerSnapshot)),
+  )
   const archiveObjectsPerDay = archivePagesPerDay * 3
   const parquetFilesPerMonth = archivePagesPerDay * 30
-  // RUM archive: one artifact per page of RUM objects, and RUM objects follow the beacon volume, not the log cadence.
+  // RUM archive: one artifact per snapshot window of RUM objects, capped by archiveBatchObjects.
   const rumObjectsPerDay = s.rumBeaconsDay * RUM_OBJECTS_PER_BEACON
   const rumPagesPerDay = rumObjectsPerDay > 0
-    ? Math.ceil(rumObjectsPerDay / Math.min(Math.max(1, s.archiveBatchObjects), Math.max(1, (rumObjectsPerDay * ARCHIVE_TICK_SECONDS) / 86400)))
+    ? Math.ceil(
+        rumObjectsPerDay /
+          Math.min(Math.max(1, s.archiveBatchObjects), Math.max(1, (rumObjectsPerDay * snapshotSeconds) / 86400)),
+      )
     : 0
   const objectsPerDay = logFilesPerDay + archiveObjectsPerDay
 
-  const logSteadyStateDays = s.deleteLogs ? 1 / 24 : s.retentionDays
+  const rawSteadyStateHours = (snapshotMinutes + ARCHIVE_DELETION_GRACE_MINUTES) / 60
+  const logSteadyStateDays = s.deleteLogs ? rawSteadyStateHours / 24 : s.retentionDays
   const billedLogDays = Math.max(logSteadyStateDays, s.minDays)
   const billedArchiveDays = Math.max(s.retentionDays + ARCHIVE_RETENTION_MARGIN_DAYS, s.minDays)
 
   const objectsBilled = (logFilesPerDay * billedLogDays) + (archiveObjectsPerDay * billedArchiveDays)
 
-  const rawFilesStored = s.deleteLogs ? logFilesPerDay / 24 : logFilesPerDay * s.retentionDays
+  const rawFilesStored = s.deleteLogs ? logFilesPerDay * (rawSteadyStateHours / 24) : logFilesPerDay * s.retentionDays
   const listOpsClassA = Math.max(1, Math.ceil(rawFilesStored / 1000)) * syncsPerMonth
   const classALogsPage = s.logsChecksPerDay * 30
-  const stateSyncClassA = ((24 * 60) / 5) * 30
+  const drStateSnapshotsPerMonth = ((24 * 60) / snapshotMinutes) * 30
+  const stateSyncClassA = drStateSnapshotsPerMonth
   const rumBeaconsMonth = s.rumBeaconsDay * 30
 
   const classAPerMonth =
@@ -249,7 +263,7 @@ export function calculate(s: CalcState): CalcResults {
   const classBPerMonth = logFilesPerMonth + (archivePagesPerDay + rumPagesPerDay) * 30 * 3
 
   const logGBPerFile = logSizeKB / (1024 * 1024)
-  const logActualH = s.deleteLogs ? 1 : s.retentionDays * 24
+  const logActualH = s.deleteLogs ? rawSteadyStateHours : s.retentionDays * 24
   const logBilledH = Math.max(logActualH, minChargeHours)
   const rawLogGBMonths = (logFilesPerMonth * logGBPerFile * logBilledH) / 720
 
@@ -281,7 +295,7 @@ export function calculate(s: CalcState): CalcResults {
   return {
     classAPerMonth, classBPerMonth, totalGBStored, cdnEgressGB,
     costA, costB, costStorage, costEgress, totalCost,
-    logFilesPerMonth, parquetFilesPerMonth, syncsPerMonth, logFilesPerSync,
+    logFilesPerMonth, parquetFilesPerMonth, drStateSnapshotsPerMonth, syncsPerMonth, logFilesPerSync,
     reqDayEffective, objectsPerDay, objectsBilled, classALogsPage, storageTiers,
     totalBytesPerMonth, totalGzBytesPerMonth, rumBeaconsMonth, rumParquetGBMonths, costRum,
   }

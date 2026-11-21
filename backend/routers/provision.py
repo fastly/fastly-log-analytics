@@ -959,6 +959,7 @@ def provision_execute(req: ProvisionExecuteRequest):
         "delete_after": req.delete_after,
         "log_retention_days": req.log_retention_days,
         "rum_retention_days": req.rum_retention_days,
+        "snapshot_interval_minutes": req.snapshot_interval_minutes,
         "logging_enabled": req.logging_enabled,
         "rum_enabled": req.rum_enabled,
     }
@@ -1067,6 +1068,7 @@ def provision_execute(req: ProvisionExecuteRequest):
                                 "enable_cron_sync": cfg.get("enable_cron_sync"),
                                 "delete_after": cfg.get("delete_after"),
                                 "log_retention_days": cfg.get("log_retention_days"),
+                                "snapshot_interval_minutes": cfg.get("snapshot_interval_minutes"),
                                 "log_fields": cfg.get("log_fields"),
                             },
                         )
@@ -1366,6 +1368,8 @@ def provision_ingest(payload: ProvisionConfigRequest):
         state["logging_enabled"] = bool(body["logging_enabled"])
     if "rum_enabled" in body:
         state["rum_enabled"] = bool(body["rum_enabled"])
+    if body.get("snapshot_interval_minutes") is not None:
+        state["snapshot_interval_minutes"] = body["snapshot_interval_minutes"]
 
     if parsed_ingest_lf is not None:
         state["log_fields"] = parsed_ingest_lf

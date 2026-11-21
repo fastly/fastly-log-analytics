@@ -1,3 +1,4 @@
+pub mod dr;
 pub mod fixture;
 mod fos;
 pub mod logs;
@@ -108,6 +109,9 @@ fn admin_audit(request: &Request) -> Option<(&'static str, String)> {
             ["api", "services", sid, "scoring", "rotate-key"]
             | ["api", "admin", "services", sid, "scoring", "rotate-key"],
         ) => Some(("scoring_key_rotated", (*sid).to_owned())),
+        ("POST", ["api", "admin", "provision", "recover"] | ["api", "provision", "recover"]) => {
+            Some(("provision_recovered", "install".to_owned()))
+        }
         _ => None,
     }
 }
@@ -356,6 +360,9 @@ fn route(
         }
         ("POST", ["api", "admin", "provision", "teardown"] | ["api", "provision", "teardown"]) => {
             teardown(context, actor, body(request)?)
+        }
+        ("POST", ["api", "admin", "provision", "recover"] | ["api", "provision", "recover"]) => {
+            dr::recover(context, actor, body(request)?)
         }
         ("POST", ["api", "admin", "services", sid, "delete-data"]) => {
             reset::start(context, actor, sid, body(request)?)
@@ -1138,7 +1145,11 @@ fn save_service(
         &format!("svc:{}", service.service_id),
         Some(&record.generation),
         &value,
-    )
+    )?;
+    if !event.starts_with("data_reset.") {
+        dr::sync_best_effort(context.runtime, service);
+    }
+    Ok(())
 }
 fn save_job_service(
     context: &Context<'_, impl Runtime>,
@@ -1771,6 +1782,9 @@ fn run_step(
                 json!({"at":context.runtime.now(),"outcome":"complete","dry_run":job.dry_run,"activated":job.activate,"changes":public_job(job)["changes"]}),
             );
             save_job_service(context, &record, &service, job, "job.completed", "finalize")?;
+            if job.kind != "teardown" && !job.dry_run {
+                dr::sync_best_effort(context.runtime, &service);
+            }
             scoring::on_job_finalized(context, job, &service);
             if job.kind == "teardown" {
                 let (record, mut install) = install(context)?;

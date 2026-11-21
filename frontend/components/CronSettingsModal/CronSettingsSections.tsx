@@ -9,6 +9,7 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
+import { SNAPSHOT_INTERVAL_SELECT_OPTIONS } from '@/lib/serviceDefaults'
 
 export const SYNC_INTERVAL_OPTIONS = [
   { value: '1', label: 'Every 1 minute' },
@@ -57,6 +58,8 @@ interface LogSyncSectionProps {
   setSyncEnabled: (v: boolean) => void
   pollingMode: 'regular' | 'adaptive'
   setPollingMode: (v: 'regular' | 'adaptive') => void
+  snapshotIntervalMinutes: string
+  setSnapshotIntervalMinutes: (v: string) => void
   deleteAfter: boolean
   setDeleteAfter: (v: boolean) => void
   dataRetention: string
@@ -79,7 +82,7 @@ interface LogSyncSectionProps {
 }
 
 export function LogSyncSection({
-  syncEnabled, setSyncEnabled, pollingMode, setPollingMode, deleteAfter, setDeleteAfter,
+  syncEnabled, setSyncEnabled, pollingMode, setPollingMode, snapshotIntervalMinutes, setSnapshotIntervalMinutes, deleteAfter, setDeleteAfter,
   dataRetention, setDataRetention, syncLogEnabled, setSyncLogEnabled, syncRetention, setSyncRetention,
   syncFreqLabel, rumRetention, setRumRetention,
   rumEnabled, rumSyncEnabled, setRumSyncEnabled, rumLogPeriod, setRumLogPeriod, rumDeleteAfter, setRumDeleteAfter, serviceId,
@@ -125,6 +128,21 @@ export function LogSyncSection({
             <p className="text-[10px] text-muted-foreground leading-tight">Saves FOS storage by removing raw logs once they are archived to Parquet and ingested into ClickHouse.</p>
           </div>
           <Switch id="auto-delete" checked={deleteAfter} onCheckedChange={setDeleteAfter} />
+        </div>
+
+        <div className="grid gap-1.5 max-w-sm">
+          <Label htmlFor="snapshot-interval" className="text-[11px] font-semibold">Cloud Snapshot Interval</Label>
+          <Select value={snapshotIntervalMinutes} onValueChange={v => { if (v) setSnapshotIntervalMinutes(v) }}>
+            <SelectTrigger id="snapshot-interval" aria-label="Cloud Snapshot Interval" className="h-7 text-[11px]"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              {SNAPSHOT_INTERVAL_SELECT_OPTIONS.map(o => (
+                <SelectItem key={o.value} value={o.value} className="text-[11px]">{o.label}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="text-[10px] text-muted-foreground leading-tight">
+            How often Elevation flushes consolidated Parquet archives and DR state snapshots to FOS. Raw logs remain in FOS until archived (+15m grace).
+          </p>
         </div>
 
         <div className={`grid gap-4 pb-2 ${rumEnabled ? 'grid-cols-2' : 'grid-cols-1'}`}>

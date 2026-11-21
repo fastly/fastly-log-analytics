@@ -3636,3 +3636,702 @@ def test_ingest_batch_isolates_poison_pill_source_object_in_multi_object_batch()
     assert poison_rec is not None and poison_rec.status == "discovered"
     assert poison_rec.last_error is not None and "poison-pill" in poison_rec.last_error
     assert poison_rec.malformed_rows == 2
+
+
+# ── F4: Decoupled Archive Flushing (Zero Data Loss) ──────────────────────────
+
+
+class _DictReader:
+    def __init__(self, payloads: dict[str, bytes]) -> None:
+        self._payloads = dict(payloads)
+        self.read_calls: list[str] = []
+
+    def read_source_object(self, service_id: str, domain: str, object_key: str) -> bytes:
+        self.read_calls.append(object_key)
+        if object_key not in self._payloads:
+            raise SourceObjectMissingError(f"missing {object_key}")
+        return self._payloads[object_key]
+
+
+@pytest.mark.no_postgres
+def test_deferred_ingest_marks_appended_without_writing_fos_archive_until_flush() -> None:
+    ownership = OwnershipStore()
+    ownership.initialize("svc-defer", owner="high_scale", source_cursor="cursor-0")
+    ledger = HighScaleLedger()
+    objects = InMemoryObjectStore()
+    clickhouse = _ClickHouse()
+    archive = ArchivePublication(objects)
+    controller = HighScaleIngestController(
+        ownership=ownership,
+        ledger=ledger,
+        archive=archive,
+        serving=ClickHousePublication(InMemoryBatchManifestStore(), clickhouse),
+        worker_id="worker-1",
+        defer_archive_flush=True,
+    )
+
+    t0 = datetime(2026, 11, 20, 12, 0, 0, tzinfo=UTC)
+    raw_store: dict[str, bytes] = {}
+    for i in range(3):
+        key = f"raw/request/f{i}.log"
+        payload = f'{{"timestamp":"2026-11-20T12:00:0{i}Z","url":"/p/{i}","status":200}}\n'.encode()
+        raw_store[key] = payload
+        desc = SourceObjectDescriptor(key, f"sha256:f{i}", len(payload), "v1")
+        ledger.discover("svc-defer", "request", key, desc.checksum, size_bytes=len(payload), version="v1")
+        ledger.claim("svc-defer", key, "worker-1", now=t0)
+        res = controller.ingest_batch(
+            service_id="svc-defer",
+            domain="request",
+            sources_payloads=[(desc, payload)],
+            now=t0,
+        )
+        assert res.manifest is None
+        assert res.total_events == 1
+        assert res.publication.status == PublicationStatus.VISIBLE
+        rec = ledger.source("svc-defer", key)
+        assert rec is not None and rec.status == "appended" and rec.archive_manifest_id is None
+
+    # ClickHouse received all 3 events immediately, while FOS archive has 0 objects
+    assert sum(len(b.rows) for b in clickhouse.batches) == 3
+    assert len(objects._objects) == 0
+
+    reader = _DictReader(raw_store)
+    # Before snapshot_interval_minutes elapses (and below object/byte cap): no flush
+    not_yet = controller.flush_archive_snapshot(
+        service_id="svc-defer",
+        domain="request",
+        reader=reader,
+        snapshot_interval_minutes=15,
+        now=datetime.now(UTC),
+    )
+    assert not_yet.manifest is None
+    assert not_yet.sources_flushed == 0
+    assert len(objects._objects) == 0
+
+    # Once interval elapses (16 minutes later): ONE consolidated archive (3 FOS objects: .parquet, .json, .commit)
+    flushed = controller.flush_archive_snapshot(
+        service_id="svc-defer",
+        domain="request",
+        reader=reader,
+        snapshot_interval_minutes=15,
+        now=datetime.now(UTC) + timedelta(minutes=16),
+    )
+    assert flushed.manifest is not None
+    assert flushed.sources_flushed == 3
+    assert flushed.rows_archived == 3
+    assert len(objects._objects) == 3  # 1 parquet + 1 manifest json + 1 commit marker
+    assert reader.read_calls == []  # served from in-memory payload cache!
+
+    for i in range(3):
+        rec = ledger.source("svc-defer", f"raw/request/f{i}.log")
+        assert rec is not None
+        assert rec.status == "acknowledged"
+        assert rec.archive_manifest_id == flushed.manifest.manifest_id
+
+
+@pytest.mark.no_postgres
+def test_deferred_flush_recovers_after_restart_by_reading_raw_from_fos() -> None:
+    ownership = OwnershipStore()
+    ownership.initialize("svc-crash", owner="high_scale", source_cursor="cursor-0")
+    ledger = HighScaleLedger()
+    objects = InMemoryObjectStore()
+    clickhouse = _ClickHouse()
+    archive = ArchivePublication(objects)
+
+    # Worker 1 ingests fast and crashes before snapshot flush
+    worker1 = HighScaleIngestController(
+        ownership=ownership,
+        ledger=ledger,
+        archive=archive,
+        serving=ClickHousePublication(InMemoryBatchManifestStore(), clickhouse),
+        worker_id="worker-1",
+        defer_archive_flush=True,
+    )
+    key = "raw/request/crash.log"
+    payload = b'{"timestamp":"2026-11-20T12:00:00Z","url":"/crash","status":200}\n'
+    desc = SourceObjectDescriptor(key, "sha256:crash", len(payload), "v1")
+    ledger.discover("svc-crash", "request", key, desc.checksum, size_bytes=len(payload), version="v1")
+    ledger.claim("svc-crash", key, "worker-1")
+    worker1.ingest_batch(service_id="svc-crash", domain="request", sources_payloads=[(desc, payload)])
+    assert len(objects._objects) == 0
+
+    # Brand-new Worker 2 (empty payload cache) reads from FOS via reader and flushes
+    worker2 = HighScaleIngestController(
+        ownership=ownership,
+        ledger=ledger,
+        archive=archive,
+        serving=ClickHousePublication(InMemoryBatchManifestStore(), clickhouse),
+        worker_id="worker-2",
+        defer_archive_flush=True,
+    )
+    reader = _DictReader({key: payload})
+    res = worker2.flush_archive_snapshot(
+        service_id="svc-crash",
+        domain="request",
+        reader=reader,
+        force=True,
+    )
+    assert res.manifest is not None
+    assert res.sources_flushed == 1
+    assert res.rows_archived == 1
+    assert reader.read_calls == [key]
+    rec = ledger.source("svc-crash", key)
+    assert rec is not None and rec.status == "acknowledged"
+    assert rec.archive_manifest_id == res.manifest.manifest_id
+
+
+@pytest.mark.no_postgres
+def test_deferred_flush_triggers_on_object_cap_and_preserves_deletion_safety() -> None:
+    from backend.high_scale.postgres_control import DeletionController
+
+    ownership = OwnershipStore()
+    ownership.initialize("svc-del", owner="high_scale", source_cursor="cursor-0")
+    ledger = HighScaleLedger()
+    archive_store = InMemoryObjectStore()
+    raw_fos = InMemoryObjectStore()
+    clickhouse = _ClickHouse()
+    archive = ArchivePublication(archive_store)
+
+    controller = HighScaleIngestController(
+        ownership=ownership,
+        ledger=ledger,
+        archive=archive,
+        serving=ClickHousePublication(InMemoryBatchManifestStore(), clickhouse),
+        worker_id="worker-1",
+        defer_archive_flush=True,
+        deletion_grace_seconds=900,
+    )
+
+    key = "raw/request/safe.log"
+    payload = b'{"timestamp":"2026-11-20T12:00:00Z","url":"/safe","status":200}\n'
+    raw_fos.put(key, payload)
+    desc = SourceObjectDescriptor(key, "sha256:safe", len(payload), "v1")
+    ledger.discover("svc-del", "request", key, desc.checksum, size_bytes=len(payload), version="v1")
+    ledger.claim("svc-del", key, "worker-1")
+    controller.ingest_batch(service_id="svc-del", domain="request", sources_payloads=[(desc, payload)])
+
+    # Zero-data-loss invariant: ledger MUST refuse deletion authorization while status='appended'
+    with pytest.raises(ValueError, match="acknowledged"):
+        ledger.authorize_source_delete("svc-del", key, "fake-manifest", current_owner_epoch=1)
+    assert raw_fos.exists(key)
+
+    # Flush triggered immediately by max_objects=1 cap (even with 1440m interval)
+    t_flush = datetime(2026, 11, 20, 12, 0, 0, tzinfo=UTC)
+    flushed = controller.flush_archive_snapshot(
+        service_id="svc-del",
+        domain="request",
+        reader=_DictReader({key: payload}),
+        snapshot_interval_minutes=1440,
+        max_objects=1,
+        now=t_flush,
+    )
+    assert flushed.manifest is not None
+
+    del_ctrl = DeletionController(raw_fos, archive, ledger, ownership=ownership)
+    # Within 15-minute grace period -> raw object MUST NOT be deleted
+    before_grace = del_ctrl.delete_manifest_sources(
+        flushed.manifest,
+        current_owner_epoch=1,
+        now=t_flush + timedelta(seconds=899),
+    )
+    assert before_grace == []
+    assert raw_fos.exists(key)
+
+    # After 15-minute grace period -> raw object IS safely deleted
+    after_grace = del_ctrl.delete_manifest_sources(
+        flushed.manifest,
+        current_owner_epoch=1,
+        now=t_flush + timedelta(seconds=901),
+    )
+    assert after_grace == [key]
+    assert not raw_fos.exists(key)
+
+
+@pytest.mark.no_postgres
+def test_deferred_ingest_preserves_rum_sibling_safety() -> None:
+    ownership = OwnershipStore()
+    ownership.initialize("svc-rum", owner="high_scale", source_cursor="cursor-0")
+    ledger = HighScaleLedger()
+    objects = InMemoryObjectStore()
+    clickhouse = _ClickHouse()
+    archive = ArchivePublication(objects)
+    controller = HighScaleIngestController(
+        ownership=ownership,
+        ledger=ledger,
+        archive=archive,
+        serving=ClickHousePublication(InMemoryBatchManifestStore(), clickhouse),
+        worker_id="worker-1",
+        defer_archive_flush=True,
+    )
+
+    key = "raw/rum/mixed.log"
+    payload = (
+        b'{"event_id":"vital-1","timestamp":"2026-11-20T12:00:00Z","metric_name":"LCP","metric_value":1.25,"fastly_req_id":"req-1"}\n'
+        b'{"event_id":"error-1","timestamp":"2026-11-20T12:00:01Z","error_message":"Boom","fastly_req_id":"req-1"}\n'
+    )
+    desc = SourceObjectDescriptor(key, "sha256:rum1", len(payload), "v1")
+    ledger.discover("svc-rum", "rum_vitals", key, desc.checksum, size_bytes=len(payload), version="v1")
+    ledger.claim("svc-rum", key, "worker-1")
+
+    res = controller.ingest_batch(
+        service_id="svc-rum",
+        domain="rum_vitals",
+        sources_payloads=[(desc, payload)],
+    )
+    assert res.manifest is None
+    assert res.derived_publication_complete is True
+    # Both vitals and sibling errors were published to ClickHouse immediately
+    by_domain = {b.domain: b for b in clickhouse.batches}
+    assert sorted(by_domain) == ["rum_errors", "rum_vitals"]
+    assert sum(len(b.rows) for b in clickhouse.batches) == 2
+
+    # Flush under owning domain (rum_vitals) archives and acknowledges the raw RUM object
+    flushed = controller.flush_archive_snapshot(
+        service_id="svc-rum",
+        domain="rum_vitals",
+        reader=_DictReader({key: payload}),
+        force=True,
+    )
+    assert flushed.manifest is not None
+    assert flushed.sources_flushed == 1
+    assert ledger.source("svc-rum", key).status == "acknowledged"  # type: ignore[union-attr]
+
+
+@pytest.mark.no_postgres
+def test_postgres_control_plane_deferred_archive_methods() -> None:
+    """Exercise all 6 F4 PostgresControlPlane methods directly via a fake connection pool."""
+    from contextlib import contextmanager
+
+    from backend.high_scale.postgres_control.control_plane import PostgresControlPlane, SourceClaimToken
+
+    t0 = datetime(2026, 11, 20, 12, 0, tzinfo=UTC)
+    executed: list[tuple[str, tuple[object, ...]]] = []
+    state: dict[str, object] = {
+        "owner_epoch": 2,
+        "manifest_state": ArchiveState.MANIFEST_COMMITTED.value,
+        "summary_row": (2, 300, t0),
+    }
+
+    def _source_row(
+        object_key: str,
+        *,
+        size_bytes: int = 100,
+        status: str = "appended",
+        owner: str | None = None,
+        owner_epoch: int = 2,
+        lease_generation: int = 1,
+    ) -> dict[str, object]:
+        return {
+            "object_id": f"oid-{object_key}",
+            "service_id": "svc-1",
+            "domain": "request",
+            "object_key": object_key,
+            "checksum": f"sha256:{object_key}",
+            "size_bytes": size_bytes,
+            "version": "v1",
+            "status": status,
+            "owner": owner,
+            "lease_until": None,
+            "lease_generation": lease_generation,
+            "archive_manifest_id": None,
+            "owner_epoch": owner_epoch,
+            "malformed_rows": 0,
+            "accepted_rows": 10,
+            "last_error": None,
+            "discovered_at": t0,
+        }
+
+    class _FakeCursor:
+        def __init__(self, *, one: object = None, many: list[object] | None = None) -> None:
+            self._one = one
+            self._many = many if many is not None else []
+
+        def fetchone(self) -> object:
+            return self._one
+
+        def fetchall(self) -> list[object]:
+            return list(self._many)
+
+    class _FakeConnection:
+        @contextmanager
+        def transaction(self):
+            yield
+
+        def execute(self, sql: str, params: tuple[object, ...] = ()) -> _FakeCursor:
+            executed.append((sql, params))
+            if "FROM high_scale_ownership" in sql:
+                return _FakeCursor(
+                    one={
+                        "service_id": "svc-1",
+                        "owner_epoch": state["owner_epoch"],
+                        "current_owner": "high_scale",
+                        "previous_owner": None,
+                        "source_cursor": "",
+                        "drain_complete": False,
+                        "cutover_committed": False,
+                        "rollback_allowed": False,
+                    }
+                )
+            if "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0), MIN(updated_at)" in sql:
+                return _FakeCursor(one=state["summary_row"])
+            if "FROM high_scale_source_objects WHERE service_id=%s AND object_key = ANY(%s) FOR UPDATE" in sql:
+                return _FakeCursor(
+                    many=[
+                        _source_row("raw/k1.log", status="claimed", owner="worker-1", owner_epoch=2, lease_generation=1)
+                    ]
+                )
+            if "FOR UPDATE SKIP LOCKED" in sql:
+                return _FakeCursor(
+                    many=[
+                        _source_row("raw/k1.log", size_bytes=100, owner_epoch=2, lease_generation=1),
+                        _source_row("raw/k2.log", size_bytes=200, owner_epoch=2, lease_generation=1),
+                    ]
+                )
+            if (
+                "SELECT * FROM high_scale_source_objects" in sql
+                and "ORDER BY discovered_at, object_key LIMIT %s" in sql
+            ):
+                return _FakeCursor(
+                    many=[
+                        _source_row("raw/k1.log", size_bytes=100, owner_epoch=2),
+                        _source_row("raw/k2.log", size_bytes=200, owner_epoch=2),
+                    ]
+                )
+            if "UPDATE high_scale_source_objects" in sql and "RETURNING *" in sql:
+                worker_id, epoch, _lease_until, _svc, keys = params
+                return _FakeCursor(
+                    many=[
+                        _source_row(
+                            str(k),
+                            size_bytes=100,
+                            owner=str(worker_id),
+                            owner_epoch=int(epoch),  # type: ignore[arg-type]
+                            lease_generation=2,
+                        )
+                        for k in keys  # type: ignore[union-attr]
+                    ]
+                )
+            if "FROM high_scale_archive_manifests WHERE manifest_id=%s" in sql:
+                return _FakeCursor(
+                    one={
+                        "manifest_id": "m-1",
+                        "service_id": "svc-1",
+                        "domain": "request",
+                        "source_key": "raw/k1.log",
+                        "source_checksum": "sha256:raw/k1.log",
+                        "source_size": 100,
+                        "source_version": "v1",
+                        "artifact_uri": "s3://archive/m-1.parquet",
+                        "artifact_checksum": "sha256:art",
+                        "artifact_size": 50,
+                        "row_count": 10,
+                        "byte_count": 100,
+                        "canonical_digest": "sha256:dig",
+                        "schema_version": "1",
+                        "transform_version": "1",
+                        "coverage_start": t0,
+                        "coverage_end": t0,
+                        "retention_deadline": t0,
+                        "deletion_authorization_deadline": t0,
+                        "archive_epoch": 1,
+                        "owner_epoch": state["owner_epoch"],
+                        "state": state["manifest_state"],
+                        "sources_json": None,
+                    }
+                )
+            return _FakeCursor()
+
+    class _FakePool:
+        def __init__(self, conn: _FakeConnection) -> None:
+            self._conn = conn
+
+        @contextmanager
+        def connection(self, timeout: float | None = None):
+            yield self._conn
+
+    control = PostgresControlPlane(pool=_FakePool(_FakeConnection()))
+
+    # 1. mark_sources_appended_batch
+    control.mark_sources_appended_batch(
+        "svc-1",
+        ["raw/k1.log"],
+        expected_owner_epoch=2,
+        claim_tokens=[SourceClaimToken("raw/k1.log", "worker-1", 2, 1)],
+        next_cursor="raw/k1.log",
+        domain="request",
+    )
+    assert any("SET status='appended', archive_manifest_id=NULL" in sql for sql, _ in executed)
+    assert any("INSERT INTO high_scale_partition_cursors" in sql for sql, _ in executed)
+    assert any("INSERT INTO high_scale_source_cursors" in sql for sql, _ in executed)
+
+    # 2. unarchived_appended_summary (must use read_only transaction)
+    executed.clear()
+    assert control.unarchived_appended_summary("svc-1", "request") == (2, 300, t0)
+    assert executed[0][0] == "SET TRANSACTION READ ONLY"
+    state["summary_row"] = None
+    assert control.unarchived_appended_summary("svc-1", "request") == (0, 0, None)
+
+    # 3. unarchived_appended_sources (must use read_only transaction)
+    executed.clear()
+    listed = control.unarchived_appended_sources("svc-1", "request", limit=10)
+    assert executed[0][0] == "SET TRANSACTION READ ONLY"
+    assert [rec.object_key for rec in listed] == ["raw/k1.log", "raw/k2.log"]
+    assert all(rec.discovered_at == t0 for rec in listed)
+
+    # 4. claim_unarchived_appended_sources (after owner_epoch bump 2 -> 3 + max_bytes cap)
+    state["owner_epoch"] = 3
+    executed.clear()
+    claimed = control.claim_unarchived_appended_sources(
+        "svc-1",
+        "request",
+        "worker-2",
+        expected_owner_epoch=3,
+        max_bytes=150,
+        now=t0,
+    )
+    assert [rec.object_key for rec in claimed] == ["raw/k1.log"]
+    assert claimed[0].owner == "worker-2"
+    assert claimed[0].owner_epoch == 3
+    claim_updates = [(sql, params) for sql, params in executed if "RETURNING *" in sql]
+    assert len(claim_updates) == 1
+    assert "owner_epoch=%s" in claim_updates[0][0]
+    assert claim_updates[0][1][1] == 3
+
+    # 5. release_unarchived_appended_sources
+    executed.clear()
+    control.release_unarchived_appended_sources(
+        "svc-1",
+        ["raw/k1.log"],
+        worker_id="worker-2",
+        error="transient S3 timeout",
+    )
+    assert len(executed) == 1
+    assert "SET owner=NULL, lease_until=NULL, last_error=%s" in executed[0][0]
+    assert executed[0][1] == ("transient S3 timeout", "svc-1", ["raw/k1.log"], "worker-2")
+
+    # 6. attach_archive_manifest_to_sources (both worker_id and worker_id=None update owner_epoch)
+    for wid in ("worker-2", None):
+        executed.clear()
+        control.attach_archive_manifest_to_sources(
+            "svc-1",
+            ["raw/k1.log"],
+            manifest_id="m-1",
+            expected_owner_epoch=3,
+            worker_id=wid,
+        )
+        attach_updates = [(sql, params) for sql, params in executed if "SET status='acknowledged'" in sql]
+        assert len(attach_updates) == 1
+        assert "owner_epoch=%s" in attach_updates[0][0]
+        assert attach_updates[0][1][0] == "m-1"
+        assert attach_updates[0][1][1] == 3
+
+    # Uncommitted manifest must be rejected
+    state["manifest_state"] = ArchiveState.ARTIFACT_UPLOADING.value
+    with pytest.raises(RuntimeError, match="not committed"):
+        control.attach_archive_manifest_to_sources(
+            "svc-1",
+            ["raw/k1.log"],
+            manifest_id="m-1",
+            expected_owner_epoch=3,
+            worker_id="worker-2",
+        )
+
+
+@pytest.mark.no_postgres
+def test_pending_payload_cache_evicts_oldest_entries_and_skips_oversized() -> None:
+    ownership = OwnershipStore()
+    ownership.initialize("svc-cache", owner="high_scale", source_cursor="cursor-0")
+    ledger = HighScaleLedger()
+    objects = InMemoryObjectStore()
+    clickhouse = _ClickHouse()
+    archive = ArchivePublication(objects)
+
+    p0 = b'{"timestamp":"2026-11-20T12:00:00Z","url":"/p/0","status":200}\n'
+    p1 = b'{"timestamp":"2026-11-20T12:00:01Z","url":"/p/1","status":200}\n'
+    p2 = b'{"timestamp":"2026-11-20T12:00:02Z","url":"/p/2","status":200}\n'
+    p_big = b'{"timestamp":"2026-11-20T12:00:03Z","url":"/p/' + (b"x" * 200) + b'","status":200}\n'
+
+    cap = len(p0) + len(p1)
+    assert cap < len(p0) + len(p1) + len(p2)
+    assert len(p_big) > cap
+
+    controller = HighScaleIngestController(
+        ownership=ownership,
+        ledger=ledger,
+        archive=archive,
+        serving=ClickHousePublication(InMemoryBatchManifestStore(), clickhouse),
+        worker_id="worker-1",
+        defer_archive_flush=True,
+        snapshot_cache_max_bytes=cap,
+    )
+
+    t0 = datetime(2026, 11, 20, 12, 0, 0, tzinfo=UTC)
+    entries = [
+        ("raw/request/f0.log", p0),
+        ("raw/request/f1.log", p1),
+        ("raw/request/f2.log", p2),
+        ("raw/request/f_big.log", p_big),
+    ]
+    raw_store = dict(entries)
+
+    def _ingest_one(key: str, payload: bytes) -> None:
+        desc = SourceObjectDescriptor(key, f"sha256:{key}", len(payload), "v1")
+        ledger.discover("svc-cache", "request", key, desc.checksum, size_bytes=len(payload), version="v1")
+        ledger.claim("svc-cache", key, "worker-1", now=t0)
+        controller.ingest_batch(
+            service_id="svc-cache",
+            domain="request",
+            sources_payloads=[(desc, payload)],
+            now=t0,
+        )
+
+    _ingest_one("raw/request/f0.log", p0)
+    _ingest_one("raw/request/f1.log", p1)
+    _ingest_one("raw/request/f2.log", p2)
+
+    # f0 must be evicted FIFO; f1 and f2 remain cached within cap
+    assert ("svc-cache", "request", "raw/request/f0.log") not in controller._pending_payload_cache
+    assert ("svc-cache", "request", "raw/request/f1.log") in controller._pending_payload_cache
+    assert ("svc-cache", "request", "raw/request/f2.log") in controller._pending_payload_cache
+    assert controller._pending_payload_cache_bytes == len(p1) + len(p2) <= cap
+
+    # Oversized payload must be skipped without evicting f1 or f2
+    _ingest_one("raw/request/f_big.log", p_big)
+    assert ("svc-cache", "request", "raw/request/f_big.log") not in controller._pending_payload_cache
+    assert ("svc-cache", "request", "raw/request/f1.log") in controller._pending_payload_cache
+    assert ("svc-cache", "request", "raw/request/f2.log") in controller._pending_payload_cache
+    assert controller._pending_payload_cache_bytes == len(p1) + len(p2)
+
+    reader = _DictReader(raw_store)
+    flushed = controller.flush_archive_snapshot(
+        service_id="svc-cache",
+        domain="request",
+        reader=reader,
+        force=True,
+        now=t0 + timedelta(minutes=5),
+    )
+    assert flushed.manifest is not None
+    assert flushed.sources_flushed == 4
+    # Only evicted f0 and skipped oversized f_big needed FOS reads
+    assert reader.read_calls == ["raw/request/f0.log", "raw/request/f_big.log"]
+    assert controller._pending_payload_cache_bytes == 0
+    for key, _ in entries:
+        rec = ledger.source("svc-cache", key)
+        assert rec is not None and rec.status == "acknowledged"
+
+
+@pytest.mark.no_postgres
+def test_deferred_flush_archives_empty_source_in_mixed_batch_for_deletion() -> None:
+    ownership = OwnershipStore()
+    ownership.initialize("svc-mix", owner="high_scale", source_cursor="cursor-0")
+    ledger = HighScaleLedger()
+    raw_fos = InMemoryObjectStore()
+    archive_fos = InMemoryObjectStore()
+    clickhouse = _ClickHouse()
+    archive = ArchivePublication(archive_fos)
+    controller = HighScaleIngestController(
+        ownership=ownership,
+        ledger=ledger,
+        archive=archive,
+        serving=ClickHousePublication(InMemoryBatchManifestStore(), clickhouse),
+        worker_id="worker-1",
+        defer_archive_flush=True,
+    )
+
+    t0 = datetime(2026, 11, 20, 12, 0, 0, tzinfo=UTC)
+    empty_key = "raw/request/empty.log"
+    valid_key = "raw/request/valid.log"
+    empty_payload = b"\n\n"
+    valid_payload = b'{"timestamp":"2026-11-20T12:00:00Z","url":"/ok","status":200}\n'
+
+    raw_fos.put(empty_key, empty_payload)
+    raw_fos.put(valid_key, valid_payload)
+
+    for key, payload in ((empty_key, empty_payload), (valid_key, valid_payload)):
+        desc = SourceObjectDescriptor(key, f"sha256:{key}", len(payload), "v1")
+        ledger.discover("svc-mix", "request", key, desc.checksum, size_bytes=len(payload), version="v1")
+        ledger.claim("svc-mix", key, "worker-1", now=t0)
+        controller.ingest_batch(
+            service_id="svc-mix",
+            domain="request",
+            sources_payloads=[(desc, payload)],
+            now=t0,
+        )
+
+    t_flush = t0 + timedelta(minutes=5)
+    flushed = controller.flush_archive_snapshot(
+        service_id="svc-mix",
+        domain="request",
+        reader=_DictReader({empty_key: empty_payload, valid_key: valid_payload}),
+        force=True,
+        now=t_flush,
+    )
+    assert flushed.manifest is not None
+    assert flushed.sources_flushed == 2
+    assert flushed.rows_archived == 1
+    assert flushed.skipped_missing == 0
+
+    rows_by_key = {src.key: src.row_count for src in flushed.manifest.sources}
+    assert rows_by_key == {empty_key: 0, valid_key: 1}
+    for key in (empty_key, valid_key):
+        rec = ledger.source("svc-mix", key)
+        assert rec is not None
+        assert rec.status == "acknowledged"
+        assert rec.archive_manifest_id == flushed.manifest.manifest_id
+
+    del_ctrl = DeletionController(raw_fos, archive, ledger, ownership=ownership)
+    deleted = del_ctrl.delete_manifest_sources(
+        flushed.manifest,
+        current_owner_epoch=1,
+        now=t_flush + timedelta(seconds=901),
+    )
+    assert sorted(deleted) == sorted([empty_key, valid_key])
+    assert not raw_fos.exists(empty_key)
+    assert not raw_fos.exists(valid_key)
+
+
+@pytest.mark.no_postgres
+def test_deferred_flush_all_empty_batch_exits_cleanly_without_error() -> None:
+    ownership = OwnershipStore()
+    ownership.initialize("svc-empty", owner="high_scale", source_cursor="cursor-0")
+    ledger = HighScaleLedger()
+    objects = InMemoryObjectStore()
+    clickhouse = _ClickHouse()
+    archive = ArchivePublication(objects)
+    controller = HighScaleIngestController(
+        ownership=ownership,
+        ledger=ledger,
+        archive=archive,
+        serving=ClickHousePublication(InMemoryBatchManifestStore(), clickhouse),
+        worker_id="worker-1",
+        defer_archive_flush=True,
+    )
+
+    t0 = datetime(2026, 11, 20, 12, 0, 0, tzinfo=UTC)
+    empties = [("raw/request/e1.log", b"\n\n"), ("raw/request/e2.log", b"")]
+    for key, payload in empties:
+        desc = SourceObjectDescriptor(key, f"sha256:{key}", len(payload), "v1")
+        ledger.discover("svc-empty", "request", key, desc.checksum, size_bytes=len(payload), version="v1")
+        ledger.claim("svc-empty", key, "worker-1", now=t0)
+        controller.ingest_batch(
+            service_id="svc-empty",
+            domain="request",
+            sources_payloads=[(desc, payload)],
+            now=t0,
+        )
+
+    flushed = controller.flush_archive_snapshot(
+        service_id="svc-empty",
+        domain="request",
+        reader=_DictReader(dict(empties)),
+        force=True,
+        now=t0 + timedelta(minutes=5),
+    )
+    assert flushed.manifest is None
+    assert flushed.sources_flushed == 0
+    assert flushed.rows_archived == 0
+    assert flushed.skipped_missing == 2
+    assert len(objects._objects) == 0
+    for key, _ in empties:
+        rec = ledger.source("svc-empty", key)
+        assert rec is not None and rec.status == "source_missing"

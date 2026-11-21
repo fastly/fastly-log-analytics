@@ -4,6 +4,8 @@ mod attach_mode;
 mod cron_and_cmcd;
 #[path = "service_jobs/delete_data.rs"]
 mod delete_data;
+#[path = "service_jobs/dr_recovery.rs"]
+mod dr_recovery;
 #[path = "service_jobs/provisioning.rs"]
 mod provisioning;
 #[path = "service_jobs/retries_and_budgets.rs"]

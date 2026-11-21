@@ -130,6 +130,9 @@ export function CloudCostCalculator({ prefillData, rates: configuredRates, obser
         ))}
         <ResultRow label="Total Estimated Monthly Cost" cost={formatUSD(resultTotal)} highlight />
       </div>
+      <p className="text-xs text-muted-foreground leading-relaxed">
+        Cloud DR state mirroring (<code>meta/cloud_dr_state.json</code>) is event-driven on service settings and saved view updates, classified under <code>pq_ops</code>, and automatically folded into measured fixed storage and Class A operations when FOS usage logging is enabled.
+      </p>
     </div>
   )
 }

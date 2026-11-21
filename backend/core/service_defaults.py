@@ -6,7 +6,12 @@ Mirrors ``frontend/lib/serviceDefaults.ts`` and the Cloud app (``compute/cloud/s
 an unconfigured service the same way.
 """
 
+from typing import Literal
+
 DEFAULT_LOG_PERIOD_SECONDS = 10
 DEFAULT_RUM_LOG_PERIOD_SECONDS = 300
 DEFAULT_LOG_RETENTION_DAYS = 30
 DEFAULT_RUM_RETENTION_DAYS = 30
+SnapshotIntervalMinutes = Literal[5, 15, 30, 60, 360, 1440]
+DEFAULT_SNAPSHOT_INTERVAL_MINUTES: SnapshotIntervalMinutes = 5
+VALID_SNAPSHOT_INTERVAL_MINUTES: tuple[int, ...] = (5, 15, 30, 60, 360, 1440)

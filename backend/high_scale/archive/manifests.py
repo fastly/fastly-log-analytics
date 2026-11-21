@@ -201,6 +201,7 @@ class ObjectStore(Protocol):
     def get(self, key: str) -> bytes: ...
     def exists(self, key: str) -> bool: ...
     def delete(self, key: str) -> None: ...
+    def list_keys(self, prefix: str = "") -> list[str]: ...
 
 
 class PublicationState(StrEnum):
@@ -249,6 +250,10 @@ class InMemoryObjectStore:
     def delete(self, key: str) -> None:
         self._objects.pop(key, None)
 
+    def list_keys(self, prefix: str = "") -> list[str]:
+        norm = prefix.lstrip("/")
+        return sorted(k for k in self._objects if k.startswith(norm))
+
 
 class S3ObjectStore:
     """S3-compatible object store adapter for FOS and local S3 emulators."""
@@ -275,6 +280,60 @@ class S3ObjectStore:
 
     def delete(self, key: str) -> None:
         self._client.delete_object(Bucket=self._bucket, Key=self._key(key))
+
+    def list_keys(self, prefix: str = "") -> list[str]:
+        sub = prefix.lstrip("/")
+        if self._prefix and sub:
+            s3_prefix = f"{self._prefix}/{sub}"
+        elif self._prefix:
+            s3_prefix = f"{self._prefix}/"
+        else:
+            s3_prefix = sub
+
+        strip_prefix = f"{self._prefix}/" if self._prefix else ""
+        keys: list[str] = []
+
+        get_paginator = getattr(self._client, "get_paginator", None)
+        if callable(get_paginator):
+            paginator = get_paginator("list_objects_v2")
+            pages = paginator.paginate(Bucket=self._bucket, Prefix=s3_prefix)
+            for page in pages:
+                for item in page.get("Contents") or ():
+                    raw_key = item.get("Key", "")
+                    if not raw_key:
+                        continue
+                    if strip_prefix:
+                        if not raw_key.startswith(strip_prefix):
+                            continue
+                        raw_key = raw_key[len(strip_prefix) :]
+                    if not raw_key:
+                        continue
+                    keys.append(raw_key)
+        else:
+            token: str | None = None
+            while True:
+                kwargs: dict[str, Any] = {"Bucket": self._bucket, "Prefix": s3_prefix}
+                if token:
+                    kwargs["ContinuationToken"] = token
+                page = self._client.list_objects_v2(**kwargs)
+                for item in page.get("Contents") or ():
+                    raw_key = item.get("Key", "")
+                    if not raw_key:
+                        continue
+                    if strip_prefix:
+                        if not raw_key.startswith(strip_prefix):
+                            continue
+                        raw_key = raw_key[len(strip_prefix) :]
+                    if not raw_key:
+                        continue
+                    keys.append(raw_key)
+                if not page.get("IsTruncated"):
+                    break
+                token = page.get("NextContinuationToken")
+                if not token:
+                    break
+
+        return sorted(keys)
 
     def _key(self, key: str) -> str:
         normalized = key.strip("/")
@@ -348,10 +407,13 @@ class ArchivePublication:
         try:
             manifest_payload = self._store.get(manifest_key)
             commit = json.loads(self._store.get(commit_key))
+            if not isinstance(commit, dict):
+                return None
             manifest = _manifest_from_json(manifest_payload)
             manifest.validate()
             if (
-                commit.get("manifest_id") != manifest_id
+                manifest.manifest_id != manifest_id
+                or commit.get("manifest_id") != manifest_id
                 or commit.get("manifest_checksum") != _checksum(manifest_payload)
                 or commit.get("artifact_checksum") != manifest.artifact.checksum
             ):
@@ -362,6 +424,51 @@ class ArchivePublication:
             return None
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             return None
+
+    def read_committed_manifest(self, manifest_id: str) -> ArchiveManifest | None:
+        manifest_key = f"archive/manifests/{manifest_id}.json"
+        commit_key = f"archive/manifests/{manifest_id}.commit"
+        if not self._store.exists(manifest_key) or not self._store.exists(commit_key):
+            return None
+        try:
+            manifest_payload = self._store.get(manifest_key)
+            commit = json.loads(self._store.get(commit_key))
+            if not isinstance(commit, dict):
+                logger.warning("archive_manifest_commit_not_dict", manifest_id=manifest_id)
+                return None
+            manifest = _manifest_from_json(manifest_payload)
+            manifest.validate()
+            if (
+                manifest.manifest_id != manifest_id
+                or commit.get("manifest_id") != manifest_id
+                or commit.get("manifest_checksum") != _checksum(manifest_payload)
+                or commit.get("artifact_checksum") != manifest.artifact.checksum
+            ):
+                logger.warning("archive_manifest_commit_checksum_mismatch", manifest_id=manifest_id)
+                return None
+            return manifest
+        except (KeyError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            logger.warning("archive_manifest_commit_invalid", manifest_id=manifest_id, error=str(exc))
+            return None
+
+    def list_committed_manifests(self, *, service_id: str | None = None) -> list[ArchiveManifest]:
+        prefix = "archive/manifests/"
+        manifests: list[ArchiveManifest] = []
+        for key in self._store.list_keys(prefix):
+            if not key.endswith(".commit"):
+                continue
+            rel = key[len(prefix) :] if key.startswith(prefix) else key
+            manifest_id = rel[: -len(".commit")]
+            if not manifest_id:
+                continue
+            manifest = self.read_committed_manifest(manifest_id)
+            if manifest is None:
+                continue
+            if service_id is not None and manifest.service_id != service_id:
+                continue
+            manifests.append(manifest)
+        manifests.sort(key=lambda m: (m.coverage_start, m.manifest_id))
+        return manifests
 
     def is_replayable(self, manifest_id: str) -> bool:
         return self._read_verified_artifact(manifest_id) is not None
@@ -383,6 +490,8 @@ def _artifact_key(uri: str) -> str:
 
 def _manifest_from_json(payload: bytes) -> ArchiveManifest:
     raw = json.loads(payload)
+    if not isinstance(raw, dict):
+        raise ValueError("manifest payload must be a JSON object")
     raw_sources = raw.get("sources")
     sources = (
         [

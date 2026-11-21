@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import inspect
 import json
 import logging
 import os
 import tempfile
 import time
+from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
@@ -89,18 +91,46 @@ from backend.high_scale.query_service import DecodeResult, decode_source_object 
 HIGH_SCALE_PAGE_MAX_BYTES = 64 * 1024 * 1024  # 64 MB in-flight byte guard
 HIGH_SCALE_DEFAULT_MAX_BATCH_OBJECTS = 50
 HIGH_SCALE_DEFAULT_MAX_BATCH_BYTES = 6 * 1024 * 1024  # 6 MB compressed sub-batch target
+HIGH_SCALE_SNAPSHOT_DEFAULT_MAX_OBJECTS = 500
+HIGH_SCALE_SNAPSHOT_DEFAULT_MAX_BYTES = 32 * 1024 * 1024  # 32 MB consolidated snapshot target
+HIGH_SCALE_SNAPSHOT_CACHE_DEFAULT_MAX_BYTES = 16 * 1024 * 1024  # 16 MB bounded in-memory payload cache
 HIGH_SCALE_MAX_DEAD_LETTER_RATIO = 0.05  # 5% dead-letter limit
 _RUM_SIBLING_DOMAIN = {"rum_vitals": "rum_errors", "rum_errors": "rum_vitals"}
 
 
 @dataclass(frozen=True)
 class BatchIngestResult:
-    manifest: ArchiveManifest
+    manifest: ArchiveManifest | None
     publication: PublicationResult
     total_events: int
     quarantined_events: int
     sources_count: int
     derived_publication_complete: bool = True
+
+
+@dataclass(frozen=True)
+class SnapshotFlushResult:
+    service_id: str
+    domain: str
+    manifest: ArchiveManifest | None
+    sources_flushed: int
+    rows_archived: int
+    skipped_missing: int = 0
+
+
+def _build_ingest_publication_id(
+    service_id: str,
+    domain: str,
+    sources_payloads: Sequence[tuple[SourceObjectDescriptor, bytes]],
+    schema_version: str,
+    transform_version: str,
+) -> str:
+    """Deterministic publication ID for decoupled fast ClickHouse ingest."""
+    hasher = hashlib.sha256()
+    hasher.update(f"{service_id}\x00{domain}\x00{schema_version}\x00{transform_version}\x00".encode())
+    for desc, _ in sources_payloads:
+        hasher.update(f"{desc.object_key}\x00{desc.checksum}\x00".encode())
+    return f"ingest-{hasher.hexdigest()[:40]}"
 
 
 @dataclass(frozen=True)
@@ -171,6 +201,66 @@ class HighScaleControlPlane(Protocol):
         domain: str = "request",
         partition_id: str = "default",
     ) -> None: ...
+    def mark_source_missing(
+        self,
+        service_id: str,
+        object_key: str,
+        *,
+        expected_owner: str,
+        expected_owner_epoch: int,
+        error: str,
+        now: datetime | None = None,
+    ) -> Any: ...
+    def mark_sources_appended_batch(
+        self,
+        service_id: str,
+        object_keys: Sequence[str],
+        *,
+        expected_owner_epoch: int,
+        claim_tokens: Sequence[Any],
+        next_cursor: str | None = None,
+        domain: str = "request",
+        partition_id: str = "default",
+    ) -> None: ...
+    def unarchived_appended_summary(self, service_id: str, domain: str) -> tuple[int, int, datetime | None]: ...
+    def claim_unarchived_appended_sources(
+        self,
+        service_id: str,
+        domain: str,
+        worker_id: str,
+        *,
+        expected_owner_epoch: int,
+        lease_seconds: float = 300.0,
+        limit: int = 500,
+        max_bytes: int | None = None,
+        now: datetime | None = None,
+    ) -> tuple[Any, ...]: ...
+    def release_unarchived_appended_sources(
+        self,
+        service_id: str,
+        object_keys: Sequence[str],
+        *,
+        worker_id: str,
+        error: str | None = None,
+    ) -> None: ...
+    def attach_archive_manifest_to_sources(
+        self,
+        service_id: str,
+        object_keys: Sequence[str],
+        *,
+        manifest_id: str,
+        expected_owner_epoch: int,
+        worker_id: str | None = None,
+    ) -> None: ...
+    def fail_sources_batch(
+        self,
+        service_id: str,
+        object_keys: Sequence[str],
+        *,
+        expected_owner_epoch: int,
+        error: str,
+        claim_tokens: Sequence[Any],
+    ) -> None: ...
 
 
 class HighScaleIngestController:
@@ -194,6 +284,8 @@ class HighScaleIngestController:
         retention_seconds: int = 0,
         deletion_grace_seconds: int = 900,
         lease_seconds: float = 300.0,
+        defer_archive_flush: bool = False,
+        snapshot_cache_max_bytes: int | None = None,
     ) -> None:
         if not worker_id:
             raise ValueError("worker identity is required")
@@ -214,6 +306,22 @@ class HighScaleIngestController:
         self._retention_seconds = retention_seconds
         self._deletion_grace_seconds = deletion_grace_seconds
         self._lease_seconds = lease_seconds
+        self._defer_archive_flush = bool(defer_archive_flush)
+        self._snapshot_cache_max_bytes = (
+            max(0, int(snapshot_cache_max_bytes))
+            if snapshot_cache_max_bytes is not None
+            else max(
+                0,
+                int(
+                    os.getenv(
+                        "HIGH_SCALE_SNAPSHOT_CACHE_MAX_BYTES",
+                        str(HIGH_SCALE_SNAPSHOT_CACHE_DEFAULT_MAX_BYTES),
+                    )
+                ),
+            )
+        )
+        self._pending_payload_cache: OrderedDict[tuple[str, str, str], bytes] = OrderedDict()
+        self._pending_payload_cache_bytes = 0
         self._publication_retry_backoff: dict[str, tuple[float, int]] = {}
 
     def ingest_batch(
@@ -417,6 +525,63 @@ class HighScaleIngestController:
             for _, rows in source_batches:
                 _mark_ngwaf_enrichment(rows, ngwaf_bots)
         observed = (now or datetime.now(UTC)).astimezone(UTC)
+        object_keys = tuple(desc.object_key for desc, _ in sources_payloads)
+
+        if self._defer_archive_flush:
+            source_batches.clear()
+            publication_id = _build_ingest_publication_id(
+                service_id, domain, sources_payloads, self._schema_version, self._transform_version
+            )
+            current_owner = (
+                self._control.owner(service_id) if self._control is not None else self._ownership.get(service_id)
+            )
+            if current_owner.current_owner != "high_scale" or current_owner.owner_epoch != owner.owner_epoch:
+                raise RuntimeError(f"high-scale owner epoch changed during ingest for {service_id}")
+            if domain == "request":
+                _apply_high_scale_ngwaf_bots(all_events, ngwaf_bots)
+            try:
+                publication, derived_ok, derived_err = self._publish_manifest_publications(
+                    service_id, domain, publication_id, owner.owner_epoch, all_events, sibling_events
+                )
+            except Exception as exc:
+                self._fail_deferred_sources(service_id, object_keys, owner.owner_epoch, str(exc), tokens_by_key)
+                raise
+            if not derived_ok:
+                self._fail_deferred_sources(service_id, object_keys, owner.owner_epoch, derived_err, tokens_by_key)
+                return BatchIngestResult(
+                    None,
+                    publication,
+                    total_accepted,
+                    total_quarantined,
+                    len(sources_payloads),
+                    derived_publication_complete=False,
+                )
+            if self._control is not None:
+                self._control.mark_sources_appended_batch(
+                    service_id,
+                    object_keys,
+                    expected_owner_epoch=owner.owner_epoch,
+                    claim_tokens=tuple(tokens_by_key[key] for key in object_keys if key in tokens_by_key),
+                    next_cursor=next_cursor,
+                    domain=domain,
+                    partition_id=partition_id,
+                )
+            else:
+                for desc, _ in sources_payloads:
+                    cur_src = self._ledger.source(service_id, desc.object_key)
+                    gen = cur_src.lease_generation if cur_src is not None else 1
+                    if cur_src is None or cur_src.status not in {"appended", "acknowledged"}:
+                        self._ledger.mark_appended(service_id, desc.object_key, gen)
+            self._cache_pending_payloads(service_id, domain, sources_payloads)
+            return BatchIngestResult(
+                None,
+                publication,
+                total_accepted,
+                total_quarantined,
+                len(sources_payloads),
+                derived_publication_complete=True,
+            )
+
         with tempfile.TemporaryDirectory(prefix="high-scale-archive-") as root:
             local_manifest = write_batch_archive_checkpoint(
                 Path(root),
@@ -453,7 +618,6 @@ class HighScaleIngestController:
             raise RuntimeError(f"high-scale owner epoch changed during ingest for {service_id}")
         if domain == "request":
             _apply_high_scale_ngwaf_bots(all_events, ngwaf_bots)
-        object_keys = tuple(desc.object_key for desc, _ in sources_payloads)
         try:
             publication, derived_ok, derived_err = self._publish_manifest_publications(
                 service_id, domain, manifest.manifest_id, owner.owner_epoch, all_events, sibling_events
@@ -511,6 +675,291 @@ class HighScaleIngestController:
             len(sources_payloads),
             derived_publication_complete=derived_ok,
         )
+
+    def _fail_deferred_sources(
+        self,
+        service_id: str,
+        object_keys: Sequence[str],
+        owner_epoch: int,
+        error: str,
+        tokens_by_key: Mapping[str, Any],
+    ) -> None:
+        if self._control is not None:
+            self._control.fail_sources_batch(
+                service_id,
+                object_keys,
+                expected_owner_epoch=owner_epoch,
+                error=error,
+                claim_tokens=tuple(tokens_by_key[key] for key in object_keys if key in tokens_by_key),
+            )
+            return
+        for key in object_keys:
+            cur_src = self._ledger.source(service_id, key)
+            if cur_src is not None and cur_src.status == "claimed" and hasattr(self._ledger, "mark_failed"):
+                self._ledger.mark_failed(service_id, key, cur_src.lease_generation, error)
+
+    def _cache_pending_payloads(
+        self,
+        service_id: str,
+        domain: str,
+        sources_payloads: Sequence[tuple[SourceObjectDescriptor, bytes]],
+    ) -> None:
+        max_bytes = self._snapshot_cache_max_bytes
+        if max_bytes <= 0:
+            return
+        for desc, payload in sources_payloads:
+            cache_key = (service_id, domain, desc.object_key)
+            if cache_key in self._pending_payload_cache:
+                self._pending_payload_cache.move_to_end(cache_key)
+                continue
+            size = len(payload)
+            if size > max_bytes:
+                continue
+            while self._pending_payload_cache and (self._pending_payload_cache_bytes + size > max_bytes):
+                _, evicted = self._pending_payload_cache.popitem(last=False)
+                self._pending_payload_cache_bytes = max(0, self._pending_payload_cache_bytes - len(evicted))
+            self._pending_payload_cache[cache_key] = payload
+            self._pending_payload_cache_bytes += size
+
+    def _pop_cached_payload(self, service_id: str, domain: str, object_key: str) -> bytes | None:
+        payload = self._pending_payload_cache.pop((service_id, domain, object_key), None)
+        if payload is not None:
+            self._pending_payload_cache_bytes = max(0, self._pending_payload_cache_bytes - len(payload))
+        return payload
+
+    def flush_archive_snapshot(
+        self,
+        *,
+        service_id: str,
+        domain: str,
+        reader: SourceObjectReader,
+        snapshot_interval_minutes: int = 5,
+        force: bool = False,
+        now: datetime | None = None,
+        max_objects: int | None = None,
+        max_bytes: int | None = None,
+    ) -> SnapshotFlushResult:
+        """Flush accumulated 'appended' sources for *(service_id, domain)* into one consolidated archive."""
+        owner = self._control.owner(service_id) if self._control is not None else self._ownership.get(service_id)
+        if owner.current_owner != "high_scale":
+            return SnapshotFlushResult(service_id, domain, None, 0, 0, 0)
+
+        observed = (now or datetime.now(UTC)).astimezone(UTC)
+        resolved_max_objects = (
+            max(1, int(max_objects))
+            if max_objects is not None
+            else max(
+                1,
+                int(os.getenv("HIGH_SCALE_SNAPSHOT_MAX_OBJECTS", str(HIGH_SCALE_SNAPSHOT_DEFAULT_MAX_OBJECTS))),
+            )
+        )
+        resolved_max_bytes = min(
+            HIGH_SCALE_PAGE_MAX_BYTES,
+            max(1, int(max_bytes))
+            if max_bytes is not None
+            else max(
+                1,
+                int(os.getenv("HIGH_SCALE_SNAPSHOT_MAX_BYTES", str(HIGH_SCALE_SNAPSHOT_DEFAULT_MAX_BYTES))),
+            ),
+        )
+
+        source_store = self._control if self._control is not None else self._ledger
+        count, total_bytes, oldest_at = source_store.unarchived_appended_summary(service_id, domain)
+        if count <= 0:
+            return SnapshotFlushResult(service_id, domain, None, 0, 0, 0)
+
+        if not force and count < resolved_max_objects and total_bytes < resolved_max_bytes:
+            if oldest_at is not None:
+                oldest_utc = (oldest_at if oldest_at.tzinfo else oldest_at.replace(tzinfo=UTC)).astimezone(UTC)
+                elapsed = (observed - oldest_utc).total_seconds()
+                if elapsed < max(1, int(snapshot_interval_minutes)) * 60:
+                    return SnapshotFlushResult(service_id, domain, None, 0, 0, 0)
+
+        if self._control is not None:
+            claimed = self._control.claim_unarchived_appended_sources(
+                service_id,
+                domain,
+                self._worker_id,
+                expected_owner_epoch=owner.owner_epoch,
+                lease_seconds=self._lease_seconds,
+                limit=resolved_max_objects,
+                max_bytes=resolved_max_bytes,
+                now=observed,
+            )
+        else:
+            claimed = self._ledger.unarchived_appended_sources(
+                service_id,
+                domain,
+                limit=resolved_max_objects,
+                max_bytes=resolved_max_bytes,
+            )
+        if not claimed:
+            return SnapshotFlushResult(service_id, domain, None, 0, 0, 0)
+
+        claimed_keys = tuple(rec.object_key for rec in claimed)
+        skipped_missing = 0
+        try:
+            source_batches: list[tuple[ArchiveSourceObject, list[dict[str, Any]]]] = []
+            valid_recs: list[Any] = []
+            all_events: list[dict[str, Any]] = []
+            total_archive_rows = 0
+
+            for rec in claimed:
+                payload = self._pop_cached_payload(service_id, domain, rec.object_key)
+                if payload is None:
+                    try:
+                        payload = reader.read_source_object(service_id, domain, rec.object_key)
+                    except SourceObjectMissingError as exc:
+                        skipped_missing += 1
+                        if self._control is not None:
+                            self._control.mark_source_missing(
+                                service_id,
+                                rec.object_key,
+                                expected_owner="high_scale",
+                                expected_owner_epoch=owner.owner_epoch,
+                                error=str(exc),
+                            )
+                        elif hasattr(self._ledger, "mark_source_missing"):
+                            self._ledger.mark_source_missing(service_id, rec.object_key, error=str(exc))
+                        logger.error(
+                            "high-scale snapshot flush skipped missing source",
+                            extra={"service_id": service_id, "domain": domain, "object_key": rec.object_key},
+                        )
+                        continue
+
+                archive_src = ArchiveSourceObject(
+                    service_id=service_id,
+                    domain=domain,
+                    object_key=rec.object_key,
+                    checksum=rec.checksum,
+                    size_bytes=len(payload),
+                    version=rec.version,
+                )
+                decoded = decode_source_object(
+                    archive_src, payload, transform_version=self._transform_version, domain=domain
+                )
+                archive_rows: list[dict[str, Any]] = [dict(row, _record_kind="event") for row in decoded.events]
+                archive_rows.extend(
+                    {
+                        "_record_kind": "dead_letter",
+                        "source_object_key": dl.source_object_key,
+                        "line_ordinal": dl.line_ordinal,
+                        "raw_line_base64": dl.raw_line_base64,
+                        "reason": dl.reason,
+                    }
+                    for dl in decoded.dead_letters
+                )
+                total_archive_rows += len(archive_rows)
+                all_events.extend(decoded.events)
+                source_batches.append((archive_src, archive_rows))
+                valid_recs.append(rec)
+
+            if total_archive_rows == 0:
+                for rec in valid_recs:
+                    skipped_missing += 1
+                    if self._control is not None:
+                        self._control.mark_source_missing(
+                            service_id,
+                            rec.object_key,
+                            expected_owner="high_scale",
+                            expected_owner_epoch=owner.owner_epoch,
+                            error="empty source object (0 rows)",
+                        )
+                    elif hasattr(self._ledger, "mark_source_missing"):
+                        self._ledger.mark_source_missing(
+                            service_id, rec.object_key, error="empty source object (0 rows)"
+                        )
+                return SnapshotFlushResult(service_id, domain, None, 0, 0, skipped_missing)
+
+            if domain == "request":
+                ngwaf_bots = _lookup_high_scale_ngwaf_bots(all_events)
+                for _, rows in source_batches:
+                    _mark_ngwaf_enrichment(rows, ngwaf_bots)
+
+            discovered_times = [
+                (dt if dt.tzinfo else dt.replace(tzinfo=UTC)).astimezone(UTC)
+                for rec in valid_recs
+                if (dt := getattr(rec, "discovered_at", None)) is not None
+            ]
+            coverage_start = min(discovered_times, default=observed)
+            if coverage_start > observed:
+                coverage_start = observed
+
+            with tempfile.TemporaryDirectory(prefix="high-scale-snapshot-") as root:
+                local_manifest = write_batch_archive_checkpoint(
+                    Path(root),
+                    service_id=service_id,
+                    domain=domain,
+                    source_batches=source_batches,
+                    archive_epoch=self._archive_epoch,
+                    schema_version=self._schema_version,
+                    transform_version=self._transform_version,
+                    coverage_start=coverage_start,
+                    coverage_end=observed,
+                    retention_seconds=self._retention_seconds,
+                    deletion_grace_seconds=self._deletion_grace_seconds,
+                )
+                source_batches.clear()
+                artifact = Path(local_manifest.artifact.uri.removeprefix("file://")).read_bytes()
+                manifest = replace(
+                    local_manifest,
+                    artifact=replace(
+                        local_manifest.artifact,
+                        uri=f"s3://archive/{local_manifest.manifest_id}.parquet",
+                    ),
+                )
+                if self._control is not None:
+                    try:
+                        manifest = self._control.archive_manifest(manifest.manifest_id).manifest
+                    except KeyError:
+                        pass
+                self._archive.publish(manifest, artifact)
+                del artifact
+
+            if self._control is not None:
+                self._publish_control_manifest(manifest, owner.owner_epoch)
+                self._control.attach_archive_manifest_to_sources(
+                    service_id,
+                    tuple(rec.object_key for rec in valid_recs),
+                    manifest_id=manifest.manifest_id,
+                    expected_owner_epoch=owner.owner_epoch,
+                    worker_id=self._worker_id,
+                )
+            else:
+                for rec in valid_recs:
+                    self._ledger.mark_archived(
+                        service_id,
+                        rec.object_key,
+                        rec.lease_generation,
+                        manifest.manifest_id,
+                        owner.owner_epoch,
+                    )
+                    self._ledger.acknowledge(service_id, rec.object_key, manifest.manifest_id)
+
+            return SnapshotFlushResult(
+                service_id=service_id,
+                domain=domain,
+                manifest=manifest,
+                sources_flushed=len(valid_recs),
+                rows_archived=manifest.artifact.row_count,
+                skipped_missing=skipped_missing,
+            )
+        except Exception as exc:
+            if self._control is not None:
+                try:
+                    self._control.release_unarchived_appended_sources(
+                        service_id,
+                        claimed_keys,
+                        worker_id=self._worker_id,
+                        error=str(exc),
+                    )
+                except Exception:
+                    logger.warning(
+                        "high-scale snapshot flush failed to release claimed sources",
+                        extra={"service_id": service_id, "domain": domain},
+                        exc_info=True,
+                    )
+            raise
 
     def _publish_manifest_publications(
         self,
@@ -1565,6 +2014,29 @@ class HighScaleWorkerCoordinator:
                     ),
                 )
         return PageRun(listing_cursor, next_cursor, len(objects), processed, duplicates, failed, missing)
+
+    def flush_archive_snapshot(
+        self,
+        *,
+        service_id: str,
+        domain: str,
+        snapshot_interval_minutes: int = 5,
+        force: bool = False,
+        now: datetime | None = None,
+        max_objects: int | None = None,
+        max_bytes: int | None = None,
+    ) -> SnapshotFlushResult:
+        """Delegate consolidated archive snapshot flushing to the ingest controller."""
+        return self._controller.flush_archive_snapshot(
+            service_id=service_id,
+            domain=domain,
+            reader=self._reader,
+            snapshot_interval_minutes=snapshot_interval_minutes,
+            force=force,
+            now=now,
+            max_objects=max_objects,
+            max_bytes=max_bytes,
+        )
 
     def _chunk_active_sources(
         self, active_sources: Sequence[SourceObjectDescriptor]

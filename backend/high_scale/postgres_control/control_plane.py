@@ -233,6 +233,7 @@ class SourceObjectRecord:
     malformed_rows: int
     accepted_rows: int
     last_error: str | None = None
+    discovered_at: datetime | None = None
 
     @property
     def claim_token(self) -> SourceClaimToken:
@@ -1383,6 +1384,192 @@ class PostgresControlPlane:
                 if partition_id == "default":
                     _upsert_domain_cursor(connection, service_id, domain, next_cursor)
 
+    def mark_sources_appended_batch(
+        self,
+        service_id: str,
+        object_keys: Sequence[str],
+        *,
+        expected_owner_epoch: int,
+        claim_tokens: Sequence[SourceClaimToken],
+        next_cursor: str | None = None,
+        domain: str = "request",
+        partition_id: str = "default",
+    ) -> None:
+        """Mark claimed sources as 'appended' (visible in ClickHouse, archive flush deferred)."""
+        _require_texts(service_id=service_id)
+        if expected_owner_epoch <= 0:
+            raise ValueError("owner epoch must be positive")
+        with self.transaction() as connection:
+            self._fenced_owner(connection, service_id, expected_owner_epoch=expected_owner_epoch)
+            self._locked_claim_rows(
+                connection,
+                service_id,
+                object_keys,
+                claim_tokens=claim_tokens,
+                expected_owner_epoch=expected_owner_epoch,
+            )
+            if object_keys:
+                connection.execute(
+                    "UPDATE high_scale_source_objects SET status='appended', archive_manifest_id=NULL, "
+                    "owner=NULL, lease_until=NULL, last_error=NULL, updated_at=clock_timestamp() "
+                    "WHERE service_id=%s AND object_key = ANY(%s)",
+                    (service_id, list(object_keys)),
+                )
+            if next_cursor is not None:
+                connection.execute(
+                    "INSERT INTO high_scale_partition_cursors (service_id, domain, partition_id, source_cursor, updated_at) "
+                    "VALUES (%s, %s, %s, %s, clock_timestamp()) "
+                    "ON CONFLICT (service_id, domain, partition_id) DO UPDATE "
+                    "SET source_cursor=EXCLUDED.source_cursor, updated_at=clock_timestamp()",
+                    (service_id, domain, partition_id, next_cursor),
+                )
+                if partition_id == "default":
+                    _upsert_domain_cursor(connection, service_id, domain, next_cursor)
+
+    def unarchived_appended_summary(self, service_id: str, domain: str) -> tuple[int, int, datetime | None]:
+        """Return (count, total_bytes, oldest_updated_at) for 'appended' sources awaiting archive flush."""
+        _require_texts(service_id=service_id, domain=domain)
+        with self.transaction(read_only=True) as connection:
+            row = connection.execute(
+                "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0), MIN(updated_at) "
+                "FROM high_scale_source_objects "
+                "WHERE service_id=%s AND domain=%s AND status='appended' AND archive_manifest_id IS NULL",
+                (service_id, domain),
+            ).fetchone()
+        if not row:
+            return (0, 0, None)
+        return (int(row[0] or 0), int(row[1] or 0), _parse_iso_or_dt(row[2]))
+
+    def unarchived_appended_sources(
+        self,
+        service_id: str,
+        domain: str,
+        *,
+        limit: int = 500,
+    ) -> tuple[SourceObjectRecord, ...]:
+        """List 'appended' sources awaiting archive flush in discovery order."""
+        _require_texts(service_id=service_id, domain=domain)
+        with self.transaction(read_only=True) as connection:
+            rows = connection.execute(
+                "SELECT * FROM high_scale_source_objects "
+                "WHERE service_id=%s AND domain=%s AND status='appended' AND archive_manifest_id IS NULL "
+                "ORDER BY discovered_at, object_key LIMIT %s",
+                (service_id, domain, max(1, int(limit))),
+            ).fetchall()
+        return tuple(_source_from_row(row) for row in rows)
+
+    def claim_unarchived_appended_sources(
+        self,
+        service_id: str,
+        domain: str,
+        worker_id: str,
+        *,
+        expected_owner_epoch: int,
+        lease_seconds: float = 300.0,
+        limit: int = 500,
+        max_bytes: int | None = None,
+        now: datetime | None = None,
+    ) -> tuple[SourceObjectRecord, ...]:
+        """Lease a bounded batch of 'appended' sources for consolidated archive flushing."""
+        _require_texts(service_id=service_id, domain=domain, worker_id=worker_id)
+        if expected_owner_epoch <= 0:
+            raise ValueError("owner epoch must be positive")
+        observed = (now or datetime.now(UTC)).astimezone(UTC)
+        lease_until = observed + timedelta(seconds=max(1.0, float(lease_seconds)))
+        with self.transaction() as connection:
+            self._fenced_owner(
+                connection,
+                service_id,
+                expected_owner_epoch=expected_owner_epoch,
+                expected_owner="high_scale",
+            )
+            rows = connection.execute(
+                "SELECT * FROM high_scale_source_objects "
+                "WHERE service_id=%s AND domain=%s AND status='appended' AND archive_manifest_id IS NULL "
+                "AND (lease_until IS NULL OR lease_until <= %s) "
+                "ORDER BY discovered_at, object_key LIMIT %s FOR UPDATE SKIP LOCKED",
+                (service_id, domain, observed, max(1, int(limit))),
+            ).fetchall()
+            candidates = [_source_from_row(row) for row in rows]
+            if not candidates:
+                return ()
+            selected: list[SourceObjectRecord] = []
+            running_bytes = 0
+            for rec in candidates:
+                if max_bytes is not None and selected and running_bytes + rec.size_bytes > max_bytes:
+                    break
+                selected.append(rec)
+                running_bytes += rec.size_bytes
+            selected_keys = [rec.object_key for rec in selected]
+            updated_rows = connection.execute(
+                "UPDATE high_scale_source_objects "
+                "SET owner=%s, owner_epoch=%s, lease_until=%s, lease_generation=lease_generation+1 "
+                "WHERE service_id=%s AND object_key = ANY(%s) RETURNING *",
+                (worker_id, expected_owner_epoch, lease_until, service_id, selected_keys),
+            ).fetchall()
+        updated_by_key = {rec.object_key: rec for rec in (_source_from_row(row) for row in updated_rows)}
+        return tuple(updated_by_key[key] for key in selected_keys if key in updated_by_key)
+
+    def release_unarchived_appended_sources(
+        self,
+        service_id: str,
+        object_keys: Sequence[str],
+        *,
+        worker_id: str,
+        error: str | None = None,
+    ) -> None:
+        """Release flush leases on 'appended' sources after a transient archive error."""
+        _require_texts(service_id=service_id, worker_id=worker_id)
+        if not object_keys:
+            return
+        with self.transaction() as connection:
+            connection.execute(
+                "UPDATE high_scale_source_objects "
+                "SET owner=NULL, lease_until=NULL, last_error=%s "
+                "WHERE service_id=%s AND object_key = ANY(%s) "
+                "AND status='appended' AND archive_manifest_id IS NULL AND owner=%s",
+                (error, service_id, list(object_keys), worker_id),
+            )
+
+    def attach_archive_manifest_to_sources(
+        self,
+        service_id: str,
+        object_keys: Sequence[str],
+        *,
+        manifest_id: str,
+        expected_owner_epoch: int,
+        worker_id: str | None = None,
+    ) -> None:
+        """Transition 'appended' sources to 'acknowledged' once their archive manifest is committed."""
+        _require_texts(service_id=service_id, manifest_id=manifest_id)
+        if expected_owner_epoch <= 0:
+            raise ValueError("owner epoch must be positive")
+        if not object_keys:
+            return
+        with self.transaction() as connection:
+            self._fenced_owner(connection, service_id, expected_owner_epoch=expected_owner_epoch)
+            manifest = self._archive_manifest(connection, manifest_id)
+            if manifest.state not in {ArchiveState.MANIFEST_COMMITTED, ArchiveState.DELETION_ELIGIBLE}:
+                raise RuntimeError(f"archive manifest {manifest_id} is not committed (state={manifest.state.value})")
+            if worker_id is not None:
+                connection.execute(
+                    "UPDATE high_scale_source_objects "
+                    "SET status='acknowledged', archive_manifest_id=%s, owner_epoch=%s, owner=NULL, lease_until=NULL, "
+                    "last_error=NULL, updated_at=clock_timestamp() "
+                    "WHERE service_id=%s AND object_key = ANY(%s) "
+                    "AND status='appended' AND archive_manifest_id IS NULL AND owner=%s",
+                    (manifest_id, expected_owner_epoch, service_id, list(object_keys), worker_id),
+                )
+            else:
+                connection.execute(
+                    "UPDATE high_scale_source_objects "
+                    "SET status='acknowledged', archive_manifest_id=%s, owner_epoch=%s, owner=NULL, lease_until=NULL, "
+                    "last_error=NULL, updated_at=clock_timestamp() "
+                    "WHERE service_id=%s AND object_key = ANY(%s) "
+                    "AND status='appended' AND archive_manifest_id IS NULL",
+                    (manifest_id, expected_owner_epoch, service_id, list(object_keys)),
+                )
+
     def fail_sources_batch(
         self,
         service_id: str,
@@ -1826,6 +2013,7 @@ def _source_from_row(row: Mapping[str, Any] | Any) -> SourceObjectRecord:
         int(_row_value(row, "malformed_rows", 13)),
         int(_row_value(row, "accepted_rows", 14)),
         _row_value(row, "last_error", 15),
+        _parse_iso_or_dt(_row_value_optional(row, "discovered_at", 16)),
     )
 
 

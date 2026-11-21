@@ -190,6 +190,106 @@ fn ensure_key(
     Ok(true)
 }
 
+/// Ensures a permanent bucket-scoped `read-write-objects` FOS key exists for `service` and returns
+/// `(access_key, secret_key)` in-memory so cold-start recovery avoids Secret Store propagation lag.
+pub(super) fn ensure_key_with_credentials(
+    context: &Context<'_, impl Runtime>,
+    service: &Service,
+    token: &str,
+) -> Result<(String, String), Error> {
+    let description = permanent_description(service);
+    let inventory = keys(context, token)?;
+    let managed: Vec<_> = inventory
+        .iter()
+        .filter(|v| v["description"] == description)
+        .collect();
+    if managed.len() == 1 {
+        let key = managed[0];
+        let scope_ok = key["permission"] == "read-write-objects"
+            && key["buckets"]
+                .as_array()
+                .is_some_and(|b| b.len() == 1 && b[0] == service.fos_bucket);
+        if scope_ok {
+            let access_key = required(key, "access_key")?;
+            if let Ok(value) = context.secret(&service.fos_secret_key_ref) {
+                if let Ok(pair) = serde_json::from_str::<Value>(&value) {
+                    if pair["access_key"] == access_key {
+                        if let Some(sk) = pair["secret_key"].as_str().filter(|s| !s.is_empty()) {
+                            return Ok((access_key.to_owned(), sk.to_owned()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for orphaned in managed {
+        delete_key(context, token, orphaned, service)?;
+    }
+    let body = json!({
+        "permission": "read-write-objects",
+        "description": description,
+        "buckets": [service.fos_bucket],
+    });
+    let key = context.api(
+        "POST",
+        "/resources/object-storage/access-keys",
+        token,
+        Some(body),
+    )?;
+    let ak = required(&key, "access_key").map_err(|_| Error::new(502, "key_response_invalid"))?;
+    let sk = required(&key, "secret_key").map_err(|_| Error::new(502, "key_response_invalid"))?;
+    persist_explicit_credentials(context, service, token, ak, sk)?;
+    Ok((ak.to_owned(), sk.to_owned()))
+}
+
+pub(super) fn persist_explicit_credentials(
+    context: &Context<'_, impl Runtime>,
+    service: &Service,
+    token: &str,
+    ak: &str,
+    sk: &str,
+) -> Result<(), Error> {
+    let pair = json!({"access_key": ak, "secret_key": sk}).to_string();
+    put_secret(context, token, &service.fos_access_key_ref, ak)?;
+    put_secret(context, token, &service.fos_secret_key_ref, &pair)?;
+    Ok(())
+}
+
+pub(super) fn list_objects(
+    context: &Context<'_, impl Runtime>,
+    service: &Service,
+    (ak, sk): &(String, String),
+    prefix: &str,
+    continuation_token: Option<&str>,
+) -> Result<crate::ingest::storage::Page, Error> {
+    let mut query = format!("list-type=2&max-keys=1000&prefix={}", encode(prefix));
+    if let Some(token) = continuation_token {
+        query.push_str("&continuation-token=");
+        query.push_str(&encode(token));
+    }
+    let response = context.fos(FosRequest {
+        method: "GET",
+        region: &service.fos_region,
+        bucket: &service.fos_bucket,
+        key: "",
+        query: &query,
+        access_key: ak,
+        secret_key: sk,
+        body: Vec::new(),
+        timeout: super::transport::FOS_TIMEOUT,
+        response_limit: super::transport::FOS_RESPONSE_LIMIT,
+        content_md5: None,
+    })?;
+    if response.status == 404 {
+        Ok(crate::ingest::storage::Page::default())
+    } else if (200..300).contains(&response.status) {
+        crate::ingest::storage::parse_list(&response.body)
+            .map_err(|_| Error::new(502, "object_list_invalid"))
+    } else {
+        Err(Error::new(502, "object_list_failed"))
+    }
+}
+
 fn request(
     context: &Context<'_, impl Runtime>,
     service: &Service,

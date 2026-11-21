@@ -14,7 +14,10 @@ from backend.core.clickhouse import get_clickhouse_client
 from backend.core.fastly.client import FASTLY_LOG_FIELDS, api_key_or_mock
 from backend.core.fos_client import _get_fos_client
 from backend.core.request_context import get_source
-from backend.core.service_defaults import DEFAULT_LOG_PERIOD_SECONDS
+from backend.core.service_defaults import (
+    DEFAULT_LOG_PERIOD_SECONDS,
+    DEFAULT_SNAPSHOT_INTERVAL_MINUTES,
+)
 from backend.high_scale._common import visible_publication_fence_sql
 from backend.high_scale.ingest_controller import get_high_scale_service_registry
 from backend.models.admin import (
@@ -180,6 +183,7 @@ def _compute_prefill_rates(
         "delete_after": True,
         "log_retention_days": 30,
         "rum_retention_days": 30,
+        "snapshot_interval_minutes": DEFAULT_SNAPSHOT_INTERVAL_MINUTES,
         "class_a_rate_per_1k": float(global_rates.get("class_a_rate_per_1k", 0.005)),
         "class_b_rate_per_10k": float(global_rates.get("class_b_rate_per_10k", 0.01)),
         "cdn_egress_rate_per_gb": float(global_rates.get("cdn_egress_rate_per_gb", 0.12)),
@@ -193,13 +197,16 @@ def _compute_prefill_rates(
     try:
         cfg = svcconfig.load_config(source["name"])
         if cfg:
-            prov = cfg.get("provisioning", {})
-            cron_sync = prov.get("cron_sync", {})
+            raw_prov = cfg.get("provisioning")
+            prov = raw_prov if isinstance(raw_prov, dict) else {}
+            raw_cron_sync = prov.get("cron_sync")
+            cron_sync = raw_cron_sync if isinstance(raw_cron_sync, dict) else {}
             result["sample_rate"] = int(prov.get("sample_rate", 100))
             result["edge_only"] = prov.get("edge_only", True)
             result["delete_after"] = bool(cron_sync.get("delete_after", True))
             result["log_retention_days"] = int(cron_sync.get("data_retention_days", 30))
             result["rum_retention_days"] = int(cron_sync.get("rum_retention_days", result["log_retention_days"]))
+            result["snapshot_interval_minutes"] = svcconfig.resolve_snapshot_interval_minutes(cfg)
             try:
                 from backend.core.log_fields import estimate_log_line_bytes
 

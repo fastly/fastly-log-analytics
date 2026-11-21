@@ -272,17 +272,19 @@ describe('StorageStep — Cloud mode hides self-hosted-only sections', () => {
     config: { ...INITIAL_CONFIG, logging_enabled: true, cdn_prefix: 'demo' },
   } as Partial<WizardState>)
 
-  it('self-hosted shows the CDN front and Background Sync controls', () => {
+  it('self-hosted shows the CDN front, Background Sync, and Cloud Snapshot Interval controls', () => {
     renderWithQuery(<StorageStep s={storageState()} />)
     expect(screen.getByText(/CDN Performance Front/i)).toBeInTheDocument()
     expect(screen.getByLabelText('Background Sync')).toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: 'Cloud Snapshot Interval' })).toBeInTheDocument()
   })
 
-  it('Cloud hides them: the Cloud server has no CDN prefix, domain check or cron sync', () => {
+  it('Cloud hides them: the Cloud server has no CDN prefix, domain check, cron sync, or snapshot interval', () => {
     setCloudModeRuntime(true)
     renderWithQuery(<StorageStep s={storageState()} />)
     expect(screen.queryByText(/CDN Performance Front/i)).not.toBeInTheDocument()
     expect(screen.queryByLabelText('Background Sync')).not.toBeInTheDocument()
+    expect(screen.queryByRole('combobox', { name: 'Cloud Snapshot Interval' })).not.toBeInTheDocument()
   })
 })
 
@@ -994,13 +996,15 @@ describe('runDeploy', () => {
     expect(body).toMatchObject({
       token: 'TOK', service_id: 'svc-1', service_name: 'svc', endpoint_name: 'My EP',
       fos_bucket_name: 'my-bucket', sample_rate: '1', log_period: '60',
+      snapshot_interval_minutes: 5,
       cdn_url: 'https://mycdn.global.ssl.fastly.net',
     })
 
-    const noCdn = makeArgs({ config: { ...FULL_CONFIG, cdn_prefix: '', faro_version: '1.9.0', log_fields: { groups: ['core', 'http'] } } })
+    const noCdn = makeArgs({ config: { ...FULL_CONFIG, cdn_prefix: '', snapshot_interval_minutes: 60, faro_version: '1.9.0', log_fields: { groups: ['core', 'http'] } } })
     runDeploy(noCdn)
     const [, bodyNoCdn] = (noCdn.start as ReturnType<typeof vi.fn>).mock.calls[0]
     expect(bodyNoCdn).not.toHaveProperty('cdn_url')
+    expect(bodyNoCdn.snapshot_interval_minutes).toBe(60)
     expect(bodyNoCdn.faro_version).toBe('1.9.0')
     expect(bodyNoCdn.log_fields).toBe('{"groups":["core","http"]}')
 
@@ -1029,9 +1033,14 @@ describe('runAdminIngest', () => {
   })
 
   it('on success registers the ingested service (deduping existing) and marks setup done', async () => {
-    server.use(http.post(`${API_BASE}/api/provision/ingest`, () => HttpResponse.json({ ok: true })))
-    const args = makeArgs()
+    const capturedIngestBodies: Record<string, unknown>[] = []
+    server.use(http.post(`${API_BASE}/api/provision/ingest`, async ({ request }) => {
+      capturedIngestBodies.push((await request.json()) as Record<string, unknown>)
+      return HttpResponse.json({ ok: true })
+    }))
+    const args = makeArgs({ config: { ...FULL_CONFIG, snapshot_interval_minutes: 30 } })
     await runAdminIngest(args)
+    expect(capturedIngestBodies[0]?.snapshot_interval_minutes).toBe(30)
     expect(args.setIsDeploying).toHaveBeenNthCalledWith(1, true)
     expect(args.setActiveServiceId).toHaveBeenCalledWith('svc-1')
     expect(args.setServices).toHaveBeenCalledOnce()

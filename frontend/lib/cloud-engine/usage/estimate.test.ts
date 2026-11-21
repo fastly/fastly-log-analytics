@@ -626,6 +626,31 @@ describe("measureEstimate", () => {
     expect(units.fosClassBPerDay).toBe(100);
   });
 
+  it("folds event-driven meta/cloud_dr_state.json fos_usage PUTs into fixed fosClassAPerDay rather than per-file ops", () => {
+    const { units } = measureEstimate({
+      ...base,
+      days: 2,
+      files: base.files.slice(0, 2),
+      fos: [
+        { caller: "worker:ingest", op_class: "A" as const, op_count: 6 },
+        { caller: "api:/api/admin/services/svc-1", op_class: "A" as const, op_count: 14 },
+      ].map((row) => ({
+        timestamp: 0,
+        op: "PUT",
+        dataset: "pq_ops",
+        cdn_cache: "DIRECT" as const,
+        bytes_in: 4_096,
+        bytes_out: 0,
+        bytes_deleted: 0,
+        est_cost_usd: 0,
+        ...row,
+      })),
+    });
+    // 6 worker:ingest ops / 2 files = 3, plus 1 Class A op/file for Fastly's raw log PUT = 4
+    expect(units.fosClassAPerFile).toBe(4);
+    expect(units.fosClassAPerDay).toBe(7);
+  });
+
   it("keeps per-file defaults and charges billed totals as fixed when nothing converted", () => {
     const { units, measuredUnits, inputs } = measureEstimate({
       ...base,

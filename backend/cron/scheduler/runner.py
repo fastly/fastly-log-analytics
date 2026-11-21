@@ -166,6 +166,7 @@ class Scheduler:
         from backend.core.fos_client import get_source_for_service, is_configured
         from backend.cron.jobs.metadata import (
             _run_bot_data_refresh,
+            _run_dr_state_sync,
             _run_metadata_cleanup,
             _run_ngwaf_bot_sync,
             _run_rdns_enrichment,
@@ -355,6 +356,24 @@ class Scheduler:
                     args=[service_id],
                     misfire_grace_time=3600,
                 )
+            if not dev_mode_no_crons():
+                snapshot_interval_mins = svcconfig.resolve_snapshot_interval_minutes(cfg)
+                dr_job_id = f"dr_state_sync_{service_id}"
+                self._register_reschedulable_job(
+                    dr_job_id,
+                    _run_dr_state_sync,
+                    "interval",
+                    seen_ids,
+                    "💾 [scheduler] Registered DR state sync job %s (every %dm).",
+                    dr_job_id,
+                    snapshot_interval_mins,
+                    minutes=snapshot_interval_mins,
+                    jitter=15,
+                    reschedule_kwargs={"minutes": snapshot_interval_mins, "jitter": 15},
+                    args=[service_id],
+                    misfire_grace_time=300,
+                    executor="maintenance",
+                )
         self._register_once_job(
             "bot_data_refresh",
             _run_bot_data_refresh,
@@ -427,6 +446,7 @@ class Scheduler:
                     "rdns_enrichment",
                     "rdns_refresh",
                     "bot_data_refresh",
+                    "dr_state_sync_",
                     "ngwaf_sync_",
                     "share_audit_purge",
                 )
@@ -464,6 +484,7 @@ TASK_MAP = {
     "alerts_evaluation": "alerts",
     "ngwaf_sync": "ngwaf_sync",
     "metadata_cleanup": "metadata_cleanup",
+    "dr_state_sync": "dr_state_sync",
     "insights_prewarmer": "insights_prewarmer",
     "ledger_sweep": "ledger_sweep",
     "rum_discovery": "rum_discovery",
