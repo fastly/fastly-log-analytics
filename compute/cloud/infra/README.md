@@ -124,12 +124,16 @@ error; it never becomes a successful release or an implicit full redeploy.
 `pkg/early-hints.json`. It records that file's digest as `early_hints_sha256` in
 `provenance.json`. Each route gets at most 10 links, in this order: stylesheets,
 up to six boot scripts, then font preloads. Routes listed in
-`frontend/static-export-policy.json` `earlyHintsDuckdbRoutes` also get the DuckDB
-worker and wasm, both at low priority. Keep that list in step with the pages that
-start the DuckDB engine on load. Deploy rejects a hints file whose digest does
-not match. It writes the hints into the front VCL's `#EARLYHINTS` block: a 103 on
-first-hop HTTP/2 and HTTP/3 GET document navigations, and the same `Link` header
-on the final 200 HTML response. API, auth, FOS, `_next`, `/duckdb`, `/geo`
+`frontend/static-export-policy.json` `earlyHintsDuckdbRoutes` also get
+`rel=prefetch` links for the DuckDB worker and wasm. Keep that list in step with
+the pages that start the DuckDB engine on load. DuckDB fetches both from a Web
+Worker, which never consumes a document preload, so a preload would download
+unused and warn in the console; a prefetch only warms the HTTP cache the worker
+reads. Deploy rejects a hints file whose digest does not match. It writes the
+hints into the front VCL's `#EARLYHINTS` block: the preloads as a 103 on
+first-hop HTTP/2 and HTTP/3 GET document navigations, and all links, prefetches
+included, as the `Link` header on the final 200 HTML response. Chrome ignores
+prefetch in a 103. Every hinted route needs at least two preloads. API, auth, FOS, `_next`, `/duckdb`, `/geo`
 and parquet paths are never hinted. Without a hints file, the block stays empty
 and the VCL behaves as before.
 

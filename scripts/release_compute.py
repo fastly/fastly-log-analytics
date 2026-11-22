@@ -219,12 +219,10 @@ def _duckdb_links(out: Path) -> list[str]:
     hrefs = ["/" + path.relative_to(out).as_posix() for path in (worker, wasm)]
     if not all(_HINT_HREF.fullmatch(href) for href in hrefs):
         raise RuntimeError(f"Unsafe DuckDB asset path for early hints: {hrefs}")
-    # A document preload is never handed to new Worker() or to the worker's fetch(); both only
-    # warm the HTTP cache (/duckdb/ is public), so they go last at low priority.
-    return [
-        f"<{hrefs[0]}>; rel=preload; as=script; fetchpriority=low",
-        f"<{hrefs[1]}>; rel=preload; as=fetch; crossorigin; fetchpriority=low",
-    ]
+    # DuckDB's own worker fetches both, and a worker never consumes a document preload, so a
+    # preload is fetched unused (console warning). A prefetch only warms the HTTP cache that the
+    # worker reads. Chrome ignores prefetch in a 103, so these go on the final response only.
+    return [f"<{hrefs[0]}>; rel=prefetch", f"<{hrefs[1]}>; rel=prefetch"]
 
 
 def _hints_size(links: list[str]) -> int:
@@ -234,8 +232,8 @@ def _hints_size(links: list[str]) -> int:
 def extract_early_hints(out: Path, duckdb_routes: list[str]) -> dict[str, Any]:
     """Derive per-route 103 Link values from the exported HTML so hints always match the build.
 
-    Order: stylesheets, the first boot scripts, fonts, then DuckDB's worker and wasm for routes
-    that start the engine on load.
+    Order: stylesheets, the first boot scripts, fonts, then DuckDB's worker and wasm prefetches
+    for routes that start the engine on load.
     """
     data_routes = set(duckdb_routes)
     duckdb: list[str] | None = None
@@ -260,8 +258,8 @@ def extract_early_hints(out: Path, duckdb_routes: list[str]) -> dict[str, Any]:
         links = [*[*styles, *scripts, *fonts][: EARLY_HINTS_MAX_LINKS - len(tail)], *tail]
         if _hints_size(links) > EARLY_HINTS_MAX_BYTES:
             raise RuntimeError(f"Early hints for {route} exceed {EARLY_HINTS_MAX_BYTES} bytes")
-        # The front VCL emits one early_hints() argument per link and needs at least two.
-        if len(links) >= 2:
+        # The front VCL emits one early_hints() argument per preload and needs at least two.
+        if len(links) - len(tail) >= 2:
             routes[route] = links
     missing = sorted(data_routes - routes.keys())
     if missing:

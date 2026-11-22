@@ -1192,7 +1192,8 @@ EARLY_HINTS = {
         ],
         "/admin/rum": [
             "</_next/static/chunks/a.css>; rel=preload; as=style",
-            "</duckdb/1.2.3/duckdb-eh.wasm>; rel=preload; as=fetch; crossorigin; fetchpriority=low",
+            "</_next/static/chunks/c.js>; rel=preload; as=script",
+            "</duckdb/1.2.3/duckdb-eh.wasm>; rel=prefetch",
         ],
     },
 }
@@ -1221,12 +1222,18 @@ def test_early_hints_render_one_link_per_argument_on_normalized_routes() -> None
         "    );\n"
         '  } else if (var.flp_hint_route == "/admin/rum") {\n'
         "    early_hints(\n"
+        '      {"link: </_next/static/chunks/a.css>; rel=preload; as=style"},\n'
+        '      {"link: </_next/static/chunks/c.js>; rel=preload; as=script"}\n'
+        "    );\n"
     ) in early
+    # Chrome ignores prefetch in a 103; it only belongs on the final response.
+    assert "rel=prefetch" not in early
     assert "Cookie" not in block
     assert (
         '  } else if (var.flp_hint_route == "/admin/rum") {\n'
         '    set resp.http.Link = {"</_next/static/chunks/a.css>; rel=preload; as=style, '
-        '</duckdb/1.2.3/duckdb-eh.wasm>; rel=preload; as=fetch; crossorigin; fetchpriority=low"};\n'
+        "</_next/static/chunks/c.js>; rel=preload; as=script, "
+        '</duckdb/1.2.3/duckdb-eh.wasm>; rel=prefetch"};\n'
     ) in final
 
 
@@ -1279,6 +1286,7 @@ SAFE_LINK = "</a.css>; rel=preload; as=style"
         {"/dashboard": [SAFE_LINK, "</a.js>\r\nSet-Cookie: x=1"]},
         {"/dashboard": [SAFE_LINK, "<//evil.example/a.js>; rel=preload"]},
         {"/dashboard": [SAFE_LINK]},
+        {"/dashboard": [SAFE_LINK, "</a.wasm>; rel=prefetch", "</b.wasm>; rel=prefetch"]},
         {"/dashboard": {"links": [SAFE_LINK, SAFE_LINK]}},
         {"/dashboard": [f"</{'a' * 200}.js>; rel=preload; as=script"] * 20},
     ],
