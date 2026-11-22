@@ -673,7 +673,37 @@ export type DecodedSummary = {
   truncated: string[];
   /** Distinct client IPs across the summary. */
   ipSketch: Hll | null;
+  /**
+   * Per pivot field, the same rollup of only the rows with each value
+   * (`decodeSummary` with `slices`); undefined when they were not read.
+   */
+  slices?: ReadonlyMap<string, PivotSlices>;
 };
+
+/** One pivot field's slices of a summary (compute/cloud/src/ingest/summary.rs `PIVOT_FIELDS`). */
+export type PivotSlices = {
+  /** Rows with a non-null value, including values cut from `values`. */
+  total: number;
+  /** Some value was cut, so `values` misses rows. */
+  truncated: boolean;
+  /** Keyed by the stored text of the value. */
+  values: ReadonlyMap<string, DecodedSummary>;
+};
+
+/**
+ * Fields whose values summaries slice the dashboard rollups by
+ * (compute/cloud/src/ingest/summary.rs `PIVOT_FIELDS`).
+ */
+export const PIVOT_FIELDS: readonly string[] = ["status"];
+
+/** Summary groups holding the pivot slices. */
+export const SLICE_GROUPS = [
+  "pivot_totals",
+  "slice_overview",
+  "slice_ts",
+  "slice_totals",
+  "slice_fields",
+];
 
 export const SUMMARY_COLUMNS = [
   "bundle",
@@ -689,6 +719,47 @@ export const SUMMARY_COLUMNS = [
   "cache_total",
   "resp_bytes_sum",
 ];
+
+/** The columns that key slice rows, read with `SUMMARY_COLUMNS` when slices are wanted. */
+export const SLICE_COLUMNS = ["pivot", "pivot_value"];
+
+type SliceBuilder = {
+  buckets: Map<number, MinuteBucket>;
+  counts: Map<string, Map<Scalar, number>>;
+  nonNull: Record<string, number>;
+  cut: Set<string>;
+  ipSketch: Hll | null;
+  total: number;
+};
+
+const newSlice = (): SliceBuilder => ({
+  buckets: new Map(),
+  counts: new Map(),
+  nonNull: {},
+  cut: new Set(),
+  ipSketch: null,
+  total: 0,
+});
+
+function finishSlice(slice: SliceBuilder, slices?: ReadonlyMap<string, PivotSlices>): DecodedSummary {
+  const sorted = [...slice.buckets.values()].sort((a, b) => a.t - b.t);
+  return {
+    rollup: {
+      minTs: sorted.length ? sorted[0].t : Infinity,
+      maxTs: sorted.length ? sorted[sorted.length - 1].t : -Infinity,
+      totalRequests: slice.total,
+      hasBytes: true,
+      buckets: sorted,
+      counts: Object.fromEntries(
+        [...slice.counts].map(([name, map]) => [name, [...map]]),
+      ),
+      nonNull: slice.nonNull,
+    },
+    truncated: [...slice.cut],
+    ipSketch: slice.ipSketch,
+    ...(slices ? { slices } : {}),
+  };
+}
 
 const num = (value: unknown) =>
   typeof value === "bigint"
@@ -716,6 +787,7 @@ export async function decodeSummary(
   fromMs: number,
   toMs: number,
   custom: readonly CustomField[] = [],
+  { slices: withSlices = false }: { slices?: boolean } = {},
 ): Promise<DecodedSummary | null> {
   const parts: readonly ArrayBuffer[] = Array.isArray(data) ? data : [data as ArrayBuffer];
   const version = parquetMetadata(parts[0]).key_value_metadata?.find(
@@ -723,7 +795,10 @@ export async function decodeSummary(
   )?.value;
   if (version !== SUMMARY_VERSION) return null;
   const { readSummaryColumns } = await import("./summary-projection");
-  const { rows, columns } = await readSummaryColumns(parts, SUMMARY_COLUMNS);
+  const { rows, columns } = await readSummaryColumns(
+    parts,
+    withSlices ? [...SUMMARY_COLUMNS, ...SLICE_COLUMNS] : SUMMARY_COLUMNS,
+  );
   const binary = await readSummaryColumns(parts, ["ip_sketch"], false);
   const col = (name: string) => columns.get(name) ?? [];
   const [kind, bucket, field, value, count, truncated] = [
@@ -747,43 +822,72 @@ export async function decodeSummary(
   const types = new Map(custom.map((field) => [field.id, field.type]));
   for (const field of custom) cards.add(field.id);
   const summarized = new Set<string>();
-  const buckets = new Map<number, MinuteBucket>();
-  const counts = new Map<string, Map<Scalar, number>>();
-  const nonNull: Record<string, number> = {};
-  const cut = new Set<string>();
-  let ipSketch: Hll | null = null;
-  let total = 0;
+  const base = newSlice();
+  const { counts, nonNull, cut } = base;
+  const [pivot, pivotValue] = [col("pivot"), col("pivot_value")];
+  const pivots = new Map<
+    string,
+    { total: number; truncated: boolean; values: Map<string, SliceBuilder> }
+  >();
+  const pivotOf = (i: number) => {
+    const name = pivot[i];
+    if (typeof name !== "string") return null;
+    let entry = pivots.get(name);
+    if (!entry) {
+      entry = { total: 0, truncated: false, values: new Map() };
+      pivots.set(name, entry);
+    }
+    return entry;
+  };
+  const sliceOf = (i: number) => {
+    const entry = pivotOf(i);
+    const value = pivotValue[i];
+    if (!entry || typeof value !== "string") return null;
+    let slice = entry.values.get(value);
+    if (!slice) {
+      slice = newSlice();
+      entry.values.set(value, slice);
+    }
+    return slice;
+  };
+  const addMinute = (into: Map<number, MinuteBucket>, i: number) => {
+    const t = ms(bucket[i]);
+    if (t === null || t < fromMs || t + MINUTE_MS > toMs) return false;
+    const b = into.get(t) ?? {
+      t,
+      requests: 0,
+      bytes: 0,
+      s4xx: 0,
+      s5xx: 0,
+      hits: 0,
+      cacheRows: 0,
+    };
+    b.requests += num(requests[i]);
+    b.bytes += num(respBytes[i]);
+    b.s4xx += num(s4xx[i]);
+    b.s5xx += num(s5xx[i]);
+    b.hits += num(hits[i]);
+    b.cacheRows += num(cacheTotal[i]);
+    into.set(t, b);
+    return true;
+  };
+  const mergeSketch = (into: SliceBuilder, i: number) => {
+    const blob = sketch[i];
+    const hll = blob instanceof Uint8Array ? Hll.fromBytes(blob) : null;
+    if (hll) {
+      if (into.ipSketch) into.ipSketch.merge(hll);
+      else into.ipSketch = hll;
+    }
+  };
   for (let i = 0; i < rows; i++) {
     switch (kind[i]) {
       case "time_series": {
-        const t = ms(bucket[i]);
-        if (t === null || t < fromMs || t + MINUTE_MS > toMs) return null;
-        const b = buckets.get(t) ?? {
-          t,
-          requests: 0,
-          bytes: 0,
-          s4xx: 0,
-          s5xx: 0,
-          hits: 0,
-          cacheRows: 0,
-        };
-        b.requests += num(requests[i]);
-        b.bytes += num(respBytes[i]);
-        b.s4xx += num(s4xx[i]);
-        b.s5xx += num(s5xx[i]);
-        b.hits += num(hits[i]);
-        b.cacheRows += num(cacheTotal[i]);
-        buckets.set(t, b);
-        total += num(requests[i]);
+        if (!addMinute(base.buckets, i)) return null;
+        base.total += num(requests[i]);
         break;
       }
       case "overview": {
-        const blob = sketch[i];
-        const hll = blob instanceof Uint8Array ? Hll.fromBytes(blob) : null;
-        if (hll) {
-          if (ipSketch) ipSketch.merge(hll);
-          else ipSketch = hll;
-        }
+        mergeSketch(base, i);
         break;
       }
       case "field_totals": {
@@ -804,23 +908,61 @@ export async function decodeSummary(
         counts.set(name, map);
         break;
       }
+      case "pivot_totals": {
+        if (!withSlices) break;
+        const entry = pivotOf(i);
+        if (!entry) break;
+        entry.total += num(count[i]);
+        if (truncated[i] === true) entry.truncated = true;
+        break;
+      }
+      case "slice_overview": {
+        const slice = withSlices && sliceOf(i);
+        if (slice) mergeSketch(slice, i);
+        break;
+      }
+      case "slice_ts": {
+        const slice = withSlices && sliceOf(i);
+        if (!slice) break;
+        if (!addMinute(slice.buckets, i)) return null;
+        slice.total += num(requests[i]);
+        break;
+      }
+      case "slice_totals": {
+        const name = field[i] as string;
+        const slice = withSlices && cards.has(name) && sliceOf(i);
+        if (!slice) break;
+        slice.nonNull[name] = (slice.nonNull[name] ?? 0) + num(count[i]);
+        if (truncated[i] === true) slice.cut.add(name);
+        break;
+      }
+      case "slice_fields": {
+        const name = field[i] as string;
+        const slice = withSlices && cards.has(name) && sliceOf(i);
+        if (!slice) break;
+        const typed = summaryValue(name, value[i] as string, types.get(name));
+        if (typed === null) break;
+        const map = slice.counts.get(name) ?? new Map<Scalar, number>();
+        map.set(typed, (map.get(typed) ?? 0) + num(count[i]));
+        slice.counts.set(name, map);
+        break;
+      }
     }
   }
   if (custom.some((field) => !summarized.has(field.id))) return null;
-  const sorted = [...buckets.values()].sort((a, b) => a.t - b.t);
-  return {
-    rollup: {
-      minTs: sorted.length ? sorted[0].t : Infinity,
-      maxTs: sorted.length ? sorted[sorted.length - 1].t : -Infinity,
-      totalRequests: total,
-      hasBytes: true,
-      buckets: sorted,
-      counts: Object.fromEntries(
-        [...counts].map(([name, map]) => [name, [...map]]),
-      ),
-      nonNull,
-    },
-    truncated: [...cut],
-    ipSketch,
-  };
+  const slices = withSlices
+    ? new Map(
+        [...pivots].map(([name, entry]) => [
+          name,
+          {
+            total: entry.total,
+            truncated: entry.truncated,
+            values: new Map(
+              [...entry.values].map(([v, slice]) => [v, finishSlice(slice)]),
+            ),
+          },
+        ]),
+      )
+    : undefined;
+  return finishSlice(base, slices);
 }

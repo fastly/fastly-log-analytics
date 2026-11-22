@@ -131,6 +131,18 @@ pub const FILTERED_ROLLUP_FIELDS: [&str; 8] = [
     "edge",
 ];
 
+/// Card fields whose dashboard rollups are also written per value, conditional on it: a
+/// `pivot_totals` row per field, then per kept value `slice_overview` (requests, IP sketch),
+/// `slice_ts` (the `time_series` columns per minute), `slice_totals` and `slice_fields` (the
+/// `field_totals` and `all_fields` of the rows with that value). A dashboard filtered on a pivot
+/// sums the matching slices instead of reading raw rows. Single-valued fields only: each row is
+/// in at most one slice.
+pub const PIVOT_FIELDS: [&str; 1] = ["status"];
+
+/// Values sliced per pivot field, by rows desc then value asc; rows of the others are in no slice
+/// and `pivot_totals.truncated` is set.
+pub const PIVOT_K: usize = 64;
+
 pub fn filtered_rollup_cap(field: &str) -> usize {
     match field {
         "status" => 64,
@@ -277,6 +289,8 @@ columns! {
     Pop = ("pop", Utf8),
     StatusMin = ("status_min", I64),
     TtlSum = ("ttl_sum", F64),
+    Pivot = ("pivot", Utf8),
+    PivotValue = ("pivot_value", Utf8),
 }
 
 /// The histogram columns, in [`Lat`] order.
@@ -739,6 +753,125 @@ struct Minute {
     resp_bytes: i64,
     ttfb_sum: f64,
     ttfb_count: i64,
+}
+
+impl Minute {
+    #[inline]
+    fn add(
+        &mut self,
+        status: Option<i64>,
+        cache: Option<&str>,
+        bytes: Option<i64>,
+        ttfb: Option<f64>,
+    ) {
+        self.requests += 1;
+        let s5 = status.is_some_and(|s| (500..=599).contains(&s));
+        self.s4 += i64::from(!s5 && status.is_some_and(|s| s >= 400));
+        self.s5 += i64::from(s5);
+        self.hits += i64::from(dashboard_hit(cache));
+        self.cache_total += i64::from(cache.is_some());
+        self.resp_bytes += bytes.unwrap_or(0);
+        if let Some(t) = ttfb {
+            self.ttfb_sum += t;
+            self.ttfb_count += 1;
+        }
+    }
+
+    fn push(&self, out: &mut Out, bundle: &str, minute: i64, pivot: Option<(&str, &str)>) {
+        let mut row = vec![
+            (C::Bundle, V::S(bundle)),
+            (C::Bucket, V::I(minute * 60_000)),
+            (C::Requests, V::I(self.requests)),
+            (C::Status4xx, V::I(self.s4)),
+            (C::Status5xx, V::I(self.s5)),
+            (C::Hits, V::I(self.hits)),
+            (C::CacheTotal, V::I(self.cache_total)),
+            (C::RespBytesSum, V::I(self.resp_bytes)),
+            (C::TtfbSum, V::F(self.ttfb_sum)),
+            (C::TtfbCount, V::I(self.ttfb_count)),
+        ];
+        if let Some((field, value)) = pivot {
+            row.push((C::Pivot, V::S(field)));
+            row.push((C::PivotValue, V::S(value)));
+        }
+        out.push(&row);
+    }
+}
+
+/// No slice: the row's pivot value is null or was cut.
+const NO_SLICE: u16 = u16::MAX;
+
+/// One [`PIVOT_FIELDS`] entry of a window: its kept values and, per batch row, the slice the row
+/// falls in.
+struct Pivot<'a> {
+    field: &'static str,
+    /// Rows with a non-null value, cut ones included.
+    total: i64,
+    truncated: bool,
+    values: Vec<Cow<'a, str>>,
+    /// Per batch, per row: an index into `values`, or [`NO_SLICE`].
+    slot: Vec<Vec<u16>>,
+    minutes: Vec<BTreeMap<i64, Minute>>,
+    ips: Vec<Vec<u32>>,
+}
+
+impl<'a> Pivot<'a> {
+    fn new(field: &'static str, rows: &[Rows<'a>]) -> Self {
+        let cols: Vec<Option<FieldCol<'a>>> = rows
+            .iter()
+            .map(|r| FieldCol::resolve(r.batch, field))
+            .collect();
+        let mut counted: FastMap<Key<'a>, i64> = FastMap::default();
+        for (r, col) in rows.iter().zip(&cols) {
+            let Some(col) = col else { continue };
+            for i in r.live() {
+                col.for_each_key(i, false, |key| *counted.entry(key).or_default() += 1);
+            }
+        }
+        let total = counted.values().sum();
+        let truncated = counted.len() > PIVOT_K;
+        let mut ranked: Vec<(Key<'a>, Cow<'a, str>, i64)> = counted
+            .into_iter()
+            .map(|(k, n)| (k, k.render(), n))
+            .collect();
+        rank(
+            &mut ranked,
+            |a, b| b.2.cmp(&a.2).then_with(|| a.1.cmp(&b.1)),
+            PIVOT_K,
+        );
+        let index: FastMap<Key<'a>, u16> = ranked
+            .iter()
+            .enumerate()
+            .map(|(n, (k, _, _))| (*k, n as u16))
+            .collect();
+        let slot = rows
+            .iter()
+            .zip(&cols)
+            .map(|(r, col)| {
+                let mut slot = vec![NO_SLICE; r.batch.num_rows()];
+                if let Some(col) = col {
+                    for i in r.live() {
+                        col.for_each_key(i, false, |key| {
+                            if let Some(&n) = index.get(&key) {
+                                slot[i] = n;
+                            }
+                        });
+                    }
+                }
+                slot
+            })
+            .collect();
+        let n = ranked.len();
+        Self {
+            field,
+            total,
+            truncated,
+            values: ranked.into_iter().map(|(_, v, _)| v).collect(),
+            slot,
+            minutes: (0..n).map(|_| BTreeMap::new()).collect(),
+            ips: vec![Vec::new(); n],
+        }
+    }
 }
 
 #[derive(Default)]
@@ -1813,12 +1946,37 @@ struct FieldAgg {
     count: i64,
     ip_rows: i64,
     ips: Vec<u32>,
+    /// Counts per pivot slice, keyed by [`slice_id`]: one hash lookup counts a key for the field
+    /// and for its slices.
+    slices: Vec<(u32, i64)>,
 }
 
+/// A slice of pivot `pivot` with value index `slot`.
+fn slice_id(pivot: usize, slot: u16) -> u32 {
+    ((pivot as u32) << 16) | u32::from(slot)
+}
+
+/// The row's slot in each pivot.
+type RowSlots = [u16; PIVOT_FIELDS.len()];
+
 #[inline]
-fn count_key<'a>(aggs: &mut FastMap<Key<'a>, FieldAgg>, key: Key<'a>, ip_id: u32) {
+fn count_key<'a>(
+    aggs: &mut FastMap<Key<'a>, FieldAgg>,
+    key: Key<'a>,
+    ip_id: u32,
+    slots: &RowSlots,
+) {
     let agg = aggs.entry(key).or_default();
     agg.count += 1;
+    for (p, &slot) in slots.iter().enumerate() {
+        if slot != NO_SLICE {
+            let id = slice_id(p, slot);
+            match agg.slices.iter_mut().find(|(s, _)| *s == id) {
+                Some((_, n)) => *n += 1,
+                None => agg.slices.push((id, 1)),
+            }
+        }
+    }
     if ip_id != NO_IP {
         agg.ip_rows += 1;
         if agg.ips.last() != Some(&ip_id) {
@@ -3200,7 +3358,8 @@ pub fn write_summary(batches: &[&RecordBatch], start: i64) -> Result<Vec<u8>, St
     let mut ov = Overview::default();
     let mut ov_hists: [Hist; 5] = Default::default();
     let mut minutes: BTreeMap<i64, Minute> = BTreeMap::new();
-    for r in &rows {
+    let mut pivots: Vec<Pivot> = PIVOT_FIELDS.iter().map(|f| Pivot::new(f, &rows)).collect();
+    for (b, r) in rows.iter().enumerate() {
         for i in r.live() {
             let status = get_i(r.status, i);
             let cache = get_s(r.cache, i);
@@ -3218,17 +3377,23 @@ pub fn write_summary(batches: &[&RecordBatch], start: i64) -> Result<Vec<u8>, St
                     h.add(v);
                 }
             }
-            let m = minutes.entry(r.ts.value(i).div_euclid(60_000)).or_default();
-            m.requests += 1;
-            let s5 = status.is_some_and(|s| (500..=599).contains(&s));
-            m.s4 += i64::from(!s5 && status.is_some_and(|s| s >= 400));
-            m.s5 += i64::from(s5);
-            m.hits += i64::from(dashboard_hit(cache));
-            m.cache_total += i64::from(cache.is_some());
-            m.resp_bytes += bytes.unwrap_or(0);
-            if let Some(t) = ttfb {
-                m.ttfb_sum += t;
-                m.ttfb_count += 1;
+            let minute = r.ts.value(i).div_euclid(60_000);
+            minutes
+                .entry(minute)
+                .or_default()
+                .add(status, cache, bytes, ttfb);
+            for p in &mut pivots {
+                let s = p.slot[b][i];
+                if s != NO_SLICE {
+                    let s = usize::from(s);
+                    p.minutes[s]
+                        .entry(minute)
+                        .or_default()
+                        .add(status, cache, bytes, ttfb);
+                    if r.ip_id[i] != NO_IP {
+                        p.ips[s].push(r.ip_id[i]);
+                    }
+                }
             }
 
             ov.requests += 1;
@@ -3311,20 +3476,36 @@ pub fn write_summary(batches: &[&RecordBatch], start: i64) -> Result<Vec<u8>, St
     push_hists(&mut row, &HIST_COLS, &blobs);
     out.push(&row);
     for (minute, m) in &minutes {
-        out.push(&[
-            (C::Bundle, V::S("time_series")),
-            (C::Bucket, V::I(minute * 60_000)),
-            (C::Requests, V::I(m.requests)),
-            (C::Status4xx, V::I(m.s4)),
-            (C::Status5xx, V::I(m.s5)),
-            (C::Hits, V::I(m.hits)),
-            (C::CacheTotal, V::I(m.cache_total)),
-            (C::RespBytesSum, V::I(m.resp_bytes)),
-            (C::TtfbSum, V::F(m.ttfb_sum)),
-            (C::TtfbCount, V::I(m.ttfb_count)),
-        ]);
+        m.push(&mut out, "time_series", *minute, None);
     }
     drop(minutes);
+    for p in &mut pivots {
+        out.push(&[
+            (C::Bundle, V::S("pivot_totals")),
+            (C::Bucket, V::I(bucket)),
+            (C::Pivot, V::S(p.field)),
+            (C::Count, V::I(p.total)),
+            (C::Truncated, V::B(p.truncated)),
+        ]);
+        for (s, value) in p.values.iter().enumerate() {
+            let at = Some((p.field, value.as_ref()));
+            let requests: i64 = p.minutes[s].values().map(|m| m.requests).sum();
+            let (hll, _) = sketch_ids(&mut p.ips[s], &ip_table.entries);
+            out.push(&[
+                (C::Bundle, V::S("slice_overview")),
+                (C::Bucket, V::I(bucket)),
+                (C::Pivot, V::S(p.field)),
+                (C::PivotValue, V::S(value)),
+                (C::Requests, V::I(requests)),
+                (C::IpSketch, V::Bin(&hll.to_bytes())),
+            ]);
+            for (minute, m) in &p.minutes[s] {
+                m.push(&mut out, "slice_ts", *minute, at);
+            }
+            p.minutes[s] = BTreeMap::new();
+            p.ips[s] = Vec::new();
+        }
+    }
 
     let custom = custom_fields(batches);
     let stems: Vec<Vec<(usize, String)>> = rows.iter().map(ref_stems).collect();
@@ -3334,10 +3515,11 @@ pub fn write_summary(batches: &[&RecordBatch], start: i64) -> Result<Vec<u8>, St
     let mut aggs: FastMap<Key, FieldAgg> = FastMap::default();
     for field in FIELDS.iter().copied().chain(extra) {
         let sketched = IP_SKETCH_FIELDS.contains(&field);
-        for (r, stems) in rows.iter().zip(&stems) {
+        for (b, (r, stems)) in rows.iter().zip(&stems).enumerate() {
+            let slots = |i: usize| -> RowSlots { std::array::from_fn(|p| pivots[p].slot[b][i]) };
             if field == REF_STEM {
                 for (i, stem) in stems {
-                    count_key(&mut aggs, Key::S(stem), r.ip_id[*i]);
+                    count_key(&mut aggs, Key::S(stem), r.ip_id[*i], &slots(*i));
                 }
                 continue;
             }
@@ -3346,7 +3528,53 @@ pub fn write_summary(batches: &[&RecordBatch], start: i64) -> Result<Vec<u8>, St
             };
             for i in r.live() {
                 let ip_id = if sketched { r.ip_id[i] } else { NO_IP };
-                col.for_each_key(i, false, |key| count_key(&mut aggs, key, ip_id));
+                let row = slots(i);
+                col.for_each_key(i, false, |key| count_key(&mut aggs, key, ip_id, &row));
+            }
+        }
+        let mut sliced: Vec<Vec<Vec<(Key, i64)>>> = pivots
+            .iter()
+            .map(|p| vec![Vec::new(); p.values.len()])
+            .collect();
+        for (key, agg) in &mut aggs {
+            for (id, n) in agg.slices.drain(..) {
+                sliced[(id >> 16) as usize][(id & 0xffff) as usize].push((*key, n));
+            }
+        }
+        for (p, sliced) in pivots.iter().zip(sliced) {
+            for (value, counts) in p.values.iter().zip(sliced) {
+                let total: i64 = counts.iter().map(|(_, n)| n).sum();
+                if total == 0 {
+                    continue;
+                }
+                let truncated = counts.len() > TOP_K;
+                let mut ranked: Vec<(Cow<str>, i64)> =
+                    counts.into_iter().map(|(k, n)| (k.render(), n)).collect();
+                rank(
+                    &mut ranked,
+                    |a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)),
+                    TOP_K,
+                );
+                out.push(&[
+                    (C::Bundle, V::S("slice_totals")),
+                    (C::Bucket, V::I(bucket)),
+                    (C::Pivot, V::S(p.field)),
+                    (C::PivotValue, V::S(value)),
+                    (C::FieldName, V::S(field)),
+                    (C::Count, V::I(total)),
+                    (C::Truncated, V::B(truncated)),
+                ]);
+                for (v, n) in &ranked {
+                    out.push(&[
+                        (C::Bundle, V::S("slice_fields")),
+                        (C::Bucket, V::I(bucket)),
+                        (C::Pivot, V::S(p.field)),
+                        (C::PivotValue, V::S(value)),
+                        (C::FieldName, V::S(field)),
+                        (C::Value, V::S(v)),
+                        (C::Count, V::I(*n)),
+                    ]);
+                }
             }
         }
         let total: i64 = aggs.values().map(|a| a.count).sum();

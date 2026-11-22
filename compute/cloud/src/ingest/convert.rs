@@ -1267,7 +1267,8 @@ pub(crate) fn write_with_metadata(
     write_with(schema, batches, metadata, None, false)
 }
 
-/// Summary bundle output: one row group per batch, lean stats on `bundle`, `bucket` and `field`.
+/// Summary bundle output: one row group per batch, lean stats on `bundle`, `bucket` and `field`,
+/// no page index.
 pub(crate) fn write_summary_batches(
     schema: SchemaRef,
     batches: &[&RecordBatch],
@@ -1291,7 +1292,11 @@ fn write_with(
         .set_key_value_metadata(Some(metadata))
         .set_sorting_columns(sorting);
     if lean_summary_stats {
-        builder = builder.set_statistics_enabled(EnabledStatistics::None);
+        // No reader uses the page index; its offsets cost ~10 B per chunk of a footer the
+        // browser must fetch whole before reading any summary column.
+        builder = builder
+            .set_statistics_enabled(EnabledStatistics::None)
+            .set_offset_index_disabled(true);
         for name in ["bundle", "bucket", "field"] {
             builder = builder
                 .set_column_statistics_enabled(ColumnPath::from(name), EnabledStatistics::Chunk);

@@ -50,6 +50,7 @@
 
 use super::{
     cmcd_summary,
+    convert::FastMap,
     hist::Hist,
     hour_dir, raw_key_minute, raw_prefix, scope,
     storage::{Object, Store, CDN_READ_LIMIT},
@@ -109,7 +110,7 @@ const WALL_STOP: std::time::Duration = std::time::Duration::from_secs(40);
 pub const VCPU_STOP_MS: u64 = 600;
 /// Start a final serialization (~250ms plus the tail) only below this, keeping it under 900ms.
 pub const WRITE_VCPU_STOP_MS: u64 = 630;
-const PARTIAL_MAGIC: &[u8; 5] = b"FLPB\x09";
+const PARTIAL_MAGIC: &[u8; 5] = b"FLPB\x0a";
 /// A packed partial: [`PACKED_MAGIC`], the object count (u32 LE) and the raw length (u64 LE),
 /// then the first slice of the zstd-compressed [`PARTIAL_MAGIC`] body; the rest follows in
 /// [`part_key`] objects, each at most the CDN read limit.
@@ -1155,6 +1156,43 @@ impl GroupAcc {
 /// `(sample_key, timestamp ms, cells)`.
 type SampleRow = (i64, i64, Vec<Cell>);
 
+/// A `slice_totals` field of one slice and its `slice_fields` counts.
+#[derive(Default)]
+struct SliceField {
+    total: i64,
+    truncated: bool,
+    values: FastMap<String, i64>,
+}
+
+/// The dashboard rollups of the rows with one pivot value (see [`summary::PIVOT_FIELDS`]).
+#[derive(Default)]
+struct SliceAcc {
+    requests: i64,
+    ips: Hll,
+    minutes: BTreeMap<i64, Vec<Cell>>,
+    fields: BTreeMap<String, SliceField>,
+}
+
+/// One pivot field's slices.
+#[derive(Default)]
+struct PivotAcc {
+    /// Rows with a non-null value, cut values included.
+    total: i64,
+    truncated: bool,
+    values: FastMap<String, SliceAcc>,
+    /// Folded sources (weighted like `Acc::sources`) with this pivot's `pivot_totals` row.
+    sources: u64,
+}
+
+/// Slice groups, written together in one row group that the unfiltered dashboard skips.
+const SLICE_GROUPS: &[&str] = &[
+    "pivot_totals",
+    "slice_overview",
+    "slice_ts",
+    "slice_totals",
+    "slice_fields",
+];
+
 /// The merge state of a bundle under construction.
 struct Acc {
     /// Per hour bucket (ms): sums, IP sketch, `sample_capped` of any source.
@@ -1166,6 +1204,8 @@ struct Acc {
     groups: [BTreeMap<String, GroupAcc>; GROUPS.len()],
     /// The lowest [`summary::SAMPLE_K`] sample rows, by `(key, timestamp)`.
     sample: Vec<SampleRow>,
+    /// Per [`summary::PIVOT_FIELDS`] entry.
+    pivots: BTreeMap<String, PivotAcc>,
     /// A source of another summary version was folded in: the bundle is written as `mixed`,
     /// which readers skip.
     foreign: bool,
@@ -1208,6 +1248,7 @@ impl Acc {
             sessions: HashMap::new(),
             groups: Default::default(),
             sample: Vec::new(),
+            pivots: BTreeMap::new(),
             foreign: false,
             step: match unit {
                 Unit::Hour => summary::SERIES_STEP_MS,
@@ -1242,6 +1283,7 @@ impl Acc {
             .map_err(|_| "summary_unreadable".to_string())?;
         let mut seen = BTreeSet::new();
         let mut seen_groups = BTreeSet::new();
+        let mut seen_pivots = BTreeSet::new();
         for batch in reader {
             let batch = batch.map_err(|_| "summary_unreadable".to_string())?;
             let cols = Cols::new(&batch);
@@ -1250,6 +1292,13 @@ impl Acc {
                     let f = cols.s(C::FieldName, i).unwrap_or_default();
                     if !seen.contains(f) {
                         seen.insert(f.to_owned());
+                    }
+                }
+                if cols.s(C::Bundle, i) == Some("pivot_totals") {
+                    if let Some(p) = cols.s(C::Pivot, i) {
+                        if !seen_pivots.contains(p) {
+                            seen_pivots.insert(p.to_owned());
+                        }
                     }
                 }
                 if cols.s(C::Bundle, i) == Some("dim_totals") {
@@ -1270,6 +1319,10 @@ impl Acc {
             let acc = self.group_acc(g, &field);
             acc.sources = acc.sources.saturating_add(weight);
         }
+        for pivot in seen_pivots {
+            let acc = self.pivots.entry(pivot).or_default();
+            acc.sources = acc.sources.saturating_add(weight);
+        }
         self.sources = self.sources.saturating_add(weight);
         Ok(())
     }
@@ -1284,6 +1337,25 @@ impl Acc {
     /// raw. Catalog fields are in every version-3 summary.
     fn covered(&self, field: &str, acc: &FieldAcc) -> bool {
         FIELDS.contains(&field) || acc.sources >= self.sources
+    }
+
+    /// A pivot that some source never sliced (it predates slices) would merge to partial slices,
+    /// so it is left out and filtered readers fall back to raw.
+    fn pivot_covered(&self, acc: &PivotAcc) -> bool {
+        acc.sources >= self.sources
+    }
+
+    fn slice_acc(&mut self, cols: &Cols<'_>, i: usize) -> Option<&mut SliceAcc> {
+        let pivot = cols.s(C::Pivot, i)?;
+        let value = cols.s(C::PivotValue, i)?;
+        if !self.pivots.contains_key(pivot) {
+            self.pivots.insert(pivot.to_owned(), PivotAcc::default());
+        }
+        let acc = self.pivots.get_mut(pivot).expect("inserted");
+        if !acc.values.contains_key(value) {
+            acc.values.insert(value.to_owned(), SliceAcc::default());
+        }
+        acc.values.get_mut(value)
     }
 
     fn field_acc(&mut self, field: &str) -> &mut FieldAcc {
@@ -1383,6 +1455,71 @@ impl Acc {
                     .saturating_add(cols.i(C::Requests, i).unwrap_or_default());
                 acc.truncated |= cols.b(C::Truncated, i);
             }
+            Some("pivot_totals") => {
+                let Some(pivot) = cols.s(C::Pivot, i) else {
+                    return;
+                };
+                if !self.pivots.contains_key(pivot) {
+                    self.pivots.insert(pivot.to_owned(), PivotAcc::default());
+                }
+                let acc = self.pivots.get_mut(pivot).expect("inserted");
+                acc.total = acc
+                    .total
+                    .saturating_add(cols.i(C::Count, i).unwrap_or_default());
+                acc.truncated |= cols.b(C::Truncated, i);
+            }
+            Some("slice_overview") => {
+                let Some(slice) = self.slice_acc(cols, i) else {
+                    return;
+                };
+                slice.requests = slice
+                    .requests
+                    .saturating_add(cols.i(C::Requests, i).unwrap_or_default());
+                if let Some(blob) = cols.bin(C::IpSketch, i) {
+                    slice.ips.merge_bytes(blob);
+                }
+            }
+            Some("slice_ts") => {
+                let minute = cols.i(C::Bucket, i).unwrap_or_default();
+                let Some(slice) = self.slice_acc(cols, i) else {
+                    return;
+                };
+                match slice.minutes.get_mut(&minute) {
+                    Some(cells) => cols.merge_into(cells, TS_COLS, i),
+                    None => {
+                        slice.minutes.insert(minute, cols.cells(TS_COLS, i));
+                    }
+                }
+            }
+            Some("slice_totals") => {
+                let Some(slice) = self.slice_acc(cols, i) else {
+                    return;
+                };
+                if !slice.fields.contains_key(f_str) {
+                    slice.fields.insert(f_str.to_owned(), SliceField::default());
+                }
+                let acc = slice.fields.get_mut(f_str).expect("inserted");
+                acc.total = acc
+                    .total
+                    .saturating_add(cols.i(C::Count, i).unwrap_or_default());
+                acc.truncated |= cols.b(C::Truncated, i);
+            }
+            Some("slice_fields") => {
+                let Some(slice) = self.slice_acc(cols, i) else {
+                    return;
+                };
+                if !slice.fields.contains_key(f_str) {
+                    slice.fields.insert(f_str.to_owned(), SliceField::default());
+                }
+                let acc = slice.fields.get_mut(f_str).expect("inserted");
+                let count = cols.i(C::Count, i).unwrap_or_default();
+                match acc.values.get_mut(v_str) {
+                    Some(n) => *n = n.saturating_add(count),
+                    None => {
+                        acc.values.insert(v_str.to_owned(), count);
+                    }
+                }
+            }
             Some("sample") => {
                 self.sample.push((
                     cols.i(C::SampleKey, i).unwrap_or_default(),
@@ -1467,6 +1604,26 @@ impl Acc {
         if self.sample.len() > summary::SAMPLE_K {
             self.sample.sort_by_key(|r| (r.0, r.1));
             self.sample.truncate(summary::SAMPLE_K);
+        }
+        for pivot in self.pivots.values_mut() {
+            if pivot.values.len() > summary::PIVOT_K {
+                let mut values: Vec<(String, SliceAcc)> = pivot.values.drain().collect();
+                keep_top(&mut values, summary::PIVOT_K, |a, b| {
+                    by_count(a, b, |s| s.requests)
+                });
+                pivot.values.extend(values);
+                pivot.truncated = true;
+            }
+            for slice in pivot.values.values_mut() {
+                for acc in slice.fields.values_mut() {
+                    if acc.values.len() > summary::TOP_K {
+                        let mut values: Vec<(String, i64)> = acc.values.drain().collect();
+                        keep_top(&mut values, summary::TOP_K, |a, b| by_count(a, b, |n| *n));
+                        acc.values.extend(values);
+                        acc.truncated = true;
+                    }
+                }
+            }
         }
     }
 
@@ -1597,6 +1754,35 @@ impl Acc {
             put_i64(&mut out, *key);
             put_i64(&mut out, *ts);
             put_cells(&mut out, cells);
+        }
+        put_u32(&mut out, self.pivots.len() as u32);
+        for (pivot, acc) in &self.pivots {
+            put_str(&mut out, pivot);
+            put_i64(&mut out, acc.total);
+            out.push(u8::from(acc.truncated));
+            put_u64(&mut out, acc.sources);
+            put_u32(&mut out, acc.values.len() as u32);
+            for (value, slice) in &acc.values {
+                put_str(&mut out, value);
+                put_i64(&mut out, slice.requests);
+                put_hll(&mut out, &slice.ips);
+                put_u32(&mut out, slice.minutes.len() as u32);
+                for (minute, cells) in &slice.minutes {
+                    put_i64(&mut out, *minute);
+                    put_cells(&mut out, cells);
+                }
+                put_u32(&mut out, slice.fields.len() as u32);
+                for (field, f) in &slice.fields {
+                    put_str(&mut out, field);
+                    put_i64(&mut out, f.total);
+                    out.push(u8::from(f.truncated));
+                    put_u32(&mut out, f.values.len() as u32);
+                    for (v, n) in &f.values {
+                        put_str(&mut out, v);
+                        put_i64(&mut out, *n);
+                    }
+                }
+            }
         }
         out.push(u8::from(self.foreign));
         out
@@ -1786,6 +1972,71 @@ impl Acc {
             let ts = cur.i64()?;
             acc.sample.push((key, ts, cur.cells()?));
         }
+        let p_len = cur.u32()? as usize;
+        for _ in 0..p_len {
+            let pivot = cur.str()?;
+            let total = cur.i64()?;
+            let truncated = cur.u8()? != 0;
+            let sources = cur.u64()?;
+            let v_len = cur.u32()? as usize;
+            if v_len > cur.0.len() / 24 {
+                return Err("partial_unreadable".to_string());
+            }
+            let mut values = FastMap::with_capacity_and_hasher(v_len, Default::default());
+            for _ in 0..v_len {
+                let value = cur.str()?;
+                let requests = cur.i64()?;
+                let ips = cur.hll()?;
+                let m_len = cur.u32()? as usize;
+                let mut minutes = BTreeMap::new();
+                for _ in 0..m_len {
+                    let minute = cur.i64()?;
+                    minutes.insert(minute, cur.cells()?);
+                }
+                let f_len = cur.u32()? as usize;
+                let mut fields = BTreeMap::new();
+                for _ in 0..f_len {
+                    let field = cur.str()?;
+                    let total = cur.i64()?;
+                    let truncated = cur.u8()? != 0;
+                    let n_len = cur.u32()? as usize;
+                    if n_len > cur.0.len() / 12 {
+                        return Err("partial_unreadable".to_string());
+                    }
+                    let mut counts = FastMap::with_capacity_and_hasher(n_len, Default::default());
+                    for _ in 0..n_len {
+                        let v = cur.str()?;
+                        counts.insert(v, cur.i64()?);
+                    }
+                    fields.insert(
+                        field,
+                        SliceField {
+                            total,
+                            truncated,
+                            values: counts,
+                        },
+                    );
+                }
+                values.insert(
+                    value,
+                    SliceAcc {
+                        requests,
+                        ips,
+                        minutes,
+                        fields,
+                    },
+                );
+            }
+            acc.pivots.insert(
+                pivot,
+                PivotAcc {
+                    total,
+                    truncated,
+                    values,
+                    sources,
+                },
+            );
+        }
         acc.foreign = cur.u8()? != 0;
         if !cur.0.is_empty() {
             return Err("partial_unreadable".to_string());
@@ -1954,6 +2205,80 @@ impl Acc {
             &mut groups_out,
             &mut layout_rg,
         )?;
+        for (pivot, acc) in &self.pivots {
+            if !self.pivot_covered(acc) {
+                continue;
+            }
+            out.push(&[
+                (C::Bundle, V::S("pivot_totals")),
+                (C::Bucket, V::I(bucket)),
+                (C::Pivot, V::S(pivot)),
+                (C::Count, V::I(acc.total)),
+                (C::Truncated, V::B(acc.truncated)),
+            ]);
+            let mut values: Vec<(&String, &SliceAcc)> = acc.values.iter().collect();
+            values.sort_unstable_by(|a, b| a.0.cmp(b.0));
+            for (value, slice) in values {
+                let head = [(C::Pivot, V::S(pivot)), (C::PivotValue, V::S(value))];
+                let blob = slice.ips.to_bytes();
+                out.push(&[
+                    (C::Bundle, V::S("slice_overview")),
+                    (C::Bucket, V::I(bucket)),
+                    head[0],
+                    head[1],
+                    (C::Requests, V::I(slice.requests)),
+                    (C::IpSketch, V::Bin(&blob)),
+                ]);
+                for (minute, cells) in &slice.minutes {
+                    row(
+                        &mut out,
+                        &[
+                            (C::Bundle, V::S("slice_ts")),
+                            (C::Bucket, V::I(*minute)),
+                            head[0],
+                            head[1],
+                        ],
+                        TS_COLS,
+                        cells,
+                    );
+                }
+                for (field, f) in &slice.fields {
+                    if !self
+                        .fields
+                        .get(field)
+                        .is_some_and(|main| self.covered(field, main))
+                    {
+                        continue;
+                    }
+                    let mut ranked: Vec<(&String, &i64)> = f.values.iter().collect();
+                    ranked.sort_unstable_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+                    let cut = top_k.unwrap_or(ranked.len());
+                    let truncated = f.truncated || ranked.len() > cut;
+                    ranked.truncate(cut);
+                    out.push(&[
+                        (C::Bundle, V::S("slice_totals")),
+                        (C::Bucket, V::I(bucket)),
+                        head[0],
+                        head[1],
+                        (C::FieldName, V::S(field)),
+                        (C::Count, V::I(f.total)),
+                        (C::Truncated, V::B(truncated)),
+                    ]);
+                    for (v, n) in ranked {
+                        out.push(&[
+                            (C::Bundle, V::S("slice_fields")),
+                            (C::Bucket, V::I(bucket)),
+                            head[0],
+                            head[1],
+                            (C::FieldName, V::S(field)),
+                            (C::Value, V::S(v)),
+                            (C::Count, V::I(*n)),
+                        ]);
+                    }
+                }
+            }
+        }
+        flush_group(&mut out, SLICE_GROUPS, &mut groups_out, &mut layout_rg)?;
         let mut sessions: Vec<(&SessionKey, &Vec<Cell>)> = self.sessions.iter().collect();
         sessions.sort_unstable_by(|a, b| {
             int(&b.1[SESSION_REQS])
