@@ -97,6 +97,8 @@ pub const REVISIT_INTERVAL_S: i64 = 6 * 3600;
 /// A replaced bundle is deleted this long after its replacement is written, so a reader that
 /// listed it can still read it.
 pub const RETIRE_GRACE_S: i64 = 600;
+/// Catalog bundles are checked for a missing file at most this often (one listing).
+pub const HEAL_INTERVAL_S: i64 = 300;
 pub const STATE_KEY: &str = "summary:bundle_state";
 /// The CMCD bundler's state.
 pub const CMCD_STATE_KEY: &str = "summary:cmcd_bundle_state";
@@ -2538,6 +2540,17 @@ struct State {
     /// When this dataset last led a [`bundle_datasets`] execution and had work.
     #[serde(default)]
     led: i64,
+    /// The bundle file each listed catalog coverage names (both content-addressed, so a mapping
+    /// never goes stale).
+    #[serde(default)]
+    files: BTreeMap<String, String>,
+    /// Hours and days last re-queued because the catalog lost their bundle, so one the catalog
+    /// keeps refusing is retried only every [`REVISIT_INTERVAL_S`].
+    #[serde(default)]
+    requeued: BTreeMap<i64, i64>,
+    /// When [`Ctx::heal`] last checked every catalog bundle's file.
+    #[serde(default)]
+    healed: i64,
 }
 
 enum Step {
@@ -2559,6 +2572,8 @@ struct Ctx<'s, 'a, R: Runtime> {
     report: BundleReport,
     catalog: super::catalog::Head,
     publication: Option<super::catalog::bundles::Coverage>,
+    /// Every bundle file the catalog lists, once [`Ctx::heal`] has mapped them this execution.
+    referenced: Option<BTreeSet<String>>,
 }
 
 /// A partial's state and object count, `Err` when it cannot be read, `None` when out of calls.
@@ -3027,8 +3042,133 @@ impl<R: Runtime> Ctx<'_, '_, R> {
 
     fn retire(&self, state: &mut State, old: Option<String>, new: Option<&str>) {
         if let Some(old) = old.filter(|old| Some(old.as_str()) != new) {
+            // A catalog bundle may still be listed until its replacement's publication lands;
+            // the catalog retires it in that same commit and deletes it after its grace.
+            if self.cataloged(&old) {
+                return;
+            }
             state.retire.insert(old, self.now + RETIRE_GRACE_S);
         }
+    }
+
+    /// A content-addressed bundle that catalog commits list and retire.
+    fn cataloged(&self, key: &str) -> bool {
+        self.catalog.version == super::catalog::VERSION
+            && key
+                .strip_prefix(&self.bundles)
+                .is_some_and(|relative| relative.starts_with("sha256="))
+    }
+
+    /// Drops catalog bundles whose file is gone in one catalog commit, at most every
+    /// [`HEAL_INTERVAL_S`], and maps every listed bundle to its file for
+    /// [`Ctx::delete_retired`]. [`Ctx::requeue_lost`] then rebuilds what the catalog lost.
+    /// Runs after the execution's bundling, so it only spends what bundling left over.
+    fn heal(&mut self, state: &mut State) -> Result<(), String> {
+        if self.now - state.healed >= HEAL_INTERVAL_S && self.drop_missing(state)? {
+            state.healed = self.now;
+        }
+        Ok(())
+    }
+
+    /// The missing-file half of [`Ctx::heal`]; `false` when out of budget before it finished.
+    fn drop_missing(&mut self, state: &mut State) -> Result<bool, String> {
+        let head = &self.catalog;
+        let listed: Vec<super::catalog::Reference> =
+            [&head.open_bundles, &head.hour_bundles, &head.day_bundles]
+                .into_iter()
+                .flat_map(|map| map.values().cloned())
+                .collect();
+        state
+            .files
+            .retain(|coverage, _| listed.iter().any(|r| &r.key == coverage));
+        for reference in &listed {
+            if state.files.contains_key(&reference.key) {
+                continue;
+            }
+            if !self.room(3) || !super::catalog::bundles::admitted(self.store) {
+                return Ok(false);
+            }
+            let file = match super::catalog::bundles::load(self.store, reference) {
+                Ok(coverage) => coverage.file.key,
+                // No coverage, no file: an empty name is never listed.
+                Err(error) if error == "catalog_object_not_visible" => String::new(),
+                // Publication reports an unproven reference; healing leaves it to that.
+                Err(_) => return Ok(true),
+            };
+            state.files.insert(reference.key.clone(), file);
+        }
+        let Some(objects) = self.list_all(&self.bundles, None)? else {
+            return Ok(false);
+        };
+        let present: BTreeSet<String> = objects.into_iter().map(|o| o.key).collect();
+        let missing: Vec<(super::catalog::Reference, String)> = listed
+            .iter()
+            .map(|r| (r.clone(), state.files[&r.key].clone()))
+            .filter(|(_, file)| !present.contains(file))
+            .collect();
+        self.referenced = Some(state.files.values().cloned().collect());
+        if !missing.is_empty() {
+            let Some(head) =
+                super::catalog::bundles::drop_missing(self.store, &missing, self.reserve + 1)?
+            else {
+                return Ok(false);
+            };
+            for (reference, file) in &missing {
+                state.files.remove(&reference.key);
+                state.open_bundles.retain(|_, key| key != file);
+                self.store.runtime.admin_event(serde_json::json!({
+                    "event": "catalog.bundle_missing_dropped",
+                    "file": file,
+                }));
+            }
+            self.catalog = head;
+        }
+        Ok(true)
+    }
+
+    /// Re-queues the bundled hours and days of `[from, next)` the catalog lists no bundle for (a
+    /// publication superseded, rejected or lost to a crash, or a bundle dropped as missing).
+    fn requeue_lost(&self, state: &mut State, from: i64, next: i64) {
+        let cutoff = match i64::from(self.store.service.log_retention_days) {
+            0 => i64::MIN,
+            days => (self.now - days * DAY_S).div_euclid(HOUR_S) * HOUR_S,
+        };
+        let due = |state: &State, start: i64| {
+            start >= from
+                && start >= cutoff
+                && state
+                    .requeued
+                    .get(&start)
+                    .is_none_or(|at| self.now - at >= REVISIT_INTERVAL_S)
+        };
+        let lost_hours: Vec<i64> = state
+            .hours
+            .keys()
+            .copied()
+            .filter(|hour| *hour < next && !self.catalog.hour_bundles.contains_key(hour))
+            .filter(|hour| due(state, *hour))
+            .collect();
+        for hour in lost_hours {
+            state.hours.remove(&hour);
+            state.catalog_hours.remove(&hour);
+            state.dirty.insert(hour.div_euclid(DAY_S) * DAY_S);
+            state.requeued.insert(hour, self.now);
+            state.revisit = Some(state.revisit.map_or(hour, |at| at.min(hour)));
+        }
+        let lost_days: Vec<i64> = state
+            .days
+            .keys()
+            .copied()
+            .filter(|day| !self.catalog.day_bundles.contains_key(day) && due(state, *day))
+            .collect();
+        for day in lost_days {
+            state.days.remove(&day);
+            state.dirty.insert(day);
+            state.requeued.insert(day, self.now);
+        }
+        state
+            .requeued
+            .retain(|_, at| self.now - *at < REVISIT_INTERVAL_S);
     }
 
     /// Brings hour `hour`'s bundle up to date with its windows.
@@ -3265,12 +3405,28 @@ impl<R: Runtime> Ctx<'_, '_, R> {
 
     /// Deletes replaced bundles whose grace has passed.
     fn delete_retired(&mut self, state: &mut State) {
-        let due: Vec<String> = state
+        let mut due: Vec<String> = state
             .retire
             .iter()
             .filter(|(key, at)| **at <= self.now && key.starts_with(&self.bundles))
             .map(|(key, _)| key.clone())
             .collect();
+        // A catalog bundle goes only once this execution proved the catalog no longer lists it;
+        // one the catalog retired itself is the catalog's to delete after its grace.
+        let catalog = &self.catalog;
+        let referenced = self.referenced.as_ref();
+        due.retain(|key| {
+            if !self.cataloged(key) {
+                return true;
+            }
+            if catalog.bundle_retired.contains_key(key)
+                || referenced.is_some_and(|r| r.contains(key))
+            {
+                state.retire.remove(key);
+            }
+            referenced.is_some_and(|r| !r.contains(key))
+                && !catalog.bundle_retired.contains_key(key)
+        });
         if due.is_empty() {
             return;
         }
@@ -3475,6 +3631,7 @@ fn run<R: Runtime, A: Fold>(
         report: BundleReport::default(),
         catalog: super::catalog::Head::default(),
         publication: None,
+        referenced: None,
     };
     if ctx.stop() || !ctx.room(2) {
         ctx.report.more_pending = true;
@@ -3497,7 +3654,8 @@ fn run<R: Runtime, A: Fold>(
     // read after that commit. Publishing is idempotent, so a run that ends before saving the
     // state publishes the same coverage again next time.
     let mut published_catalog: Option<super::catalog::Head> = None;
-    if let Some(publication) = state.publication.as_ref() {
+    if let Some(publication) = state.publication.clone() {
+        let publication = &publication;
         match super::catalog::bundles::publish(store, publication, reserve + 1) {
             Ok(super::catalog::bundles::PublishOutcome::Published(committed)) => {
                 published_catalog = Some(committed);
@@ -3520,6 +3678,10 @@ fn run<R: Runtime, A: Fold>(
                     "start": publication.start,
                     "publication_file": publication.file.key,
                 }));
+                // Never listed, so it goes once the catalog is proven not to list it either.
+                state
+                    .retire
+                    .insert(publication.file.key.clone(), now + RETIRE_GRACE_S);
                 state.publication = None;
                 state.inventory = None;
             }
@@ -3529,6 +3691,9 @@ fn run<R: Runtime, A: Fold>(
             }
             Err(error) if error == "catalog_bundle_not_active" => {
                 ctx.report.errors.push(error);
+                state
+                    .retire
+                    .insert(publication.file.key.clone(), now + RETIRE_GRACE_S);
                 state.publication = None;
                 state.inventory = None;
             }
@@ -3600,6 +3765,10 @@ fn run<R: Runtime, A: Fold>(
     }
     let mut next = state.next_hour.unwrap_or(floor).max(floor);
     state.next_hour = Some(next);
+    let healing = spec.catalog && ctx.catalog.version == super::catalog::VERSION;
+    if healing {
+        ctx.requeue_lost(&mut state, (next - REVISIT_S).max(floor), next);
+    }
 
     let result = (|| -> Result<(), String> {
         let ctx = &mut ctx;
@@ -3710,6 +3879,11 @@ fn run<R: Runtime, A: Fold>(
     }
     if let Some(publication) = ctx.publication.take() {
         state.publication = Some(publication);
+    }
+    if healing && ctx.report.stopped.is_none() {
+        if let Err(error) = ctx.heal(&mut state) {
+            ctx.report.errors.push(error);
+        }
     }
     if ctx.report.stopped != Some("wall_time") {
         ctx.delete_retired(&mut state);
@@ -4047,6 +4221,102 @@ mod tests {
             partial.len(),
             encode.as_secs_f64() * 1000.0,
             decode.as_secs_f64() * 1000.0
+        );
+    }
+
+    /// A window summary shaped like a live one (~200 KB): `rows` rows over one minute with
+    /// high-cardinality IPs, URLs, UAs, ASNs and cities and a spread of statuses.
+    fn live_window(offset: i64, rows: i64) -> Vec<u8> {
+        let base = 1_800_000_000 + offset;
+        let fmt = &time::format_description::well_known::Rfc3339;
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64 ^ offset as u64;
+        let mut next = |n: u64| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) % n
+        };
+        let statuses = [
+            200, 200, 200, 200, 206, 304, 301, 302, 404, 403, 500, 503, 429,
+        ];
+        let mut plain = Vec::new();
+        for i in 0..rows {
+            let ts = time::OffsetDateTime::from_unix_timestamp(base + i % 60).unwrap();
+            let row = serde_json::json!({
+                "timestamp": ts.format(fmt).unwrap(),
+                "ip": format!("10.{}.{}.{}", next(4), next(16), next(64)),
+                "status": statuses[next(statuses.len() as u64) as usize],
+                "cache": (["HIT", "MISS", "PASS"][next(3) as usize]),
+                "ttfb": 0.001 * next(400) as f64,
+                "elapsed": 1_000 + next(90_000),
+                "resp_bytes": next(2_000_000),
+                "host": format!("h{}.example", next(6)),
+                "url": format!("/p/{}/{}", next(40), next(60)),
+                "method": (["GET", "GET", "POST", "HEAD"][next(4) as usize]),
+                "proto": (["HTTP/2", "HTTP/3", "HTTP/1.1"][next(3) as usize]),
+                "ua": format!("Mozilla/5.0 agent{}", next(150)),
+                "referer": format!("https://r{}.example/", next(80)),
+                "pop": format!("P{:02}", next(60)),
+                "country": format!("C{}", next(40)),
+                "city": format!("city{}", next(300)),
+                "lat": 1.5,
+                "lon": -2.5,
+                "asn": 1000 + next(400),
+                "tcp_rtt": 2_000 + next(90_000),
+                "ottfb": 500 + next(5_000),
+                "ost": statuses[next(statuses.len() as u64) as usize],
+                "backend": format!("b{}", next(4)),
+                "ja4": format!("t13d{}", next(120)),
+                "waf_sig": (["VERIFIED-BOT.googlebot", "x", ""][next(3) as usize]),
+                "req_header_bytes": 100 * next(50),
+                "content_type": (["text/html", "image/png", "application/json"][next(3) as usize]),
+                "rid": format!("r{offset}-{i}"),
+            });
+            plain.extend_from_slice(row.to_string().as_bytes());
+            plain.push(b'\n');
+        }
+        let zst = zstd::stream::encode_all(plain.as_slice(), 1).unwrap();
+        let rows = convert::convert_object(&zst, 300, base).unwrap();
+        let batch = rows.windows.into_values().next().unwrap();
+        summary::write_summary(&[&batch], base).unwrap()
+    }
+
+    /// The CPU of one open-hour bundling turn on a live-sized hour: resume the partial, fold the
+    /// new windows, then encode the partial or write the `open_bundle=` snapshot.
+    #[test]
+    #[ignore = "measurement; run with --release --ignored --nocapture"]
+    fn open_hour_turn_cost() {
+        let windows: Vec<Vec<u8>> = (0..150).map(|i| live_window(i * 24, 1000)).collect();
+        let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1000.0;
+        let mut acc = Acc::new(Unit::Hour);
+        let t = std::time::Instant::now();
+        for w in &windows[..142] {
+            acc.fold(w.clone(), 1).unwrap();
+            acc.prune();
+        }
+        let fold_each = ms(t) / 142.0;
+        let t = std::time::Instant::now();
+        let partial = acc.encode_partial();
+        let encode = ms(t);
+        let t = std::time::Instant::now();
+        let mut acc = Acc::decode_partial(&partial, Unit::Hour).unwrap();
+        let decode = ms(t);
+        let t = std::time::Instant::now();
+        for w in &windows[142..] {
+            acc.fold(w.clone(), 1).unwrap();
+            acc.prune();
+        }
+        let tail = ms(t);
+        let t = std::time::Instant::now();
+        let snapshot = acc.write(1_800_000_000, Some(Unit::Hour), "hour").unwrap();
+        let finish = ms(t);
+        println!(
+            "window {} B, partial {} B, snapshot {} B: fold {fold_each:.1} ms/window, \
+             decode {decode:.1} ms, encode {encode:.1} ms, 8-window tail {tail:.1} ms, \
+             finish {finish:.1} ms",
+            windows[0].len(),
+            partial.len(),
+            snapshot.len(),
         );
     }
 

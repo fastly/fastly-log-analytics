@@ -935,6 +935,111 @@ fn the_open_hour_stays_a_handful_of_files_while_late_runs_keep_arriving() {
     );
 }
 
+/// Every open, hour and day bundle the catalog lists, as `kind@hour: missing object` when its
+/// coverage or its file is gone.
+fn dangling(fake: &Fake) -> Vec<String> {
+    let head = catalog_head(fake);
+    let bucket = fake.bucket.borrow();
+    let mut out = Vec::new();
+    for (kind, map) in [
+        ("open", &head.open_bundles),
+        ("hour", &head.hour_bundles),
+        ("day", &head.day_bundles),
+    ] {
+        for (start, reference) in map {
+            let file = bucket
+                .get(&reference.key)
+                .map(|body| catalog::bundles::parse(body).unwrap().file.key);
+            if !file.as_ref().is_some_and(|key| bucket.contains_key(key)) {
+                out.push(format!("{kind}@{}: {file:?}", (start - BASE) / HOUR));
+            }
+        }
+    }
+    out
+}
+
+/// Runs the bundle stage every maintenance tick from `from` to `to`, committing each minute's
+/// windows as ingest does, and asserts after every run that the catalog lists no deleted bundle.
+fn run_catalog(fake: &Fake, svc: &Service, from: i64, to: i64, written: &mut i64) {
+    let bodies = bodies();
+    let mut now = from;
+    while now < to {
+        fake.now.set(now);
+        while *written + 2 * LIVE_PERIOD_S <= now {
+            commit_minute(fake, svc, *written, &bodies);
+            *written += 60;
+        }
+        if now % 60 == 0 {
+            run(fake, svc);
+            let dangling = dangling(fake);
+            assert!(
+                dangling.is_empty(),
+                "+{}s: catalog lists deleted bundles {dangling:?}",
+                now - BASE
+            );
+        }
+        now += 10;
+    }
+}
+
+fn bundle_state(fake: &Fake) -> Value {
+    fake.kv.borrow()[bundle::STATE_KEY].1.clone()
+}
+
+#[test]
+fn a_lost_hour_publication_never_deletes_the_open_bundle_the_catalog_lists() {
+    let fake = Fake::default();
+    let svc = service_with_period(LIVE_PERIOD_S);
+    let mut written = BASE;
+    // Into the hour's close, until its hour bundle is built and waits to be published.
+    let mut now = BASE;
+    run_catalog(&fake, &svc, now, BASE + HOUR - 600, &mut written);
+    assert!(catalog_head(&fake).open_bundles.contains_key(&BASE));
+    now = BASE + HOUR - 600;
+    while bundle_state(&fake)["hours"][BASE.to_string()].is_null()
+        || bundle_state(&fake)["publication"].is_null()
+    {
+        run_catalog(&fake, &svc, now, now + 60, &mut written);
+        now += 60;
+        assert!(now < BASE + 2 * HOUR, "the hour bundle was never built");
+    }
+    // The publication never lands (superseded, rejected or lost to a crash).
+    let mut state = bundle_state(&fake);
+    state["publication"] = Value::Null;
+    fake.kv.borrow_mut().get_mut(bundle::STATE_KEY).unwrap().1 = state;
+    run_catalog(&fake, &svc, now, now + HOUR, &mut written);
+    assert!(
+        catalog_head(&fake).hour_bundles.contains_key(&BASE),
+        "the hour is rebuilt and published"
+    );
+}
+
+#[test]
+fn a_catalog_bundle_whose_object_is_missing_is_dropped_on_the_next_run() {
+    let fake = Fake::default();
+    let svc = service_with_period(LIVE_PERIOD_S);
+    let mut written = BASE;
+    run_catalog(&fake, &svc, BASE, BASE + 2 * HOUR - 600, &mut written);
+    let head = catalog_head(&fake);
+    let (hour_ref, open_ref) = (
+        &head.hour_bundles[&BASE],
+        &head.open_bundles[&(BASE + HOUR)],
+    );
+    for reference in [hour_ref, open_ref] {
+        let coverage = catalog::bundles::parse(&fake.bucket.borrow()[&reference.key]).unwrap();
+        fake.bucket.borrow_mut().remove(&coverage.file.key);
+    }
+    assert_eq!(dangling(&fake).len(), 2);
+    // The next run after the last check's interval drops them.
+    let now = BASE + 2 * HOUR - 600 + bundle::HEAL_INTERVAL_S;
+    fake.now.set(now);
+    run(&fake, &svc);
+    assert_eq!(dangling(&fake), Vec::<String>::new());
+    // The dropped hour is rebuilt from its windows.
+    run_catalog(&fake, &svc, now + 60, now + 1800, &mut written);
+    assert!(catalog_head(&fake).hour_bundles.contains_key(&BASE));
+}
+
 const CMCD_WINDOWS: &str = "processed/request/cmcd_summary/";
 const CMCD_BUNDLES: &str = "processed/summary_bundle/cmcd_summary/";
 

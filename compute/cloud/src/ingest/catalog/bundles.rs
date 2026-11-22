@@ -231,13 +231,19 @@ pub fn publish<R: Runtime>(
         root.open_bundles.insert(coverage.start, reference);
     } else {
         if let Some(open_ref) = root.open_bundles.remove(&coverage.start) {
-            let open_cov = load(store, &open_ref)?;
-            root.bundle_retired.insert(
-                open_cov.file.key,
-                runtime
-                    .now()
-                    .saturating_add(super::super::bundle::RETIRE_GRACE_S as u64),
-            );
+            // An open bundle whose coverage is gone has nothing left to retire.
+            match load(store, &open_ref) {
+                Ok(open_cov) => {
+                    root.bundle_retired.insert(
+                        open_cov.file.key,
+                        runtime
+                            .now()
+                            .saturating_add(super::super::bundle::RETIRE_GRACE_S as u64),
+                    );
+                }
+                Err(error) if error == "catalog_object_not_visible" => {}
+                Err(error) => return Err(error),
+            }
         }
         root.hour_bundles.insert(coverage.start, reference);
     }
@@ -261,6 +267,87 @@ pub fn publish<R: Runtime>(
     }
 }
 
+/// Removes the listed open, hour or day bundle `references` whose objects are gone, in one
+/// catalog commit naming their files so delta readers refresh those days. `Ok(None)` when out of
+/// budget or the watermark moved; `Ok(Some(head))` is the committed (or already clean) head.
+pub fn drop_missing<R: Runtime>(
+    store: &Store<'_, R>,
+    references: &[(Reference, String)],
+    reserve: u32,
+) -> Result<Option<Head>, String> {
+    let runtime = store.runtime;
+    if runtime.admin_remaining_calls() < reserve + 3 || !admitted(store) {
+        return Ok(None);
+    }
+    let record = runtime
+        .admin_get(WATERMARK_KEY)?
+        .ok_or("catalog_bundle_not_active")?;
+    let mut root = head(&record.value)?;
+    let mut dropped = Vec::new();
+    for map in [
+        &mut root.open_bundles,
+        &mut root.hour_bundles,
+        &mut root.day_bundles,
+    ] {
+        map.retain(|_, reference| {
+            let Some((_, file)) = references.iter().find(|(r, _)| r == reference) else {
+                return true;
+            };
+            dropped.push(Output {
+                key: file.clone(),
+                ..Output::default()
+            });
+            false
+        });
+    }
+    if dropped.is_empty() {
+        return Ok(Some(root));
+    }
+    let generation = root
+        .generation
+        .checked_add(1)
+        .filter(|n| *n <= 9_007_199_254_740_991)
+        .ok_or("catalog_generation_exhausted")?;
+    let at = rfc3339(runtime.now() as i64);
+    let manifest_key = put(
+        store,
+        &Manifest {
+            version: VERSION,
+            service_id: store.service.service_id.clone(),
+            generation,
+            batch: "summary_bundle_repair".into(),
+            schema: String::new(),
+            committed_at: at.clone(),
+            previous: root.manifest.clone(),
+            files: Vec::new(),
+            summaries: dropped,
+            sources: Vec::new(),
+            replaces: Vec::new(),
+            bytes: 0,
+            rows: 0,
+            parents: BTreeMap::new(),
+        },
+    )?;
+    root.generation = generation;
+    root.manifest = Some(manifest_key.clone());
+    root.recent.push(Event {
+        cursor: format!("{}:{generation}", store.service.service_id),
+        generation,
+        committed_at: Some(at),
+        manifest: Some(manifest_key),
+    });
+    if root.recent.len() > REPLAY_COMMITS {
+        root.recent.drain(..root.recent.len() - REPLAY_COMMITS);
+    }
+    let mut value = record.value;
+    value["catalog"] = serde_json::to_value(&root).map_err(|e| e.to_string())?;
+    if runtime.admin_cas(WATERMARK_KEY, Some(&record.generation), &value)? {
+        Ok(Some(root))
+    } else {
+        Ok(None)
+    }
+}
+
 pub fn cleanup<R: Runtime>(
     store: &Store<'_, R>,
     record: Option<&crate::admin::Record>,
@@ -280,9 +367,14 @@ pub fn cleanup<R: Runtime>(
     if keys.is_empty() || store.runtime.admin_remaining_calls() < reserve + 2 || !admitted(store) {
         return Ok(0);
     }
+    // Keys that failed stay due and are retried; a missing object counts as deleted.
     let deleted = store.delete_objects(&keys)?;
-    if !deleted.failed.is_empty() {
-        return Err("catalog_bundle_delete_partial".into());
+    if deleted.deleted.is_empty() {
+        return if deleted.failed.is_empty() {
+            Ok(0)
+        } else {
+            Err("catalog_bundle_delete_partial".into())
+        };
     }
     for key in &deleted.deleted {
         root.bundle_retired.insert(key.clone(), 0);
