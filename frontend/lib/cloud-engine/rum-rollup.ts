@@ -1,4 +1,5 @@
 import { parquetMetadata } from "hyparquet";
+import { MissingCloudFileError } from "./dashboard/file-errors";
 import { Histogram } from "./dashboard/histogram";
 import { Hll } from "./dashboard/hll";
 import { fetchManifest, type ManifestFile } from "./dashboard/manifest";
@@ -499,12 +500,21 @@ export async function queryRumFromRollup(
 
   if (byWindow.size === 0) return emptyRumAnalytics();
 
-  const decoded = await Promise.all(
-    [...byWindow.values()].map(async (file) => {
-      const { bytes } = await source.fetchFile(file.key, params.signal);
-      return decodeRumSummary(bytes);
-    }),
-  );
+  let decoded: (RumSummary | null)[];
+  try {
+    decoded = await Promise.all(
+      [...byWindow.values()].map(async (file) => {
+        const { bytes } = await source.fetchFile(file.key, params.signal);
+        return decodeRumSummary(bytes);
+      }),
+    );
+  } catch (error) {
+    params.signal?.throwIfAborted();
+    // Each RUM summary is the only one for its window, so raw Parquet answers a lost one.
+    if (!(error instanceof MissingCloudFileError)) throw error;
+    console.warn(`flp: RUM summary ${error.key} is listed but missing; reading raw Parquet`);
+    return null;
+  }
   if (decoded.some((part) => part === null)) return null;
 
   return rumAnalyticsFromSummary(mergeRumSummaries(decoded as RumSummary[]));

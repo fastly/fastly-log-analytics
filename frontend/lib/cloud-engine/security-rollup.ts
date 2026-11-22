@@ -1,5 +1,6 @@
 import { parquetMetadata } from "hyparquet";
 import type { FileSource } from "./dashboard/engine";
+import { MissingCloudFileError } from "./dashboard/file-errors";
 import { Hll } from "./dashboard/hll";
 import { fetchManifestWithSummaries, type ManifestFile } from "./dashboard/manifest";
 import { planRollup } from "./dashboard/rollup-query";
@@ -382,21 +383,36 @@ export async function querySecurityRollup(
     controller.signal.throwIfAborted();
     if (callEpoch !== securityRollupEpoch) throw securityRollupAbortError();
     if (!raw.complete || !summaries.complete) return null;
-    const usable = hourly ? summaries.files.filter((file) => !isDayBundle(file.key)) : summaries.files;
-    const plan = planRollup(raw.files, usable, fromMs, toMs);
-    if (!plan) return null;
-    const parts = await Promise.all(
-      plan.files.map((use) => decodeCached(source, use.file, spec, controller.signal, callEpoch)),
-    );
-    signal?.throwIfAborted();
-    controller.signal.throwIfAborted();
-    if (callEpoch !== securityRollupEpoch) throw securityRollupAbortError();
-    if (parts.some((part) => part === null)) return null;
-    return {
-      files: plan.files.map((use, i) => ({ key: use.file.key, summary: parts[i]! })),
-      dataFromMs: plan.dataFromMs,
-      dataThroughMs: plan.dataThroughMs,
-    };
+    const missing = new Set<string>();
+    for (;;) {
+      const usable = summaries.files.filter((file) => !(hourly && isDayBundle(file.key)) && !missing.has(file.key));
+      const plan = planRollup(raw.files, usable, fromMs, toMs);
+      if (!plan) return null;
+      let parts: (SecuritySummary | null)[];
+      try {
+        parts = await Promise.all(
+          plan.files.map((use) => decodeCached(source, use.file, spec, controller.signal, callEpoch)),
+        );
+      } catch (error) {
+        signal?.throwIfAborted();
+        controller.signal.throwIfAborted();
+        if (callEpoch !== securityRollupEpoch) throw securityRollupAbortError();
+        if (!(error instanceof MissingCloudFileError) || missing.has(error.key)
+          || !plan.files.some((use) => use.file.key === error.key)) throw error;
+        console.warn(`flp: summary ${error.key} is listed but missing; planning without it`);
+        missing.add(error.key);
+        continue;
+      }
+      signal?.throwIfAborted();
+      controller.signal.throwIfAborted();
+      if (callEpoch !== securityRollupEpoch) throw securityRollupAbortError();
+      if (parts.some((part) => part === null)) return null;
+      return {
+        files: plan.files.map((use, i) => ({ key: use.file.key, summary: parts[i]! })),
+        dataFromMs: plan.dataFromMs,
+        dataThroughMs: plan.dataThroughMs,
+      };
+    }
   } finally {
     signal?.removeEventListener("abort", onCallerAbort);
     activeSecurityRollupControllers.delete(controller);
