@@ -19,7 +19,8 @@ import {
   fixtureFiles,
   fixturePage,
 } from "./summary-fixtures";
-import { fixtureSource } from "./test-fixtures";
+import { fixtureSource, projectingSource } from "./test-fixtures";
+import { INSIGHTS_RESIDUAL } from "../insights-residual";
 
 const HOUR = 3_600_000;
 const T0 = FIXTURE_START * 1000;
@@ -197,6 +198,44 @@ describe("planRollup", () => {
       (f) => at(f) !== T0 + HOUR + 15 * 60_000,
     );
     expect(planRollup(RAW, summaries, T0, T0 + 2 * HOUR)).toBeNull();
+  });
+
+  describe("with a residual budget", () => {
+    const keys = (files: readonly ManifestFile[] | undefined) => (files ?? []).map((f) => f.key);
+    const cutAt = (file: ManifestFile) => RAW.find((r) => r.start === file.start)!;
+
+    it("plans a window crossing the range start as residual, data from the range start", () => {
+      const fromMs = T0 + 5 * 60_000;
+      const plan = planRollup(RAW, all, fromMs, T0 + 2 * HOUR, { residualBytes: Infinity })!;
+      expect(keys(plan.residual)).toEqual([RAW[0].key]);
+      expect(plan.dataFromMs).toBe(fromMs);
+      expect(plan.dataThroughMs).toBe(T0 + 2 * HOUR);
+      expect(plan.files.flatMap((use) => use.covers).map((f) => f.key)).not.toContain(RAW[0].key);
+    });
+
+    it("plans a gap and a long open tail as residual instead of null", () => {
+      const gap = WINDOWS.find((f) => at(f) === T0 + 15 * 60_000)!;
+      const summaries = WINDOWS.filter((f) => f !== gap && at(f) < T0 + HOUR);
+      expect(planRollup(RAW, summaries, T0, T0 + 2 * HOUR)).toBeNull();
+      const plan = planRollup(RAW, summaries, T0, T0 + 2 * HOUR, { residualBytes: Infinity })!;
+      expect(keys(plan.residual).toSorted()).toEqual(
+        [cutAt(gap), ...RAW.filter((f) => at(f) >= T0 + HOUR)].map((f) => f.key).toSorted(),
+      );
+      expect(plan.dataThroughMs).toBe(T0 + 2 * HOUR);
+    });
+
+    it("clips a residual window crossing the range end", () => {
+      const toMs = T0 + 2 * HOUR - 5 * 60_000;
+      const plan = planRollup(RAW, all, T0, toMs, { residualBytes: Infinity })!;
+      expect(keys(plan.residual)).toEqual([RAW.at(-1)!.key]);
+      expect(plan.dataThroughMs).toBe(toMs);
+    });
+
+    it("is null when the residual's listed bytes pass the budget", () => {
+      const fromMs = T0 + 5 * 60_000;
+      expect(planRollup(RAW, all, fromMs, T0 + 2 * HOUR, { residualBytes: RAW[0].size })).not.toBeNull();
+      expect(planRollup(RAW, all, fromMs, T0 + 2 * HOUR, { residualBytes: RAW[0].size - 1 })).toBeNull();
+    });
   });
 
   it("falls back to raw when the omitted tail is longer than one raw window", () => {
@@ -410,6 +449,32 @@ describe("queryRollup", () => {
     const result = await queryRollup(s, { fromMs: T0, toMs: T0 + 2 * HOUR });
     expect(overall(result!.rollup)).toBe(overall(await decodeAll(WINDOWS)));
     expect(s.log.summary).toHaveLength(1);
+  });
+
+  it("rolls up the raw rows no summary answers, exactly through the range end", async () => {
+    const fromMs = T0 + 5 * 60_000;
+    const toMs = T0 + 2 * HOUR - 7 * 60_000;
+    const gap = WINDOWS.find((f) => at(f) === T0 + HOUR)!;
+    const s = projectingSource(source(WINDOWS.filter((f) => f !== gap)), BUFFERS);
+    expect(await queryRollup(s, { fromMs, toMs })).toBeNull();
+    const result = (await queryRollup(s, { fromMs, toMs, residual: INSIGHTS_RESIDUAL }))!;
+    let rows = 0;
+    for (const file of RAW) {
+      const { rows: n, columns } = await readColumns(BUFFERS[file.key], ["timestamp"]);
+      const ts = columns.get("timestamp")!;
+      for (let i = 0; i < n; i++) {
+        const t = ts[i] instanceof Date ? (ts[i] as Date).getTime() : Number(ts[i]);
+        if (ts[i] != null && t >= fromMs && t < toMs) rows++;
+      }
+    }
+    expect(overall(result.rollup)).toBe(rows);
+    expect([result.dataFromMs, result.dataThroughMs]).toEqual([fromMs, toMs]);
+    expect(s.ranges.toSorted()).toEqual(
+      [RAW[0], RAW.find((f) => at(f) === T0 + HOUR)!, RAW.at(-1)!].map((f) => f.key).toSorted(),
+    );
+    expect([...result.rollup.dims.keys()]).toEqual(["city"]);
+    expect(result.rollup.present!.has("ins_url/url")).toBe(true);
+    expect(result.missingRanges!.size).toBe(0);
   });
 
   it("returns null, never zero, when a planned summary is not v3", async () => {

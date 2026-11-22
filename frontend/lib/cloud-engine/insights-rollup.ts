@@ -11,6 +11,7 @@ import {
 } from "./insights";
 import type { NetworkRollupMeta } from "./network-rollup";
 import { defineSummarySpec, type SummarySpec } from "./dashboard/summary-projection";
+import { INSIGHTS_RESIDUAL } from "./insights-residual";
 
 /**
  * How an /insights response whose baseline came from v3 summaries differs from
@@ -116,7 +117,9 @@ export function insightsBaselineFromRollup(
 ): Promise<RollupResult | null> {
   if (filters.length) return Promise.resolve(null);
   const { start, windowStart } = resolveInsightWindow(body);
-  return queryRollup(source, { fromMs: start, toMs: windowStart, signal, spec: spec ?? undefined });
+  return queryRollup(source, {
+    fromMs: start, toMs: windowStart, signal, spec: spec ?? undefined, residual: INSIGHTS_RESIDUAL,
+  });
 }
 
 type Row = Record<string, unknown>;
@@ -377,8 +380,12 @@ export async function insightsFromRollup(
   if (filters.length || Array.isArray(body.detectors)) return null;
   const { end, windowStart, start } = resolveInsightWindow(body);
   const [windowResult, baselineResult] = await Promise.all([
-    queryRollup(source, { fromMs: windowStart, toMs: end, signal, spec: spec ?? undefined }),
-    queryRollup(source, { fromMs: start, toMs: windowStart, signal, spec: spec ?? undefined }),
+    queryRollup(source, {
+      fromMs: windowStart, toMs: end, signal, spec: spec ?? undefined, residual: INSIGHTS_RESIDUAL,
+    }),
+    queryRollup(source, {
+      fromMs: start, toMs: windowStart, signal, spec: spec ?? undefined, residual: INSIGHTS_RESIDUAL,
+    }),
   ]);
   if (!windowResult || !baselineResult) return null;
 
