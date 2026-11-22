@@ -1609,6 +1609,8 @@ async function collectAggregator(
     file: ManifestFile;
     scopedKey: string;
     local: boolean;
+    /** Held in OPFS, so `openParquet` opens it without the network. */
+    opfs: boolean;
     hadRollup: boolean;
     rollupMeta?: { rawRows: number; minTs: number; maxTs: number };
     summary?: SummaryUse;
@@ -1618,13 +1620,21 @@ async function collectAggregator(
   const pending: PendingFile[] = [];
   let toFetch = 0;
   let toDecode = 0;
-  const addPending = async (entry: Omit<PendingFile, "local">) => {
+  const addPending = async (entry: Omit<PendingFile, "local" | "opfs">) => {
     assertActive();
     const local = Boolean(await source.hasFile?.(entry.file.key));
     assertActive();
-    if (local) toDecode++;
+    const opfs =
+      !local &&
+      !entry.summary &&
+      Boolean(
+        source.openParquet &&
+        (await source.hasPersistentFile?.(entry.file, signal, variant)),
+      );
+    assertActive();
+    if (local || opfs) toDecode++;
     else toFetch++;
-    pending.push({ ...entry, local });
+    pending.push({ ...entry, local, opfs });
   };
   const classify = async (file: ManifestFile) => {
     const scopedKey = scopedKeyOf(file.key);
@@ -1977,7 +1987,25 @@ async function collectAggregator(
     ? projectedReader(source, scanColumns, signal)
     : null;
 
-  await runPool(pending, async (entry) => {
+  const wholeReadable = (file: ManifestFile) =>
+    searchQuery === undefined &&
+    Number.isSafeInteger(file.size) &&
+    file.size > 0 &&
+    file.size <= WHOLE_READ_MAX_BYTES;
+  // A whole file the browser cache holds is read as is; a Range probe would
+  // only revalidate the remote copy, which cached bytes never come from.
+  const cachedWhole = (entry: PendingFile) =>
+    entry.local &&
+    !entry.opfs &&
+    !microFiles.has(entry.file.key) &&
+    wholeReadable(entry.file);
+  // Cache hits need no network slot, so they run beside the network pool
+  // rather than queueing behind its downloads.
+  const cacheReady = (entry: PendingFile) =>
+    !entry.summary &&
+    (entry.opfs ||
+      (entry.local && (!source.openParquet || cachedWhole(entry))));
+  const readPending = async (entry: PendingFile) => {
     assertActive();
     const { file, scopedKey, hadRollup, rollupMeta } = entry;
     if (entry.summary) {
@@ -2003,25 +2031,21 @@ async function collectAggregator(
         }
       }
       assertActive();
-      let access = await source.openParquet(file, signal, variant);
+      let access = cachedWhole(entry)
+        ? null
+        : await source.openParquet(file, signal, variant);
       try {
         assertActive();
       } catch (error) {
-        access.release?.();
+        access?.release?.();
         throw error;
       }
       let wholeBytes = 0;
       // DuckDB-wasm reads HTTP ranges with serial synchronous XHRs, about two
       // round trips per 32 KiB for a full-card scan; one whole fetch per file
       // runs in the pool instead. Field search reads one column, so it keeps ranges.
-      if (
-        access.kind === "http" &&
-        searchQuery === undefined &&
-        Number.isSafeInteger(file.size) &&
-        file.size > 0 &&
-        file.size <= WHOLE_READ_MAX_BYTES
-      ) {
-        access.release?.();
+      if (access === null || (access.kind === "http" && wholeReadable(file))) {
+        access?.release?.();
         // A whole file the browser already holds costs no transfer.
         const projected =
           readProjected && !entry.local ? await readProjected(file) : null;
@@ -2259,7 +2283,14 @@ async function collectAggregator(
     else stats.fetched++;
     if (isCdnHit(cdn)) stats.cdnHits++;
     finishFile();
-  });
+  };
+  await Promise.all([
+    runPool(pending.filter(cacheReady), readPending),
+    runPool(
+      pending.filter((entry) => !cacheReady(entry)),
+      readPending,
+    ),
+  ]);
   progress.phase = "aggregate";
   maybeReportProgress(false);
   if (duckdbScopedKeys.length > 0) {

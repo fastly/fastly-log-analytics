@@ -148,6 +148,107 @@ describe("runDashboard", () => {
     expect(peak).toBe(16);
   });
 
+  const cacheRaceSource = async (opfsKeys: readonly string[] = []) => {
+    const net = Array.from({ length: 6 }, (_, i) => `net-${i}`);
+    const local = Array.from({ length: 3 }, (_, i) => `local-${i}`);
+    const keys = [...net, ...local, ...opfsKeys];
+    const bytes = await parquetFixture([row(5)]);
+    const base = fixtureSource(
+      [
+        {
+          files: keys.map((k) =>
+            manifestEntry(k, "2026-10-29T10:00:00Z", "2026-10-29T10:05:00Z", 1),
+          ),
+          next_cursor: null,
+          complete: true,
+        },
+      ],
+      {},
+    );
+    const events: string[] = [];
+    const hitCount = local.length + opfsKeys.length;
+    // Network replies wait for every cache hit (or 1s), so a hit that queues
+    // behind the network pool lands after the network events.
+    const slowNetwork = async () => {
+      const deadline = Date.now() + 1000;
+      while (
+        Date.now() < deadline &&
+        events.filter((e) => e.startsWith("cache:") || e.startsWith("opfs:"))
+          .length < hitCount
+      ) {
+        await new Promise((r) => setTimeout(r, 5));
+      }
+    };
+    const source = {
+      ...base,
+      readRollup: undefined,
+      writeRollup: undefined,
+      hasFile: async (key: string) => key.startsWith("local-"),
+      hasPersistentFile: async (file: { key: string }) =>
+        file.key.startsWith("opfs-"),
+      fetchFile: async (key: string) => {
+        if (key.startsWith("local-")) {
+          events.push(`cache:${key}`);
+          return { bytes: bytes.slice(0), cached: true };
+        }
+        await slowNetwork();
+        events.push(`net:${key}`);
+        return { bytes: bytes.slice(0), cached: false };
+      },
+    };
+    return { source, events, slowNetwork, bytes, local };
+  };
+
+  it("serves browser-cache hits without queueing behind network fetches", async () => {
+    const { source, events, local } = await cacheRaceSource();
+    const result = await runDashboard(source, {
+      from: "2026-10-29T10:00:00Z",
+      to: "2026-10-29T10:03:00Z",
+      concurrency: 2,
+    });
+    expect(result.totalRequests).toBe(9);
+    expect(result.stats).toMatchObject({ cached: 3, fetched: 6 });
+    // Every cache hit resolves before the first network fetch completes.
+    expect(events.slice(0, local.length).sort()).toEqual(
+      local.map((k) => `cache:${k}`),
+    );
+  });
+
+  it("opens browser-cache and OPFS hits without a network probe or slot", async () => {
+    const { source, events, slowNetwork, bytes, local } = await cacheRaceSource(
+      ["opfs-0"],
+    );
+    const result = await runDashboard(
+      {
+        ...source,
+        openParquet: async (file) => {
+          if (file.key.startsWith("opfs-")) {
+            events.push(`opfs:${file.key}`);
+            return { kind: "buffer", bytes: bytes.slice(0), cached: true };
+          }
+          events.push(`probe:${file.key}`);
+          await slowNetwork();
+          return { kind: "http", url: `https://x/${file.key}`, cached: false };
+        },
+      },
+      {
+        from: "2026-10-29T10:00:00Z",
+        to: "2026-10-29T10:03:00Z",
+        concurrency: 2,
+      },
+    );
+    expect(result.totalRequests).toBe(10);
+    expect(events.some((e) => e.startsWith("probe:local-"))).toBe(false);
+    const firstProbeDone = events.findIndex((e) => e.startsWith("net:"));
+    const hits = events
+      .map((e, i) => [e, i] as const)
+      .filter(([e]) => e.startsWith("cache:") || e.startsWith("opfs:"));
+    expect(hits.map(([e]) => e).sort()).toEqual(
+      [...local.map((k) => `cache:${k}`), "opfs:opfs-0"].sort(),
+    );
+    expect(hits.every(([, i]) => i < firstProbeDone)).toBe(true);
+  });
+
   it("treats a missing column as no samples and counts cached files", async () => {
     const buffers = {
       a: await parquetFixture(rows, ["host"]),
