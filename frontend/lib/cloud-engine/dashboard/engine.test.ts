@@ -964,6 +964,61 @@ describe("runDashboard", () => {
     expect(againAnswer).toEqual(wholeAnswer);
   });
 
+  it("reads only the row groups of an unfiltered edge compact whose timestamps reach into the range", async () => {
+    // An hour compact of six ten-minute row groups, like the closed hour a relative range starts in.
+    const n = 1200;
+    const at = (i: number) => T0 + Math.floor(i / 200) * 600_000 + (i % 200) * 3000;
+    let seed = 7;
+    const hex = () => Array.from({ length: 16 }, () => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return seed.toString(16).padStart(8, "0");
+    }).join("");
+    const hour = parquetWriteBuffer({
+      codec: "SNAPPY",
+      rowGroupSize: 200,
+      columnData: [
+        { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: n }, (_, i) => new Date(at(i))) },
+        { name: "status", type: "INT32", data: Array.from({ length: n }, (_, i) => (i % 7 === 3 ? 503 : 200)) },
+        { name: "cache", type: "STRING", data: Array.from({ length: n }, (_, i) => (i % 7 < 4 ? "HIT" : "MISS")) },
+        { name: "resp_bytes", type: "INT64", data: Array.from({ length: n }, (_, i) => BigInt(100 + (i % 7))) },
+        { name: "edge", type: "BOOLEAN", data: Array.from({ length: n }, (_, i) => i % 3 !== 0) },
+        // A card column big enough that the footer probe covers only the last row group or so.
+        { name: "url", type: "STRING", data: Array.from({ length: n }, hex) },
+      ],
+    });
+    const buffers = { hour };
+    const page = {
+      files: [{ ...manifestEntry("hour", "2026-10-29T10:00:00Z", "2026-10-29T11:00:00Z", n), size: hour.byteLength }],
+      next_cursor: null,
+      complete: true,
+    };
+    const http = async (file: { key: string }) => ({
+      kind: "http" as const, url: `https://flp.example/api/file/${file.key}`, cached: false,
+    });
+    // Starts 70 rows into the last row group.
+    const options = { from: "2026-10-29T10:53:30Z", to: "2026-10-29T11:30:00Z", concurrency: 1 };
+    const expected = await runDashboard({ ...fixtureSource([page], buffers), openParquet: http }, options);
+    expect(expected.totalRequests).toBe(130);
+
+    const source = fixtureSource([page], buffers);
+    const fetchFile = vi.spyOn(source, "fetchFile");
+    const ranges: [number, number][] = [];
+    const result = await runDashboard({
+      ...source,
+      openParquet: http,
+      fetchRange: async (_file: { key: string }, start: number, end: number) => {
+        ranges.push([start, end]);
+        return hour.slice(start, end);
+      },
+    }, options);
+    expect(fetchFile).not.toHaveBeenCalled();
+    expect(hour.byteLength).toBeGreaterThan(140_000);
+    expect(ranges.reduce((sum, [start, end]) => sum + end - start, 0)).toBeLessThan(hour.byteLength / 2);
+    const { stats: _stats, ...answer } = result;
+    const { stats: _expectedStats, ...wholeAnswer } = expected;
+    expect(answer).toEqual(wholeAnswer);
+  });
+
   it("bounds the bytes of whole selective reads held between fetch and query", async () => {
     const MiB = 1024 * 1024;
     const keys = ["a", "b", "c", "d"] as const;

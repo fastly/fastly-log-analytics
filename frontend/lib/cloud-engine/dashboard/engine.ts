@@ -288,6 +288,7 @@ function columnFields(options: EngineOptions): CustomField[] {
 // probes halved wall time from 8 to 16 lanes, and 32 added little. The edge
 // allows 100 HTTP/2 streams, so this is a tuning choice, not a browser cap.
 const FETCH_CONCURRENCY = 24;
+const EDGE_PRUNE_MIN_SPAN_MS = 10 * 60_000;
 // Cache probes read local storage only, so they run wider than network lanes.
 const CACHE_PROBE_CONCURRENCY = 64;
 // One coalesced selective query registers every file it reads in DuckDB memory.
@@ -2013,6 +2014,19 @@ async function collectAggregator(
   const readProjected = scanColumns
     ? projectedReader(source, scanColumns, signal)
     : null;
+  // A file straddling the range edge (the closed hour a relative range starts
+  // in) is read only in the row groups its footer says reach into the range.
+  const edgeColumns =
+    searchQuery === undefined && source.fetchRange
+      ? (scanColumns ?? dashboardScanColumns(fields, options.filters ?? [], readFields))
+      : null;
+  const readEdge = edgeColumns
+    ? projectedReader(source, edgeColumns, signal, { fromMs, toMs })
+    : null;
+  // A 2-minute window is one small row group: a footer round trip would only
+  // delay it. Compacts span many windows, each its own row groups.
+  const spansRowGroups = (file: ManifestFile) =>
+    Date.parse(file.end) - Date.parse(file.start) >= EDGE_PRUNE_MIN_SPAN_MS;
 
   const wholeReadable = (file: ManifestFile) =>
     searchQuery === undefined &&
@@ -2074,8 +2088,11 @@ async function collectAggregator(
       if (access === null || (access.kind === "http" && wholeReadable(file))) {
         access?.release?.();
         // A whole file the browser already holds costs no transfer.
-        const projected =
-          readProjected && !entry.local ? await readProjected(file) : null;
+        const reader =
+          readEdge && !insideRange(file) && spansRowGroups(file)
+            ? readEdge
+            : readProjected;
+        const projected = reader && !entry.local ? await reader(file) : null;
         assertActive();
         const held = projected ? projected.bytes : file.size;
         await acquireWhole(held);

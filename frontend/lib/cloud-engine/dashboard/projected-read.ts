@@ -3,7 +3,8 @@ import type { FileSource } from "./engine";
 import type { DashboardFilter } from "./filters";
 import type { ManifestFile } from "./manifest";
 import {
-  assembleProjectedParquet, fetchProjectedRanges, planParquetProjection, readParquetFooter, type ParquetFooter,
+  assembleProjectedParquet, fetchProjectedRanges, planParquetProjection, readParquetFooter,
+  timestampRowGroupFilter, type ParquetFooter,
 } from "./parquet-projection";
 import type { BrowserFileSource } from "./sources";
 import type { CustomField } from "./summaries";
@@ -44,11 +45,14 @@ export type ProjectedRead = {
 /**
  * Reads files as standalone Parquet holding only `columns`, through footer-planned
  * byte ranges. Footers and projections persist as derived files of the source file.
+ * With `window`, row groups whose timestamp statistics lie wholly outside it are
+ * left out too; the caller still clips rows to the window.
  */
 export function projectedReader(
   source: ProjectionSource,
   columns: readonly string[],
   signal?: AbortSignal,
+  window?: { fromMs: number; toMs: number },
 ): (file: ManifestFile) => Promise<ProjectedRead> {
   const fetchFrom = source.fetchRange;
   if (!fetchFrom) throw new Error("Projected Cloud reads need a range-capable file source");
@@ -74,8 +78,10 @@ export function projectedReader(
     }
     const identity = ["dashboard", source.cacheScope ?? "", file.key, file.etag ?? "", file.size, file.schema_version ?? ""];
     const footerKey = JSON.stringify([...identity, "footer"]);
-    const projectionKey = JSON.stringify([...identity, "projection", ...columnsKey]);
-    const stored = await source.readDerivedFile?.(file.key, projectionKey);
+    const projectionKey = (rowGroups?: number[]) =>
+      JSON.stringify([...identity, "projection", ...columnsKey, ...(rowGroups ? [{ rowGroups }] : [])]);
+    // Without a window the projection's identity needs no footer.
+    const stored = window ? null : await source.readDerivedFile?.(file.key, projectionKey());
     if (stored) {
       return { bytes: stored.byteLength, read: async () => ({ bytes: await stored.bytes(), cached: true, downloaded: 0 }) };
     }
@@ -95,12 +101,18 @@ export function projectedReader(
     if (!tail && footer.tail) {
       void source.writeDerivedFile?.(file.key, footerKey, footer.tail.bytes, String(footer.tail.start));
     }
-    const plan = planParquetProjection(footer, wanted);
+    const plan = planParquetProjection(footer, wanted, window
+      ? timestampRowGroupFilter(footer.metadata, window.fromMs, window.toMs) : undefined);
+    const key = projectionKey(plan.rowGroups.length < footer.metadata.row_groups.length ? plan.rowGroups : undefined);
+    const windowed = window ? await source.readDerivedFile?.(file.key, key) : null;
+    if (windowed) {
+      return { bytes: windowed.byteLength, read: async () => ({ bytes: await windowed.bytes(), cached: true, downloaded: 0 }) };
+    }
     return {
       bytes: plan.projectedBytes,
       read: async () => {
         const bytes = assembleProjectedParquet(plan, await fetchProjectedRanges(plan, counted));
-        void source.writeDerivedFile?.(file.key, projectionKey, bytes, JSON.stringify(plan.presentColumns));
+        void source.writeDerivedFile?.(file.key, key, bytes, JSON.stringify(plan.presentColumns));
         return { bytes, cached: false, downloaded };
       },
     };

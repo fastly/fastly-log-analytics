@@ -104,6 +104,28 @@ const chunkStart = (meta: { data_page_offset: bigint; dictionary_page_offset?: b
 };
 
 /**
+ * Whether a row group may hold a `timestamp` in [fromMs, toMs]: false only when
+ * its footer statistics prove every value lies outside, so a group without
+ * statistics is kept.
+ */
+export function timestampRowGroupFilter(
+  metadata: FileMetaData,
+  fromMs: number,
+  toMs: number,
+): (rowGroup: number) => boolean {
+  return (rowGroup) => {
+    const chunk = metadata.row_groups[rowGroup]?.columns.find(
+      (column) => column.meta_data?.path_in_schema.length === 1 && column.meta_data.path_in_schema[0] === "timestamp");
+    const stats = chunk?.meta_data?.statistics;
+    const min = stats?.min_value;
+    const max = stats?.max_value;
+    // Microsecond values floor to their millisecond, so "max < fromMs" stays exact.
+    if (!(min instanceof Date) || !(max instanceof Date)) return true;
+    return !(max.getTime() < fromMs || min.getTime() > toMs);
+  };
+}
+
+/**
  * The column chunks of `columns` to fetch, in the row groups `keepRowGroup`
  * accepts (every row group by default), coalesced into byte ranges.
  */
