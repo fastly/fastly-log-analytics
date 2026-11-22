@@ -9,6 +9,7 @@ import {
   billedVcpuMsPerRequest,
   fetchUsageInput,
   fetchUsageSettings,
+  fetchIngestDeletedBytes,
   resetUsageSettingsCache,
   incurredCost,
   parseComputeBilling,
@@ -48,12 +49,53 @@ describe("storageCostUsd", () => {
       });
     });
 
-    it("accepts a complete zero only when the telemetry reader covered the range", () => {
+    it("does not invent a deletion history from an empty FOS telemetry read", () => {
       expect(deletedBytesAccountingSince([], 0, true)).toEqual({
         bytes: 0,
-        complete: true,
-        provenance: "fos_usage_exact",
+        complete: false,
+        provenance: "fos_usage_incomplete",
       });
+    });
+  });
+});
+
+describe("fetchIngestDeletedBytes", () => {
+  it("recovers historical raw deletions from persisted ingest_files state", async () => {
+    const read = vi.fn(async () => ({
+      rows: [
+        {
+          raw_key: "raw/service/a.log.zst",
+          raw_size: 4_000,
+          raw_deleted: false,
+          timestamp: 100,
+        },
+        {
+          raw_key: "raw/service/a.log.zst",
+          raw_size: null,
+          raw_deleted: true,
+          raw_deleted_at: 500,
+          timestamp: 500,
+        },
+        {
+          raw_key: "raw/service/b.log.zst",
+          raw_size: 2_000,
+          raw_deleted: true,
+          raw_deleted_at: 600,
+          timestamp: 600,
+        },
+      ],
+      liveTruncated: false,
+    }));
+    await expect(
+      fetchIngestDeletedBytes(
+        { from: 250, to: 700 },
+        { user: "admin", role: "admin" },
+        read,
+      ),
+    ).resolves.toEqual({
+      bytes: 6_000,
+      complete: true,
+      provenance: "ingest_files_exact",
     });
   });
 });

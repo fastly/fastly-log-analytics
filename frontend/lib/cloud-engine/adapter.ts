@@ -117,6 +117,7 @@ import { bucketUsage } from "./usage/series";
 import {
   buildSevenLineCostTable,
   deletedBytesAccountingSince,
+  fetchIngestDeletedBytes,
   fetchUsageKindWithCoverage,
   fetchUsageSettings,
   resetUsageSettingsCache,
@@ -2105,13 +2106,25 @@ async function dispatchCloudRequest(
         billedFrom,
         input.settings.enabled && deletionSource.complete,
       );
+      const ingestDeletion = deletionAccounting.complete
+        ? null
+        : await fetchIngestDeletedBytes(
+            { from: billedFrom, to: now },
+            { user: "default", role: "admin" },
+            undefined,
+            request.signal,
+          );
+      const effectiveDeletion =
+        ingestDeletion?.complete
+          ? ingestDeletion
+          : deletionAccounting;
       return jsonResponse(
         {
           total_billed_gb_hours: summary.storage.billedGbMonths * 720,
           live_bytes: summary.storage.totalBytes,
-          deleted_bytes: deletionAccounting.bytes,
-          deleted_bytes_complete: deletionAccounting.complete,
-          deleted_bytes_provenance: deletionAccounting.provenance,
+          deleted_bytes: effectiveDeletion.bytes,
+          deleted_bytes_complete: effectiveDeletion.complete,
+          deleted_bytes_provenance: effectiveDeletion.provenance,
           regular_log_bytes:
             summary.storage.datasets.find((d) => d.dataset === "pq_request")
               ?.bytes ?? 0,

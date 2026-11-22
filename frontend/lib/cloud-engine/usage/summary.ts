@@ -40,6 +40,68 @@ export function resetUsageSettingsCache(
   }
 }
 
+export async function fetchIngestDeletedBytes(
+  range: { from: number; to: number },
+  identity: { user: string; role: string },
+  read: UsageLogReader = readLogs,
+  signal?: AbortSignal,
+) {
+  const result = await read(
+    "ingest_files",
+    {
+      from: new Date(range.from).toISOString(),
+      to: new Date(range.to).toISOString(),
+    },
+    { ...identity, signal },
+  );
+  const known = new Map<string, number>();
+  const latest = new Map<
+    string,
+    { deleted: boolean; at: number; version: number }
+  >();
+  for (const row of result.rows) {
+    const key = typeof row.raw_key === "string" ? row.raw_key : "";
+    if (!key) continue;
+    const size = Number(row.raw_size);
+    if (Number.isFinite(size) && size >= 0 && !known.has(key)) {
+      known.set(key, size);
+    }
+    const at = Number(row.raw_deleted_at ?? row.timestamp);
+    const version = Number(row.state_version ?? 0);
+    const candidate = {
+      deleted: row.raw_deleted === true,
+      at: Number.isFinite(at) ? at : 0,
+      version: Number.isFinite(version) ? version : 0,
+    };
+    const previous = latest.get(key);
+    if (
+      !previous ||
+      candidate.version > previous.version ||
+      (candidate.version === previous.version && candidate.at > previous.at)
+    ) {
+      latest.set(key, candidate);
+    }
+  }
+  let bytes = 0;
+  let complete = result.liveTruncated !== true;
+  for (const [key, state] of latest) {
+    if (!state.deleted || state.at < range.from || state.at > range.to) continue;
+    const size = known.get(key);
+    if (size === undefined) {
+      complete = false;
+      continue;
+    }
+    bytes += size;
+  }
+  return {
+    bytes,
+    complete: complete && latest.size > 0,
+    provenance: complete && latest.size > 0
+      ? "ingest_files_exact"
+      : "ingest_files_incomplete",
+  } as const;
+}
+
 /** Readers of the usage-logging settings share one request per user. */
 const readUsageLogging = async (signal?: AbortSignal): Promise<unknown> => {
   const startOpsEpoch = currentOpsCacheEpoch();
@@ -540,7 +602,9 @@ export function deletedBytesAccountingSince(
     (row) => row.op === "DELETE" || row.op === "DELETE_OBJECTS",
   );
   const complete =
-    coverage && deletionRows.every((row) => row.bytes_deleted_complete === true);
+    coverage &&
+    deletionRows.length > 0 &&
+    deletionRows.every((row) => row.bytes_deleted_complete === true);
   return {
     bytes: deletionRows.reduce((sum, row) => sum + row.bytes_deleted, 0),
     complete,
@@ -1229,9 +1293,10 @@ export const USAGE_KINDS = [
 ] as const;
 
 export type UsageKind = (typeof USAGE_KINDS)[number];
+type UsageReadKind = UsageKind | "ingest_files";
 
 export type UsageLogReader = (
-  kind: UsageKind,
+  kind: UsageReadKind,
   range: LogsRange,
   options: { user: string; role: string; signal?: AbortSignal },
 ) => Promise<{

@@ -527,6 +527,11 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       lines: [],
       totalUsd: 0,
     });
+    vi.spyOn(usage, "fetchIngestDeletedBytes").mockResolvedValue({
+      bytes: 0,
+      complete: false,
+      provenance: "ingest_files_incomplete",
+    });
 
     const response = await handleCloudAnalyticalRequest(
       new Request("http://localhost/api/usage/current-storage"),
@@ -551,15 +556,20 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       rows: [],
       complete: false,
     });
+    vi.spyOn(usage, "fetchIngestDeletedBytes").mockResolvedValue({
+      bytes: 6_000,
+      complete: true,
+      provenance: "ingest_files_exact",
+    });
 
     const response = await handleCloudAnalyticalRequest(
       new Request("http://localhost/api/usage/current-storage"),
     );
 
     expect(await response!.json()).toMatchObject({
-      deleted_bytes: 0,
-      deleted_bytes_complete: false,
-      deleted_bytes_provenance: "fos_usage_incomplete",
+      deleted_bytes: 6_000,
+      deleted_bytes_complete: true,
+      deleted_bytes_provenance: "ingest_files_exact",
     });
   });
 
