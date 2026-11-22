@@ -1273,6 +1273,22 @@ async function collectAggregator(
   const countedFilters = (options.filters ?? []).every((filter) =>
     cardFields.includes(filter.field),
   );
+  // The summary listing is its own chain of pages; start it with the raw
+  // listing rather than after it. Unused when no file lies inside the range.
+  // File reads still wait for both: the planner needs every raw and summary
+  // file to know which raw files summaries cover, and a delta listing only
+  // resolves once all its pages are replayed.
+  const earlySummaries =
+    !options.manifest &&
+    !hasFilters &&
+    !edgeOnly &&
+    topK !== null &&
+    fields.length === cardFields.length &&
+    toMs - fromMs >= SUMMARY_MIN_RANGE_MS
+      ? fetchManifest(source.fetchJson, from, to, signal, undefined, "summary")
+      : null;
+  // Awaited below when used; this only keeps an unused failure from being unhandled.
+  earlySummaries?.catch(() => {});
   const manifest =
     options.manifest ??
     (await fetchManifest(source.fetchJson, from, to, signal));
@@ -1311,13 +1327,9 @@ async function collectAggregator(
         : null;
     const listing =
       inlineSummaries ??
-      (await fetchManifest(
-        source.fetchJson,
-        from,
-        to,
-        signal,
-        undefined,
-        "summary",
+      (await (
+        earlySummaries ??
+        fetchManifest(source.fetchJson, from, to, signal, undefined, "summary")
       ).catch((error: unknown) => {
         // Summaries only save work; without them every window reads raw.
         if (signal?.aborted) throw error;
@@ -2339,6 +2351,12 @@ export async function searchFieldSummaries(
   const customFields = options.customFields ?? [];
   const variant = customFieldsKey(customFields);
   const scope = source.cacheScope ?? "default";
+  const earlySummaries =
+    !options.manifest && toMs - fromMs >= SUMMARY_MIN_RANGE_MS
+      ? fetchManifest(source.fetchJson, from, to, signal, undefined, "summary")
+      : null;
+  // Awaited below when used; this only keeps an unused failure from being unhandled.
+  earlySummaries?.catch(() => {});
   const manifest =
     options.manifest ??
     (await fetchManifest(source.fetchJson, from, to, signal));
@@ -2352,13 +2370,16 @@ export async function searchFieldSummaries(
         (manifest.summaryRange.from === from &&
           manifest.summaryRange.to === to))
         ? { files: manifest.summaryFiles, complete: true }
-        : await fetchManifest(
-            source.fetchJson,
-            from,
-            to,
-            signal,
-            undefined,
-            "summary",
+        : await (
+            earlySummaries ??
+            fetchManifest(
+              source.fetchJson,
+              from,
+              to,
+              signal,
+              undefined,
+              "summary",
+            )
           ).catch((error: unknown) => {
             if (signal?.aborted) throw error;
             return null;

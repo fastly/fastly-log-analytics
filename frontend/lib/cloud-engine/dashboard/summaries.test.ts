@@ -720,6 +720,43 @@ describe("summary readers", () => {
     expect(source.log.files.toSorted()).toEqual(listed.files.toSorted());
   });
 
+  it("lists summaries alongside the raw listing instead of after it", async () => {
+    const from = "2027-01-15T08:00:00Z";
+    const to = "2027-01-15T10:00:00Z";
+    const hours = pick("hour", (e) => !e.early);
+    const listed = await run(from, to, RAW, hours);
+    for (const search of [false, true]) {
+      const source = fixtureSource(
+        [page(RAW)],
+        BUFFERS,
+        { json: [], files: [] },
+        [page(hours)],
+      );
+      const order: string[] = [];
+      const slow = {
+        ...source,
+        async fetchJson(url: string, signal?: AbortSignal) {
+          const summary = url.includes("view=summary");
+          order.push(summary ? "summary:start" : "raw:start");
+          if (!summary) await new Promise((resolve) => setTimeout(resolve, 20));
+          const body = await source.fetchJson(url, signal);
+          order.push(summary ? "summary:end" : "raw:end");
+          return body;
+        },
+      };
+      if (search) {
+        await searchFieldSummaries(slow, { from, to, column: "host", query: "" });
+      } else {
+        const result = await runDashboard(slow, { from, to });
+        expect(result.stats).toMatchObject({ summaryListing: "listed", summaryFiles: 2 });
+        expect(source.log.files.toSorted()).toEqual(listed.files.toSorted());
+      }
+      expect(order.indexOf("summary:start")).toBeGreaterThanOrEqual(0);
+      expect(order.indexOf("summary:start")).toBeLessThan(order.indexOf("raw:end"));
+      expect(source.log.summary).toHaveLength(1);
+    }
+  });
+
   it("classifies summaries against filters and edgeOnly while respecting truncated fields", async () => {
     const dayKey = pick("day")[0].key;
     const h08Key = pick("hour", (e) => e.start < HOUR_09 && !e.early)[0].key;
