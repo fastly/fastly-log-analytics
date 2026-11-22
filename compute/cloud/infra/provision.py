@@ -524,7 +524,8 @@ def early_hints_vcl(hints: dict[str, Any]) -> str:
             raise ValueError(f"Unsafe early hints link for {route}")
         if early_hints_size(links) > EARLY_HINTS_MAX_BYTES:
             raise ValueError(f"Early hints for {route} exceed {EARLY_HINTS_MAX_BYTES} bytes")
-        args = ",\n      ".join(f'{{"Link: {link}"}}' for link in links)
+        # early_hints() sends the name verbatim and HTTP/2 rejects uppercase field names.
+        args = ",\n      ".join(f'{{"link: {link}"}}' for link in links)
         early.append((route, f"    early_hints(\n      {args}\n    );"))
         final.append((route, f'    set resp.http.Link = {{"{", ".join(links)}"}};'))
     return "\n".join(

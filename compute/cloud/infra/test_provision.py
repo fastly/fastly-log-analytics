@@ -1216,8 +1216,8 @@ def test_early_hints_render_one_link_per_argument_on_normalized_routes() -> None
     assert (
         '  if (var.flp_hint_route == "/") {\n'
         "    early_hints(\n"
-        '      {"Link: </_next/static/chunks/a.css>; rel=preload; as=style"},\n'
-        '      {"Link: </_next/static/chunks/b.js>; rel=preload; as=script"}\n'
+        '      {"link: </_next/static/chunks/a.css>; rel=preload; as=style"},\n'
+        '      {"link: </_next/static/chunks/b.js>; rel=preload; as=script"}\n'
         "    );\n"
         '  } else if (var.flp_hint_route == "/admin/rum") {\n'
         "    early_hints(\n"
@@ -1316,7 +1316,7 @@ def test_deploy_uploads_front_vcl_with_the_builds_early_hints(package, inventory
 
     front_vcl = next(fields["content"] for _, path, fields, _ in api.calls if path.endswith("/vcl/main"))
     assert "# frozen-test-source" in front_vcl
-    assert '{"Link: </_next/static/chunks/b.js>; rel=preload; as=script"}' in front_vcl
+    assert '{"link: </_next/static/chunks/b.js>; rel=preload; as=script"}' in front_vcl
     assert f'set req.hash += "build:{"a" * 40}";' in front_vcl
 
 
