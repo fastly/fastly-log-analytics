@@ -1,7 +1,8 @@
 //! Hour and day summary bundles (Task 22.2): the `summary_bundle` maintenance stage merges a
 //! closed hour's per-window summaries ([`super::summary`]) into one hour bundle, then a closed
 //! day's hour bundles into one day bundle, like fla v3's `hour_bundled`/`day_bundled` rollups.
-//! The open hour stays per-window; the browser merges it.
+//! The open hour gets a rolling `open_bundle=` snapshot whose catalog coverage lists its exact
+//! windows; the browser merges it with the windows it does not cover.
 //!
 //! Layout, under `{scope}processed/`:
 //! - windows: `summary/{table}/year=Y/month=M/day=D/hour=HH/summary={a}-{b}-{plan}s{shard}-n{rows}.parquet`
@@ -77,8 +78,9 @@ pub const SERIES_ASN_TOP_K: usize = 30;
 pub const SERIES_CITY_TOP_K: usize = 50;
 /// Sources folded per execution, which bounds heap and time per build step.
 pub const MAX_SOURCES: usize = 24;
-/// Minimum unfolded window summaries in an open hour before pre-folding a `partial=` batch.
-const OPEN_BATCH_SOURCES: usize = 18;
+/// Minimum unfolded settled window summaries in an open hour before pre-folding a `partial=`
+/// batch: small enough that a snapshot turn can fold the rest of the hour after it.
+const OPEN_BATCH_SOURCES: usize = 8;
 /// Minimum new closed windows in an open hour before writing an `open_bundle=` Parquet snapshot.
 const OPEN_BUNDLE_MIN: usize = 6;
 /// An hour is closed once ingest has listed raw objects this long past its end plus the log
@@ -2154,6 +2156,14 @@ struct Ctx<'s, 'a, R: Runtime> {
 /// A partial's state and object count, `Err` when it cannot be read, `None` when out of calls.
 type Resume = Option<Result<(Acc, usize), String>>;
 
+/// An open hour's build: its state, how many windows its current snapshot covers and the end
+/// (seconds) up to which its windows are settled.
+struct Open<'s> {
+    state: &'s mut State,
+    covered: usize,
+    settled: i64,
+}
+
 struct Job<'j> {
     sources: Vec<String>,
     partials: Vec<String>,
@@ -2318,14 +2328,20 @@ impl<R: Runtime> Ctx<'_, '_, R> {
     /// Folds what the job's best partial and its remaining sources allow this execution, then
     /// writes the bundle or a partial to resume from (and for open hours, an `open_bundle=`
     /// Parquet snapshot every [`OPEN_BUNDLE_MIN`] new closed windows).
-    fn build(
-        &mut self,
-        job: Job<'_>,
-        mut open: Option<(&mut State, usize)>,
-    ) -> Result<Step, String> {
+    fn build(&mut self, job: Job<'_>, mut open: Option<Open<'_>>) -> Result<Step, String> {
         let mut sources = job.sources;
         sources.sort_unstable_by(|a, b| file_name(a).cmp(file_name(b)));
         let names: Vec<&str> = sources.iter().map(|k| file_name(k)).collect();
+        // Open-hour partials cover only the name-order prefix of settled windows, so the windows
+        // late runs still write never land inside one and force a rebuild from scratch.
+        let foldable = open.as_ref().map_or(sources.len(), |o| {
+            sources
+                .iter()
+                .take_while(|k| {
+                    super::catalog::file_bounds(k).is_some_and(|(_, end)| end <= o.settled)
+                })
+                .count()
+        });
         let mut candidates: Vec<(usize, &String)> = job
             .partials
             .iter()
@@ -2340,11 +2356,17 @@ impl<R: Runtime> Ctx<'_, '_, R> {
             .collect();
         candidates.sort_unstable_by(|a, b| b.cmp(a));
         let covered = candidates.first().map_or(0, |(count, _)| *count);
-        let need_partial =
-            job.final_key.is_none() && sources.len().saturating_sub(covered) >= OPEN_BATCH_SOURCES;
-        let need_open = open
-            .as_ref()
-            .is_some_and(|(_, oc)| sources.len().saturating_sub(*oc) >= OPEN_BUNDLE_MIN);
+        // A snapshot is due once one execution can fold everything past the partial: under a
+        // burst, folding a tail no partial keeps would refetch it every execution.
+        let need_open = sources.len().saturating_sub(covered) <= MAX_SOURCES
+            && open
+                .as_ref()
+                .is_some_and(|o| sources.len().saturating_sub(o.covered) >= OPEN_BUNDLE_MIN);
+        // One encode fits an execution's vCPU, so an open hour advances its partial or its
+        // snapshot, never both: the snapshot first while it covers no more than the partial.
+        let need_partial = job.final_key.is_none()
+            && foldable.saturating_sub(covered) >= OPEN_BATCH_SOURCES
+            && !(need_open && open.as_ref().is_some_and(|o| o.covered <= covered));
         if job.final_key.is_none() {
             if !need_partial && !need_open {
                 return Ok(Step::Done);
@@ -2352,7 +2374,8 @@ impl<R: Runtime> Ctx<'_, '_, R> {
             let need = if need_partial {
                 OPEN_BATCH_SOURCES as u32 + 3
             } else {
-                (sources.len().saturating_sub(covered)).min(MAX_SOURCES) as u32 + 4
+                // The folds stop on their own when calls run out; a snapshot needs only a few.
+                (sources.len().saturating_sub(covered)).min(OPEN_BATCH_SOURCES) as u32 + 4
             };
             if !self.room(need) {
                 return Ok(Step::Pending);
@@ -2383,8 +2406,16 @@ impl<R: Runtime> Ctx<'_, '_, R> {
             }
         }
         let resumed = done;
-        let tail = if job.partials.is_empty() { 3 } else { 4 } + extra as u32;
-        while done < sources.len() {
+        let tail = if job.partials.is_empty() { 3 } else { 4 }
+            + extra as u32
+            + u32::from(open.is_some() && !need_partial);
+        // Only a partial stops at the settled prefix.
+        let limit = if need_partial {
+            foldable
+        } else {
+            sources.len()
+        };
+        while done < limit {
             if done - resumed >= MAX_SOURCES || self.stop() {
                 break;
             }
@@ -2422,7 +2453,7 @@ impl<R: Runtime> Ctx<'_, '_, R> {
                 let body = acc.write(job.start, Some(job.unit), job.unit.label())?;
                 (Some(final_key.to_owned()), vec![body], true)
             }
-            None if (job.final_key.is_some() || need_partial || need_open) && done > resumed => {
+            None if (job.final_key.is_some() || need_partial) && done > resumed => {
                 let objects = pack_partial(&acc.encode_partial(), CDN_READ_LIMIT)?;
                 if !self.room(objects.len() as u32) {
                     return Ok(Step::Pending);
@@ -2484,8 +2515,18 @@ impl<R: Runtime> Ctx<'_, '_, R> {
         if wrote_partial {
             self.report.partials += 1;
         }
-        if let Some((state, open_covered)) = open.as_mut() {
-            if done.saturating_sub(*open_covered) >= OPEN_BUNDLE_MIN && !self.write_stop() {
+        if let Some(Open {
+            state,
+            covered: open_covered,
+            ..
+        }) = open.as_mut()
+        {
+            if !wrote_partial
+                && done.saturating_sub(*open_covered) >= OPEN_BUNDLE_MIN
+                && !self.write_stop()
+                // The PUT, then the state write.
+                && self.room(2)
+            {
                 let end_ms = sources[..done]
                     .iter()
                     .filter_map(|k| super::catalog::file_bounds(k))
@@ -2525,10 +2566,7 @@ impl<R: Runtime> Ctx<'_, '_, R> {
                     self.retire(state, old, Some(&open_key));
                 }
             }
-            if self.publication.is_some()
-                || (need_partial && sources.len().saturating_sub(done) >= OPEN_BATCH_SOURCES)
-                || (need_open && done < sources.len())
-            {
+            if self.publication.is_some() || wrote_partial || (need_open && done < sources.len()) {
                 Ok(Step::Pending)
             } else {
                 Ok(Step::Done)
@@ -2669,7 +2707,7 @@ impl<R: Runtime> Ctx<'_, '_, R> {
 
     /// Pre-folds full batches of an open hour's windows into a resumable `partial=` without
     /// writing `hour_bundle=`, so closing the hour only has the final tail left to fold.
-    fn open_hour(&mut self, state: &mut State, hour: i64) -> Result<Step, String> {
+    fn open_hour(&mut self, state: &mut State, hour: i64, settled: i64) -> Result<Step, String> {
         let day = hour.div_euclid(DAY_S) * DAY_S;
         if let Some(hours) = self.present.get(&day) {
             if !hours.contains(&hour) {
@@ -2700,18 +2738,13 @@ impl<R: Runtime> Ctx<'_, '_, R> {
             };
             windows = committed;
         }
-        let mut sorted_names: Vec<&str> = windows.iter().map(|k| file_name(k)).collect();
-        sorted_names.sort_unstable();
+        // Progress, not proof: a late window sorting inside the snapshot's coverage must not
+        // send the snapshot back to zero, since readers check its exact coverage themselves.
         let open_covered = state
             .open_bundles
             .get(&hour)
             .and_then(|key| parse_name(key))
-            .filter(|name| {
-                name.kind == NameKind::Open
-                    && name.count > 0
-                    && name.count <= sorted_names.len()
-                    && fingerprint(sorted_names[..name.count].iter().copied()) == name.fp
-            })
+            .filter(|name| name.kind == NameKind::Open && name.count <= windows.len())
             .map_or(0, |name| name.count);
         let step = self.build(
             Job {
@@ -2723,7 +2756,11 @@ impl<R: Runtime> Ctx<'_, '_, R> {
                 unit: Unit::Hour,
                 coverage: None,
             },
-            Some((state, open_covered)),
+            Some(Open {
+                state,
+                covered: open_covered,
+                settled,
+            }),
         )?;
         if matches!(step, Step::Done) {
             state.inventory = None;
@@ -2821,7 +2858,8 @@ impl<R: Runtime> Ctx<'_, '_, R> {
         if due.is_empty() {
             return;
         }
-        if !self.room(1) {
+        // The delete, then the state write that records it.
+        if !self.room(2) {
             self.report.more_pending = true;
             return;
         }
@@ -2957,15 +2995,14 @@ pub fn summary_bundle<R: Runtime>(
         .filter(|r| r.value["sweep"]["after"].as_str() == Some(""))
         .and_then(|r| r.value["sweep"]["at"].as_i64())
         .unwrap_or(0);
-    let closed = watermark
+    let listed_to = watermark
         .as_ref()
         .and_then(|r| r.value["key"].as_str())
         .and_then(|key| raw_key_minute(key, &raw_prefix(store.service)))
-        .map(|minute| {
-            (minute + 60).max(swept_at).min(now)
-                - i64::from(store.service.log_period)
-                - CLOSE_SLACK_S
-        });
+        .map(|minute| (minute + 60).max(swept_at).min(now));
+    let closed = listed_to.map(|to| to - i64::from(store.service.log_period) - CLOSE_SLACK_S);
+    // Raw objects not yet listed only reach windows ending after this.
+    let settled = listed_to.map(|to| to - super::settle_s(store.service.log_period) as i64);
     let today = now.div_euclid(DAY_S) * DAY_S;
     let retention = i64::from(store.service.log_retention_days);
     let lookback = if retention == 0 {
@@ -3061,13 +3098,13 @@ pub fn summary_bundle<R: Runtime>(
                 }
             }
         }
-        if closed.is_some() && !held {
+        if let (Some(settled), false) = (settled, held) {
             let mut open = next;
             while open <= now {
                 if ctx.report.stopped.is_some() || ctx.report.bytes_written > 0 {
                     break;
                 }
-                match ctx.open_hour(state, open) {
+                match ctx.open_hour(state, open, settled) {
                     Ok(Step::Done) => {}
                     Ok(Step::Pending) => {
                         ctx.report.more_pending = true;

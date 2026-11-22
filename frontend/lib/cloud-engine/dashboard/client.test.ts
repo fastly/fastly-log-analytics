@@ -55,3 +55,25 @@ describe("answerRollupInWorker", () => {
     expect(answerRollupInWorker("/api/network-health", {}, "svc-1")).toBeNull();
   });
 });
+
+describe("persistent storage", () => {
+  it("asks once for persistent storage when the engine worker starts", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+    const persist = vi.fn().mockResolvedValue(true);
+    vi.stubGlobal("navigator", { storage: { persist } });
+    const { answerRollupInWorker } = await import("./client");
+    answerRollupInWorker("/api/network-health", {}, "svc-1");
+    answerRollupInWorker("/api/network-health", {}, "svc-1");
+    expect(persist).toHaveBeenCalledTimes(1);
+  });
+
+  it("starts the worker when the browser refuses persistence", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+    vi.stubGlobal("navigator", {
+      storage: { persist: vi.fn().mockRejectedValue(new Error("denied")) },
+    });
+    const { answerRollupInWorker } = await import("./client");
+    expect(answerRollupInWorker("/api/network-health", {}, "svc-1")).not.toBeNull();
+    await Promise.resolve();
+  });
+});

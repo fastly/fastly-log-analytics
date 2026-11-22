@@ -1,5 +1,6 @@
 import { isCdnHit } from "../dashboard/cdn-cache";
 import {
+  dashboardCacheIdentity,
   deleteCaches,
   emitDebugSubCalls,
   fileDisplayPath,
@@ -18,14 +19,98 @@ export const opsCacheName = (user: string, role: string) =>
 export type OpsIdentity = { user: string; role: string };
 
 let activeUserId: string | null = null;
+let opsCacheEpoch = 0;
+let volatileOpsScopeCounter = 0;
+let volatileOpsScope = `volatile-ops-${++volatileOpsScopeCounter}`;
+const activeOpsControllers = new Set<AbortController>();
+const activeOpsWrites = new Set<Promise<unknown>>();
+
+function opsAbortError(): DOMException {
+  return new DOMException("The operation was aborted.", "AbortError");
+}
 
 /** The signed-in user whose session cookies the browser sends with ops reads. */
 export const activeOpsUser = (): string | null => activeUserId;
+
+export const currentOpsCacheEpoch = (): number => opsCacheEpoch;
+
+export const currentVolatileOpsScope = (): string => volatileOpsScope;
+
+export function assertOpsEpoch(
+  entryOpsEpoch: number,
+  signal?: AbortSignal,
+): void {
+  signal?.throwIfAborted();
+  if (entryOpsEpoch !== opsCacheEpoch) {
+    throw opsAbortError();
+  }
+}
+
+export function currentOpsIdentity(
+  explicit?: { user?: string; role?: string } | null,
+): OpsIdentity {
+  const dashId = dashboardCacheIdentity();
+  let dashUser: string | null = null;
+  let dashRole: string | null = null;
+  if (dashId && dashId !== "anonymous") {
+    const sep = dashId.lastIndexOf(":");
+    if (sep > 0) {
+      dashUser = dashId.slice(0, sep);
+      dashRole = dashId.slice(sep + 1) || null;
+    } else {
+      dashUser = dashId;
+    }
+  }
+  const rawExplicitUser =
+    explicit?.user && explicit.user.trim().length > 0
+      ? explicit.user.trim()
+      : null;
+  let explicitUser =
+    rawExplicitUser && rawExplicitUser !== "anonymous"
+      ? rawExplicitUser
+      : null;
+  let explicitRole =
+    explicit?.role && explicit.role.trim().length > 0
+      ? explicit.role.trim()
+      : null;
+  if (explicitUser) {
+    const sep = explicitUser.lastIndexOf(":");
+    if (sep > 0) {
+      const parsedUser = explicitUser.slice(0, sep);
+      const parsedRole = explicitUser.slice(sep + 1) || null;
+      if (parsedUser === "anonymous") {
+        explicitUser = null;
+      } else {
+        explicitUser = parsedUser;
+        explicitRole ??= parsedRole;
+      }
+    }
+  }
+  const user = explicitUser ?? activeUserId ?? dashUser ?? volatileOpsScope;
+  const role =
+    explicitRole ??
+    (activeUserId === null || activeUserId === dashUser ? dashRole : null) ??
+    "admin";
+  return { user, role };
+}
 
 /** Deletes ops caches: all of them, or one user's (optionally keeping one partition). */
 export async function clearOpsCaches(
   options: { user?: string; keep?: string } = {},
 ): Promise<void> {
+  if (!options.user) {
+    activeUserId = null;
+  }
+  opsCacheEpoch += 1;
+  volatileOpsScope = `volatile-ops-${++volatileOpsScopeCounter}`;
+  for (const controller of activeOpsControllers) {
+    controller.abort(opsAbortError());
+  }
+  activeOpsControllers.clear();
+  const pendingWrites = [...activeOpsWrites];
+  if (pendingWrites.length > 0) {
+    await Promise.allSettled(pendingWrites);
+  }
   if (typeof caches === "undefined") return;
   const prefix = options.user
     ? `${OPS_CACHE_PREFIX}${options.user}:`
@@ -63,10 +148,11 @@ export function browserOpsSource(
   identityOrPageLoad?: OpsIdentity | (() => string | null),
   options?: BrowserSourceOptions,
 ): OpsSource {
-  const identity: OpsIdentity =
+  const explicitIdentity =
     typeof identityOrPageLoad === "object" && identityOrPageLoad !== null
       ? identityOrPageLoad
-      : { user: activeUserId ?? "default", role: "admin" };
+      : null;
+  const identity = currentOpsIdentity(explicitIdentity);
   const resolvedOptions: BrowserSourceOptions | undefined =
     typeof identityOrPageLoad === "function"
       ? {
@@ -75,7 +161,10 @@ export function browserOpsSource(
         }
       : options;
   const name = opsCacheName(identity.user, identity.role);
-  const open = (): Promise<Cache | null> => openCache(name);
+  const open = (callEpoch: number, aborted = false): Promise<Cache | null> =>
+    callEpoch === opsCacheEpoch && !aborted
+      ? openCache(name)
+      : Promise.resolve(null);
   const fileUrl = (key: string) => `${baseUrl}${fileRequestPath(key)}`;
   const denied = async (response: Response) => {
     if (response.status === 401 || response.status === 403) {
@@ -89,147 +178,221 @@ export function browserOpsSource(
     if (resolvedOptions?.debugResponses?.()) headers["X-Debug-Responses"] = "1";
     return Object.keys(headers).length > 0 ? headers : undefined;
   };
+  const withOpsController = async <T>(
+    callerSignal: AbortSignal | undefined,
+    work: (callEpoch: number, controller: AbortController) => Promise<T>,
+  ): Promise<T> => {
+    callerSignal?.throwIfAborted();
+    const callEpoch = opsCacheEpoch;
+    const controller = new AbortController();
+    const onCallerAbort = () =>
+      controller.abort(callerSignal?.reason ?? opsAbortError());
+    if (callerSignal) {
+      callerSignal.addEventListener("abort", onCallerAbort, { once: true });
+    }
+    activeOpsControllers.add(controller);
+    try {
+      return await work(callEpoch, controller);
+    } finally {
+      callerSignal?.removeEventListener("abort", onCallerAbort);
+      activeOpsControllers.delete(controller);
+    }
+  };
+  const assertOpsActive = (
+    callEpoch: number,
+    controller: AbortController,
+  ): void => {
+    if (controller.signal.aborted) {
+      throw controller.signal.reason ?? opsAbortError();
+    }
+    if (callEpoch !== opsCacheEpoch) {
+      throw opsAbortError();
+    }
+  };
   return {
     async fetchJson(url, signal) {
-      const headers = buildRequestHeaders();
-      const pageLoadId = resolvedOptions?.getPageLoadId?.();
-      const start =
-        typeof performance !== "undefined" ? performance.now() : Date.now();
-      const response = await fetch(baseUrl + url, {
-        credentials: "same-origin",
-        ...(headers ? { headers } : {}),
-        signal,
-      });
-      const end =
-        typeof performance !== "undefined" ? performance.now() : Date.now();
-      const endpoint = `GET ${url.split("?")[0]}`;
-      const vcpuHeader = response?.headers?.get?.("x-flp-vcpu-ms");
-      const vcpuMs =
-        vcpuHeader != null && vcpuHeader !== "" ? Number(vcpuHeader) : null;
-      resolvedOptions?.onApiCall?.({
-        source: "Compute API",
-        method: "GET",
-        path: url,
-        status: response?.status ?? null,
-        duration_ms: Math.max(0, Math.round(end - start)),
-        vcpu_ms: Number.isFinite(vcpuMs) ? vcpuMs : null,
-        endpoint,
-        page_load_id: pageLoadId,
-      });
-      emitDebugSubCalls(
-        response,
-        endpoint,
-        pageLoadId,
-        resolvedOptions?.onApiCall,
-      );
-      if (!response.ok) {
-        await denied(response);
-        const body = await response.json().catch(() => null);
-        const detail = typeof body?.detail === "string" ? body.detail : null;
-        throw new Error(
-          detail
-            ? `${detail} (${response.status})`
-            : `Request failed (${response.status})`,
-        );
-      }
-      return response.json();
-    },
-    async fetchFile(key, signal) {
-      const path = fileDisplayPath(key);
-      const pageLoadId = resolvedOptions?.getPageLoadId?.();
-      const url = fileUrl(key);
-      const cacheStart =
-        typeof performance !== "undefined" ? performance.now() : Date.now();
-      const cache = await open();
-      const hit = await cache?.match(url);
-      if (hit) {
-        const bytes = await hit.arrayBuffer();
-        const cacheEnd =
+      return withOpsController(signal, async (callEpoch, controller) => {
+        const headers = buildRequestHeaders();
+        const pageLoadId = resolvedOptions?.getPageLoadId?.();
+        const start =
           typeof performance !== "undefined" ? performance.now() : Date.now();
-        resolvedOptions?.onApiCall?.({
-          source: "Browser Cache",
-          method: "GET",
-          path,
-          status: 200,
-          duration_ms: Math.max(0, Math.round(cacheEnd - cacheStart)),
-          bytes: bytes.byteLength,
-          cache: "browser",
-          endpoint: "GET /api/file",
-          page_load_id: pageLoadId,
+        const response = await fetch(baseUrl + url, {
+          credentials: "same-origin",
+          ...(headers ? { headers } : {}),
+          signal: controller.signal,
         });
-        return { bytes, cached: true };
-      }
-      const headers = buildRequestHeaders();
-      const start =
-        typeof performance !== "undefined" ? performance.now() : Date.now();
-      const response = await fetch(url, {
-        credentials: "same-origin",
-        cache: "no-store",
-        ...(headers ? { headers } : {}),
-        signal,
-      });
-      if (!response.ok) {
+        assertOpsActive(callEpoch, controller);
         const end =
           typeof performance !== "undefined" ? performance.now() : Date.now();
+        const endpoint = `GET ${url.split("?")[0]}`;
+        const vcpuHeader = response?.headers?.get?.("x-flp-vcpu-ms");
+        const vcpuMs =
+          vcpuHeader != null && vcpuHeader !== "" ? Number(vcpuHeader) : null;
         resolvedOptions?.onApiCall?.({
           source: "Compute API",
+          method: "GET",
+          path: url,
+          status: response?.status ?? null,
+          duration_ms: Math.max(0, Math.round(end - start)),
+          vcpu_ms: Number.isFinite(vcpuMs) ? vcpuMs : null,
+          endpoint,
+          page_load_id: pageLoadId,
+        });
+        emitDebugSubCalls(
+          response,
+          endpoint,
+          pageLoadId,
+          resolvedOptions?.onApiCall,
+        );
+        if (!response.ok) {
+          await denied(response);
+          const body = await response.json().catch(() => null);
+          const detail = typeof body?.detail === "string" ? body.detail : null;
+          throw new Error(
+            detail
+              ? `${detail} (${response.status})`
+              : `Request failed (${response.status})`,
+          );
+        }
+        const parsed = await response.json();
+        assertOpsActive(callEpoch, controller);
+        return parsed;
+      });
+    },
+    async fetchFile(key, signal) {
+      return withOpsController(signal, async (callEpoch, controller) => {
+        const path = fileDisplayPath(key);
+        const pageLoadId = resolvedOptions?.getPageLoadId?.();
+        const url = fileUrl(key);
+        const cacheStart =
+          typeof performance !== "undefined" ? performance.now() : Date.now();
+        const cache = await open(callEpoch, controller.signal.aborted);
+        assertOpsActive(callEpoch, controller);
+        const hit =
+          callEpoch === opsCacheEpoch && !controller.signal.aborted
+            ? await cache?.match(url)
+            : undefined;
+        assertOpsActive(callEpoch, controller);
+        if (hit) {
+          const bytes = await hit.arrayBuffer();
+          assertOpsActive(callEpoch, controller);
+          const cacheEnd =
+            typeof performance !== "undefined" ? performance.now() : Date.now();
+          resolvedOptions?.onApiCall?.({
+            source: "Browser Cache",
+            method: "GET",
+            path,
+            status: 200,
+            duration_ms: Math.max(0, Math.round(cacheEnd - cacheStart)),
+            bytes: bytes.byteLength,
+            cache: "browser",
+            endpoint: "GET /api/file",
+            page_load_id: pageLoadId,
+          });
+          return { bytes, cached: true };
+        }
+        const headers = buildRequestHeaders();
+        const start =
+          typeof performance !== "undefined" ? performance.now() : Date.now();
+        let onAbortRace!: () => void;
+        const abortRace = new Promise<never>((_, reject) => {
+          onAbortRace = () =>
+            reject(controller.signal.reason ?? opsAbortError());
+          if (controller.signal.aborted) {
+            onAbortRace();
+            return;
+          }
+          controller.signal.addEventListener("abort", onAbortRace, {
+            once: true,
+          });
+        });
+        let response: Response;
+        try {
+          response = await Promise.race([
+            fetch(url, {
+              credentials: "same-origin",
+              cache: "no-store",
+              ...(headers ? { headers } : {}),
+              signal: controller.signal,
+            }),
+            abortRace,
+          ]);
+        } finally {
+          controller.signal.removeEventListener("abort", onAbortRace);
+        }
+        assertOpsActive(callEpoch, controller);
+        if (!response.ok) {
+          const end =
+            typeof performance !== "undefined" ? performance.now() : Date.now();
+          resolvedOptions?.onApiCall?.({
+            source: "Compute API",
+            method: "GET",
+            path,
+            status: response.status,
+            duration_ms: Math.max(0, Math.round(end - start)),
+            endpoint: "GET /api/file",
+            page_load_id: pageLoadId,
+          });
+          await denied(response);
+          throw new Error(`File ${key} failed (${response.status})`);
+        }
+        if (cache && callEpoch === opsCacheEpoch && !controller.signal.aborted) {
+          const writePromise = cache.put(url, response.clone()).catch(() => {});
+          activeOpsWrites.add(writePromise);
+          writePromise.finally(() => activeOpsWrites.delete(writePromise));
+          await writePromise;
+        }
+        assertOpsActive(callEpoch, controller);
+        const bytes = await response.arrayBuffer();
+        assertOpsActive(callEpoch, controller);
+        const end =
+          typeof performance !== "undefined" ? performance.now() : Date.now();
+        const cdn = response.headers.get("x-flp-cdn-cache");
+        const cdnHit = isCdnHit(cdn);
+        const vcpuHeader = response?.headers?.get?.("x-flp-vcpu-ms");
+        const vcpuMs =
+          vcpuHeader != null && vcpuHeader !== "" ? Number(vcpuHeader) : null;
+        const directCdnMiss = cdn !== null && vcpuMs === null;
+        resolvedOptions?.onApiCall?.({
+          source: cdnHit
+            ? "CDN Cache"
+            : directCdnMiss
+              ? "FOS S3"
+              : "Compute API",
           method: "GET",
           path,
           status: response.status,
           duration_ms: Math.max(0, Math.round(end - start)),
+          vcpu_ms: Number.isFinite(vcpuMs) ? vcpuMs : null,
+          bytes: bytes.byteLength,
+          cache: cdnHit ? "cdn" : "miss",
           endpoint: "GET /api/file",
           page_load_id: pageLoadId,
         });
-        await denied(response);
-        throw new Error(`File ${key} failed (${response.status})`);
-      }
-      if (cache) await cache.put(url, response.clone()).catch(() => {});
-      const bytes = await response.arrayBuffer();
-      const end =
-        typeof performance !== "undefined" ? performance.now() : Date.now();
-      const cdn = response.headers.get("x-flp-cdn-cache");
-      const cdnHit = isCdnHit(cdn);
-      const vcpuHeader = response?.headers?.get?.("x-flp-vcpu-ms");
-      const vcpuMs =
-        vcpuHeader != null && vcpuHeader !== "" ? Number(vcpuHeader) : null;
-      const directCdnMiss = cdn !== null && vcpuMs === null;
-      resolvedOptions?.onApiCall?.({
-        source: cdnHit
-          ? "CDN Cache"
-          : directCdnMiss
-            ? "FOS S3"
-            : "Compute API",
-        method: "GET",
-        path,
-        status: response.status,
-        duration_ms: Math.max(0, Math.round(end - start)),
-        vcpu_ms: Number.isFinite(vcpuMs) ? vcpuMs : null,
-        bytes: bytes.byteLength,
-        cache: cdnHit ? "cdn" : "miss",
-        endpoint: "GET /api/file",
-        page_load_id: pageLoadId,
+        emitDebugSubCalls(
+          response,
+          "GET /api/file",
+          pageLoadId,
+          resolvedOptions?.onApiCall,
+        );
+        return {
+          bytes,
+          cached: false,
+          cdn,
+        };
       });
-      emitDebugSubCalls(
-        response,
-        "GET /api/file",
-        pageLoadId,
-        resolvedOptions?.onApiCall,
-      );
-      return {
-        bytes,
-        cached: false,
-        cdn,
-      };
     },
     async cachedKeys() {
-      const cache = await open();
-      if (!cache) return [];
+      const callEpoch = opsCacheEpoch;
+      const cache = await open(callEpoch);
+      if (!cache || callEpoch !== opsCacheEpoch) return [];
       return (await cache.keys()).map((request) =>
         keyFromFileUrl(request.url)!,
       );
     },
     async evict(key) {
-      await (await open())?.delete(fileUrl(key));
+      const callEpoch = opsCacheEpoch;
+      await (await open(callEpoch))?.delete(fileUrl(key));
     },
   };
 }

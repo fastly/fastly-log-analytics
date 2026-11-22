@@ -58,6 +58,8 @@ from backend.provision.session_scoring.wasm_deploy import (
     shipped_scorer_identity,
 )
 
+EARLY_HINTS_FILE = "early-hints.json"
+
 
 def _git(root: Path, *args: str) -> str:
     result = subprocess.run(
@@ -97,7 +99,27 @@ def verify_package_provenance(
         stream = archive.extractfile(members[0])
         if stream is None or sha.encode() not in stream.read():
             raise ValueError("Package Wasm does not contain its frozen built SHA")
-    return {"build_sha": sha, "package_sha256": digest}
+    verified = {"build_sha": sha, "package_sha256": digest}
+    if "early_hints_sha256" in provenance:
+        hints_digest = provenance["early_hints_sha256"]
+        if not isinstance(hints_digest, str) or not re.fullmatch(r"[a-f0-9]{64}", hints_digest):
+            raise ValueError("Invalid frozen build provenance")
+        hints = package.parent / EARLY_HINTS_FILE
+        if not hints.is_file() or hashlib.sha256(hints.read_bytes()).hexdigest() != hints_digest:
+            raise ValueError("Early hints changed after the recorded build")
+        verified["early_hints_sha256"] = hints_digest
+    return verified
+
+
+def load_early_hints(package: Path, provenance: dict[str, str]) -> dict[str, Any] | None:
+    """Return the build's early hints only when their bytes match the verified provenance digest."""
+    digest = provenance.get("early_hints_sha256")
+    if digest is None:
+        return None
+    data = (package.parent / EARLY_HINTS_FILE).read_bytes()
+    if hashlib.sha256(data).hexdigest() != digest:
+        raise ValueError("Early hints changed after the recorded build")
+    return json.loads(data)
 
 
 def upload_wasm_package(
@@ -162,6 +184,7 @@ __all__ = [
     "ensure_scoring_service",
     "fetch_snippet",
     "generate_scoring_vcl",
+    "load_early_hints",
     "miss_snippet",
     "pass_snippet",
     "recv_snippet",

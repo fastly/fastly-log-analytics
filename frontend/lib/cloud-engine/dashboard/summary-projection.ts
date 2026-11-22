@@ -1,6 +1,7 @@
 import type { FileMetaData } from "hyparquet";
 import { fetchLanes } from "../fetch-lanes";
 import type { FileSource } from "./engine";
+import { currentStoreMetaEpoch } from "./file-store";
 import type { ManifestFile } from "./manifest";
 import { readColumns } from "./parquet";
 import {
@@ -165,49 +166,74 @@ export async function readSummaryProjection(
   spec: SummarySpec,
   signal?: AbortSignal,
 ): Promise<SummaryProjection> {
+  const entryStoreEpoch = currentStoreMetaEpoch();
+  const assertProjectionActive = () => {
+    signal?.throwIfAborted();
+    if (entryStoreEpoch !== currentStoreMetaEpoch()) {
+      throw new DOMException("The operation was aborted.", "AbortError");
+    }
+  };
   const whole = async (): Promise<SummaryProjection> => {
+    assertProjectionActive();
     const { bytes, cached, cdn } = await source.fetchFile(file.key, signal);
+    assertProjectionActive();
     return { parts: [bytes], whole: true, cached, downloadedBytes: cached ? 0 : bytes.byteLength, cdn };
   };
   const { fetchRange, readDerivedFile, writeDerivedFile } = source;
   if (!fetchRange || !readDerivedFile || !writeDerivedFile || !(file.size > summaryProjectionLimits.wholeBelowBytes)) {
     return whole();
   }
-  if (await source.hasFile?.(file.key)) return whole();
+  assertProjectionActive();
+  const hasWhole = await source.hasFile?.(file.key);
+  assertProjectionActive();
+  if (hasWhole) return whole();
   const identity = fileIdentity(source, file);
   const partsId = partsIdentity(source, file, spec);
   const stored = await readDerivedFile(file.key, partsId);
+  assertProjectionActive();
   if (stored) {
-    return { parts: splitParts(await stored.bytes(), stored.meta, file.key), whole: false, cached: true, downloadedBytes: 0 };
+    const rawStored = await stored.bytes();
+    assertProjectionActive();
+    return { parts: splitParts(rawStored, stored.meta, file.key), whole: false, cached: true, downloadedBytes: 0 };
   }
   let downloadedBytes = 0;
   const read = (start: number, end: number) => fetchLanes.run("summary", async () => {
-    signal?.throwIfAborted();
+    assertProjectionActive();
     const bytes = await fetchRange(file, start, end, signal, "high");
+    assertProjectionActive();
     downloadedBytes += bytes.byteLength;
     return bytes;
   });
   const footerId = JSON.stringify([...identity, "summary-footer"]);
   const cachedFooter = await readDerivedFile(file.key, footerId);
+  assertProjectionActive();
   const tailStart = cachedFooter ? Number(cachedFooter.meta) : NaN;
   const tail = cachedFooter && Number.isSafeInteger(tailStart) && tailStart >= 0
     ? { start: tailStart, bytes: await cachedFooter.bytes() } : null;
+  assertProjectionActive();
   const footer = await readParquetFooter(file.size, (start, end) =>
     tail && start >= tail.start && end <= tail.start + tail.bytes.byteLength
       ? Promise.resolve(tail.bytes.slice(start - tail.start, end - tail.start)) : read(start, end));
-  if (!tail && footer.tail) await writeDerivedFile(file.key, footerId, footer.tail.bytes, String(footer.tail.start));
+  assertProjectionActive();
+  if (!tail && footer.tail) {
+    await writeDerivedFile(file.key, footerId, footer.tail.bytes, String(footer.tail.start));
+    assertProjectionActive();
+  }
   const plan = planSummary(footer, spec);
   if (plan.kind === "whole") return whole();
   const parts = await Promise.all(plan.plans.map(async (projection) =>
     assembleProjectedParquet(projection, await fetchProjectedRanges(projection, read))));
+  assertProjectionActive();
   const joined = new Uint8Array(parts.reduce((sum, part) => sum + part.byteLength, 0));
   let offset = 0;
   for (const part of parts) {
     joined.set(new Uint8Array(part), offset);
     offset += part.byteLength;
   }
+  assertProjectionActive();
   await writeDerivedFile(file.key, partsId, joined.buffer,
     JSON.stringify({ v: 1, parts: parts.map((part) => part.byteLength) }));
+  assertProjectionActive();
   return { parts, whole: false, cached: downloadedBytes === 0, downloadedBytes };
 }
 

@@ -469,8 +469,112 @@ def initial_secrets(api_token: str) -> dict[str, str]:
     }
 
 
-def load_vcl(rate_limiting: bool = True, *, source: str | None = None) -> str:
+EARLY_HINTS_MAX_BYTES = 4096
+_EARLY_HINTS_BLOCK = re.compile(r"(?ms)^#EARLYHINTS_BEGIN\n.*?^#EARLYHINTS_END\n")
+_BUILD_KEY_BLOCK = re.compile(r"(?ms)^#BUILDKEY_BEGIN\n.*?^#BUILDKEY_END\n")
+_EARLY_HINT_ROUTE = re.compile(r"/(?:[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*)?")
+_EARLY_HINT_LINK = re.compile(r"</(?!/)[A-Za-z0-9._~/%-]+>(?:; [a-z]+(?:=[A-Za-z0-9/._+-]+)?)+")
+_EARLY_HINT_RESERVED = {"api", "auth", "fos", "_tick", "_flush", "_next", "duckdb", "geo"}
+
+
+def early_hints_size(links: list[str]) -> int:
+    """Bytes of the 103 header block: one `Link:` line (with CRLF) per hinted resource."""
+    return sum(len("Link: ") + len(link) + 2 for link in links)
+
+
+def _hint_dispatch(routes: list[tuple[str, str]]) -> list[str]:
+    """Route chain on the normalized path: /x, /x/ and /x.html share /x; "" means /."""
+    lines = [
+        "  declare local var.flp_hint_route STRING;",
+        '  set var.flp_hint_route = regsub(req.url.path, "(\\.html|/)$", "");',
+        '  if (var.flp_hint_route == "") {',
+        '    set var.flp_hint_route = "/";',
+        "  }",
+    ]
+    for index, (route, body) in enumerate(routes):
+        keyword = "if" if index == 0 else "} else if"
+        lines.append(f'  {keyword} (var.flp_hint_route == "{route}") {{')
+        lines.append(body)
+    if routes:
+        lines.append("  }")
+    return lines
+
+
+def early_hints_vcl(hints: dict[str, Any]) -> str:
+    """Render the hint subs; every value is allowlisted so nothing can escape its VCL string.
+
+    flp_early_hints (vcl_recv) passes each resource as its own early_hints() argument, one Link
+    line each as in Fastly's example; falco's linter rejects a single-argument call, so routes
+    need at least two links. flp_hint_links (vcl_deliver) repeats them as one Link header on the
+    final HTML for clients that ignore 103 preloads (Safari, HTTP/1.1).
+    """
+    if not isinstance(hints, dict) or hints.get("version") != 1 or not isinstance(hints.get("routes"), dict):
+        raise ValueError("Early hints must be a version 1 route map")
+    early, final = [], []
+    for route, links in sorted(hints["routes"].items()):
+        if (
+            not isinstance(route, str)
+            or not _EARLY_HINT_ROUTE.fullmatch(route)
+            or route.split("/")[1] in _EARLY_HINT_RESERVED
+        ):
+            raise ValueError(f"Unsafe early hints route: {route!r}")
+        if not isinstance(links, list) or len(links) < 2:
+            raise ValueError(f"Early hints for {route} need at least two links")
+        if not all(isinstance(link, str) and _EARLY_HINT_LINK.fullmatch(link) for link in links):
+            raise ValueError(f"Unsafe early hints link for {route}")
+        if early_hints_size(links) > EARLY_HINTS_MAX_BYTES:
+            raise ValueError(f"Early hints for {route} exceed {EARLY_HINTS_MAX_BYTES} bytes")
+        args = ",\n      ".join(f'{{"Link: {link}"}}' for link in links)
+        early.append((route, f"    early_hints(\n      {args}\n    );"))
+        final.append((route, f'    set resp.http.Link = {{"{", ".join(links)}"}};'))
+    return "\n".join(
+        [
+            "#EARLYHINTS_BEGIN",
+            "sub flp_early_hints {",
+            *_hint_dispatch(early),
+            "}",
+            "",
+            "sub flp_hint_links {",
+            *_hint_dispatch(final),
+            "}",
+            "#EARLYHINTS_END",
+            "",
+        ]
+    )
+
+
+def build_key_vcl(build_sha: str) -> str:
+    if not re.fullmatch(r"[a-f0-9]{40}", build_sha):
+        raise ValueError("Front build key needs a 40-character lowercase build SHA")
+    return "\n".join(
+        [
+            "#BUILDKEY_BEGIN",
+            "sub flp_build_hash {",
+            f'  set req.hash += "build:{build_sha}";',
+            "}",
+            "#BUILDKEY_END",
+            "",
+        ]
+    )
+
+
+def load_vcl(
+    rate_limiting: bool = True,
+    *,
+    source: str | None = None,
+    early_hints: dict[str, Any] | None = None,
+    build_sha: str | None = None,
+) -> str:
     content = (VCL / "main.vcl").read_text() if source is None else source
+    if build_sha:
+        # Builds from before edge-cached app shells have no block and never cache them.
+        rendered_key = build_key_vcl(build_sha)
+        content = _BUILD_KEY_BLOCK.sub(lambda _: rendered_key, content, count=1)
+    if early_hints is not None:
+        rendered = early_hints_vcl(early_hints)
+        content, count = _EARLY_HINTS_BLOCK.subn(lambda _: rendered, content)
+        if count != 1:
+            raise ValueError("Front VCL has no early hints block to fill")
     if not rate_limiting:
         content = re.sub(
             r"(?m)^[ \t]*#[ \t]*RATELIMIT_BEGIN\n.*?^[ \t]*#[ \t]*RATELIMIT_END\n",
@@ -485,7 +589,13 @@ def load_vcl(rate_limiting: bool = True, *, source: str | None = None) -> str:
     return content
 
 
-def lint_front(rate_limiting: bool, *, source: str | None = None) -> None:
+def lint_front(
+    rate_limiting: bool,
+    *,
+    source: str | None = None,
+    early_hints: dict[str, Any] | None = None,
+    build_sha: str | None = None,
+) -> None:
     path = VCL / "tests" / f".lint-{uuid.uuid4()}.vcl"
     try:
         path.write_text(
@@ -494,7 +604,7 @@ def lint_front(rate_limiting: bool, *, source: str | None = None) -> None:
                     'table flp_front_auth {\n  "front_key": "test-not-live",\n}',
                     "table flp_fos_buckets {}",
                     "table flp_fos_credentials {}",
-                    load_vcl(rate_limiting, source=source),
+                    load_vcl(rate_limiting, source=source, early_hints=early_hints, build_sha=build_sha),
                 )
             )
         )
@@ -576,12 +686,18 @@ def prepare_front(
     *,
     rate_limiting: bool | None = None,
     frozen_source: str | None = None,
+    early_hints: dict[str, Any] | None = None,
+    build_sha: str | None = None,
 ) -> dict[str, Any]:
     """Prepare and validate a front draft; activation remains the release wrapper's job."""
     inventory = json.loads(inventory_path.read_text())
+    if build_sha is None:
+        build_sha = inventory.get("build_sha") or None
     lint_front(
         inventory["rate_limiting"] if rate_limiting is None else rate_limiting,
         source=frozen_source,
+        early_hints=early_hints,
+        build_sha=build_sha,
     )
     front_service = inventory["services"]["front"]
     service_id = front_service["id"]
@@ -592,7 +708,7 @@ def prepare_front(
         rate_limiting = account_has_rate_limiting(api, service_id)
         if rate_limiting is None:
             rate_limiting = inventory["rate_limiting"]
-        lint_front(rate_limiting, source=frozen_source)
+        lint_front(rate_limiting, source=frozen_source, early_hints=early_hints, build_sha=build_sha)
     versions = api.request("GET", f"/service/{service_id}/version")
     latest = max(versions, key=lambda version: int(version["number"]))
     if latest.get("active") in (True, 1, "1", "true") or latest.get("locked") in (
@@ -609,13 +725,14 @@ def prepare_front(
     inventory["rate_limiting"] = rate_limiting
     _save(inventory_path, inventory)
     base = f"/service/{service_id}/version/{version}"
+    content = load_vcl(rate_limiting, source=frozen_source, early_hints=early_hints, build_sha=build_sha)
     api.request(
         "PUT",
         base + "/vcl/main",
-        {"content": load_vcl(rate_limiting, source=frozen_source), "main": "true"},
+        {"content": content, "main": "true"},
         form=True,
     )
-    if "req.http.x-flp-fos-service" in load_vcl(rate_limiting, source=frozen_source):
+    if "req.http.x-flp-fos-service" in content:
         api.request(
             "PUT",
             base + "/condition/flp_app",
@@ -823,7 +940,14 @@ def deploy(
         raise APIError("Compute package hashes differ; no version was activated")
     subdir = "compute/cloud" if package.parent.parent.name == "cloud" else "app"
     frozen_front = _git(root, "show", f"{provenance['build_sha']}:{subdir}/vcl/front/main.vcl")
-    inventory = prepare_front(api, inventory_path, frozen_source=frozen_front)
+    early_hints = _wasm_deploy.load_early_hints(package, provenance)
+    inventory = prepare_front(
+        api,
+        inventory_path,
+        frozen_source=frozen_front,
+        early_hints=early_hints,
+        build_sha=provenance["build_sha"],
+    )
     inventory.update(provenance)
     _save(inventory_path, inventory)
     for role in ("worker", "compute", "front"):

@@ -152,4 +152,200 @@ describe("readLogs request sharing", () => {
     expect(one).toHaveBeenCalledWith(progress);
     expect(two).toHaveBeenCalledWith(progress);
   });
+
+  it("passes explicit non-shared identity to Worker, terminates Worker via resetOpsLogsClient, and fences in-flight ops CacheStorage writes across clearOpsCaches and setDashboardCacheIdentity", async () => {
+    const bucketEntries = new Map<string, Map<string, Response>>();
+    let putGateRelease: (() => void) | null = null;
+    let putGateStarted: (() => void) | null = null;
+    vi.stubGlobal("caches", {
+      async open(name: string) {
+        let store = bucketEntries.get(name);
+        if (!store) {
+          store = new Map();
+          bucketEntries.set(name, store);
+        }
+        return {
+          async match(req: RequestInfo | URL) {
+            return store!.get(String(req))?.clone();
+          },
+          async put(req: RequestInfo | URL, res: Response) {
+            if (putGateStarted) {
+              const notify = putGateStarted;
+              putGateStarted = null;
+              notify();
+              await new Promise<void>((r) => { putGateRelease = r; });
+            }
+            store!.set(String(req), res.clone());
+          },
+          async delete(req: RequestInfo | URL) {
+            return store!.delete(String(req));
+          },
+          async keys() {
+            return [...store!.keys()].map((u) => new Request(u));
+          },
+        };
+      },
+      async keys() {
+        return [...bucketEntries.keys()];
+      },
+      async delete(name: string) {
+        return bucketEntries.delete(name);
+      },
+    });
+
+    const clientMod = await load();
+    const { clearDashboardData, setDashboardCacheIdentity } = await import("../dashboard/client");
+    const resetFn = (clientMod as Record<string, unknown>).resetOpsLogsClient as (() => void) | undefined;
+    expect(typeof resetFn).toBe("function");
+
+    // 1. Empty identity uses volatile per-epoch scope (NOT shared "default") and forwards identity in Worker message:
+    const pendingWorkerRead = clientMod.readLogs({ kind: "cron_runs", ...range });
+    const w1 = MockWorker.instances[0];
+    const firstJob = w1.jobs()[0] as Job & { identity?: { user: string; role: string } };
+    expect(firstJob.identity?.user).toBeTruthy();
+    expect(firstJob.identity?.user).not.toBe("default");
+
+    let terminated = false;
+    w1.terminate = () => { terminated = true; };
+    resetFn!();
+    expect(terminated).toBe(true);
+    await expect(pendingWorkerRead).rejects.toMatchObject({ name: "AbortError" });
+
+    // 2. In-flight browserOpsSource.fetchFile paused before fetch settles across clearOpsCaches() must NOT re-create ops cache:
+    let resolveOpsFetch!: (res: Response) => void;
+    let opsSignalObserved: AbortSignal | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+        opsSignalObserved = init?.signal ?? undefined;
+        return new Promise<Response>((resolve) => {
+          resolveOpsFetch = resolve;
+        });
+      }),
+    );
+
+    await clientMod.syncOpsCacheForSession({ userId: "alice" });
+    const opsSrc = clientMod.browserOpsSource("http://localhost");
+    const inFlightFile = opsSrc
+      .fetchFile("processed/ops/audit_log/part-1.parquet")
+      .then(() => "RESOLVED", () => "REJECTED");
+
+    await new Promise((r) => setTimeout(r, 5));
+    await clientMod.clearOpsCaches();
+    expect(opsSignalObserved?.aborted).toBe(true);
+    resolveOpsFetch(new Response(new Uint8Array([1, 2, 3, 4]), { status: 200 }));
+    expect(await inFlightFile).toBe("REJECTED");
+    expect([...bucketEntries.keys()]).toEqual([]);
+
+    // 3. Drain activeOpsWrites during clearOpsCaches() AND wipe ops caches during setDashboardCacheIdentity() & clearDashboardData():
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(new Uint8Array([9, 8, 7, 6]), { status: 200 })),
+    );
+    const putStartedPromise = new Promise<void>((r) => { putGateStarted = r; });
+    const gatedFetch = opsSrc.fetchFile("processed/ops/audit_log/part-2.parquet");
+    await putStartedPromise;
+    let clearSettled = false;
+    const clearPending = clientMod.clearOpsCaches().then(() => { clearSettled = true; });
+    await new Promise((r) => setTimeout(r, 5));
+    expect(clearSettled).toBe(false);
+    (putGateRelease as (() => void) | null)?.();
+    await clearPending;
+    await gatedFetch.catch(() => {});
+    expect([...bucketEntries.keys()]).toEqual([]);
+
+    // Populate ops cache for Alice, then switch dashboard identity to Bob: must wipe Alice's ops cache!
+    await setDashboardCacheIdentity("alice:admin");
+    await clientMod.syncOpsCacheForSession({ userId: "alice" });
+    const aliceOps = clientMod.browserOpsSource("http://localhost");
+    await aliceOps.fetchFile("processed/ops/audit_log/part-3.parquet");
+    expect([...bucketEntries.keys()]).toEqual(["flp-ops-parquet-v1:alice:admin"]);
+
+    await setDashboardCacheIdentity("bob:analyst");
+    expect([...bucketEntries.keys()]).toEqual([]);
+
+    // Populate again, then clearDashboardData() must also wipe ops caches:
+    await clientMod.syncOpsCacheForSession({ userId: "alice" });
+    const aliceOps2 = clientMod.browserOpsSource("http://localhost");
+    await aliceOps2.fetchFile("processed/ops/audit_log/part-4.parquet");
+    expect([...bucketEntries.keys()]).toEqual(["flp-ops-parquet-v1:alice:admin"]);
+    await clearDashboardData();
+    expect([...bucketEntries.keys()]).toEqual([]);
+  });
+
+  it("resets activeOpsUser to null on full clearOpsCaches() while preserving non-matching user wipe", async () => {
+    const sourcesMod = await import("./sources");
+    await sourcesMod.syncOpsCacheForSession({ userId: "alice", needsLogin: false });
+    expect(sourcesMod.activeOpsUser()).toBe("alice");
+
+    await sourcesMod.clearOpsCaches({ user: "bob" });
+    expect(sourcesMod.activeOpsUser()).toBe("alice");
+
+    await sourcesMod.clearOpsCaches();
+    expect(sourcesMod.activeOpsUser()).toBeNull();
+  });
+
+  it("uses volatile-ops scope when dashboardCacheIdentity is anonymous and normalizes user:role in Worker context when dashId is null", async () => {
+    const bucketEntries = new Map<string, Map<string, Response>>();
+    vi.stubGlobal("caches", {
+      async open(name: string) {
+        let store = bucketEntries.get(name);
+        if (!store) {
+          store = new Map();
+          bucketEntries.set(name, store);
+        }
+        return {
+          async match(req: RequestInfo | URL) { return store!.get(String(req))?.clone(); },
+          async put(req: RequestInfo | URL, res: Response) { store!.set(String(req), res.clone()); },
+          async delete(req: RequestInfo | URL) { return store!.delete(String(req)); },
+          async keys() { return [...store!.keys()].map((u) => new Request(u)); },
+        };
+      },
+      async keys() { return [...bucketEntries.keys()]; },
+      async delete(name: string) { return bucketEntries.delete(name); },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(new Uint8Array([1, 2, 3, 4]), { status: 200 })),
+    );
+
+    const clientMod = await load();
+    const { clearDashboardData, setDashboardCacheIdentity } = await import("../dashboard/client");
+
+    // 1. After unauthenticated bootstrap, dashboardCacheIdentity() === "anonymous" and activeOpsUser() === null:
+    await setDashboardCacheIdentity("anonymous");
+    await clientMod.clearOpsCaches();
+
+    const pendingAnonRead = clientMod.readLogs("cron_runs", range);
+    const worker = MockWorker.instances[0];
+    const anonJob = worker.jobs()[0] as Job & { identity?: { user: string; role: string } };
+    expect(anonJob.identity?.user).toMatch(/^volatile-ops-\d+$/);
+    expect(anonJob.identity?.user).not.toBe("anonymous");
+    worker.emit({ id: anonJob.id, type: "result", result: result("cron_runs") });
+    await pendingAnonRead;
+
+    // 2. Explicit "anonymous" is treated as unauthenticated and falls back to volatile-ops:
+    expect(clientMod.currentOpsIdentity({ user: "anonymous", role: "admin" }).user).toMatch(
+      /^volatile-ops-\d+$/,
+    );
+
+    // 3. Inside Web Worker (where localStorage / dashId is null and activeOpsUser is null),
+    // currentOpsIdentity and browserOpsSource split "alice:admin" cleanly without creating ":alice:admin:admin":
+    await clearDashboardData();
+    await clientMod.clearOpsCaches();
+    expect(clientMod.currentOpsIdentity({ user: "alice:admin", role: "admin" })).toEqual({
+      user: "alice",
+      role: "admin",
+    });
+    expect(clientMod.currentOpsIdentity({ user: "alice:analyst-no-pii" })).toEqual({
+      user: "alice",
+      role: "analyst-no-pii",
+    });
+    const workerSrc = clientMod.browserOpsSource("http://localhost", {
+      user: "alice:admin",
+      role: "admin",
+    });
+    await workerSrc.fetchFile("processed/ops/audit_log/part-worker.parquet");
+    expect([...bucketEntries.keys()]).toEqual(["flp-ops-parquet-v1:alice:admin"]);
+  });
 });

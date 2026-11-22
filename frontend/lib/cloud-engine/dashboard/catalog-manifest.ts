@@ -180,6 +180,9 @@ export function manifestCacheKey(
 }
 
 export function clearCatalogManifests(): void {
+  for (const s of inFlight.values()) {
+    s.controller.abort();
+  }
   inFlight.clear();
   recent.clear();
   snapshots.clear();
@@ -187,6 +190,13 @@ export function clearCatalogManifests(): void {
   fetchIds = new WeakMap();
   epoch++;
   queueStoreInvalidation(undefined, deleteManifestSnapshots);
+}
+
+export function drainCatalogManifestStore(): Promise<void> {
+  return storeWork.then(
+    () => undefined,
+    () => undefined,
+  );
 }
 
 export function observeCatalogCommit(

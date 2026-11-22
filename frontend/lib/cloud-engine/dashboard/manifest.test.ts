@@ -184,6 +184,65 @@ describe("closed-hour manifest cache", () => {
     expect(result.summaryFiles).toEqual([summary]);
   });
 
+  it("replaces a day's windows with an open-hour bundle and its uncovered windows through a summaries delta and reload", async () => {
+    fakeManifestCacheStorage();
+    const raw = file(T0);
+    const window = (minute: number) => ({
+      ...file(T0 + minute * 60_000, 5),
+      key: `processed/summary/request/w-${minute}.parquet`,
+      kind: "window" as const,
+    });
+    const [w0, w5, w10] = [window(0), window(5), window(10)];
+    const bundle = {
+      ...file(T0, 10),
+      key: "processed/summary_bundle/request/year=2026/month=01/day=10/open_bundle=00-1-c2-n2-h0.parquet",
+      kind: "hour" as const,
+      sources: 2,
+    };
+    const calls: URLSearchParams[] = [];
+    const fetchJson = Object.assign(
+      vi.fn(async (input: string) => {
+        const params = new URL(input, "http://x").searchParams;
+        calls.push(params);
+        if (!params.has("since_generation")) {
+          return {
+            files: [raw],
+            summary_files: [w0, w5, w10],
+            next_cursor: null,
+            complete: true,
+            catalog_generation: 7,
+          };
+        }
+        const base = Number(params.get("since_generation"));
+        return {
+          files: [],
+          summary_files: base === 7 ? [bundle, w10] : [],
+          changes: [],
+          summary_partitions:
+            base === 7 ? [{ from: iso(T0), to: iso(T0 + 24 * H) }] : [],
+          base_generation: base,
+          catalog_generation: 8,
+          next_cursor: null,
+          complete: true,
+        };
+      }),
+      { manifestCacheScope: () => '["session","service"]' },
+    );
+    const range = [iso(T0), iso(T0 + 3 * H)] as const;
+    const list = (fetch: typeof fetchManifest) =>
+      fetch(fetchJson, ...range, undefined, undefined, undefined, true);
+
+    await list(fetchManifest);
+    for (const since of ["7", "8"]) {
+      vi.resetModules();
+      const { fetchManifest: fetchAfterReload } = await import("./manifest");
+      calls.length = 0;
+      const result = await list(fetchAfterReload);
+      expect(calls.map((c) => c.get("since_generation"))).toEqual([since]);
+      expect(keys(result.summaryFiles!)).toEqual(keys([bundle, w10]));
+    }
+  });
+
   it("re-lists instead of replaying a summaries delta onto a listing that omitted summaries", async () => {
     const calls: URLSearchParams[] = [];
     const summary = { ...file(T0, 60), key: "summary-hour", kind: "hour" as const };

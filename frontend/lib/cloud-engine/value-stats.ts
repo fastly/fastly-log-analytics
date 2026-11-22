@@ -1,6 +1,8 @@
 import type { components } from "@/types/api.generated";
+import { dashboardCacheIdentity } from "./dashboard/sources";
 import { roundTo } from "./engine-utils";
 import { adminRequest } from "./telemetry/admin";
+import { activeOpsUser } from "./telemetry/sources";
 import type { paths } from "./cloud-api.generated";
 
 export type ServiceStats =
@@ -17,9 +19,11 @@ const CACHE_TTL_MS = 300_000;
 /** How long a summaries answer waits on a slower Stats read before it goes without the comparison. */
 const STATS_GRACE_MS = 5_000;
 
+let statsCacheEpoch = 0;
 const cache = new Map<string, { at: number; stats: Promise<ServiceStats | null> }>();
 
-export function clearServiceStatsCache() {
+export function clearServiceStatsCache(): void {
+  statsCacheEpoch += 1;
   cache.clear();
 }
 
@@ -31,20 +35,34 @@ const isoZ = (ms: number) => new Date(ms).toISOString().replace(".000Z", "Z");
  * admin-only), no configured service, a Stats error or a range Stats doesn't
  * cover. Answers and failures are reused per range for a few minutes.
  */
-function fetchServiceStats(fromMs: number, toMs: number): Promise<ServiceStats | null> | null {
+function fetchServiceStats(
+  fromMs: number,
+  toMs: number,
+  serviceId?: string,
+): Promise<ServiceStats | null> | null {
   const from = Math.ceil(fromMs / HOUR_MS) * HOUR_MS;
   const to = Math.floor(Math.min(toMs, Date.now()) / HOUR_MS) * HOUR_MS;
   if (!(to > from) || to - from > MAX_SPAN_MS) return null;
-  const key = `${from}:${to}`;
+  const startEpoch = statsCacheEpoch;
+  const key = JSON.stringify([
+    startEpoch,
+    dashboardCacheIdentity(),
+    activeOpsUser(),
+    serviceId ?? "",
+    from,
+    to,
+  ]);
   const now = Date.now();
   for (const [k, entry] of cache) if (now - entry.at > CACHE_TTL_MS) cache.delete(k);
   let entry = cache.get(key);
   if (!entry) {
-    entry = {
-      at: now,
-      stats: adminRequest<ServiceStats>(`/api/admin/usage/service-stats?from=${from}&to=${to}`).catch(() => null),
-    };
-    cache.set(key, entry);
+    const stats = adminRequest<ServiceStats>(`/api/admin/usage/service-stats?from=${from}&to=${to}`)
+      .then((res) => (startEpoch === statsCacheEpoch ? res : null))
+      .catch(() => null);
+    entry = { at: now, stats };
+    if (startEpoch === statsCacheEpoch) {
+      cache.set(key, entry);
+    }
   }
   return entry.stats;
 }
@@ -111,8 +129,10 @@ type RollupAnswer = { overview?: unknown; rollup?: { data_through?: string; logg
 export function valueStatsDecorator(start: string, end: string, params: Record<string, unknown>) {
   const fromMs = Date.parse(start);
   const sections = Array.isArray(params.sections) ? params.sections : [];
-  const stats = sections.includes("overview") ? fetchServiceStats(fromMs, Date.parse(end)) : null;
   const serviceId = typeof params.service_id === "string" ? params.service_id : undefined;
+  const stats = sections.includes("overview")
+    ? fetchServiceStats(fromMs, Date.parse(end), serviceId)
+    : null;
   return async (answer: unknown): Promise<unknown> => {
     const { rollup, ...rest } = answer as RollupAnswer;
     if (!rollup?.logged_hours) return answer;

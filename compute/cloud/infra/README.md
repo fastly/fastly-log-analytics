@@ -118,6 +118,33 @@ This verifies the front's identity and deployed SHA before using the documented
 `POST /service/{service_id}/purge/flp-html` endpoint. A purge error remains an
 error; it never becomes a successful release or an implicit full redeploy.
 
+## Early Hints
+
+`make cloud-build` reads each exported route's `<head>` and writes
+`pkg/early-hints.json`. It records that file's digest as `early_hints_sha256` in
+`provenance.json`. Each route gets at most 10 links, in this order: stylesheets,
+up to six boot scripts, then font preloads. Routes listed in
+`frontend/static-export-policy.json` `earlyHintsDuckdbRoutes` also get the DuckDB
+worker and wasm, both at low priority. Keep that list in step with the pages that
+start the DuckDB engine on load. Deploy rejects a hints file whose digest does
+not match. It writes the hints into the front VCL's `#EARLYHINTS` block: a 103 on
+first-hop HTTP/2 and HTTP/3 GET document navigations, and the same `Link` header
+on the final 200 HTML response. API, auth, FOS, `_next`, `/duckdb`, `/geo`
+and parquet paths are never hinted. Without a hints file, the block stays empty
+and the VCL behaves as before.
+
+## App shell cache
+
+Deploy also writes the build SHA into the front VCL's `#BUILDKEY` block. Every
+cached page and RSC file is keyed by build as well as by path and host, so a new
+front version never serves an older build's HTML. Hashed `_next/static`,
+`/duckdb`, `/geo` and FOS objects keep their build-independent keys. The
+`flp-html` purge after readiness covers POPs that got the new VCL before the new
+Compute. Analytics page shells are cached at the edge like `/`. Admin page
+shells come from cache only for an edge-verified admin `flp_cdn` credential.
+See `docs/cloud/security-route-access.md`. A frozen front source without the
+block keeps passing app pages to Compute.
+
 ## Verify
 
 ```sh

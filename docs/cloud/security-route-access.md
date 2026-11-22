@@ -55,3 +55,27 @@ The pages hold no data and every data route is 401; deploying the new build clos
 `/api/sync-status` and `/api/cron-runs` are served from Core Cache, but only after
 the session and admin role check; the cache key includes the service id, so no
 cached body reaches an unauthorized caller.
+
+## Edge-cached page shells
+
+Page HTML and RSC `.txt` files are the build's static export: no nonces, no
+per-user, per-session or per-install data. The front VCL caches them for 60
+seconds, keyed by path (query dropped), host and the deployed build SHA. Deploy
+also purges `flp-html`. A response with `Set-Cookie`, a redirect or any
+non-200 status is never cached.
+
+- Analytics pages (`/dashboard`, `/origin`, `/sessions`, `/query` and the rest)
+  were already public in Compute (`public, max-age=60`). Serving them from cache
+  changes nothing about exposure. Their data stays behind the APIs above, and the
+  app sends signed-out visitors to `/share-login`.
+- Admin pages (`/admin*`, `/logs*`, `/provision*`, `/log-fields*`, `/services*`)
+  come from cache only when the edge verifies the request's `flp_cdn` credential.
+  The credential must have a valid HMAC, the admin role, an unexpired time, the
+  current `auth_epoch`, and a binding to the presented `flp_session`. That is the
+  same check that already admits ops parquet. Every other request reaches
+  Compute, which still returns the 303, 403 and cookie clearing. Cached admin
+  copies are kept apart in the cache key and keep `private, no-store` and
+  `Vary: Cookie` for browsers. A role change or revocation bumps the epoch, so
+  the next navigation falls back to Compute. The credential lasts at most 180
+  seconds.
+- `/api`, `/auth`, `/setup` and `/share-login` always pass to Compute.

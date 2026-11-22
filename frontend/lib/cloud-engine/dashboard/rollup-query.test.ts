@@ -379,4 +379,114 @@ describe("queryRollup", () => {
     const s = source(WINDOWS, { ...BUFFERS, [stale.key]: BUFFERS[RAW[0].key] });
     expect(await queryRollup(s, { fromMs: T0, toMs: T0 + 2 * HOUR })).toBeNull();
   });
+
+  it("aborts in-flight queryRollup and readSummaryProjection across clearRollupQueryCache without writing derived CacheStorage or retaining decoded Rollups in RAM", async () => {
+    const rollupMod = await import("./rollup-query");
+    const { defineSummarySpec, summaryProjectionLimits } = await import("./summary-projection");
+
+    const spec = defineSummarySpec({ groups: ["dims"], columns: ["requests", "status5xx", "resp_bytes"] });
+    const prevLimit = summaryProjectionLimits.wholeBelowBytes;
+    summaryProjectionLimits.wholeBelowBytes = 128;
+
+    try {
+      let releaseDerivedRead: () => void = () => {};
+      let notifyDerivedPaused: () => void = () => {};
+      let pauseFirstDerivedRead = true;
+      let derivedWrites = 0;
+      let rangeReads = 0;
+      let wholeFetches = 0;
+
+      const paused = new Promise<void>((r) => {
+        notifyDerivedPaused = r;
+      });
+      const base = source(HOURS);
+      const trackedSource = {
+        ...base,
+        cacheScope: "alice-scope:svc-alice",
+        fetchFile: async (key: string, sig?: AbortSignal) => {
+          wholeFetches++;
+          sig?.throwIfAborted();
+          return base.fetchFile(key, sig);
+        },
+        fetchRange: async (file: ManifestFile, start: number, end: number, sig?: AbortSignal) => {
+          rangeReads++;
+          sig?.throwIfAborted();
+          return BUFFERS[file.key].slice(start, end);
+        },
+        readDerivedFile: async () => {
+          if (pauseFirstDerivedRead) {
+            pauseFirstDerivedRead = false;
+            notifyDerivedPaused?.();
+            await new Promise<void>((r) => {
+              releaseDerivedRead = r;
+            });
+          }
+          return null;
+        },
+        writeDerivedFile: async () => {
+          derivedWrites++;
+        },
+      };
+
+      const caller = new AbortController();
+      const pending = queryRollup(trackedSource, {
+        fromMs: T0,
+        toMs: T0 + 2 * HOUR,
+        spec,
+        signal: caller.signal,
+      }).then(
+        () => "RESOLVED",
+        () => "REJECTED",
+      );
+
+      await paused;
+      caller.abort(new DOMException("Unmounted on logout", "AbortError"));
+      const clearFn = (rollupMod as { clearRollupQueryCache?: () => void }).clearRollupQueryCache;
+      clearFn?.();
+      releaseDerivedRead?.();
+
+      expect(await pending).toBe("REJECTED");
+      await new Promise((r) => setTimeout(r, 10));
+
+      expect(rangeReads).toBe(0);
+      expect(derivedWrites).toBe(0);
+      expect(wholeFetches).toBe(0);
+      expect(typeof (rollupMod as Record<string, unknown>).clearRollupQueryCache).toBe("function");
+
+      // Subsequent post-clear replay must NOT hit stale decoded RAM from before logout:
+      const replay = await queryRollup(trackedSource, {
+        fromMs: T0,
+        toMs: T0 + 2 * HOUR,
+        spec,
+      });
+      expect(replay).not.toBeNull();
+      expect(rangeReads + wholeFetches).toBeGreaterThan(0);
+
+      // Auditor Challenge 1: un-signaled queryRollup must ALSO abort and evict decoded solely via clearRollupQueryCache():
+      clearFn?.();
+      rangeReads = 0;
+      wholeFetches = 0;
+      derivedWrites = 0;
+      pauseFirstDerivedRead = true;
+      const pausedUnsignaled = new Promise<void>((r) => {
+        notifyDerivedPaused = r;
+      });
+      const unsignaledPending = queryRollup(trackedSource, {
+        fromMs: T0,
+        toMs: T0 + 2 * HOUR,
+        spec,
+      }).then(
+        () => "RESOLVED",
+        () => "REJECTED",
+      );
+      await pausedUnsignaled;
+      clearFn?.();
+      releaseDerivedRead?.();
+      expect(await unsignaledPending).toBe("REJECTED");
+      expect(rangeReads).toBe(0);
+      expect(derivedWrites).toBe(0);
+    } finally {
+      summaryProjectionLimits.wholeBelowBytes = prevLimit;
+    }
+  });
 });

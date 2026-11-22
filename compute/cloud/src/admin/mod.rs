@@ -1107,9 +1107,10 @@ fn new_job(
         warnings: vec![],
         delete_matrices: false,
         scorer_ownership_verified: false,
+        pending_failure: None,
     })
 }
-// A failed reconcile is superseded by the next one: it can fail for good (service_changed_rerun),
+// A failed reconcile or scoring job is superseded by the next mutation/job: it can fail for good,
 // and keeping it pending would wedge the service. Failed provision/teardown jobs still block.
 fn reject_blocking_job(
     context: &Context<'_, impl Runtime>,
@@ -1117,7 +1118,11 @@ fn reject_blocking_job(
 ) -> Result<(), Error> {
     if let Some(id) = &service.pending_job_id {
         let (_, job) = load_job(context, id)?;
-        let superseded = job.status == "failed" && job.kind == "reconcile";
+        let superseded = job.status == "failed"
+            && matches!(
+                job.kind.as_str(),
+                "reconcile" | "scoring_enable" | "scoring_disable" | "scoring_teardown"
+            );
         if job.status != "complete" && !superseded {
             return Err(Error::new(409, "job_in_progress"));
         }
@@ -1528,6 +1533,7 @@ fn step(context: &Context<'_, impl Runtime>, id: &str, retry: bool) -> Result<Va
     if retry && job.status == "failed" {
         job.retry = None;
         job.retry_attempts.clear();
+        job.pending_failure = None;
     }
     let now = context.runtime.now();
     if job.retry.as_ref().is_some_and(|retry| retry.at > now) {
@@ -1541,11 +1547,13 @@ fn step(context: &Context<'_, impl Runtime>, id: &str, retry: bool) -> Result<Va
     }
     // Provision fixes this reference; settings cannot change it.
     let token_ref = format!("fastly_token.{}", job.service_id);
-    context.confirm_with_secret(if job.step == "finalize" {
-        "fastly_token"
-    } else {
-        &token_ref
-    });
+    context.confirm_with_secret(
+        if matches!(job.step.as_str(), "finalize" | "scoring_rollback") {
+            "fastly_token"
+        } else {
+            &token_ref
+        },
+    );
     let lease_key = format!("reconcile_lock:{}", job.service_id);
     let lease_record = context.get(&lease_key)?;
     let old: Lease = lease_record
@@ -1595,16 +1603,22 @@ fn step(context: &Context<'_, impl Runtime>, id: &str, retry: bool) -> Result<Va
     context.set_retry_attempts(job.retry_attempts.clone());
     context.set_uncertain_operations(job.uncertain_operations.clone());
     context.journal_job(format!("job:{id}"), claimed.clone());
-    let result = load_service(context, &job.service_id)
-        .and_then(|current| {
-            // A cached read can predate the job's own service write; confirm before failing.
-            if bind_service(&mut job.clone(), &current.0, &current.1).is_ok() {
-                Ok(current)
-            } else {
-                load_service_from(context, &job.service_id, true)
-            }
-        })
-        .and_then(|current| run_step(context, &mut job, current));
+    let loaded_service = load_service(context, &job.service_id).and_then(|current| {
+        // A cached read can predate the job's own service write; confirm before failing.
+        if bind_service(&mut job.clone(), &current.0, &current.1).is_ok() {
+            Ok(current)
+        } else {
+            load_service_from(context, &job.service_id, true)
+        }
+    });
+    let mut cached_service: Option<(Record, Service)> = None;
+    let result = match loaded_service {
+        Ok(current) => {
+            cached_service = Some(current.clone());
+            run_step(context, &mut job, current)
+        }
+        Err(err) => Err(err),
+    };
     if result.is_ok() {
         context.settle_waits();
     }
@@ -1622,16 +1636,33 @@ fn step(context: &Context<'_, impl Runtime>, id: &str, retry: bool) -> Result<Va
         if job.retry.as_ref().is_some_and(|retry| retry.at > 0) {
             job.status = "pending".into();
             job.error = None;
+        } else if scoring::needs_failed_enable_rollback(&job, &previous_step) {
+            let rolled_back = if let Some((svc_rec, mut svc)) = cached_service {
+                scoring::rollback_failed_enable(context, &mut svc, &svc_rec, &mut job)
+            } else if context.remaining_calls() >= 7 {
+                if let Ok((svc_rec, mut svc)) = load_service_from(context, &job.service_id, true) {
+                    scoring::rollback_failed_enable(context, &mut svc, &svc_rec, &mut job)
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if rolled_back {
+                job.pending_failure = None;
+                job.status = "failed".into();
+                job.error = Some(failure.code.into());
+            } else {
+                job.pending_failure = Some(failure.code.into());
+                job.step = "scoring_rollback".into();
+                job.status = "pending".into();
+                job.error = None;
+            }
         } else {
             job.status = "failed".into();
             job.error = Some(failure.code.into());
-            if job.kind == "scoring_enable" {
-                if let Ok((svc_rec, mut svc)) = load_service(context, &job.service_id) {
-                    scoring::rollback_failed_enable(context, &mut svc, &svc_rec, &job.actor);
-                }
-            }
         }
-    } else if job.status != "complete" {
+    } else if job.status != "complete" && job.status != "failed" {
         job.status = "pending".into();
         job.retry = if job.step == previous_step {
             context.retry()
@@ -1723,7 +1754,11 @@ fn bind_service(job: &mut Job, record: &Record, service: &Service) -> Result<(),
             let next = checkpoint["next"]
                 .as_str()
                 .ok_or_else(|| Error::new(409, "invalid_job_checkpoint"))?;
-            job.step = next.into();
+            if job.pending_failure.is_some() {
+                job.step = "scoring_rollback".into();
+            } else {
+                job.step = next.into();
+            }
         } else if job.expected_generation.is_empty()
             && job.kind == "provision"
             && job
@@ -1752,7 +1787,7 @@ fn run_step(
     (record, mut service): (Record, Service),
 ) -> Result<(), Error> {
     bind_service(job, &record, &service)?;
-    let token = if job.step == "finalize" {
+    let token = if matches!(job.step.as_str(), "finalize" | "scoring_rollback") {
         String::new()
     } else {
         context.secret(&service.fastly_token_ref)?

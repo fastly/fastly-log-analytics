@@ -569,12 +569,21 @@ fn discover(
     if job.kind == "teardown" {
         if job.options.remove_logging {
             target.insert("logging/fos".into(), vec![]);
-            target.insert("condition".into(), vec![]);
+            if job.options.remove_snippets {
+                target.insert("condition".into(), vec![]);
+            } else if let Some(conds) = target.get_mut("condition") {
+                conds.retain(|c| c["name"] == "fastly_log_analytics_false");
+            }
         }
         if job.options.remove_snippets {
             target.insert("snippet".into(), vec![]);
             target.insert("backend".into(), vec![]);
             target.insert("dictionary".into(), vec![]);
+            if !job.options.remove_logging {
+                if let Some(conds) = target.get_mut("condition") {
+                    conds.retain(|c| c["name"] != "fastly_log_analytics_false");
+                }
+            }
         }
     }
     let mut current = BTreeMap::new();
@@ -591,7 +600,7 @@ fn discover(
         current.insert(resource.to_owned(), list(&value)?.clone());
     }
     let attached = service.capture == Capture::Attached;
-    // Attach mode never reads or writes the other install's RUM backend and dictionary.
+    // Attach mode never reads or writes the other install's RUM/scoring backends and dictionaries.
     let rum_involved = !attached
         && (service.rum.enabled
             || service
@@ -600,18 +609,27 @@ fn discover(
             || job
                 .previous_endpoint_names
                 .contains(&service.rum.endpoint_name)
-            || current["condition"].iter().any(|v| {
-                matches!(
-                    v["name"].as_str(),
-                    Some("fastly_log_analytics_false" | "rum_log_condition")
-                )
-            })
+            || current["condition"]
+                .iter()
+                .any(|v| v["name"].as_str() == Some("rum_log_condition"))
             || current["snippet"].iter().any(|v| {
                 v["content"]
                     .as_str()
                     .or_else(|| v["body"].as_str())
                     .unwrap_or("")
                     .contains("Section 1: RUM")
+            }));
+    let scoring_involved = !attached
+        && (service.scoring.is_some()
+            || job.kind == "reconcile"
+            || (job.kind == "teardown" && job.options.remove_snippets)
+            || current["condition"]
+                .iter()
+                .any(|v| v["name"].as_str() == Some("fastly_log_analytics_false"))
+            || current["snippet"].iter().any(|v| {
+                v["name"]
+                    .as_str()
+                    .is_some_and(super::scoring::is_scoring_snippet_name)
             }));
     if rum_involved {
         for resource in ["backend", "dictionary"] {
@@ -626,13 +644,7 @@ fn discover(
             )?;
             current.insert(resource.to_owned(), list(&value)?.clone());
         }
-    } else if service.scoring.as_ref().is_some_and(|s| s.enabled)
-        || current["snippet"].iter().any(|v| {
-            v["name"]
-                .as_str()
-                .is_some_and(super::scoring::is_scoring_snippet_name)
-        })
-    {
+    } else if scoring_involved {
         let value = context.api(
             "GET",
             &format!("/service/{}/version/{version}/backend", service.service_id),
@@ -803,7 +815,9 @@ fn discover(
         }
     }
     let mut changes = Vec::new();
-    let resources: &[&str] = if rum_involved {
+    let resources: &[&str] = if job.kind == "teardown" && !job.options.remove_snippets {
+        &["logging/s3", "logging/fos", "condition"]
+    } else if rum_involved {
         &[
             "snippet",
             "logging/s3",
@@ -811,6 +825,14 @@ fn discover(
             "condition",
             "backend",
             "dictionary",
+        ]
+    } else if scoring_involved {
+        &[
+            "snippet",
+            "logging/s3",
+            "logging/fos",
+            "condition",
+            "backend",
         ]
     } else {
         &["snippet", "logging/s3", "logging/fos", "condition"]
@@ -887,6 +909,10 @@ fn discover(
                 } else if resource == "condition" {
                     if attached {
                         name == ATTACH_CONDITION || name == ATTACH_RUM_CONDITION
+                    } else if job.kind == "teardown" && !job.options.remove_snippets {
+                        matches!(name, "log_analytics_condition" | "rum_log_condition")
+                    } else if job.kind == "teardown" && !job.options.remove_logging {
+                        name == "fastly_log_analytics_false"
                     } else {
                         matches!(
                             name,
@@ -896,7 +922,10 @@ fn discover(
                         )
                     }
                 } else if resource == "backend" {
-                    name == "fos_origin"
+                    matches!(
+                        name,
+                        "fos_origin" | super::scoring::SCORING_BACKEND_API_NAME
+                    )
                 } else if resource == "dictionary" {
                     name == "fos_credentials"
                 } else if attached {
@@ -939,39 +968,27 @@ fn discover(
             });
         }
     }
-    // Fastly rejects an endpoint whose response condition does not exist yet,
-    // and a condition still referenced by an endpoint.
-    if rum_involved {
-        changes.sort_by_key(
-            |change| match (change.action.as_str(), change.resource.as_str()) {
-                (_, "condition") if change.action != "delete" => 0,
-                (_, "dictionary") if change.action != "delete" => 1,
-                (_, "dictionary_item") if change.action != "delete" => 2,
-                (_, "backend") if change.action != "delete" => 3,
-                (_, "snippet") if change.action != "delete" => 4,
-                (_, "logging/s3" | "logging/fos") if change.action != "delete" => 5,
-                (_, "fos_object") if change.action != "delete" => 6,
-                ("delete", "snippet") => 7,
-                ("delete", "logging/s3" | "logging/fos") => 8,
-                ("delete", "backend") => 9,
-                ("delete", "dictionary") => 10,
-                ("delete", "condition") => 11,
-                ("delete", "fos_object") => 12,
-                _ => 13,
-            },
-        );
-    } else {
-        changes.sort_by_key(
-            |change| match (change.action.as_str(), change.resource.as_str()) {
-                ("delete", "logging/s3" | "logging/fos") => 3,
-                ("delete", "condition") => 4,
-                ("delete", _) => 5,
-                (_, "snippet") => 0,
-                (_, "condition") => 1,
-                _ => 2,
-            },
-        );
-    }
+    // Fastly rejects an endpoint or backend whose condition does not exist yet,
+    // a dictionary item whose dictionary does not exist yet, and a condition still
+    // referenced by a backend or endpoint; VCL snippet symbols are checked at validate.
+    changes.sort_by_key(
+        |change| match (change.action.as_str(), change.resource.as_str()) {
+            (_, "snippet") if change.action != "delete" => 0,
+            (_, "condition") if change.action != "delete" => 1,
+            (_, "dictionary") if change.action != "delete" => 2,
+            (_, "dictionary_item") if change.action != "delete" => 3,
+            (_, "backend") if change.action != "delete" => 4,
+            (_, "logging/s3" | "logging/fos") if change.action != "delete" => 5,
+            (_, "fos_object") if change.action != "delete" => 6,
+            ("delete", "snippet") => 7,
+            ("delete", "logging/s3" | "logging/fos") => 8,
+            ("delete", "backend") => 9,
+            ("delete", "dictionary") => 10,
+            ("delete", "condition") => 11,
+            ("delete", "fos_object") => 12,
+            _ => 13,
+        },
+    );
     job.source_version = Some(version);
     job.changes = changes;
     job.change_cursor = 0;
@@ -1055,8 +1072,10 @@ fn clone(
     let tag = format!("flp-job:{}", job.id);
     if let Some(draft) = versions
         .iter()
-        .find(|v| v["comment"] == tag && v["active"] != true && v["locked"] != true)
-        .and_then(|v| v["number"].as_u64())
+        .filter(|v| v["comment"] == tag && v["active"] != true && v["locked"] != true)
+        .filter_map(|v| v["number"].as_u64())
+        .filter(|&n| n > source)
+        .max()
     {
         job.draft_version = Some(draft);
         advance(job, "apply");
@@ -1362,8 +1381,10 @@ pub fn front(
             let tag = format!("flp-front-job:{}", job.id);
             if let Some(number) = list(&versions)?
                 .iter()
-                .find(|v| v["comment"] == tag && v["locked"] != true && v["active"] != true)
-                .and_then(|v| v["number"].as_u64())
+                .filter(|v| v["comment"] == tag && v["locked"] != true && v["active"] != true)
+                .filter_map(|v| v["number"].as_u64())
+                .filter(|&n| n > source)
+                .max()
             {
                 job.front_draft_version = Some(number);
                 job.front_cursor = 2;

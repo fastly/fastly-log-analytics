@@ -163,7 +163,14 @@ describe("Cloud scan metadata", () => {
 
   it("does not keep a failed lookup", async () => {
     const fetcher = metadataFetcher();
-    fetcher.mockResolvedValueOnce(new Response("busy", { status: 503 }));
+    const serve = fetcher.getMockImplementation()!;
+    let failExtents = true;
+    fetcher.mockImplementation(async (input) => {
+      const path = input instanceof Request ? new URL(input.url).pathname : String(input);
+      if (path !== "/api/log-extents" || !failExtents) return serve(input);
+      failExtents = false;
+      return new Response("busy", { status: 503 });
+    });
     vi.stubGlobal("fetch", fetcher);
     await expect(handleCloudAnalyticalRequest(scan())).rejects.toThrow("Cloud range discovery failed (503)");
     expect((await handleCloudAnalyticalRequest(scan()))?.ok).toBe(true);

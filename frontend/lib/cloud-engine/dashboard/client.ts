@@ -2,7 +2,15 @@ import { getPageLoadId } from "@/lib/api";
 import { useDebugStore } from "@/stores/filterStore";
 import { BaseWorkerRpcClient } from "../worker-rpc";
 import { beginCloudLoading } from "../loading-progress";
+import { resetCloudMetadataCache } from "../metadata-cache";
 import { resetRangeLoaderCache } from "../range-loader";
+import { clearSecurityRollupCache } from "../security-rollup";
+import { clearCloudSessionReferences } from "../session-reference";
+import { resetOpsLogsClient } from "../telemetry/client";
+import { clearOpsCaches } from "../telemetry/sources";
+import { resetUsageSettingsCache } from "../usage/summary";
+import { resetComputeBillingCache } from "../usage/computeUsage";
+import { clearServiceStatsCache } from "../value-stats";
 import { getDuckDBEngine } from "./duckdb";
 import {
   clearDashboardMemo,
@@ -18,6 +26,7 @@ import {
 import type { WorkerMessage, WorkerRequest } from "./engine.worker";
 import type { DashboardFilter } from "./filters";
 import { clearManifestCache, type Manifest } from "./manifest";
+import { clearRollupQueryCache } from "./rollup-query";
 import {
   browserSource,
   clearRequestLogCaches,
@@ -45,6 +54,15 @@ const getInlineSource = () =>
     debugTelemetry(),
   ));
 
+let persistRequested = false;
+
+/** Best effort: persistent storage keeps OPFS and Cache Storage files out of eviction. */
+function requestPersistentStorage(): void {
+  if (persistRequested) return;
+  persistRequested = true;
+  void globalThis.navigator?.storage?.persist?.().catch(() => false);
+}
+
 class DashboardWorkerClient extends BaseWorkerRpcClient<
   WorkerRequest,
   WorkerMessage
@@ -58,12 +76,12 @@ class DashboardWorkerClient extends BaseWorkerRpcClient<
   >();
 
   constructor() {
-    super(
-      () =>
-        new Worker(new URL("./engine.worker.ts", import.meta.url), {
-          type: "module",
-        }),
-    );
+    super(() => {
+      requestPersistentStorage();
+      return new Worker(new URL("./engine.worker.ts", import.meta.url), {
+        type: "module",
+      });
+    });
   }
 
   private handleMessage = (msg: WorkerMessage) => {
@@ -415,11 +433,24 @@ export function notifyDashboardCatalogChange(): void {
 export async function clearDashboardData(): Promise<void> {
   rpcClient?.terminate();
   rpcClient = null;
+  resetOpsLogsClient();
+  inlineSource = null;
   clearDashboardMemo();
   clearManifestCache();
+  clearRollupQueryCache();
+  clearSecurityRollupCache();
   resetRangeLoaderCache();
+  clearCloudSessionReferences();
+  resetCloudMetadataCache();
+  resetUsageSettingsCache();
+  resetComputeBillingCache();
+  clearServiceStatsCache();
   updateDashboardCacheIdentity(null);
-  await Promise.all([getDuckDBEngine().reset(), clearRequestLogCaches()]);
+  await Promise.all([
+    getDuckDBEngine().reset(),
+    clearRequestLogCaches(),
+    clearOpsCaches(),
+  ]);
 }
 
 export async function setDashboardCacheIdentity(
@@ -430,15 +461,24 @@ export async function setDashboardCacheIdentity(
   if (previous === normalized) return;
   rpcClient?.terminate();
   rpcClient = null;
+  resetOpsLogsClient();
+  inlineSource = null;
   clearDashboardMemo();
   clearManifestCache();
+  clearRollupQueryCache();
+  clearSecurityRollupCache();
   resetRangeLoaderCache();
+  clearCloudSessionReferences();
+  resetCloudMetadataCache();
+  resetUsageSettingsCache();
+  resetComputeBillingCache();
+  clearServiceStatsCache();
   updateDashboardCacheIdentity(normalized);
-  if (previous !== null) {
-    await Promise.all([getDuckDBEngine().reset(), clearRequestLogCaches()]);
-  } else {
-    await getDuckDBEngine().reset();
-  }
+  await Promise.all([
+    getDuckDBEngine().reset(),
+    clearRequestLogCaches(),
+    clearOpsCaches(),
+  ]);
 }
 
 export function runDashboard(options: EngineOptions): Promise<DashboardResult> {

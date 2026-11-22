@@ -127,4 +127,60 @@ describe("valueStatsDecorator", () => {
     valueStatsDecorator(new Date(Date.now() + HOUR).toISOString(), new Date(Date.now() + 3 * HOUR).toISOString(), params);
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it("isolates cached service stats across clearDashboardData, setDashboardCacheIdentity, service_id, and mid-flight epoch resets", async () => {
+    const { clearDashboardData, setDashboardCacheIdentity } = await import("./dashboard/client");
+    let allowAdmin = true;
+    fetchMock.mockImplementation(async () => {
+      if (!allowAdmin) return Response.json({ error: "forbidden" }, { status: 403 });
+      return Response.json(stats([[H0, 100, 1000, 80], [H0 + HOUR, 100, 1000, 90]]));
+    });
+
+    await setDashboardCacheIdentity("alice:admin");
+    const aliceOut = await valueStatsDecorator(start, end, params)(answer()) as Record<string, unknown>;
+    expect(aliceOut.fastly_reported).toMatchObject({ requests: 200 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Different service_id must not hit svc-1's cache entry:
+    fetchMock.mockImplementationOnce(async () =>
+      Response.json(stats([[H0, 40, 400, 30], [H0 + HOUR, 40, 400, 30]], { service_id: "svc-2" })),
+    );
+    const svc2Out = await valueStatsDecorator(start, end, { ...params, service_id: "svc-2" })(answer()) as Record<string, unknown>;
+    expect(svc2Out.fastly_reported).toMatchObject({ requests: 80 });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    // Switch identity to non-admin Bob: must NOT leak Alice's cached fastly_reported metrics!
+    allowAdmin = false;
+    await setDashboardCacheIdentity("bob:analyst-no-pii");
+    const bobOut = await valueStatsDecorator(start, end, params)(answer()) as Record<string, unknown>;
+    expect(bobOut).not.toHaveProperty("fastly_reported");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+
+    // Switch back to Admin Alice: Bob's 403 must NOT poison Alice's fastly_reported!
+    allowAdmin = true;
+    await setDashboardCacheIdentity("alice:admin");
+    const aliceAgain = await valueStatsDecorator(start, end, params)(answer()) as Record<string, unknown>;
+    expect(aliceAgain.fastly_reported).toMatchObject({ requests: 200 });
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+
+    // Logout via clearDashboardData() must also clear cached Admin stats:
+    allowAdmin = false;
+    await clearDashboardData();
+    const afterLogout = await valueStatsDecorator(start, end, params)(answer()) as Record<string, unknown>;
+    expect(afterLogout).not.toHaveProperty("fastly_reported");
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+
+    // In-flight Admin fetch resolving after clearServiceStatsCache() must be discarded:
+    clearServiceStatsCache();
+    allowAdmin = true;
+    let resolveInFlight!: (res: Response) => void;
+    fetchMock.mockImplementationOnce(
+      () => new Promise<Response>((resolve) => { resolveInFlight = resolve; }),
+    );
+    const finishInFlight = valueStatsDecorator(start, end, params);
+    clearServiceStatsCache();
+    resolveInFlight(Response.json(stats([[H0, 100, 1000, 80], [H0 + HOUR, 100, 1000, 90]])));
+    const discardedOut = await finishInFlight(answer()) as Record<string, unknown>;
+    expect(discardedOut).not.toHaveProperty("fastly_reported");
+  });
 });

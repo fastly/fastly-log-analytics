@@ -1,6 +1,11 @@
 import { getLoggedTraffic } from "../telemetry/admin";
 import { readLogs } from "../telemetry/client";
 import {
+  assertOpsEpoch,
+  currentOpsCacheEpoch,
+  currentOpsIdentity,
+} from "../telemetry/sources";
+import {
   measureEstimate,
   type EstimateRates,
   type EstimatePrefill,
@@ -45,27 +50,40 @@ export interface MeasuredEstimate extends EstimatePrefill {
 
 /** Everything the estimator measures from this install; any source that fails keeps its defaults. */
 export async function fetchEstimatePrefill(
-  identity: { user: string; role: string },
+  identity: { user?: string; role?: string } = currentOpsIdentity(),
   read: UsageLogReader & Reader = readLogs as UsageLogReader & Reader,
   signal?: AbortSignal,
   now = Date.now(),
 ): Promise<MeasuredEstimate> {
+  const startOpsEpoch = currentOpsCacheEpoch();
+  assertOpsEpoch(startOpsEpoch, signal);
+  const resolvedIdentity = currentOpsIdentity(identity);
   const range = { from: now - UNIT_WINDOW_DAYS * DAY_MS, to: now };
   const iso = {
     from: new Date(range.from).toISOString(),
     to: new Date(range.to).toISOString(),
   };
-  const optional = <T>(promise: Promise<T>) => promise.catch(() => null);
+  const optional = <T>(promise: Promise<T>) =>
+    promise.catch((err: unknown) => {
+      if (signal?.aborted || startOpsEpoch !== currentOpsCacheEpoch()) {
+        throw err;
+      }
+      return null;
+    });
   const settings = await fetchUsageSettings(signal);
+  assertOpsEpoch(startOpsEpoch, signal);
   const [traffic, billing, runs, fos, files] = await Promise.all([
     optional(getLoggedTraffic(signal)),
     optional(fetchComputeBilling(range, signal)),
-    optional(fetchUsageKind("cron_runs", range, identity, read, signal)),
+    optional(fetchUsageKind("cron_runs", range, resolvedIdentity, read, signal)),
     settings.enabled
-      ? optional(fetchUsageKind("fos_usage", range, identity, read, signal))
+      ? optional(
+          fetchUsageKind("fos_usage", range, resolvedIdentity, read, signal),
+        )
       : Promise.resolve(null),
-    optional(read("ingest_files", iso, { ...identity, signal })),
+    optional(read("ingest_files", iso, { ...resolvedIdentity, signal })),
   ]);
+  assertOpsEpoch(startOpsEpoch, signal);
   const ingest = (runs ?? []).filter(
     (run) => run.cron_kind === "request_ingest",
   );
