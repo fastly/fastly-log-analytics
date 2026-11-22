@@ -1472,14 +1472,28 @@ fn bundle_stage<R: Runtime>(store: &Store<'_, R>) -> Option<StageRow> {
     let span = VcpuSpan::start(runtime);
     let began = Instant::now();
     let before = runtime.admin_remaining_calls();
-    let request = bundle::summary_bundle(store, &cdn_key, TAIL + 1);
-    // CMCD bundles share the execution's calls and vCPU gates and go second, so a request
-    // backlog that hits a limit holds them until it clears.
-    let cmcd = match &request {
-        Ok(report) if report.stopped.is_none() && enough(runtime, MIN_BUNDLE_CALLS) => {
-            Some(bundle::cmcd_summary_bundle(store, &cdn_key, TAIL + 1))
+    // The two datasets share the execution's calls and vCPU; `bundle_datasets` alternates which
+    // goes first, so a backlog in one cannot hold the other back until it clears.
+    let reports = bundle::bundle_datasets(store, &cdn_key, TAIL + 1, MIN_BUNDLE_CALLS);
+    let (request, cmcd, cmcd_first) = match reports {
+        Ok(r) => (
+            r.request
+                .unwrap_or_else(|| Ok(bundle::BundleReport::default())),
+            r.cmcd,
+            r.cmcd_first,
+        ),
+        Err(error) => (Err(error), None, false),
+    };
+    // A leading CMCD run's work still counts when the request run after it fails.
+    let request = match (request, &cmcd) {
+        (Err(error), Some(Ok(_))) => {
+            row.error = Some(error);
+            Ok(bundle::BundleReport {
+                more_pending: true,
+                ..bundle::BundleReport::default()
+            })
         }
-        _ => None,
+        (request, _) => request,
     };
     match request {
         Ok(report) => {
@@ -1518,6 +1532,7 @@ fn bundle_stage<R: Runtime>(store: &Store<'_, R>) -> Option<StageRow> {
                 "days": report.days,
                 "partials": report.partials,
                 "stopped": report.stopped,
+                "cmcd_first": cmcd_first,
                 "cmcd": cmcd.as_ref().map(|c| json!({
                     "hours": c.hours,
                     "days": c.days,

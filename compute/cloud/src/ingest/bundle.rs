@@ -2535,6 +2535,9 @@ struct State {
     publication: Option<super::catalog::bundles::Coverage>,
     #[serde(default)]
     catalog_hours: BTreeMap<i64, (super::catalog::Reference, String)>,
+    /// When this dataset last led a [`bundle_datasets`] execution and had work.
+    #[serde(default)]
+    led: i64,
 }
 
 enum Step {
@@ -3297,11 +3300,23 @@ pub fn summary_bundle<R: Runtime>(
     cdn_key: &str,
     reserve: u32,
 ) -> Result<BundleReport, String> {
+    request_bundle(store, cdn_key, reserve, None, false)
+}
+
+fn request_bundle<R: Runtime>(
+    store: &Store<'_, R>,
+    cdn_key: &str,
+    reserve: u32,
+    record: Option<Option<crate::admin::Record>>,
+    lead: bool,
+) -> Result<BundleReport, String> {
     let scope = scope(store.service);
     run::<R, Acc>(
         store,
         cdn_key,
         reserve,
+        record,
+        lead,
         Spec {
             windows: summary::summary_prefix(&scope, TABLE),
             bundles: bundle_prefix(&scope, TABLE),
@@ -3322,6 +3337,16 @@ pub fn cmcd_summary_bundle<R: Runtime>(
     cdn_key: &str,
     reserve: u32,
 ) -> Result<BundleReport, String> {
+    cmcd_bundle(store, cdn_key, reserve, None, false)
+}
+
+fn cmcd_bundle<R: Runtime>(
+    store: &Store<'_, R>,
+    cdn_key: &str,
+    reserve: u32,
+    record: Option<Option<crate::admin::Record>>,
+    lead: bool,
+) -> Result<BundleReport, String> {
     // Its windows are listed from the bucket rather than a reset catalog head, so a bundle written
     // before Delete Data cleanup finishes could fold pre-reset windows and outlive the reset.
     if store.service.data_reset.is_some() {
@@ -3332,6 +3357,8 @@ pub fn cmcd_summary_bundle<R: Runtime>(
         store,
         cdn_key,
         reserve,
+        record,
+        lead,
         Spec {
             windows: cmcd_summary::cmcd_summary_prefix(&scope, TABLE),
             bundles: bundle_prefix(&scope, CMCD_TABLE),
@@ -3341,6 +3368,75 @@ pub fn cmcd_summary_bundle<R: Runtime>(
             caller: "cron:summary_bundle",
         },
     )
+}
+
+/// One execution's request and CMCD bundling, each `Err` on failure and `None` when it did not
+/// get a turn.
+#[derive(Debug, Default)]
+pub struct DatasetReports {
+    pub request: Option<Result<BundleReport, String>>,
+    pub cmcd: Option<Result<BundleReport, String>>,
+    pub cmcd_first: bool,
+}
+
+/// Bundles both datasets in one execution. The one that led less recently goes first with the
+/// whole vCPU and call allowance; the other follows only while the leader stopped short of the
+/// limits and `min_calls` remain. A backlog in either one therefore alternates with the other
+/// instead of holding it back until it clears.
+pub fn bundle_datasets<R: Runtime>(
+    store: &Store<'_, R>,
+    cdn_key: &str,
+    reserve: u32,
+    min_calls: u32,
+) -> Result<DatasetReports, String> {
+    let runtime = store.runtime;
+    let request_record = runtime.admin_get(STATE_KEY)?;
+    // A reset service skips CMCD bundling (see `cmcd_bundle`), so its state is not read.
+    let cmcd_record = if store.service.data_reset.is_some() {
+        None
+    } else {
+        Some(runtime.admin_get(CMCD_STATE_KEY)?)
+    };
+    let led = |record: Option<&crate::admin::Record>| {
+        record.and_then(|r| r.value["led"].as_i64()).unwrap_or(0)
+    };
+    let cmcd_first = cmcd_record
+        .as_ref()
+        .is_some_and(|cmcd| led(cmcd.as_ref()) < led(request_record.as_ref()));
+    let mut out = DatasetReports {
+        cmcd_first,
+        ..DatasetReports::default()
+    };
+    let follows = |first: &Result<BundleReport, String>| {
+        first.as_ref().map_or(true, |r| r.stopped.is_none())
+            && runtime.admin_remaining_calls() >= reserve + min_calls
+    };
+    if cmcd_first {
+        let first = cmcd_bundle(store, cdn_key, reserve, cmcd_record, true);
+        if follows(&first) {
+            out.request = Some(request_bundle(
+                store,
+                cdn_key,
+                reserve,
+                Some(request_record),
+                false,
+            ));
+        }
+        out.cmcd = Some(first);
+    } else {
+        let first = request_bundle(store, cdn_key, reserve, Some(request_record), true);
+        if follows(&first) {
+            out.cmcd = Some(cmcd_bundle(
+                store,
+                cdn_key,
+                reserve,
+                Some(cmcd_record.flatten()),
+                false,
+            ));
+        }
+        out.request = Some(first);
+    }
+    Ok(out)
 }
 
 /// One dataset's bundling: where its windows and bundles live, how window files are named, its
@@ -3354,10 +3450,14 @@ struct Spec {
     caller: &'static str,
 }
 
+/// `record` is the dataset's state when the caller already read it; a `lead` run that had work
+/// stamps `led`, so the other dataset leads next.
 fn run<R: Runtime, A: Fold>(
     store: &Store<'_, R>,
     cdn_key: &str,
     reserve: u32,
+    record: Option<Option<crate::admin::Record>>,
+    lead: bool,
     spec: Spec,
 ) -> Result<BundleReport, String> {
     let runtime = store.runtime;
@@ -3383,7 +3483,10 @@ fn run<R: Runtime, A: Fold>(
     if let Some(usage) = runtime.usage_agg() {
         usage.set_caller(spec.caller);
     }
-    let record = runtime.admin_get(state_key)?;
+    let record = match record {
+        Some(record) => record,
+        None => runtime.admin_get(state_key)?,
+    };
     let mut state: State = record
         .as_ref()
         .and_then(|r| serde_json::from_value(r.value.clone()).ok())
@@ -3621,6 +3724,14 @@ fn run<R: Runtime, A: Fold>(
         .retain(|h, _| *h >= keep_from || dirty.contains(&(h.div_euclid(DAY_S) * DAY_S)));
     state.days.retain(|d, _| *d >= keep_from);
     state.catalog_hours.retain(|h, _| *h >= keep_from);
+    let report = &ctx.report;
+    if lead
+        && (report.more_pending
+            || report.hours + report.days + report.partials > 0
+            || report.deleted > 0)
+    {
+        state.led = now;
+    }
     if state != original {
         let value = serde_json::to_value(&state).map_err(|_| "bundle_state_encode")?;
         if !runtime.admin_cas(
