@@ -66,7 +66,12 @@ export async function fetchIngestDeletedBytes(
     if (Number.isFinite(size) && size >= 0 && !known.has(key)) {
       known.set(key, size);
     }
-    const at = Number(row.raw_deleted_at ?? row.timestamp);
+    const rawAt = row.raw_deleted_at ?? row.timestamp;
+    const numericAt = Number(rawAt);
+    const at =
+      typeof rawAt === "string" && !Number.isFinite(numericAt)
+        ? Date.parse(rawAt)
+        : numericAt;
     const version = Number(row.state_version ?? 0);
     const candidate = {
       deleted: row.raw_deleted === true,
