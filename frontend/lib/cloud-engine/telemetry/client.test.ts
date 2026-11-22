@@ -272,4 +272,16 @@ describe("readLogs request sharing", () => {
     await clearDashboardData();
     expect([...bucketEntries.keys()]).toEqual([]);
   });
+
+  it("resets activeOpsUser to null on full clearOpsCaches() while preserving non-matching user wipe", async () => {
+    const sourcesMod = await import("./sources");
+    await sourcesMod.syncOpsCacheForSession({ userId: "alice", needsLogin: false });
+    expect(sourcesMod.activeOpsUser()).toBe("alice");
+
+    await sourcesMod.clearOpsCaches({ user: "bob" });
+    expect(sourcesMod.activeOpsUser()).toBe("alice");
+
+    await sourcesMod.clearOpsCaches();
+    expect(sourcesMod.activeOpsUser()).toBeNull();
+  });
 });

@@ -32,12 +32,62 @@ function opsAbortError(): DOMException {
 /** The signed-in user whose session cookies the browser sends with ops reads. */
 export const activeOpsUser = (): string | null => activeUserId;
 
+export const currentOpsCacheEpoch = (): number => opsCacheEpoch;
+
 export const currentVolatileOpsScope = (): string => volatileOpsScope;
+
+export function assertOpsEpoch(
+  entryOpsEpoch: number,
+  signal?: AbortSignal,
+): void {
+  signal?.throwIfAborted();
+  if (entryOpsEpoch !== opsCacheEpoch) {
+    throw opsAbortError();
+  }
+}
+
+export function currentOpsIdentity(
+  explicit?: { user?: string; role?: string } | null,
+): OpsIdentity {
+  const dashId = dashboardCacheIdentity();
+  let dashUser: string | null = null;
+  let dashRole: string | null = null;
+  if (dashId && dashId !== "anonymous") {
+    const sep = dashId.lastIndexOf(":");
+    if (sep > 0) {
+      dashUser = dashId.slice(0, sep);
+      dashRole = dashId.slice(sep + 1) || null;
+    } else {
+      dashUser = dashId;
+    }
+  }
+  let explicitUser =
+    explicit?.user && explicit.user.trim().length > 0
+      ? explicit.user.trim()
+      : null;
+  let explicitRole =
+    explicit?.role && explicit.role.trim().length > 0
+      ? explicit.role.trim()
+      : null;
+  if (explicitUser && dashId && explicitUser === dashId && dashUser) {
+    explicitUser = dashUser;
+    explicitRole ??= dashRole;
+  }
+  const user = explicitUser ?? activeUserId ?? dashUser ?? volatileOpsScope;
+  const role =
+    explicitRole ??
+    (activeUserId === null || activeUserId === dashUser ? dashRole : null) ??
+    "admin";
+  return { user, role };
+}
 
 /** Deletes ops caches: all of them, or one user's (optionally keeping one partition). */
 export async function clearOpsCaches(
   options: { user?: string; keep?: string } = {},
 ): Promise<void> {
+  if (!options.user) {
+    activeUserId = null;
+  }
   opsCacheEpoch += 1;
   volatileOpsScope = `volatile-ops-${++volatileOpsScopeCounter}`;
   for (const controller of activeOpsControllers) {
@@ -89,20 +139,7 @@ export function browserOpsSource(
     typeof identityOrPageLoad === "object" && identityOrPageLoad !== null
       ? identityOrPageLoad
       : null;
-  const resolvedUser =
-    (explicitIdentity?.user && explicitIdentity.user.trim().length > 0
-      ? explicitIdentity.user
-      : null) ??
-    activeUserId ??
-    dashboardCacheIdentity() ??
-    volatileOpsScope;
-  const identity: OpsIdentity = {
-    user: resolvedUser,
-    role:
-      explicitIdentity?.role && explicitIdentity.role.trim().length > 0
-        ? explicitIdentity.role
-        : "admin",
-  };
+  const identity = currentOpsIdentity(explicitIdentity);
   const resolvedOptions: BrowserSourceOptions | undefined =
     typeof identityOrPageLoad === "function"
       ? {

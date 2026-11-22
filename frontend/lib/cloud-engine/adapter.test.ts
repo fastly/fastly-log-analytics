@@ -1693,6 +1693,8 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     const { clearDashboardData, setDashboardCacheIdentity } = await import("./dashboard/client");
     const { getDuckDBEngine } = await import("./dashboard/duckdb");
 
+    vi.stubGlobal("Worker", undefined);
+    ops.resetOpsLogsClient();
     const cacheBuckets = new Map<string, Map<string, Response>>();
     vi.stubGlobal("caches", {
       async open(name: string) {
@@ -1852,5 +1854,402 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     expect([...cacheBuckets.keys()]).toEqual([]);
     const rowsAfter = await getDuckDBEngine().readContext().executeSql("SELECT count(*) AS cnt FROM requests");
     expect(rowsAfter).toEqual([{ cnt: 0 }]);
+  });
+
+  it("allows concurrent Compare Mode POST /api/dashboard/bundle + POST /api/dashboard/aggregates + POST /api/dashboard/field-values + POST /api/web-vitals + GET /api/log-extents without aborting shared metadataCache", async () => {
+    const { setDashboardCacheIdentity } = await import("./dashboard/client");
+    const dashboardClient = await import("./dashboard/client");
+    await setDashboardCacheIdentity("alice:admin");
+
+    vi.spyOn(dashboardClient, "runInWorker").mockResolvedValue({
+      totalRequests: 10,
+      buckets: [],
+      cards: {},
+      stats: { rows: 10, bytes: 512, listed: 1, fetched: 0, cached: 1, cdnHits: 1 },
+    } as never);
+    vi.spyOn(dashboardClient, "searchFieldValuesInWorker").mockResolvedValue([
+      { value: "v1", count: 4 },
+    ]);
+
+    let resolveCatalog!: (res: Response) => void;
+    let resolveExtents!: (res: Response) => void;
+    let notifyCatalogStarted!: () => void;
+    let notifyExtentsStarted!: () => void;
+    let catalogFetches = 0;
+    let extentsFetches = 0;
+    const catalogStarted = new Promise<void>((r) => { notifyCatalogStarted = r; });
+    const extentsStarted = new Promise<void>((r) => { notifyExtentsStarted = r; });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url.includes("/api/log-fields/catalog")) {
+          catalogFetches += 1;
+          notifyCatalogStarted();
+          return new Promise<Response>((r) => { resolveCatalog = r; });
+        }
+        if (url.includes("/api/log-extents")) {
+          extentsFetches += 1;
+          notifyExtentsStarted();
+          return new Promise<Response>((r) => { resolveExtents = r; });
+        }
+        if (url.includes("/api/services")) {
+          return Promise.resolve(
+            Response.json({
+              services: [
+                {
+                  service_id: "svc-alice",
+                  log_fields: {
+                    custom_fields: [{ name: "x_tenant", sql_type: "VARCHAR" }],
+                  },
+                },
+              ],
+            }),
+          );
+        }
+        return Promise.resolve(Response.json({ ok: true }));
+      }),
+    );
+
+    const bundleReq = handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/dashboard/bundle?service_id=svc-alice", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          start_time: "2026-11-10T00:00:00Z",
+          end_time: "2026-11-10T01:00:00Z",
+          custom_filters: { x_tenant: { mode: "include", values: ["acme"] } },
+        }),
+      }),
+    );
+    const extentsReq = handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/log-extents"),
+    );
+
+    await Promise.all([catalogStarted, extentsStarted]);
+
+    // Fire concurrent Compare Mode aggregates, field-values, web-vitals, and ux-events while metadata is in flight:
+    const compareAggsReq = handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/dashboard/aggregates?service_id=svc-alice", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          start_time: "2026-11-09T23:00:00Z",
+          end_time: "2026-11-10T00:00:00Z",
+          custom_filters: { x_tenant: { mode: "include", values: ["acme"] } },
+        }),
+      }),
+    );
+    const fieldValuesReq = handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/dashboard/field-values?service_id=svc-alice", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          field: "x_tenant",
+          start_time: "2026-11-10T00:00:00Z",
+          end_time: "2026-11-10T01:00:00Z",
+        }),
+      }),
+    );
+    const webVitalsRes = await handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/web-vitals", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "LCP", value: 120 }),
+      }),
+    );
+    const uxEventsRes = await handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/ux-events", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ event: "click" }),
+      }),
+    );
+
+    expect(webVitalsRes?.status).toBe(204);
+    expect(uxEventsRes?.status).toBe(204);
+
+    resolveCatalog(Response.json({ groups: [], fields: [] }));
+    resolveExtents(
+      Response.json({
+        earliest_log_at: "2026-11-10T00:00:00Z",
+        latest_log_at: "2026-11-10T01:00:00Z",
+      }),
+    );
+
+    const [bundleRes, extentsRes, compareAggsRes, fieldValuesRes] = await Promise.all([
+      bundleReq,
+      extentsReq,
+      compareAggsReq,
+      fieldValuesReq,
+    ]);
+    expect(bundleRes?.status).toBe(200);
+    expect(extentsRes?.status).toBe(200);
+    expect(compareAggsRes?.status).toBe(200);
+    expect(fieldValuesRes?.status).toBe(200);
+    expect(catalogFetches).toBe(1);
+    expect(extentsFetches).toBe(1);
+  });
+
+  it("fences POST /api/dashboard/bundle, POST /api/dashboard/aggregates, and POST /api/dashboard/field-values across clearDashboardData without re-populating CacheStorage", async () => {
+    const { clearDashboardData, setDashboardCacheIdentity } = await import("./dashboard/client");
+    const dashboardClient = await import("./dashboard/client");
+    await setDashboardCacheIdentity("alice:admin");
+
+    vi.stubGlobal("Worker", undefined);
+    ops.resetOpsLogsClient();
+    const cacheBuckets = new Map<string, Map<string, Response>>();
+    vi.stubGlobal("caches", {
+      async open(name: string) {
+        let b = cacheBuckets.get(name);
+        if (!b) {
+          b = new Map();
+          cacheBuckets.set(name, b);
+        }
+        return {
+          async match(k: RequestInfo | URL) { return b!.get(String(k))?.clone(); },
+          async put(k: RequestInfo | URL, v: Response) { b!.set(String(k), v.clone()); },
+          async delete(k: RequestInfo | URL) { return b!.delete(String(k)); },
+          async keys() { return [...b!.keys()].map((u) => new Request(u)); },
+        };
+      },
+      async keys() { return [...cacheBuckets.keys()]; },
+      async delete(name: string) { return cacheBuckets.delete(name); },
+    });
+
+    const runSpy = vi.spyOn(dashboardClient, "runInWorker").mockImplementation(async () => {
+      await caches.open("flp-parquet-v1");
+      return {
+        totalRequests: 1,
+        buckets: [],
+        cards: {},
+        stats: { rows: 1, bytes: 64, listed: 1, fetched: 1, cached: 0, cdnHits: 0 },
+      } as never;
+    });
+    const searchSpy = vi.spyOn(dashboardClient, "searchFieldValuesInWorker").mockImplementation(async () => {
+      await caches.open("flp-manifest-v1");
+      return [];
+    });
+
+    const makeSuspendedPost = (url: string, payload: Record<string, unknown>) => {
+      let notifyCloning!: () => void;
+      let releaseJson!: () => void;
+      const cloning = new Promise<void>((r) => { notifyCloning = r; });
+      let cloneCount = 0;
+      const req = new Request(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const origClone = req.clone.bind(req);
+      vi.spyOn(req, "clone").mockImplementation(() => {
+        cloneCount += 1;
+        const cloned = origClone();
+        // Suspend at dispatchCloudRequest's body parse (clone #2 for DASHBOARD_PATH, clone #1 for field-values)
+        const targetClone = url.includes("field-values") ? 1 : 2;
+        if (cloneCount === targetClone) {
+          vi.spyOn(cloned, "json").mockImplementation(async () => {
+            notifyCloning();
+            await new Promise<void>((r) => { releaseJson = r; });
+            return payload;
+          });
+        }
+        return cloned;
+      });
+      return { req, cloning, release: () => releaseJson() };
+    };
+
+    const sBundle = makeSuspendedPost("http://localhost/api/dashboard/bundle", {
+      start_time: "2026-11-10T00:00:00Z",
+      end_time: "2026-11-10T01:00:00Z",
+    });
+    const sAggs = makeSuspendedPost("http://localhost/api/dashboard/aggregates", {
+      start_time: "2026-11-10T00:00:00Z",
+      end_time: "2026-11-10T01:00:00Z",
+    });
+    const sFieldVals = makeSuspendedPost("http://localhost/api/dashboard/field-values", {
+      field: "url",
+      start_time: "2026-11-10T00:00:00Z",
+      end_time: "2026-11-10T01:00:00Z",
+    });
+
+    const pBundle = handleCloudAnalyticalRequest(sBundle.req);
+    const pAggs = handleCloudAnalyticalRequest(sAggs.req);
+    const pFieldVals = handleCloudAnalyticalRequest(sFieldVals.req);
+
+    await Promise.all([sBundle.cloning, sAggs.cloning, sFieldVals.cloning]);
+    await clearDashboardData();
+
+    sBundle.release();
+    sAggs.release();
+    sFieldVals.release();
+
+    await expect(pBundle).rejects.toMatchObject({ name: "AbortError" });
+    await expect(pAggs).rejects.toMatchObject({ name: "AbortError" });
+    await expect(pFieldVals).rejects.toMatchObject({ name: "AbortError" });
+    expect(runSpy).not.toHaveBeenCalled();
+    expect(searchSpy).not.toHaveBeenCalled();
+    expect([...cacheBuckets.keys()]).toEqual([]);
+  });
+
+  it("scopes /api/usage/* ops caches to the signed-in bootstrap identity (never default:admin) and fences GET /api/cron-runs and GET /api/usage/prefill across clearDashboardData + clearOpsCaches", async () => {
+    vi.restoreAllMocks();
+    const { clearDashboardData } = await import("./dashboard/client");
+    const { activeOpsUser, clearOpsCaches } = await import("./telemetry/sources");
+
+    vi.stubGlobal("Worker", undefined);
+    ops.resetOpsLogsClient();
+    const cacheBuckets = new Map<string, Map<string, Response>>();
+    vi.stubGlobal("caches", {
+      async open(name: string) {
+        let b = cacheBuckets.get(name);
+        if (!b) {
+          b = new Map();
+          cacheBuckets.set(name, b);
+        }
+        return {
+          async match(k: RequestInfo | URL) { return b!.get(String(k))?.clone(); },
+          async put(k: RequestInfo | URL, v: Response) { b!.set(String(k), v.clone()); },
+          async delete(k: RequestInfo | URL) { return b!.delete(String(k)); },
+          async keys() { return [...b!.keys()].map((u) => new Request(u)); },
+        };
+      },
+      async keys() { return [...cacheBuckets.keys()]; },
+      async delete(name: string) { return cacheBuckets.delete(name); },
+    });
+
+    // 1. Bootstrap as alice:admin -> must sync activeOpsUser to "alice" and scope /api/usage/current-storage to alice:admin (never default:admin)
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url.includes("/api/bootstrap")) {
+          return Response.json({
+            runtime_mode: "cloud",
+            user: { id: "alice", role: "admin" },
+            services: [{ service_id: "svc-alice" }],
+            active_service_id: "svc-alice",
+            active_log_field_ids: [],
+            log_fields_catalog: { fields: [] },
+            views: [],
+            build_sha: "796123d2e",
+            ngwaf_configured: false,
+            fastly_bots_available: false,
+            settings: { needs_login: false },
+            debug_state: {},
+          });
+        }
+        if (url.includes("/api/admin/usage-logging")) {
+          return Response.json(fixtureUsageInput.settings);
+        }
+        const startSec = Math.floor(Date.parse("2026-11-10T00:00:00Z") / 1000);
+        if (url.includes("/api/files")) {
+          return Response.json({
+            files: [
+              {
+                key: `processed/ops/fos_usage/year=2026/month=11/day=10/hour=00/window=${startSec}-${startSec + 600}-s1-n1.parquet`,
+                start: "2026-11-10T00:00:00Z",
+                end: "2026-11-10T00:10:00Z",
+                size: 4,
+                rows: 1,
+              },
+            ],
+            next_cursor: null,
+            complete: true,
+          });
+        }
+        if (url.includes("/api/logs") || url.includes("/api/admin/logs")) {
+          return Response.json({ rows: [], next_cursor: null });
+        }
+        if (url.includes("/fos/pq/") || url.includes("/api/file")) {
+          return new Response(new Uint8Array([80, 65, 82, 49]), {
+            status: 200,
+            headers: { etag: '"e1"' },
+          });
+        }
+        if (url.includes("/api/admin/usage/platform-bundle")) {
+          return Response.json({
+            platform: { storage: { status: "ok", bytes: 0 }, compute: { status: "ok", requests: 0 }, ngwaf: { status: "not_configured" } },
+            compute_billing: { services: [] },
+          });
+        }
+        return Response.json({});
+      }),
+    );
+
+    const boot = await handleCloudAnalyticalRequest(new Request("http://localhost/api/bootstrap"));
+    expect(boot?.status).toBe(200);
+    expect(activeOpsUser()).toBe("alice");
+
+    await handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/usage/current-storage?start=2026-11-10T00:00:00Z&end=2026-11-10T01:00:00Z"),
+    ).catch(() => null);
+    expect([...cacheBuckets.keys()].some((k) => k.includes("default:admin"))).toBe(false);
+    expect([...cacheBuckets.keys()]).toContain("flp-ops-parquet-v1:alice:admin");
+
+    // 2. Pause GET /api/cron-runs in nativePages and GET /api/usage/prefill in fetchUsageSettings across clearDashboardData + clearOpsCaches:
+    let notifyCronPageStarted!: () => void;
+    let releaseCronPage!: (res: Response) => void;
+    let notifyPrefillSettingsStarted!: () => void;
+    let releasePrefillSettings!: (res: Response) => void;
+    const cronPageStarted = new Promise<void>((r) => { notifyCronPageStarted = r; });
+    const prefillSettingsStarted = new Promise<void>((r) => { notifyPrefillSettingsStarted = r; });
+
+    usage.resetUsageSettingsCache();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url.includes("/api/cron-runs")) {
+          notifyCronPageStarted();
+          return new Promise<Response>((r) => { releaseCronPage = r; });
+        }
+        if (url.includes("/api/admin/usage-logging")) {
+          notifyPrefillSettingsStarted();
+          return new Promise<Response>((r) => { releasePrefillSettings = r; });
+        }
+        if (url.includes("/api/admin/logs/")) {
+          return Promise.resolve(
+            Response.json({
+              live_rows: [],
+              live_truncated: false,
+              files: ["processed/ops/cron_runs/2026-11-10T00-00Z.parquet"],
+            }),
+          );
+        }
+        if (url.includes("/fos/pq/") || url.includes("/api/file")) {
+          return Promise.resolve(
+            new Response(new Uint8Array([80, 65, 82, 49]), {
+              status: 200,
+              headers: { etag: '"e2"' },
+            }),
+          );
+        }
+        return Promise.resolve(Response.json({ days: [], services: [] }));
+      }),
+    );
+
+    const cronPending = handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/cron-runs"),
+    );
+    const prefillPending = handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/usage/prefill"),
+    );
+
+    await Promise.all([cronPageStarted, prefillSettingsStarted]);
+    await clearDashboardData();
+    await clearOpsCaches();
+    expect(activeOpsUser()).toBeNull();
+    expect([...cacheBuckets.keys()]).toEqual([]);
+
+    releaseCronPage?.(
+      Response.json({ service_id: "svc-alice", runs: [], complete: true, next_cursor: null }),
+    );
+    releasePrefillSettings?.(Response.json(fixtureUsageInput.settings));
+
+    await expect(cronPending).rejects.toMatchObject({ name: "AbortError" });
+    await expect(prefillPending).rejects.toMatchObject({ name: "AbortError" });
+    expect([...cacheBuckets.keys()]).toEqual([]);
   });
 });

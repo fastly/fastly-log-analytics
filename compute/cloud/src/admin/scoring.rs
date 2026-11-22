@@ -1664,45 +1664,110 @@ fn ensure_scorer_store_config_step(
         .is_some_and(|v| {
             v["active"].as_bool() != Some(true) && v["locked"].as_bool() != Some(true)
         });
-    if v1_unlocked {
-        let existing_res = context.api(
-            "GET",
-            &format!("/service/{scorer_sid}/version/1/resource"),
+    if v1_unlocked
+        && !sync_scorer_resource_links(
+            context,
+            &scorer_sid,
+            1,
+            [
+                (KEYS_RESOURCE_LINK_NAME, keys_store_id.as_str()),
+                (CONFIG_RESOURCE_LINK_NAME, cfg_store_id.as_str()),
+                (MATRIX_RESOURCE_LINK_NAME, matrix_store_id.as_str()),
+            ],
             token,
-            None,
-        )?;
-        let existing_links = list(&existing_res)?;
-        for (link_name, res_id) in [
-            (KEYS_RESOURCE_LINK_NAME, keys_store_id.as_str()),
-            (CONFIG_RESOURCE_LINK_NAME, cfg_store_id.as_str()),
-            (MATRIX_RESOURCE_LINK_NAME, matrix_store_id.as_str()),
-        ] {
-            if res_id.is_empty() {
-                continue;
-            }
-            if existing_links.iter().any(|r| {
-                r["name"].as_str() == Some(link_name) && r["resource_id"].as_str() == Some(res_id)
-            }) {
-                continue;
-            }
-            if context.remaining_calls() < 8 {
-                return Ok(());
-            }
-            let (status, _) = context.api_status(
-                "POST",
-                &format!("/service/{scorer_sid}/version/1/resource"),
-                token,
-                Some(json!({"name": link_name, "resource_id": res_id})),
-            )?;
-            if !(200..300).contains(&status) && status != 409 {
-                return Err(Error::new(502, "scorer_resource_link_failed"));
-            }
-        }
+        )?
+    {
+        return Ok(());
     }
 
     job.scorer_ownership_verified = false;
     advance(job, "scorer_deploy");
     Ok(())
+}
+
+fn sync_scorer_resource_links(
+    context: &Context<'_, impl Runtime>,
+    scorer_sid: &str,
+    version: u64,
+    links: [(&str, &str); 3],
+    token: &str,
+) -> Result<bool, Error> {
+    if context.remaining_calls() < 6 {
+        return Ok(false);
+    }
+    let existing_res = context.api(
+        "GET",
+        &format!("/service/{scorer_sid}/version/{version}/resource"),
+        token,
+        None,
+    )?;
+    let existing_links = list(&existing_res)?;
+    for (link_name, res_id) in links {
+        if res_id.is_empty() {
+            continue;
+        }
+        if let Some(existing) = existing_links
+            .iter()
+            .find(|r| r["name"].as_str() == Some(link_name))
+        {
+            if existing["resource_id"].as_str() == Some(res_id) {
+                continue;
+            }
+            if context.remaining_calls() < 8 {
+                return Ok(false);
+            }
+            let link_id = existing["id"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| Error::new(502, "scorer_resource_link_failed"))?;
+            let (del_status, _) = context.api_status(
+                "DELETE",
+                &format!(
+                    "/service/{scorer_sid}/version/{version}/resource/{}",
+                    encode(link_id)
+                ),
+                token,
+                None,
+            )?;
+            if !(200..300).contains(&del_status) && del_status != 404 {
+                return Err(Error::new(502, "scorer_resource_link_failed"));
+            }
+        }
+        if context.remaining_calls() < 8 {
+            return Ok(false);
+        }
+        let (status, post_body) = context.api_status(
+            "POST",
+            &format!("/service/{scorer_sid}/version/{version}/resource"),
+            token,
+            Some(json!({"name": link_name, "resource_id": res_id})),
+        )?;
+        if (200..300).contains(&status) {
+            continue;
+        }
+        if status == 409 {
+            let matches_body = post_body["resource_id"].as_str() == Some(res_id);
+            let matches_live = if matches_body {
+                true
+            } else {
+                let refreshed = context.api(
+                    "GET",
+                    &format!("/service/{scorer_sid}/version/{version}/resource"),
+                    token,
+                    None,
+                )?;
+                list(&refreshed)?.iter().any(|r| {
+                    r["name"].as_str() == Some(link_name)
+                        && r["resource_id"].as_str() == Some(res_id)
+                })
+            };
+            if matches_live {
+                continue;
+            }
+        }
+        return Err(Error::new(502, "scorer_resource_link_failed"));
+    }
+    Ok(true)
 }
 
 fn deploy_scorer_step(
@@ -1797,62 +1862,24 @@ fn deploy_scorer_step(
             base_ver
         };
 
-        if context.remaining_calls() < 6 {
-            return Ok(());
-        }
-        let existing_res = context.api(
-            "GET",
-            &format!("/service/{scorer_sid}/version/{deploy_ver}/resource"),
+        if !sync_scorer_resource_links(
+            context,
+            &scorer_sid,
+            deploy_ver,
+            [
+                (KEYS_RESOURCE_LINK_NAME, sc.scoring_keys_store_id.as_str()),
+                (
+                    CONFIG_RESOURCE_LINK_NAME,
+                    sc.scoring_config_store_id.as_str(),
+                ),
+                (
+                    MATRIX_RESOURCE_LINK_NAME,
+                    sc.scoring_matrix_store_id.as_str(),
+                ),
+            ],
             token,
-            None,
-        )?;
-        let existing_links = list(&existing_res)?;
-        for (link_name, res_id) in [
-            (KEYS_RESOURCE_LINK_NAME, sc.scoring_keys_store_id.as_str()),
-            (
-                CONFIG_RESOURCE_LINK_NAME,
-                sc.scoring_config_store_id.as_str(),
-            ),
-            (
-                MATRIX_RESOURCE_LINK_NAME,
-                sc.scoring_matrix_store_id.as_str(),
-            ),
-        ] {
-            if res_id.is_empty() {
-                continue;
-            }
-            if let Some(existing) = existing_links
-                .iter()
-                .find(|r| r["name"].as_str() == Some(link_name))
-            {
-                if existing["resource_id"].as_str() == Some(res_id) {
-                    continue;
-                }
-                if context.remaining_calls() < 8 {
-                    return Ok(());
-                }
-                let _ = context.api_status(
-                    "DELETE",
-                    &format!(
-                        "/service/{scorer_sid}/version/{deploy_ver}/resource/{}",
-                        encode(link_name)
-                    ),
-                    token,
-                    None,
-                )?;
-            }
-            if context.remaining_calls() < 8 {
-                return Ok(());
-            }
-            let (status, _) = context.api_status(
-                "POST",
-                &format!("/service/{scorer_sid}/version/{deploy_ver}/resource"),
-                token,
-                Some(json!({"name": link_name, "resource_id": res_id})),
-            )?;
-            if !(200..300).contains(&status) && status != 409 {
-                return Err(Error::new(502, "scorer_resource_link_failed"));
-            }
+        )? {
+            return Ok(());
         }
 
         if context.remaining_calls() < 11 {
@@ -2361,51 +2388,83 @@ fn cleanup_scoring_state_step(
         || job.kind == "scoring_disable" && job.delete_matrices
         || job.kind == "teardown"
     {
-        if context.remaining_calls() < 9 {
+        if context.remaining_calls() < 11 {
             return Ok(());
         }
         if let Ok(creds) = fos::credentials(context, service) {
             let prefix = scoring_fos_prefix(service);
             let latest = format!("{prefix}matrix_latest.json");
             let index_key = format!("{prefix}matrices/index.json");
-            if let Ok(Some(idx)) = fos_json_get_with_creds(context, service, &creds, &index_key) {
-                if let Some(versions) = idx["versions"].as_array() {
+            let mut need_index_delete = false;
+            let mut s3_write_failed = false;
+            match fos_json_get_with_creds(context, service, &creds, &index_key) {
+                Ok(Some(idx)) => {
                     let mut remaining = Vec::new();
-                    for entry in versions {
-                        if context.remaining_calls() <= 7 {
-                            remaining.push(entry.clone());
-                            continue;
-                        }
-                        if let Some(ver) = entry["version"]
-                            .as_str()
-                            .filter(|v| valid_matrix_version(v))
-                        {
-                            let _ = fos::delete_object(
-                                context,
-                                service,
-                                &creds,
-                                &format!("{prefix}matrices/{ver}.json"),
-                            );
+                    let mut total_versions = 0usize;
+                    if let Some(versions) = idx["versions"].as_array() {
+                        total_versions = versions.len();
+                        for entry in versions {
+                            if context.remaining_calls() <= 7 {
+                                remaining.push(entry.clone());
+                                continue;
+                            }
+                            if let Some(ver) = entry["version"]
+                                .as_str()
+                                .filter(|v| valid_matrix_version(v))
+                            {
+                                let _ = fos::delete_object(
+                                    context,
+                                    service,
+                                    &creds,
+                                    &format!("{prefix}matrices/{ver}.json"),
+                                );
+                            }
                         }
                     }
                     if !remaining.is_empty() {
-                        let _ = fos_json_put_with_creds(
-                            context,
-                            service,
-                            &creds,
-                            &index_key,
-                            &json!({"versions": remaining}),
-                        );
-                        return Ok(());
+                        if remaining.len() < total_versions
+                            && fos_json_put_with_creds(
+                                context,
+                                service,
+                                &creds,
+                                &index_key,
+                                &json!({"versions": remaining}),
+                            )
+                            .is_ok()
+                        {
+                            return Ok(());
+                        }
+                        s3_write_failed = true;
+                        need_index_delete = true;
+                    } else {
+                        let index_deleted =
+                            fos::delete_object(context, service, &creds, &index_key).is_ok();
+                        if index_deleted && context.remaining_calls() < 8 {
+                            return Ok(());
+                        }
+                        if !index_deleted {
+                            s3_write_failed = true;
+                        }
                     }
                 }
+                Ok(None) => {}
+                Err(_) => {
+                    need_index_delete = true;
+                }
             }
-            if context.remaining_calls() < 9 {
+            if !s3_write_failed && context.remaining_calls() < if need_index_delete { 9 } else { 8 }
+            {
                 return Ok(());
             }
-            let _ = fos::delete_object(context, service, &creds, &index_key);
-            let _ = fos::delete_object(context, service, &creds, &latest);
-            if job.kind == "scoring_teardown" || job.kind == "teardown" {
+            if need_index_delete && context.remaining_calls() >= 7 {
+                let _ = fos::delete_object(context, service, &creds, &index_key);
+            }
+            if context.remaining_calls() >= 7 {
+                let _ = fos::delete_object(context, service, &creds, &latest);
+            }
+            if (job.kind == "scoring_teardown" || job.kind == "teardown")
+                && context.remaining_calls() >= 7
+            {
                 let _ =
                     fos::delete_object(context, service, &creds, &format!("{prefix}labels.json"));
             }
@@ -2506,20 +2565,78 @@ pub fn rollback_failed_enable(
     record: &Record,
     job: &mut Job,
 ) {
+    let fresh_rec;
+    let rec: &Record = if record.generation != job.expected_generation
+        && context.remaining_calls() >= 7
+    {
+        if let Ok((loaded_rec, loaded_svc)) = load_service_from(context, &job.service_id, true) {
+            *service = loaded_svc;
+            fresh_rec = loaded_rec;
+            &fresh_rec
+        } else {
+            record
+        }
+    } else {
+        record
+    };
+    let passed_logging_reconcile = job.kind == "scoring_enable"
+        && (job.completed_steps.iter().any(|s| s == "logging_reconcile")
+            || matches!(
+                job.step.as_str(),
+                "discover" | "clone" | "apply" | "validate" | "activate" | "sync_rum" | "finalize"
+            ));
+    let next_step = if passed_logging_reconcile {
+        "logging_reconcile".to_owned()
+    } else {
+        job.step.clone()
+    };
+    let mut rolled_back_state = false;
     if let Some(sc) = service.scoring.as_mut() {
         if sc.enabled {
             sc.enabled = false;
-            remove_scoring_custom_fields(&mut service.log_fields);
-            let _ = save_job_service(
-                context,
-                record,
-                service,
-                job,
-                "scoring.enable_rolled_back",
-                &job.step,
-            );
+            rolled_back_state = true;
         }
     }
+    if rolled_back_state {
+        remove_scoring_custom_fields(&mut service.log_fields);
+        if checkpoint_scoring_job_service(
+            context,
+            rec,
+            service,
+            job,
+            "scoring.enable_rolled_back",
+            &next_step,
+        )
+        .is_ok()
+            && passed_logging_reconcile
+        {
+            rewind_scoring_enable_to_logging_reconcile(job);
+        }
+    } else if passed_logging_reconcile {
+        rewind_scoring_enable_to_logging_reconcile(job);
+    }
+}
+
+fn rewind_scoring_enable_to_logging_reconcile(job: &mut Job) {
+    job.step = "logging_reconcile".into();
+    job.completed_steps.retain(|s| {
+        !matches!(
+            s.as_str(),
+            "logging_reconcile"
+                | "discover"
+                | "clone"
+                | "apply"
+                | "validate"
+                | "activate"
+                | "sync_rum"
+                | "finalize"
+        )
+    });
+    job.source_version = None;
+    job.draft_version = None;
+    job.clone_intent = None;
+    job.changes.clear();
+    job.change_cursor = 0;
 }
 
 pub fn on_job_finalized(context: &Context<'_, impl Runtime>, job: &Job, service: &Service) {

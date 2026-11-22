@@ -1576,6 +1576,80 @@ fn main() {
     let dr17_backends = rt_dr17.admin.resources(&sc17_sid, "backend").len();
     let dr17_links = rt_dr17.admin.resources(&sc17_sid, "resource").len();
 
+    // Iteration-21 WS1 (BUG-CLOUD-DR-18A/B/C):
+    // 1) 4-matrix cleanup_scoring_state_step on scoring/disable(delete_matrices=true) without livelock,
+    // 2) rollback_failed_enable rewind to logging_reconcile on validate failure + retry!
+    let mut dr18_versions = Vec::new();
+    for n in 1..=4usize {
+        let ver = format!("2027-03-01-e2e-{n}");
+        rt_dr17.admin.seed_object_bytes(
+            "fos-fixture-logs",
+            &format!("processed/scoring/matrices/{ver}.json"),
+            serde_json::to_vec(&json!({"version": ver, "vocab_size": 1})).unwrap(),
+        );
+        dr18_versions.push(json!({"version": ver, "vocab_size": 1}));
+    }
+    rt_dr17.admin.seed_object_bytes(
+        "fos-fixture-logs",
+        "processed/scoring/matrices/index.json",
+        serde_json::to_vec(&json!({"versions": dr18_versions})).unwrap(),
+    );
+    let (_, dr18_dis_start) = rt_dr17.call_budgeted(
+        "POST",
+        "/api/services/fixtureService/scoring/disable",
+        json!({"delete_matrices": true}),
+    );
+    let mut jb_dr18_dis = dr18_dis_start["job"].clone();
+    for _ in 0..30 {
+        if jb_dr18_dis["status"] == "complete" || jb_dr18_dis["status"] == "failed" {
+            break;
+        }
+        let (st_step, sb) = rt_dr17.call_budgeted(
+            "POST",
+            &format!("/api/admin/jobs/{}/step", jb_dr18_dis["id"].as_str().unwrap()),
+            json!({}),
+        );
+        assert_eq!(st_step, 200, "{sb}");
+        jb_dr18_dis = sb["job"].clone();
+    }
+    let dr18c_dis_status = jb_dr18_dis["status"].as_str().unwrap_or("").to_owned();
+    let dr18c_matrices_gone = !rt_dr17
+        .admin
+        .object_keys("fos-fixture-logs")
+        .iter()
+        .any(|k| k.starts_with("processed/scoring/matrices/"));
+
+    let (_, dr18_en_start) = rt_dr17.call_budgeted("POST", "/api/services/fixtureService/scoring/enable", json!({}));
+    let mut jb_dr18_en = dr18_en_start["job"].clone();
+    let dr18_en_id = jb_dr18_en["id"].as_str().unwrap().to_owned();
+    let mut dr18_injected = false;
+    for _ in 0..45 {
+        if jb_dr18_en["status"] == "complete" || jb_dr18_en["status"] == "failed" {
+            break;
+        }
+        if jb_dr18_en["step"] == "validate" && !dr18_injected {
+            rt_dr17.admin.invalid_draft(true);
+            dr18_injected = true;
+        }
+        let (st_step, sb) = rt_dr17.call_budgeted("POST", &format!("/api/admin/jobs/{dr18_en_id}/step"), json!({}));
+        assert_eq!(st_step, 200, "{sb}");
+        jb_dr18_en = sb["job"].clone();
+    }
+    rt_dr17.admin.invalid_draft(false);
+    rt_dr17.now_s.fetch_add(65, Ordering::SeqCst);
+    let (_, dr18_retried) = rt_dr17.call_budgeted("POST", &format!("/api/admin/jobs/{dr18_en_id}/retry"), json!({}));
+    let mut jb_dr18_rt = dr18_retried["job"].clone();
+    for _ in 0..40 {
+        if jb_dr18_rt["status"] == "complete" || jb_dr18_rt["status"] == "failed" {
+            break;
+        }
+        let (st_step, sb) = rt_dr17.call_budgeted("POST", &format!("/api/admin/jobs/{dr18_en_id}/step"), json!({}));
+        assert_eq!(st_step, 200, "{sb}");
+        jb_dr18_rt = sb["job"].clone();
+    }
+    let dr18b_retry_status = jb_dr18_rt["status"].as_str().unwrap_or("").to_owned();
+    let dr18b_enabled_after = rt_dr17.call("GET", "/api/services/fixtureService/scoring/status", json!({})).1["scoring"]["enabled"] == json!(true);
+
     println!("{}", json!({
         "st_trav": st_trav,
         "st_own_svc": st_own_svc,
@@ -1634,6 +1708,10 @@ fn main() {
         "dr17_domains": dr17_domains,
         "dr17_backends": dr17_backends,
         "dr17_links": dr17_links,
+        "dr18c_dis_status": dr18c_dis_status,
+        "dr18c_matrices_gone": dr18c_matrices_gone,
+        "dr18b_retry_status": dr18b_retry_status,
+        "dr18b_enabled_after": dr18b_enabled_after,
     }));
 }
 """,
@@ -1714,6 +1792,10 @@ fn main() {
     assert dr14["dr17_domains"] == 1
     assert dr14["dr17_backends"] == 1
     assert dr14["dr17_links"] == 3
+    assert dr14["dr18c_dis_status"] == "complete"
+    assert dr14["dr18c_matrices_gone"] is True
+    assert dr14["dr18b_retry_status"] == "complete"
+    assert dr14["dr18b_enabled_after"] is True
 
 
 def test_t5_c04_c12_cloud_disabled_rum_faro_cdn_shield_reconcile_cookie_and_fos_guards(
@@ -5547,7 +5629,7 @@ console.log('NODE_PROXY_AND_CSV_PARITY_OK');
             "lib/cloud-engine/telemetry/client.test.ts",
             "lib/cloud-engine/adapter.test.ts",
             "-t",
-            "wipes range-loader singleton|aborts in-flight|blocks post-logout OPFS persistFile|blocks multi-step runDashboard|aborts in-flight queryRollup|suppresses pending write|skips CacheStorage and error telemetry|isolates cached service stats|clears decoded SecuritySummary|fences in-flight ops CacheStorage|aborts multi-step handleCloudAnalyticalRequest",
+            "wipes range-loader singleton|aborts in-flight|blocks post-logout OPFS persistFile|blocks multi-step runDashboard|aborts in-flight queryRollup|suppresses pending write|skips CacheStorage and error telemetry|isolates cached service stats|clears decoded SecuritySummary|fences in-flight ops CacheStorage|resets activeOpsUser to null|aborts multi-step handleCloudAnalyticalRequest|allows concurrent Compare Mode|fences POST /api/dashboard/bundle|scopes /api/usage/",
         ],
         cwd=str(REPO_ROOT / "frontend"),
         env=cloud_vitest_env,

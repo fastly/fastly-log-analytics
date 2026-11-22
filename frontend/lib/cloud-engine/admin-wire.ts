@@ -1,8 +1,27 @@
+import { currentStoreMetaEpoch } from "./dashboard/file-store";
+import { dashboardCacheIdentity } from "./dashboard/sources";
 import { adminRequest, deleteLogHistory, purgeQuarantine } from "./telemetry/admin";
 import { queryOpsLogs } from "./telemetry/client";
+import {
+  activeOpsUser,
+  assertOpsEpoch,
+  currentOpsCacheEpoch,
+} from "./telemetry/sources";
 import { deriveFosUsageFromCronRuns, fetchUsageSettings, type CronRunRow, type FosUsageRow } from "./usage/summary";
 
 type Row = Record<string, unknown>;
+
+function assertAdminWireEpoch(
+  request: Request,
+  entryMetaEpoch: number,
+  entryOpsEpoch: number,
+): void {
+  request.signal.throwIfAborted();
+  if (entryMetaEpoch !== currentStoreMetaEpoch()) {
+    throw new DOMException("The operation was aborted.", "AbortError");
+  }
+  assertOpsEpoch(entryOpsEpoch, request.signal);
+}
 
 function id(value: unknown): number {
   let hash = 2166136261;
@@ -15,7 +34,13 @@ function positive(params: URLSearchParams, name: string, fallback: number, max: 
   return Number.isFinite(value) ? Math.min(max, Math.max(1, Math.floor(value))) : fallback;
 }
 
-async function nativePages(request: Request, path: string, field: string): Promise<Row> {
+async function nativePages(
+  request: Request,
+  path: string,
+  field: string,
+  entryMetaEpoch: number,
+  entryOpsEpoch: number,
+): Promise<Row> {
   const url = new URL(path, request.url);
   const original = new URL(request.url);
   for (const [key, value] of original.searchParams) url.searchParams.set(key, value);
@@ -27,8 +52,9 @@ async function nativePages(request: Request, path: string, field: string): Promi
   let first: Row | undefined;
   const cursors = new Set<string>();
   for (let count = 0; count < 32; count++) {
-    request.signal.throwIfAborted();
+    assertAdminWireEpoch(request, entryMetaEpoch, entryOpsEpoch);
     const page = await adminRequest<Row>(`${url.pathname}${url.search}`, { signal: request.signal });
+    assertAdminWireEpoch(request, entryMetaEpoch, entryOpsEpoch);
     first ??= page;
     if (!Array.isArray(page[field])) throw new Error("Invalid Cloud administrative listing");
     rows.push(...page[field] as Row[]);
@@ -54,15 +80,26 @@ const sharedCronReads = new Map<string, { read: Promise<OpsRead>; controller: Ab
 // The logs page asks for runs, recent runs and the schedule at once; all of
 // them need the same cron history, so concurrent callers share one read. The
 // read is cancelled only when every caller has gone.
-async function cronHistory(key: string, range: { from: string; to: string }, signal: AbortSignal): Promise<OpsRead> {
-  signal.throwIfAborted();
-  let entry = sharedCronReads.get(key);
+async function cronHistory(
+  key: string,
+  range: { from: string; to: string },
+  signal: AbortSignal,
+  entryOpsEpoch: number,
+): Promise<OpsRead> {
+  assertOpsEpoch(entryOpsEpoch, signal);
+  const scopedKey = JSON.stringify([
+    key,
+    entryOpsEpoch,
+    activeOpsUser(),
+    dashboardCacheIdentity(),
+  ]);
+  let entry = sharedCronReads.get(scopedKey);
   if (!entry) {
     const controller = new AbortController();
     const created = { read: queryOpsLogs("cron_runs", range, { signal: controller.signal }), controller, users: 0 };
-    const forget = () => { if (sharedCronReads.get(key) === created) sharedCronReads.delete(key); };
+    const forget = () => { if (sharedCronReads.get(scopedKey) === created) sharedCronReads.delete(scopedKey); };
     created.read.then(forget, forget);
-    sharedCronReads.set(key, created);
+    sharedCronReads.set(scopedKey, created);
     entry = created;
   }
   const shared = entry;
@@ -73,13 +110,15 @@ async function cronHistory(key: string, range: { from: string; to: string }, sig
     signal.addEventListener("abort", onAbort, { once: true });
   });
   try {
-    return await Promise.race([shared.read, aborted]);
+    const res = await Promise.race([shared.read, aborted]);
+    assertOpsEpoch(entryOpsEpoch, signal);
+    return res;
   } finally {
     signal.removeEventListener("abort", onAbort);
     shared.users -= 1;
     if (shared.users === 0 && signal.aborted) {
       shared.controller.abort(signal.reason);
-      if (sharedCronReads.get(key) === shared) sharedCronReads.delete(key);
+      if (sharedCronReads.get(scopedKey) === shared) sharedCronReads.delete(scopedKey);
     }
   }
 }
@@ -97,7 +136,11 @@ function matchesTask(row: Row, task: string | null): boolean {
   return row.task === task || (TASK_ALIASES[task] ?? []).includes(String(row.task));
 }
 
-async function cron(request: Request): Promise<Response> {
+async function cron(
+  request: Request,
+  entryMetaEpoch: number,
+  entryOpsEpoch: number,
+): Promise<Response> {
   const url = new URL(request.url);
   const params = url.searchParams;
   const end = params.get("end") ?? params.get("end_time") ?? new Date().toISOString();
@@ -108,7 +151,13 @@ async function cron(request: Request): Promise<Response> {
   if (!Number.isFinite(to) || lookbacks.some((span) => !Number.isFinite(span) || span < 0)) {
     return Response.json({ detail: { error: "invalid_time_range" } }, { status: 422 });
   }
-  const page = await nativePages(request, "/api/cron-runs", "runs");
+  const page = await nativePages(
+    request,
+    "/api/cron-runs",
+    "runs",
+    entryMetaEpoch,
+    entryOpsEpoch,
+  );
   const service = params.get("service_id") ?? request.headers.get("x-service-id") ?? page.service_id;
   if (service && page.service_id !== service) throw new Error("Cloud cron service does not match the selected service");
   const coordinators = (page.runs as Row[]).map((row): Row => ({ ...row, task: "cloud_ingest_clock" }));
@@ -122,8 +171,14 @@ async function cron(request: Request): Promise<Response> {
     const start = explicitStart ?? new Date(to - span).toISOString();
     const from = to - span;
     const key = defaultRange ? `default:${span}` : `${start}|${end}`;
-    const evidence = await cronHistory(key, { from: start, to: end }, request.signal);
-    request.signal.throwIfAborted();
+    assertAdminWireEpoch(request, entryMetaEpoch, entryOpsEpoch);
+    const evidence = await cronHistory(
+      key,
+      { from: start, to: end },
+      request.signal,
+      entryOpsEpoch,
+    );
+    assertAdminWireEpoch(request, entryMetaEpoch, entryOpsEpoch);
     if (evidence.liveTruncated) throw new Error("Cloud cron history is incomplete; choose a smaller range");
     const stageRows = evidence.rows.filter((row) => typeof row.cron_kind === "string")
       .map((row): Row => ({ ...row, task: row.cron_kind }));
@@ -178,7 +233,12 @@ async function cron(request: Request): Promise<Response> {
   throw new Error("Cloud cron history lookback exhausted");
 }
 
-async function usage(request: Request): Promise<Response> {
+async function usage(
+  request: Request,
+  entryMetaEpoch: number,
+  entryOpsEpoch: number,
+): Promise<Response> {
+  assertAdminWireEpoch(request, entryMetaEpoch, entryOpsEpoch);
   const url = new URL(request.url);
   const params = url.searchParams;
   const end = params.get("end") ?? params.get("end_time") ?? new Date().toISOString();
@@ -188,13 +248,17 @@ async function usage(request: Request): Promise<Response> {
   }
   const range = { from: start, to: end };
   const fos = await queryOpsLogs("fos_usage", range, { signal: request.signal });
+  assertAdminWireEpoch(request, entryMetaEpoch, entryOpsEpoch);
   if (fos.liveTruncated) throw new Error("Cloud usage history is incomplete; choose a smaller range");
   let source = fos.rows as unknown as FosUsageRow[];
   let basis = "native_fos_usage";
   if (!source.length) {
     const cron = await queryOpsLogs("cron_runs", range, { signal: request.signal });
+    assertAdminWireEpoch(request, entryMetaEpoch, entryOpsEpoch);
     if (cron.liveTruncated) throw new Error("Cloud usage history is incomplete; choose a smaller range");
-    source = deriveFosUsageFromCronRuns(cron.rows as unknown as CronRunRow[], await fetchUsageSettings(request.signal));
+    const settings = await fetchUsageSettings(request.signal);
+    assertAdminWireEpoch(request, entryMetaEpoch, entryOpsEpoch);
+    source = deriveFosUsageFromCronRuns(cron.rows as unknown as CronRunRow[], settings);
     basis = "derived_cron_counters";
   }
   const service = params.get("service_id") ?? request.headers.get("x-service-id");
@@ -275,7 +339,12 @@ function isoFromMs(value: unknown): string | null {
   return value != null && value !== "" && Number.isFinite(n) ? new Date(n).toISOString() : null;
 }
 
-async function ingestedFiles(request: Request): Promise<Response> {
+async function ingestedFiles(
+  request: Request,
+  entryMetaEpoch: number,
+  entryOpsEpoch: number,
+): Promise<Response> {
+  assertAdminWireEpoch(request, entryMetaEpoch, entryOpsEpoch);
   const url = new URL(request.url);
   const params = url.searchParams;
   const end = params.get("end") ?? params.get("end_time") ?? new Date().toISOString();
@@ -291,6 +360,7 @@ async function ingestedFiles(request: Request): Promise<Response> {
     { from: new Date(from).toISOString(), to: new Date(to).toISOString() },
     { signal: request.signal },
   );
+  assertAdminWireEpoch(request, entryMetaEpoch, entryOpsEpoch);
   const known = new Map<string, { rows: unknown; size: unknown }>();
   const latest = new Map<string, { rank: [number, number, string]; row: Row }>();
   for (const row of result.rows as Row[]) {
@@ -330,7 +400,12 @@ async function ingestedFiles(request: Request): Promise<Response> {
   return Response.json({ files, skipped_objects: 0, next_cursor: null, complete: true });
 }
 
-export async function cloudAdminWire(request: Request): Promise<Response | null> {
+export async function cloudAdminWire(
+  request: Request,
+  entryMetaEpoch: number = currentStoreMetaEpoch(),
+  entryOpsEpoch: number = currentOpsCacheEpoch(),
+): Promise<Response | null> {
+  assertAdminWireEpoch(request, entryMetaEpoch, entryOpsEpoch);
   const url = new URL(request.url);
   const path = url.pathname;
   if (path === "/api/admin/quarantine/purge" && request.method === "POST") {
@@ -341,17 +416,25 @@ export async function cloudAdminWire(request: Request): Promise<Response | null>
     return Response.json(await deleteLogHistory("fos_usage"));
   }
   if (request.method !== "GET") return null;
-  if (path === "/api/admin/usage-log" || path === "/api/admin/usage-log/export") return usage(request);
+  if (path === "/api/admin/usage-log" || path === "/api/admin/usage-log/export") {
+    return usage(request, entryMetaEpoch, entryOpsEpoch);
+  }
   if (path === "/api/admin/raw-tree" || path === "/api/admin/storage-tree") {
-    const page = await nativePages(request, path, "nodes");
+    const page = await nativePages(request, path, "nodes", entryMetaEpoch, entryOpsEpoch);
     const unique = new Map((page.nodes as Row[]).map((node) => [String(node.key ?? node.prefix), node]));
     return Response.json({ ...page, nodes: [...unique.values()] });
   }
   if (path === "/api/admin/ingested-files") {
-    return ingestedFiles(request);
+    return ingestedFiles(request, entryMetaEpoch, entryOpsEpoch);
   }
   if (path === "/api/audit-logs") {
-    const page = await nativePages(request, "/api/admin/audit-logs", "entries");
+    const page = await nativePages(
+      request,
+      "/api/admin/audit-logs",
+      "entries",
+      entryMetaEpoch,
+      entryOpsEpoch,
+    );
     const entries = (page.entries as Row[]).map((row) => {
       let details: unknown = row.details;
       if (typeof details === "string") {
@@ -363,7 +446,7 @@ export async function cloudAdminWire(request: Request): Promise<Response | null>
     return Response.json(paginate(entries, url.searchParams));
   }
   if (path === "/api/cron-runs" || path === "/api/cron-schedule") {
-    return cron(request);
+    return cron(request, entryMetaEpoch, entryOpsEpoch);
   }
   return null;
 }

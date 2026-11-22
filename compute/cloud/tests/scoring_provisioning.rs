@@ -1281,12 +1281,32 @@ fn bug_cloud_dr_17_stale_kv_locked_reuse_post_activate_retry_and_failed_job_supe
         json!({}),
     );
     assert_eq!(re_status["scoring"]["scoring_service_id"], scorer_sid);
+    let re_svc = p.adapter.record_snapshot("svc:fixtureService").unwrap();
+    let new_keys = re_svc.value["scoring"]["scoring_keys_store_id"]
+        .as_str()
+        .unwrap();
+    let new_cfg = re_svc.value["scoring"]["scoring_config_store_id"]
+        .as_str()
+        .unwrap();
+    let new_mat = re_svc.value["scoring"]["scoring_matrix_store_id"]
+        .as_str()
+        .unwrap();
+    assert_ne!(new_keys, prev_keys);
+    assert_ne!(new_cfg, prev_cfg);
+    assert_ne!(new_mat, prev_mat);
     let v2_links = p.adapter.resources(&scorer_sid, "resource");
-    let link_names: BTreeSet<&str> = v2_links.iter().filter_map(|r| r["name"].as_str()).collect();
+    let link_pairs: BTreeSet<(&str, &str)> = v2_links
+        .iter()
+        .filter_map(|r| Some((r["name"].as_str()?, r["resource_id"].as_str()?)))
+        .collect();
     assert_eq!(
-        link_names,
-        BTreeSet::from(["scoring_keys", "scoring_config", "scoring_matrix"]),
-        "cloned scorer version must link all 3 stores: {v2_links:?}"
+        link_pairs,
+        BTreeSet::from([
+            ("scoring_keys", new_keys),
+            ("scoring_config", new_cfg),
+            ("scoring_matrix", new_mat),
+        ]),
+        "cloned scorer version must link all 3 newly recreated store IDs: {v2_links:?}"
     );
 
     // 4. Post-activate transient FOS failure on scorer_deploy + manual retry:
@@ -1436,4 +1456,324 @@ fn bug_cloud_dr_17_stale_kv_locked_reuse_post_activate_retry_and_failed_job_supe
         json!({}),
     );
     assert_eq!(p2.run_job(en4["job"].clone())["status"], "complete");
+}
+
+#[test]
+fn scoring_enable_rollback_retry_rewinds_to_logging_reconcile() {
+    let p = Platform::new();
+    p.provision_logging_service();
+    let en = p.ok(
+        "POST",
+        "/api/services/fixtureService/scoring/enable",
+        json!({}),
+    );
+    let mut job = en["job"].clone();
+    let job_id = job["id"].as_str().unwrap().to_owned();
+    let mut injected_validate_fail = false;
+    for _ in 0..80 {
+        if job["status"] == "complete" || job["status"] == "failed" {
+            break;
+        }
+        if let Some(at) = job["retry_at"].as_u64() {
+            p.clock.fetch_max(at, Ordering::SeqCst);
+        }
+        if job["step"] == "validate" && !injected_validate_fail {
+            p.adapter.invalid_draft(true);
+            injected_validate_fail = true;
+        }
+        let (st, res) = p.call("POST", &format!("/api/admin/jobs/{job_id}/step"), json!({}));
+        assert_eq!(st, 200, "step returned {st}: {res}");
+        job = res["job"].clone();
+    }
+    p.adapter.invalid_draft(false);
+    assert!(injected_validate_fail, "must reach customer VCL validate");
+    assert_eq!(job["status"], "failed", "{job}");
+    assert_eq!(job["error"], "draft_validation_failed", "{job}");
+
+    // Rollback must have reverted enabled=false and stripped SCORING_FIELD_NAMES while failed:
+    let rolled_back_svc = p.adapter.record_snapshot("svc:fixtureService").unwrap();
+    assert_eq!(rolled_back_svc.value["scoring"]["enabled"], false);
+    assert_eq!(
+        rolled_back_svc.value["log_fields"]["custom_fields"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+
+    // Retry must rewind to logging_reconcile, re-enable scoring + all 9 custom fields,
+    // activate customer scoring VCL, and allow clean scoring/disable!
+    p.clock.fetch_add(65, Ordering::SeqCst);
+    let retried = p.ok(
+        "POST",
+        &format!("/api/admin/jobs/{job_id}/retry"),
+        json!({}),
+    )["job"]
+        .clone();
+    let done = p.run_job(retried);
+    assert_eq!(done["status"], "complete", "{done}");
+
+    let status_after = p.ok(
+        "GET",
+        "/api/services/fixtureService/scoring/status",
+        json!({}),
+    );
+    assert_eq!(status_after["scoring"]["enabled"], true, "{status_after}");
+    let svc_after = p.adapter.record_snapshot("svc:fixtureService").unwrap();
+    let custom_names: BTreeSet<&str> = svc_after.value["log_fields"]["custom_fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|f| f["name"].as_str())
+        .collect();
+    assert_eq!(
+        custom_names,
+        BTreeSet::from([
+            "edge_cookie_compliance",
+            "edge_matrix_version",
+            "edge_score",
+            "edge_score_exec_us",
+            "edge_score_l1",
+            "edge_score_l2",
+            "edge_score_reason",
+            "edge_score_rtt_us",
+            "edge_sid",
+        ]),
+        "all 9 scoring custom fields must be restored on retry: {custom_names:?}"
+    );
+    let active_snippets = p.adapter.resources("fixtureService", "snippet");
+    assert!(
+        active_snippets
+            .iter()
+            .any(|s| s["name"] == "Session Scoring - Recv"),
+        "live customer VCL must include Session Scoring snippets"
+    );
+
+    let dis = p.ok(
+        "POST",
+        "/api/services/fixtureService/scoring/disable",
+        json!({}),
+    );
+    let dis_done = p.run_job(dis["job"].clone());
+    assert_eq!(dis_done["status"], "complete", "{dis_done}");
+}
+
+#[test]
+fn scoring_cleanup_state_deletes_multi_batch_matrices_without_livelock() {
+    let seed_matrices = |p: &Platform, count: usize, with_labels: bool| {
+        let svc = p.adapter.record_snapshot("svc:fixtureService").unwrap();
+        let ak_ref = svc.value["fos_access_key_ref"].as_str().unwrap();
+        let sk_ref = svc.value["fos_secret_key_ref"].as_str().unwrap();
+        let ak = p.adapter.secret(ak_ref).unwrap().unwrap();
+        let sk_env: Value =
+            serde_json::from_str(&p.adapter.secret(sk_ref).unwrap().unwrap()).unwrap();
+        let sk = sk_env["secret_key"].as_str().unwrap().to_owned();
+        let mut versions = Vec::new();
+        for n in 1..=count {
+            let ver = format!("2027-03-01-mat-{n:03}");
+            let mat_key = format!("processed/scoring/matrices/{ver}.json");
+            assert_eq!(
+                p.adapter
+                    .fos(FosRequest {
+                        method: "PUT",
+                        region: "us-east-1",
+                        bucket: "fos-fixture-logs",
+                        key: &mat_key,
+                        query: "",
+                        access_key: &ak,
+                        secret_key: &sk,
+                        body: serde_json::to_vec(&json!({"version": ver, "vocab_size": 1}))
+                            .unwrap(),
+                        timeout: std::time::Duration::from_secs(5),
+                        response_limit: 65_536,
+                        content_md5: None,
+                    })
+                    .unwrap()
+                    .status,
+                200
+            );
+            versions.push(json!({"version": ver, "vocab_size": 1}));
+        }
+        for (key, payload) in [
+            (
+                "processed/scoring/matrices/index.json",
+                json!({"versions": versions}),
+            ),
+            (
+                "processed/scoring/matrix_latest.json",
+                json!({"version": "latest", "vocab_size": 1}),
+            ),
+        ] {
+            assert_eq!(
+                p.adapter
+                    .fos(FosRequest {
+                        method: "PUT",
+                        region: "us-east-1",
+                        bucket: "fos-fixture-logs",
+                        key,
+                        query: "",
+                        access_key: &ak,
+                        secret_key: &sk,
+                        body: serde_json::to_vec(&payload).unwrap(),
+                        timeout: std::time::Duration::from_secs(5),
+                        response_limit: 65_536,
+                        content_md5: None,
+                    })
+                    .unwrap()
+                    .status,
+                200
+            );
+        }
+        if with_labels {
+            assert_eq!(
+                p.adapter
+                    .fos(FosRequest {
+                        method: "PUT",
+                        region: "us-east-1",
+                        bucket: "fos-fixture-logs",
+                        key: "processed/scoring/labels.json",
+                        query: "",
+                        access_key: &ak,
+                        secret_key: &sk,
+                        body: serde_json::to_vec(&json!({"labels": {"sid-1": "bot"}})).unwrap(),
+                        timeout: std::time::Duration::from_secs(5),
+                        response_limit: 65_536,
+                        content_md5: None,
+                    })
+                    .unwrap()
+                    .status,
+                200
+            );
+        }
+    };
+
+    // Case 1 & 2: 4-retrain warm-KV and 5-retrain warm-KV on scoring/disable({"delete_matrices": true})
+    // (must delete matrices + index.json + matrix_latest.json, while preserving labels.json!)
+    let p = Platform::new();
+    p.provision_logging_service();
+    for count in [4usize, 5usize] {
+        let en = p.ok(
+            "POST",
+            "/api/services/fixtureService/scoring/enable",
+            json!({}),
+        );
+        assert_eq!(p.run_job(en["job"].clone())["status"], "complete");
+        seed_matrices(&p, count, true);
+        let dis = p.ok(
+            "POST",
+            "/api/services/fixtureService/scoring/disable",
+            json!({"delete_matrices": true}),
+        );
+        let dis_done = p.run_job(dis["job"].clone());
+        assert_eq!(
+            dis_done["status"], "complete",
+            "warm-KV disable(delete_matrices=true) with {count} matrices must complete: {dis_done}"
+        );
+        let keys = p.adapter.object_keys("fos-fixture-logs");
+        assert!(
+            !keys
+                .iter()
+                .any(|k| k.starts_with("processed/scoring/matrices/")
+                    || k == "processed/scoring/matrix_latest.json"),
+            "matrices and matrix_latest.json must be deleted for count={count}: {keys:?}"
+        );
+        assert!(
+            keys.iter().any(|k| k == "processed/scoring/labels.json"),
+            "scoring_disable(delete_matrices=true) must preserve labels.json: {keys:?}"
+        );
+    }
+
+    // Case 3: 50-matrix stale-KV on POST /scoring/teardown (deletes labels.json too!)
+    let en50 = p.ok(
+        "POST",
+        "/api/services/fixtureService/scoring/enable",
+        json!({}),
+    );
+    assert_eq!(p.run_job(en50["job"].clone())["status"], "complete");
+    seed_matrices(&p, 50, true);
+    let td_gen = p
+        .adapter
+        .record_snapshot("svc:fixtureService")
+        .unwrap()
+        .generation;
+    let td = p.ok(
+        "POST",
+        "/api/services/fixtureService/scoring/teardown",
+        json!({"confirm_service_id": "fixtureService", "generation": td_gen}),
+    );
+    let mut td_job = td["job"].clone();
+    let td_id = td_job["id"].as_str().unwrap().to_owned();
+    let mut prev_svc = p.adapter.record_snapshot("svc:fixtureService");
+    for _ in 0..80 {
+        if td_job["status"] == "complete" || td_job["status"] == "failed" {
+            break;
+        }
+        if let Some(stale) = prev_svc.clone() {
+            p.adapter.cache_stale("svc:fixtureService", Some(stale));
+        }
+        prev_svc = p.adapter.record_snapshot("svc:fixtureService");
+        let (st, res) = p.call("POST", &format!("/api/admin/jobs/{td_id}/step"), json!({}));
+        assert_eq!(st, 200, "stale-KV scoring_teardown step failed: {res}");
+        td_job = res["job"].clone();
+    }
+    assert_eq!(td_job["status"], "complete", "{td_job}");
+    let keys_after_td = p.adapter.object_keys("fos-fixture-logs");
+    assert!(
+        !keys_after_td
+            .iter()
+            .any(|k| k.starts_with("processed/scoring/")),
+        "scoring_teardown must delete all processed/scoring/* including labels.json: {keys_after_td:?}"
+    );
+
+    // Case 4: 65-matrix stale-KV on full POST /api/admin/provision/teardown
+    let en65 = p.ok(
+        "POST",
+        "/api/services/fixtureService/scoring/enable",
+        json!({}),
+    );
+    assert_eq!(p.run_job(en65["job"].clone())["status"], "complete");
+    seed_matrices(&p, 65, true);
+    let full_td_gen = p
+        .adapter
+        .record_snapshot("svc:fixtureService")
+        .unwrap()
+        .generation;
+    let full_td = p.ok(
+        "POST",
+        "/api/admin/provision/teardown",
+        json!({
+            "token": "fixture-token",
+            "service_id": "fixtureService",
+            "confirm_service_id": "fixtureService",
+            "generation": full_td_gen,
+            "remove_logging": true,
+            "remove_snippets": true
+        }),
+    );
+    let mut ftd_job = full_td["job"].clone();
+    let ftd_id = ftd_job["id"].as_str().unwrap().to_owned();
+    let mut prev_svc2 = p.adapter.record_snapshot("svc:fixtureService");
+    for _ in 0..100 {
+        if ftd_job["status"] == "complete" || ftd_job["status"] == "failed" {
+            break;
+        }
+        if let Some(at) = ftd_job["retry_at"].as_u64() {
+            p.clock.fetch_max(at, Ordering::SeqCst);
+        }
+        if let Some(stale) = prev_svc2.clone() {
+            p.adapter.cache_stale("svc:fixtureService", Some(stale));
+        }
+        prev_svc2 = p.adapter.record_snapshot("svc:fixtureService");
+        let (st, res) = p.call("POST", &format!("/api/admin/jobs/{ftd_id}/step"), json!({}));
+        assert_eq!(st, 200, "stale-KV provision/teardown step failed: {res}");
+        ftd_job = res["job"].clone();
+    }
+    assert_eq!(ftd_job["status"], "complete", "{ftd_job}");
+    let keys_after_full = p.adapter.object_keys("fos-fixture-logs");
+    assert!(
+        !keys_after_full
+            .iter()
+            .any(|k| k.starts_with("processed/scoring/")),
+        "full provision/teardown must delete all processed/scoring/*: {keys_after_full:?}"
+    );
 }

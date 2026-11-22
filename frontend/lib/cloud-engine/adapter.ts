@@ -53,6 +53,7 @@ import { cloudServiceStatus } from "./service-bridges";
 import {
   fetchCloudMetadata,
   invalidateCloudConfigMetadata,
+  invalidateCloudMetadataCache,
   resetCloudMetadataCache,
 } from "./metadata-cache";
 import { cloudRumMutation } from "./rum-management";
@@ -95,7 +96,13 @@ import {
 } from "./telemetry/admin";
 import { queryOpsLogs } from "./telemetry/client";
 import type { OpsKind } from "./telemetry/kinds";
-import { activeOpsUser } from "./telemetry/sources";
+import {
+  activeOpsUser,
+  assertOpsEpoch,
+  currentOpsCacheEpoch,
+  currentOpsIdentity,
+  syncOpsCacheForSession,
+} from "./telemetry/sources";
 import { evaluateCapacity } from "./usage/capacity";
 import {
   computeUsage,
@@ -403,7 +410,16 @@ async function processNativeCloudBootstrap(response: Response): Promise<Response
   ) {
     throw new Error("Invalid Cloud bootstrap response");
   }
+  const userObj =
+    user && typeof user === "object"
+      ? (user as { id?: string | null; role?: string | null })
+      : null;
+  const needsLogin = Boolean((settings as Record<string, unknown>).needs_login);
   await setDashboardCacheIdentity(cloudCacheIdentity(payload));
+  await syncOpsCacheForSession({
+    userId: needsLogin ? null : (userObj?.id ?? null),
+    needsLogin,
+  });
   return response;
 }
 
@@ -446,10 +462,15 @@ async function loadCloudCatalog(
 
 /** Catalog types of the custom fields `ids` names; a 400 when one isn't in the catalog. */
 async function catalogCustomFields(
-  request: Request, ids: ReadonlySet<string>, unknownDetail: string,
+  request: Request,
+  ids: ReadonlySet<string>,
+  unknownDetail: string,
+  entryMetaEpoch: number = currentStoreMetaEpoch(),
 ): Promise<CustomField[] | Response> {
+  assertAdapterEpoch(request, entryMetaEpoch);
   if (!ids.size) return [];
-  const catalog = await loadCloudCatalog(request);
+  const catalog = await loadCloudCatalog(request, entryMetaEpoch);
+  assertAdapterEpoch(request, entryMetaEpoch);
   if (catalog instanceof Response) return catalog;
   const fields: CustomField[] = (catalog.fields ?? [])
     .filter((field) => field.is_custom && ids.has(field.id))
@@ -467,6 +488,16 @@ async function catalogCustomFields(
 let analyticalQueue = Promise.resolve();
 /** Needed-column bytes a speculative Insights prefetch may load. */
 const PREFETCH_PROJECTION_BYTES = 32 * 1024 * 1024;
+
+function isReadOnlyCloudPost(path: string): boolean {
+  return (
+    DASHBOARD_PATH.test(path) ||
+    path === "/api/dashboard/field-values" ||
+    path === "/api/field-values" ||
+    path === "/api/web-vitals" ||
+    path === "/api/ux-events"
+  );
+}
 
 function isLocalScan(path: string, method: string): boolean {
   if (!["GET", "POST"].includes(method)) return false;
@@ -979,11 +1010,14 @@ async function handleCloudRequest(
   const url = new URL(request.url);
   const path = url.pathname;
   const configMutation = isCloudConfigMutation(request.method, path);
-  if (!configMutation &&
-      !["GET", "HEAD"].includes(request.method) &&
-      !isLocalScan(path, request.method)) {
-    resetCloudMetadataCache();
-    resetUsageSettingsCache();
+  if (
+    !configMutation &&
+    !["GET", "HEAD"].includes(request.method) &&
+    !isLocalScan(path, request.method) &&
+    !(request.method === "POST" && isReadOnlyCloudPost(path))
+  ) {
+    invalidateCloudMetadataCache();
+    resetUsageSettingsCache({ abortActive: false });
   }
   const response = await handleCloudRequestInner(request, origin, entryMetaEpoch);
   const isEventStream =
@@ -1051,19 +1085,44 @@ async function handleCloudRequestInner(
     if (bridged) return bridged;
   }
   if (/^\/api\/(?:cron-runs|cron-schedule|audit-logs|admin\/(?:usage-log(?:\/export)?|raw-tree|storage-tree|ingested-files|quarantine\/purge))$/.test(path)) {
-    const administrative = await withLoading("listing", () => cloudAdminWire(request));
-    if (administrative) return administrative;
+    assertAdapterEpoch(request, entryMetaEpoch);
+    const startOpsEpoch = currentOpsCacheEpoch();
+    const administrative = await withLoading("listing", () =>
+      cloudAdminWire(request, entryMetaEpoch, startOpsEpoch),
+    );
+    if (administrative) {
+      assertAdapterEpoch(request, entryMetaEpoch);
+      assertOpsEpoch(startOpsEpoch, request.signal);
+      return administrative;
+    }
   }
-  if (request.method === "GET" && path === "/api/admin/log-accounting") return cloudLogAccounting(request);
+  if (request.method === "GET" && path === "/api/admin/log-accounting") {
+    assertAdapterEpoch(request, entryMetaEpoch);
+    const startOpsEpoch = currentOpsCacheEpoch();
+    const response = await cloudLogAccounting(request);
+    assertAdapterEpoch(request, entryMetaEpoch);
+    assertOpsEpoch(startOpsEpoch, request.signal);
+    return response;
+  }
   if (request.method === "GET" && ["/api/admin/quarantine", "/api/admin/quarantine/summary"].includes(path)) {
-    return withLoading("listing", () => cloudQuarantine(request));
+    assertAdapterEpoch(request, entryMetaEpoch);
+    const startOpsEpoch = currentOpsCacheEpoch();
+    const response = await withLoading("listing", () => cloudQuarantine(request));
+    assertAdapterEpoch(request, entryMetaEpoch);
+    assertOpsEpoch(startOpsEpoch, request.signal);
+    return response;
   }
   if (/^\/api\/services\/[^/]+\/scoring\//.test(path) && !isLocalScan(path, request.method)) {
     if (isNativeCloudRoute(request.method, path)) return null;
-    return (await cloudScoringRead(request)) ?? unsupportedCloudEndpoint(request);
+    assertAdapterEpoch(request, entryMetaEpoch);
+    const response = await cloudScoringRead(request);
+    assertAdapterEpoch(request, entryMetaEpoch);
+    return response ?? unsupportedCloudEndpoint(request);
   }
   if (/^\/api\/services\/[^/]+\/(?:rum|cmcd)\/(?:status|versions)$/.test(path)) {
+    assertAdapterEpoch(request, entryMetaEpoch);
     const response = await withLoading("session", () => cloudServiceStatus(request));
+    assertAdapterEpoch(request, entryMetaEpoch);
     return response ?? unsupportedCloudEndpoint(request);
   }
   if (/^\/api\/(?:origin|performance|security|network|value|assets|cmcd|rum)(?:\/|-)/.test(path) &&
@@ -1173,7 +1232,8 @@ async function handleCloudRequestInner(
         assertAdapterEpoch(request, entryMetaEpoch);
         read = cloudReadContext(prepared);
         const response = /\/scoring\//.test(path)
-          ? await cloudScoringRead(prepared) : await dispatchCloudRequest(prepared, origin, cloudReadContext(prepared));
+          ? await cloudScoringRead(prepared)
+          : await dispatchCloudRequest(prepared, origin, cloudReadContext(prepared), entryMetaEpoch);
         cloudReadContext(prepared).assertCurrent();
         assertAdapterEpoch(prepared, entryMetaEpoch);
         success = Boolean(response?.ok);
@@ -1185,7 +1245,7 @@ async function handleCloudRequestInner(
       }
     }
     assertAdapterEpoch(request, entryMetaEpoch);
-    const response = await dispatchCloudRequest(request, origin);
+    const response = await dispatchCloudRequest(request, origin, undefined, entryMetaEpoch);
     assertAdapterEpoch(request, entryMetaEpoch);
     if (response) return response;
     return !path.startsWith("/api/") || isNativeCloudRoute(request.method, path)
@@ -1194,7 +1254,12 @@ async function handleCloudRequestInner(
   return stage ? withLoading(stage, work) : work();
 }
 
-async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext, read?: DuckDBReadContext): Promise<Response | null> {
+async function dispatchCloudRequest(
+  request: Request,
+  origin?: CloudQueryContext,
+  read?: DuckDBReadContext,
+  entryMetaEpoch: number = currentStoreMetaEpoch(),
+): Promise<Response | null> {
   const executeSql = (sql: string, params: readonly unknown[] = [], signal?: AbortSignal) =>
     (read ?? cloudReadContext(request)).executeSql<Record<string, unknown>>(sql, params, signal);
   const getPresentColumns = (keys?: readonly string[], signal?: AbortSignal) => {
@@ -1502,6 +1567,9 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
     }
     const eventType = url.searchParams.get("event_type");
     const email = url.searchParams.get("email");
+    const startOpsEpoch = currentOpsCacheEpoch();
+    assertAdapterEpoch(request, entryMetaEpoch);
+    assertOpsEpoch(startOpsEpoch, request.signal);
     const res = await queryOpsLogs(
       "admin_audit",
       {
@@ -1510,6 +1578,8 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
       },
       { signal: request.signal },
     );
+    assertAdapterEpoch(request, entryMetaEpoch);
+    assertOpsEpoch(startOpsEpoch, request.signal);
     const audit_logs = shareAuditRows(res.rows, { from, to, eventType, email, limit });
     return jsonResponse({ audit_logs }, request);
   }
@@ -1522,6 +1592,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
       pathname === "/api/timeseries") &&
     method === "POST"
   ) {
+    assertAdapterEpoch(request, entryMetaEpoch);
     const startedAt =
       typeof performance !== "undefined" ? performance.now() : Date.now();
     const body = (await request.clone().json().catch(() => ({}))) as {
@@ -1536,6 +1607,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
       fields?: string[];
       sections?: string[];
     };
+    assertAdapterEpoch(request, entryMetaEpoch);
     const now = Date.now();
     const fromMs = body.start_time ? Date.parse(body.start_time) : now - 86_400_000;
     const toMs = body.end_time ? Date.parse(body.end_time) : now;
@@ -1548,11 +1620,24 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
     const customFields = customCards((body.fields ?? []).map((id) => ({
       id, label: id, type: "string" as const,
     })));
-    const filterFields = await catalogCustomFields(request, new Set(filters.map((filter) => filter.field)
-      .filter((id) => !Object.hasOwn(FIELD_DUCKDB_TYPES, id) && !customFields.some((field) => field.id === id))),
-    "Unknown field in Cloud dashboard filter");
+    const filterFields = await catalogCustomFields(
+      request,
+      new Set(
+        filters
+          .map((filter) => filter.field)
+          .filter(
+            (id) =>
+              !Object.hasOwn(FIELD_DUCKDB_TYPES, id) &&
+              !customFields.some((field) => field.id === id),
+          ),
+      ),
+      "Unknown field in Cloud dashboard filter",
+      entryMetaEpoch,
+    );
+    assertAdapterEpoch(request, entryMetaEpoch);
     if (filterFields instanceof Response) return filterFields;
 
+    assertAdapterEpoch(request, entryMetaEpoch);
     const result = await runInWorker(
       {
         from: new Date(fromMs).toISOString(),
@@ -1567,6 +1652,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
       },
       request.signal,
     );
+    assertAdapterEpoch(request, entryMetaEpoch);
 
     const totalReqs = result.totalRequests;
     let totalBytes = 0;
@@ -1619,6 +1705,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
     `;
     const rawSeries = rawMetric
       ? await executeSql(rawSql, [fromMs, toMs], request.signal) : null;
+    assertAdapterEpoch(request, entryMetaEpoch);
     const durationMs = Math.max(1, Math.round(
       (typeof performance !== "undefined" ? performance.now() : Date.now()) - startedAt,
     ));
@@ -1747,6 +1834,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
       pathname === "/api/field-values") &&
     (method === "POST" || method === "GET")
   ) {
+    assertAdapterEpoch(request, entryMetaEpoch);
     const body =
       method === "POST"
         ? ((await request.clone().json().catch(() => ({}))) as {
@@ -1766,6 +1854,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
             end_time: searchParams.get("end_time") ?? undefined,
             limit: Number(searchParams.get("limit") ?? 50),
           };
+    assertAdapterEpoch(request, entryMetaEpoch);
     const now = Date.now();
     const fromIso = body.start_time ?? new Date(now - 86_400_000).toISOString();
     const toIso = body.end_time ?? new Date(now).toISOString();
@@ -1774,9 +1863,16 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
     const fieldName = (body.fields?.[0] ?? body.field ?? "url") as CardField;
     const customIds = new Set([fieldName, ...filters.map((filter) => filter.field)]
       .filter((id) => !Object.hasOwn(FIELD_DUCKDB_TYPES, id)));
-    const customFields = await catalogCustomFields(request, customIds, "Unknown field in Cloud field search");
+    const customFields = await catalogCustomFields(
+      request,
+      customIds,
+      "Unknown field in Cloud field search",
+      entryMetaEpoch,
+    );
+    assertAdapterEpoch(request, entryMetaEpoch);
     if (customFields instanceof Response) return customFields;
     if (Array.isArray(body.fields) && body.fields.length > 0) {
+      assertAdapterEpoch(request, entryMetaEpoch);
       const summaries = await searchFieldSummariesInWorker(
         fromIso,
         toIso,
@@ -1790,8 +1886,10 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
           customFields,
         },
       );
+      assertAdapterEpoch(request, entryMetaEpoch);
       return jsonResponse({ summaries }, request);
     }
+    assertAdapterEpoch(request, entryMetaEpoch);
     const items = await searchFieldValuesInWorker(
       fromIso,
       toIso,
@@ -1805,6 +1903,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
         customFields,
       },
     );
+    assertAdapterEpoch(request, entryMetaEpoch);
     return jsonResponse(
       {
         field: fieldName,
@@ -1816,15 +1915,32 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
 
   // Page 5: Usage & Cost (/api/usage/*)
   if (pathname === "/api/usage/rum-breakdown" && method === "GET") {
-    const settings = await fetchUsageSettings();
-    return jsonResponse(await cloudRumUsage({
-      start_time: searchParams.get("start_time")!,
-      end_time: searchParams.get("end_time")!,
-      signal: request.signal,
-      engine: read,
-    }, settings.class_a_rate_per_1k), request);
+    const startOpsEpoch = currentOpsCacheEpoch();
+    assertAdapterEpoch(request, entryMetaEpoch);
+    assertOpsEpoch(startOpsEpoch, request.signal);
+    const settings = await fetchUsageSettings(request.signal);
+    assertAdapterEpoch(request, entryMetaEpoch);
+    assertOpsEpoch(startOpsEpoch, request.signal);
+    const rumUsage = await cloudRumUsage(
+      {
+        start_time: searchParams.get("start_time")!,
+        end_time: searchParams.get("end_time")!,
+        signal: request.signal,
+        engine: read,
+      },
+      settings.class_a_rate_per_1k,
+    );
+    assertAdapterEpoch(request, entryMetaEpoch);
+    assertOpsEpoch(startOpsEpoch, request.signal);
+    return jsonResponse(rumUsage, request);
   }
   if (pathname.startsWith("/api/usage/")) {
+    const startOpsEpoch = currentOpsCacheEpoch();
+    const checkUsageEpoch = () => {
+      assertAdapterEpoch(request, entryMetaEpoch);
+      assertOpsEpoch(startOpsEpoch, request.signal);
+    };
+    checkUsageEpoch();
     const now = Date.now();
     const days = Number(searchParams.get("days") ?? 30) || 30;
     const fromMs = searchParams.get("start_time") || searchParams.get("start")
@@ -1835,26 +1951,42 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
       : now;
 
     if (pathname === "/api/usage/prefill/rates") {
-      const settings = await fetchUsageSettings().catch(() => LIST_RATES);
+      const settings = await fetchUsageSettings(request.signal).catch(
+        (err: unknown) => {
+          checkUsageEpoch();
+          if (isAdapterAbortError(err)) throw err;
+          return LIST_RATES;
+        },
+      );
+      checkUsageEpoch();
       return jsonResponse(settings, request);
     }
     if (pathname === "/api/usage/prefill") {
       const prefill = await fetchEstimatePrefill(
-        { user: "default", role: "admin" },
+        currentOpsIdentity(),
         undefined,
         request.signal,
-      ).catch(() => null);
+      ).catch((err: unknown) => {
+        checkUsageEpoch();
+        if (isAdapterAbortError(err)) throw err;
+        return null;
+      });
+      checkUsageEpoch();
       return jsonResponse(prefill ?? { rates: LIST_RATES }, request);
     }
     if (pathname === "/api/usage/compute") {
-      return jsonResponse(await computeUsage(
+      const computed = await computeUsage(
         { from: fromMs, to: toMs },
         request.signal,
         async (range, signal) => {
+          checkUsageEpoch();
           const bundle = await cloudPlatformBundle(range.from, range.to, request, signal);
+          checkUsageEpoch();
           return parseComputeBilling(bundle.computeBilling);
         },
-      ), request);
+      );
+      checkUsageEpoch();
+      return jsonResponse(computed, request);
     }
 
     // Shares the Compute charts' Platform Metrics read; resolves to null (logged lines) on failure.
@@ -1866,6 +1998,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
       to: toMs,
       signal: request.signal,
     });
+    checkUsageEpoch();
     const { input, summary } = usageRes;
     const requestedBucket = searchParams.get("by");
     const points = bucketUsage(input.rows, {
@@ -1875,6 +2008,8 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
         ? requestedBucket
         : toMs - fromMs <= 2 * 86_400_000 ? "hour" : "day",
     });
+    const resolvedBilling = await costBilling;
+    checkUsageEpoch();
     const costLines = buildSevenLineCostTable({
       hours: (toMs - fromMs) / 3_600_000,
       settings: input.settings,
@@ -1886,7 +2021,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
       loggedComputeRequests: summary.computeRequests,
       loggedComputeVcpuMs: summary.computeVcpuMs,
       loggedComputeSegments: summary.computeSegments,
-      billing: await costBilling,
+      billing: resolvedBilling,
     });
 
     if (pathname === "/api/usage/current-storage") {
@@ -1900,10 +2035,11 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
         : await fetchUsageKindWithCoverage(
             "fos_usage",
             { from: billedFrom, to: now },
-            { user: "default", role: "admin" },
+            currentOpsIdentity(),
             undefined,
             request.signal,
           );
+      checkUsageEpoch();
       const deletionAccounting = deletedBytesAccountingSince(
         deletionSource.rows,
         billedFrom,

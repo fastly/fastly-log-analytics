@@ -24,13 +24,22 @@ function metadataAbortError(): DOMException {
   return new DOMException("The operation was aborted.", "AbortError");
 }
 
-export function resetCloudMetadataCache(): void {
+export function resetCloudMetadataCache(
+  options: { abortActive?: boolean } = {},
+): void {
+  const abortActive = options.abortActive ?? true;
   metadataEpoch += 1;
-  for (const controller of activeMetadataControllers) {
-    controller.abort(metadataAbortError());
+  if (abortActive) {
+    for (const controller of activeMetadataControllers) {
+      controller.abort(metadataAbortError());
+    }
+    activeMetadataControllers.clear();
   }
-  activeMetadataControllers.clear();
   metadataCache.clear();
+}
+
+export function invalidateCloudMetadataCache(): void {
+  resetCloudMetadataCache({ abortActive: false });
 }
 
 export function resetCloudMetadataPaths(paths: readonly string[]): void {

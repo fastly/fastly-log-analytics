@@ -532,6 +532,12 @@ impl FixtureAdapter {
     }
     pub fn seed_resource(&self, sid: &str, resource: &str, mut value: Value) {
         let mut state = self.state.lock().expect("fixture lock");
+        let minted_rl_seq = if resource == "resource" && value["id"].as_str().is_none() {
+            state.sequence += 1;
+            Some(state.sequence)
+        } else {
+            None
+        };
         let version = state
             .versions
             .get_mut(sid)
@@ -545,6 +551,9 @@ impl FixtureAdapter {
             .to_owned();
         if resource == "dictionary" && value["id"].as_str().is_none() {
             value["id"] = format!("dict-{sid}-{name}").into();
+        }
+        if let Some(seq) = minted_rl_seq {
+            value["id"] = format!("rl-{}-{seq}", version.number).into();
         }
         version
             .resources
@@ -832,12 +841,20 @@ fn api(state: &mut State, request: &ApiRequest<'_>) -> Result<(u16, Value), Stri
             Ok((204,json!({})))
         }
         ("PUT",["service",sid,"version",source,"clone"])=>{
+            let mut next_seq=state.sequence;
             let versions=state.versions.get_mut(*sid).ok_or("fixture_service_missing")?;
             let mut version=versions.iter().find(|v|v.number.to_string()==*source).ok_or("fixture_source_missing")?.clone();
             version.number=versions.iter().map(|v|v.number).max().unwrap_or(0)+1;
             version.active=false;version.locked=false;
             let number=version.number;
+            if let Some(rl_entries)=version.resources.get_mut("resource") {
+                for val in rl_entries.values_mut() {
+                    next_seq+=1;
+                    val["id"]=format!("rl-{number}-{next_seq}").into();
+                }
+            }
             versions.push(version);
+            state.sequence=next_seq;
             Ok((200,json!({"number":number})))
         }
         ("PUT",["service",sid,"version",number])=>{
@@ -896,9 +913,17 @@ fn api(state: &mut State, request: &ApiRequest<'_>) -> Result<(u16, Value), Stri
                 }
             }
             let minted=if resource=="logging/fos" && method=="POST" {state.sequence+=1;Some(format!("fixture-fos-endpoint-key-{}",state.sequence))} else {None};
+            let minted_rl_id=if resource=="resource" && method=="POST" {state.sequence+=1;Some(format!("rl-{number}-{}",state.sequence))} else {None};
             let version=version_mut(state,sid,number)?;
             let values=version.resources.entry(resource.into()).or_default();
             if method=="GET" {
+                if resource=="resource" {
+                    return Ok(if let Some(item_id)=name {
+                        values.values().find(|v|v["id"].as_str()==Some(item_id)).cloned().map(|v|(200,v)).unwrap_or((404,json!({})))
+                    } else {
+                        (200,Value::Array(values.values().cloned().collect()))
+                    });
+                }
                 return Ok(if let Some(name)=name {values.get(name).map(|v|(200,v.clone())).unwrap_or((404,json!({})))} else {(200,Value::Array(values.values().cloned().collect()))});
             }
             if version.locked || version.active {return Ok((400,json!({"error":"version_locked"})));}
@@ -906,6 +931,16 @@ fn api(state: &mut State, request: &ApiRequest<'_>) -> Result<(u16, Value), Stri
                 "POST"|"PUT"=>{
                     let name=name.or_else(||body["name"].as_str()).ok_or("fixture_resource_name")?.to_owned();
                     let mut body=body;
+                    if resource=="resource" {
+                        if method=="POST" && values.contains_key(&name) {
+                            return Ok((409,json!({"error":"duplicate_resource_link"})));
+                        }
+                        if body["id"].as_str().is_none() {
+                            if let Some(id)=minted_rl_id {
+                                body["id"]=id.into();
+                            }
+                        }
+                    }
                     if resource=="dictionary" && body["id"].as_str().is_none() {
                         body["id"]=format!("dict-{sid}-{name}").into();
                     }
@@ -931,7 +966,20 @@ fn api(state: &mut State, request: &ApiRequest<'_>) -> Result<(u16, Value), Stri
                     }
                     values.insert(name,body.clone());Ok((200,body))
                 }
-                "DELETE"=>{if let Some(name)=name {values.remove(name);}Ok((204,json!({})))}
+                "DELETE"=>{
+                    if resource=="resource" {
+                        let Some(item_id)=name else {return Ok((404,json!({})));};
+                        let found_key=values.iter().find_map(|(k,v)|(v["id"].as_str()==Some(item_id)).then(||k.clone()));
+                        return Ok(if let Some(k)=found_key {
+                            values.remove(&k);
+                            (204,json!({}))
+                        } else {
+                            (404,json!({"error":"resource_link_not_found"}))
+                        });
+                    }
+                    if let Some(name)=name {values.remove(name);}
+                    Ok((204,json!({})))
+                }
                 _=>Ok((405,json!({}))),
             }
         }
