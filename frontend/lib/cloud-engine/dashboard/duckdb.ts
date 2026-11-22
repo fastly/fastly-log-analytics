@@ -1008,16 +1008,16 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
     const fields = [
       ...new Set([...targets.values()].flatMap((target) => target.fields)),
     ].filter((f) => f in FIELD_DUCKDB_TYPES || customTypes.has(f));
-    const projection = [...new Set(["status", "cache", "resp_bytes", ...fields])]
-      .map((field) =>
-        (FIELD_DUCKDB_TYPES[field] ?? customTypes.get(field)) === "DOUBLE"
-          ? `(${sqlIdent(field)} + 0.0) AS ${sqlIdent(field)}`
-          : sqlIdent(field),
-      )
-      .join(", ");
-    const base = `WITH base AS NOT MATERIALIZED (SELECT ${FILE_COLUMN}, ts_ms, ${projection} FROM ${relation} WHERE ${where})`;
+    const project = (columns: readonly string[]) =>
+      columns
+        .map((field) =>
+          (FIELD_DUCKDB_TYPES[field] ?? customTypes.get(field)) === "DOUBLE"
+            ? `(${sqlIdent(field)} + 0.0) AS ${sqlIdent(field)}`
+            : sqlIdent(field),
+        )
+        .join(", ");
     const bucketTable = await backend.query(
-      `${base} SELECT ${FILE_COLUMN} AS file, (floor(ts_ms / ${MINUTE_MS}) * ${MINUTE_MS})::BIGINT AS t, COUNT(*)::BIGINT AS requests, COALESCE(SUM("resp_bytes"), 0)::DOUBLE AS bytes, (COUNT(*) FILTER (WHERE "status" >= 500 AND "status" < 600))::BIGINT AS s5xx, (COUNT(*) FILTER (WHERE "status" >= 400 AND NOT ("status" >= 500 AND "status" < 600)))::BIGINT AS s4xx, COUNT("cache")::BIGINT AS cache_rows, (COUNT(*) FILTER (WHERE starts_with(upper("cache"), 'HIT')))::BIGINT AS hits, MIN(ts_ms)::BIGINT AS min_ts, MAX(ts_ms)::BIGINT AS max_ts FROM base GROUP BY 1, 2 ORDER BY 1, 2`,
+      `WITH base AS NOT MATERIALIZED (SELECT ${FILE_COLUMN}, ts_ms, ${project(["status", "cache", "resp_bytes"])} FROM ${relation} WHERE ${where}) SELECT ${FILE_COLUMN} AS file, (floor(ts_ms / ${MINUTE_MS}) * ${MINUTE_MS})::BIGINT AS t, COUNT(*)::BIGINT AS requests, COALESCE(SUM("resp_bytes"), 0)::DOUBLE AS bytes, (COUNT(*) FILTER (WHERE "status" >= 500 AND "status" < 600))::BIGINT AS s5xx, (COUNT(*) FILTER (WHERE "status" >= 400 AND NOT ("status" >= 500 AND "status" < 600)))::BIGINT AS s4xx, COUNT("cache")::BIGINT AS cache_rows, (COUNT(*) FILTER (WHERE starts_with(upper("cache"), 'HIT')))::BIGINT AS hits, MIN(ts_ms)::BIGINT AS min_ts, MAX(ts_ms)::BIGINT AS max_ts FROM base GROUP BY 1, 2 ORDER BY 1, 2`,
       signal,
     );
     signal?.throwIfAborted();
@@ -1065,37 +1065,52 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
     if (fields.length > 0) {
       const typeOf: FieldTypeOf = (field) =>
         FIELD_DUCKDB_TYPES[field] ?? customTypes.get(field)!;
-      const statsTable = await backend.query(
-        `${base} ${fieldStatsSql(fields, true, true)}`,
-        signal,
-      );
-      signal?.throwIfAborted();
       // The same per-field bounds as a one-file `queryRelation`.
       const candidateLimit = Math.min(4096, Math.floor(150_000 / fields.length));
       const fieldByteCap = Math.floor((32 * 1024 * 1024) / fields.length);
+      // An inlined base rescans the Parquet once per card branch, and one
+      // statement over every card held each branch's per-file hash tables and
+      // windows at once, which ran out of memory on a batch of small files. A
+      // few cards share each statement, over their own columns of the
+      // filtered rows, materialized once per statement while they are few
+      // enough to hold.
+      const fieldGroups = fieldGroupsOf(fields.length);
+      let rows = 0;
+      for (const part of parts.values()) rows += part.totalRequests;
+      const materialize =
+        rows <= MATERIALIZE_ROWS ? "MATERIALIZED" : "NOT MATERIALIZED";
+      const groupBase = (group: readonly number[]) =>
+        `WITH base AS ${materialize} (SELECT ${FILE_COLUMN}, ${project(group.map((i) => fields[i]))} FROM ${relation} WHERE ${where})`;
 
-      const sf = column(statsTable, "file");
-      const si = column(statsTable, "field_idx");
-      const snn = column(statsTable, "nn");
-      const sd = column(statsTable, "d");
-      const sml = column(statsTable, "ml");
       const sizes = new Map<number, { rows: number; bytes: number }>();
-      for (let r = 0; r < statsTable.numRows; r++) {
-        const file = Number(sf[r]);
-        const i = Number(si[r]);
-        const distinct = Number(sd[r] ?? 0);
-        const keyBytes = 48 + 4 * Number(sml[r] ?? 0);
-        const kept = Math.min(distinct, candidateLimit);
-        let size = sizes.get(file);
-        if (!size) sizes.set(file, (size = { rows: 0, bytes: 0 }));
-        size.rows += kept;
-        size.bytes += Math.min(kept * keyBytes, fieldByteCap + keyBytes);
-        partOf(file).fields[fields[i]] = {
-          nonNull: Number(snn[r] ?? 0),
-          distinct,
-          entries: [],
-          complete: false,
-        };
+      for (const group of fieldGroups) {
+        const statsTable = await backend.query(
+          `${groupBase(group)} ${fieldStatsSql(fields, true, true, group)}`,
+          signal,
+        );
+        signal?.throwIfAborted();
+        const sf = column(statsTable, "file");
+        const si = column(statsTable, "field_idx");
+        const snn = column(statsTable, "nn");
+        const sd = column(statsTable, "d");
+        const sml = column(statsTable, "ml");
+        for (let r = 0; r < statsTable.numRows; r++) {
+          const file = Number(sf[r]);
+          const i = Number(si[r]);
+          const distinct = Number(sd[r] ?? 0);
+          const keyBytes = 48 + 4 * Number(sml[r] ?? 0);
+          const kept = Math.min(distinct, candidateLimit);
+          let size = sizes.get(file);
+          if (!size) sizes.set(file, (size = { rows: 0, bytes: 0 }));
+          size.rows += kept;
+          size.bytes += Math.min(kept * keyBytes, fieldByteCap + keyBytes);
+          partOf(file).fields[fields[i]] = {
+            nonNull: Number(snn[r] ?? 0),
+            distinct,
+            entries: [],
+            complete: false,
+          };
+        }
       }
 
       // Each file may return its own bounded values, so files share a values
@@ -1119,20 +1134,11 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
       }
 
       const qualify = boundedQualify(fields, candidateLimit, fieldByteCap);
-      // Every branch's per-file window holds its partitions until the statement
-      // ends, so one statement over all cards ran out of memory on a batch of
-      // small files; a few cards share each statement instead.
-      const fieldGroups: number[][] = [];
-      for (let i = 0; i < fields.length; i += PER_FILE_VALUES_FIELDS) {
-        fieldGroups.push(
-          fields.slice(i, i + PER_FILE_VALUES_FIELDS).map((_, j) => i + j),
-        );
-      }
       for (const chunk of chunks) {
         const only = chunks.length > 1 ? ` AND ${FILE_COLUMN} IN (${chunk.join(", ")})` : "";
         for (const group of fieldGroups) {
           const valuesTable = await backend.query(
-            `${base} ${fieldValuesSql(fields, typeOf, true, only, qualify, group)}`,
+            `${groupBase(group)} ${fieldValuesSql(fields, typeOf, true, only, qualify, group)}`,
             signal,
           );
           signal?.throwIfAborted();
@@ -1197,6 +1203,15 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
       ? ` AND contains(lower(CAST(${sqlIdent(search.field)} AS VARCHAR)), ${sqlString(search.query.trim().toLowerCase())})`
       : "";
     const base = `WITH base AS NOT MATERIALIZED (SELECT ts_ms, ${projection} FROM ${relation} WHERE ${where}${searchWhere})`;
+    const groupBase = (group: readonly number[], materialize: boolean) =>
+      `WITH base AS ${materialize ? "" : "NOT "}MATERIALIZED (SELECT ${group
+        .map((i) => fields[i])
+        .map((field) =>
+          (FIELD_DUCKDB_TYPES[field] ?? customTypes.get(field)) === "DOUBLE"
+            ? `(${sqlIdent(field)} + 0.0) AS ${sqlIdent(field)}`
+            : sqlIdent(field),
+        )
+        .join(", ")} FROM ${relation} WHERE ${where}${searchWhere})`;
 
     const bucketTable = await backend.query(
       `${base} SELECT (floor(ts_ms / ${MINUTE_MS}) * ${MINUTE_MS})::BIGINT AS t, COUNT(*)::BIGINT AS requests, COALESCE(SUM("resp_bytes"), 0)::DOUBLE AS bytes, (COUNT(*) FILTER (WHERE "status" >= 500 AND "status" < 600))::BIGINT AS s5xx, (COUNT(*) FILTER (WHERE "status" >= 400 AND NOT ("status" >= 500 AND "status" < 600)))::BIGINT AS s4xx, COUNT("cache")::BIGINT AS cache_rows, (COUNT(*) FILTER (WHERE starts_with(upper("cache"), 'HIT')))::BIGINT AS hits, MIN(ts_ms)::BIGINT AS min_ts, MAX(ts_ms)::BIGINT AS max_ts FROM base GROUP BY 1 ORDER BY 1`,
@@ -1241,12 +1256,6 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
     if (fields.length > 0) {
       const typeOf: FieldTypeOf = (field) =>
         FIELD_DUCKDB_TYPES[field] ?? customTypes.get(field)!;
-      const statsTable = await backend.query(
-        `${base} ${fieldStatsSql(fields, false, false)}`,
-        signal,
-      );
-      signal?.throwIfAborted();
-
       const topK =
         options.topK != null && aggregator.isPristine() ? options.topK : null;
       const allValues = new Set(options.allValuesFields ?? []);
@@ -1270,12 +1279,6 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
           )
         : (i: number, window: string) =>
             fullSet.has(i) ? "" : `rank() OVER (${window}) <= ${topLimit(fields[i])}`;
-      const valuesTable = await backend.query(
-        `${base} ${fieldValuesSql(fields, typeOf, false, "", qualify)}`,
-        signal,
-      );
-      signal?.throwIfAborted();
-
       fields.forEach((field, i) => {
         fieldAggregates[field] = {
           nonNull: 0,
@@ -1284,22 +1287,37 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
           complete: fullSet.has(i),
         };
       });
-      const si = column(statsTable, "field_idx");
-      const snn = column(statsTable, "nn");
-      const sd = column(statsTable, "d");
-      for (let r = 0; r < statsTable.numRows; r++) {
-        const aggregate = fieldAggregates[fields[Number(si[r])]];
-        aggregate.nonNull = Number(snn[r] ?? 0);
-        aggregate.distinct = Number(sd[r] ?? 0);
-      }
-      const idxCol = column(valuesTable, "field_idx");
-      const cntCol = column(valuesTable, "cnt");
-      const valueCols = fields.map((field) => column(valuesTable, valueColumn(typeOf(field))));
-      for (let r = 0; r < valuesTable.numRows; r++) {
-        const i = Number(idxCol[r]);
-        const value = toScalarValue(valueCols[i][r]);
-        if (value === null) continue;
-        fieldAggregates[fields[i]].entries.push([value, Number(cntCol[r])]);
+      // As in `queryRelationPerFile`: a few cards per statement, each over
+      // its own columns of the filtered rows.
+      const materialize = totalRequests <= MATERIALIZE_ROWS;
+      for (const group of fieldGroupsOf(fields.length)) {
+        const statsTable = await backend.query(
+          `${groupBase(group, materialize)} ${fieldStatsSql(fields, false, false, group)}`,
+          signal,
+        );
+        signal?.throwIfAborted();
+        const valuesTable = await backend.query(
+          `${groupBase(group, materialize)} ${fieldValuesSql(fields, typeOf, false, "", qualify, group)}`,
+          signal,
+        );
+        signal?.throwIfAborted();
+        const si = column(statsTable, "field_idx");
+        const snn = column(statsTable, "nn");
+        const sd = column(statsTable, "d");
+        for (let r = 0; r < statsTable.numRows; r++) {
+          const aggregate = fieldAggregates[fields[Number(si[r])]];
+          aggregate.nonNull = Number(snn[r] ?? 0);
+          aggregate.distinct = Number(sd[r] ?? 0);
+        }
+        const idxCol = column(valuesTable, "field_idx");
+        const cntCol = column(valuesTable, "cnt");
+        const valueCols = fields.map((field) => column(valuesTable, valueColumn(typeOf(field))));
+        for (let r = 0; r < valuesTable.numRows; r++) {
+          const i = Number(idxCol[r]);
+          const value = toScalarValue(valueCols[i][r]);
+          if (value === null) continue;
+          fieldAggregates[fields[i]].entries.push([value, Number(cntCol[r])]);
+        }
       }
       if (bounded) {
         for (const aggregate of Object.values(fieldAggregates)) {
@@ -1336,7 +1354,19 @@ type ParquetGroup = {
 
 const FILE_COLUMN = `"__flp_file"`;
 const FILENAME_COLUMN = "__flp_filename";
-const PER_FILE_VALUES_FIELDS = 8;
+const FIELD_GROUP = 6;
+/** Filtered rows above which a statement rescans rather than materializes. */
+const MATERIALIZE_ROWS = 500_000;
+
+function fieldGroupsOf(count: number): number[][] {
+  const groups: number[][] = [];
+  for (let i = 0; i < count; i += FIELD_GROUP) {
+    groups.push(
+      Array.from({ length: Math.min(FIELD_GROUP, count - i) }, (_, j) => i + j),
+    );
+  }
+  return groups;
+}
 
 function customTypesOf(customFields: readonly CustomField[]): CustomTypes {
   return new Map(
@@ -1364,10 +1394,11 @@ function fieldStatsSql(
   fields: readonly string[],
   file: boolean,
   maxLength: boolean,
+  include: readonly number[] = fields.map((_, i) => i),
 ): string {
-  return fields
-    .map((field, i) => {
-      const f = sqlIdent(field);
+  return include
+    .map((i) => {
+      const f = sqlIdent(fields[i]);
       const text = `CASE WHEN CAST(${f} AS VARCHAR) != '' THEN ${f} END`;
       return `SELECT ${file ? `${FILE_COLUMN} AS file, ` : ""}${i} AS field_idx, COUNT(${f})::BIGINT AS nn, COUNT(DISTINCT ${text})::BIGINT AS d${maxLength ? `, MAX(length(CAST(${text} AS VARCHAR)))::BIGINT AS ml` : ""} FROM base${file ? ` GROUP BY ${FILE_COLUMN}` : ""}`;
     })
