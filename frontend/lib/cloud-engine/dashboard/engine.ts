@@ -304,7 +304,7 @@ const SELECTIVE_BATCH_BYTES = 16 * 1024 * 1024;
 // Larger files keep DuckDB's HTTP ranges; whole reads hold their bytes from
 // fetch until their query settles, within an in-flight budget per run.
 const WHOLE_READ_MAX_BYTES = 64 * 1024 * 1024;
-const WHOLE_READ_INFLIGHT_BYTES = 64 * 1024 * 1024;
+const WHOLE_READ_INFLIGHT_BYTES = 128 * 1024 * 1024;
 
 export type SearchFieldOptions = {
   from: string;
