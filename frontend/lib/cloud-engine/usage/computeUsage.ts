@@ -18,9 +18,10 @@ export function resetComputeBillingCache(): void {
 }
 
 /** Ranges ending at "now" differ by milliseconds between the page's requests. */
-const billingKey = (range: { from: number; to: number }) =>
+const billingKey = (range: { from: number; to: number }, scope: "full" | "compute") =>
   JSON.stringify([
     activeOpsUser(),
+    scope,
     Math.floor(range.from / 60_000),
     Math.floor(range.to / 60_000),
   ]);
@@ -33,12 +34,13 @@ async function readBilling(
   range: { from: number; to: number },
   signal: AbortSignal | undefined,
   fetchBilling: typeof fetchComputeBilling,
+  scope: "full" | "compute",
 ): Promise<BillingRead> {
   if (!(range.to > range.from)) return { billing: null, reason: "invalid_range" };
   if (range.to - range.from > MAX_SPAN_MS) {
     return { billing: null, reason: "range_over_31_days" };
   }
-  const key = billingKey(range);
+  const key = billingKey(range, scope);
   const now = Date.now();
   for (const [k, entry] of settledBilling) {
     if (now - entry.at >= BILLING_TTL_MS) settledBilling.delete(k);
@@ -63,7 +65,7 @@ export async function usageComputeBilling(
   range: { from: number; to: number },
   signal?: AbortSignal,
 ): Promise<ComputeBilling | null> {
-  return (await readBilling(range, signal, fetchComputeBilling)).billing;
+  return (await readBilling(range, signal, fetchComputeBilling, "full")).billing;
 }
 
 const iso = (ms: number | null) =>
@@ -74,7 +76,10 @@ export async function computeUsage(
   signal?: AbortSignal,
   fetchBilling: typeof fetchComputeBilling = fetchComputeBilling,
 ): Promise<ComputeUsageResponse> {
-  const read = await readBilling(range, signal, fetchBilling);
+  // The adapter's custom reader uses the shared /usage/platform app+worker payload. Keep that
+  // cache separate from the full /usage/compute-billing contract used by current-storage.
+  const scope = fetchBilling === fetchComputeBilling ? "full" : "compute";
+  const read = await readBilling(range, signal, fetchBilling, scope);
   if (!read.billing) return { source: "unavailable", reason: read.reason };
   const { billing } = read;
   const app = billing.byRole?.app ?? { requests: 0, vcpuMs: 0 };

@@ -312,6 +312,124 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       });
     });
 
+    it("returns identical complete incurred billing for both concurrent read orderings", async () => {
+      const incurredResults: unknown[] = [];
+      for (const ordering of ["compute-first", "storage-first"] as const) {
+        resetComputeBillingCache();
+        resetCloudPlatformBundleCache();
+        const fullBilling = {
+          services: [
+            {
+              role: "app",
+              compute_requests: 5,
+              compute_requests_buckets: [{ start_time: from / 1000, compute_requests: 3 }],
+              compute_execution_time_ms: 50,
+              compute_execution_time_ms_buckets: [
+                { start_time: from / 1000, compute_execution_time_ms: 50 },
+              ],
+              compute_request_time_billed_ms: 500,
+              compute_request_time_billed_ms_buckets: [
+                { start_time: from / 1000, compute_request_time_billed_ms: 500 },
+              ],
+              bandwidth: 0,
+              kv_store_class_a_operations: 0,
+              kv_store_class_b_operations: 0,
+            },
+            {
+              role: "front",
+              requests: 9,
+              bandwidth: 2_000,
+              kv_store_class_a_operations: 7,
+              kv_store_class_b_operations: 8,
+              bandwidth_buckets: [{ start_time: from / 1000, bandwidth: 2_000 }],
+            },
+          ],
+          secret_store: { secrets: 3 },
+        };
+        const platformPayload = {
+          source: "fastly",
+          storage: { status: "ok", scope: "account", bytes: 1_024 },
+          compute: { status: "ok", scope: "app_and_worker", requests: 5 },
+          ngwaf: { status: "not_configured" },
+        };
+        let releaseFull: () => void = () => {};
+        const fullReady = new Promise<void>((resolve) => {
+          releaseFull = resolve;
+        });
+        let platformResolved = false;
+        const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+          const path = String(input);
+          if (path.includes("/api/admin/usage/platform")) {
+            await Promise.resolve();
+            platformResolved = true;
+            return Response.json({ platform: platformPayload, compute_billing: { services: [
+              fullBilling.services[0],
+            ] } });
+          }
+          if (path.includes("/api/admin/usage/compute-billing")) {
+            if (ordering === "compute-first") await fullReady;
+            return Response.json(fullBilling);
+          }
+          throw new Error(`unexpected fetch: ${path}`);
+        });
+        vi.stubGlobal("fetch", fetchMock);
+        const params = new URLSearchParams({
+          start_time: new Date(from).toISOString(),
+          end_time: new Date(from + 2 * 3_600_000).toISOString(),
+          from: String(from),
+          to: String(from + 2 * 3_600_000),
+        });
+        const platform = () => handleCloudAnalyticalRequest(
+          new Request(`http://localhost/api/usage/platform?${params}`),
+        );
+        const compute = () => handleCloudAnalyticalRequest(
+          new Request(`http://localhost/api/usage/compute?${params}`),
+        );
+        const storage = () => handleCloudAnalyticalRequest(
+          new Request(`http://localhost/api/usage/current-storage?${params}`),
+        );
+        const platformPromise = platform();
+        const computePromise = ordering === "compute-first" ? compute() : null;
+        const storagePromise = storage();
+        let firstComputeBody: Record<string, unknown> | null = null;
+        if (ordering === "compute-first") {
+          const computed = await computePromise!;
+          expect(platformResolved).toBe(true);
+          firstComputeBody = await computed!.json();
+          expect(firstComputeBody).toMatchObject({ source: "fastly", requests: 5, vcpu_ms: 50 });
+          releaseFull();
+        }
+        const [platformResponse, computeResponse, storageResponse] = await Promise.all([
+          platformPromise,
+          computePromise ?? compute(),
+          storagePromise,
+        ]);
+        const storageBody = await storageResponse!.json();
+        const computeBody = firstComputeBody ?? await computeResponse!.json();
+        expect(await platformResponse!.json()).toEqual(platformPayload);
+        expect(computeBody).toMatchObject({ source: "fastly", requests: 5, vcpu_ms: 50 });
+        expect(line(storageBody, "compute")).toMatchObject({ source: "fastly" });
+        expect(line(storageBody, "delivery")).toMatchObject({
+          source: "fastly",
+          detail: expect.stringContaining("front reqs"),
+        });
+        expect(line(storageBody, "kv")).toMatchObject({
+          source: "fastly",
+          detail: "A 7 · B 8",
+        });
+        expect(line(storageBody, "secrets")).toMatchObject({
+          source: "fastly",
+          detail: "3 secrets × 0.1 days",
+        });
+        expect(fetchMock.mock.calls.filter(([input]) =>
+          String(input).includes("/api/admin/usage/platform"))).toHaveLength(1);
+        expect(fetchMock.mock.calls.filter(([input]) =>
+          String(input).includes("/api/admin/usage/compute-billing"))).toHaveLength(1);
+        incurredResults.push(storageBody.seven_line_table);
+      }
+      expect(incurredResults[1]).toEqual(incurredResults[0]);
+    });
+
     it("prices Compute, KV and secrets from Platform Metrics, shared with the Compute charts' read", async () => {
       const fetchBilling = vi.spyOn(usage, "fetchComputeBilling").mockResolvedValue(stats);
 
