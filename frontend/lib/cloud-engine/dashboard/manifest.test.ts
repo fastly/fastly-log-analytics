@@ -1189,3 +1189,115 @@ describe("closed-hour manifest cache", () => {
     expect(attempts).toBe(3);
   });
 });
+
+describe("forked catalog listing", () => {
+  beforeEach(() => {
+    clearManifestCache();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(T0 + 30 * H);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  /** A server that forks the first request into `chains`, each a list of pages of files. */
+  function forkingServer(chains: ManifestFile[][][], generation = (_fork: number) => 5) {
+    const started: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const fetchJson = vi.fn(async (input: string, signal?: AbortSignal) => {
+      const params = new URL(input, "http://x").searchParams;
+      const cursor = params.get("cursor");
+      started.push(cursor ?? `first fork=${params.get("fork")}`);
+      if (!cursor) {
+        return {
+          files: [], summary_files: [], next_cursor: null, complete: false,
+          forks: chains.map((_, i) => `fork-${i}-0`), catalog_generation: 5,
+        };
+      }
+      // No fork page answers until every fork has been requested.
+      if (started.filter((s) => s.endsWith("-0")).length === chains.length) release();
+      await gate;
+      signal?.throwIfAborted();
+      const [, fork, page] = cursor.split("-").map(Number);
+      const last = page + 1 >= chains[fork].length;
+      return {
+        files: chains[fork][page],
+        summary_files: [file(T0 + fork * H + page * 60_000, 2)].map((f) => ({ ...f, key: `s-${f.key}` })),
+        next_cursor: last ? null : `fork-${fork}-${page + 1}`,
+        complete: last,
+        catalog_generation: generation(fork),
+      };
+    });
+    return { fetchJson, started };
+  }
+
+  it("requests forks and pages every fork concurrently into one exact listing", async () => {
+    const chains = [
+      [[file(T0)], [file(T0 + 60_000)]],
+      [[file(T0 + 8 * H)]],
+      [[file(T0 + 16 * H), file(T0 + 17 * H)], [file(T0 + 18 * H)], [file(T0 + 19 * H)]],
+    ];
+    const { fetchJson, started } = forkingServer(chains);
+    const manifest = await fetchManifest(
+      fetchJson, iso(T0), iso(T0 + 24 * H), undefined, undefined, undefined, true,
+    );
+    expect(started[0]).toBe("first fork=1");
+    expect(started.slice(1, 4).sort()).toEqual(["fork-0-0", "fork-1-0", "fork-2-0"]);
+    expect(keys(manifest.files)).toEqual(keys(chains.flat(2)));
+    expect(manifest.summaryFiles).toHaveLength(6);
+    expect(manifest.complete).toBe(true);
+    expect(manifest.catalogGeneration).toBe(5);
+  });
+
+  it("rejects a fork page from another catalog generation", async () => {
+    const { fetchJson } = forkingServer(
+      [[[file(T0)]], [[file(T0 + 8 * H)]]],
+      (fork) => (fork === 1 ? 6 : 5),
+    );
+    await expect(fetchManifest(fetchJson, iso(T0), iso(T0 + 24 * H))).rejects.toThrow(
+      "generation changed",
+    );
+  });
+
+  it("restarts the whole listing once when a fork's snapshot expires", async () => {
+    let listings = 0;
+    const seen: string[] = [];
+    const fetchJson = vi.fn(async (input: string, signal?: AbortSignal) => {
+      const params = new URL(input, "http://x").searchParams;
+      const cursor = params.get("cursor");
+      seen.push(cursor ?? "first");
+      if (!cursor) {
+        listings++;
+        return {
+          files: [], summary_files: [], next_cursor: null, complete: false,
+          forks: [`a${listings}`, `b${listings}`], catalog_generation: 10 + listings,
+        };
+      }
+      if (cursor === "a1") throw new ManifestRequestError(409, "Catalog snapshot expired; restart discovery");
+      if (cursor === "b1") {
+        await new Promise((_, reject) => signal?.addEventListener("abort", () => reject(signal.reason)));
+      }
+      return {
+        files: [file(cursor.startsWith("a") ? T0 : T0 + 8 * H)],
+        next_cursor: null, complete: true, catalog_generation: 10 + listings,
+      };
+    });
+    const manifest = await fetchManifest(fetchJson, iso(T0), iso(T0 + 24 * H));
+    expect(listings).toBe(2);
+    expect(manifest.catalogGeneration).toBe(12);
+    expect(keys(manifest.files)).toEqual(keys([file(T0), file(T0 + 8 * H)]));
+  });
+
+  it("does not ask datasets outside the request catalog to fork", async () => {
+    const urls: string[] = [];
+    const fetchJson = vi.fn(async (input: string) => {
+      urls.push(input);
+      return { files: [], next_cursor: null, complete: true };
+    });
+    await fetchManifest(fetchJson, iso(T0), iso(T0 + 24 * H), undefined, "rum");
+    expect(urls).toHaveLength(1);
+    expect(new URL(urls[0], "http://x").searchParams.has("fork")).toBe(false);
+  });
+});

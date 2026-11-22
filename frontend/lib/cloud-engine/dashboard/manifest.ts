@@ -30,6 +30,8 @@ type ManifestPage = {
   cache?: CacheHint | null;
   summary_files?: ManifestFile[];
   catalog_generation?: number | string;
+  /** Cursors of concurrent chains that replace this first page's own cursor. */
+  forks?: string[];
 };
 
 export type ListView = "raw" | "summary";
@@ -86,6 +88,9 @@ export const invalidateManifestCache = clearManifestCache;
 
 type Listing = Manifest & { hint: CacheHint | null };
 
+/** A listing cursor the server no longer holds; the whole listing restarts once. */
+class CursorExpired extends Error {}
+
 async function listPages(
   fetchJson: FetchJson,
   from: string,
@@ -96,51 +101,73 @@ async function listPages(
   includeSummaries?: boolean,
   budget?: ManifestBudget,
 ): Promise<Listing> {
+  try {
+    return await listOnce(fetchJson, from, to, signal, dataset, view, includeSummaries, budget);
+  } catch (error) {
+    if (!(error instanceof CursorExpired)) throw error;
+    signal?.throwIfAborted();
+    try {
+      return await listOnce(fetchJson, from, to, signal, dataset, view, includeSummaries, budget);
+    } catch (again) {
+      throw again instanceof CursorExpired ? again.cause : again;
+    }
+  }
+}
+
+/**
+ * One listing of `[from, to)`. A request catalog listing asks to fork: the
+ * server may answer the first request with cursors of independent chains that
+ * together list the range exactly once, all pinned to one catalog generation,
+ * which are paged concurrently instead of as one sequential walk.
+ */
+async function listOnce(
+  fetchJson: FetchJson,
+  from: string,
+  to: string,
+  signal: AbortSignal | undefined,
+  dataset: string | undefined,
+  view: ListView | undefined,
+  includeSummaries?: boolean,
+  budget?: ManifestBudget,
+): Promise<Listing> {
   const files = new Map<string, ManifestFile>();
-  let cursor: string | null = null;
   let hint: CacheHint | null | undefined;
   const summaryFiles = new Map<string, ManifestFile>();
   let summariesIncluded = false;
   let catalogGeneration: number | string | undefined;
   const seen = new Set<string>();
-  let restarted = false;
-  for (let page = 0; page < MAX_PAGES; page++) {
+  let pages = 0;
+  const forkable = !dataset || dataset === "request";
+
+  const fetchPage = async (
+    cursor: string | null,
+    pageSignal: AbortSignal | undefined,
+  ): Promise<ManifestPage> => {
+    if (++pages > MAX_PAGES) throw new Error("File manifest exceeded the page limit");
     const params = new URLSearchParams({ from, to });
     if (dataset) params.set("dataset", dataset);
     if (view) params.set("view", view);
     if (includeSummaries) params.set("summaries", "1");
     if (cursor) params.set("cursor", cursor);
+    else if (forkable) params.set("fork", "1");
     let body: ManifestPage;
     try {
-      body = (await fetchJson(
-        `/api/files?${params}`,
-        signal,
-      )) as ManifestPage;
+      body = (await fetchJson(`/api/files?${params}`, pageSignal)) as ManifestPage;
     } catch (error) {
       if (
         cursor &&
-        !restarted &&
         error &&
         typeof error === "object" &&
         "status" in error &&
         error.status === 409
       ) {
-        restarted = true;
-        files.clear();
-        summaryFiles.clear();
-        summariesIncluded = false;
-        catalogGeneration = undefined;
-        hint = undefined;
-        cursor = null;
-        seen.clear();
-        page = -1;
-        continue;
+        throw new CursorExpired("File manifest cursor expired", { cause: error });
       }
       throw error;
     }
-    signal?.throwIfAborted();
+    pageSignal?.throwIfAborted();
     if (budget) accountManifestPage(body, budget);
-    if (page === 0) catalogGeneration = body.catalog_generation;
+    if (cursor === null) catalogGeneration = body.catalog_generation;
     else if (body.catalog_generation !== catalogGeneration) {
       throw new Error(
         "File manifest catalog generation changed during pagination",
@@ -160,32 +187,70 @@ async function listPages(
         : hint && pageHint && hint.gen === pageHint.gen
           ? hint
           : null;
-    cursor = body.next_cursor;
-    if (!cursor) {
-      if (!body.complete) {
-        throw new IncompleteManifestError(
-          "File manifest ended incomplete without a cursor",
-        );
+    return body;
+  };
+
+  /** Follows `body`'s cursors to the end of its chain. */
+  const follow = async (
+    body: ManifestPage,
+    chainSignal: AbortSignal | undefined,
+  ): Promise<void> => {
+    for (;;) {
+      const cursor = body.next_cursor;
+      if (!cursor) {
+        if (!body.complete) {
+          throw new IncompleteManifestError(
+            "File manifest ended incomplete without a cursor",
+          );
+        }
+        return;
       }
-      return {
-        files: [...files.values()],
-        complete: body.complete,
-        hint: hint ?? null,
-        ...(catalogGeneration !== undefined
-          ? { catalogGeneration: manifestGeneration(catalogGeneration) }
-          : {}),
-        ...(summariesIncluded
-          ? {
-              summaryFiles: [...summaryFiles.values()],
-              summaryRange: { from, to },
-            }
-          : {}),
-      };
+      if (seen.has(cursor)) throw new Error("File manifest cursor repeated");
+      seen.add(cursor);
+      body = await fetchPage(cursor, chainSignal);
     }
-    if (seen.has(cursor)) throw new Error("File manifest cursor repeated");
-    seen.add(cursor);
+  };
+
+  const first = await fetchPage(null, signal);
+  const forks = forkable && Array.isArray(first.forks) ? first.forks : [];
+  if (forks.length > 0 && !first.next_cursor) {
+    // A failed chain stops its siblings: the listing fails or restarts as a whole.
+    const siblings = new AbortController();
+    const stop = () => siblings.abort(signal?.reason);
+    signal?.addEventListener("abort", stop, { once: true });
+    try {
+      await Promise.all(
+        forks.map(async (cursor) => {
+          try {
+            if (seen.has(cursor)) throw new Error("File manifest cursor repeated");
+            seen.add(cursor);
+            await follow(await fetchPage(cursor, siblings.signal), siblings.signal);
+          } catch (error) {
+            siblings.abort(error);
+            throw error;
+          }
+        }),
+      );
+    } finally {
+      signal?.removeEventListener("abort", stop);
+    }
+  } else {
+    await follow(first, signal);
   }
-  throw new Error("File manifest exceeded the page limit");
+  return {
+    files: [...files.values()],
+    complete: true,
+    hint: hint ?? null,
+    ...(catalogGeneration !== undefined
+      ? { catalogGeneration: manifestGeneration(catalogGeneration) }
+      : {}),
+    ...(summariesIncluded
+      ? {
+          summaryFiles: [...summaryFiles.values()],
+          summaryRange: { from, to },
+        }
+      : {}),
+  };
 }
 
 /** Keeps `files` (a complete listing of at least `[fromMs, toMs)`) up to the last closed hour. */
