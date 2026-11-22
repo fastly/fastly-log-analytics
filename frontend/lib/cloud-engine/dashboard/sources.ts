@@ -1118,6 +1118,10 @@ export function browserSource(
               });
             },
           };
+        // Catalog keys are write-once and the listing carries their size, so
+        // the probe round trip only runs for files without a listed size.
+        if (file.size > 0 && !file.etag)
+          return { kind: "http" as const, url: url.href, cached: false };
         const start = performance.now();
         const response = await fetchRetrying(url.href, {
           credentials: "same-origin",
