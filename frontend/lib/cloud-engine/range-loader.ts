@@ -113,6 +113,9 @@ export async function ensureCloudRange(
   generation.assertCurrent();
   signal.throwIfAborted();
   const loading = beginCloudLoading("listing");
+  // WASM instantiation needs nothing from the listing, so it overlaps it. A
+  // failure here surfaces from the first DuckDB operation below.
+  engine.prewarm().catch(() => {});
   let success = false;
   try {
     const fetchJson = options.serviceId
