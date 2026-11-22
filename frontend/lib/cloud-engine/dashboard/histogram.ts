@@ -3,6 +3,7 @@
 // Blob: `[1, varint under, varint over, zigzag min, zigzag max, (u8 bucket, varint count)...]`.
 const VERSION = 1;
 const BUCKETS = 128;
+const LIMIT = 2 ** 52 - 1;
 
 /** Bucket `i` holds `[BOUNDS[i], BOUNDS[i + 1])` µs. */
 export const BOUNDS: readonly number[] = [
@@ -73,6 +74,25 @@ export class Histogram {
       last = s;
     }
     return (last < 0 && under === 0 && over === 0) || h.min > h.max ? null : h;
+  }
+
+  /** Adds one value as hist.rs `Hist::add`: its slot from the value, min/max clamped to ±(2^52 - 1). */
+  add(v: number) {
+    if (v < BOUNDS[0]) this.under++;
+    else if (v >= BOUNDS[BUCKETS]) this.over++;
+    else {
+      let lo = 0;
+      let hi = BUCKETS;
+      while (hi - lo > 1) {
+        const mid = (lo + hi) >> 1;
+        if (BOUNDS[mid] <= v) lo = mid;
+        else hi = mid;
+      }
+      this.buckets[lo]++;
+    }
+    const clamped = Math.max(-LIMIT, Math.min(LIMIT, v));
+    this.min = Math.min(this.min, clamped);
+    this.max = Math.max(this.max, clamped);
   }
 
   isEmpty(): boolean {

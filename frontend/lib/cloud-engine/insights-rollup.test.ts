@@ -9,7 +9,7 @@ import {
   fixtureFiles,
   fixturePage,
 } from "./dashboard/summary-fixtures";
-import { fixtureSource } from "./dashboard/test-fixtures";
+import { fixtureSource, projectingSource } from "./dashboard/test-fixtures";
 import { queryCloudInsights } from "./insight-scans";
 import {
   _coalesced_asn_aggregates,
@@ -555,6 +555,45 @@ describe("insights baseline from summaries vs raw DuckDB over the same rows", ()
       // Filters or explicit detectors must return null so raw DuckDB handles them.
       expect(await insightsFromRollup(body, [{ field: "country", mode: "include", value: "US" }], src, signal)).toBeNull();
       expect(await insightsFromRollup({ ...body, detectors: ["error_spikes"] }, [], src, signal)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("answers an end inside a summarized window by rolling up the edge raw files, matching raw", async () => {
+    const end = T1 - 7 * 60_000;
+    const cut = { ...body, clamp_end: new Date(end).toISOString() };
+    vi.useFakeTimers({ toFake: ["Date"], now: T1 });
+    try {
+      const plain = fixtureSource([fixturePage(RAW)], BUFFERS, { json: [], files: [] }, [fixturePage(fixtureFiles("window"))]);
+      const src = projectingSource(
+        fixtureSource([fixturePage(RAW)], BUFFERS, { json: [], files: [] }, [fixturePage(fixtureFiles("window"))]),
+        BUFFERS,
+      );
+      const [raw, rolled] = await Promise.all([
+        queryCloudInsights(cut, { signal, maskIps: false, filters: [], engine: read }),
+        insightsFromRollup(cut, [], src, signal),
+      ]);
+      expect(plain.fetchRange).toBeUndefined();
+      expect(rolled).not.toBeNull();
+      expect(rolled!.rollup).toMatchObject({
+        // The baseline starts before the fixtures' first row.
+        data_from: new Date(T0).toISOString(),
+        data_through: new Date(end).toISOString(),
+      });
+      expect(rolled!.window_total_requests).toBe(raw.window_total_requests);
+      expect(src.ranges.length).toBeGreaterThan(0);
+      expect(src.ranges.length).toBeLessThanOrEqual(3);
+      for (const card of rolled!.insights) {
+        if (rolled!.deferred_detectors.includes(card.id) || card.id === "city_error_spikes") continue;
+        const rawCard = raw.insights.find((c) => c.id === card.id)!;
+        const approximate = rolled!.rollup.approximate.includes(card.id);
+        expect(card.severity, card.id).toBe(rawCard.severity);
+        expect(
+          card.items.map(({ baseline_label: _, baseline_val, ...rest }) => (approximate ? rest : { ...rest, baseline_val })),
+          card.id,
+        ).toEqual(rawCard.items.map(({ baseline_label: _, baseline_val, ...rest }) => (approximate ? rest : { ...rest, baseline_val })));
+      }
     } finally {
       vi.useRealTimers();
     }

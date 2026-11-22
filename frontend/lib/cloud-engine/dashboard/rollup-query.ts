@@ -2,6 +2,7 @@ import { parquetMetadata } from "hyparquet";
 import type { FileSource } from "./engine";
 import { Histogram } from "./histogram";
 import { fetchManifestWithSummaries, filesOverlapping, type ManifestFile } from "./manifest";
+import { projectedReader } from "./projected-read";
 import {
   readSummaryColumns, readSummaryProjection, type SummaryProjectionSource, type SummarySpec,
 } from "./summary-projection";
@@ -646,16 +647,21 @@ function addKeyed(
   else values.set(value, copy ? sumAggs([agg]) : agg);
 }
 
-/** Sums rollups into new aggregates; the inputs (often cached) are not changed. */
-export function mergeRollups(rollups: readonly Rollup[]): Rollup {
+/**
+ * Sums rollups into new aggregates; the inputs (often cached) are not changed.
+ * With `keys`, only those `group/field` keys (`dims/city`, `series5/overall`,
+ * `all_fields/ua`, `ins_url/url`...) are kept, and no other rows.
+ */
+export function mergeRollups(rollups: readonly Rollup[], keys?: ReadonlySet<string>): Rollup {
+  const keep = (key: string) => !keys || keys.has(key);
   const out: Rollup = {
     dims: new Map(),
     series: new Map(),
     seriesStepMs: Math.max(FIVE_MINUTES_MS, ...rollups.map((r) => r.seriesStepMs)),
     fields: new Map(),
-    truncated: new Set(rollups.flatMap((r) => [...r.truncated])),
+    truncated: new Set(rollups.flatMap((r) => [...r.truncated]).filter(keep)),
     groups: new Map(),
-    present: new Set(rollups.length ? [...rollups[0].present ?? []] : []),
+    present: new Set(rollups.length ? [...rollups[0].present ?? []].filter(keep) : []),
   };
   const specced = rollups.flatMap((rollup) => (rollup.loaded ? [rollup.loaded] : []));
   const loaded = specced.length
@@ -667,8 +673,13 @@ export function mergeRollups(rollups: readonly Rollup[]): Rollup {
     }
     for (const [group, fields] of rollup.groups ?? []) {
       for (const [field, values] of fields) {
+        if (!keep(`${group}/${field}`)) continue;
         for (const [value, agg] of values) addKeyed(out.groups!, group, field, value, agg);
       }
+    }
+    if (keys) {
+      mergeKept(out, rollup, keep, has);
+      continue;
     }
     const samples = own(rollup, "samples");
     if (samples) (out.samples ??= []).push(...samples);
@@ -690,31 +701,44 @@ export function mergeRollups(rollups: readonly Rollup[]): Rollup {
       const into = (out.assets ??= new Map());
       for (const [key, asset] of assets) into.set(key, addSums(into.get(key), asset, ASSET_KEYS));
     }
-    if (has(rollup, "all_fields")) addFieldCounts(out.fields, rollup.fields);
-    for (const [dim, values] of has(rollup, "dims") ? rollup.dims : []) {
-      const target = out.dims.get(dim) ?? new Map<string, RollupAgg>();
-      out.dims.set(dim, target);
-      for (const [value, agg] of values) {
-        const into = target.get(value) ?? emptyAgg();
-        target.set(value, into);
+    mergeKept(out, rollup, keep, has);
+  }
+  return guard(out, loaded);
+}
+
+function mergeKept(
+  out: Rollup,
+  rollup: Rollup,
+  keep: (key: string) => boolean,
+  has: (rollup: Rollup, group: string) => boolean,
+) {
+  if (has(rollup, "all_fields")) {
+    addFieldCounts(out.fields, new Map([...rollup.fields].filter(([field]) => keep(`all_fields/${field}`))));
+  }
+  for (const [dim, values] of has(rollup, "dims") ? rollup.dims : []) {
+    if (!keep(`dims/${dim}`)) continue;
+    const target = out.dims.get(dim) ?? new Map<string, RollupAgg>();
+    out.dims.set(dim, target);
+    for (const [value, agg] of values) {
+      const into = target.get(value) ?? emptyAgg();
+      target.set(value, into);
+      addAgg(into, agg);
+    }
+  }
+  for (const [field, values] of has(rollup, "series5") ? rollup.series : []) {
+    if (!keep(`series5/${field}`)) continue;
+    const target = out.series.get(field) ?? new Map();
+    out.series.set(field, target);
+    for (const [value, buckets] of values) {
+      const byBucket: Map<number, RollupAgg> = target.get(value) ?? new Map();
+      target.set(value, byBucket);
+      for (const [t, agg] of buckets) {
+        const into = byBucket.get(t) ?? emptyAgg();
+        byBucket.set(t, into);
         addAgg(into, agg);
       }
     }
-    for (const [field, values] of has(rollup, "series5") ? rollup.series : []) {
-      const target = out.series.get(field) ?? new Map();
-      out.series.set(field, target);
-      for (const [value, buckets] of values) {
-        const byBucket: Map<number, RollupAgg> = target.get(value) ?? new Map();
-        target.set(value, byBucket);
-        for (const [t, agg] of buckets) {
-          const into = byBucket.get(t) ?? emptyAgg();
-          byBucket.set(t, into);
-          addAgg(into, agg);
-        }
-      }
-    }
   }
-  return guard(out, loaded);
 }
 
 /**
@@ -751,9 +775,11 @@ export function sumAggs(aggs: Iterable<RollupAgg>): RollupAgg {
 
 export type RollupPlan = {
   files: SummaryUse[];
-  /** Start of the earliest raw window the summaries answer. */
+  /** Raw files no summary answers, read whole and clipped to the range (with `residualBytes`). */
+  residual?: ManifestFile[];
+  /** Start of the earliest raw window the summaries (and residual) answer. */
   dataFromMs: number;
-  /** End of the newest raw window the summaries answer; newer data is omitted. */
+  /** End of the newest raw window the summaries (and residual) answer; newer data is omitted. */
   dataThroughMs: number;
 };
 
@@ -766,12 +792,20 @@ export type RollupPlan = {
  * period, a window listed between the raw and summary listings). Any other
  * file without a summary is a gap, which a rollup would show as zero, so it is
  * null.
+ *
+ * With `residualBytes`, every raw file no summary answers (one crossing either
+ * edge of the range, an open tail or a gap) is planned as `residual` instead,
+ * for the caller to roll up from raw rows clipped to the range, so the plan is
+ * exact through `toMs`; it is null when their listed sizes sum past the budget.
+ * Summaries only claim raw files they hold every row of (by identity and row
+ * count), so no row is counted by both.
  */
 export function planRollup(
   rawFiles: readonly ManifestFile[],
   summaryFiles: readonly ManifestFile[],
   fromMs: number,
   toMs: number,
+  options: { residualBytes?: number } = {},
 ): RollupPlan | null {
   const raw = filesOverlapping([...rawFiles], fromMs, toMs);
   const coarse = planCoarsestFirst(raw, summaryFiles, fromMs, toMs);
@@ -786,6 +820,22 @@ export function planRollup(
     summaries: [...coarse.summaries, ...compacted.summaries],
     raw: compacted.raw,
   };
+  if (options.residualBytes !== undefined) {
+    const residual = plan.raw;
+    if (!plan.summaries.length && !residual.length) return null;
+    const bytes = residual.reduce((sum, file) => sum + (file.size >= 0 ? file.size : Infinity), 0);
+    if (bytes > options.residualBytes) return null;
+    const spans = [
+      ...plan.summaries.flatMap((use) => use.covers).map((f) => [Date.parse(f.start), Date.parse(f.end)]),
+      ...residual.map((f) => [Math.max(fromMs, Date.parse(f.start)), Math.min(toMs, Date.parse(f.end))]),
+    ];
+    return {
+      files: plan.summaries,
+      residual,
+      dataFromMs: Math.min(...spans.map(([start]) => start)),
+      dataThroughMs: Math.max(...spans.map(([, end]) => end)),
+    };
+  }
   if (!plan.summaries.length) return null;
   const covered = plan.summaries.flatMap((use) => use.covers);
   const dataFromMs = Math.min(...covered.map((f) => Date.parse(f.start)));
@@ -817,6 +867,26 @@ export type RollupResult = {
 };
 
 type RollupSource = Pick<FileSource, "fetchJson"> & SummaryProjectionSource;
+
+/**
+ * Rolls up the raw rows no summary answers (see `planRollup`), so a range
+ * whose edges cut through bundled hours stays exact. The merged result holds
+ * only `keys`, the `group/field` keys the residual computes exactly.
+ */
+export type RollupResidual = {
+  /** Distinguishes cached results. */
+  id: string;
+  /** The raw columns `accumulate` reads. */
+  columns: readonly string[];
+  /** Largest summed listed size of residual raw files worth reading; more answers null. */
+  maxBytes: number;
+  keys: ReadonlySet<string>;
+  /** Adds decoded raw files' rows with a timestamp in [fromMs, toMs), one file at a time. */
+  accumulate(fromMs: number, toMs: number): {
+    add(file: ArrayBuffer): Promise<void>;
+    finish(): Rollup;
+  };
+};
 
 const DECODED_LIMIT = 64;
 let rollupEpoch = 0;
@@ -913,11 +983,17 @@ function decodeCached(
  */
 export function queryRollup(
   source: RollupSource,
-  range: { fromMs: number; toMs: number; signal?: AbortSignal; spec?: SummarySpec },
+  range: {
+    fromMs: number;
+    toMs: number;
+    signal?: AbortSignal;
+    spec?: SummarySpec;
+    residual?: RollupResidual;
+  },
 ): Promise<RollupResult | null> {
   const { signal } = range;
   signal?.throwIfAborted();
-  const key = `${source.cacheScope ?? "default"}|${range.fromMs}|${range.toMs}|${range.spec?.id ?? "whole"}`;
+  const key = `${source.cacheScope ?? "default"}|${range.fromMs}|${range.toMs}|${range.spec?.id ?? "whole"}|${range.residual?.id ?? ""}`;
   let shared = inflight.get(key);
   if (!shared || shared.settled || shared.controller.signal.aborted) {
     const controller = new AbortController();
@@ -934,6 +1010,7 @@ export function queryRollup(
       range.fromMs,
       range.toMs,
       range.spec,
+      range.residual,
       controller.signal,
       callRollupEpoch,
     ).finally(() => {
@@ -991,6 +1068,7 @@ async function runRollup(
   fromMs: number,
   toMs: number,
   spec: SummarySpec | undefined,
+  residual: RollupResidual | undefined,
   signal: AbortSignal,
   callRollupEpoch: number,
 ): Promise<RollupResult | null> {
@@ -1011,19 +1089,37 @@ async function runRollup(
   );
   assertRollupActive();
   if (!raw.complete || !summaries.complete) return null;
-  const plan = planRollup(raw.files, summaries.files, fromMs, toMs);
-  if (!plan) return null;
-  const parts = await Promise.all(
-    plan.files.map((use) =>
-      decodeCached(source, use.file, spec, signal, callRollupEpoch),
-    ),
+  const plan = planRollup(
+    raw.files,
+    summaries.files,
+    fromMs,
+    toMs,
+    residual ? { residualBytes: residual.maxBytes } : {},
   );
+  if (!plan) return null;
+  const [decodedParts, residualPart] = await Promise.all([
+    Promise.all(
+      plan.files.map((use) =>
+        decodeCached(source, use.file, spec, signal, callRollupEpoch),
+      ),
+    ),
+    residual && plan.residual?.length
+      ? readResidual(source, residual, plan.residual, fromMs, toMs, signal, assertRollupActive)
+      : null,
+  ]);
   assertRollupActive();
-  if (parts.some((part) => part === null)) return null;
-  const merged = mergeRollups(parts as Rollup[]);
+  if (decodedParts.some((part) => part === null)) return null;
+  const parts = [...(decodedParts as Rollup[]), ...(residualPart ? [residualPart] : [])];
+  const spans = [
+    ...plan.files.map((use) => (use.covers.length ? use.covers : [use.file])),
+    ...(residualPart ? [plan.residual!] : []),
+  ];
+  const merged = mergeRollups(parts, residual?.keys);
   const seenKeys = new Set<string>();
-  for (const part of parts as Rollup[]) {
-    for (const key of part.present ?? []) seenKeys.add(key);
+  for (const part of parts) {
+    for (const key of part.present ?? []) {
+      if (!residual || residual.keys.has(key)) seenKeys.add(key);
+    }
   }
   const missingRanges = new Map<string, { startMs: number; endMs: number }>();
   for (const key of seenKeys) {
@@ -1031,11 +1127,9 @@ async function runRollup(
     let startMs = Infinity;
     let endMs = -Infinity;
     for (let i = 0; i < parts.length; i++) {
-      const present = (parts[i] as Rollup).present;
+      const present = parts[i].present;
       if (present && Set.prototype.has.call(present, key)) continue;
-      const use = plan.files[i];
-      const files = use.covers.length ? use.covers : [use.file];
-      for (const f of files) {
+      for (const f of spans[i]) {
         startMs = Math.min(startMs, Date.parse(f.start));
         endMs = Math.max(endMs, Date.parse(f.end));
       }
@@ -1048,4 +1142,43 @@ async function runRollup(
     dataThroughMs: plan.dataThroughMs,
     missingRanges,
   };
+}
+
+/**
+ * Reads residual raw files as projections of `residual.columns` (row groups
+ * outside the range left out, the projection kept as a derived file), or
+ * whole without range reads, and rolls up their rows in the range.
+ */
+async function readResidual(
+  source: RollupSource,
+  residual: RollupResidual,
+  files: readonly ManifestFile[],
+  fromMs: number,
+  toMs: number,
+  signal: AbortSignal,
+  assertActive: () => void,
+): Promise<Rollup> {
+  const project = source.fetchRange
+    ? projectedReader(source, residual.columns, signal, { fromMs, toMs })
+    : null;
+  const into = residual.accumulate(fromMs, toMs);
+  let added = Promise.resolve();
+  await Promise.all(
+    files.map(async (file) => {
+      const bytes = project && file.size > 0
+        ? (await (await project(file)).read()).bytes
+        : (await source.fetchFile(file.key, signal)).bytes;
+      assertActive();
+      // Decoding one file at a time bounds the decoded columns held at once.
+      const add = added.then(() => {
+        assertActive();
+        return into.add(bytes);
+      });
+      added = add;
+      await add;
+      assertActive();
+    }),
+  );
+  assertActive();
+  return into.finish();
 }
