@@ -1149,8 +1149,11 @@ fn apply(
             && change.name == super::scoring::SCORING_PASS_NAME
             && change.action != "delete"
         {
-            let req_secret =
-                context.secret(&super::scoring::request_secret_ref(&service.service_id))?;
+            let Some(req_secret) =
+                super::scoring::load_or_recover_request_secret(context, service, token)?
+            else {
+                return Ok(());
+            };
             super::scoring::validate_vcl_literal(&req_secret, false)?;
             for field in ["content", "body"] {
                 if let Some(text) = body[field].as_str() {
@@ -1521,7 +1524,10 @@ pub fn front(
     Ok(())
 }
 
-fn activation_generation(context: &Context<'_, impl Runtime>, job: &Job) -> Result<(), Error> {
+pub(super) fn activation_generation(
+    context: &Context<'_, impl Runtime>,
+    job: &Job,
+) -> Result<(), Error> {
     let record = context
         .get(&format!("svc:{}", job.service_id))?
         .ok_or_else(|| Error::new(409, "service_changed_rerun"))?;
