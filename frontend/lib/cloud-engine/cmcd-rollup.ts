@@ -2,6 +2,7 @@ import type { CmcdQueryParams } from "./cmcd";
 import { classifySessionDurationBucket, CMCD_SESSION_DURATION_BUCKETS, emptyCmcdAggregates } from "./cmcd";
 import type { FileSource } from "./dashboard/engine";
 import { Histogram } from "./dashboard/histogram";
+import { MissingCloudFileError } from "./dashboard/file-errors";
 import { Hll } from "./dashboard/hll";
 import { mergeHistogramBytes, mergeHllBytes } from "./rollup-merge";
 import { filesOverlapping, type ManifestFile } from "./dashboard/manifest";
@@ -306,7 +307,36 @@ export async function cmcdFromRollup(
     signal,
   );
   if (!files || files.length === 0) return null;
+  try {
+    return await cmcdFromFiles(files, params, fromMs, toMs, source, signal);
+  } catch (error) {
+    if (signal?.aborted || !(error instanceof MissingCloudFileError)) throw error;
+    const missing = files.find((file) => file.key === error.key);
+    if (missing?.kind !== "hour" && missing?.kind !== "day") throw error;
+    // A bundle the listing names but storage lost: its hours' windows still answer them exactly.
+    console.warn(`flp: CMCD bundle ${error.key} is listed but missing; reading its windows`);
+    const windows = await listCmcdSummaryFiles(
+      source.fetchJson,
+      fromIso,
+      toIso,
+      fromMs,
+      toMs,
+      MAX_CMCD_ROLLUP_FILES,
+      signal,
+    );
+    if (!windows || windows.length === 0) return null;
+    return cmcdFromFiles(windows, params, fromMs, toMs, source, signal);
+  }
+}
 
+async function cmcdFromFiles(
+  files: ManifestFile[],
+  params: CmcdQueryParams,
+  fromMs: number,
+  toMs: number,
+  source: CmcdRollupSource,
+  signal?: AbortSignal,
+) {
   const buckets = new Map<number, BucketAgg>();
   const sessions = new Map<string, { firstTs: number; lastTs: number; reqs: number }>();
   const contents = new Map<string, ContentAgg>();

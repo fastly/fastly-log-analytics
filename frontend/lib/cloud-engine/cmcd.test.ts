@@ -9,6 +9,7 @@ import {
   queryCmcdAggregates,
 } from "./cmcd";
 import { cmcdFromRollup, MAX_CMCD_ROLLUP_FILES } from "./cmcd-rollup";
+import { MissingCloudFileError } from "./dashboard/file-errors";
 import { BOUNDS, Histogram } from "./dashboard/histogram";
 import { Hll } from "./dashboard/hll";
 import {
@@ -660,6 +661,35 @@ describe("Feature F24 — CMCD Streaming Media cloud-engine", () => {
     );
     expect(views).toEqual(["summary", null]);
     expect(res?.summary.total_requests).toBe(7);
+  });
+
+  it("answers from the per-window CMCD listing when a listed hour bundle's object is gone", async () => {
+    const t0 = Date.parse("2026-01-01T00:00:00Z");
+    const file = (kind: string, key: string, from: number, to: number) =>
+      ({ kind, key, start: new Date(from).toISOString(), end: new Date(to).toISOString(), size: 1, rows: 1 });
+    const bundle = file("hour", "processed/summary_bundle/cmcd_summary/hour_bundle=0.parquet", t0, t0 + 3_600_000);
+    const windows = [0, 1, 2].map((i) =>
+      file("window", `processed/request/cmcd_summary/window=${i}.parquet`, t0 + i * 600_000, t0 + (i + 1) * 600_000));
+    const views: (string | null)[] = [];
+    const fetched: string[] = [];
+    const res = await cmcdFromRollup(
+      { start_time: new Date(t0).toISOString(), end_time: new Date(t0 + 3_600_000).toISOString(), bucket_seconds: 300 },
+      {
+        async fetchJson(url: string) {
+          const view = new URL(url, "http://x").searchParams.get("view");
+          views.push(view);
+          return { files: view === "summary" ? [bundle] : windows, next_cursor: null, complete: true };
+        },
+        async fetchFile(key: string) {
+          fetched.push(key);
+          if (key === bundle.key) throw new MissingCloudFileError(key);
+          return { bytes: oneBucketSummary(t0, 5), cached: false };
+        },
+      },
+    );
+    expect(views).toEqual(["summary", null]);
+    expect(fetched.sort()).toEqual([bundle.key, ...windows.map((w) => w.key)].sort());
+    expect(res?.summary.total_requests).toBe(15);
   });
 
   it("filters out cmcd_summary buckets outside [fromMs, toMs) and reports has_data=false when none remain", async () => {

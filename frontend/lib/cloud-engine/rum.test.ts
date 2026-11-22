@@ -1,6 +1,7 @@
 // @vitest-environment node
 import { parquetWriteBuffer } from "hyparquet-writer";
 import { describe, expect, it } from "vitest";
+import { MissingCloudFileError } from "./dashboard/file-errors";
 import { Histogram } from "./dashboard/histogram";
 import { Hll } from "./dashboard/hll";
 import type { RumRollupSource } from "./rum-rollup";
@@ -479,6 +480,17 @@ describe("Feature F23 — RUM & Web Vitals cloud-engine", () => {
       // Filtered queries bypass rum_summary and hit raw DuckDB
       const filtered = await queryRumAnalytics({ engine, start_time: T0, end_time: T1, rollupSource, country: "US" });
       expect(filtered.no_data).toBe(true);
+
+      // A listed summary whose object is gone leaves the read to raw DuckDB
+      const gone: RumRollupSource = {
+        fetchJson: rollupSource.fetchJson,
+        async fetchFile(key) {
+          throw new MissingCloudFileError(key);
+        },
+      };
+      const fallback = await queryRumAnalytics({ engine, start_time: T0, end_time: T1, rollupSource: gone });
+      expect(fallback.summary).toEqual(raw.summary);
+      expect(fallback.top_errors).toEqual(raw.top_errors);
     } finally {
       await engine.reset();
     }

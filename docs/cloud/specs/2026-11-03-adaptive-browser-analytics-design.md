@@ -313,6 +313,15 @@ Where raw reads remain:
   of a rolling 1h range);
 - filters on fields other than pivots, and ranges under an hour.
 
+A summary or bundle the listing names but storage answers with 404 (a
+catalog entry that outlived its object) never fails a page. Its read throws
+`MissingCloudFileError`, and each reader covers its rows exactly another way:
+rollups (`runRollup`, behind /insights, /network, /origin, /performance,
+/assets and /fastly-value) and /security re-plan without it; /streaming
+re-lists that range per window when a CMCD bundle is gone; /rum reads raw
+Parquet, since each RUM summary is the only one for its window; and the
+dashboard engine reads the summary's raw files, as for any unreadable summary.
+
 Cost (bench `summary_bench`, release, native; noisy shared machine):
 
 | | before | with status slices |
