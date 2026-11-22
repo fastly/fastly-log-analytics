@@ -10,6 +10,7 @@ import {
   decodeSummary,
   fingerprint,
   normalizeDashboardValue,
+  planCoarsestFirst,
   planCompactsFromWindows,
   planSummaries,
   summaryValue,
@@ -380,6 +381,49 @@ describe("summary readers", () => {
     expect(
       plan.raw.filter((f) => Date.parse(f.start) >= HOUR_09 * 1000),
     ).toEqual([]);
+  });
+
+  it("plan uses an open bundle covering a set while a late window it does not cover is listed", () => {
+    const windows09 = pick("window", (e) => e.start >= HOUR_09).sort(
+      (a, b) => Date.parse(a.start) - Date.parse(b.start),
+    );
+    const covered = [windows09[0], windows09[2]];
+    const listed = [windows09[1], windows09[3]];
+    const rows = covered.reduce((sum, w) => sum + w.rows, 0);
+    const fp = fingerprint(
+      covered.map((w) => w.key.slice(w.key.lastIndexOf("/") + 1)).sort(),
+    )
+      .toString(16)
+      .padStart(16, "0");
+    const openKey = `processed/summary_bundle/request/year=2027/month=01/day=15/open_bundle=09-${Date.parse(windows09[2].end)}-c2-n${rows}-h${fp}.parquet`;
+    const openFile: ManifestFile = {
+      key: openKey,
+      start: covered[0].start,
+      end: covered[1].end,
+      size: 1024,
+      rows,
+      kind: "hour",
+      sources: 2,
+    };
+    const from = HOUR_09 * 1000;
+    const to = (HOUR_09 + 3600) * 1000;
+    for (const plan of [
+      planSummaries(RAW, [openFile, ...listed], from, to),
+      planCoarsestFirst(RAW, [openFile, ...listed], from, to),
+    ]) {
+      expect(
+        plan.summaries.map((s) => [s.file.key, s.covers.length]).sort(),
+      ).toEqual(
+        [[openKey, 2], ...listed.map((w) => [w.key, 1])].sort(),
+      );
+      expect(plan.raw.filter((f) => Date.parse(f.start) >= from)).toEqual([]);
+    }
+    // A window neither listed nor in the bundle's set keeps the bundle out.
+    const missing = planSummaries(RAW, [openFile, windows09[3]], from, to);
+    expect(missing.summaries.map((s) => s.file.key)).toEqual([windows09[3].key]);
+    expect(
+      missing.raw.filter((f) => Date.parse(f.start) >= from),
+    ).toHaveLength(3);
   });
 
   it("fingerprint mismatch falls back to windows", () => {

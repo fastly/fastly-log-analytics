@@ -2183,6 +2183,14 @@ mod summary_bundles {
         );
         let third = run(&fake);
         assert!(third.errors.is_empty(), "tick 3 errors: {:?}", third.errors);
+        // Tick 2 pre-folds a partial and tick 3 encodes the snapshot (one encode per tick), so
+        // tick 4 publishes it.
+        let fourth = run(&fake);
+        assert!(
+            fourth.errors.is_empty(),
+            "tick 4 errors: {:?}",
+            fourth.errors
+        );
 
         // Simulate another POP reading the stale `STATE_KEY` from tick 1 (holding the old
         // `state.publication` whose `built_generation` is now behind `WATERMARK_KEY`).

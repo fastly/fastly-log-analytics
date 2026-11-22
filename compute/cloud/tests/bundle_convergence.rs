@@ -731,3 +731,206 @@ fn a_day_of_60s_windows_converges_to_catalog_hour_bundles() {
         busy / runs as u64
     );
 }
+
+/// Live 2-minute windows: each gets a summary per shard from the run that read each of the
+/// three log periods its lines land in, so its files keep arriving for three minutes after it
+/// ends, under random run ids that sort anywhere among the window's earlier files.
+const OPEN_WINDOW_S: i64 = 120;
+const OPEN_RUN_SHARDS: u32 = 1;
+const OPEN_RUN_LAGS: [i64; 3] = [60, 120, 180];
+/// What a browser fetches for the open hour once it is this far in: one open bundle plus the
+/// windows written since the last snapshot was built and published (at most and on average).
+/// Before open-hour partials stopped at settled windows it was 79 and 33.
+const OPEN_HOUR_FILES: usize = 30;
+const OPEN_HOUR_MEAN_FILES: usize = 16;
+const OPEN_SETTLED_FROM_S: i64 = 20 * 60;
+
+/// Commits the summaries `runs` (window start, run id) wrote, one processed file each, and
+/// moves the watermark to the raw minute that run read.
+fn commit_runs(
+    fake: &Fake,
+    svc: &Service,
+    runs: &[(i64, String)],
+    read_minute: i64,
+    bodies: &[Vec<u8>],
+) -> Vec<String> {
+    let (mut files, mut summaries, mut keys) = (Vec::new(), Vec::new(), Vec::new());
+    for (start, run) in runs {
+        for shard in 0..OPEN_RUN_SHARDS {
+            let id = format!("{run}s{shard}");
+            let key = summary::summary_key(WINDOWS, *start, start + OPEN_WINDOW_S, &id, 4);
+            let body = bodies[(*start / 60) as usize % bodies.len()].clone();
+            summaries.push(Output {
+                key: key.clone(),
+                rows: 4,
+                bytes: body.len() as u64,
+                ..Default::default()
+            });
+            fake.bucket.borrow_mut().insert(key.clone(), body);
+            keys.push(key);
+            files.push(Output {
+                key: ingest::processed_key(
+                    "processed/request/",
+                    *start,
+                    start + OPEN_WINDOW_S,
+                    &id,
+                    4,
+                ),
+                rows: 4,
+                bytes: 1000,
+                ..Default::default()
+            });
+        }
+    }
+    for _ in 0..50 {
+        fake.new_execution();
+        let record = fake.kv.borrow().get(ingest::WATERMARK_KEY).cloned();
+        let previous = record
+            .as_ref()
+            .map(|(_, value)| value.clone())
+            .unwrap_or_else(|| json!({}));
+        match catalog::prepare(
+            &store(fake, svc),
+            &previous,
+            "commit",
+            "schema",
+            &files,
+            &summaries,
+            &[],
+            &[],
+        ) {
+            Ok(mut value) => {
+                value["key"] = raw_key(read_minute).into();
+                let generation = record.map_or(1, |(generation, _)| generation + 1);
+                fake.kv
+                    .borrow_mut()
+                    .insert(ingest::WATERMARK_KEY.into(), (generation, value));
+                return keys;
+            }
+            Err(error) if error == "catalog_prepare_pending" => {}
+            Err(error) => panic!("commit failed: {error}"),
+        }
+    }
+    panic!("commit made no progress");
+}
+
+/// The files a summary listing hands a browser for the open hour: its published open bundle
+/// plus every committed window the bundle does not cover, else every window.
+fn open_hour_files(
+    fake: &Fake,
+    hour: i64,
+    committed: &std::collections::BTreeSet<String>,
+) -> usize {
+    let head = catalog_head(fake);
+    let Some(reference) = head.open_bundles.get(&hour) else {
+        return committed.len();
+    };
+    let coverage = catalog::bundles::parse(&fake.bucket.borrow()[&reference.key]).unwrap();
+    assert!(
+        coverage.windows.is_subset(committed),
+        "an open bundle covers only committed windows"
+    );
+    1 + committed.difference(&coverage.windows).count()
+}
+
+#[test]
+fn the_open_hour_stays_a_handful_of_files_while_late_runs_keep_arriving() {
+    let fake = Fake::default();
+    let svc = service_with_period(LIVE_PERIOD_S);
+    let bodies = bodies();
+    let mut mirror = Mirror {
+        configured: true,
+        log_period_s: LIVE_PERIOD_S as u64,
+        jobs: Jobs::default(),
+        rum_log_period_s: 0,
+        compaction: false,
+    };
+    let (start, end) = (BASE, BASE + 6 * HOUR);
+    let mut committed: BTreeMap<i64, std::collections::BTreeSet<String>> = BTreeMap::new();
+    let (mut slots, mut runs, mut busy, mut peak) = (0u32, 0usize, 0u64, 0u64);
+    let mut samples: Vec<(i64, usize)> = Vec::new();
+    let mut now = start;
+    while now < end {
+        fake.now.set(now);
+        if now % 60 == 0 && now >= start + 60 {
+            // The run at `now` read the raw minute before it: its lines land in windows that
+            // ended up to three periods ago.
+            let mut due = Vec::new();
+            for lag in OPEN_RUN_LAGS {
+                let window_end = now - lag;
+                if window_end > start && window_end % OPEN_WINDOW_S == 0 {
+                    let id = format!(
+                        "{:012x}",
+                        (now as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 16
+                    );
+                    due.push((window_end - OPEN_WINDOW_S, id));
+                }
+            }
+            for key in commit_runs(&fake, &svc, &due, now - 60, &bodies) {
+                let hour = key
+                    .rsplit('/')
+                    .next()
+                    .and_then(|name| name.strip_prefix("summary="))
+                    .and_then(|rest| rest.split('-').next())
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .map(|s| s - s.rem_euclid(HOUR))
+                    .unwrap();
+                committed.entry(hour).or_default().insert(key);
+            }
+        }
+        if schedule::due(&mirror, now as u64).maint {
+            let bundle_pending = (slots % (BUSY_STAGES + 1) == 0).then(|| {
+                let report = run_with_cpu(&fake, &svc, STARTUP_MS[runs % STARTUP_MS.len()]);
+                runs += 1;
+                busy += fake.vcpu.get();
+                peak = peak.max(fake.vcpu.get());
+                report.more_pending
+            });
+            slots += 1;
+            let pending =
+                schedule::maint_catching_up(mirror.jobs.maint.more_pending, bundle_pending);
+            mirror.jobs.maint = JobState {
+                last_run: Some(now as u64),
+                more_pending: pending,
+                retry_after: if pending {
+                    now as u64 + schedule::MAINT_CATCHUP_S
+                } else {
+                    0
+                },
+                ..JobState::default()
+            };
+        }
+        let hour = now - now.rem_euclid(HOUR);
+        if now - hour >= OPEN_SETTLED_FROM_S && now % 60 == 30 && hour > start {
+            let files = committed
+                .get(&hour)
+                .map_or(0, |windows| open_hour_files(&fake, hour, windows));
+            samples.push((now - start, files));
+        }
+        now += 10;
+    }
+    let worst = samples.iter().map(|(_, n)| *n).max().unwrap();
+    let mean = samples.iter().map(|(_, n)| *n).sum::<usize>() / samples.len();
+    let over: Vec<&(i64, usize)> = samples
+        .iter()
+        .filter(|(_, n)| *n > OPEN_HOUR_FILES)
+        .collect();
+    assert!(
+        over.is_empty(),
+        "open hour over {OPEN_HOUR_FILES} files (mean {mean}, worst {worst}) at {} of {} samples: {:?}",
+        over.len(),
+        samples.len(),
+        &over[..over.len().min(12)]
+    );
+    assert!(mean <= OPEN_HOUR_MEAN_FILES, "open hour mean {mean} files");
+    assert!(
+        busy / runs as u64 <= VCPU_BUDGET_MS,
+        "{} ms a run",
+        busy / runs as u64
+    );
+    assert!(peak <= 1000, "{peak} ms peak");
+    eprintln!(
+        "open hour files: mean {mean}, worst {worst}; vCPU mean {} peak {peak}",
+        busy / runs as u64
+    );
+}
