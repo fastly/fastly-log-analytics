@@ -17,6 +17,7 @@ import {
   updateDashboardCacheIdentity,
 } from "./sources";
 import { FILTERED_CACHE_NAME } from "./filtered-cache";
+import { rangedReadsOnly } from "./test-fixtures";
 import {
   STORE_META_CACHE,
   readStoreError,
@@ -1449,6 +1450,7 @@ describe("persistent Parquet store", () => {
   }, 45_000);
 
   it("aborts in-flight <65% fetchRange + ensureCloudRange and >=65% fetchFile/storeQueue across clearDashboardData leaving 0 DuckDB rows and empty CacheStorage", async () => {
+    rangedReadsOnly();
     const ls = new Map<string, string>();
     vi.stubGlobal("localStorage", {
       getItem: (k: string) => ls.get(k) ?? null,

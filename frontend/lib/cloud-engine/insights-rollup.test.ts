@@ -9,7 +9,7 @@ import {
   fixtureFiles,
   fixturePage,
 } from "./dashboard/summary-fixtures";
-import { fixtureSource, projectingSource } from "./dashboard/test-fixtures";
+import { fixtureSource, projectingSource, rangedReadsOnly } from "./dashboard/test-fixtures";
 import { queryCloudInsights } from "./insight-scans";
 import {
   _coalesced_asn_aggregates,
@@ -576,6 +576,7 @@ describe("insights baseline from summaries vs raw DuckDB over the same rows", ()
   });
 
   it("answers an end inside a summarized window by rolling up the edge raw files, matching raw", async () => {
+    rangedReadsOnly();
     const end = T1 - 7 * 60_000;
     const cut = { ...body, clamp_end: new Date(end).toISOString() };
     vi.useFakeTimers({ toFake: ["Date"], now: T1 });

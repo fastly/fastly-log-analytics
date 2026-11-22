@@ -1,4 +1,6 @@
 import { parquetWriteBuffer } from "hyparquet-writer";
+import { onTestFinished } from "vitest";
+import { wholeReadLimits } from "./parquet-projection";
 export { parquetFixture, type FixtureRow } from "./parquet-fixture";
 import type { FileRollup, FileSource } from "./engine";
 import type { ManifestFile } from "./manifest";
@@ -6,6 +8,15 @@ import {
   createNodeBackend, getDuckDBEngine as analyticalEngine, interpolateSqlParams,
   DuckDBAnalyticalEngine as AnalyticalEngine, type DuckDBBackend,
 } from "./duckdb";
+
+/** Keeps this test's projected reads of small closed-hour fixtures on footer-planned ranges. */
+export function rangedReadsOnly(): void {
+  const limits = { ...wholeReadLimits };
+  Object.assign(wholeReadLimits, { anyUpToBytes: 0, closedHourUpToBytes: 0 });
+  onTestFinished(() => {
+    Object.assign(wholeReadLimits, limits);
+  });
+}
 
 let fixtureBackend: Promise<DuckDBBackend> | undefined;
 let nextSqlFixture = 1;

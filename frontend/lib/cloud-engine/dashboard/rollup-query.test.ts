@@ -19,7 +19,7 @@ import {
   fixtureFiles,
   fixturePage,
 } from "./summary-fixtures";
-import { fixtureSource, projectingSource } from "./test-fixtures";
+import { fixtureSource, projectingSource, rangedReadsOnly } from "./test-fixtures";
 import { INSIGHTS_RESIDUAL } from "../insights-residual";
 
 const HOUR = 3_600_000;
@@ -452,6 +452,7 @@ describe("queryRollup", () => {
   });
 
   it("rolls up the raw rows no summary answers, exactly through the range end", async () => {
+    rangedReadsOnly();
     const fromMs = T0 + 5 * 60_000;
     const toMs = T0 + 2 * HOUR - 7 * 60_000;
     const gap = WINDOWS.find((f) => at(f) === T0 + HOUR)!;

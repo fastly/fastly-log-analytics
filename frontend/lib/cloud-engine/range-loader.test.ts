@@ -20,6 +20,9 @@ import * as sqlBuilder from "../sqlBuilder";
 import { insightsBaselineFromRollup } from "./insights-rollup";
 import { mergeRollups } from "./dashboard/rollup-query";
 import { dashboardManifestCacheScope } from "./dashboard/sources";
+import { wholeReadLimits } from "./dashboard/parquet-projection";
+
+const DEFAULT_WHOLE_READ_LIMITS = { ...wholeReadLimits };
 
 const { source, scopeState } = vi.hoisted(() => {
   const mock = {
@@ -51,6 +54,8 @@ const signal = new AbortController().signal;
 const file = { key: "processed/request/fixture.parquet", start: from, end: to, size: 100, rows: 1 };
 
 beforeEach(async () => {
+  // Fixtures are small closed-hour files, so tests of footer-planned ranges opt out of whole reads.
+  Object.assign(wholeReadLimits, { anyUpToBytes: 0, closedHourUpToBytes: 0 });
   scopeState.value = "fixture-session";
   clearManifestCache();
   await getDuckDBEngine().reset();
@@ -69,7 +74,7 @@ beforeEach(async () => {
   cloudLoadingStore.reset();
   vi.mocked(fetchManifest).mockResolvedValue({ files: [file], complete: true });
 });
-afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); clearManifestCache(); cloudLoadingStore.reset(); });
+afterEach(() => { Object.assign(wholeReadLimits, DEFAULT_WHOLE_READ_LIMITS); vi.restoreAllMocks(); vi.unstubAllGlobals(); clearManifestCache(); cloudLoadingStore.reset(); });
 
 async function analyticalFiles(fixtures: (ManifestFile & { bytes: ArrayBuffer })[]) {
   const entries = fixtures.map((entry) => ({ ...entry, size: entry.bytes.byteLength }));
@@ -151,6 +156,47 @@ describe("Cloud first-page analytical range loading", () => {
       "SELECT count(*) AS n, count(*) FILTER (WHERE status = 503) AS errors, count(*) FILTER (WHERE cache = 'HIT') AS hits FROM requests",
     )).toEqual([{ n: 6400, errors: 4 * 229, hits: 4 * 1066 }]);
     expect([...await read.getPresentColumns()]).toEqual(expect.arrayContaining(["ua", "referer", "status"]));
+    read.release?.();
+  });
+
+  it("reads small closed-hour files whole in one request each, without footer or column ranges", async () => {
+    Object.assign(wholeReadLimits, DEFAULT_WHOLE_READ_LIMITS);
+    const { entries, ranges, fullBytes } = projectedFiles(3);
+    expect(Math.max(...entries.map((entry) => entry.size))).toBeLessThan(DEFAULT_WHOLE_READ_LIMITS.closedHourUpToBytes);
+    source.fetchFile.mockImplementation(async (key: string) => ({
+      bytes: entries.find((entry) => entry.key === key)!.bytes.slice(0), cached: false,
+    }));
+    const read = await ensureCloudRange(from, to, signal, ["request"], projection(fullBytes));
+    expect(ranges.count).toBe(0);
+    expect(source.fetchFile.mock.calls.map(([key]) => key).sort()).toEqual(entries.map((entry) => entry.key).sort());
+    expect(await read.executeSql(
+      "SELECT count(*) AS n, count(*) FILTER (WHERE status = 503) AS errors, count(*) FILTER (WHERE cache = 'HIT') AS hits FROM requests",
+    )).toEqual([{ n: 4800, errors: 3 * 229, hits: 3 * 1066 }]);
+    read.release?.();
+  });
+
+  it("keeps footer-planned ranges for open-hour files above the small-file size, and reads tiny ones whole", async () => {
+    Object.assign(wholeReadLimits, DEFAULT_WHOLE_READ_LIMITS);
+    const { entries, ranges } = projectedFiles(2);
+    const tiny = wideFile(9, 100);
+    expect(tiny.byteLength).toBeLessThan(DEFAULT_WHOLE_READ_LIMITS.anyUpToBytes);
+    expect(entries[0].size).toBeGreaterThan(DEFAULT_WHOLE_READ_LIMITS.anyUpToBytes);
+    const open = new Date(Date.now() + 600_000).toISOString();
+    const listed = [
+      ...entries.map(({ bytes: _bytes, ...entry }) => ({ ...entry, end: open })),
+      { ...file, key: "processed/request/tiny.parquet", end: open, size: tiny.byteLength },
+    ];
+    vi.mocked(fetchManifest).mockResolvedValue({ files: listed, complete: true });
+    source.fetchFile.mockImplementation(async (key: string) => {
+      expect(key).toBe("processed/request/tiny.parquet");
+      return { bytes: tiny.slice(0), cached: false };
+    });
+    const read = await ensureCloudRange(from, to, signal, ["request"], projection(1 << 30));
+    expect(source.fetchFile).toHaveBeenCalledTimes(1);
+    expect(source.fetchRange.mock.calls.every(([entry]) => (entry as ManifestFile).key !== "processed/request/tiny.parquet"))
+      .toBe(true);
+    expect(ranges.count).toBeGreaterThan(2);
+    expect(await read.executeSql("SELECT count(*) AS n FROM requests")).toEqual([{ n: 3300 }]);
     read.release?.();
   });
 
