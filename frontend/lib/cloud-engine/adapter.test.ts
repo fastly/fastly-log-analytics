@@ -9,7 +9,7 @@ import { parseComputeBilling } from "./usage/summary";
 import { fixtureUsageInput } from "./usage/fixtures";
 import { resetComputeBillingCache } from "./usage/computeUsage";
 import * as ops from "./telemetry/client";
-import { CloudBudgetError, ensureCloudRange } from "./range-loader";
+import { CloudBudgetError, cloudRangePresentColumns, ensureCloudRange } from "./range-loader";
 import { insightScanColumns } from "./insight-scans";
 import { NETWORK_SCAN_COLUMNS, networkScanColumns } from "./network";
 import { VALUE_SCAN_COLUMNS } from "./value";
@@ -26,6 +26,7 @@ import { mergeRollups } from "./dashboard/rollup-query";
 vi.mock("./range-loader", async (importOriginal) => ({
   ...await importOriginal<typeof import("./range-loader")>(),
   ensureCloudRange: vi.fn(async () => getDuckDBEngine().readContext()),
+  cloudRangePresentColumns: vi.fn(async () => new Set<string>()),
 }));
 
 vi.mock("./network-rollup", async (importOriginal) => ({
@@ -966,8 +967,9 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     }));
     expect(insights?.projection?.columns).toEqual(expect.arrayContaining(["url", "status", "transport", "host"]));
     expect(insights?.projection?.maxBytes).toBeUndefined();
-    // Availability needs only the files' schemas, which a projection keeps whole.
-    expect((await options("/api/insight-availability"))?.projection?.columns).toEqual(["timestamp", "ts_ms"]);
+    // Availability needs only the files' schemas, read from their footers without loading a range.
+    expect(await options("/api/insight-availability")).toBeUndefined();
+    expect(vi.mocked(cloudRangePresentColumns)).toHaveBeenCalled();
     expect((await options("/api/insights/cache-collapse-detail", post({ url: "/a", window_size_hrs: 24, baseline_hours: 168 })))
       ?.projection?.columns).toEqual(insightScanColumns([]));
     expect((await options("/api/insights", post({ window_size_hrs: 24, baseline_hours: 720 }, { "x-flp-cloud-prefetch": "1" })))

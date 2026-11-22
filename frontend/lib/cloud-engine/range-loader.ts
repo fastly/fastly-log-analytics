@@ -1,6 +1,6 @@
 import { ALL_TABLE_FIELDS, getDuckDBEngine, type DuckDBReadContext } from "./dashboard/duckdb";
 import type { CustomField } from "./dashboard/summaries";
-import { fetchManifest } from "./dashboard/manifest";
+import { fetchManifest, type ManifestFile } from "./dashboard/manifest";
 import {
   browserSource,
   dashboardCacheScope,
@@ -65,6 +65,131 @@ export function resetRangeLoaderCache(): void {
   source.clearMemoryCache?.();
 }
 
+function scopedFetchJson(serviceId?: string) {
+  if (!serviceId) return source.fetchJson;
+  return Object.assign(
+    (path: string, signal?: AbortSignal) => {
+      const url = new URL(path, globalThis.location?.origin ?? "http://localhost");
+      url.searchParams.set("service_id", serviceId);
+      return source.fetchJson(`${url.pathname}${url.search}`, signal);
+    },
+    { manifestCacheScope: () => dashboardManifestCacheScope("", serviceId) },
+  );
+}
+
+const fileIdentity = (scope: string, serviceId: string | undefined, dataset: string, file: ManifestFile) =>
+  [scope, serviceId ?? "", dataset, file.key, file.etag ?? "", file.size, file.schema_version ?? ""];
+
+type FileSource = ReturnType<typeof source.withOptions>;
+
+/**
+ * A file's Parquet footer. Footers persist under the file's own identity, so
+ * any projection of it, and a schema-only read, reuse them. `check` runs after
+ * every await; `canPersist` gates writing a freshly read footer.
+ */
+async function readPersistedFooter(
+  fileSource: FileSource,
+  file: { key: string; size: number; footerKey: string },
+  fetchRange: (start: number, end: number) => Promise<ArrayBuffer>,
+  check: () => void,
+  canPersist: () => boolean,
+) {
+  check();
+  const cached = await fileSource.readDerivedFile(file.key, file.footerKey);
+  check();
+  const tailStart = cached ? Number(cached.meta) : NaN;
+  const tail = cached && Number.isSafeInteger(tailStart) && tailStart >= 0
+    ? { start: tailStart, bytes: await cached.bytes() } : null;
+  check();
+  const footer = await readParquetFooter(file.size, (start, end) =>
+    tail && start >= tail.start && end <= tail.start + tail.bytes.byteLength
+      ? Promise.resolve(tail.bytes.slice(start - tail.start, end - tail.start)) : fetchRange(start, end));
+  check();
+  if (!tail && footer.tail && canPersist()) {
+    void fileSource.writeDerivedFile(file.key, file.footerKey, footer.tail.bytes, String(footer.tail.start));
+  }
+  return footer;
+}
+
+/**
+ * The request columns present in any raw file of the range, read from the
+ * files' footers alone: the same set a loaded range's `getPresentColumns`
+ * reports, without downloading column data or touching DuckDB. Insights
+ * availability needs only this, and under steady ingest a 24 h projection of
+ * even two columns covers most of every compacted file.
+ */
+export async function cloudRangePresentColumns(
+  from: string,
+  to: string,
+  signal: AbortSignal,
+  options: { serviceId?: string; isCurrent?: () => void } = {},
+): Promise<Set<string>> {
+  const check = () => {
+    options.isCurrent?.();
+    signal.throwIfAborted();
+  };
+  const loading = beginCloudLoading("listing");
+  let success = false;
+  try {
+    const listFrom = new Date(Math.floor(Date.parse(from) / 1000) * 1000).toISOString();
+    const listTo = new Date(Math.ceil(Date.parse(to) / 1000) * 1000).toISOString();
+    const manifest = await fetchManifest(scopedFetchJson(options.serviceId), listFrom, listTo, signal, "request", "raw");
+    check();
+    if (!manifest.complete) throw new Error("Cloud file listing is incomplete; choose a smaller range");
+    if (manifest.files.length > MAX_RANGE_FILES)
+      throw overBudget({ unit: "files", needed: manifest.files.length, limit: MAX_RANGE_FILES });
+    if (manifest.files.some((file) => !(file.size > 0))) throw new Error("Cloud file listing has no file size to project");
+    const fileSource = options.serviceId ? source.withOptions({ serviceId: options.serviceId }) : source;
+    const scope = dashboardCacheScope();
+    const downloads = new AbortController();
+    activeRangeDownloads.add(downloads);
+    const abortDownloads = () => downloads.abort(signal.reason);
+    signal.addEventListener("abort", abortDownloads, { once: true });
+    if (signal.aborted) abortDownloads();
+    const progress = { phase: "files" as const, cached: 0, toFetch: manifest.files.length,
+      toDecode: 0, done: 0, downloadedBytes: 0, cachedBytes: 0 };
+    loading.update({ stage: "files", progress: { ...progress } });
+    try {
+      const columns = new Set<string>();
+      let next = 0;
+      const worker = async () => {
+        while (next < manifest.files.length) {
+          const file = manifest.files[next++];
+          const footerKey = JSON.stringify([...fileIdentity(scope, options.serviceId, "request", file), "footer"]);
+          const footer = await readPersistedFooter(fileSource, { key: file.key, size: file.size, footerKey },
+            (start, end) => fetchLanes.run("raw", () => {
+              downloads.signal.throwIfAborted();
+              return fileSource.fetchRange(file, start, end, downloads.signal, "low").then((bytes) => {
+                progress.downloadedBytes += bytes.byteLength;
+                return bytes;
+              });
+            }),
+            () => { check(); downloads.signal.throwIfAborted(); },
+            () => !downloads.signal.aborted);
+          check();
+          for (const field of planParquetProjection(footer, new Set()).presentColumns) columns.add(field);
+          progress.done++;
+          loading.update({ progress: { ...progress } });
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(RANGE_CONCURRENCY, manifest.files.length) }, worker));
+      check();
+      if (manifest.files.length > 0) {
+        columns.add("timestamp");
+        columns.add("ts_ms");
+      }
+      success = true;
+      return columns;
+    } finally {
+      activeRangeDownloads.delete(downloads);
+      signal.removeEventListener("abort", abortDownloads);
+      downloads.abort();
+    }
+  } finally {
+    loading.finish(success);
+  }
+}
+
 export function bindCloudReadContext(request: Request, context: DuckDBReadContext): Request {
   requestReads.set(request, context);
   return request;
@@ -118,22 +243,7 @@ export async function ensureCloudRange(
   engine.prewarm().catch(() => {});
   let success = false;
   try {
-    const fetchJson = options.serviceId
-      ? Object.assign(
-          (path: string, signal?: AbortSignal) => {
-            const url = new URL(
-              path,
-              globalThis.location?.origin ?? "http://localhost",
-            );
-            url.searchParams.set("service_id", options.serviceId!);
-            return source.fetchJson(`${url.pathname}${url.search}`, signal);
-          },
-          {
-            manifestCacheScope: () =>
-              dashboardManifestCacheScope("", options.serviceId),
-          },
-        )
-      : source.fetchJson;
+    const fetchJson = scopedFetchJson(options.serviceId);
     // Native discovery has second precision; SQL retains the original bounds.
     const listFrom = new Date(Math.floor(Date.parse(from) / 1000) * 1000).toISOString();
     const listTo = new Date(Math.ceil(Date.parse(to) / 1000) * 1000).toISOString();
@@ -149,8 +259,7 @@ export async function ensureCloudRange(
     const scope = dashboardCacheScope();
     const files = manifests.flatMap((manifest, index) =>
       manifest.files.map((file) => {
-        const identity = [scope, options.serviceId ?? "", datasets[index],
-          file.key, file.etag ?? "", file.size, file.schema_version ?? ""];
+        const identity = fileIdentity(scope, options.serviceId, datasets[index], file);
         const columns = widerColumns && Date.parse(file.end) > widerFromMs ? widerColumns : projectedColumns;
         return { ...file, dataset: datasets[index], columns,
           wholeKey: JSON.stringify(identity),
@@ -196,26 +305,11 @@ export async function ensureCloudRange(
         return false;
       }
     };
-    // Footers persist under the file's own identity, so any projection of it reuses them.
-    const readFooter = async (file: typeof files[number]) => {
-      generation.assertCurrent();
-      downloads.signal.throwIfAborted();
-      const cached = await fileSource.readDerivedFile(file.key, file.footerKey);
-      generation.assertCurrent();
-      downloads.signal.throwIfAborted();
-      const tailStart = cached ? Number(cached.meta) : NaN;
-      const tail = cached && Number.isSafeInteger(tailStart) && tailStart >= 0
-        ? { start: tailStart, bytes: await cached.bytes() } : null;
-      generation.assertCurrent();
-      downloads.signal.throwIfAborted();
-      const footer = await readParquetFooter(file.size, (start, end) =>
-        tail && start >= tail.start && end <= tail.start + tail.bytes.byteLength
-          ? Promise.resolve(tail.bytes.slice(start - tail.start, end - tail.start)) : fetchRange(file, start, end));
-      if (!tail && footer.tail && canPersistDerived()) {
-        void fileSource.writeDerivedFile(file.key, file.footerKey, footer.tail.bytes, String(footer.tail.start));
-      }
-      return footer;
-    };
+    const readFooter = (file: typeof files[number]) => readPersistedFooter(fileSource, file,
+      (start, end) => fetchRange(file, start, end), () => {
+        generation.assertCurrent();
+        downloads.signal.throwIfAborted();
+      }, canPersistDerived);
     try {
       const plans = new Map<string, ParquetProjection>();
       const persisted = new Map<string, DerivedFile>();
