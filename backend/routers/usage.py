@@ -632,12 +632,14 @@ def usage_current_storage(
             )
 
         archive_bytes = archive_objects = archive_expired_bytes = 0
+        archive_storage_complete = False
         try:
             from backend.high_scale.postgres_control import PostgresControlPlane
 
             summary = PostgresControlPlane().archive_storage_summary(str(src.get("service_id") or src["name"]))
             archive_bytes, archive_objects = summary["live_bytes"], summary["live_objects"]
             archive_expired_bytes = summary["expired_30d_bytes"]
+            archive_storage_complete = True
         except Exception:
             logger.debug("usage_current_storage: archive summary failed (ignored)", exc_info=True)
 
@@ -681,9 +683,11 @@ def usage_current_storage(
             live_bytes=live_bytes,
             live_files=live_files,
             deleted_bytes=deleted_bytes,
-            deleted_bytes_complete=cloud_copy_deleted_bytes_complete,
+            deleted_bytes_complete=archive_storage_complete and cloud_copy_deleted_bytes_complete,
             deleted_bytes_provenance=(
-                "metadata_ledgers" if cloud_copy_deleted_bytes_complete else "metadata_ledgers_incomplete"
+                "metadata_ledgers"
+                if archive_storage_complete and cloud_copy_deleted_bytes_complete
+                else "metadata_ledgers_incomplete"
             ),
             quarantine_bytes=quarantine_bytes,
             total_billed_bytes=billed_bytes,

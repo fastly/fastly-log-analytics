@@ -239,7 +239,10 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       vi.spyOn(usage, "fetchUsageSummary").mockResolvedValue({
         ...summary, input: fixtureUsageInput, summary, lines: [], totalUsd: 0,
       });
-      vi.spyOn(usage, "fetchUsageKind").mockResolvedValue([]);
+      vi.spyOn(usage, "fetchUsageKindWithCoverage").mockResolvedValue({
+        rows: [],
+        complete: true,
+      });
     });
 
     it("prices Compute, KV and secrets from Platform Metrics, shared with the Compute charts' read", async () => {
@@ -285,10 +288,19 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       bytes_in: 0, bytes_deleted: bytes, bytes_deleted_complete: true,
     });
     const fosUsage = [deletion(40, 9_000), deletion(1, 2_000), deletion(1 / 48, 500)];
-    const input = { ...fixtureUsageInput, rows: { ...fixtureUsageInput.rows, fos_usage: rangeDays >= 30 ? fosUsage : [] } };
+    const input = {
+      ...fixtureUsageInput,
+      telemetryCoverage: { fos_usage: true },
+      rows: {
+        ...fixtureUsageInput.rows,
+        fos_usage: rangeDays >= 30 ? fosUsage : [],
+      },
+    };
     const summary = usage.summarizeUsage(input);
     vi.spyOn(usage, "fetchUsageSummary").mockResolvedValue({ ...summary, input, summary, lines: [], totalUsd: 0 });
-    const fetchKind = vi.spyOn(usage, "fetchUsageKind").mockResolvedValue(fosUsage);
+    const fetchKind = vi
+      .spyOn(usage, "fetchUsageKindWithCoverage")
+      .mockResolvedValue({ rows: fosUsage, complete: true });
     const params = new URLSearchParams({
       start: new Date(now - rangeDays * 86_400_000).toISOString(),
       end: new Date(now).toISOString(),
@@ -329,6 +341,30 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       summary: usage.summarizeUsage(input),
       lines: [],
       totalUsd: 0,
+    });
+
+    const response = await handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/usage/current-storage"),
+    );
+
+    expect(await response!.json()).toMatchObject({
+      deleted_bytes: 0,
+      deleted_bytes_complete: false,
+      deleted_bytes_provenance: "fos_usage_incomplete",
+    });
+  });
+
+  it("marks an uncovered empty deletion read as incomplete", async () => {
+    vi.spyOn(usage, "fetchUsageSummary").mockResolvedValue({
+      ...usage.summarizeUsage(fixtureUsageInput),
+      input: { ...fixtureUsageInput, rows: { ...fixtureUsageInput.rows, fos_usage: [] } },
+      summary: usage.summarizeUsage(fixtureUsageInput),
+      lines: [],
+      totalUsd: 0,
+    });
+    vi.spyOn(usage, "fetchUsageKindWithCoverage").mockResolvedValue({
+      rows: [],
+      complete: false,
     });
 
     const response = await handleCloudAnalyticalRequest(

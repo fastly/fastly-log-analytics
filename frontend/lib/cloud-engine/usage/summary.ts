@@ -144,6 +144,9 @@ export interface UsageInput {
     cache_replaces: number | null;
     purges: number | null;
   };
+  telemetryCoverage?: {
+    fos_usage: boolean;
+  };
   retention_days?: Record<string, number>;
 }
 
@@ -487,12 +490,17 @@ export function deletedBytesSince(rows: FosUsageRow[], from: number): number {
   return rows.reduce((sum, row) => (row.timestamp >= from ? sum + row.bytes_deleted : sum), 0);
 }
 
-export function deletedBytesAccountingSince(rows: FosUsageRow[], from: number) {
+export function deletedBytesAccountingSince(
+  rows: FosUsageRow[],
+  from: number,
+  coverage = false,
+) {
   const since = rows.filter((row) => row.timestamp >= from);
   const deletionRows = since.filter(
     (row) => row.op === "DELETE" || row.op === "DELETE_OBJECTS",
   );
-  const complete = deletionRows.every((row) => row.bytes_deleted_complete === true);
+  const complete =
+    coverage && deletionRows.every((row) => row.bytes_deleted_complete === true);
   return {
     bytes: deletionRows.reduce((sum, row) => sum + row.bytes_deleted, 0),
     complete,
@@ -1186,7 +1194,10 @@ export type UsageLogReader = (
   kind: UsageKind,
   range: LogsRange,
   options: { user: string; role: string; signal?: AbortSignal },
-) => Promise<{ rows: Record<string, unknown>[] }>;
+) => Promise<{
+  rows: Record<string, unknown>[];
+  liveTruncated?: boolean;
+}>;
 
 function parseSettings(raw: unknown): UsageLoggingSettings {
   const settingsRaw = record(raw, "settings");
@@ -1349,6 +1360,10 @@ export async function fetchUsageInput(
     days,
     settings: parseSettings(settings),
     rows: parseRows(raw),
+    telemetryCoverage: {
+      fos_usage:
+        parseSettings(settings).enabled && results[0].liveTruncated === false,
+    },
     counters: { kv_ops: null, cache_replaces: null, purges: null },
   };
 }
@@ -1367,6 +1382,17 @@ export async function fetchUsageKind<K extends UsageKind>(
   read: UsageLogReader = readLogs,
   signal?: AbortSignal,
 ): Promise<UsageInput["rows"][K]> {
+  return (await fetchUsageKindWithCoverage(kind, range, identity, read, signal))
+    .rows;
+}
+
+export async function fetchUsageKindWithCoverage<K extends UsageKind>(
+  kind: K,
+  range: { from: number; to: number },
+  identity: { user: string; role: string },
+  read: UsageLogReader = readLogs,
+  signal?: AbortSignal,
+): Promise<{ rows: UsageInput["rows"][K]; complete: boolean }> {
   const result = await read(
     kind,
     {
@@ -1386,7 +1412,10 @@ export async function fetchUsageKind<K extends UsageKind>(
         : [],
     ]),
   ) as Record<UsageKind, Record<string, unknown>[]>;
-  return parseRows(raw)[kind];
+  return {
+    rows: parseRows(raw)[kind],
+    complete: result.liveTruncated === false,
+  };
 }
 
 export interface ComputeHour {

@@ -1523,6 +1523,7 @@ def test_current_storage_counts_the_high_scale_archive_and_recently_expired_arti
         _STORAGE_INSPECTION_CACHE.pop(("svc-archive-usage", "b", ""), None)
 
 
+@pytest.mark.no_postgres
 def test_current_storage_marks_missing_cloud_copy_deletion_ledger_incomplete(client):
     from backend.routers.usage import _STORAGE_INSPECTION_CACHE
 
@@ -1538,11 +1539,41 @@ def test_current_storage_marks_missing_cloud_copy_deletion_ledger_incomplete(cli
                 "backend.core.metadata.usage_log.cloud_copy_deleted_bytes_in_billing_window",
                 side_effect=RuntimeError("ledger unavailable"),
             ),
-            patch(
-                "backend.high_scale.postgres_control.PostgresControlPlane.archive_storage_summary",
-                return_value={"live_bytes": 0, "live_objects": 0, "expired_30d_bytes": 0},
-            ),
+            patch("backend.high_scale.postgres_control.PostgresControlPlane") as control_plane,
         ):
+            control_plane.return_value.archive_storage_summary.return_value = {
+                "live_bytes": 0,
+                "live_objects": 0,
+                "expired_30d_bytes": 0,
+            }
+            r = client.get("/api/usage/current-storage", headers={"x-fastly-service-id": svc})
+        assert r.status_code == 200
+        assert r.json()["deleted_bytes_complete"] is False
+        assert r.json()["deleted_bytes_provenance"] == "metadata_ledgers_incomplete"
+    finally:
+        app.dependency_overrides.pop(get_source, None)
+        _STORAGE_INSPECTION_CACHE.pop((svc, "b", ""), None)
+
+
+@pytest.mark.no_postgres
+def test_current_storage_marks_archive_summary_failure_incomplete(client):
+    from backend.routers.usage import _STORAGE_INSPECTION_CACHE
+
+    svc = "svc-archive-incomplete"
+    src = {"name": svc, "service_id": svc, "bucket": "b", "prefix": ""}
+    _STORAGE_INSPECTION_CACHE[(svc, "b", "")] = (1000, 1, 0, 0)
+    app.dependency_overrides[get_source] = lambda: src
+    try:
+        with (
+            patch("backend.routers.usage._get_storage_stats", return_value={"total_files": 0, "total_bytes": 0}),
+            patch("backend.config.load_config", return_value={}),
+            patch(
+                "backend.core.metadata.usage_log.cloud_copy_deleted_bytes_in_billing_window",
+                return_value=0,
+            ),
+            patch("backend.high_scale.postgres_control.PostgresControlPlane") as control_plane,
+        ):
+            control_plane.return_value.archive_storage_summary.side_effect = RuntimeError("archive ledger unavailable")
             r = client.get("/api/usage/current-storage", headers={"x-fastly-service-id": svc})
         assert r.status_code == 200
         assert r.json()["deleted_bytes_complete"] is False

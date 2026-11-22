@@ -103,7 +103,7 @@ import { bucketUsage } from "./usage/series";
 import {
   buildSevenLineCostTable,
   deletedBytesAccountingSince,
-  fetchUsageKind,
+  fetchUsageKindWithCoverage,
   fetchUsageSettings,
   resetUsageSettingsCache,
   fetchUsageSummary,
@@ -1678,9 +1678,24 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
 
     if (pathname === "/api/usage/current-storage") {
       const billedFrom = now - input.settings.min_billed_days * 86_400_000;
-      const deletions = fromMs <= billedFrom && toMs >= now ? input.rows.fos_usage
-        : await fetchUsageKind("fos_usage", { from: billedFrom, to: now }, { user: "default", role: "admin" }, undefined, request.signal);
-      const deletionAccounting = deletedBytesAccountingSince(deletions, billedFrom);
+      const coversBillingWindow = fromMs <= billedFrom && toMs >= now;
+      const deletionSource = coversBillingWindow
+        ? {
+            rows: input.rows.fos_usage,
+            complete: input.telemetryCoverage?.fos_usage === true,
+          }
+        : await fetchUsageKindWithCoverage(
+            "fos_usage",
+            { from: billedFrom, to: now },
+            { user: "default", role: "admin" },
+            undefined,
+            request.signal,
+          );
+      const deletionAccounting = deletedBytesAccountingSince(
+        deletionSource.rows,
+        billedFrom,
+        input.settings.enabled && deletionSource.complete,
+      );
       return jsonResponse(
         {
           total_billed_gb_hours: summary.storage.billedGbMonths * 720,

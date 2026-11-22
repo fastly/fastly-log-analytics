@@ -4,6 +4,7 @@ import {
   LIST_RATES,
   type CronRunRow,
   deriveFosUsageFromCronRuns,
+  deletedBytesAccountingSince,
   billedVcpuForExecutions,
   billedVcpuMsPerRequest,
   fetchUsageInput,
@@ -36,6 +37,24 @@ describe("storageCostUsd", () => {
     expect(storageCostUsd(1, 0.02, 7, 30)).toBeCloseTo(0.02);
     expect(storageCostUsd(1, 0.02, 365, 30)).toBeCloseTo(0.02 * (365 / 30));
     expect(storageCostUsd(2, 0.02, 1, 30)).toBeCloseTo(0.04);
+  });
+
+  describe("deletedBytesAccountingSince", () => {
+    it("treats an empty read as incomplete without positive coverage evidence", () => {
+      expect(deletedBytesAccountingSince([], 0)).toEqual({
+        bytes: 0,
+        complete: false,
+        provenance: "fos_usage_incomplete",
+      });
+    });
+
+    it("accepts a complete zero only when the telemetry reader covered the range", () => {
+      expect(deletedBytesAccountingSince([], 0, true)).toEqual({
+        bytes: 0,
+        complete: true,
+        provenance: "fos_usage_exact",
+      });
+    });
   });
 });
 
@@ -371,9 +390,13 @@ describe("fetchUsageInput", () => {
         kind: string,
         range: { from: string; to: string },
         options: unknown,
-      ) => Promise<{ rows: Record<string, unknown>[] }>
+      ) => Promise<{
+        rows: Record<string, unknown>[];
+        liveTruncated?: boolean;
+      }>
     >(async (kind) => ({
       rows: rows[kind] ?? [],
+      liveTruncated: false,
     }));
 
   it("reads settings and the four log kinds over the requested window", async () => {
@@ -404,6 +427,7 @@ describe("fetchUsageInput", () => {
     expect(input.days).toBe(7);
     expect(input.now).toBeGreaterThanOrEqual(before);
     expect(input.settings).toEqual(fixtureUsageInput.settings);
+    expect(input.telemetryCoverage).toEqual({ fos_usage: true });
     expect(input.rows.fos_usage).toEqual([fixtureUsageInput.rows.fos_usage[0]]);
     expect(input.rows.cron_runs).toHaveLength(1);
     expect(input.rows.api_telemetry).toEqual([]);
@@ -412,6 +436,19 @@ describe("fetchUsageInput", () => {
       cache_replaces: null,
       purges: null,
     });
+  });
+
+  it("records incomplete FOS telemetry coverage when live logs are truncated", async () => {
+    respond(fixtureUsageInput.settings);
+    const read = reader();
+    read.mockImplementation(async (kind) => ({
+      rows: [],
+      liveTruncated: kind === "fos_usage",
+    }));
+
+    const input = await fetchUsageInput(7, identity, read);
+
+    expect(input.telemetryCoverage).toEqual({ fos_usage: false });
   });
 
   it("reads the idle tick counters on cron_runs rows", async () => {

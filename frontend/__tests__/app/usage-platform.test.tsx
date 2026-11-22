@@ -106,6 +106,13 @@ describe('observed Platform usage', () => {
     expect(screen.queryByText('0 B')).not.toBeInTheDocument()
   })
 
+  it('preserves an explicitly complete measured deletion zero', () => {
+    render(<UsageStatCards {...statProps} />)
+
+    expect(screen.getByText('0 B')).toBeInTheDocument()
+    expect(screen.queryByText('Incomplete')).not.toBeInTheDocument()
+  })
+
   it('labels account-wide storage and summarizes counters without adding snapshots', () => {
     render(<PlatformUsageCards data={platform} cloudMode />)
 
