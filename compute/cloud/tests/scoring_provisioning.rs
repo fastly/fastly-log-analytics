@@ -33,6 +33,7 @@ struct Platform {
     clock: AtomicU64,
     random_counter: AtomicU64,
     refuse_scorer_teardown: AtomicBool,
+    fail_svc_cas: AtomicBool,
 }
 
 impl Platform {
@@ -42,6 +43,7 @@ impl Platform {
             clock: AtomicU64::new(1_800_000_000),
             random_counter: AtomicU64::new(1),
             refuse_scorer_teardown: AtomicBool::new(false),
+            fail_svc_cas: AtomicBool::new(false),
         }
     }
 
@@ -224,6 +226,9 @@ impl Runtime for Platform {
     ) -> Result<bool, String> {
         self.adapter.cache_invalidate(key);
         charge_backend()?;
+        if key == "svc:fixtureService" && self.fail_svc_cas.load(Ordering::SeqCst) {
+            return Err("kv_write_injected_failure".into());
+        }
         self.adapter.cas(key, generation, value)
     }
     fn admin_api(&self, request: ApiRequest<'_>) -> Result<admin::ApiResponse, String> {
@@ -2492,6 +2497,40 @@ fn bug_cloud_dr_20b_mutating_scoring_and_label_routes_reject_active_jobs_leases_
     p.clock.fetch_add(35, Ordering::SeqCst);
     assert_eq!(p.run_job(rec)["status"], "complete");
 
+    // 1b. Standalone active reconcile_lock lease when pending_job_id is None (Auditor Challenge 1):
+    let post_rec_svc = p.adapter.record_snapshot("svc:fixtureService").unwrap();
+    assert!(
+        post_rec_svc.value["pending_job_id"].is_null(),
+        "pending_job_id must be null after reconcile completes: {}",
+        post_rec_svc.value
+    );
+    let standalone_now = p.clock.load(Ordering::SeqCst);
+    let standalone_lock_gen = p
+        .adapter
+        .record_snapshot("reconcile_lock:fixtureService")
+        .map(|r| r.generation);
+    p.adapter.cache_invalidate("reconcile_lock:fixtureService");
+    p.adapter
+        .cas(
+            "reconcile_lock:fixtureService",
+            standalone_lock_gen.as_deref(),
+            &json!({"job_id": "external-lease-only", "fence": 105, "expires_at": standalone_now + 30}),
+        )
+        .unwrap();
+    assert_all_mutations_409(&p, "standalone_active_reconcile_lease");
+    let clear_lock_gen = p
+        .adapter
+        .record_snapshot("reconcile_lock:fixtureService")
+        .map(|r| r.generation);
+    p.adapter.cache_invalidate("reconcile_lock:fixtureService");
+    p.adapter
+        .cas(
+            "reconcile_lock:fixtureService",
+            clear_lock_gen.as_deref(),
+            &json!({"job_id": "external-lease-only", "fence": 105, "expires_at": 0}),
+        )
+        .unwrap();
+
     // 2. Active data_reset marker on svc:fixtureService:
     let svc_snap = p.adapter.record_snapshot("svc:fixtureService").unwrap();
     let mut with_reset = svc_snap.value.clone();
@@ -2725,7 +2764,7 @@ fn bug_cloud_dr_20c_scoring_rollback_never_livelocks_preserves_pending_failure_a
         "Session Scoring - Enforce must never leak onto live VCL during scoring_rollback"
     );
 
-    // Also verify non-retryable error inside scoring_rollback (>= 4104 _audit_outbox) terminates in 1 tick with orig_error!
+    // Also verify non-retryable error inside scoring_rollback (>= 4120 _audit_outbox) terminates in 1 tick with orig_error!
     let p2b = Platform::new();
     p2b.provision_logging_service();
     let pre_svc_b = p2b.adapter.record_snapshot("svc:fixtureService");
@@ -2762,11 +2801,11 @@ fn bug_cloud_dr_20c_scoring_rollback_never_livelocks_preserves_pending_failure_a
         json!({}),
     );
     assert_eq!(def_b["job"]["step"], "scoring_rollback");
-    // Corrupt _audit_outbox to 4105 entries while keeping expected_generation synced so bind_service passes and rollback save hits 409:
+    // Corrupt _audit_outbox to 4121 entries while keeping expected_generation synced so bind_service passes and rollback save hits 409:
     let cur_b = p2b.adapter.record_snapshot("svc:fixtureService").unwrap();
     let mut over_b = cur_b.value.clone();
     over_b["_audit_outbox"] = Value::Array(
-        (0..4105)
+        (0..4121)
             .map(|i| json!({"actor": "fixtureAdmin", "at": 1_800_000_000u64 + i, "event": "seed", "config_version": 1}))
             .collect(),
     );
@@ -3021,4 +3060,572 @@ fn bug_cloud_dr_20d_strip_logging_activate_guards_source_version_and_retries_pre
             .starts_with("Session Scoring - ")),
         "all Session Scoring snippets must be stripped on v6: {end_snippets:?}"
     );
+}
+
+#[test]
+fn bug_cloud_dr_21a_post_dr_reconcile_recovers_secret_under_stale_kv_and_tight_budgets_without_livelock_or_clone_poison(
+) {
+    let make_post_dr_platform = || -> (Platform, Option<Record>, String) {
+        let p = Platform::new();
+        p.provision_logging_service();
+        let en = p.ok(
+            "POST",
+            "/api/services/fixtureService/scoring/enable",
+            json!({}),
+        );
+        assert_eq!(p.run_job(en["job"].clone())["status"], "complete");
+        for k in p.adapter.records().into_keys() {
+            p.adapter.cache_invalidate(&k);
+            p.adapter.delete(&k).unwrap();
+        }
+        for sec in [
+            "fastly_token.fixtureService",
+            "fos_ak.fixtureService",
+            "fos_sk.fixtureService",
+            "scoring_request_secret.fixtureService",
+        ] {
+            let _ = p
+                .adapter
+                .api(ApiRequest {
+                    method: "DELETE",
+                    path: &format!("/resources/stores/secret/fixtureSecrets/secrets/{sec}"),
+                    query: "",
+                    token: "fixture-token",
+                    body: None,
+                    timeout: std::time::Duration::from_secs(5),
+                })
+                .unwrap();
+        }
+        let (recov_st, recov_body) = p.call_with_initial_used(
+            3,
+            "POST",
+            "/api/admin/provision/recover",
+            json!({
+                "token": "fixture-token",
+                "service_id": "fixtureService",
+                "fos_bucket": "fos-fixture-logs",
+                "fos_region": "us-east-1"
+            }),
+        );
+        assert_eq!(recov_st, 200, "{recov_body}");
+        assert_eq!(recov_body["source"], "dr_state");
+        assert!(
+            p.adapter
+                .secret("scoring_request_secret.fixtureService")
+                .unwrap()
+                .is_none(),
+            "recover should leave scoring_request_secret lazy for reconcile"
+        );
+        let pre_rec_snap = p.adapter.record_snapshot("svc:fixtureService");
+        let rec_gen = pre_rec_snap.as_ref().unwrap().generation.clone();
+        let rec_job = p.ok(
+            "POST",
+            "/api/admin/services/fixtureService/reconcile",
+            json!({"generation": rec_gen}),
+        )["job"]
+            .clone();
+        (p, pre_rec_snap, rec_job["id"].as_str().unwrap().to_owned())
+    };
+
+    // 1. Stale svc:fixtureService KV cache on EVERY tick under 29/32 Shell budget (initial_used = 3):
+    // must recover scoring_request_secret and complete reconcile without stalling!
+    let (p_stale, stale_snap, stale_job_id) = make_post_dr_platform();
+    let mut final_stale_job = Value::Null;
+    for _ in 0..20 {
+        p_stale
+            .adapter
+            .cache_stale("svc:fixtureService", stale_snap.clone());
+        let (st, res) = p_stale.call_with_initial_used(
+            3,
+            "POST",
+            &format!("/api/admin/jobs/{stale_job_id}/step"),
+            json!({}),
+        );
+        assert_eq!(st, 200, "{res}");
+        final_stale_job = res["job"].clone();
+        if let Some(at) = final_stale_job["retry_at"].as_u64() {
+            p_stale.clock.fetch_max(at + 1, Ordering::SeqCst);
+        }
+        if final_stale_job["status"] == "complete" || final_stale_job["status"] == "failed" {
+            break;
+        }
+    }
+    assert_eq!(
+        final_stale_job["status"], "complete",
+        "post-DR reconcile under stale KV + 29/32 budget must complete cleanly: {final_stale_job}"
+    );
+    assert!(
+        p_stale
+            .adapter
+            .secret("scoring_request_secret.fixtureService")
+            .unwrap()
+            .is_some(),
+        "scoring_request_secret must be backfilled into Secret Store"
+    );
+
+    // 2. Sweep initial_used across 0..=18 (admin_remaining_calls == 32..=14), under both warm KV and stale KV:
+    // - NEVER fails with uncheckpointed_clone_requires_review!
+    // - NEVER spins infinitely with status=="pending" && retry_at==null!
+    // - Completes cleanly once budget allows (or directly at initial_used <= 12)!
+    for stale_mode in [false, true] {
+        for init_used in 0..=18u32 {
+            let (p_sw, sw_snap, sw_job_id) = make_post_dr_platform();
+            let mut jb = Value::Null;
+            let mut prev_marker = String::new();
+            let mut null_retry_same_state_streak = 0u32;
+            for tick in 0..16u32 {
+                if stale_mode {
+                    p_sw.adapter
+                        .cache_stale("svc:fixtureService", sw_snap.clone());
+                }
+                // Give constrained budgets (14..19 remaining) 6 constrained ticks to verify zero clone-poison
+                // and proper retry_at backoff, then allow normal 29/32 ticks to finish cleanly:
+                let used_this_tick = if tick < 6 {
+                    init_used
+                } else {
+                    init_used.min(3)
+                };
+                let (st, res) = p_sw.call_with_initial_used(
+                    used_this_tick,
+                    "POST",
+                    &format!("/api/admin/jobs/{sw_job_id}/step"),
+                    json!({}),
+                );
+                if init_used == 18 && tick < 6 {
+                    // 32 - 18 = 14 remaining BEFORE load_job (13 < 14 at admission gate): returns retryable 503 backend_budget!
+                    assert_eq!(st, 503, "stale={stale_mode} init={init_used}: {res}");
+                    assert_eq!(res["error"], "backend_budget");
+                    continue;
+                } else {
+                    assert_eq!(st, 200, "stale={stale_mode} init={init_used}: {res}");
+                }
+                jb = res["job"].clone();
+                assert_ne!(
+                    jb["error"],
+                    json!("uncheckpointed_clone_requires_review"),
+                    "stale={stale_mode} init={init_used} self-poisoned clone: {jb}"
+                );
+                let secret_now = p_sw
+                    .adapter
+                    .secret("scoring_request_secret.fixtureService")
+                    .unwrap()
+                    .is_some();
+                let marker = format!(
+                    "{}:{}:{}:{secret_now}",
+                    jb["step"].as_str().unwrap_or(""),
+                    jb["draft_version"],
+                    jb["completed_steps"]
+                );
+                if jb["status"] == "pending" && jb["retry_at"].is_null() && marker == prev_marker {
+                    null_retry_same_state_streak += 1;
+                    assert!(
+                        null_retry_same_state_streak <= 1,
+                        "stale={stale_mode} init={init_used} livelocked with retry_at=null at {marker}: {jb}"
+                    );
+                } else {
+                    null_retry_same_state_streak = 0;
+                }
+                prev_marker = marker;
+                if let Some(at) = jb["retry_at"].as_u64() {
+                    p_sw.clock.fetch_max(at + 1, Ordering::SeqCst);
+                }
+                if jb["status"] == "complete" || jb["status"] == "failed" {
+                    break;
+                }
+            }
+            if jb["status"] != "complete" && jb["status"] != "failed" {
+                jb = p_sw.run_job(jb);
+            }
+            assert_eq!(
+                jb["status"], "complete",
+                "stale={stale_mode} init={init_used} must complete cleanly: {jb}"
+            );
+        }
+    }
+}
+
+#[test]
+fn bug_cloud_dr_21b_audit_outbox_boundary_headroom_and_post_activate_strip_kv_idempotency() {
+    let seed_outbox = |p: &Platform, count: usize| -> String {
+        let snap = p.adapter.record_snapshot("svc:fixtureService").unwrap();
+        let mut val = snap.value.clone();
+        val["_audit_outbox"] = Value::Array(
+            (0..count)
+                .map(|i| {
+                    json!({
+                        "actor": "fixtureAdmin",
+                        "at": 1_800_000_000u64 + i as u64,
+                        "event": "seed",
+                        "config_version": 1
+                    })
+                })
+                .collect(),
+        );
+        p.adapter.cache_invalidate("svc:fixtureService");
+        p.adapter
+            .cas("svc:fixtureService", Some(&snap.generation), &val)
+            .unwrap();
+        p.adapter
+            .record_snapshot("svc:fixtureService")
+            .unwrap()
+            .generation
+    };
+
+    // 1. Sweep _audit_outbox == 4090..=4097 across scoring_enable, scoring_disable, scoring_teardown,
+    // provision/teardown, and reconcile:
+    // - At 4096..=4097: rejected upfront with 409 audit_archive_required and ZERO Fastly VCL mutations!
+    // - At 4090..=4095: admitted job MUST complete all checkpoints to "complete" without crashing mid-job!
+    for count in 4090..=4097usize {
+        // 1a. scoring_enable + reconcile:
+        let p_en = Platform::new();
+        p_en.provision_logging_service();
+        let _ = seed_outbox(&p_en, count);
+        let (st_en, res_en) = p_en.call(
+            "POST",
+            "/api/services/fixtureService/scoring/enable",
+            json!({}),
+        );
+        if count >= 4096 {
+            assert_eq!(st_en, 409, "count={count}: {res_en}");
+            assert_eq!(res_en["error"], "audit_archive_required");
+        } else {
+            assert_eq!(st_en, 200, "count={count}: {res_en}");
+            let done_en = p_en.run_job(res_en["job"].clone());
+            assert_eq!(
+                done_en["status"], "complete",
+                "scoring_enable admitted at outbox={count} must complete without mid-job audit_archive_required: {done_en}"
+            );
+            let svc_en = p_en.adapter.record_snapshot("svc:fixtureService").unwrap();
+            assert_eq!(svc_en.value["scoring"]["enabled"], true);
+        }
+
+        // 1b. scoring_disable at count:
+        let p_dis = Platform::new();
+        p_dis.provision_logging_service();
+        let en_job = p_dis.ok(
+            "POST",
+            "/api/services/fixtureService/scoring/enable",
+            json!({}),
+        )["job"]
+            .clone();
+        assert_eq!(p_dis.run_job(en_job)["status"], "complete");
+        let _ = seed_outbox(&p_dis, count);
+        let (st_dis, res_dis) = p_dis.call(
+            "POST",
+            "/api/services/fixtureService/scoring/disable",
+            json!({}),
+        );
+        if count >= 4096 {
+            assert_eq!(st_dis, 409, "count={count}: {res_dis}");
+            assert_eq!(res_dis["error"], "audit_archive_required");
+            assert!(
+                p_dis
+                    .adapter
+                    .resources("fixtureService", "snippet")
+                    .iter()
+                    .any(|s| s["name"] == "Session Scoring - Pass"),
+                "rejected scoring_disable at {count} must leave live scoring VCL untouched"
+            );
+        } else {
+            assert_eq!(st_dis, 200, "count={count}: {res_dis}");
+            let done_dis = p_dis.run_job(res_dis["job"].clone());
+            assert_eq!(
+                done_dis["status"], "complete",
+                "scoring_disable admitted at outbox={count} must complete cleanly: {done_dis}"
+            );
+            let svc_dis = p_dis.adapter.record_snapshot("svc:fixtureService").unwrap();
+            assert!(
+                svc_dis.value["scoring"].is_null()
+                    || svc_dis.value["scoring"]["enabled"] == json!(false),
+                "scoring must be disabled/cleared after scoring_disable completes: {}",
+                svc_dis.value
+            );
+        }
+
+        // 1c. scoring_teardown, provision/teardown, and reconcile at critical boundary 4095 & 4096:
+        if matches!(count, 4095 | 4096) {
+            let p_std = Platform::new();
+            p_std.provision_logging_service();
+            let en_std = p_std.ok(
+                "POST",
+                "/api/services/fixtureService/scoring/enable",
+                json!({}),
+            )["job"]
+                .clone();
+            assert_eq!(p_std.run_job(en_std)["status"], "complete");
+            let gen_std = seed_outbox(&p_std, count);
+            let (st_std, res_std) = p_std.call(
+                "POST",
+                "/api/services/fixtureService/scoring/teardown",
+                json!({"confirm_service_id": "fixtureService", "generation": gen_std}),
+            );
+            if count >= 4096 {
+                assert_eq!(st_std, 409);
+                assert_eq!(res_std["error"], "audit_archive_required");
+            } else {
+                assert_eq!(st_std, 200);
+                assert_eq!(p_std.run_job(res_std["job"].clone())["status"], "complete");
+            }
+
+            let p_ptd = Platform::new();
+            p_ptd.provision_logging_service();
+            let en_ptd = p_ptd.ok(
+                "POST",
+                "/api/services/fixtureService/scoring/enable",
+                json!({}),
+            )["job"]
+                .clone();
+            assert_eq!(p_ptd.run_job(en_ptd)["status"], "complete");
+            let gen_ptd = seed_outbox(&p_ptd, count);
+            let (st_ptd, res_ptd) = p_ptd.call(
+                "POST",
+                "/api/admin/provision/teardown",
+                json!({
+                    "service_id": "fixtureService",
+                    "confirm_service_id": "fixtureService",
+                    "generation": gen_ptd,
+                    "remove_logging": true,
+                    "remove_snippets": true,
+                    "delete_fos_keys": true,
+                    "delete_data": true,
+                    "delete_fos_bucket": true
+                }),
+            );
+            if count >= 4096 {
+                assert_eq!(st_ptd, 409);
+                assert_eq!(res_ptd["error"], "audit_archive_required");
+            } else {
+                assert_eq!(st_ptd, 200);
+                assert_eq!(p_ptd.run_job(res_ptd["job"].clone())["status"], "complete");
+            }
+
+            let p_rec = Platform::new();
+            p_rec.provision_logging_service();
+            let gen_rec = seed_outbox(&p_rec, count);
+            let (st_rec, res_rec) = p_rec.call(
+                "POST",
+                "/api/admin/services/fixtureService/reconcile",
+                json!({"generation": gen_rec}),
+            );
+            if count >= 4096 {
+                assert_eq!(st_rec, 409);
+                assert_eq!(res_rec["error"], "audit_archive_required");
+            } else {
+                assert_eq!(st_rec, 200);
+                assert_eq!(p_rec.run_job(res_rec["job"].clone())["status"], "complete");
+            }
+        }
+    }
+
+    // 2. Post-activate KV failure in strip_logging_activate_step:
+    // Once PUT .../version/4/activate succeeds on Fastly, transient state_write_failed on svc:fixtureService
+    // must NOT clear draft_version or rewind to scoring_strip_logging_vcl, and /retry must complete at active == 4
+    // without cloning a duplicate v5!
+    let p_kv = Platform::new();
+    p_kv.provision_logging_service();
+    let en_kv = p_kv.ok(
+        "POST",
+        "/api/services/fixtureService/scoring/enable",
+        json!({}),
+    )["job"]
+        .clone();
+    assert_eq!(p_kv.run_job(en_kv)["status"], "complete");
+    let mut dis_kv = p_kv.ok(
+        "POST",
+        "/api/services/fixtureService/scoring/disable",
+        json!({}),
+    )["job"]
+        .clone();
+    let dis_kv_id = dis_kv["id"].as_str().unwrap().to_owned();
+    for _ in 0..20 {
+        if dis_kv["step"] == "scoring_strip_activate" {
+            break;
+        }
+        let (st, res) = p_kv.call(
+            "POST",
+            &format!("/api/admin/jobs/{dis_kv_id}/step"),
+            json!({}),
+        );
+        assert_eq!(st, 200, "{res}");
+        dis_kv = res["job"].clone();
+    }
+    assert_eq!(dis_kv["step"], "scoring_strip_activate");
+    assert_eq!(dis_kv["draft_version"], 4);
+
+    p_kv.fail_svc_cas.store(true, Ordering::SeqCst);
+    let (fail_st, fail_res) = p_kv.call(
+        "POST",
+        &format!("/api/admin/jobs/{dis_kv_id}/step"),
+        json!({}),
+    );
+    p_kv.fail_svc_cas.store(false, Ordering::SeqCst);
+    assert_eq!(fail_st, 200, "{fail_res}");
+    assert_eq!(fail_res["job"]["status"], "failed", "{fail_res}");
+    assert_eq!(fail_res["job"]["error"], "state_write_failed", "{fail_res}");
+    assert_eq!(
+        fail_res["job"]["step"], "scoring_strip_activate",
+        "post-activate KV failure must NOT rewind step to scoring_strip_logging_vcl: {fail_res}"
+    );
+    assert_eq!(
+        fail_res["job"]["draft_version"], 4,
+        "post-activate KV failure must preserve draft_version=4: {fail_res}"
+    );
+
+    let retried_kv = p_kv.ok(
+        "POST",
+        &format!("/api/admin/jobs/{dis_kv_id}/retry"),
+        json!({}),
+    )["job"]
+        .clone();
+    let done_kv = p_kv.run_job(retried_kv);
+    assert_eq!(done_kv["status"], "complete", "{done_kv}");
+    let (_, vers_after) = p_kv
+        .adapter
+        .api(ApiRequest {
+            method: "GET",
+            path: "/service/fixtureService/version",
+            query: "",
+            token: "fixture-token",
+            body: None,
+            timeout: std::time::Duration::from_secs(5),
+        })
+        .unwrap();
+    let active_after = vers_after
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["active"] == true)
+        .and_then(|v| v["number"].as_u64())
+        .unwrap();
+    let max_ver_after = vers_after
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v["number"].as_u64())
+        .max()
+        .unwrap();
+    assert_eq!(
+        active_after, 4,
+        "retry after post-activate KV failure must keep v4 active without cloning duplicate v5: {vers_after}"
+    );
+    assert_eq!(
+        max_ver_after, 4,
+        "no duplicate v5 draft may be cloned after v4 was already activated: {vers_after}"
+    );
+}
+
+#[test]
+fn bug_cloud_dr_21c_rejects_patch_reconcile_and_teardown_during_active_delete_data() {
+    let p = Platform::new();
+    p.provision_logging_service();
+
+    let pre_dd_gen = p
+        .adapter
+        .record_snapshot("svc:fixtureService")
+        .unwrap()
+        .generation;
+    let (dd_st, dd_res) = p.call(
+        "POST",
+        "/api/admin/services/fixtureService/delete-data",
+        json!({"confirm_service_id": "fixtureService", "generation": pre_dd_gen}),
+    );
+    assert_eq!(dd_st, 200, "delete-data start must succeed: {dd_res}");
+    let snap = p.adapter.record_snapshot("svc:fixtureService").unwrap();
+    assert!(
+        !snap.value["data_reset"].is_null(),
+        "data_reset marker must be active: {}",
+        snap.value
+    );
+    let gen = snap.generation;
+
+    // 1. PATCH /api/admin/services/fixtureService attempting fos_prefix redirection -> 409 data_reset_in_progress
+    let (patch_st, patch_res) = p.call(
+        "PATCH",
+        "/api/admin/services/fixtureService",
+        json!({"generation": gen, "fos_prefix": "team_b/"}),
+    );
+    assert_eq!(
+        patch_st, 409,
+        "PATCH /services during delete-data must return 409, got {patch_st}: {patch_res}"
+    );
+    assert_eq!(patch_res["error"], "data_reset_in_progress");
+    assert_eq!(
+        p.adapter
+            .record_snapshot("svc:fixtureService")
+            .unwrap()
+            .value["fos_prefix"],
+        "",
+        "fos_prefix must never be mutated to team_b/ during delete-data"
+    );
+
+    // 2. PATCH /api/admin/log-fields/config -> 409 data_reset_in_progress
+    let (lf_st, lf_res) = p.call(
+        "PATCH",
+        "/api/admin/log-fields/config",
+        json!({
+            "service_id": "fixtureService",
+            "generation": gen,
+            "log_fields": {"groups": ["A"], "custom_fields": [], "field_overrides": {}, "field_limits": {}}
+        }),
+    );
+    assert_eq!(lf_st, 409, "{lf_res}");
+    assert_eq!(lf_res["error"], "data_reset_in_progress");
+
+    // 3. POST /api/admin/services/fixtureService/reconcile -> 409 data_reset_in_progress
+    let (rec_st, rec_res) = p.call(
+        "POST",
+        "/api/admin/services/fixtureService/reconcile",
+        json!({"generation": gen}),
+    );
+    assert_eq!(
+        rec_st, 409,
+        "POST /reconcile during delete-data must return 409, got {rec_st}: {rec_res}"
+    );
+    assert_eq!(rec_res["error"], "data_reset_in_progress");
+
+    // 4. POST /api/admin/provision/teardown -> 409 data_reset_in_progress
+    let (td_st, td_res) = p.call(
+        "POST",
+        "/api/admin/provision/teardown",
+        json!({
+            "service_id": "fixtureService",
+            "confirm_service_id": "fixtureService",
+            "generation": gen,
+            "remove_logging": true,
+            "remove_snippets": true,
+            "delete_fos_keys": false,
+            "delete_data": false,
+            "delete_fos_bucket": false
+        }),
+    );
+    assert_eq!(
+        td_st, 409,
+        "POST /provision/teardown during delete-data must return 409, got {td_st}: {td_res}"
+    );
+    assert_eq!(td_res["error"], "data_reset_in_progress");
+
+    // 5. GET & cancel delete-data still work cleanly, and once cancelled, PATCH succeeds again:
+    let (get_dd_st, _) = p.call(
+        "GET",
+        "/api/admin/services/fixtureService/delete-data",
+        json!({}),
+    );
+    assert_eq!(get_dd_st, 200);
+    let (cancel_st, _) = p.call(
+        "POST",
+        "/api/admin/services/fixtureService/delete-data/cancel",
+        json!({}),
+    );
+    assert_eq!(cancel_st, 200);
+    let post_cancel_gen = p
+        .adapter
+        .record_snapshot("svc:fixtureService")
+        .unwrap()
+        .generation;
+    let (post_patch_st, _) = p.call(
+        "PATCH",
+        "/api/admin/services/fixtureService",
+        json!({"generation": post_cancel_gen, "sample_rate": 50}),
+    );
+    assert_eq!(post_patch_st, 200);
 }

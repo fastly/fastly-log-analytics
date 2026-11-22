@@ -55,11 +55,12 @@ fn delete_key(
 ) -> Result<(), Error> {
     let key = required(key, "access_key")?;
     let store = config(context.runtime, "secret_store_id")?;
+    let rec_ref = recovery_ref(service, key);
     let (status, _) = context.api_status(
         "DELETE",
         &format!(
             "/resources/stores/secret/{store}/secrets/{}",
-            encode(&recovery_ref(service, key))
+            encode(&rec_ref)
         ),
         token,
         None,
@@ -67,6 +68,7 @@ fn delete_key(
     if !(200..300).contains(&status) && status != 404 {
         return Err(Error::new(502, "secret_delete_failed"));
     }
+    context.invalidate_secret(&rec_ref);
     let (status, _) = context.api_status(
         "DELETE",
         &format!("/resources/object-storage/access-keys/{}", encode(key)),
@@ -540,6 +542,7 @@ pub fn cleanup_temp_secrets(
         if !(200..300).contains(&status) && status != 404 {
             return Err(Error::new(502, "secret_delete_failed"));
         }
+        context.invalidate_secret(&name);
     }
     Ok(())
 }
@@ -677,6 +680,7 @@ pub fn revoke(
                 if !(200..300).contains(&status) && status != 404 {
                     return Err(Error::new(502, "secret_delete_failed"));
                 }
+                context.invalidate_secret(&name);
             }
             advance(job, next);
         }
@@ -701,6 +705,7 @@ pub fn cleanup_token(context: &Context<'_, impl Runtime>, service: &Service) -> 
             if !(200..300).contains(&status) && status != 404 {
                 return Err(Error::new(502, "secret_delete_failed"));
             }
+            context.invalidate_secret(&service.fastly_token_ref);
             Ok(())
         }
         Err(error) if error.code == "credentials_pending" => {

@@ -188,6 +188,7 @@ export function useBootstrapSyncEffects(
         settings?: {
           is_remote_analyst?: boolean
           needs_login?: boolean
+          mask_ips?: boolean
         }
         debug_state?: {
           query_debug_visibility?: string
@@ -208,7 +209,9 @@ export function useBootstrapSyncEffects(
     applyBootstrapRuntimeMode(data)
     if (IS_CLOUD_MODE || isCloudMode() || data.runtime_mode === 'cloud') {
       const needsLogin = Boolean(data.settings?.needs_login)
+      const maskIps = Boolean(data.settings?.mask_ips)
       const userId = needsLogin ? null : (data.user?.id ?? null)
+      const role = needsLogin ? null : (data.user?.role ?? null)
       const nextIdentity = cloudCacheIdentity(data)
       void import('@/lib/cloud-engine/dashboard/client')
         .then(async ({ setDashboardCacheIdentity }) => {
@@ -218,7 +221,7 @@ export function useBootstrapSyncEffects(
         .catch(() => {})
         .finally(() => {
           if (_lastSyncedBootstrapData !== data) return
-          void syncOpsCacheForSession({ userId, needsLogin })
+          void syncOpsCacheForSession({ userId, role, maskIps, needsLogin })
         })
     }
     const { setServices, setInitialized } = useServiceStore.getState()

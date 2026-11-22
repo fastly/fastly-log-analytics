@@ -28,6 +28,8 @@ import type { DashboardFilter } from "./filters";
 import { clearManifestCache, type Manifest } from "./manifest";
 import { clearRollupQueryCache } from "./rollup-query";
 import {
+  IDENTITY_CACHE_KEY,
+  SESSION_CACHE_KEY,
   browserSource,
   clearRequestLogCaches,
   dashboardCacheIdentity,
@@ -430,7 +432,21 @@ export function notifyDashboardCatalogChange(): void {
   rpcClient?.catalogChanged();
 }
 
-export async function clearDashboardData(): Promise<void> {
+type IdentityTransitionTarget = {
+  kind: "clear" | "set";
+  identity: string | null;
+  syncStorage: boolean;
+};
+
+let appliedTabIdentity: string | null = null;
+let targetTransitionKey: string | null = null;
+let inFlightIdentityTransition: Promise<void> | null = null;
+let registeredStorageWindow: EventTarget | null = null;
+
+async function executeIdentityTransition(
+  target: IdentityTransitionTarget,
+): Promise<void> {
+  appliedTabIdentity = null;
   rpcClient?.terminate();
   rpcClient = null;
   resetOpsLogsClient();
@@ -445,40 +461,159 @@ export async function clearDashboardData(): Promise<void> {
   resetUsageSettingsCache();
   resetComputeBillingCache();
   clearServiceStatsCache();
-  updateDashboardCacheIdentity(null);
+  updateDashboardCacheIdentity(target.identity, {
+    syncStorage: target.syncStorage,
+  });
   await Promise.all([
     getDuckDBEngine().reset(),
     clearRequestLogCaches(),
     clearOpsCaches(),
   ]);
+  appliedTabIdentity = target.kind === "clear" ? null : target.identity;
+}
+
+function runIdentityTransition(
+  target: IdentityTransitionTarget,
+): Promise<void> {
+  ensureStorageListenerRegistered();
+  const key =
+    target.kind === "clear" ? "clear" : `set:${target.identity ?? ""}`;
+  if (inFlightIdentityTransition === null) {
+    if (
+      target.kind === "set" &&
+      appliedTabIdentity === target.identity &&
+      (!target.syncStorage || dashboardCacheIdentity() === target.identity)
+    ) {
+      return Promise.resolve();
+    }
+    const current = executeIdentityTransition(target);
+    targetTransitionKey = key;
+    inFlightIdentityTransition = current;
+    void current.then(
+      () => {
+        if (inFlightIdentityTransition === current) {
+          inFlightIdentityTransition = null;
+          targetTransitionKey = null;
+        }
+      },
+      () => {
+        if (inFlightIdentityTransition === current) {
+          inFlightIdentityTransition = null;
+          targetTransitionKey = null;
+        }
+      },
+    );
+    return current;
+  }
+  if (targetTransitionKey === key) {
+    return inFlightIdentityTransition;
+  }
+  const previous = inFlightIdentityTransition;
+  const chained = previous
+    .catch(() => {})
+    .then(() => executeIdentityTransition(target));
+  targetTransitionKey = key;
+  inFlightIdentityTransition = chained;
+  void chained.then(
+    () => {
+      if (inFlightIdentityTransition === chained) {
+        inFlightIdentityTransition = null;
+        targetTransitionKey = null;
+      }
+    },
+    () => {
+      if (inFlightIdentityTransition === chained) {
+        inFlightIdentityTransition = null;
+        targetTransitionKey = null;
+      }
+    },
+  );
+  return chained;
+}
+
+function handleCrossTabStorageEvent(event: Event): void {
+  const storageEvent = event as StorageEvent;
+  if (
+    storageEvent.storageArea !== null &&
+    storageEvent.storageArea !== undefined &&
+    typeof localStorage !== "undefined" &&
+    storageEvent.storageArea !== localStorage
+  ) {
+    return;
+  }
+  if (storageEvent.key === null) {
+    void runIdentityTransition({
+      kind: "clear",
+      identity: null,
+      syncStorage: false,
+    });
+    return;
+  }
+  if (storageEvent.key === IDENTITY_CACHE_KEY) {
+    const next = storageEvent.newValue;
+    if (next === null || next === "") {
+      void runIdentityTransition({
+        kind: "clear",
+        identity: null,
+        syncStorage: false,
+      });
+    } else if (next !== appliedTabIdentity) {
+      void runIdentityTransition({
+        kind: "set",
+        identity: next,
+        syncStorage: false,
+      });
+    }
+    return;
+  }
+  if (storageEvent.key === SESSION_CACHE_KEY && storageEvent.newValue === null) {
+    const currentStored = dashboardCacheIdentity();
+    if (currentStored === null || currentStored === "") {
+      void runIdentityTransition({
+        kind: "clear",
+        identity: null,
+        syncStorage: false,
+      });
+    } else if (currentStored !== appliedTabIdentity) {
+      void runIdentityTransition({
+        kind: "set",
+        identity: currentStored,
+        syncStorage: false,
+      });
+    }
+  }
+}
+
+function ensureStorageListenerRegistered(): void {
+  if (
+    typeof window === "undefined" ||
+    typeof window.addEventListener !== "function"
+  ) {
+    return;
+  }
+  if (registeredStorageWindow === window) return;
+  registeredStorageWindow = window;
+  window.addEventListener("storage", handleCrossTabStorageEvent);
+}
+
+ensureStorageListenerRegistered();
+
+export async function clearDashboardData(): Promise<void> {
+  await runIdentityTransition({
+    kind: "clear",
+    identity: null,
+    syncStorage: true,
+  });
 }
 
 export async function setDashboardCacheIdentity(
   identity: string,
 ): Promise<void> {
-  const normalized = identity;
-  const previous = dashboardCacheIdentity();
-  if (previous === normalized) return;
-  rpcClient?.terminate();
-  rpcClient = null;
-  resetOpsLogsClient();
-  inlineSource = null;
-  clearDashboardMemo();
-  clearManifestCache();
-  clearRollupQueryCache();
-  clearSecurityRollupCache();
-  resetRangeLoaderCache();
-  clearCloudSessionReferences();
-  resetCloudMetadataCache();
-  resetUsageSettingsCache();
-  resetComputeBillingCache();
-  clearServiceStatsCache();
-  updateDashboardCacheIdentity(normalized);
-  await Promise.all([
-    getDuckDBEngine().reset(),
-    clearRequestLogCaches(),
-    clearOpsCaches(),
-  ]);
+  await runIdentityTransition({
+    kind: "set",
+    identity,
+    syncStorage: true,
+  });
 }
 
 export function runDashboard(options: EngineOptions): Promise<DashboardResult> {

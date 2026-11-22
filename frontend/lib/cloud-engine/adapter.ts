@@ -172,8 +172,10 @@ async function storageDeletion(
   toMs: number,
   summaryRead: ReturnType<typeof fetchUsageSummary>,
   signal: AbortSignal,
+  checkUsageEpoch: () => void,
 ): Promise<DeletionAccounting> {
   const settings = await fetchUsageSettings(signal);
+  checkUsageEpoch();
   const billedFrom = now - settings.min_billed_days * 86_400_000;
   const window = { from: billedFrom, to: now };
   const ingestController = new AbortController();
@@ -200,6 +202,7 @@ async function storageDeletion(
           undefined,
           signal,
         );
+    checkUsageEpoch();
     const accounting = deletedBytesAccountingSince(
       source.rows,
       billedFrom,
@@ -212,6 +215,7 @@ async function storageDeletion(
       return accounting;
     }
     const ingest = await ingestRead;
+    checkUsageEpoch();
     return ingest.complete ? ingest : accounting;
   } finally {
     signal.removeEventListener("abort", abortIngest);
@@ -481,9 +485,12 @@ async function processNativeCloudBootstrap(response: Response): Promise<Response
       ? (user as { id?: string | null; role?: string | null })
       : null;
   const needsLogin = Boolean((settings as Record<string, unknown>).needs_login);
+  const maskIps = Boolean((settings as Record<string, unknown>).mask_ips);
   await setDashboardCacheIdentity(cloudCacheIdentity(payload));
   await syncOpsCacheForSession({
     userId: needsLogin ? null : (userObj?.id ?? null),
+    role: needsLogin ? null : (userObj?.role ?? null),
+    maskIps,
     needsLogin,
   });
   return response;
@@ -796,7 +803,7 @@ function networkBudgetError(error: CloudBudgetError, scans: readonly string[] | 
  */
 const insightsSummaryWindows: string[] = [];
 const insightsWindowKey = (serviceId: unknown, end: unknown) =>
-  `${serviceId == null ? "" : decodeURIComponent(String(serviceId))}|${Date.parse(String(end))}`;
+  `${currentStoreMetaEpoch()}|${serviceId == null ? "" : decodeURIComponent(String(serviceId))}|${Date.parse(String(end))}`;
 
 /**
  * Serves an unfiltered /api/insights read (without explicit `detectors`) from
@@ -2156,7 +2163,7 @@ async function dispatchCloudRequest(
     });
     // The minimum-billed-days deletion reads span 30 days; start them with the range summary.
     const deletionRead = pathname === "/api/usage/current-storage"
-      ? storageDeletion(now, fromMs, toMs, summaryRead, request.signal)
+      ? storageDeletion(now, fromMs, toMs, summaryRead, request.signal, checkUsageEpoch)
       : null;
     deletionRead?.catch(() => {});
     const usageRes = await summaryRead;

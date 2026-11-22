@@ -1,4 +1,4 @@
-import { quoteIdent, sqlEscape } from "@/lib/sqlBuilder";
+import { sqlEscape } from "@/lib/sqlBuilder";
 import type {
   ArrowTableLike, DuckDBBackend, DuckDBColumnType, DuckDBLease,
   DuckDBReadContext, IngestedFileMeta,
@@ -32,6 +32,7 @@ type Config = {
   interpolate(sql: string, params: readonly unknown[]): string;
 };
 const literal = (value: string) => `'${sqlEscape(value)}'`;
+const quoteDuckIdent = (s: string): string => `"${s.replace(/"/g, '""')}"`;
 // Pseudo-column naming the file each row came from in a multi-file scan.
 const SOURCE_FILE_COLUMN = "__flp_source_file";
 const MAX_COMPRESSED_BYTES = 64 * 1024 * 1024;
@@ -438,7 +439,7 @@ export class ParquetBindingStore {
       `${shape ? `(${shape.ts})::BIGINT` : "NULL::BIGINT"} AS ts_ms`,
       `${shape ? `epoch_ms((${shape.ts})::BIGINT)::TIMESTAMPTZ` : "NULL::TIMESTAMPTZ"} AS "timestamp"`,
       ...Object.entries({ ...schema, ...custom }).map(([name, type]) => {
-        const column = quoteIdent(name);
+        const column = quoteDuckIdent(name);
         const aliases: Record<string, string> = shape?.table === "requests" ? {} : {
           request_event_id: "req_id", client_id: "cid", session_id: "cid",
           rating: "metric_rating", page_url: "pathname", path: "pathname",
@@ -446,7 +447,7 @@ export class ParquetBindingStore {
           filename: "error_file", lineno: "error_line", colno: "error_col",
         };
         const source = shape?.types.has(name) ? name : aliases[name];
-        const cast = source && shape?.types.has(source) ? `CAST(${quoteIdent(source)} AS ${type})` : `NULL::${type}`;
+        const cast = source && shape?.types.has(source) ? `CAST(${quoteDuckIdent(source)} AS ${type})` : `NULL::${type}`;
         return `${type === "DOUBLE" ? `CASE WHEN isnan(${cast}) THEN NULL ELSE ${cast} END` : cast} AS ${column}`;
       }),
     ];
@@ -569,7 +570,7 @@ export class ParquetBindingStore {
         const tsColumn = typeMap.has("timestamp") ? "timestamp" : typeMap.has("ts_ms") ? "ts_ms" : null;
         if (!tsColumn && table === "requests") throw new Error("Cloud Parquet file has no timestamp column");
         const tsType = tsColumn ? typeMap.get(tsColumn)! : "";
-        const column = tsColumn ? quoteIdent(tsColumn) : "";
+        const column = tsColumn ? quoteDuckIdent(tsColumn) : "";
         const ts = !tsColumn ? "0::BIGINT" : tsType.startsWith("TIMESTAMP") ? `epoch_ms(${column})`
           : tsType.includes("CHAR") ? `epoch_ms(TRY_CAST(${column} AS TIMESTAMP))` : `CAST(${column} AS BIGINT)`;
         let known = stats;
