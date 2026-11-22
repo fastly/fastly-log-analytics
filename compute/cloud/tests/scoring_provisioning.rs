@@ -253,8 +253,38 @@ impl Runtime for Platform {
         charge_backend()?;
         self.adapter.fos(request)
     }
+    fn admin_fos_etag(
+        &self,
+        request: FosRequest<'_>,
+    ) -> Result<(FosResponse, Option<String>), String> {
+        use md5::{Digest, Md5};
+        let etag = (request.method == "PUT")
+            .then(|| format!("\"{}\"", hex::encode(Md5::digest(&request.body))));
+        let response = self.admin_fos(request)?;
+        let etag = etag.filter(|_| (200..300).contains(&response.status));
+        Ok((response, etag))
+    }
     fn admin_remaining_calls(&self) -> u32 {
         REQ_CALLS.with(|c| 32u32.saturating_sub(c.get()))
+    }
+    fn kv_list(
+        &self,
+        prefix: &str,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<fastly_log_analytics::shell::KvPage, String> {
+        charge_backend()?;
+        Ok(fastly_log_analytics::shell::KvPage::from_sorted_keys(
+            self.adapter.records().into_keys(),
+            prefix,
+            cursor,
+            limit,
+        ))
+    }
+    fn kv_delete(&self, key: &str) -> Result<(), String> {
+        self.adapter.cache_invalidate(key);
+        charge_backend()?;
+        self.adapter.delete(key)
     }
     fn scorer_package(&self) -> Option<Vec<u8>> {
         Some(b"fixture-session-scorer-wasm-tar-gz".to_vec())
@@ -3604,6 +3634,41 @@ fn bug_cloud_dr_21c_rejects_patch_reconcile_and_teardown_during_active_delete_da
     );
     assert_eq!(td_res["error"], "data_reset_in_progress");
 
+    // 4b. Auditor Challenge 2: POST /api/admin/provision/execute and POST /api/admin/provision/recover
+    // during active delete-data must ALSO fail closed with 409 data_reset_in_progress!
+    let (prov_st, prov_res) = p.call(
+        "POST",
+        "/api/admin/provision/execute",
+        json!({
+            "token": "fixture-token",
+            "service_id": "fixtureService",
+            "fos_bucket": "fos-fixture-logs",
+            "fos_region": "us-east-1",
+            "log_fields": {"groups":["A","C"],"custom_fields":[],"field_overrides":{},"field_limits":{}}
+        }),
+    );
+    assert_eq!(
+        prov_st, 409,
+        "POST /provision/execute during delete-data must return 409, got {prov_st}: {prov_res}"
+    );
+    assert_eq!(prov_res["error"], "data_reset_in_progress");
+
+    let (dr_st, dr_res) = p.call(
+        "POST",
+        "/api/admin/provision/recover",
+        json!({
+            "token": "fixture-token",
+            "service_id": "fixtureService",
+            "fos_bucket": "fos-fixture-logs",
+            "fos_region": "us-east-1"
+        }),
+    );
+    assert_eq!(
+        dr_st, 409,
+        "POST /provision/recover during delete-data must return 409, got {dr_st}: {dr_res}"
+    );
+    assert_eq!(dr_res["error"], "data_reset_in_progress");
+
     // 5. GET & cancel delete-data still work cleanly, and once cancelled, PATCH succeeds again:
     let (get_dd_st, _) = p.call(
         "GET",
@@ -3628,4 +3693,641 @@ fn bug_cloud_dr_21c_rejects_patch_reconcile_and_teardown_during_active_delete_da
         json!({"generation": post_cancel_gen, "sample_rate": 50}),
     );
     assert_eq!(post_patch_st, 200);
+}
+
+#[test]
+fn bug_cloud_dr_24a_front_clone_tight_budget_never_self_poisons_provision() {
+    for init_used in 15..=17u32 {
+        let p = Platform::new();
+        let start = p.ok(
+            "POST",
+            "/api/admin/provision/execute",
+            json!({
+                "token": "fixture-token",
+                "service_id": "fixtureService",
+                "fos_bucket": "fos-fixture-logs",
+                "fos_region": "eu-central-1",
+                "log_fields": {"groups":["A","C"],"custom_fields":[],"field_overrides":{},"field_limits":{}}
+            }),
+        );
+        let mut job = start["job"].clone();
+        let job_id = job["id"].as_str().unwrap().to_owned();
+        while job["step"] != "front" {
+            let (st, res) = p.call("POST", &format!("/api/admin/jobs/{job_id}/step"), json!({}));
+            assert_eq!(st, 200, "init_used={init_used}: {res}");
+            job = res["job"].clone();
+        }
+        // Advance front cursor 0 -> 1 and record front_clone_intent, then run constrained ticks at cursor 1:
+        for tick in 0..5u32 {
+            let (st, res) = p.call_with_initial_used(
+                init_used,
+                "POST",
+                &format!("/api/admin/jobs/{job_id}/step"),
+                json!({}),
+            );
+            assert_eq!(st, 200, "init_used={init_used} tick={tick}: {res}");
+            job = res["job"].clone();
+            assert_ne!(
+                job["error"],
+                json!("uncheckpointed_front_clone_requires_review"),
+                "BUG-CLOUD-DR-24A: provision self-poisoned at init_used={init_used}: {job}"
+            );
+            assert_ne!(
+                job["status"], "failed",
+                "BUG-CLOUD-DR-24A: provision must not fail under tight front clone budget init_used={init_used}: {job}"
+            );
+            if let Some(at) = job["retry_at"].as_u64() {
+                p.clock.fetch_max(at + 1, Ordering::SeqCst);
+            }
+            if job["step"] != "front" || job["status"] == "complete" {
+                break;
+            }
+        }
+        let done = p.run_job(job);
+        assert_eq!(
+            done["status"], "complete",
+            "BUG-CLOUD-DR-24A: provision must complete cleanly after tight front budget init_used={init_used}: {done}"
+        );
+    }
+}
+
+#[test]
+fn bug_cloud_dr_24b_scoring_tight_budget_backoff_and_zero_redundant_outbox_checkpoints() {
+    let seed_outbox = |p: &Platform, count: usize| {
+        let snap = p.adapter.record_snapshot("svc:fixtureService").unwrap();
+        let mut val = snap.value.clone();
+        val["_audit_outbox"] = Value::Array(
+            (0..count)
+                .map(|i| {
+                    json!({
+                        "actor": "fixtureAdmin",
+                        "at": 1_800_000_000u64 + i as u64,
+                        "event": "seed",
+                        "config_version": 1
+                    })
+                })
+                .collect(),
+        );
+        p.adapter.cache_invalidate("svc:fixtureService");
+        p.adapter
+            .cas("svc:fixtureService", Some(&snap.generation), &val)
+            .unwrap();
+    };
+
+    // 1. scorer_stores at outbox == 4094 and init_used == 16 (rem == 16):
+    // Once keys_store exists, constrained ticks must NOT repeatedly checkpoint svc:fixtureService or spin with retry_at == null!
+    let p_st = Platform::new();
+    p_st.provision_logging_service();
+    seed_outbox(&p_st, 4094);
+    let mut job_st = p_st.ok(
+        "POST",
+        "/api/services/fixtureService/scoring/enable",
+        json!({}),
+    )["job"]
+        .clone();
+    let job_st_id = job_st["id"].as_str().unwrap().to_owned();
+    while job_st["step"] != "scorer_stores" {
+        job_st = p_st.ok(
+            "POST",
+            &format!("/api/admin/jobs/{job_st_id}/step"),
+            json!({}),
+        )["job"]
+            .clone();
+    }
+    // Pre-create only keys_store so ensure_scorer_stores_step hits the cfg_store `< 9` guard:
+    let sc_sid = p_st
+        .adapter
+        .record_snapshot("svc:fixtureService")
+        .unwrap()
+        .value["scoring"]["scoring_service_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let _ = p_st
+        .adapter
+        .api(ApiRequest {
+            method: "POST",
+            path: "/resources/stores/config",
+            query: "",
+            token: "fixture-token",
+            body: Some(json!({"name": format!("scoring_keys_{sc_sid}")})),
+            timeout: std::time::Duration::from_secs(5),
+        })
+        .unwrap();
+    let mut null_retry_ticks = 0u32;
+    for _ in 0..8u32 {
+        let (st, res) = p_st.call_with_initial_used(
+            16,
+            "POST",
+            &format!("/api/admin/jobs/{job_st_id}/step"),
+            json!({}),
+        );
+        assert_eq!(st, 200, "{res}");
+        job_st = res["job"].clone();
+        assert_ne!(
+            job_st["status"], "failed",
+            "BUG-CLOUD-DR-24B: scorer_stores must never burn outbox to 4112 and crash: {job_st}"
+        );
+        if job_st["retry_at"].is_null() {
+            null_retry_ticks += 1;
+        } else if let Some(at) = job_st["retry_at"].as_u64() {
+            p_st.clock.fetch_max(at + 1, Ordering::SeqCst);
+        }
+    }
+    assert!(
+        null_retry_ticks <= 1,
+        "BUG-CLOUD-DR-24B: scorer_stores may checkpoint discovered keys_store at most once, then must set retry_at backoff (null_retry_ticks={null_retry_ticks}): {job_st}"
+    );
+    let outbox_after_constrained = p_st
+        .adapter
+        .record_snapshot("svc:fixtureService")
+        .unwrap()
+        .value["_audit_outbox"]
+        .as_array()
+        .unwrap()
+        .len();
+    assert!(
+        outbox_after_constrained <= 4098,
+        "BUG-CLOUD-DR-24B: scorer_stores must not burn _audit_outbox on no-op ticks (got {outbox_after_constrained})"
+    );
+    assert_eq!(p_st.run_job(job_st)["status"], "complete");
+
+    // 2. scorer_deploy at init_used == 13 (rem == 19) must back off via retry_at instead of spinning at retry_at == null:
+    let p_dep = Platform::new();
+    p_dep.provision_logging_service();
+    let mut job_dep = p_dep.ok(
+        "POST",
+        "/api/services/fixtureService/scoring/enable",
+        json!({}),
+    )["job"]
+        .clone();
+    let job_dep_id = job_dep["id"].as_str().unwrap().to_owned();
+    while job_dep["step"] != "scorer_deploy" {
+        job_dep = p_dep.ok(
+            "POST",
+            &format!("/api/admin/jobs/{job_dep_id}/step"),
+            json!({}),
+        )["job"]
+            .clone();
+    }
+    let mut dep_null_streak = 0u32;
+    for _ in 0..5u32 {
+        let (st, res) = p_dep.call_with_initial_used(
+            13,
+            "POST",
+            &format!("/api/admin/jobs/{job_dep_id}/step"),
+            json!({}),
+        );
+        assert_eq!(st, 200, "{res}");
+        job_dep = res["job"].clone();
+        if job_dep["step"] == "scorer_deploy" && job_dep["retry_at"].is_null() {
+            dep_null_streak += 1;
+        } else if let Some(at) = job_dep["retry_at"].as_u64() {
+            p_dep.clock.fetch_max(at + 1, Ordering::SeqCst);
+        }
+    }
+    assert!(
+        dep_null_streak <= 1,
+        "BUG-CLOUD-DR-24B: scorer_deploy spun with retry_at=null (streak={dep_null_streak}): {job_dep}"
+    );
+    assert_eq!(p_dep.run_job(job_dep)["status"], "complete");
+
+    // 3. scoring_cleanup_state at init_used == 14 (rem == 18) must back off via retry_at instead of spinning:
+    let p_cl = Platform::new();
+    p_cl.provision_logging_service();
+    let en_cl = p_cl.ok(
+        "POST",
+        "/api/services/fixtureService/scoring/enable",
+        json!({}),
+    )["job"]
+        .clone();
+    assert_eq!(p_cl.run_job(en_cl)["status"], "complete");
+    let gen_cl = p_cl
+        .adapter
+        .record_snapshot("svc:fixtureService")
+        .unwrap()
+        .generation;
+    let mut job_cl = p_cl.ok(
+        "POST",
+        "/api/services/fixtureService/scoring/teardown",
+        json!({"confirm_service_id": "fixtureService", "generation": gen_cl}),
+    )["job"]
+        .clone();
+    let job_cl_id = job_cl["id"].as_str().unwrap().to_owned();
+    while job_cl["step"] != "scoring_cleanup_state" {
+        job_cl = p_cl.ok(
+            "POST",
+            &format!("/api/admin/jobs/{job_cl_id}/step"),
+            json!({}),
+        )["job"]
+            .clone();
+    }
+    let mut cl_null_streak = 0u32;
+    for _ in 0..5u32 {
+        let (st, res) = p_cl.call_with_initial_used(
+            14,
+            "POST",
+            &format!("/api/admin/jobs/{job_cl_id}/step"),
+            json!({}),
+        );
+        assert_eq!(st, 200, "{res}");
+        job_cl = res["job"].clone();
+        if job_cl["step"] == "scoring_cleanup_state" && job_cl["retry_at"].is_null() {
+            cl_null_streak += 1;
+        } else if let Some(at) = job_cl["retry_at"].as_u64() {
+            p_cl.clock.fetch_max(at + 1, Ordering::SeqCst);
+        }
+    }
+    assert!(
+        cl_null_streak <= 1,
+        "BUG-CLOUD-DR-24B: scoring_cleanup_state spun with retry_at=null (streak={cl_null_streak}): {job_cl}"
+    );
+    assert_eq!(p_cl.run_job(job_cl)["status"], "complete");
+}
+
+#[test]
+fn bug_cloud_dr_24e_synchronous_scoring_routes_reject_full_outbox_before_external_side_effects() {
+    let p = Platform::new();
+    p.provision_logging_service();
+
+    // Seed outbox == 4095 and run scoring_enable to completion so post-job outbox >= 4096 (normal post-job state!):
+    let snap = p.adapter.record_snapshot("svc:fixtureService").unwrap();
+    let mut val = snap.value.clone();
+    val["_audit_outbox"] = Value::Array(
+        (0..4095)
+            .map(|i| json!({"actor":"fixtureAdmin","at":1_800_000_000u64 + i as u64,"event":"seed","config_version":1}))
+            .collect(),
+    );
+    p.adapter.cache_invalidate("svc:fixtureService");
+    p.adapter
+        .cas("svc:fixtureService", Some(&snap.generation), &val)
+        .unwrap();
+
+    let en_job = p.ok(
+        "POST",
+        "/api/services/fixtureService/scoring/enable",
+        json!({}),
+    )["job"]
+        .clone();
+    assert_eq!(p.run_job(en_job)["status"], "complete");
+
+    // Seed a stored historical matrix v-prev in S3 so /restore would find it if it reached S3:
+    p.adapter.seed_object_bytes(
+        "fos-fixture-logs",
+        "processed/scoring/matrices/v-prev.json",
+        serde_json::to_vec(&json!({
+            "version": "v-prev",
+            "vocab_size": 1,
+            "session_count": 1,
+            "transition_count": 1,
+            "counts": {"/": {"/": 1}},
+            "row_totals": {"/": 1}
+        }))
+        .unwrap(),
+    );
+
+    let post_en_snap = p.adapter.record_snapshot("svc:fixtureService").unwrap();
+    let outbox_len = post_en_snap.value["_audit_outbox"]
+        .as_array()
+        .unwrap()
+        .len();
+    assert!(
+        outbox_len >= 4096,
+        "expected outbox >= 4096, got {outbox_len}"
+    );
+    let matrix_store_id = post_en_snap.value["scoring"]["scoring_matrix_store_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let matrix_kv_before = p.adapter.kv_store_value(&matrix_store_id, "matrix");
+
+    let (_, vers_before) = p
+        .adapter
+        .api(ApiRequest {
+            method: "GET",
+            path: "/service/fixtureService/version",
+            query: "",
+            token: "fixture-token",
+            body: None,
+            timeout: std::time::Duration::from_secs(5),
+        })
+        .unwrap();
+    let max_ver_before = vers_before
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v["number"].as_u64())
+        .max()
+        .unwrap();
+
+    for (label, method, path, body) in [
+        (
+            "threshold",
+            "PUT",
+            "/api/services/fixtureService/scoring/threshold",
+            json!({"threshold": 77}),
+        ),
+        (
+            "exclude-regex",
+            "PUT",
+            "/api/services/fixtureService/scoring/exclude-regex?confirm=true",
+            json!({"exclude_url_regex": r"\.(pdf|zip)$"}),
+        ),
+        (
+            "enforce-status-code",
+            "PUT",
+            "/api/services/fixtureService/scoring/enforce-status-code?confirm=true",
+            json!({"status_code": 429}),
+        ),
+        (
+            "retrain",
+            "POST",
+            "/api/services/fixtureService/scoring/retrain",
+            json!({
+                "matrix": {
+                    "version": "v-desync-1",
+                    "vocab_size": 1,
+                    "session_count": 1,
+                    "transition_count": 1,
+                    "counts": {"/": {"/": 1}},
+                    "row_totals": {"/": 1}
+                }
+            }),
+        ),
+        (
+            "restore",
+            "POST",
+            "/api/services/fixtureService/scoring/matrix/versions/restore?confirm=true",
+            json!({"version": "v-prev"}),
+        ),
+    ] {
+        let (st, res) = p.call(method, path, body);
+        assert_eq!(st, 409, "BUG-CLOUD-DR-24E [{label}]: {res}");
+        assert_eq!(
+            res["error"], "audit_archive_required",
+            "BUG-CLOUD-DR-24E [{label}]: {res}"
+        );
+    }
+
+    let (_, vers_after) = p
+        .adapter
+        .api(ApiRequest {
+            method: "GET",
+            path: "/service/fixtureService/version",
+            query: "",
+            token: "fixture-token",
+            body: None,
+            timeout: std::time::Duration::from_secs(5),
+        })
+        .unwrap();
+    let max_ver_after = vers_after
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v["number"].as_u64())
+        .max()
+        .unwrap();
+    assert_eq!(
+        max_ver_after, max_ver_before,
+        "BUG-CLOUD-DR-24E: customer Fastly VCL must NOT be cloned/activated when outbox >= 4096"
+    );
+    assert_eq!(
+        p.adapter.kv_store_value(&matrix_store_id, "matrix"),
+        matrix_kv_before,
+        "BUG-CLOUD-DR-24E: scoring_matrix KV must NOT be overwritten before 409 audit_archive_required"
+    );
+    assert!(
+        !p.adapter
+            .object_keys("fos-fixture-logs")
+            .iter()
+            .any(|k| k == "processed/scoring/matrices/v-desync-1.json"),
+        "BUG-CLOUD-DR-24E: S3 matrices must NOT be written before 409 audit_archive_required"
+    );
+
+    for (label, method, path, body) in [
+        (
+            "disable-with-token",
+            "POST",
+            "/api/services/fixtureService/scoring/disable",
+            json!({"token": "rotated-should-not-save-token"}),
+        ),
+        (
+            "teardown-with-token",
+            "POST",
+            "/api/services/fixtureService/scoring/teardown",
+            json!({
+                "confirm_service_id": "fixtureService",
+                "generation": post_en_snap.generation,
+                "token": "rotated-should-not-save-token"
+            }),
+        ),
+    ] {
+        let (st, res) = p.call(method, path, body);
+        assert_eq!(st, 409, "BUG-CLOUD-DR-24E [{label}]: {res}");
+        assert_eq!(
+            res["error"], "audit_archive_required",
+            "BUG-CLOUD-DR-24E [{label}]: {res}"
+        );
+    }
+    assert_eq!(
+        p.adapter
+            .secret("fastly_token.fixtureService")
+            .unwrap()
+            .as_deref(),
+        Some("fixture-token"),
+        "BUG-CLOUD-DR-24E: fastly_token.fixtureService must NOT be overwritten before 409 audit_archive_required"
+    );
+}
+
+#[test]
+fn bug_cloud_dr_24c_delete_data_torn_down_reconcile_lock_superseded_job_and_cancel_at_4095() {
+    // 1. Torn-down service (both delete_fos_keys = true and false) rejects POST /delete-data with 409 service_torn_down
+    // WITHOUT writing svc:fixtureService.data_reset, so re-provisioning succeeds!
+    for delete_fos_keys in [true, false] {
+        let p = Platform::new();
+        p.provision_logging_service();
+        let gen = p
+            .adapter
+            .record_snapshot("svc:fixtureService")
+            .unwrap()
+            .generation;
+        let td_job = p.ok(
+            "POST",
+            "/api/admin/provision/teardown",
+            json!({
+                "service_id": "fixtureService",
+                "confirm_service_id": "fixtureService",
+                "generation": gen,
+                "remove_logging": true,
+                "remove_snippets": true,
+                "delete_fos_keys": delete_fos_keys,
+                "delete_data": false,
+                "delete_fos_bucket": false
+            }),
+        )["job"]
+            .clone();
+        assert_eq!(p.run_job(td_job)["status"], "complete");
+        let td_snap = p.adapter.record_snapshot("svc:fixtureService").unwrap();
+        assert_eq!(td_snap.value["status"], "torn_down");
+        let (dd_st, dd_res) = p.call(
+            "POST",
+            "/api/admin/services/fixtureService/delete-data",
+            json!({"confirm_service_id": "fixtureService", "generation": td_snap.generation}),
+        );
+        assert_eq!(
+            dd_st, 409,
+            "delete_fos_keys={delete_fos_keys}: POST /delete-data on torn_down must return 409: {dd_res}"
+        );
+        assert_eq!(
+            dd_res["error"], "service_torn_down",
+            "delete_fos_keys={delete_fos_keys}: {dd_res}"
+        );
+        assert!(
+            p.adapter
+                .record_snapshot("svc:fixtureService")
+                .unwrap()
+                .value
+                .get("data_reset")
+                .is_none_or(Value::is_null),
+            "delete_fos_keys={delete_fos_keys}: torn_down delete-data must NOT poison svc.data_reset"
+        );
+        let (reprov_st, reprov_res) = p.call(
+            "POST",
+            "/api/admin/provision/execute",
+            json!({
+                "token": "fixture-token",
+                "service_id": "fixtureService",
+                "fos_bucket": "fos-fixture-logs",
+                "fos_region": "us-east-1",
+                "log_fields": {"groups":["A","C"],"custom_fields":[],"field_overrides":{},"field_limits":{}}
+            }),
+        );
+        assert_eq!(
+            reprov_st, 200,
+            "delete_fos_keys={delete_fos_keys}: re-provision after rejected delete-data must succeed: {reprov_res}"
+        );
+    }
+
+    // 2. Active reconcile_lock blocks POST /delete-data with 409 service_locked, while terminal failed reconcile is superseded:
+    let p_lock = Platform::new();
+    p_lock.provision_logging_service();
+    let lock_old = p_lock
+        .adapter
+        .record_snapshot("reconcile_lock:fixtureService")
+        .map(|r| r.generation);
+    p_lock
+        .adapter
+        .cas(
+            "reconcile_lock:fixtureService",
+            lock_old.as_deref(),
+            &json!({"job_id": "active-step", "fence": 99, "expires_at": 1_800_000_060u64}),
+        )
+        .unwrap();
+    let gen_lock = p_lock
+        .adapter
+        .record_snapshot("svc:fixtureService")
+        .unwrap()
+        .generation;
+    let (lk_st, lk_res) = p_lock.call(
+        "POST",
+        "/api/admin/services/fixtureService/delete-data",
+        json!({"confirm_service_id": "fixtureService", "generation": gen_lock}),
+    );
+    assert_eq!(
+        lk_st, 409,
+        "active reconcile_lock must block delete-data: {lk_res}"
+    );
+    assert_eq!(lk_res["error"], "service_locked");
+
+    // Expire lock and seed a terminal failed reconcile job on svc.pending_job_id -> delete-data supersedes it (200 OK)!
+    let lock_cur = p_lock
+        .adapter
+        .record_snapshot("reconcile_lock:fixtureService")
+        .unwrap();
+    p_lock
+        .adapter
+        .cas(
+            "reconcile_lock:fixtureService",
+            Some(&lock_cur.generation),
+            &json!({"job_id": "active-step", "fence": 99, "expires_at": 0}),
+        )
+        .unwrap();
+    let started_rec = p_lock.ok(
+        "POST",
+        "/api/admin/services/fixtureService/reconcile",
+        json!({"generation": gen_lock}),
+    );
+    let rec_job_id = started_rec["job"]["id"].as_str().unwrap().to_owned();
+    let rec_job_key = format!("job:{rec_job_id}");
+    let rec_job_snap = p_lock.adapter.record_snapshot(&rec_job_key).unwrap();
+    let mut failed_job_val = rec_job_snap.value.clone();
+    failed_job_val["status"] = json!("failed");
+    failed_job_val["error"] = json!("active_version_changed");
+    p_lock.adapter.cache_invalidate(&rec_job_key);
+    p_lock
+        .adapter
+        .cas(
+            &rec_job_key,
+            Some(&rec_job_snap.generation),
+            &failed_job_val,
+        )
+        .unwrap();
+    let gen_sup = p_lock
+        .adapter
+        .record_snapshot("svc:fixtureService")
+        .unwrap()
+        .generation;
+    let (sup_st, sup_res) = p_lock.call(
+        "POST",
+        "/api/admin/services/fixtureService/delete-data",
+        json!({"confirm_service_id": "fixtureService", "generation": gen_sup}),
+    );
+    assert_eq!(
+        sup_st, 200,
+        "terminal failed reconcile job must not wedge POST /delete-data: {sup_res}"
+    );
+
+    // 3. Outbox == 4095 start (200 OK -> outbox 4096) followed by immediate POST /delete-data/cancel MUST succeed 200 OK and clear svc.data_reset!
+    let p_ob = Platform::new();
+    p_ob.provision_logging_service();
+    let ob_snap = p_ob.adapter.record_snapshot("svc:fixtureService").unwrap();
+    let mut ob_val = ob_snap.value.clone();
+    ob_val["_audit_outbox"] = Value::Array(
+        (0..4095)
+            .map(|i| json!({"actor":"fixtureAdmin","at":1_800_000_000u64 + i as u64,"event":"seed","config_version":1}))
+            .collect(),
+    );
+    p_ob.adapter.cache_invalidate("svc:fixtureService");
+    p_ob.adapter
+        .cas("svc:fixtureService", Some(&ob_snap.generation), &ob_val)
+        .unwrap();
+    let gen_4095 = p_ob
+        .adapter
+        .record_snapshot("svc:fixtureService")
+        .unwrap()
+        .generation;
+    let (st_4095, res_4095) = p_ob.call(
+        "POST",
+        "/api/admin/services/fixtureService/delete-data",
+        json!({"confirm_service_id": "fixtureService", "generation": gen_4095}),
+    );
+    assert_eq!(st_4095, 200, "{res_4095}");
+    let (cancel_4095_st, cancel_4095_res) = p_ob.call(
+        "POST",
+        "/api/admin/services/fixtureService/delete-data/cancel",
+        json!({}),
+    );
+    assert_eq!(
+        cancel_4095_st, 200,
+        "BUG-CLOUD-DR-24C: delete-data/cancel after start at outbox=4095 must succeed: {cancel_4095_res}"
+    );
+    assert!(
+        p_ob.adapter
+            .record_snapshot("svc:fixtureService")
+            .unwrap()
+            .value
+            .get("data_reset")
+            .is_none_or(Value::is_null),
+        "BUG-CLOUD-DR-24C: svc.data_reset must be cleared by synchronous cancel at outbox=4096"
+    );
 }

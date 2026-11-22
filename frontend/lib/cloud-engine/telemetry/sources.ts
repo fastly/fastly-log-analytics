@@ -90,7 +90,17 @@ export function currentOpsIdentity(
   const user = explicitUser ?? activeUserId ?? dashUser ?? volatileOpsScope;
   const role =
     explicitRole ??
-    (activeUserId === null || activeUserId === dashUser ? dashRole : null) ??
+    (activeUserId !== null &&
+    (explicitUser === null || explicitUser === activeUserId)
+      ? activeUserRole
+      : null) ??
+    (explicitUser !== null
+      ? explicitUser === dashUser
+        ? dashRole
+        : null
+      : activeUserId === null || activeUserId === dashUser
+        ? dashRole
+        : null) ??
     "admin";
   return { user, role };
 }
@@ -152,24 +162,40 @@ export async function syncOpsCacheForSession(session: {
     : session.role && session.role.trim().length > 0
       ? session.role.trim()
       : null;
+  const baseRole =
+    nextUser === null
+      ? null
+      : ((rawRole === "analyst_masked" ? "analyst-no-pii" : rawRole) ??
+        dashboardRoleForUser(nextUser));
   const nextRole =
     nextUser === null
       ? null
-      : session.maskIps && (!rawRole || rawRole === "analyst")
-        ? "analyst-no-pii"
-        : (rawRole ?? dashboardRoleForUser(nextUser));
+      : session.maskIps
+        ? !baseRole || baseRole === "analyst" || baseRole === "analyst-no-pii"
+          ? "analyst-no-pii"
+          : baseRole.endsWith("-no-pii")
+            ? baseRole
+            : `${baseRole}-no-pii`
+        : baseRole;
+  const effectivePrevRole =
+    activeUserId !== null
+      ? (activeUserRole ?? dashboardRoleForUser(activeUserId) ?? "admin")
+      : null;
+  const effectiveNextRole = nextUser !== null ? (nextRole ?? "admin") : null;
   const userChanged = activeUserId !== null && activeUserId !== nextUser;
   const roleChanged =
     activeUserId !== null &&
     nextUser !== null &&
-    activeUserRole !== null &&
-    nextRole !== null &&
-    activeUserRole !== nextRole;
-  if (userChanged || roleChanged || session.needsLogin) {
+    effectivePrevRole !== effectiveNextRole;
+  const initialMismatch =
+    activeUserId === null &&
+    nextUser !== null &&
+    dashboardRoleForUser(nextUser) !== effectiveNextRole;
+  if (userChanged || roleChanged || initialMismatch || session.needsLogin) {
     await clearOpsCaches();
   }
   activeUserId = nextUser;
-  activeUserRole = nextRole;
+  activeUserRole = effectiveNextRole;
 }
 
 export function browserOpsSource(

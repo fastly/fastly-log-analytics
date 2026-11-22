@@ -9,6 +9,7 @@ import {
   DUCKDB_WASM_VERSION,
   DuckDBAnalyticalEngine,
   duckdbAssetUrls,
+  interpolateSqlParams,
 } from "./duckdb";
 import { Aggregator } from "./engine";
 import { fixtureEngine } from "./test-fixtures";
@@ -231,6 +232,99 @@ describe("DuckDB browser assets", () => {
       customFields,
     );
     expect(aggPerFile.totalRequests).toBe(2);
+    await engine.reset();
+  });
+
+  it("SEC-T5-ITER24-03: interpolateSqlParams skips literals/identifiers/comments and DuckDB safely handles NUL bytes", async () => {
+    // 1. Single-pass token-aware interpolateSqlParams:
+    const raw = `SELECT "col?$1" FROM requests -- comment ? $1\n/* block ? $2 */ WHERE ts_ms >= ? AND ts_ms < ? AND url = '/search?q=alpha&p=$1' AND tag = 'prefix_$1_suffix' AND extra = $3`;
+    const interpolated = interpolateSqlParams(raw, [
+      100,
+      200,
+      "safe' || (SELECT ip FROM requests LIMIT 1) || '",
+    ]);
+    expect(interpolated).toContain(`"col?$1"`);
+    expect(interpolated).toContain(`WHERE ts_ms >= 100 AND ts_ms < 200`);
+    expect(interpolated).toContain(`url = '/search?q=alpha&p=$1'`);
+    expect(interpolated).toContain(`tag = 'prefix_$1_suffix'`);
+    expect(interpolated).toContain(
+      `extra = 'safe'' || (SELECT ip FROM requests LIMIT 1) || '''`,
+    );
+
+    // 2. Real DuckDB-WASM NUL byte handling in string filters and identifier rejection without poisoning engine:
+    const ts0 = 1_700_000_000_000;
+    const goodBytes = parquetWriteBuffer({
+      codec: "SNAPPY",
+      columnData: [
+        { name: "timestamp", type: "TIMESTAMP", data: [new Date(ts0)] },
+        { name: "status", type: "INT64", data: [BigInt(200)] },
+        { name: "url", type: "STRING", data: ["/search?q=alpha"] },
+        { name: "cache", type: "STRING", data: ["HIT"] },
+        { name: "resp_bytes", type: "INT64", data: [BigInt(128)] },
+        { name: "edge", type: "BOOLEAN", data: [true] },
+      ],
+    });
+    const engine = new DuckDBAnalyticalEngine();
+    const lease = engine.lease([]);
+    try {
+      await lease.ingestFile("svc-nul:good", "svc-nul/good.parquet", goodBytes);
+      await lease.publishView();
+      const ctx = lease.readContext();
+
+      // NUL byte inside filter value must execute cleanly without Parser Error: unterminated quoted string!
+      const aggNul = new Aggregator(ts0 - 1000, ts0 + 5000, ["url"]);
+      await engine.queryIntoAggregator(
+        ["svc-nul:good"],
+        ts0 - 1000,
+        ts0 + 5000,
+        [{ field: "url", mode: "exclude", value: "abc\0def" }],
+        aggNul,
+        { context: ctx },
+      );
+      expect(aggNul.totalRequests).toBe(1);
+
+      // NUL byte in parameter via executeSql must preserve exact NUL string length (7 chars):
+      const nulRows = await ctx.executeSql<{ len: number }>(
+        "SELECT length(?) AS len",
+        ["abc\0def"],
+      );
+      expect(Number(nulRows[0]?.len)).toBe(7);
+
+      // URL filter containing '?' alongside positional '?' params (the exact 1s /api/timeseries shape) must match accurately:
+      const qmarkRows = await ctx.executeSql<{ cnt: number }>(
+        "SELECT count(*) AS cnt FROM requests WHERE ts_ms >= ? AND ts_ms < ? AND url = '/search?q=alpha'",
+        [ts0 - 1000, ts0 + 5000],
+      );
+      expect(Number(qmarkRows[0]?.cnt)).toBe(1);
+    } finally {
+      lease.release();
+    }
+
+    // Custom column containing NUL byte must fail cleanly BEFORE poisoning ParquetBindingStore,
+    // so subsequent clean queries on the same engine continue working!
+    const badLease = engine.lease([{ id: "bad\0col", type: "string" }]);
+    try {
+      await expect(
+        badLease.ingestFile("svc-nul:bad", "svc-nul/bad.parquet", goodBytes),
+      ).rejects.toThrow(/NUL/i);
+    } finally {
+      badLease.release();
+    }
+    const checkLease = engine.lease([]);
+    try {
+      await checkLease.ingestFile(
+        "svc-nul:good",
+        "svc-nul/good.parquet",
+        goodBytes,
+      );
+      await checkLease.publishView();
+      const okRows = await checkLease
+        .readContext()
+        .executeSql<{ cnt: number }>("SELECT count(*) AS cnt FROM requests");
+      expect(Number(okRows[0]?.cnt)).toBe(1);
+    } finally {
+      checkLease.release();
+    }
     await engine.reset();
   });
 });

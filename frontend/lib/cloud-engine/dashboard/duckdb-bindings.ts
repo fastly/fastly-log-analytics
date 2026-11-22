@@ -31,8 +31,19 @@ type Config = {
   rows<T>(table: ArrowTableLike): T[];
   interpolate(sql: string, params: readonly unknown[]): string;
 };
-const literal = (value: string) => `'${sqlEscape(value)}'`;
-const quoteDuckIdent = (s: string): string => `"${s.replace(/"/g, '""')}"`;
+const literal = (value: string) =>
+  !value.includes("\0")
+    ? `'${sqlEscape(value)}'`
+    : `(${value
+        .split("\0")
+        .map((part) => `'${sqlEscape(part)}'`)
+        .join(" || chr(0) || ")})`;
+const quoteDuckIdent = (s: string): string => {
+  if (s.includes("\0")) {
+    throw new Error("Invalid DuckDB identifier: NUL byte is not allowed");
+  }
+  return `"${s.replace(/"/g, '""')}"`;
+};
 // Pseudo-column naming the file each row came from in a multi-file scan.
 const SOURCE_FILE_COLUMN = "__flp_source_file";
 const MAX_COMPRESSED_BYTES = 64 * 1024 * 1024;
@@ -554,6 +565,8 @@ export class ParquetBindingStore {
       }
       if (registeredBytes + bytes.byteLength > MAX_COMPRESSED_BYTES)
         throw new Error("Cloud query registered compressed files exceed the browser byte budget");
+      for (const [id] of required) quoteDuckIdent(id);
+      for (const id of this.customTypes.keys()) quoteDuckIdent(id);
       const name = `bound_g${generation}_${this.nextFile++}.parquet`;
       let registered = false, committed = false;
       let failure: unknown;
@@ -565,6 +578,7 @@ export class ParquetBindingStore {
         const schema = await backend.query(`DESCRIBE SELECT * FROM read_parquet(${literal(name)})`, signal);
         this.check(generation, signal);
         const names = (schema.getChild("column_name")?.toJSON() ?? []) as string[];
+        for (const colName of names) quoteDuckIdent(colName);
         const types = (schema.getChild("column_type")?.toJSON() ?? []) as string[];
         const typeMap = new Map(names.map((name, index) => [name, types[index].toUpperCase()]));
         const tsColumn = typeMap.has("timestamp") ? "timestamp" : typeMap.has("ts_ms") ? "ts_ms" : null;

@@ -280,10 +280,19 @@ function concatBatches(
 }
 
 function sqlString(value: string): string {
-  return `'${sqlEscape(value)}'`;
+  if (!value.includes("\0")) return `'${sqlEscape(value)}'`;
+  return `(${value
+    .split("\0")
+    .map((part) => `'${sqlEscape(part)}'`)
+    .join(" || chr(0) || ")})`;
 }
 
-const quoteDuckIdent = (s: string): string => `"${s.replace(/"/g, '""')}"`;
+const quoteDuckIdent = (s: string): string => {
+  if (s.includes("\0")) {
+    throw new Error("Invalid DuckDB identifier: NUL byte is not allowed");
+  }
+  return `"${s.replace(/"/g, '""')}"`;
+};
 const sqlIdent = quoteDuckIdent;
 
 function escapeRegex(value: string): string {
@@ -395,20 +404,68 @@ export async function createNodeBackend(): Promise<DuckDBBackend> {
     VoidLogger: new () => unknown;
     NODE_RUNTIME: unknown;
   };
+  const fsBuiltin = getBuiltin("fs") as {
+    readFileSync: (filePath: string) => BufferSource;
+  };
   const distDir = pathBuiltin.resolve(
     process.cwd(),
     "node_modules/@duckdb/duckdb-wasm/dist",
   );
+  const wasmPath = pathBuiltin.join(distDir, "duckdb-eh.wasm");
   const db = await duckdb.createDuckDB(
     {
       eh: {
-        mainModule: pathBuiltin.join(distDir, "duckdb-eh.wasm"),
+        mainModule: wasmPath,
         mainWorker: pathBuiltin.join(distDir, "duckdb-node-eh.worker.cjs"),
       },
     },
     new duckdb.VoidLogger(),
     duckdb.NODE_RUNTIME,
   );
+  const nodeDb = db as typeof db & {
+    _runtime?: Record<string, unknown>;
+    instantiateWasm?: (
+      imports: WebAssembly.Imports,
+      cb: (inst: WebAssembly.Instance, mod: WebAssembly.Module) => void,
+    ) => unknown;
+  };
+  if (typeof nodeDb.instantiateWasm === "function" && nodeDb._runtime) {
+    const cacheSym = Symbol.for("flp.duckdb.nodeWasmModuleCache");
+    const globalHolder = globalThis as unknown as Record<
+      symbol,
+      Map<string, Promise<WebAssembly.Module>> | undefined
+    >;
+    let modCache = globalHolder[cacheSym];
+    if (!modCache) {
+      modCache = new Map<string, Promise<WebAssembly.Module>>();
+      globalHolder[cacheSym] = modCache;
+    }
+    const runtimeObj = nodeDb._runtime;
+    nodeDb.instantiateWasm = (imports, cb) => {
+      const rtGlobal = globalThis as unknown as {
+        DUCKDB_RUNTIME?: Record<string, unknown>;
+      };
+      rtGlobal.DUCKDB_RUNTIME = {};
+      for (const prop of Object.getOwnPropertyNames(runtimeObj)) {
+        if (prop !== "constructor") {
+          rtGlobal.DUCKDB_RUNTIME[prop] = Object.getOwnPropertyDescriptor(
+            runtimeObj,
+            prop,
+          )?.value;
+        }
+      }
+      let modPromise = modCache.get(wasmPath);
+      if (!modPromise) {
+        modPromise = WebAssembly.compile(fsBuiltin.readFileSync(wasmPath));
+        modCache.set(wasmPath, modPromise);
+      }
+      void modPromise.then(async (compiledMod) => {
+        const instance = await WebAssembly.instantiate(compiledMod, imports);
+        cb(instance, compiledMod);
+      });
+      return [];
+    };
+  }
   let conn: ReturnType<typeof db.connect>;
   try {
     await db.instantiate();
@@ -676,14 +733,103 @@ export function interpolateSqlParams(
     return sqlString(String(val));
   };
   let positionalIdx = 0;
-  return sql.replace(/\$([0-9]+)|\?/g, (_match, numStr) => {
-    if (numStr !== undefined) {
-      const idx = Number(numStr) - 1;
-      return idx >= 0 && idx < params.length ? encodeParam(params[idx]) : "NULL";
+  let out = "";
+  let i = 0;
+  const len = sql.length;
+  while (i < len) {
+    const ch = sql[i];
+    if (ch === "'") {
+      let j = i + 1;
+      while (j < len) {
+        if (sql[j] === "'") {
+          if (j + 1 < len && sql[j + 1] === "'") {
+            j += 2;
+            continue;
+          }
+          j += 1;
+          break;
+        }
+        j += 1;
+      }
+      out += sql.slice(i, j);
+      i = j;
+      continue;
     }
-    const idx = positionalIdx++;
-    return idx < params.length ? encodeParam(params[idx]) : "NULL";
-  });
+    if (ch === '"') {
+      let j = i + 1;
+      while (j < len) {
+        if (sql[j] === '"') {
+          if (j + 1 < len && sql[j + 1] === '"') {
+            j += 2;
+            continue;
+          }
+          j += 1;
+          break;
+        }
+        j += 1;
+      }
+      out += sql.slice(i, j);
+      i = j;
+      continue;
+    }
+    if (ch === "-" && i + 1 < len && sql[i + 1] === "-") {
+      let j = i + 2;
+      while (j < len && sql[j] !== "\n") j += 1;
+      if (j < len) j += 1;
+      out += sql.slice(i, j);
+      i = j;
+      continue;
+    }
+    if (ch === "/" && i + 1 < len && sql[i + 1] === "*") {
+      let j = i + 2;
+      let depth = 1;
+      while (j < len && depth > 0) {
+        if (sql[j] === "/" && j + 1 < len && sql[j + 1] === "*") {
+          depth += 1;
+          j += 2;
+          continue;
+        }
+        if (sql[j] === "*" && j + 1 < len && sql[j + 1] === "/") {
+          depth -= 1;
+          j += 2;
+          continue;
+        }
+        j += 1;
+      }
+      out += sql.slice(i, j);
+      i = j;
+      continue;
+    }
+    if (ch === "$") {
+      const rest = sql.slice(i);
+      const numMatch = rest.match(/^\$([0-9]+)/);
+      if (numMatch) {
+        const idx = Number(numMatch[1]) - 1;
+        out +=
+          idx >= 0 && idx < params.length ? encodeParam(params[idx]) : "NULL";
+        i += numMatch[0].length;
+        continue;
+      }
+      const tagMatch = rest.match(/^\$([A-Za-z_][A-Za-z0-9_]*)?\$/);
+      if (tagMatch) {
+        const delim = tagMatch[0];
+        const endIdx = sql.indexOf(delim, i + delim.length);
+        const j = endIdx === -1 ? len : endIdx + delim.length;
+        out += sql.slice(i, j);
+        i = j;
+        continue;
+      }
+    }
+    if (ch === "?") {
+      const idx = positionalIdx++;
+      out += idx < params.length ? encodeParam(params[idx]) : "NULL";
+      i += 1;
+      continue;
+    }
+    out += ch;
+    i += 1;
+  }
+  return out;
 }
 
 function arrowTableToRows<T = Record<string, unknown>>(

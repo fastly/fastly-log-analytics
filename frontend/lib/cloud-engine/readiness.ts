@@ -44,10 +44,16 @@ const SECRET_WORD = String.raw`(?:\w+[_-])?(?:token|key|secret|passw(?:or)?d|aut
 // mask anything that may be private, and bound what is left.
 function redactedMessage(message: string): string {
   const text = (message.split(/\r?\n/, 1)[0] ?? "")
-    .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "[url]")
     .replace(/'[^']*'|"[^"]*"|`[^`]*`/g, "[redacted]")
+    .replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s'"`]+/gi, "[url]")
     .replace(/\S+@\S+/g, "[redacted]")
-    .replace(new RegExp(String.raw`\b(${SECRET_WORD})\b\s*[:=]?\s*(?:bearer\s+)?[^\s,;]+`, "gi"), "$1 [redacted]")
+    .replace(
+      new RegExp(
+        String.raw`\b(${SECRET_WORD})\b\s*[:=]?\s*(?:(?:bearer|basic|digest|token)\s+)?[^\s,;]+`,
+        "gi",
+      ),
+      "$1 [redacted]",
+    )
     .replace(/[\w+/=.-]{20,}/g, "[redacted]")
     .replace(/\s+/g, " ")
     .trim();

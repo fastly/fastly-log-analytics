@@ -1081,9 +1081,16 @@ export function browserSource(
         await hit?.body?.cancel();
         return null;
       }
+      let decodedMeta = "";
+      try {
+        decodedMeta = decodeURIComponent(hit.headers.get(DERIVED_META_HEADER) ?? "");
+      } catch {
+        await hit.body?.cancel();
+        return null;
+      }
       return {
         byteLength,
-        meta: decodeURIComponent(hit.headers.get(DERIVED_META_HEADER) ?? ""),
+        meta: decodedMeta,
         bytes: async () => {
           if (callEpoch !== cacheEpoch) {
             await hit.body?.cancel();

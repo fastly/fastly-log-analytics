@@ -15,7 +15,13 @@ export async function cloudServiceStatus(request: Request): Promise<Response | n
     rum_enabled?: boolean;
     faro_version?: string;
   }> };
-  const service = payload.services?.find((item) => item.service_id === decodeURIComponent(match[1]));
+  let targetServiceId: string;
+  try {
+    targetServiceId = decodeURIComponent(match[1]);
+  } catch {
+    return Response.json({ detail: { error: "invalid_service_id" } }, { status: 400 });
+  }
+  const service = payload.services?.find((item) => item.service_id === targetServiceId);
   if (!service) return Response.json({ detail: { error: "service_not_found" } }, { status: 404 });
   if (match[3] === "versions") {
     if (match[2] !== "rum") return null;

@@ -142,7 +142,7 @@ pub fn build_dr_state(
 /// `{scope}meta/cloud_dr_state.json`. Never fails the caller and never overflows the backend
 /// call budget.
 pub fn sync_best_effort(runtime: &impl Runtime, service: &Service) {
-    if service.status != "active" {
+    if service.status != "active" || service.data_reset.is_some() {
         return;
     }
     let Some((ak, sk)) = crate::admin::fos_credentials(runtime, service) else {
@@ -504,21 +504,41 @@ fn hydrate_service(
     Ok(service)
 }
 
+type ScannedHeadPair = (
+    crate::ingest::catalog::Head,
+    Option<crate::ingest::catalog::Manifest>,
+);
+
 fn scan_catalog_head(
     context: &Context<'_, impl Runtime>,
     service: &Service,
     creds: &(String, String),
     reserve_calls: u32,
     foreign_dr_state: bool,
-) -> Result<Option<crate::ingest::catalog::Head>, Error> {
+    expected_manifest: Option<&str>,
+) -> Result<(Option<ScannedHeadPair>, bool), Error> {
     if context.remaining_calls() <= reserve_calls + 1 {
-        return Ok(None);
+        return Ok((None, false));
     }
     let scope = crate::ingest::scope(service);
     let prefix = format!("{scope}processed/_catalog/");
     let page = match fos::list_objects(context, service, creds, &prefix, None) {
         Ok(page) => page,
-        Err(_) => return Ok(None),
+        Err(_) => return Ok((None, false)),
+    };
+    let expected_on_page =
+        expected_manifest.is_some_and(|m_key| page.objects.iter().any(|o| o.key == m_key));
+    let expected_missing = match expected_manifest {
+        Some(m_key) if !expected_on_page => {
+            if page.next_token.is_none() {
+                true
+            } else if context.remaining_calls() > reserve_calls + 1 {
+                fos::get_object(context, service, creds, m_key)?.is_none()
+            } else {
+                false
+            }
+        }
+        _ => false,
     };
     let mut objects: Vec<_> = page
         .objects
@@ -576,7 +596,7 @@ fn scan_catalog_head(
     }
 
     if best_manifest.is_none() && (days.is_empty() || foreign_dr_state || saw_foreign_manifest) {
-        return Ok(None);
+        return Ok((None, expected_missing));
     }
 
     let max_day_gen = days.values().map(|(g, _, _)| *g).max().unwrap_or(0);
@@ -587,6 +607,7 @@ fn scan_catalog_head(
         .max(1);
     let manifest_key = best_manifest.as_ref().map(|(k, _)| k.clone());
     let committed_at = best_manifest.as_ref().map(|(_, m)| m.committed_at.clone());
+    let manifest_obj = best_manifest.map(|(_, m)| m);
 
     let mut head = crate::ingest::catalog::Head {
         version: crate::ingest::catalog::VERSION,
@@ -607,9 +628,9 @@ fn scan_catalog_head(
 
     let encoded = serialize(&head)?;
     if crate::ingest::catalog::head(&json!({"catalog": encoded})).is_ok() {
-        Ok(Some(head))
+        Ok((Some((head, manifest_obj)), expected_missing))
     } else {
-        Ok(None)
+        Ok((None, expected_missing))
     }
 }
 
@@ -967,8 +988,8 @@ pub(super) fn recover(
         mut service,
         views,
         mut catalog_head,
-        floor_key,
-        rum_stats,
+        mut floor_key,
+        mut rum_stats,
         mut source,
         candidate_names,
         mut inspected_active,
@@ -1073,7 +1094,7 @@ pub(super) fn recover(
         )
     };
 
-    if catalog_head.is_none() {
+    {
         let mut reserve = 2u32; // svc:<sid> + admin:install
         if !views.is_empty() {
             reserve += PER_UPSERT;
@@ -1087,8 +1108,51 @@ pub(super) fn recover(
         } else {
             3
         }; // post-upsert active-version inspection (4 calls on fallback DR) or inline Front dictionary sync
-        if let Some(scanned) =
-            scan_catalog_head(context, &service, &creds, reserve, foreign_dr_state)?
+
+        if let Some(ref dr_head) = catalog_head {
+            let reconcile_upserts =
+                u32::from(!views.is_empty()) + 1 + u32::from(rum_stats.is_some());
+            let reconcile_reserve = 2 + PER_UPSERT * reconcile_upserts;
+            let (scanned_opt, dr_manifest_missing) = scan_catalog_head(
+                context,
+                &service,
+                &creds,
+                reconcile_reserve,
+                foreign_dr_state,
+                dr_head.manifest.as_deref(),
+            )?;
+            if let Some((scanned, scanned_manifest)) = scanned_opt {
+                if dr_manifest_missing || scanned.generation > dr_head.generation {
+                    let reset_occurred = dr_manifest_missing
+                        || scanned_manifest
+                            .as_ref()
+                            .is_some_and(|m| m.batch == "reset");
+                    if reset_occurred {
+                        rum_stats = None;
+                        floor_key = scanned_manifest
+                            .as_ref()
+                            .and_then(|m| {
+                                time::OffsetDateTime::parse(
+                                    &m.committed_at,
+                                    &time::format_description::well_known::Rfc3339,
+                                )
+                                .ok()
+                            })
+                            .map(|dt| {
+                                let ts = dt.unix_timestamp();
+                                let minute_ts = ts - ts.rem_euclid(60);
+                                format!(
+                                    "{}{}",
+                                    crate::ingest::raw_prefix(&service),
+                                    crate::ingest::minute_dir(minute_ts)
+                                )
+                            });
+                    }
+                    catalog_head = Some(scanned);
+                }
+            }
+        } else if let (Some((scanned, _)), _) =
+            scan_catalog_head(context, &service, &creds, reserve, foreign_dr_state, None)?
         {
             catalog_head = Some(scanned);
             if source != "dr_state" {

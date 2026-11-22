@@ -12,7 +12,7 @@ import {
 } from "./insights";
 import type { NetworkRollupMeta } from "./network-rollup";
 import { defineSummarySpec, type SummarySpec } from "./dashboard/summary-projection";
-import { INSIGHTS_RESIDUAL } from "./insights-residual";
+import { INSIGHTS_RESIDUAL, INSIGHTS_RESIDUAL_FIELDS } from "./insights-residual";
 
 /**
  * How an /insights response whose baseline came from v3 summaries differs from
@@ -242,7 +242,11 @@ export function insightsBaselineRollup(result: RollupResult): RollupResult {
       dims: new Map(cities ? [["city", bare(cities)]] : []),
       series: new Map(overall ? [["overall", new Map([["", bare(overall)]])]] : []),
       seriesStepMs: rollup.seriesStepMs,
-      fields: rollup.fields,
+      fields: new Map(
+        [...rollup.fields].filter(([k]) =>
+          (INSIGHTS_RESIDUAL_FIELDS as readonly string[]).includes(k),
+        ),
+      ),
       groups,
       present,
       truncated: new Set(
