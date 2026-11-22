@@ -133,6 +133,18 @@ on the final 200 HTML response. API, auth, FOS, `_next`, `/duckdb`, `/geo`
 and parquet paths are never hinted. Without a hints file, the block stays empty
 and the VCL behaves as before.
 
+## App shell cache
+
+Deploy also writes the build SHA into the front VCL's `#BUILDKEY` block. Every
+cached page and RSC file is keyed by build as well as by path and host, so a new
+front version never serves an older build's HTML. Hashed `_next/static`,
+`/duckdb`, `/geo` and FOS objects keep their build-independent keys. The
+`flp-html` purge after readiness covers POPs that got the new VCL before the new
+Compute. Analytics page shells are cached at the edge like `/`. Admin page
+shells come from cache only for an edge-verified admin `flp_cdn` credential.
+See `docs/cloud/security-route-access.md`. A frozen front source without the
+block keeps passing app pages to Compute.
+
 ## Verify
 
 ```sh

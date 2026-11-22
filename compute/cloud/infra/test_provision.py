@@ -1242,6 +1242,21 @@ def test_front_vcl_without_hints_keeps_an_empty_hint_sub() -> None:
         provision.load_vcl(True, source="sub vcl_recv {\n}\n", early_hints=EARLY_HINTS)
 
 
+def test_front_vcl_keys_app_shells_by_the_release_build() -> None:
+    sha = "0123456789abcdef0123456789abcdef01234567"
+    plain = provision.load_vcl(True)
+    keyed = provision.load_vcl(True, build_sha=sha)
+
+    assert "sub flp_build_hash {\n}\n" in plain
+    assert keyed.count(f'set req.hash += "build:{sha}";') == 1
+    assert provision._BUILD_KEY_BLOCK.sub("", keyed) == provision._BUILD_KEY_BLOCK.sub("", plain)
+    legacy = "sub vcl_recv {\n}\n"
+    assert provision.load_vcl(True, source=legacy, build_sha=sha) == legacy
+    for bad in ("A" * 40, "a" * 39, 'a" ; error 600; "'):
+        with pytest.raises(ValueError, match="build SHA"):
+            provision.load_vcl(True, build_sha=bad)
+
+
 def test_front_vcl_advertises_http3_on_the_first_tls_hop() -> None:
     recv = provision.load_vcl(False).split("sub vcl_recv {", 1)[1]
     tls_redirect = recv.index('error 801 "Force TLS";')
@@ -1275,7 +1290,7 @@ def test_early_hints_reject_values_that_could_escape_or_overflow(routes) -> None
 
 @pytest.mark.parametrize("rate_limiting", [True, False])
 def test_falco_lints_front_with_injected_early_hints(rate_limiting) -> None:
-    provision.lint_front(rate_limiting, early_hints=EARLY_HINTS)
+    provision.lint_front(rate_limiting, early_hints=EARLY_HINTS, build_sha="a" * 40)
 
 
 def test_deploy_provenance_binds_early_hints_to_the_build(package) -> None:
@@ -1302,6 +1317,7 @@ def test_deploy_uploads_front_vcl_with_the_builds_early_hints(package, inventory
     front_vcl = next(fields["content"] for _, path, fields, _ in api.calls if path.endswith("/vcl/main"))
     assert "# frozen-test-source" in front_vcl
     assert '{"Link: </_next/static/chunks/b.js>; rel=preload; as=script"}' in front_vcl
+    assert f'set req.hash += "build:{"a" * 40}";' in front_vcl
 
 
 def test_deploy_retries_an_activation_that_returned_200_but_did_not_take(package, inventory_path) -> None:

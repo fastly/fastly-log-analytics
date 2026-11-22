@@ -19,6 +19,12 @@ sub flp_hint_links {
 }
 #EARLYHINTS_END
 
+#BUILDKEY_BEGIN
+# Release deploys add the build SHA to the cache key so a new build never serves old HTML.
+sub flp_build_hash {
+}
+#BUILDKEY_END
+
 sub vcl_recv {
   if (!req.is_ssl && req.url.path !~ "^/_tick$|^/_flush$") {
     unset req.http.x-flp-fos-service;
@@ -41,6 +47,7 @@ sub vcl_recv {
     unset req.http.x-flp-fos-service;
     unset req.http.x-flp-fos-bucket;
     unset req.http.x-flp-fos-region;
+    unset req.http.x-flp-shell;
     set req.http.x-flp-front-key = table.lookup(flp_front_auth, "front_key", "");
     if (req.http.x-flp-front-key == "") {
       error 620 "Front not configured";
@@ -89,6 +96,44 @@ sub vcl_recv {
       set var.cdn_cookie = req.http.Cookie:flp_cdn;
     } else {
       set var.cdn_cookie = "";
+    }
+    # Admin page shells hold no data; a verified admin CDN credential may read them from cache.
+    # Any failed check falls back to Compute, which owns the redirect, 403 and cookie clearing.
+    if (
+      (req.method == "GET" || req.method == "HEAD") &&
+      req.url.path ~ "^/(admin|logs|provision|log-fields|services)(\.(html|txt)|/|$)" &&
+      var.cdn_cookie != "" &&
+      req.http.Cookie:flp_session &&
+      var.cdn_cookie ~ "^(([A-Za-z0-9]{22})~admin~([0-9]{10})~([0-9a-f]{16})(?:~([0-9]{1,20}))?~([A-Za-z0-9._/-]*))~([0-9a-f]{64})$"
+    ) {
+      declare local var.shell_payload STRING;
+      declare local var.shell_exp STRING;
+      declare local var.shell_shash STRING;
+      declare local var.shell_epoch STRING;
+      declare local var.shell_msg STRING;
+      declare local var.shell_sig STRING;
+      declare local var.shell_secret STRING;
+      declare local var.shell_auth_epoch STRING;
+      set var.shell_payload = re.group.1;
+      set var.shell_exp = re.group.3;
+      set var.shell_shash = re.group.4;
+      set var.shell_epoch = if(re.group.5 && re.group.5 != "", re.group.5, "0");
+      set var.shell_msg = if(re.group.5 && re.group.5 != "", "flp-cdn-v2~" + var.shell_payload, "flp-cdn-v1~" + var.shell_payload);
+      set var.shell_sig = re.group.7;
+      set var.shell_secret = table.lookup(flp_front_auth, "cdn_key", "");
+      set var.shell_auth_epoch = table.lookup(flp_front_auth, "auth_epoch", "0");
+      if (var.shell_auth_epoch == "" || var.shell_auth_epoch !~ "^[0-9]{1,20}$") {
+        set var.shell_auth_epoch = "0";
+      }
+      if (
+        var.shell_secret != "" &&
+        digest.secure_is_equal(digest.hmac_sha256(var.shell_secret, var.shell_msg), "0x" + var.shell_sig) &&
+        var.shell_shash == substr(digest.hash_sha256(req.http.Cookie:flp_session), 0, 16) &&
+        var.shell_epoch == var.shell_auth_epoch &&
+        std.atoi(var.shell_exp) > std.atoi(strftime({"%s"}, now))
+      ) {
+        set req.http.x-flp-shell = "admin";
+      }
     }
     declare local var.browser_file_key STRING;
     set var.browser_file_key = "";
@@ -283,7 +328,19 @@ sub vcl_recv {
   if (req.method != "GET" && req.method != "HEAD") {
     return(pass);
   }
-  if (req.url.path ~ "^/(api|auth|setup|share-login|admin|dashboard|origin|performance|security|network|fastly-value|assets-shield|rum|streaming|sessions|query|insights|logs|provision|log-fields|services|cloud-files)(\.(html|txt)|/|$)") {
+  if (req.url.path ~ "^/(api|auth|setup|share-login)(\.(html|txt)|/|$)") {
+    return(pass);
+  }
+  # Compute serves these static shells to everyone; the APIs enforce data access.
+  if (req.url.path ~ "^/(dashboard|origin|performance|security|network|fastly-value|assets-shield|rum|streaming|sessions|query|insights|cloud-files)(\.(html|txt)|/|$)") {
+    set req.url = req.url.path;
+    return(lookup);
+  }
+  if (req.url.path ~ "^/(admin|logs|provision|log-fields|services)(\.(html|txt)|/|$)") {
+    if (req.http.x-flp-shell == "admin") {
+      set req.url = req.url.path;
+      return(lookup);
+    }
     return(pass);
   }
   if (req.url.path ~ "^/(_next/static|duckdb|geo)/" || req.url.path ~ "^/maplibre-gl-") {
@@ -300,6 +357,15 @@ sub vcl_hash {
   if (req.http.x-flp-fos-service) {
     set req.hash += req.http.x-flp-fos-bucket;
     set req.hash += req.http.x-flp-fos-region;
+  } else if (
+    req.http.x-flp-tick != "1" &&
+    req.url.path !~ "^/(_next/static|duckdb|geo)/" &&
+    req.url.path !~ "^/maplibre-gl-"
+  ) {
+    if (req.http.x-flp-shell) {
+      set req.hash += "shell:" + req.http.x-flp-shell;
+    }
+    call flp_build_hash;
   }
   return(hash);
 }
@@ -409,8 +475,22 @@ sub vcl_fetch {
     }
     unset beresp.http.x-compress-hint;
   }
+  # Compute marks admin shells private for browsers; only edge-verified admins share this copy.
   if (
-    req.url.path ~ "^/(api|auth|setup|share-login|admin|dashboard|origin|performance|security|network|fastly-value|assets-shield|rum|streaming|sessions|query|insights|logs|provision|log-fields|services|cloud-files)(\.(html|txt)|/|$)" ||
+    req.http.x-flp-shell == "admin" &&
+    req.url.path ~ "^/(admin|logs|provision|log-fields|services)(\.(html|txt)|/|$)" &&
+    beresp.status == 200 &&
+    !beresp.http.Set-Cookie &&
+    beresp.http.Content-Type ~ "^text/(html|plain)"
+  ) {
+    set beresp.cacheable = true;
+    set beresp.ttl = 60s;
+    set beresp.http.Vary = "Accept-Encoding";
+    set beresp.http.Surrogate-Key = "flp-html";
+    return(deliver);
+  }
+  if (
+    req.url.path ~ "^/(api|auth|setup|share-login|admin|logs|provision|log-fields|services)(\.(html|txt)|/|$)" ||
     beresp.http.Cache-Control ~ "(?i)(private|no-store)"
   ) {
     set beresp.cacheable = false;
@@ -489,6 +569,9 @@ sub vcl_deliver {
   #RATELIMIT_END
   if (fastly.ff.visits_this_service == 0) {
     unset resp.http.x-flp-auth-fail;
+    if (req.http.x-flp-shell == "admin" && resp.status == 200 && resp.http.Content-Type ~ "^text/(html|plain)") {
+      set resp.http.Vary = "Cookie";
+    }
     # Same preloads as the 103, for clients that ignore Early Hints (Safari, HTTP/1.1).
     if (req.method == "GET" && resp.status == 200 && resp.http.Content-Type ~ "^text/html" && !req.http.x-flp-fos-service) {
       call flp_hint_links;
