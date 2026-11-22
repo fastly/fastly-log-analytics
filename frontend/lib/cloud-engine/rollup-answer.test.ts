@@ -12,6 +12,7 @@ import {
   type SummaryFixture,
 } from "./dashboard/summary-fixtures";
 import { fixtureSource } from "./dashboard/test-fixtures";
+import { INSIGHTS_RESIDUAL } from "./insights-residual";
 import { insightsBaselineRollup, rollupInsightsBaseline } from "./insights-rollup";
 import { networkFromRollup } from "./network-rollup";
 import { originFromRollup } from "./origin-rollup";
@@ -76,7 +77,13 @@ describe("answerFromRollup", () => {
     const windows = fixtureFiles("window", (e) => e.end <= FIXTURE_START + 3600);
     const parts = await Promise.all(windows.map((f) => decodeRollup(SUMMARY_FIXTURE_BUFFERS[f.key], 300_000)));
     const full = { rollup: mergeRollups(parts.map((p) => p!)), dataFromMs: T0, dataThroughMs: T0 + HOUR, missingRanges: new Map() };
-    expect(answer).toStrictEqual(insightsBaselineRollup(full));
+    // The baseline keeps only the keys the residual computes (INSIGHTS_RESIDUAL.keys); the
+    // detector-input checks below compare against the unnarrowed rollup.
+    const kept = { ...full, rollup: mergeRollups(parts.map((p) => p!), INSIGHTS_RESIDUAL.keys) };
+    expect(answer).toStrictEqual(insightsBaselineRollup(kept));
+    expect([...answer.rollup.fields.keys()].sort()).toEqual(
+      [...full.rollup.fields.keys()].filter((f) => INSIGHTS_RESIDUAL.keys.has(`all_fields/${f}`)).sort(),
+    );
     const [city] = full.rollup.dims.get("city")!.keys();
     const [country, name] = JSON.parse(city) as [string, string];
     const [pop] = full.rollup.groups?.get("ins_lat")?.get("pop")?.keys() ?? [];
