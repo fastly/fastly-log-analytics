@@ -54,7 +54,7 @@ def project_cmcd(request_event: Mapping[str, Any]) -> dict[str, Any] | None:
         "service_id": service_id,
         "timestamp": request_event.get("timestamp"),
         "cmcd_version": request_event.get("cmcd_version"),
-        "sid": request_event.get("sid"),
+        "sid": raw_fields.get("sid") or raw_fields.get("cmcd_sid") or "",
         "country": _country(request_event.get("country")),
         "asn": _asn(request_event.get("asn")),
         "fields": dict(raw_fields),

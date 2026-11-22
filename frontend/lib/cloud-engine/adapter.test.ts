@@ -311,6 +311,11 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
         rows: [],
         complete: true,
       });
+      vi.spyOn(usage, "fetchIngestDeletedBytes").mockResolvedValue({
+        bytes: 0,
+        complete: false,
+        provenance: "ingest_files_incomplete",
+      });
     });
 
     it("returns identical complete incurred billing for both concurrent read orderings", async () => {
