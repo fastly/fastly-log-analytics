@@ -363,7 +363,8 @@ sub vcl_hash {
     req.url.path !~ "^/maplibre-gl-"
   ) {
     if (req.http.x-flp-shell) {
-      set req.hash += "shell:" + req.http.x-flp-shell;
+      set req.hash += "shell:";
+      set req.hash += req.http.x-flp-shell;
     }
     call flp_build_hash;
   }
