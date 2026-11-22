@@ -2784,3 +2784,75 @@ fn a_shard_holds_about_24_mib_decompressed_but_a_lone_larger_object_converts() {
     let reply = worker_call(&fake, &[c], 20_000);
     assert_eq!(reply["status"], "ok", "{reply}");
 }
+
+/// Summary files per grid window under `processed/summary/request/`.
+fn summaries_per_window(fake: &Fake) -> BTreeMap<String, usize> {
+    let mut out = BTreeMap::new();
+    for key in fake.keys("processed/summary/request/") {
+        let Some(name) = key
+            .rsplit('/')
+            .next()
+            .and_then(|n| n.strip_prefix("summary="))
+        else {
+            continue;
+        };
+        let mut parts = name.splitn(3, '-');
+        let window = format!("{}-{}", parts.next().unwrap(), parts.next().unwrap());
+        *out.entry(window).or_default() += 1;
+    }
+    out
+}
+
+#[test]
+fn a_burst_backlog_writes_one_summary_file_per_closed_window() {
+    use ingest::coordinator::{self, Options};
+    // Eight one-minute windows of 20 objects each land at once; runs of at most two shards
+    // drain them over several runs.
+    let fake = Fake::new(BASE);
+    let mut expected = Vec::new();
+    for minute in 0..8 {
+        let at = BASE + minute * 60;
+        for i in 0..20 {
+            let id = format!("m{minute:02}i{i:02}");
+            put_raw(&fake, at, &format!("f{i:02}"), &[line(at + 1 + i, &id)]);
+            expected.push(id);
+        }
+    }
+    fake.now.set((BASE + 8 * 60 + 600) as u64);
+    let options = Options {
+        max_width: 2,
+        ..Options::request(&fake)
+    };
+    let (mut runs, mut max_calls) = (0, 0);
+    loop {
+        fake.new_request();
+        let report = coordinator::coordinate(
+            &fake,
+            &service(),
+            "ak",
+            "sk",
+            Instant::now(),
+            &LogBuffer::new(SID, "burst"),
+            &options,
+        )
+        .unwrap();
+        assert!(!report.busy);
+        max_calls = max_calls.max(fake.calls.get());
+        runs += 1;
+        if !report.more_pending {
+            break;
+        }
+        assert!(runs < 20, "burst did not drain");
+        fake.now.set(fake.now.get() + 10);
+    }
+    expected.sort();
+    assert_eq!(processed_ips(&fake), expected);
+    assert!(max_calls <= BUDGET, "coordinator {max_calls}");
+    assert!(fake.worker_max_calls.get() <= BUDGET);
+    let per_window = summaries_per_window(&fake);
+    assert_eq!(per_window.len(), 8, "{per_window:?}");
+    assert!(
+        per_window.values().all(|&files| files == 1),
+        "summary files per window after {runs} runs: {per_window:?}"
+    );
+}

@@ -39,6 +39,8 @@ Ingest is split between a **coordinator**, which runs inside the tick and owns a
    - Width = `ceil(max(objects / 22, gz_bytes / 8 MiB))`, clamped to `1..=min(max_width, room) × max(ingest_relay, 1)`.
      - room = remaining calls − 1 (plan CAS) − 1 (`worker_secret` read by `worker_dispatch`) − 3 (writes after dispatch) − `reserve` − `TICK_RESERVE` − extra requests.
    - `pack` deals keys into shards of at most 22 objects (`SHARD_MAX_OBJECTS`, halved per replan) and 8 MiB gzip. It balances by estimated windows so each worker's window PUTs fit its budget.
+   - `pack` is window-affine: the objects of one primary window (the grid window of the key's minute directory) stay in one shard when they fit one, so a run writes one window file and one summary per window instead of one per shard its keys straddle. Only a window larger than a shard is dealt object by object.
+   - A run that cannot take every listed object (width, budget or a truncated 200-key LIST page) stops at a primary-window boundary (`window_cut`), unless that would leave nothing, so the next run converts the rest of the window instead of both runs writing a summary for it. A run that takes everything is not delayed, so the 10 s freshness path is unchanged.
    - `layout` first cuts a large object into segments: when its compressed size × 8 exceeds 2 × `segment_bytes` (and it is at most 24 MiB compressed), it becomes `ceil(gz × 8 / segment_bytes)` one-key shards, each covering `segment_bytes` of decompressed text and the last one open-ended. A line belongs to the segment holding its first byte, so the segments read every line exactly once. Segments may outnumber the width; the rest dispatch on the next ticks.
    - CAS the plan with `attempt = 1` and `lease_until = now + 90 s` (`LEASE_S`). A lost CAS reports `busy`.
 3. **Resume** (`resume`):
@@ -151,6 +153,7 @@ There are no direct public endpoints. The stage runs from `/_tick` or from the a
 
 `compute/cloud/tests/ingest.rs`. The fake runtime runs the real worker in-process with a fresh 32-call budget per worker execution, and asserts that each stays within 32.
 - `sustained_load_of_sixty_files_a_minute_drains_without_backlog`
+- `a_burst_backlog_writes_one_summary_file_per_closed_window` (and the `pack`/`window_cut` unit tests in `coordinator.rs`)
 - `a_crash_at_any_call_of_the_tick_never_duplicates_or_loses_rows`
 - `lost_and_failed_worker_calls_are_retried_without_duplicates`
 - `a_shard_with_too_many_windows_for_its_budget_splits_before_writing`
