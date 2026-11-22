@@ -131,6 +131,83 @@ describe("closed-hour manifest cache", () => {
     expect(keys(result.files)).toEqual(keys([entered]));
   });
 
+  it("hydrates a persisted listing with summaries and keeps them through a summaries delta", async () => {
+    fakeManifestCacheStorage();
+    const original = file(T0);
+    const entered = file(T0 + 2 * H);
+    const summary = { ...file(T0, 60), key: "summary-hour", kind: "hour" as const };
+    const calls: URLSearchParams[] = [];
+    const fetchJson = Object.assign(
+      vi.fn(async (input: string) => {
+        const params = new URL(input, "http://x").searchParams;
+        calls.push(params);
+        expect(params.get("summaries")).toBe("1");
+        if (!params.has("since_generation")) {
+          return {
+            files: [original],
+            summary_files: [summary],
+            next_cursor: null,
+            complete: true,
+            catalog_generation: 7,
+          };
+        }
+        return {
+          files: [entered],
+          summary_files: [],
+          changes: [],
+          summary_partitions: [],
+          base_generation: 7,
+          catalog_generation: 8,
+          next_cursor: null,
+          complete: true,
+        };
+      }),
+      { manifestCacheScope: () => '["session","service"]' },
+    );
+    const range = [iso(T0), iso(T0 + 3 * H)] as const;
+
+    await fetchManifest(fetchJson, ...range, undefined, undefined, undefined, true);
+    vi.resetModules();
+    const { fetchManifest: fetchAfterReload } = await import("./manifest");
+    calls.length = 0;
+    const result = await fetchAfterReload(
+      fetchJson,
+      ...range,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0].get("since_generation")).toBe("7");
+    expect(keys(result.files)).toEqual(keys([original, entered]));
+    expect(result.summaryFiles).toEqual([summary]);
+  });
+
+  it("re-lists instead of replaying a summaries delta onto a listing that omitted summaries", async () => {
+    const calls: URLSearchParams[] = [];
+    const summary = { ...file(T0, 60), key: "summary-hour", kind: "hour" as const };
+    const fetchJson = vi.fn(async (input: string) => {
+      const params = new URL(input, "http://x").searchParams;
+      calls.push(params);
+      return {
+        files: [file(T0)],
+        ...(calls.length > 1 ? { summary_files: [summary] } : {}),
+        next_cursor: null,
+        complete: true,
+        catalog_generation: 7,
+      };
+    });
+    const args = [fetchJson, iso(T0), iso(T0 + 3 * H), undefined, undefined, undefined, true] as const;
+
+    expect((await fetchManifest(...args)).summaryFiles).toBeUndefined();
+    vi.setSystemTime(T0 + 6 * H + SNAPSHOT_REUSE_MS + 1);
+    const result = await fetchManifest(...args);
+    expect(calls).toHaveLength(2);
+    expect(calls[1].has("since_generation")).toBe(false);
+    expect(result.summaryFiles).toEqual([summary]);
+  });
+
   it("clears persisted snapshots on an explicit manifest cache clear", async () => {
     const { storage } = fakeManifestCacheStorage();
     const state = { files: [file(T0)], gen: 1, before: T0 };
@@ -206,12 +283,14 @@ describe("closed-hour manifest cache", () => {
     const releases: Array<() => void> = [];
     const starts: Array<() => void> = [];
     const scope = '["overlapping-resync","service"]';
-    cache.delete = vi.fn(
-      () =>
-        new Promise<boolean>((resolve) => {
-          releases.push(() => resolve(true));
-          starts.shift()?.();
-        }),
+    // Gates the raw listing's snapshot; its summaries twin deletes at once.
+    cache.delete = vi.fn((url: string) =>
+      decodeURIComponent(url).includes(',true]')
+        ? Promise.resolve(true)
+        : new Promise<boolean>((resolve) => {
+            releases.push(() => resolve(true));
+            starts.shift()?.();
+          }),
     ) as unknown as Cache["delete"];
     const fetchJson = Object.assign(
       vi.fn(async () => ({
@@ -237,7 +316,7 @@ describe("closed-hour manifest cache", () => {
 
     releases.shift()!();
     await expect(fetching).resolves.toMatchObject({ catalogGeneration: 9 });
-    expect(cache.delete).toHaveBeenCalledTimes(2);
+    expect(cache.delete).toHaveBeenCalledTimes(4);
   });
 
   it("does not reuse a recent listing after an equal-generation resync", async () => {
@@ -377,7 +456,7 @@ describe("closed-hour manifest cache", () => {
     releasePut();
 
     await expect(listing).rejects.toThrow("cache identity changed");
-    expect(operations).toEqual(["put:start", "put:end", "delete"]);
+    expect(operations).toEqual(["put:start", "put:end", "delete", "delete"]);
     expect(entries.has(manifestSnapshotUrl(cacheKey))).toBe(false);
   });
 
@@ -626,6 +705,29 @@ describe("closed-hour manifest cache", () => {
     expect(fetchJson).toHaveBeenCalledTimes(3);
     for (const [url] of fetchJson.mock.calls) {
       expect(new URL(url, "http://x").searchParams.get("summaries")).toBe("1");
+    }
+  });
+
+  it("serves a raw-only caller from a concurrent or just-taken listing with summaries", async () => {
+    const summary = { ...file(T0, 60), key: "summary-hour", kind: "hour" as const };
+    const fetchJson = vi.fn(async () => ({
+      files: [file(T0)],
+      summary_files: [summary],
+      next_cursor: null,
+      complete: true,
+      catalog_generation: 7,
+    }));
+    const range = [iso(T0), iso(T0 + 3 * H)] as const;
+    const [withSummaries, concurrent] = await Promise.all([
+      fetchManifest(fetchJson, ...range, undefined, undefined, undefined, true),
+      fetchManifest(fetchJson, ...range),
+    ]);
+    const after = await fetchManifest(fetchJson, ...range);
+    expect(fetchJson).toHaveBeenCalledTimes(1);
+    expect(withSummaries.summaryFiles).toEqual([summary]);
+    for (const raw of [concurrent, after]) {
+      expect(keys(raw.files)).toEqual([file(T0).key]);
+      expect(raw.summaryFiles).toBeUndefined();
     }
   });
 

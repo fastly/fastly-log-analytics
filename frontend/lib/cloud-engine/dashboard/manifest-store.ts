@@ -38,29 +38,31 @@ function validIso(value: unknown): value is string {
   return typeof value === "string" && Number.isFinite(Date.parse(value));
 }
 
-function validCacheKey(value: unknown): value is string {
-  if (typeof value !== "string") return false;
+/** Whether `value` is a persistable key, and for which summaries setting. */
+function cacheKeySummaries(value: unknown): boolean | null {
+  if (typeof value !== "string") return null;
   let key: unknown;
   try {
     key = JSON.parse(value);
   } catch {
-    return false;
+    return null;
   }
-  return (
-    Array.isArray(key) &&
+  return Array.isArray(key) &&
     key.length === 4 &&
     typeof key[0] === "string" &&
     key[0].length > 0 &&
     key[1] === "request" &&
     key[2] === "raw" &&
-    key[3] === false
-  );
+    typeof key[3] === "boolean"
+    ? key[3]
+    : null;
 }
 
 function validFile(
   value: unknown,
   from: string,
   to: string,
+  summary = false,
 ): value is ManifestFile {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const file = value as Partial<ManifestFile>;
@@ -83,7 +85,11 @@ function validFile(
       typeof file.schema_version === "string" ||
       (typeof file.schema_version === "number" &&
         Number.isFinite(file.schema_version))) &&
-    file.kind === undefined &&
+    (file.kind === undefined ||
+      (summary &&
+        (file.kind === "day" ||
+          file.kind === "hour" ||
+          file.kind === "window"))) &&
     (file.sources === undefined ||
       (typeof file.sources === "number" &&
         Number.isSafeInteger(file.sources) &&
@@ -96,8 +102,9 @@ function parseSnapshot(
   cacheKey: string,
   now: number,
 ): ManifestSnapshot | null {
+  const summaries = cacheKeySummaries(cacheKey);
   if (
-    !validCacheKey(cacheKey) ||
+    summaries === null ||
     !Number.isFinite(now) ||
     !body ||
     typeof body !== "object" ||
@@ -134,17 +141,26 @@ function parseSnapshot(
     manifest.complete !== true ||
     manifest.catalogGeneration !== generation ||
     !Array.isArray(manifest.files) ||
-    manifest.summaryFiles !== undefined ||
-    manifest.summaryRange !== undefined
+    (summaries
+      ? !Array.isArray(manifest.summaryFiles) ||
+        manifest.summaryRange?.from !== rangeFrom ||
+        manifest.summaryRange?.to !== rangeTo
+      : manifest.summaryFiles !== undefined ||
+        manifest.summaryRange !== undefined)
   )
     return null;
 
   const files = manifest.files;
-  if (!files.every((file) => validFile(file, rangeFrom, rangeTo))) return null;
+  const summaryFiles = manifest.summaryFiles ?? [];
+  if (
+    !files.every((file) => validFile(file, rangeFrom, rangeTo)) ||
+    !summaryFiles.every((file) => validFile(file, rangeFrom, rangeTo, true))
+  )
+    return null;
 
   const budget: ManifestBudget = { bytes: 0, identities: new Set() };
   try {
-    accountManifestPage({ files }, budget);
+    accountManifestPage({ files, summary_files: summaryFiles }, budget);
   } catch {
     return null;
   }

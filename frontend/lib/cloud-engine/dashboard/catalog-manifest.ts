@@ -202,8 +202,10 @@ export function observeCatalogCommit(
   if (event.type === "resync") {
     for (const key of snapshots.keys())
       if (JSON.parse(key)[0] === identity) snapshots.delete(key);
-    const key = manifestCacheKey(fetchJson);
-    queueStoreInvalidation(key, () => deleteManifestSnapshot(key));
+    for (const summaries of [false, true]) {
+      const key = manifestCacheKey(fetchJson, undefined, undefined, summaries);
+      queueStoreInvalidation(key, () => deleteManifestSnapshot(key));
+    }
   }
   requirements.set(identity, {
     generation:
@@ -505,22 +507,43 @@ export async function fetchCatalogManifest(
   const requirement = requirements.get(identity);
   const required = requirement?.generation;
   const reset = requirement?.reset ?? 0;
-  const young = recent.get(shareKey);
-  if (
-    young &&
-    young.epoch === epoch &&
-    young.reset === reset &&
-    young.required === required &&
-    Date.now() - young.at < SNAPSHOT_REUSE_MS
-  )
-    return young.manifest;
-  const shared = inFlight.get(shareKey);
-  if (shared && !shared.settled && shared.reset === reset) {
-    try {
-      return await join(shared, signal);
-    } catch (error) {
-      signal?.throwIfAborted();
-      if (!isAbort(error)) throw error;
+  // A listing with inline summaries holds the same raw files, so a raw-only
+  // caller of the same range reuses it rather than listing again.
+  const withSummaries =
+    !summaries &&
+    (!dataset || dataset === "request") &&
+    (!view || view === "raw")
+      ? `${manifestCacheKey(fetchJson, dataset, view, true)}|${from}|${to}`
+      : null;
+  const rawOnly = (manifest: Manifest): Manifest => ({
+    files: manifest.files,
+    complete: manifest.complete,
+    ...(manifest.catalogGeneration !== undefined
+      ? { catalogGeneration: manifest.catalogGeneration }
+      : {}),
+  });
+  for (const candidate of [shareKey, withSummaries]) {
+    const young = candidate ? recent.get(candidate) : undefined;
+    if (
+      young &&
+      young.epoch === epoch &&
+      young.reset === reset &&
+      young.required === required &&
+      Date.now() - young.at < SNAPSHOT_REUSE_MS
+    )
+      return candidate === shareKey ? young.manifest : rawOnly(young.manifest);
+  }
+  for (const candidate of [shareKey, withSummaries]) {
+    const shared = candidate ? inFlight.get(candidate) : undefined;
+    if (shared && !shared.settled && shared.reset === reset) {
+      try {
+        const manifest = await join(shared, signal);
+        return candidate === shareKey ? manifest : rawOnly(manifest);
+      } catch (error) {
+        signal?.throwIfAborted();
+        // A failed summaries listing may still leave raw listing possible.
+        if (!isAbort(error) && candidate === shareKey) throw error;
+      }
     }
   }
   const controller = new AbortController();
@@ -619,10 +642,12 @@ async function fetchCatalogManifestUncached(
   const identity = scope(fetchJson);
   const incremental =
     (!dataset || dataset === "request") && (!view || view === "raw");
-  const persisted = incremental && !summaries;
+  const persisted = incremental;
   const startEpoch = epoch;
   const reset = requirements.get(identity)?.reset ?? 0;
   let base = incremental ? snapshots.get(key) : undefined;
+  // A delta resets only some summary days; it needs a base holding the rest.
+  if (base && summaries && !base.manifest.summaryFiles) base = undefined;
   if (
     !base &&
     persisted &&

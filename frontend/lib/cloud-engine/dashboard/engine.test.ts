@@ -41,7 +41,7 @@ describe("runDashboard", () => {
       { from: "2026-10-29T10:00:00Z", to: "2026-10-29T11:00:00Z" },
     );
     expect(pruneCache).toHaveBeenCalledWith(
-      { files: [], complete: true },
+      expect.objectContaining({ files: [], complete: true }),
       Date.parse("2026-10-29T10:00:00Z"),
       Date.parse("2026-10-29T11:00:00Z"),
     );

@@ -376,3 +376,36 @@ import {
 } from "./catalog-manifest";
 
 export { IncompleteManifestError } from "./catalog-manifest";
+
+/**
+ * The raw request listing and its summary listing from one chain of requests:
+ * `summaries=1` carries summaries inline, and on later calls as a delta. Falls
+ * back to the `view=summary` listing only when the server omits them.
+ */
+export async function fetchManifestWithSummaries(
+  fetchJson: FetchJson,
+  from: string,
+  to: string,
+  signal?: AbortSignal,
+): Promise<{ raw: Manifest; summaries: Manifest }> {
+  const raw = await fetchManifest(
+    fetchJson,
+    from,
+    to,
+    signal,
+    undefined,
+    undefined,
+    true,
+  );
+  if (raw.summaryFiles)
+    return { raw, summaries: { files: raw.summaryFiles, complete: true } };
+  const summaries = await fetchManifest(
+    fetchJson,
+    from,
+    to,
+    signal,
+    undefined,
+    "summary",
+  );
+  return { raw, summaries };
+}

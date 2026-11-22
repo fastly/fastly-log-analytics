@@ -1,7 +1,7 @@
 import { parquetMetadata } from "hyparquet";
 import type { FileSource } from "./dashboard/engine";
 import { Hll } from "./dashboard/hll";
-import { fetchManifest, type ManifestFile } from "./dashboard/manifest";
+import { fetchManifestWithSummaries, type ManifestFile } from "./dashboard/manifest";
 import { planRollup } from "./dashboard/rollup-query";
 import { SUMMARY_VERSION } from "./dashboard/summaries";
 import {
@@ -323,10 +323,7 @@ export async function querySecurityRollup(
   const { fromMs, toMs, hourly, signal, spec = securitySummarySpec(SECURITY_ROLLUP_SECTIONS) } = range;
   const from = new Date(fromMs).toISOString();
   const to = new Date(toMs).toISOString();
-  const [raw, summaries] = await Promise.all([
-    fetchManifest(source.fetchJson, from, to, signal),
-    fetchManifest(source.fetchJson, from, to, signal, undefined, "summary"),
-  ]);
+  const { raw, summaries } = await fetchManifestWithSummaries(source.fetchJson, from, to, signal);
   if (!raw.complete || !summaries.complete) return null;
   const usable = hourly ? summaries.files.filter((file) => !isDayBundle(file.key)) : summaries.files;
   const plan = planRollup(raw.files, usable, fromMs, toMs);
