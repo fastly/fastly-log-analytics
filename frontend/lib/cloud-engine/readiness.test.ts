@@ -55,8 +55,34 @@ it("does not turn stale-view exceptions into successful readiness", async () => 
   try {
     const error = new Error("sentinel-private-query-token");
     await expect(measureCloudQuery("dashboard.bundle", async () => { throw error; })).rejects.toBe(error);
-    expect(events).toMatchObject([{ state: "pending" }, { state: "error", totalRows: null, error: "Error" }]);
+    expect(events).toMatchObject([{ state: "pending" }, { state: "error", totalRows: null, error: "Error: [redacted]" }]);
     expect(JSON.stringify(events)).not.toContain(error.message);
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+  }
+});
+
+it("reports a bounded, redacted error message so a failed query can be diagnosed", async () => {
+  setCloudModeRuntime(true);
+  const events: { error?: string }[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    const oom = new Error("Out of Memory Error: could not allocate block of size 256.0 KiB (243.8 MiB/244.1 MiB used)");
+    await expect(measureCloudQuery("dashboard.bundle", async () => { throw oom; })).rejects.toBe(oom);
+    expect(events[1].error).toBe(`Error: ${oom.message}`);
+
+    const leaky = new Error([
+      "Binder Error: no column 'sentinel-literal' at https://user:sentinel-pass@sentinel-host.example/files?sig=sentinel-sig",
+      "token=sentinelshort Authorization: Bearer sentinelbearer key sentinelkey api_key=sentinelapikey",
+      "ops@sentinel-mail.example AKIAQWERTYSENTINEL0123456789",
+      "padding ".repeat(60),
+    ].join(" ") + "\nLINE 1: SELECT * FROM base WHERE ip = '10.0.0.1' sentinel-sql");
+    await expect(measureCloudQuery("dashboard.bundle", async () => { throw leaky; })).rejects.toBe(leaky);
+    const reported = events[3].error!;
+    expect(reported.startsWith("Error: Binder Error: no column [redacted] at [url]")).toBe(true);
+    expect(reported.length).toBeLessThanOrEqual(240);
+    expect(reported).not.toMatch(/sentinel|10\.0\.0\.1|LINE 1/);
   } finally {
     window.removeEventListener("fla:cloud-query", listener);
   }

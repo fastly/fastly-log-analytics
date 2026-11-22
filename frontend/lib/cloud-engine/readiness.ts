@@ -37,14 +37,33 @@ function rowCount(data: unknown): number | null {
   return typeof rows === "number" && Number.isSafeInteger(rows) && rows >= 0 ? rows : null;
 }
 
-// Error messages and response bodies can carry SQL, keys or tokens, so only the status or error class is reported.
+const MESSAGE_LIMIT = 200;
+const SECRET_WORD = String.raw`(?:\w+[_-])?(?:token|key|secret|passw(?:or)?d|authorization|auth|bearer|cookie|signature|sig|credentials?)`;
+
+// Error messages can carry SQL, URLs, keys or tokens: keep the first line,
+// mask anything that may be private, and bound what is left.
+function redactedMessage(message: string): string {
+  const text = (message.split(/\r?\n/, 1)[0] ?? "")
+    .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "[url]")
+    .replace(/'[^']*'|"[^"]*"|`[^`]*`/g, "[redacted]")
+    .replace(/\S+@\S+/g, "[redacted]")
+    .replace(new RegExp(String.raw`\b(${SECRET_WORD})\b\s*[:=]?\s*(?:bearer\s+)?[^\s,;]+`, "gi"), "$1 [redacted]")
+    .replace(/[\w+/=.-]{20,}/g, "[redacted]")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text.length > MESSAGE_LIMIT ? `${text.slice(0, MESSAGE_LIMIT - 1)}…` : text;
+}
+
+// Response bodies can carry SQL, keys or tokens, so only a response's status is reported.
 function failureReason(failure: unknown): string {
   if (failure instanceof Response) {
     return failure.status === 413 ? "HTTP 413: query exceeds the browser scan budget" : `HTTP ${failure.status}`;
   }
   if (isNetworkFailure(failure)) return "NetworkError";
   const name = failure instanceof Error ? failure.name : "";
-  return /^[A-Za-z]\w{0,63}$/.test(name) ? name : "Error";
+  const kind = /^[A-Za-z]\w{0,63}$/.test(name) ? name : "Error";
+  const message = failure instanceof Error ? redactedMessage(failure.message) : "";
+  return message ? `${kind}: ${message}` : kind;
 }
 
 export async function measureCloudQuery<T>(

@@ -629,6 +629,57 @@ describe("bounded complete Parquet bindings", () => {
     }
   }, 90_000);
 
+  it("answers a per-file batch of many small window files within a fraction of the engine memory limit", async () => {
+    // A filtered 24h view batches up to 16 fresh window files into one per-file
+    // pass. A scan per file inlined into every card branch, and one values
+    // statement windowing every card per file, ran the browser's 256 MB out of
+    // memory on a se-demo batch of 16 files of a few hundred rows each.
+    const engine = new DuckDBAnalyticalEngine();
+    const t = 1700000000000;
+    const fields = CARD_FIELDS.filter((field) => field in FIELD_DUCKDB_TYPES);
+    const file = (n: number) => {
+      const rows = 20;
+      const at = (i: number) => n * 100 + i;
+      return parquetWriteBuffer({
+        codec: "SNAPPY",
+        columnData: [
+          { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: rows }, (_, i) => new Date(t + at(i))) },
+          { name: "resp_bytes", type: "INT64", data: Array.from({ length: rows }, () => BigInt(100)) },
+          ...fields.map((name) => {
+            const type = FIELD_DUCKDB_TYPES[name];
+            if (name === "status") return { name, type: "INT64" as const, data: Array.from({ length: rows }, (_, i) => BigInt(i % 4 === 0 ? 404 : 200)) };
+            if (type === "DOUBLE") return { name, type: "DOUBLE" as const, data: Array.from({ length: rows }, (_, i) => at(i) + 0.5) };
+            if (type === "BIGINT") return { name, type: "INT64" as const, data: Array.from({ length: rows }, (_, i) => BigInt(at(i))) };
+            if (type === "BOOLEAN") return { name, type: "BOOLEAN" as const, data: Array.from({ length: rows }, (_, i) => i % 2 === 0) };
+            return { name, type: "STRING" as const, data: Array.from({ length: rows }, (_, i) => `${name}-${i % 3}`) };
+          }),
+        ],
+      });
+    };
+    const files = Array.from({ length: 16 }, (_, n) => file(n));
+    const filters = [{ mode: "include" as const, field: "status", value: "200" }];
+    await engine.executeSql("SET memory_limit = '64MB'");
+    try {
+      const targets = files.map(() => new Aggregator(-Infinity, Infinity, fields));
+      await engine.queryParquetPerFile(
+        files.map((bytes, n) => ({
+          access: { kind: "buffer" as const, bytes },
+          target: targets[n],
+          fromMs: n === 0 ? t + 10 : -Infinity,
+          toMs: Infinity,
+        })),
+        filters,
+        { topK: null },
+      );
+      expect(targets.map((target) => target.result().totalRequests)).toEqual([8, ...Array(15).fill(15)]);
+      expect(targets[3].result().cards.method).toMatchObject({ total: 15, distinct: 3 });
+      expect(targets[3].result().cards.method.top).toHaveLength(3);
+      expect(targets[3].result().cards.ttl).toMatchObject({ total: 15, distinct: 15 });
+    } finally {
+      await engine.reset();
+    }
+  }, 120_000);
+
   it("retains the query error when selective-file cleanup also fails", async () => {
     let fail = false, queryFailures = 0;
     const engine = new DuckDBAnalyticalEngine({ backendFactory: async () => {
