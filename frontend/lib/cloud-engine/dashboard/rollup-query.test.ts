@@ -325,6 +325,44 @@ describe("planRollup", () => {
       planRollup(raw, summaries, T0 + HOUR + 5 * 60_000, T0 + 2 * HOUR),
     ).toBeNull();
   });
+
+  it("uses a compacted open hour's open_bundle when the live tail window crosses the range end", () => {
+    // Live shape: a compact and a still-live window both inside the open bundle,
+    // and the newest window (with its summary) ending after `toMs`.
+    const compact = compactOf(hour1Raw.slice(0, 2));
+    const raw = [...RAW.filter((f) => at(f) < T0 + HOUR), compact, hour1Raw[2], hour1Raw[3]];
+    const openRows = hour1Raw.slice(0, 3).reduce((sum, f) => sum + (f.rows ?? 0), 0);
+    const openEndMs = Date.parse(hour1Raw[2].end);
+    const openBundle: ManifestFile = {
+      key: `processed/summary_bundle/request/sha256=${"a".repeat(64)}/year=2027/month=01/day=15/open_bundle=09-${openEndMs}-c3-n${openRows}-h0123456789abcdef.parquet`,
+      start: hour1Raw[0].start,
+      end: hour1Raw[2].end,
+      rows: openRows,
+      size: 1,
+    };
+    const tailSummary = WINDOWS.find((f) => at(f) === at(hour1Raw[3]))!;
+    const summaries = [...HOURS.filter((f) => at(f) === T0), openBundle, tailSummary];
+    const toMs = at(hour1Raw[3]) + 5 * 60_000;
+
+    const plan = planRollup(raw, summaries, T0, toMs)!;
+    expect(plan).not.toBeNull();
+    expect(plan.dataThroughMs).toBe(openEndMs);
+    const open = plan.files.find((use) => use.file.key === openBundle.key)!;
+    expect(open.covers.toSorted((a, b) => a.key.localeCompare(b.key))).toEqual(
+      [compact, hour1Raw[2]].toSorted((a, b) => a.key.localeCompare(b.key)),
+    );
+
+    // A bundle reaching past the range end could hold rows after it.
+    const late = Date.parse(hour1Raw[3].end);
+    const longBundle = {
+      ...openBundle,
+      key: openBundle.key.replace(`open_bundle=09-${openEndMs}-`, `open_bundle=09-${late}-`),
+      end: hour1Raw[3].end,
+    };
+    expect(planRollup(raw, [...HOURS.filter((f) => at(f) === T0), longBundle], T0, toMs)).toBeNull();
+    // A raw file of the hour that starts before the range still makes the hour partial.
+    expect(planRollup(raw, summaries, T0 + HOUR + 5 * 60_000, toMs)).toBeNull();
+  });
 });
 
 describe("queryRollup", () => {
