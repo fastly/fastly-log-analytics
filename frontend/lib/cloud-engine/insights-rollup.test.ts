@@ -18,7 +18,7 @@ import {
   _coalesced_scalar_aggregates,
   handleInsights,
 } from "./insights";
-import { INSIGHTS_DEFERRED, insightsBaselineFromRollup, insightsBaselineRollup, insightsDeferredDetectors, insightsFromRollup, ipDetectorsRuledOut, rollupInsightsBaseline } from "./insights-rollup";
+import { insightsBaselineFromRollup, insightsBaselineRollup, insightsDeferredDetectors, insightsFromRollup, ipDetectorsRuledOut, rollupInsightsBaseline } from "./insights-rollup";
 import { parquetWriteBuffer } from "hyparquet-writer";
 import { _coalesced_ip_security_aggregates } from "./insights";
 import type { Rollup } from "./dashboard/rollup-query";
