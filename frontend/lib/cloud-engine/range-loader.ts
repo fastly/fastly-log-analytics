@@ -178,6 +178,15 @@ export async function ensureCloudRange(
         else slots++;
       }
     };
+    const canPersistDerived = () => {
+      if (downloads.signal.aborted) return false;
+      try {
+        generation.assertCurrent();
+        return true;
+      } catch {
+        return false;
+      }
+    };
     // Footers persist under the file's own identity, so any projection of it reuses them.
     const readFooter = async (file: typeof files[number]) => {
       const cached = await fileSource.readDerivedFile(file.key, file.footerKey);
@@ -187,7 +196,7 @@ export async function ensureCloudRange(
       const footer = await readParquetFooter(file.size, (start, end) =>
         tail && start >= tail.start && end <= tail.start + tail.bytes.byteLength
           ? Promise.resolve(tail.bytes.slice(start - tail.start, end - tail.start)) : fetchRange(file, start, end));
-      if (!tail && footer.tail) {
+      if (!tail && footer.tail && canPersistDerived()) {
         void fileSource.writeDerivedFile(file.key, file.footerKey, footer.tail.bytes, String(footer.tail.start));
       }
       return footer;
@@ -257,7 +266,9 @@ export async function ensureCloudRange(
           }
           const parts = await fetchProjectedRanges(plan, async (start, end) => fetched.bytes.slice(start, end));
           const bytes = assembleProjectedParquet(plan, parts);
-          void fileSource.writeDerivedFile(file.key, file.scopedKey, bytes, JSON.stringify(plan.presentColumns));
+          if (canPersistDerived()) {
+            void fileSource.writeDerivedFile(file.key, file.scopedKey, bytes, JSON.stringify(plan.presentColumns));
+          }
           return {
             bytes,
             cached: fetched.cached,
@@ -272,7 +283,9 @@ export async function ensureCloudRange(
           return part;
         });
         const bytes = assembleProjectedParquet(plan, parts);
-        void fileSource.writeDerivedFile(file.key, file.scopedKey, bytes, JSON.stringify(plan.presentColumns));
+        if (canPersistDerived()) {
+          void fileSource.writeDerivedFile(file.key, file.scopedKey, bytes, JSON.stringify(plan.presentColumns));
+        }
         return { bytes, cached: false, downloaded, presentColumns: plan.presentColumns };
       };
       const fetchOne = (file: typeof files[number]): Promise<{

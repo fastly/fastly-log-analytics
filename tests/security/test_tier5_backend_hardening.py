@@ -2533,6 +2533,7 @@ def test_sec_t5_iter16_duckdb_signed_top_even_as_bypass_and_benign_aliases() -> 
     assert executed == []
 
     for rf_sql in (
+        "WITH 1 AS top SELECT top - 1 AS as FROM request_facts WHERE service_id = 'svc_b'",
         "WITH 1 AS top SELECT top - 1 AS as, url FROM request_facts WHERE service_id = 'svc_b'",
         "WITH 1 AS top SELECT top - 1 AS where, url FROM request_facts WHERE service_id = 'svc_b'",
         "WITH 1 AS top SELECT top - 1 AS select, url FROM request_facts WHERE service_id = 'svc_b'",
@@ -2551,3 +2552,86 @@ def test_sec_t5_iter16_duckdb_signed_top_even_as_bypass_and_benign_aliases() -> 
         ran_sql, ran_settings = executed[0]
         assert "request_facts" not in ran_sql and "fla_cv_m_req" in ran_sql, ran_sql
         assert "fla_cv_m_req" in str(ran_settings.get("additional_table_filters", "")), ran_settings
+
+
+def test_sec_t5_iter16_duckdb_top_postfix_factorial_even_as_blocked_and_hs_parity() -> None:
+    """SEC-T5-ITER16-SQL-DUCKDB-TOP-FACTORIAL-EVEN-AS-01: Postfix `!` after signed `TOP` must not hide `FROM`."""
+    from types import SimpleNamespace
+
+    import backend.high_scale.query as hs_query
+    from backend.core.sql_validator import SQLValidationError, validate_user_sql
+    from backend.high_scale.query import DashboardQueryRequest
+
+    blocked_sqls = (
+        "SELECT top + 0! AS as FROM ops_secret",
+        "SELECT top - 0! AS as FROM ops_secret",
+        "SELECT top + 1! AS as FROM ops_secret",
+        "SELECT top - 1 ! AS as FROM ops_secret",
+        "SELECT ALL top + 0! AS as FROM ops_secret",
+        "SELECT DISTINCT top - 0! AS as FROM ops_secret",
+        "SELECT DISTINCT ON (1) top + 0! AS as FROM ops_secret",
+        "SELECT DISTINCT ON (1) top - 1! AS as FROM ops_secret",
+        "SELECT top + 0 ! ! AS as FROM ops_secret",
+        "SELECT top + 0!! AS as FROM ops_secret",
+        "SELECT top + (0!)::INT! AS as FROM ops_secret",
+        "WITH x AS AS SELECT top + 0! AS AS AS as FROM ops_secret",
+        (
+            "SELECT string_agg(chr(ch::INT), '' ORDER BY pos) AS stolen "
+            "FROM (SELECT pos, ch, ch AS top FROM range(1, 25) t1(pos), range(32, 127) t2(ch), logs) AS grid "
+            "WHERE (SELECT top + 0! AS as FROM ops_secret WHERE ascii(substring(secret_col, pos, 1)) = ch) IS NOT NULL"
+        ),
+    )
+    for bad_sql in blocked_sqls:
+        with pytest.raises(SQLValidationError):
+            validate_user_sql(bad_sql, allowed_tables={"logs"})
+
+    benign_sqls = (
+        "SELECT top + 0! AS as FROM logs",
+        "SELECT top - 1! AS as FROM logs",
+        "SELECT DISTINCT ON (1) top + 0! AS as FROM logs",
+        "SELECT top - 0! AS where FROM logs",
+        "SELECT top + 1! AS select FROM logs",
+    )
+    for ok_sql in benign_sqls:
+        validated = validate_user_sql(ok_sql, allowed_tables={"logs"})
+        assert validated.parse_tree.get("statements"), ok_sql
+
+    class _StubCH:
+        _table_filters_verified = True
+
+        def execute(
+            self,
+            sql: str,
+            params: dict[str, object] | None = None,
+            *,
+            settings: dict[str, object] | None = None,
+        ) -> list[dict[str, object]]:
+            del sql, params, settings
+            raise AssertionError("high_scale_batch_publications query must never reach ClickHouse")
+
+    hs_svc = SimpleNamespace(service_id="svc_alpha", client=_StubCH())
+    for hs_bad in (
+        "SELECT top + 0! AS as FROM high_scale_batch_publications",
+        "SELECT DISTINCT ON (1) top - 0!! AS as FROM high_scale_batch_publications",
+    ):
+        with pytest.raises(PermissionError):
+            hs_query.query_endpoint(
+                hs_svc,
+                DashboardQueryRequest(sql=hs_bad, max_rows=10),
+                "2026-11-19T00:00:00Z",
+                "2026-11-19T01:00:00Z",
+                mask_ips=True,
+                tables={"request_facts": "fla_cv_m_req"},
+            )
+
+    for hs_rf in (
+        "WITH 1 AS top SELECT top - 0! AS as FROM request_facts WHERE service_id = 'svc_b'",
+        "WITH 1 AS top SELECT top + 0!! AS as FROM request_facts WHERE service_id = 'svc_b'",
+    ):
+        rewritten, canonicals = hs_query._rewrite_console_sql_with_canonicals(
+            hs_rf,
+            svc_table="logs_svc_alpha",
+            names={"request_facts": "fla_cv_m_req"},
+        )
+        assert canonicals == {"request_facts"}, (hs_rf, canonicals)
+        assert "request_facts" not in rewritten and "fla_cv_m_req" in rewritten, rewritten

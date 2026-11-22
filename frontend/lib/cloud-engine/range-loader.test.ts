@@ -927,4 +927,77 @@ describe("Cloud first-page analytical range loading", () => {
       }),
     ).rejects.toThrow(/Whole-file read .* returned 12 bytes, not/);
   });
+
+  it("skips writeDerivedFile across footer, whole-file, and range paths when signal aborts in flight", async () => {
+    const oneGroupBytes = parquetWriteBuffer({
+      codec: "UNCOMPRESSED",
+      rowGroupSize: 400,
+      columnData: [
+        { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: 400 }, (_, i) => new Date(Date.parse(from) + i)) },
+        { name: "status", type: "INT32", data: Array.from({ length: 400 }, () => 200) },
+        { name: "ua", type: "STRING", data: Array.from({ length: 400 }, (_, i) => `/ua-${i}-${"u".repeat(300)}`) },
+      ],
+    });
+    expect(oneGroupBytes.byteLength).toBeGreaterThan(100 * 1024);
+
+    // 1. Footer read (line 191): aborting during footer fetchRange must skip writeDerivedFile(footerKey)
+    const footerEntry = { ...file, key: "processed/request/abort-footer.parquet", size: oneGroupBytes.byteLength };
+    vi.mocked(fetchManifest).mockResolvedValueOnce({ files: [footerEntry], complete: true });
+    const footerAbort = new AbortController();
+    source.writeDerivedFile.mockClear();
+    source.fetchRange.mockImplementationOnce(async (_entry: ManifestFile, start: number, end: number) => {
+      footerAbort.abort(new DOMException("Logged out during footer", "AbortError"));
+      return oneGroupBytes.slice(start, end);
+    });
+    await expect(
+      ensureCloudRange(from, to, footerAbort.signal, ["request"], {
+        serviceId: "svc-a",
+        projection: { columns: ["timestamp", "status"] },
+      }),
+    ).rejects.toThrow();
+    expect(source.writeDerivedFile).not.toHaveBeenCalled();
+
+    // 2. Whole-file >=65% projection (line 260): aborting during fetchFile must skip writeDerivedFile(scopedKey)
+    const wholeEntry = { ...file, key: "processed/request/abort-whole.parquet", size: oneGroupBytes.byteLength };
+    vi.mocked(fetchManifest).mockResolvedValueOnce({ files: [wholeEntry], complete: true });
+    const wholeAbort = new AbortController();
+    source.fetchRange.mockImplementation(async (_entry: ManifestFile, start: number, end: number) =>
+      oneGroupBytes.slice(start, end),
+    );
+    source.fetchFile.mockImplementationOnce(async () => {
+      wholeAbort.abort(new DOMException("Logged out during whole-file", "AbortError"));
+      return { bytes: oneGroupBytes.slice(0), cached: false };
+    });
+    await expect(
+      ensureCloudRange(from, to, wholeAbort.signal, ["request"], {
+        serviceId: "svc-a",
+        projection: { columns: ["timestamp", "status", "ua"] },
+      }),
+    ).rejects.toThrow();
+    source.writeDerivedFile.mockClear();
+
+    // 3. <65% range projection (line 275): aborting during the final projected range read must skip writeDerivedFile(scopedKey)
+    const rangeEntry = { ...file, key: "processed/request/abort-range.parquet", size: oneGroupBytes.byteLength };
+    vi.mocked(fetchManifest).mockResolvedValueOnce({ files: [rangeEntry], complete: true });
+    const rangeAbort = new AbortController();
+    let rangeCallIdx = 0;
+    source.fetchRange.mockImplementation(async (_entry: ManifestFile, start: number, end: number) => {
+      rangeCallIdx += 1;
+      // Call 1 is footer tail; Call 2 is the single coalesced ["timestamp", "status"] range!
+      if (rangeCallIdx === 2) {
+        rangeAbort.abort(new DOMException("Logged out during range", "AbortError"));
+      }
+      return oneGroupBytes.slice(start, end);
+    });
+    await expect(
+      ensureCloudRange(from, to, rangeAbort.signal, ["request"], {
+        serviceId: "svc-a",
+        projection: { columns: ["timestamp", "status"] },
+      }),
+    ).rejects.toThrow();
+    const projCalls = source.writeDerivedFile.mock.calls.filter(
+      ([, identity]) => String(identity).includes("\"projection\""),
+    );
+    expect(projCalls).toEqual([]);
+  });
 });

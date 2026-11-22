@@ -1012,7 +1012,11 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
         return (
             0 < s_pos < len(sig_list)
             and tokens[sig_list[s_pos]] == ("OTHER", "!")
-            and not _is_lex_on_operator_tok(tokens, s_pos - 1, sig_list)
+            and (
+                _is_select_head_signed_top_end_lex(tokens, s_pos - 1, sig_list)
+                or _is_postfix_factorial_lex(tokens, s_pos - 1, sig_list)
+                or not _is_lex_on_operator_tok(tokens, s_pos - 1, sig_list)
+            )
         )
 
     active_case_scans: set[tuple[int, int]] = set()
@@ -1071,6 +1075,8 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
         if pk == "OTHER":
             if pt != "!":
                 return True
+            if (r % 2) == 0:
+                return False
             sig_list = _sig_indices(tokens)
             try:
                 s_pos = sig_list.index(pos)

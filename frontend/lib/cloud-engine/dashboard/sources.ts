@@ -77,7 +77,14 @@ export function dashboardCacheIdentity(): string | null {
   }
 }
 
-const activeSources = new Set<WeakRef<{ clearMemoryCache?: () => void }>>();
+type ActiveSourceClosure = {
+  clearMemoryCache: () => void;
+  drainStoreQueue: () => Promise<void>;
+};
+
+const activeSources = new Set<WeakRef<ActiveSourceClosure>>();
+const sourceKeepAlive = new WeakMap<object, ActiveSourceClosure>();
+const pendingSourceClosures = new Set<ActiveSourceClosure>();
 
 export function clearBrowserSourceMemoryCaches(): void {
   for (const ref of activeSources) {
@@ -86,7 +93,22 @@ export function clearBrowserSourceMemoryCaches(): void {
       activeSources.delete(ref);
       continue;
     }
-    instance.clearMemoryCache?.();
+    instance.clearMemoryCache();
+  }
+}
+
+async function drainBrowserSourceStoreQueues(): Promise<void> {
+  const pending: Promise<void>[] = [];
+  for (const ref of activeSources) {
+    const instance = ref.deref();
+    if (!instance) {
+      activeSources.delete(ref);
+      continue;
+    }
+    pending.push(instance.drainStoreQueue());
+  }
+  if (pending.length > 0) {
+    await Promise.allSettled(pending);
   }
 }
 
@@ -265,6 +287,7 @@ export async function deleteCaches(
 /** Deletes every cache holding request-log Parquet files, their rollups or store index. */
 export async function clearRequestLogCaches(): Promise<void> {
   clearBrowserSourceMemoryCaches();
+  await drainBrowserSourceStoreQueues();
   await clearOPFSParquetStore();
   await deleteCaches(
     (name) =>
@@ -547,6 +570,7 @@ export function browserSource(
   };
   const inFlightFiles = new Map<string, InFlightFile>();
   const inFlightRanges = new Map<string, InFlightRange>();
+  let cacheEpoch = 0;
   const waitSharedRange = (
     entry: InFlightRange,
     signal?: AbortSignal,
@@ -620,10 +644,14 @@ export function browserSource(
   const filteredCache = (scope: string) => {
     let cache = filteredCaches.get(scope);
     if (!cache) {
+      const createdEpoch = cacheEpoch;
       cache = new FilteredResultCache({
         baseUrl,
         scope,
-        openCache: () => caches.open(FILTERED_CACHE_NAME),
+        openCache: () =>
+          cacheEpoch === createdEpoch
+            ? caches.open(FILTERED_CACHE_NAME)
+            : Promise.reject(new Error("Cache cleared")),
       });
       filteredCaches.set(scope, cache);
     }
@@ -631,6 +659,78 @@ export function browserSource(
   };
   // One write at a time, so each quota check sees the previous write's usage.
   let storeQueue: Promise<void> = Promise.resolve();
+  let pendingStoreWrites = 0;
+  let storeIndexFlushPinTimer: ReturnType<typeof setTimeout> | null = null;
+  const clearClosureMemory = () => {
+    cacheEpoch += 1;
+    for (const request of inFlightFiles.values()) {
+      request.controller.abort();
+    }
+    inFlightFiles.clear();
+    for (const request of inFlightRanges.values()) {
+      request.controller.abort();
+    }
+    inFlightRanges.clear();
+    memoryRollups.clear();
+    memoryRollupBytes = 0;
+    memoryFiles.clear();
+    memoryFileIdentities.clear();
+    memoryFileBytes = 0;
+    fileCachePromise = null;
+    rollupCachePromise = null;
+    storeIndex.reset();
+    if (storeIndexFlushPinTimer !== null) {
+      clearTimeout(storeIndexFlushPinTimer);
+      storeIndexFlushPinTimer = null;
+    }
+    for (const cache of filteredCaches.values()) cache.clearMemory();
+    filteredCaches.clear();
+    syncClosurePin();
+  };
+  const closureHandle: ActiveSourceClosure = {
+    clearMemoryCache: clearClosureMemory,
+    drainStoreQueue: () =>
+      storeQueue.then(
+        () => undefined,
+        () => undefined,
+      ),
+  };
+  activeSources.add(new WeakRef(closureHandle));
+  function syncClosurePin(): void {
+    if (
+      pendingStoreWrites > 0 ||
+      storeIndexFlushPinTimer !== null ||
+      inFlightFiles.size > 0 ||
+      inFlightRanges.size > 0
+    ) {
+      pendingSourceClosures.add(closureHandle);
+    } else {
+      pendingSourceClosures.delete(closureHandle);
+    }
+  }
+  const pinStoreIndexFlush = () => {
+    if (storeIndexFlushPinTimer !== null) {
+      clearTimeout(storeIndexFlushPinTimer);
+    }
+    storeIndexFlushPinTimer = setTimeout(() => {
+      storeIndexFlushPinTimer = null;
+      syncClosurePin();
+    }, 2_200);
+    (storeIndexFlushPinTimer as { unref?: () => void }).unref?.();
+    syncClosurePin();
+  };
+  const touchStoreIndex = (key: string, bytes?: number) => {
+    storeIndex.touch(key, bytes);
+    pinStoreIndexFlush();
+  };
+  const forgetStoreIndex = (key: string) => {
+    storeIndex.forget(key);
+    pinStoreIndexFlush();
+  };
+  const pinManifestStoreIndex = (keys: Iterable<string>) => {
+    storeIndex.useManifest(keys);
+    pinStoreIndexFlush();
+  };
 
   const buildRequestHeaders = (
     options: BrowserSourceOptions | undefined,
@@ -753,8 +853,13 @@ export function browserSource(
       headers: HeadersInit;
     }>,
     tracked: boolean,
+    callEpoch: number,
   ): Promise<void> => {
+    if (callEpoch !== cacheEpoch) return Promise.resolve();
+    pendingStoreWrites += 1;
+    syncClosurePin();
     storeQueue = storeQueue.then(async () => {
+      if (callEpoch !== cacheEpoch) return;
       let size = 0;
       let room: { usage: number | null; quota: number | null } = {
         usage: null,
@@ -762,8 +867,14 @@ export function browserSource(
       };
       try {
         const { data, bytes, headers } = await body();
+        if (callEpoch !== cacheEpoch) return;
         size = bytes;
-        const made = await storeIndex.makeRoom(getFileCache, bytes, forgetFile);
+        const made = await storeIndex.makeRoom(
+          () => (callEpoch === cacheEpoch ? getFileCache() : Promise.resolve(null)),
+          bytes,
+          forgetFile,
+        );
+        if (callEpoch !== cacheEpoch) return;
         room = made;
         if (!made.ok) {
           await recordStoreError({
@@ -778,9 +889,11 @@ export function browserSource(
           });
           return;
         }
+        if (callEpoch !== cacheEpoch) return;
         await cache.put(url, new Response(data, { headers }));
-        if (tracked) storeIndex.touch(key, bytes);
+        if (tracked && callEpoch === cacheEpoch) touchStoreIndex(key, bytes);
       } catch (error) {
+        if (callEpoch !== cacheEpoch) return;
         await recordStoreError({
           at: Date.now(),
           cache: cacheName,
@@ -790,6 +903,9 @@ export function browserSource(
           usage: room.usage,
           quota: room.quota,
         });
+      } finally {
+        pendingStoreWrites = Math.max(0, pendingStoreWrites - 1);
+        syncClosurePin();
       }
     });
     return storeQueue;
@@ -828,7 +944,8 @@ export function browserSource(
     const decoded = JSON.parse(stored) as [unknown, unknown];
     return decoded[0] === (fileOwnerScope(options) ?? null);
   };
-  const sourceWith = (options?: BrowserSourceOptions): BrowserFileSource => ({
+  const sourceWith = (options?: BrowserSourceOptions): BrowserFileSource => {
+    const instance: BrowserFileSource = {
     async readDerivedFile(key, identity) {
       const cache = await getFileCache();
       const hit = await cache?.match(derivedCacheUrl(key, identity, options));
@@ -844,7 +961,7 @@ export function browserSource(
           const start = performance.now();
           const bytes = await hit.arrayBuffer();
           if (bytes.byteLength !== byteLength) throw new Error(`Cached derived file for ${key} is truncated`);
-          storeIndex.touch(key);
+          touchStoreIndex(key);
           options?.onApiCall?.({
             source: "Browser Cache",
             method: "GET",
@@ -861,10 +978,12 @@ export function browserSource(
       };
     },
     async writeDerivedFile(key, identity, bytes, meta) {
+      const callEpoch = cacheEpoch;
       // Copied before any await: the caller may hand the buffer to DuckDB, which can detach it.
       const data = new Blob([bytes]);
+      if (callEpoch !== cacheEpoch) return;
       const cache = await getFileCache();
-      if (!cache) return;
+      if (!cache || callEpoch !== cacheEpoch) return;
       // Tracked through the full file's index entry so its recorded size stays the file's own.
       await store(CACHE_NAME, cache, derivedCacheUrl(key, identity, options), key, async () => ({
         data,
@@ -873,8 +992,8 @@ export function browserSource(
           [DERIVED_BYTES_HEADER]: String(data.size),
           [DERIVED_META_HEADER]: encodeURIComponent(meta),
         },
-      }), false);
-      storeIndex.touch(key);
+      }), false, callEpoch);
+      if (callEpoch === cacheEpoch) touchStoreIndex(key);
     },
     get cacheScope() {
       return sourceScope(options);
@@ -887,6 +1006,8 @@ export function browserSource(
       }
     },
     async writeFilteredResult(id, result) {
+      const callEpoch = cacheEpoch;
+      if (callEpoch !== cacheEpoch) return;
       try {
         await filteredCache(sourceScope(options)).write(id, result);
       } catch {
@@ -1116,6 +1237,7 @@ export function browserSource(
           start >= 0 && end > start && (file.size <= 0 || end <= file.size)))
         throw new Error(`Range ${start}-${end} is outside ${file.key}`);
       signal?.throwIfAborted();
+      const callEpoch = cacheEpoch;
       const rangeKey = JSON.stringify([
         fileOwnerScope(options) ?? null,
         file.key,
@@ -1166,6 +1288,7 @@ export function browserSource(
             const bytes = await response.arrayBuffer();
             if (bytes.byteLength !== end - start)
               throw new Error(`Range read of ${file.key} returned ${bytes.byteLength} bytes, not ${end - start}`);
+            if (callEpoch !== cacheEpoch) throw new Error("Cache cleared");
             const cdn = response.headers.get("x-flp-cdn-cache");
             const cdnHit = isCdnHit(cdn);
             const vcpuMs = parseVcpuMsHeader(response.headers);
@@ -1202,6 +1325,7 @@ export function browserSource(
       return bytes.slice(0);
     },
     async fetchFile(key, signal, mode) {
+      const callEpoch = cacheEpoch;
       const transfer = Boolean(mode?.transfer);
       const reqPath = fileRequestPath(key);
       const path = fileDisplayPath(key);
@@ -1236,6 +1360,7 @@ export function browserSource(
       let inFlight = inFlightFiles.get(cacheUrl);
       const cached = inFlight !== undefined;
       if (!inFlight) {
+        const entryEpoch = callEpoch;
         const controller = new AbortController();
         const entry: InFlightFile = {
           controller,
@@ -1247,22 +1372,34 @@ export function browserSource(
         const finish = () => {
           if (inFlightFiles.get(cacheUrl) !== entry) return;
           entry.complete = true;
-          if (entry.waiters === 0) inFlightFiles.delete(cacheUrl);
+          if (entry.waiters === 0) {
+            inFlightFiles.delete(cacheUrl);
+            syncClosurePin();
+          }
         };
         entry.promise = Promise.resolve().then(async () => {
           const cacheStart =
             typeof performance !== "undefined" ? performance.now() : Date.now();
           try {
+            if (entryEpoch !== cacheEpoch) {
+              throw controller.signal.reason ?? new DOMException("The operation was aborted.", "AbortError");
+            }
             const cache = await getFileCache();
+            if (entryEpoch !== cacheEpoch) {
+              throw controller.signal.reason ?? new DOMException("The operation was aborted.", "AbortError");
+            }
             const hit = await cache?.match(cacheUrl);
             if (hit) {
               const bytes = await hit.arrayBuffer();
-              storeIndex.touch(key, bytes.byteLength);
+              if (entryEpoch !== cacheEpoch) {
+                throw controller.signal.reason ?? new DOMException("The operation was aborted.", "AbortError");
+              }
+              touchStoreIndex(key, bytes.byteLength);
               const cacheEnd =
                 typeof performance !== "undefined"
                   ? performance.now()
                   : Date.now();
-              if (!transfer) rememberFile(key, bytes, requestScope);
+              if (!transfer && entryEpoch === cacheEpoch) rememberFile(key, bytes, requestScope);
               options?.onApiCall?.({
                 source: "Browser Cache",
                 method: "GET",
@@ -1313,6 +1450,9 @@ export function browserSource(
               throw new Error(`File ${key} failed (${response.status})`);
             }
             const bytes = await response.arrayBuffer();
+            if (entryEpoch !== cacheEpoch) {
+              throw controller.signal.reason ?? new DOMException("The operation was aborted.", "AbortError");
+            }
             const end =
               typeof performance !== "undefined"
                 ? performance.now()
@@ -1347,7 +1487,7 @@ export function browserSource(
               pageLoadId,
               options?.onApiCall,
             );
-            if (cache) {
+            if (cache && entryEpoch === cacheEpoch) {
               const byteLength = bytes.byteLength;
               const persistence = store(
                 CACHE_NAME,
@@ -1360,11 +1500,15 @@ export function browserSource(
                   headers: response.headers,
                 }),
                 true,
+                entryEpoch,
               );
               void persistence.then(finish, finish);
+            } else {
+              entry.networkDone = true;
+              finish();
+              return { bytes, cached: false, cdn };
             }
             entry.networkDone = true;
-            if (!cache) finish();
             return { bytes, cached: false, cdn };
           } catch (error) {
             entry.networkDone = true;
@@ -1373,6 +1517,7 @@ export function browserSource(
           }
         });
         inFlightFiles.set(cacheUrl, entry);
+        syncClosurePin();
         inFlight = entry;
       }
       const request = inFlight;
@@ -1395,6 +1540,7 @@ export function browserSource(
           ) {
             inFlightFiles.delete(cacheUrl);
           }
+          syncClosurePin();
         }
       };
       let onAbort: (() => void) | undefined;
@@ -1411,6 +1557,9 @@ export function browserSource(
         const network = await (aborted
           ? Promise.race([request.promise, aborted])
           : request.promise);
+        if (callEpoch !== cacheEpoch) {
+          throw new DOMException("The operation was aborted.", "AbortError");
+        }
         if (!transfer) rememberFile(key, network.bytes.slice(0), requestScope);
         return {
           bytes: network.bytes.slice(0),
@@ -1439,10 +1588,13 @@ export function browserSource(
       }
     },
     async readRollup(key, variant = "") {
+      const callEpoch = cacheEpoch;
       const rollupScope = fileScope(options);
       const inMemory = memoryRollups.get(rollupMemoryKey(key, rollupScope));
       if (inMemory?.variant === variant) {
-        rememberRollup(key, inMemory.rollup, variant, inMemory.bytes, rollupScope);
+        if (callEpoch === cacheEpoch) {
+          rememberRollup(key, inMemory.rollup, variant, inMemory.bytes, rollupScope);
+        }
         return inMemory.rollup;
       }
       try {
@@ -1455,7 +1607,9 @@ export function browserSource(
                 new Uint8Array(await file.arrayBuffer()),
               );
               if (decoded && decoded.key === key) {
-                rememberRollup(key, decoded, variant, undefined, rollupScope);
+                if (callEpoch === cacheEpoch) {
+                  rememberRollup(key, decoded, variant, undefined, rollupScope);
+                }
                 return decoded;
               }
             } finally {
@@ -1463,15 +1617,17 @@ export function browserSource(
             }
           }
         }
+        if (callEpoch !== cacheEpoch) return null;
         const cache = await getRollupCache();
-        const hit = await cache?.match(
+        if (!cache || callEpoch !== cacheEpoch) return null;
+        const hit = await cache.match(
           scopedCacheUrl(rollupCacheUrl(baseUrl, key, variant), rollupScope),
         );
-        if (!hit) return null;
+        if (!hit || callEpoch !== cacheEpoch) return null;
         const decoded = await decodeRollup(
           new Uint8Array(await hit.arrayBuffer()),
         );
-        if (!decoded || decoded.key !== key) return null;
+        if (!decoded || decoded.key !== key || callEpoch !== cacheEpoch) return null;
         rememberRollup(key, decoded, variant, undefined, rollupScope);
         return decoded;
       } catch {
@@ -1479,23 +1635,30 @@ export function browserSource(
       }
     },
     async writeRollup(key, rollup, variant = "") {
+      const callEpoch = cacheEpoch;
+      if (callEpoch !== cacheEpoch) return;
       const rollupScope = fileScope(options);
       rememberRollup(key, rollup, variant, undefined, rollupScope);
       if (rollupScope) {
         const body = await encodeRollup(rollup);
+        if (callEpoch !== cacheEpoch) return;
         try {
           await opfsStore(`rollup:${rollupScope}:${variant}`).persist(
             key,
             body.byteLength,
-            async () => new Response(body as BodyInit),
+            async () => {
+              if (callEpoch !== cacheEpoch) throw new Error("Cache cleared");
+              return new Response(body as BodyInit);
+            },
           );
         } catch {
           /* The OPFS store records failures; memory remains usable. */
         }
         return;
       }
+      if (callEpoch !== cacheEpoch) return;
       const cache = await getRollupCache().catch(() => null);
-      if (!cache) return;
+      if (!cache || callEpoch !== cacheEpoch) return;
       await store(
         ROLLUP_CACHE_NAME,
         cache,
@@ -1510,6 +1673,7 @@ export function browserSource(
           };
         },
         false,
+        callEpoch,
       );
     },
     async beacon(body) {
@@ -1538,7 +1702,7 @@ export function browserSource(
       }
     },
     async pruneCache(manifest, fromMs, toMs) {
-      storeIndex.useManifest([
+      pinManifestStoreIndex([
         ...manifest.files.map((file) => file.key),
         ...(manifest.summaryFiles ?? []).map((file) => file.key),
       ]);
@@ -1557,7 +1721,7 @@ export function browserSource(
           if (fileMemoryIdentityOwnedBy(memoryFileIdentities.get(key), options)) {
             forgetFile(key);
           }
-          storeIndex.forget(key);
+          forgetStoreIndex(key);
         }
         for (const key of rollupCache
           ? await pruneRequestCache(rollupCache, manifest, fromMs, toMs, {
@@ -1573,27 +1737,11 @@ export function browserSource(
       }
     },
     clearMemoryCache() {
-      for (const request of inFlightFiles.values()) {
-        request.controller.abort();
-      }
-      inFlightFiles.clear();
-      for (const range of inFlightRanges.values()) {
-        range.controller.abort();
-      }
-      inFlightRanges.clear();
-      memoryRollups.clear();
-      memoryRollupBytes = 0;
-      memoryFiles.clear();
-      memoryFileIdentities.clear();
-      memoryFileBytes = 0;
-      fileCachePromise = null;
-      rollupCachePromise = null;
-      opfsStores.clear();
-      storeIndex.reset();
-      for (const cache of filteredCaches.values()) cache.clearMemory();
+      clearClosureMemory();
     },
-  });
-  const root = sourceWith(defaultOptions);
-  activeSources.add(new WeakRef(root));
-  return root;
+    };
+    sourceKeepAlive.set(instance, closureHandle);
+    return instance;
+  };
+  return sourceWith(defaultOptions);
 }

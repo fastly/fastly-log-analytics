@@ -24,6 +24,96 @@ pub fn capture_present(snippets: &[Value]) -> bool {
     has("Fastly Log Analytics - vcl_recv") && has("Fastly Log Analytics - vcl_deliver")
         || has("Fastly Log Analysis Capture")
 }
+
+pub(super) fn endpoint_path_matches_scope(path: &str, scope: &str) -> bool {
+    if path.contains("..") || path.contains('\\') || path.chars().any(char::is_control) {
+        return false;
+    }
+    if scope.is_empty() {
+        path.is_empty() || path.starts_with("raw/")
+    } else {
+        path.starts_with(&format!("{scope}raw/"))
+    }
+}
+
+pub(super) fn has_attach_endpoint_marker(s3_items: &[Value], fos_items: &[Value]) -> bool {
+    s3_items.iter().chain(fos_items).any(|v| {
+        matches!(
+            v["name"].as_str(),
+            Some(ATTACH_ENDPOINT | ATTACH_RUM_ENDPOINT)
+        )
+    })
+}
+
+pub(super) fn has_attach_condition_marker(conditions: &[Value]) -> bool {
+    conditions.iter().any(|v| {
+        matches!(
+            v["name"].as_str(),
+            Some(ATTACH_CONDITION | ATTACH_RUM_CONDITION)
+        )
+    })
+}
+
+pub(super) fn has_foreign_primary_endpoint(
+    service: &Service,
+    scope: &str,
+    s3_items: &[Value],
+    fos_items: &[Value],
+    allow_owned_legacy_s3: bool,
+) -> bool {
+    for item in fos_items {
+        let Some(name) = item["name"].as_str() else {
+            continue;
+        };
+        let expected_cond = match name {
+            "Fastly Object Storage Logs" => "log_analytics_condition",
+            "Fastly RUM Logs" => "rum_log_condition",
+            _ => continue,
+        };
+        let path = item["path"].as_str().unwrap_or("");
+        let cond = item["response_condition"].as_str().unwrap_or("");
+        if item["bucket_name"].as_str() != Some(service.fos_bucket.as_str())
+            || !endpoint_path_matches_scope(path, scope)
+            || cond != expected_cond
+        {
+            return true;
+        }
+    }
+    for item in s3_items {
+        let Some(name) = item["name"].as_str() else {
+            continue;
+        };
+        let expected_cond = match name {
+            "Fastly Object Storage Logs" => "log_analytics_condition",
+            "Fastly RUM Logs" => "rum_log_condition",
+            _ => continue,
+        };
+        if !allow_owned_legacy_s3 || !service.owned_endpoint_names.iter().any(|n| n == name) {
+            return true;
+        }
+        let path = item["path"].as_str().unwrap_or("");
+        let cond = item["response_condition"].as_str().unwrap_or("");
+        if item["bucket_name"].as_str() != Some(service.fos_bucket.as_str())
+            || !endpoint_path_matches_scope(path, scope)
+            || cond != expected_cond
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn verified_cloud_fos_endpoint(
+    found: &Value,
+    expected_cond: &str,
+    service: &Service,
+    scope: &str,
+) -> bool {
+    !expected_cond.is_empty()
+        && found["bucket_name"].as_str() == Some(service.fos_bucket.as_str())
+        && endpoint_path_matches_scope(found["path"].as_str().unwrap_or(""), scope)
+        && found["response_condition"].as_str() == Some(expected_cond)
+}
 /// Attach mode logs exactly the requests the other install's request-log endpoint
 /// logs, so both installs' data can be compared: its `log_analytics_condition`
 /// verbatim, or `fallback` (Cloud's own statement) minus RUM beacons when absent.
@@ -411,6 +501,7 @@ fn discover(
 ) -> Result<(), Error> {
     let version = active_version(context, &service.service_id, token)?;
     let mut target = desired(context, service)?;
+    let desired_fos_endpoints = target.get("logging/fos").cloned().unwrap_or_default();
     if job.kind == "teardown" {
         if job.options.remove_logging {
             target.insert("logging/fos".into(), vec![]);
@@ -552,6 +643,21 @@ fn discover(
     {
         return Err(Error::new(409, "managed_resources_not_owned"));
     }
+    let scope = crate::ingest::scope(service);
+    if !attached
+        && (has_attach_condition_marker(&current["condition"])
+            || has_attach_endpoint_marker(&current["logging/s3"], &current["logging/fos"])
+            || (capture_present(snippets)
+                && has_foreign_primary_endpoint(
+                    service,
+                    &scope,
+                    &current["logging/s3"],
+                    &current["logging/fos"],
+                    true,
+                )))
+    {
+        return Err(Error::new(409, "managed_resources_not_owned"));
+    }
     if !attached
         && !own_marker
         && current["logging/s3"]
@@ -651,12 +757,32 @@ fn discover(
             let name = required(value, "name")?;
             let desired = resource_body(resource, value, service);
             let found = current[resource].iter().find(|v| v["name"] == name);
-            if found.is_some()
-                && (!own_marker && !name.starts_with("flp-owner-")
-                    || resource.starts_with("logging/")
-                        && !service.owned_endpoint_names.iter().any(|v| v == name))
-            {
-                return Err(Error::new(409, "resource_name_collision"));
+            if let Some(existing) = found {
+                if !own_marker && !name.starts_with("flp-owner-") {
+                    return Err(Error::new(409, "resource_name_collision"));
+                }
+                if resource.starts_with("logging/") {
+                    if existing["bucket_name"].as_str() != Some(service.fos_bucket.as_str())
+                        || !endpoint_path_matches_scope(
+                            existing["path"].as_str().unwrap_or(""),
+                            &scope,
+                        )
+                    {
+                        return Err(Error::new(409, "resource_name_collision"));
+                    }
+                    let already_owned = service.owned_endpoint_names.iter().any(|v| v == name);
+                    let self_healed = resource == "logging/fos"
+                        && own_marker
+                        && verified_cloud_fos_endpoint(
+                            existing,
+                            value["response_condition"].as_str().unwrap_or(""),
+                            service,
+                            &scope,
+                        );
+                    if !already_owned && !self_healed {
+                        return Err(Error::new(409, "resource_name_collision"));
+                    }
+                }
             }
             if found.is_none_or(|v| normalized(resource, v) != normalized(resource, &desired)) {
                 changes.push(Change {
@@ -671,8 +797,29 @@ fn discover(
             let name = required(value, "name")?;
             let owned = own_marker
                 && if resource.starts_with("logging/") {
-                    service.owned_endpoint_names.iter().any(|v| v == name)
-                        || job.previous_endpoint_names.iter().any(|v| v == name)
+                    let scope_ok = value["bucket_name"].as_str()
+                        == Some(service.fos_bucket.as_str())
+                        && endpoint_path_matches_scope(
+                            value["path"].as_str().unwrap_or(""),
+                            &scope,
+                        )
+                        && !value["response_condition"]
+                            .as_str()
+                            .unwrap_or("")
+                            .is_empty();
+                    scope_ok
+                        && (service.owned_endpoint_names.iter().any(|v| v == name)
+                            || job.previous_endpoint_names.iter().any(|v| v == name)
+                            || (resource == "logging/fos"
+                                && desired_fos_endpoints.iter().any(|d| {
+                                    d["name"].as_str() == Some(name)
+                                        && verified_cloud_fos_endpoint(
+                                            value,
+                                            d["response_condition"].as_str().unwrap_or(""),
+                                            service,
+                                            &scope,
+                                        )
+                                })))
                 } else if resource == "condition" {
                     if attached {
                         name == ATTACH_CONDITION || name == ATTACH_RUM_CONDITION

@@ -614,19 +614,184 @@ fn upsert_kv(
     context: &Context<'_, impl Runtime>,
     key: &str,
     value: &Value,
-    try_insert_first: &mut bool,
+    try_insert_first: bool,
 ) -> Result<(), Error> {
-    if *try_insert_first {
+    if try_insert_first {
         match context.cas(key, None, value) {
             Ok(()) => return Ok(()),
-            Err(err) if err.status == 409 => {
-                *try_insert_first = false;
-            }
+            Err(err) if err.status == 409 => {}
             Err(err) => return Err(err),
         }
     }
     let existing = context.get(key)?;
     context.cas(key, existing.as_ref().map(|r| r.generation.as_str()), value)
+}
+
+fn verify_candidate_endpoints(
+    service: &Service,
+    scope: &str,
+    candidate_names: &[String],
+    s3_items: &[Value],
+    fos_items: &[Value],
+) -> Result<Vec<String>, Error> {
+    let mut verified_owned = Vec::new();
+    for ep_name in candidate_names {
+        if s3_items
+            .iter()
+            .any(|v| v["name"].as_str() == Some(ep_name.as_str()))
+        {
+            return Err(Error::new(409, "resource_name_collision"));
+        }
+        if let Some(found) = fos_items
+            .iter()
+            .find(|v| v["name"].as_str() == Some(ep_name.as_str()))
+        {
+            let cond = found["response_condition"].as_str().unwrap_or("");
+            let path = found["path"].as_str().unwrap_or("");
+            let cond_ok = match service.capture {
+                Capture::Attached => {
+                    if ep_name == ATTACH_RUM_ENDPOINT {
+                        cond == ATTACH_RUM_CONDITION
+                    } else {
+                        matches!(cond, ATTACH_CONDITION | ATTACH_RUM_CONDITION)
+                    }
+                }
+                Capture::Managed => matches!(cond, "log_analytics_condition" | "rum_log_condition"),
+            };
+            if found["bucket_name"].as_str() != Some(service.fos_bucket.as_str())
+                || !super::reconcile::endpoint_path_matches_scope(path, scope)
+                || !cond_ok
+            {
+                return Err(Error::new(409, "resource_name_collision"));
+            }
+            verified_owned.push(ep_name.clone());
+        }
+    }
+    Ok(verified_owned)
+}
+
+fn inspect_active_version_for_dr(
+    context: &Context<'_, impl Runtime>,
+    service: &mut Service,
+    token: &str,
+    candidate_names: &[String],
+    scope: &str,
+    minimal_fallback: bool,
+    reserve_after: u32,
+) -> Result<(), Error> {
+    let ver = match super::reconcile::active_version(context, &service.service_id, token) {
+        Ok(ver) => ver,
+        Err(err) if err.status == 403 => {
+            return Err(Error::new(403, "fastly_token_scope_insufficient"));
+        }
+        Err(_) => return Ok(()),
+    };
+    let encoded_sid = encode(&service.service_id);
+    let (s3_st, s3_val) = context.api_status(
+        "GET",
+        &format!("/service/{encoded_sid}/version/{ver}/logging/s3"),
+        token,
+        None,
+    )?;
+    if s3_st == 401 || s3_st == 403 {
+        return Err(Error::new(403, "fastly_token_scope_insufficient"));
+    }
+    let (fos_st, fos_val) = context.api_status(
+        "GET",
+        &format!("/service/{encoded_sid}/version/{ver}/logging/fos"),
+        token,
+        None,
+    )?;
+    if fos_st == 401 || fos_st == 403 {
+        return Err(Error::new(403, "fastly_token_scope_insufficient"));
+    }
+    if !(200..300).contains(&s3_st) || !(200..300).contains(&fos_st) {
+        return Ok(());
+    }
+    let (Ok(s3_items), Ok(fos_items)) = (list(&s3_val), list(&fos_val)) else {
+        return Ok(());
+    };
+
+    let mut coexist = super::reconcile::has_attach_endpoint_marker(s3_items, fos_items);
+    if !coexist
+        && (minimal_fallback || service.capture == Capture::Managed)
+        && context.remaining_calls() > reserve_after
+    {
+        let (cond_st, cond_val) = context.api_status(
+            "GET",
+            &format!("/service/{encoded_sid}/version/{ver}/condition"),
+            token,
+            None,
+        )?;
+        if cond_st == 401 || cond_st == 403 {
+            return Err(Error::new(403, "fastly_token_scope_insufficient"));
+        }
+        if (200..300).contains(&cond_st) {
+            if let Ok(cond_items) = list(&cond_val) {
+                if super::reconcile::has_attach_condition_marker(cond_items) {
+                    coexist = true;
+                }
+            }
+        }
+    }
+    if !coexist
+        && (minimal_fallback || service.capture == Capture::Managed)
+        && super::reconcile::has_foreign_primary_endpoint(
+            service, scope, s3_items, fos_items, false,
+        )
+        && context.remaining_calls() > reserve_after
+    {
+        let (snip_st, snip_val) = context.api_status(
+            "GET",
+            &format!("/service/{encoded_sid}/version/{ver}/snippet"),
+            token,
+            None,
+        )?;
+        if snip_st == 401 || snip_st == 403 {
+            return Err(Error::new(403, "fastly_token_scope_insufficient"));
+        }
+        if (200..300).contains(&snip_st) {
+            if let Ok(snip_items) = list(&snip_val) {
+                if super::reconcile::capture_present(snip_items) {
+                    coexist = true;
+                }
+            }
+        }
+    }
+
+    if minimal_fallback {
+        if coexist {
+            service.capture = Capture::Attached;
+            service.logging_endpoint_name = ATTACH_ENDPOINT.into();
+            service.rum.endpoint_name = ATTACH_RUM_ENDPOINT.into();
+            let attach_candidates =
+                vec![ATTACH_ENDPOINT.to_owned(), ATTACH_RUM_ENDPOINT.to_owned()];
+            service.owned_endpoint_names = verify_candidate_endpoints(
+                service,
+                scope,
+                &attach_candidates,
+                s3_items,
+                fos_items,
+            )?;
+        } else {
+            let managed_candidates = vec![service.logging_endpoint_name.clone()];
+            service.owned_endpoint_names = verify_candidate_endpoints(
+                service,
+                scope,
+                &managed_candidates,
+                s3_items,
+                fos_items,
+            )?;
+        }
+        return Ok(());
+    }
+
+    if service.capture == Capture::Managed && coexist {
+        return Err(Error::new(409, "resource_name_collision"));
+    }
+    service.owned_endpoint_names =
+        verify_candidate_endpoints(service, scope, candidate_names, s3_items, fos_items)?;
+    Ok(())
 }
 
 fn sync_front_dictionaries(
@@ -758,19 +923,21 @@ pub(super) fn recover(
         state.schema_version == SCHEMA_VERSION && state.service_id == input.service_id
     });
 
-    let (service, views, mut catalog_head, floor_key, rum_stats, mut source) =
-        if let Some(dr_state) = parsed_dr {
-            let own_store_ids = super::scoring::own_stores(context.runtime);
-            let mut service =
-                hydrate_service(dr_state.service, &fallback_svc, &owner_id, &input, now)?;
-            if let Some(ref sc) = service.scoring {
-                validate_dr_scoring(sc, &input.service_id, &own_sids, &own_store_ids)?;
-                super::scoring::verify_scoring_resources(
-                    context,
-                    &input.service_id,
-                    sc,
-                    &input.token,
-                )
+    let (
+        mut service,
+        views,
+        mut catalog_head,
+        floor_key,
+        rum_stats,
+        mut source,
+        candidate_names,
+        mut inspected_active,
+    ) = if let Some(dr_state) = parsed_dr {
+        let own_store_ids = super::scoring::own_stores(context.runtime);
+        let mut service = hydrate_service(dr_state.service, &fallback_svc, &owner_id, &input, now)?;
+        if let Some(ref sc) = service.scoring {
+            validate_dr_scoring(sc, &input.service_id, &own_sids, &own_store_ids)?;
+            super::scoring::verify_scoring_resources(context, &input.service_id, sc, &input.token)
                 .map_err(|e| {
                     if e.status == 400 {
                         Error::new(400, "invalid_dr_scoring_config")
@@ -778,142 +945,107 @@ pub(super) fn recover(
                         e
                     }
                 })?;
+        }
+        let prev_snapshot = service.clone();
+        super::reconcile_system_fields(&mut service, Some(&prev_snapshot))?;
+        super::validate_service(
+            &service,
+            Some(&prev_snapshot),
+            crate::ingest::window_seconds(context.runtime),
+        )?;
+        let mut candidate_names = Vec::new();
+        if service.logging_enabled && !service.logging_endpoint_name.is_empty() {
+            candidate_names.push(service.logging_endpoint_name.clone());
+        }
+        if service.rum.enabled {
+            let rum_ep = match service.capture {
+                Capture::Attached => ATTACH_RUM_ENDPOINT.to_owned(),
+                Capture::Managed => service.rum.endpoint_name.clone(),
+            };
+            if !rum_ep.is_empty() && !candidate_names.contains(&rum_ep) {
+                candidate_names.push(rum_ep);
             }
-            let prev_snapshot = service.clone();
-            super::reconcile_system_fields(&mut service, Some(&prev_snapshot))?;
-            super::validate_service(
-                &service,
-                Some(&prev_snapshot),
-                crate::ingest::window_seconds(context.runtime),
-            )?;
-            let mut candidate_names = Vec::new();
-            if service.logging_enabled && !service.logging_endpoint_name.is_empty() {
-                candidate_names.push(service.logging_endpoint_name.clone());
+        }
+        let mut views = dr_state.views;
+        validate_dr_views(&mut views, &input.service_id)?;
+        let scope = crate::ingest::scope(&service);
+        if let Some(ref fk) = dr_state.floor_key {
+            if !safe_dr_object_key(fk, &format!("{scope}raw/")) {
+                return Err(Error::new(400, "invalid_dr_floor_key"));
             }
-            if service.rum.enabled {
-                let rum_ep = match service.capture {
-                    Capture::Attached => ATTACH_RUM_ENDPOINT.to_owned(),
-                    Capture::Managed => service.rum.endpoint_name.clone(),
-                };
-                if !rum_ep.is_empty() && !candidate_names.contains(&rum_ep) {
-                    candidate_names.push(rum_ep);
-                }
-            }
-            let mut views = dr_state.views;
-            validate_dr_views(&mut views, &input.service_id)?;
-            let scope = crate::ingest::scope(&service);
-            if let Some(ref fk) = dr_state.floor_key {
-                if !safe_dr_object_key(fk, &format!("{scope}raw/")) {
-                    return Err(Error::new(400, "invalid_dr_floor_key"));
-                }
-            }
-            if let Some(ref head) = dr_state.catalog_head {
-                validate_dr_catalog_head(head, &scope)?;
-            }
-            let valid_head = dr_state.catalog_head.filter(|h| {
-                (h.generation > 0 || h.manifest.is_some() || !h.days.is_empty())
-                    && serde_json::to_value(h).ok().is_some_and(|v| {
-                        crate::ingest::catalog::head(&json!({"catalog": v})).is_ok()
-                    })
-            });
-            let scan_needed = if valid_head.is_none() { 2u32 } else { 0u32 };
-            let mut post_reserve = 5u32; // svc + admin:install + 3 front dict PUTs
-            if !views.is_empty() {
-                post_reserve += PER_UPSERT;
-            }
-            if valid_head.is_some() || dr_state.floor_key.is_some() || scan_needed > 0 {
-                post_reserve += PER_UPSERT;
-            }
-            if dr_state.rum_stats.is_some() {
-                post_reserve += PER_UPSERT;
-            }
-            let mut verified_owned = Vec::new();
-            if !candidate_names.is_empty()
-                && context.remaining_calls() >= post_reserve + scan_needed + 3
-            {
-                match super::reconcile::active_version(context, &service.service_id, &input.token) {
-                    Ok(ver) => {
-                        let encoded_sid = encode(&service.service_id);
-                        let (s3_st, s3_val) = context.api_status(
-                            "GET",
-                            &format!("/service/{encoded_sid}/version/{ver}/logging/s3"),
-                            &input.token,
-                            None,
-                        )?;
-                        if s3_st == 401 || s3_st == 403 {
-                            return Err(Error::new(403, "fastly_token_scope_insufficient"));
-                        }
-                        let (fos_st, fos_val) = context.api_status(
-                            "GET",
-                            &format!("/service/{encoded_sid}/version/{ver}/logging/fos"),
-                            &input.token,
-                            None,
-                        )?;
-                        if fos_st == 401 || fos_st == 403 {
-                            return Err(Error::new(403, "fastly_token_scope_insufficient"));
-                        }
-                        if (200..300).contains(&s3_st) && (200..300).contains(&fos_st) {
-                            if let (Ok(s3_items), Ok(fos_items)) = (list(&s3_val), list(&fos_val)) {
-                                for ep_name in &candidate_names {
-                                    if s3_items
-                                        .iter()
-                                        .any(|v| v["name"].as_str() == Some(ep_name.as_str()))
-                                    {
-                                        return Err(Error::new(409, "resource_name_collision"));
-                                    }
-                                    if let Some(found) = fos_items
-                                        .iter()
-                                        .find(|v| v["name"].as_str() == Some(ep_name.as_str()))
-                                    {
-                                        let cond =
-                                            found["response_condition"].as_str().unwrap_or("");
-                                        let cond_ok = match service.capture {
-                                            Capture::Attached => matches!(
-                                                cond,
-                                                ATTACH_CONDITION | ATTACH_RUM_CONDITION
-                                            ),
-                                            Capture::Managed => matches!(
-                                                cond,
-                                                "log_analytics_condition" | "rum_log_condition"
-                                            ),
-                                        };
-                                        if found["bucket_name"].as_str()
-                                            != Some(service.fos_bucket.as_str())
-                                            || !cond_ok
-                                        {
-                                            return Err(Error::new(409, "resource_name_collision"));
-                                        }
-                                        verified_owned.push(ep_name.clone());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(err) if err.status == 403 => {
-                        return Err(Error::new(403, "fastly_token_scope_insufficient"));
-                    }
-                    Err(_) => {}
-                }
-            }
-            service.owned_endpoint_names = verified_owned;
-            (
-                service,
-                views,
-                valid_head,
-                dr_state.floor_key,
-                dr_state.rum_stats,
-                "dr_state",
-            )
+        }
+        if let Some(ref head) = dr_state.catalog_head {
+            validate_dr_catalog_head(head, &scope)?;
+        }
+        let valid_head = dr_state.catalog_head.filter(|h| {
+            (h.generation > 0 || h.manifest.is_some() || !h.days.is_empty())
+                && serde_json::to_value(h)
+                    .ok()
+                    .is_some_and(|v| crate::ingest::catalog::head(&json!({"catalog": v})).is_ok())
+        });
+        let scan_needed = if valid_head.is_none() { 2u32 } else { 0u32 };
+        let num_dr_upserts = u32::from(!views.is_empty())
+            + u32::from(valid_head.is_some() || dr_state.floor_key.is_some() || scan_needed > 0)
+            + u32::from(dr_state.rum_stats.is_some());
+        let mandatory_post = 2 + if cold_start {
+            num_dr_upserts
         } else {
-            (
-                fallback_svc.clone(),
-                Vec::new(),
-                None,
-                None,
-                None,
-                "minimal",
-            )
+            PER_UPSERT * num_dr_upserts
         };
+        let conservative_post = 5 + PER_UPSERT * num_dr_upserts;
+        service.owned_endpoint_names.clear();
+        let should_inspect = !candidate_names.is_empty() || service.capture == Capture::Managed;
+        let mut inspected = false;
+        if should_inspect && context.remaining_calls() >= conservative_post + scan_needed + 3 {
+            inspect_active_version_for_dr(
+                context,
+                &mut service,
+                &input.token,
+                &candidate_names,
+                &scope,
+                false,
+                conservative_post + scan_needed,
+            )?;
+            inspected = true;
+        } else if !should_inspect || context.remaining_calls() < mandatory_post + scan_needed + 3 {
+            inspected = true;
+        }
+        (
+            service,
+            views,
+            valid_head,
+            dr_state.floor_key,
+            dr_state.rum_stats,
+            "dr_state",
+            candidate_names,
+            inspected,
+        )
+    } else {
+        let mut min_svc = fallback_svc.clone();
+        let min_scope = crate::ingest::scope(&min_svc);
+        let min_reserve = 5 + PER_UPSERT + 3;
+        if context.remaining_calls() >= min_reserve + 3 {
+            inspect_active_version_for_dr(
+                context,
+                &mut min_svc,
+                &input.token,
+                &[],
+                &min_scope,
+                true,
+                min_reserve,
+            )?;
+        }
+        (
+            min_svc,
+            Vec::new(),
+            None,
+            None,
+            None,
+            "minimal",
+            Vec::new(),
+            true,
+        )
+    };
 
     if catalog_head.is_none() {
         let mut reserve = 2u32; // svc:<sid> + admin:install
@@ -938,7 +1070,7 @@ pub(super) fn recover(
     let num_upserts = u32::from(!views.is_empty())
         + u32::from(catalog_head.is_some() || floor_key.is_some())
         + u32::from(rum_stats.is_some());
-    let mut try_insert_first = cold_start && context.remaining_calls() < 5 + 2 * num_upserts;
+    let try_insert_first = cold_start && context.remaining_calls() < 5 + 2 * num_upserts;
 
     let views_restored = views.len();
     if !views.is_empty() {
@@ -946,7 +1078,7 @@ pub(super) fn recover(
             context,
             &crate::views::key(&input.service_id),
             &json!({"views": views, "updated_at": now}),
-            &mut try_insert_first,
+            try_insert_first,
         )?;
     }
 
@@ -962,7 +1094,7 @@ pub(super) fn recover(
             context,
             crate::ingest::WATERMARK_KEY,
             &Value::Object(wm),
-            &mut try_insert_first,
+            try_insert_first,
         )?;
     }
 
@@ -971,9 +1103,25 @@ pub(super) fn recover(
             context,
             &crate::ingest::watermark_key(crate::ingest::rum::STREAM),
             &json!({ crate::ingest::RUM_STATS_FIELD: stats }),
-            &mut try_insert_first,
+            try_insert_first,
         )?;
     }
+
+    let post_upsert_floor = if try_insert_first { 2 + 3 } else { 5 + 3 };
+    if !inspected_active && context.remaining_calls() >= post_upsert_floor {
+        let scope = crate::ingest::scope(&service);
+        inspect_active_version_for_dr(
+            context,
+            &mut service,
+            &input.token,
+            &candidate_names,
+            &scope,
+            false,
+            if try_insert_first { 2 } else { 5 },
+        )?;
+        inspected_active = true;
+    }
+    let _ = inspected_active;
 
     let mut svc_value = serialize(&service)?;
     svc_value["_audit"] = json!({

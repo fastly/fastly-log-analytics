@@ -2,6 +2,7 @@ import { getPageLoadId } from "@/lib/api";
 import { useDebugStore } from "@/stores/filterStore";
 import { BaseWorkerRpcClient } from "../worker-rpc";
 import { beginCloudLoading } from "../loading-progress";
+import { resetRangeLoaderCache } from "../range-loader";
 import { getDuckDBEngine } from "./duckdb";
 import {
   clearDashboardMemo,
@@ -416,22 +417,27 @@ export async function clearDashboardData(): Promise<void> {
   rpcClient = null;
   clearDashboardMemo();
   clearManifestCache();
+  resetRangeLoaderCache();
   updateDashboardCacheIdentity(null);
-  await clearRequestLogCaches();
+  await Promise.all([getDuckDBEngine().reset(), clearRequestLogCaches()]);
 }
 
 export async function setDashboardCacheIdentity(
   identity: string,
 ): Promise<void> {
+  const normalized = identity;
   const previous = dashboardCacheIdentity();
-  if (previous === identity) return;
+  if (previous === normalized) return;
   rpcClient?.terminate();
   rpcClient = null;
   clearDashboardMemo();
   clearManifestCache();
-  updateDashboardCacheIdentity(identity);
+  resetRangeLoaderCache();
+  updateDashboardCacheIdentity(normalized);
   if (previous !== null) {
-    await clearRequestLogCaches();
+    await Promise.all([getDuckDBEngine().reset(), clearRequestLogCaches()]);
+  } else {
+    await getDuckDBEngine().reset();
   }
 }
 

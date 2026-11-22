@@ -3151,6 +3151,17 @@ fn bug_cloud_dr_08_cold_start_scoring_fits_24_call_budget_and_heals_partial_svc_
         floor_key: Some("raw/2026/floor.zst".into()),
         rum_stats: Some(json!({"rows": 42, "bytes": 4096})),
     };
+    p.adapter.seed_resource(
+        "fixtureService",
+        "logging/fos",
+        json!({
+            "name": "Fastly Object Storage Logs",
+            "bucket_name": "fos-fixture-logs",
+            "region": "us-east-1",
+            "path": "raw/",
+            "response_condition": "log_analytics_condition"
+        }),
+    );
     p.adapter.seed_object_bytes(
         "fos-fixture-logs",
         "meta/cloud_dr_state.json",
@@ -3177,7 +3188,12 @@ fn bug_cloud_dr_08_cold_start_scoring_fits_24_call_budget_and_heals_partial_svc_
     assert_eq!(full_body["ok"], true);
     assert_eq!(full_body["views_restored"], 1);
     assert_eq!(full_body["catalog_generation"], 12);
-    assert_eq!(full_body["front_synced"], true);
+    assert_eq!(
+        p.adapter.records()["svc:fixtureService"].value["owned_endpoint_names"],
+        json!(["Fastly Object Storage Logs"]),
+        "BUG-CLOUD-DR-11: single-shot cold-start DR with scoring + 1 FOS key + views + head + rum_stats must verify owned_endpoint_names (16 + 3 + 5 = 24 <= 24)"
+    );
+    assert_eq!(full_body["front_synced"], false);
 
     // Subsequent duplicate recover when install is already active must reject 409 service_already_configured!
     let r_dup = p.call(
@@ -3257,11 +3273,11 @@ fn bug_cloud_dr_08_cold_start_scoring_fits_24_call_budget_and_heals_partial_svc_
     // 3. Atomic pre-check before svc:<sid>: when only 1 call remains right before final commit,
     // svc:<sid> must NOT be written!
     let p_atomic = Platform::new();
-    // Minimal cold-start recover uses 10 Platform::CALLS before final 2 CAS writes:
-    // validate_token(3) + install(1) + svc(1) + put_secret(1) + ensure_key(GET+POST+2*PUT = 4) = 10.
-    // Setting CALLS = 32 - 11 = 21 leaves exactly 1 call right before the 2 final CAS writes!
+    // Minimal cold-start recover uses 11 Platform::CALLS before final 2 CAS writes:
+    // validate_token(3) + install(1) + svc(1) + put_secret(1) + ensure_key(GET+POST+2*PUT = 4) + get_object(dr_key)(1) = 11.
+    // Setting CALLS = 32 - 12 = 20 leaves remaining_calls() == 1 right at dr.rs's `if context.remaining_calls() < 2` check!
     ELAPSED_MS.with(|e| e.set(0));
-    CALLS.with(|c| c.set(21));
+    CALLS.with(|c| c.set(20));
     SECRETS.with(|s| {
         *s.borrow_mut() =
             std::collections::BTreeSet::from(["front_key".into(), "session_key".into()])
@@ -3405,4 +3421,502 @@ fn bug_cloud_views_dr_09_views_save_rejects_dup_keys_and_control_chars_preservin
     assert_eq!(cold_res.status, 200);
     let cold_body: Value = serde_json::from_slice(&cold_res.body).unwrap();
     assert_eq!(cold_body["views_restored"], 1);
+}
+
+fn seed_coexisting_gce_and_attached_cloud(p: &Platform) {
+    for (resource, body) in [
+        (
+            "snippet",
+            json!({"name": "Fastly Log Analytics - vcl_recv", "type": "recv", "priority": "10", "content": "# gce-primary-recv"}),
+        ),
+        (
+            "snippet",
+            json!({"name": "Fastly Log Analytics - vcl_deliver", "type": "deliver", "priority": "10", "content": "# gce-primary-deliver"}),
+        ),
+        (
+            "snippet",
+            json!({"name": "flp-owner-fixtureApp", "type": "recv", "priority": "0", "content": "# flp-owner:fixtureApp:fixtureService"}),
+        ),
+        (
+            "condition",
+            json!({"name": "log_analytics_condition", "type": "RESPONSE", "priority": "10", "statement": "!segmented_caching.is_inner_req"}),
+        ),
+        (
+            "condition",
+            json!({"name": "flp_cloud_log_condition", "type": "RESPONSE", "priority": "10", "statement": "!segmented_caching.is_inner_req"}),
+        ),
+        (
+            "backend",
+            json!({"name": "fos_origin", "address": "gce-rum.object.fastlystorage.app", "port": 443, "use_ssl": true, "ssl_check_cert": true}),
+        ),
+        (
+            "dictionary",
+            json!({"name": "fos_credentials", "write_only": true}),
+        ),
+        (
+            "logging/fos",
+            json!({"name": "Fastly Object Storage Logs", "bucket_name": "fos-gce-logs", "region": "us-east-1", "path": "raw/", "response_condition": "log_analytics_condition"}),
+        ),
+        (
+            "logging/fos",
+            json!({"name": "FLP Cloud Logs", "bucket_name": "fos-fixture-logs", "region": "us-east-1", "path": "raw/request/year=%Y/", "response_condition": "flp_cloud_log_condition"}),
+        ),
+    ] {
+        p.adapter.seed_resource("fixtureService", resource, body);
+    }
+}
+
+#[test]
+fn bug_cloud_dr_10_coexistence_and_shared_bucket_path_scope_protects_primary_install() {
+    // PROBE_1F1: Poisoned cloud_dr_state.json downgrading Attached -> Managed must be rejected 409 at DR time,
+    // AND even if svc:<sid> were tampered to Capture::Managed with own_marker == true, reconcile/teardown
+    // must fail closed with 409 managed_resources_not_owned without touching GCE VM VCL/backends/dictionaries!
+    let p_1f1 = Platform::new();
+    seed_coexisting_gce_and_attached_cloud(&p_1f1);
+    p_1f1.adapter.seed_object_bytes(
+        "fos-fixture-logs",
+        "meta/cloud_dr_state.json",
+        serde_json::to_vec(&CloudDrState {
+            schema_version: SCHEMA_VERSION,
+            updated_at: 1_800_000_000,
+            service_id: "fixtureService".into(),
+            service: json!({
+                "capture": "managed",
+                "logging_enabled": true,
+                "logging_endpoint_name": "Cloud Temp Logs",
+                "rum": {"enabled": true, "endpoint_name": "Cloud Temp RUM", "log_period": 60}
+            }),
+            views: vec![],
+            catalog_head: None,
+            floor_key: None,
+            rum_stats: None,
+        })
+        .unwrap(),
+    );
+    let r_1f1 = p_1f1.call(
+        "POST",
+        "/api/admin/provision/recover",
+        json!({
+            "token": "fixture-token",
+            "service_id": "fixtureService",
+            "fos_bucket": "fos-fixture-logs",
+            "fos_region": "us-east-1"
+        }),
+    );
+    assert_eq!(
+        r_1f1.status,
+        409,
+        "PROBE_1F1: Capture::Managed DR against coexisting Attached/GCE service must fail 409: {}",
+        String::from_utf8_lossy(&r_1f1.body)
+    );
+    assert!(!p_1f1.adapter.records().contains_key("svc:fixtureService"));
+
+    // Defense-in-depth in reconcile::discover even when own_marker == true & svc:<sid> claims Capture::Managed:
+    p_1f1
+        .adapter
+        .cas(
+            "admin:install",
+            None,
+            &json!({"service_id": "fixtureService", "job_id": null, "fence": 1}),
+        )
+        .unwrap();
+    p_1f1
+        .adapter
+        .cas(
+            "svc:fixtureService",
+            None,
+            &json!({
+                "service_id": "fixtureService",
+                "name": "Tampered Managed",
+                "status": "active",
+                "created_at": 1_800_000_000u64,
+                "updated_at": 1_800_000_000u64,
+                "config_version": 1,
+                "logging_enabled": true,
+                "logging_endpoint_name": "Cloud Temp Logs",
+                "log_period": 60,
+                "sample_rate": 100,
+                "edge_only": true,
+                "custom_condition": "",
+                "fos_bucket": "fos-fixture-logs",
+                "fos_prefix": "",
+                "fos_region": "us-east-1",
+                "fos_endpoint": "us-east-1.object.fastlystorage.app",
+                "log_fields": {"groups": ["A", "C"], "custom_fields": [], "field_overrides": {}, "field_limits": {}},
+                "field_limits": {},
+                "rum": {"enabled": true, "endpoint_name": "Cloud Temp RUM", "log_period": 60},
+                "fastly_token_ref": "fastly_token.fixtureService",
+                "fos_access_key_ref": "fos_ak.fixtureService",
+                "fos_secret_key_ref": "fos_sk.fixtureService",
+                "owner": "fixtureApp",
+                "bucket_adopted": true,
+                "bucket_checked": true,
+                "last_activated_version": null,
+                "last_reconcile": null,
+                "pending_job_id": null
+            }),
+        )
+        .unwrap();
+    let rec_1f1_job = p_1f1.json(
+        "POST",
+        "/api/admin/services/fixtureService/reconcile",
+        json!({"generation": p_1f1.service()["generation"]}),
+    )["job"]
+        .clone();
+    let rec_1f1_step = p_1f1.json(
+        "POST",
+        &format!(
+            "/api/admin/jobs/{}/step",
+            rec_1f1_job["id"].as_str().unwrap()
+        ),
+        json!({}),
+    )["job"]
+        .clone();
+    assert_eq!(rec_1f1_step["status"], "failed");
+    assert_eq!(rec_1f1_step["error"], "managed_resources_not_owned");
+    assert!(p_1f1
+        .adapter
+        .resources("fixtureService", "snippet")
+        .iter()
+        .any(|s| s["name"] == "Fastly Log Analytics - vcl_recv"
+            && s["content"] == "# gce-primary-recv"));
+    assert_eq!(
+        p_1f1.adapter.resources("fixtureService", "backend")[0]["address"],
+        "gce-rum.object.fastlystorage.app"
+    );
+
+    // PROBE_1F2: Benign "minimal" DR (missing cloud_dr_state.json) on a Capture::Attached service
+    // must infer Capture::Attached, set FLP Cloud Logs / FLP Cloud RUM, verify owned_endpoint_names,
+    // and preserve 100% of GCE VM VCL/backends/dictionaries/endpoints across teardown!
+    let p_1f2 = Platform::new();
+    seed_coexisting_gce_and_attached_cloud(&p_1f2);
+    let r_1f2 = p_1f2.call(
+        "POST",
+        "/api/admin/provision/recover",
+        json!({
+            "token": "fixture-token",
+            "service_id": "fixtureService",
+            "fos_bucket": "fos-fixture-logs",
+            "fos_region": "us-east-1"
+        }),
+    );
+    assert_eq!(r_1f2.status, 200);
+    let svc_1f2 = &p_1f2.adapter.records()["svc:fixtureService"].value;
+    assert_eq!(svc_1f2["capture"], "attached");
+    assert_eq!(svc_1f2["logging_endpoint_name"], "FLP Cloud Logs");
+    assert_eq!(svc_1f2["rum"]["endpoint_name"], "FLP Cloud RUM");
+    assert_eq!(svc_1f2["owned_endpoint_names"], json!(["FLP Cloud Logs"]));
+
+    let td_1f2 = p_1f2.json(
+        "POST",
+        "/api/admin/provision/teardown",
+        json!({
+            "service_id": "fixtureService",
+            "confirm_service_id": "fixtureService",
+            "token": "fixture-token",
+            "generation": p_1f2.service()["generation"]
+        }),
+    )["job"]
+        .clone();
+    p_1f2.drain(td_1f2);
+    let rem_snippets: Vec<String> = p_1f2
+        .adapter
+        .resources("fixtureService", "snippet")
+        .into_iter()
+        .filter_map(|v| v["name"].as_str().map(str::to_owned))
+        .collect();
+    assert!(rem_snippets.contains(&"Fastly Log Analytics - vcl_recv".to_owned()));
+    assert!(rem_snippets.contains(&"Fastly Log Analytics - vcl_deliver".to_owned()));
+    assert!(!rem_snippets.contains(&"flp-owner-fixtureApp".to_owned()));
+    let rem_fos: Vec<String> = p_1f2
+        .adapter
+        .resources("fixtureService", "logging/fos")
+        .into_iter()
+        .filter_map(|v| v["name"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(rem_fos, vec!["Fastly Object Storage Logs"]);
+    assert_eq!(
+        p_1f2.adapter.resources("fixtureService", "backend").len(),
+        1
+    );
+    assert_eq!(
+        p_1f2
+            .adapter
+            .resources("fixtureService", "dictionary")
+            .len(),
+        1
+    );
+
+    // PROBE_1F3: Shared FOS bucket with fos_prefix ("cloud/") must reject High-Scale's "hs/raw/" endpoint
+    // with 409 resource_name_collision instead of claiming and deleting it!
+    let p_1f3 = Platform::new();
+    for (resource, body) in [
+        (
+            "snippet",
+            json!({"name": "flp-owner-fixtureApp", "type": "recv", "priority": "0", "content": "# flp-owner:fixtureApp:fixtureService"}),
+        ),
+        (
+            "logging/fos",
+            json!({"name": "Fastly Object Storage Logs", "bucket_name": "fos-fixture-logs", "region": "us-east-1", "path": "hs/raw/", "response_condition": "log_analytics_condition"}),
+        ),
+        (
+            "logging/fos",
+            json!({"name": "FLP Cloud Logs", "bucket_name": "fos-fixture-logs", "region": "us-east-1", "path": "cloud/raw/", "response_condition": "flp_cloud_log_condition"}),
+        ),
+    ] {
+        p_1f3
+            .adapter
+            .seed_resource("fixtureService", resource, body);
+    }
+    p_1f3.adapter.seed_object_bytes(
+        "fos-fixture-logs",
+        "cloud/meta/cloud_dr_state.json",
+        serde_json::to_vec(&CloudDrState {
+            schema_version: SCHEMA_VERSION,
+            updated_at: 1_800_000_000,
+            service_id: "fixtureService".into(),
+            service: json!({
+                "capture": "managed",
+                "logging_enabled": true,
+                "logging_endpoint_name": "Fastly Object Storage Logs",
+                "fos_prefix": "cloud/"
+            }),
+            views: vec![],
+            catalog_head: None,
+            floor_key: None,
+            rum_stats: None,
+        })
+        .unwrap(),
+    );
+    let r_1f3 = p_1f3.call(
+        "POST",
+        "/api/admin/provision/recover",
+        json!({
+            "token": "fixture-token",
+            "service_id": "fixtureService",
+            "fos_bucket": "fos-fixture-logs",
+            "fos_region": "us-east-1",
+            "fos_prefix": "cloud/"
+        }),
+    );
+    assert_eq!(
+        r_1f3.status,
+        409,
+        "PROBE_1F3: shared-bucket foreign prefix 'hs/raw/' must be rejected 409: {}",
+        String::from_utf8_lossy(&r_1f3.body)
+    );
+    assert!(!p_1f3.adapter.records().contains_key("svc:fixtureService"));
+}
+
+#[test]
+fn bug_cloud_dr_11_post_dr_reconcile_self_heals_verified_endpoints_and_preseed_views_fits_24_call_budget(
+) {
+    let make_scoring_platform = |n_keys: usize, preseed_views: bool| -> Platform {
+        let p = Platform::new();
+        let (_, sc_svc) = p
+            .adapter
+            .api(fastly_log_analytics::admin::ApiRequest {
+                method: "POST",
+                path: "/service",
+                token: "fixture-token",
+                body: Some(json!({
+                    "name": "Session Scoring Service for fixtureService",
+                    "type": "wasm"
+                })),
+                timeout: std::time::Duration::from_secs(5),
+                query: "",
+            })
+            .unwrap();
+        let scorer_sid = sc_svc["id"].as_str().unwrap().to_owned();
+        let (_, k_resp) = p
+            .adapter
+            .api(fastly_log_analytics::admin::ApiRequest {
+                method: "POST",
+                path: "/resources/stores/config",
+                token: "fixture-token",
+                body: Some(json!({"name": format!("scoring_keys_{scorer_sid}")})),
+                timeout: std::time::Duration::from_secs(5),
+                query: "",
+            })
+            .unwrap();
+        let (_, c_resp) = p
+            .adapter
+            .api(fastly_log_analytics::admin::ApiRequest {
+                method: "POST",
+                path: "/resources/stores/config",
+                token: "fixture-token",
+                body: Some(json!({"name": format!("scoring_config_{scorer_sid}")})),
+                timeout: std::time::Duration::from_secs(5),
+                query: "",
+            })
+            .unwrap();
+        let (_, m_resp) = p
+            .adapter
+            .api(fastly_log_analytics::admin::ApiRequest {
+                method: "POST",
+                path: "/resources/stores/kv",
+                token: "fixture-token",
+                body: Some(json!({"name": format!("scoring_matrix_{scorer_sid}")})),
+                timeout: std::time::Duration::from_secs(5),
+                query: "",
+            })
+            .unwrap();
+        for _ in 0..n_keys {
+            let _ = p
+                .adapter
+                .api(fastly_log_analytics::admin::ApiRequest {
+                    method: "POST",
+                    path: "/resources/object-storage/access-keys",
+                    token: "fixture-token",
+                    body: Some(json!({
+                        "permission": "read-write-objects",
+                        "description": "flp-fixtureApp-fixtureService",
+                        "buckets": ["fos-fixture-logs"]
+                    })),
+                    timeout: std::time::Duration::from_secs(5),
+                    query: "",
+                })
+                .unwrap();
+        }
+        p.adapter.seed_resource(
+            "fixtureService",
+            "snippet",
+            json!({"name": "flp-owner-fixtureApp", "type": "recv", "priority": "0", "content": "# flp-owner:fixtureApp:fixtureService"}),
+        );
+        p.adapter.seed_resource(
+            "fixtureService",
+            "logging/fos",
+            json!({
+                "name": "Fastly Object Storage Logs",
+                "bucket_name": "fos-fixture-logs",
+                "region": "us-east-1",
+                "path": "raw/request/year=%Y/month=%m/day=%d/hour=%H/minute=%M/",
+                "response_condition": "log_analytics_condition"
+            }),
+        );
+        if preseed_views {
+            p.adapter
+                .cas(
+                    "views:fixtureService",
+                    None,
+                    &json!({"views": [], "updated_at": 1}),
+                )
+                .unwrap();
+        }
+        let head = Head {
+            version: fastly_log_analytics::ingest::catalog::VERSION,
+            generation: 7,
+            manifest: Some("processed/_catalog/manifest=7-fixtureService.json".into()),
+            recent: vec![Event {
+                cursor: "fixtureService:7".into(),
+                generation: 7,
+                committed_at: Some("2026-11-21T00:00:00Z".into()),
+                manifest: Some("processed/_catalog/manifest=7-fixtureService.json".into()),
+            }],
+            ..Head::default()
+        };
+        p.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            "meta/cloud_dr_state.json",
+            serde_json::to_vec(&CloudDrState {
+                schema_version: SCHEMA_VERSION,
+                updated_at: 1_800_000_000,
+                service_id: "fixtureService".into(),
+                service: json!({
+                    "scoring": {
+                        "enabled": false,
+                        "scoring_service_id": scorer_sid,
+                        "scoring_service_name": "Session Scoring Service for fixtureService",
+                        "scoring_domain": "fos-fixtureservice-session-scorer.edgecompute.app",
+                        "scoring_keys_store_id": k_resp["id"],
+                        "scoring_config_store_id": c_resp["id"],
+                        "scoring_matrix_store_id": m_resp["id"],
+                        "enabled_at": "2026-11-20T00:00:00Z",
+                        "deployed_package_sha": "abc",
+                        "deployed_package_files_hash": "def",
+                        "deployed_vcl_sha": "ghi",
+                        "exclude_url_regex": ""
+                    }
+                }),
+                views: vec![SavedView {
+                    id: "v-dr11".into(),
+                    service_id: "fixtureService".into(),
+                    name: "Ops View".into(),
+                    filters_json: r#"{"status":500}"#.into(),
+                    time_range_type: Some("1h".into()),
+                    start_time: None,
+                    end_time: None,
+                    page: Some("/dashboard".into()),
+                    created_at: Some("2026-11-21T00:00:00Z".into()),
+                }],
+                catalog_head: Some(head),
+                floor_key: Some("raw/2026/floor.zst".into()),
+                rum_stats: Some(json!({"rows": 9})),
+            })
+            .unwrap(),
+        );
+        p
+    };
+
+    // 1. PROBE_2A_BUDGET [n_keys=1, preseed_views=true]: by-value try_insert_first keeps watermarks 1-call CAS -> 200 OK (<= 24 calls)!
+    let p_preseed = make_scoring_platform(1, true);
+    let r_preseed = p_preseed.call(
+        "POST",
+        "/api/admin/provision/recover",
+        json!({
+            "token": "fixture-token",
+            "service_id": "fixtureService",
+            "fos_bucket": "fos-fixture-logs",
+            "fos_region": "us-east-1"
+        }),
+    );
+    assert_eq!(
+        r_preseed.status,
+        200,
+        "PROBE_2A_BUDGET [n_keys=1, preseed_views=true] must succeed 200 OK within <=24 calls: {}",
+        String::from_utf8_lossy(&r_preseed.body)
+    );
+    assert!(p_preseed
+        .adapter
+        .records()
+        .contains_key("svc:fixtureService"));
+    assert_eq!(
+        p_preseed.adapter.records()["admin:install"].value["service_id"],
+        "fixtureService"
+    );
+
+    // 2. PROBE_2B [n_keys=2]: when budget forces owned_endpoint_names == [] at DR time,
+    // subsequent reconcile self-heals verified Cloud endpoint into owned_endpoint_names and completes cleanly!
+    let p_2keys = make_scoring_platform(2, false);
+    let r_2keys = p_2keys.call(
+        "POST",
+        "/api/admin/provision/recover",
+        json!({
+            "token": "fixture-token",
+            "service_id": "fixtureService",
+            "fos_bucket": "fos-fixture-logs",
+            "fos_region": "us-east-1"
+        }),
+    );
+    assert_eq!(r_2keys.status, 200);
+    assert_eq!(
+        p_2keys.adapter.records()["svc:fixtureService"].value["owned_endpoint_names"],
+        json!([])
+    );
+
+    let rec_job = p_2keys.json(
+        "POST",
+        "/api/admin/services/fixtureService/reconcile",
+        json!({"generation": p_2keys.service()["generation"]}),
+    )["job"]
+        .clone();
+    let rec_done = p_2keys.drain(rec_job);
+    assert_eq!(
+        rec_done["status"], "complete",
+        "PROBE_2B: post-DR reconcile must self-heal verified Cloud endpoint instead of wedging 409: {rec_done}"
+    );
+    assert_eq!(
+        p_2keys.adapter.records()["svc:fixtureService"].value["owned_endpoint_names"],
+        json!(["Fastly Object Storage Logs"])
+    );
 }

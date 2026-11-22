@@ -1355,9 +1355,28 @@ describe("persistent Parquet store", () => {
     expect(seenFileServiceHeaders).toEqual(["svc-a"]);
     adminRead.release?.();
 
-    // Sign out Alice and sign in Bob (AnalystNoPii on svc-b, forbidden 403 on whole-file /api/file)
-    await clearDashboardData();
+    // Auditor Challenge 3: clearRequestLogCaches() with UNCHANGED (scope, serviceId, etag) must evict >64 KiB memoryFiles in RAM!
+    await clearRequestLogCaches();
     await getDuckDBEngine().reset();
+    clearManifestCache();
+    const adminReadAfterCacheClear = await ensureCloudRange(
+      fromIso,
+      toIso,
+      new AbortController().signal,
+      ["request"],
+      { serviceId: "svc-a", projection: { columns: ["timestamp", "url", "client_ip"] } },
+    );
+    expect(wholeFileNetworkHits).toBe(2);
+    adminReadAfterCacheClear.release?.();
+
+    // Sign out Alice and sign in Bob (AnalystNoPii on svc-b, forbidden 403 on whole-file /api/file).
+    // IMPORTANT: Do NOT manually call getDuckDBEngine().reset() here — clearDashboardData() MUST reset it!
+    await clearDashboardData();
+    const postLogoutRows = await getDuckDBEngine()
+      .readContext()
+      .executeSql("SELECT count(*) AS cnt FROM requests");
+    expect(postLogoutRows).toEqual([{ cnt: 0 }]);
+
     activeRole = "analyst-no-pii";
     await setDashboardCacheIdentity("bob:analyst-no-pii");
 
@@ -1370,8 +1389,161 @@ describe("persistent Parquet store", () => {
         { serviceId: "svc-b", projection: { columns: ["timestamp", "url"] } },
       ),
     ).rejects.toThrow(/403/);
-    expect(wholeFileNetworkHits).toBe(2);
-    expect(seenFileServiceHeaders).toEqual(["svc-a", "svc-b"]);
+    expect(wholeFileNetworkHits).toBe(3);
+    expect(seenFileServiceHeaders).toEqual(["svc-a", "svc-a", "svc-b"]);
+  });
+
+  it("aborts in-flight <65% fetchRange + ensureCloudRange and >=65% fetchFile/storeQueue across clearDashboardData leaving 0 DuckDB rows and empty CacheStorage", async () => {
+    const ls = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (k: string) => ls.get(k) ?? null,
+      setItem: (k: string, v: string) => {
+        ls.set(k, v);
+      },
+      removeItem: (k: string) => {
+        ls.delete(k);
+      },
+    });
+    const { stores } = fakeCacheStorage({});
+    const { parquetWriteBuffer } = await import("hyparquet-writer");
+    const { ensureCloudRange, cloudFileSource } = await import("../range-loader");
+    const { clearManifestCache } = await import("./manifest");
+    const { getDuckDBEngine } = await import("./duckdb");
+    const { clearDashboardData, setDashboardCacheIdentity } = await import("./client");
+
+    clearManifestCache();
+    await getDuckDBEngine().reset();
+
+    const fromIso = "2026-11-21T02:00:00.000Z";
+    const toIso = "2026-11-21T03:00:00.000Z";
+    const rows = 800;
+    // Large padding column ensures ["timestamp", "ip"] projection is well under 65% of file size -> uses fetchRange!
+    const widePiiBytes = parquetWriteBuffer({
+      codec: "UNCOMPRESSED",
+      rowGroupSize: 400,
+      columnData: [
+        { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: rows }, (_, i) => new Date(Date.parse(fromIso) + i)) },
+        { name: "ip", type: "STRING", data: Array.from({ length: rows }, () => "203.0.113.55") },
+        { name: "cookie_session", type: "STRING", data: Array.from({ length: rows }, () => "ALICE_RAW_COOKIE_999") },
+        { name: "url", type: "STRING", data: Array.from({ length: rows }, (_, i) => `/alice-secret-${i}-${"x".repeat(520)}`) },
+      ],
+    });
+    expect(widePiiBytes.byteLength).toBeGreaterThan(400 * 1024);
+
+    const relKey = "processed/request/year=2026/month=11/day=21/hour=02/window=10-20.parquet";
+    const pendingDataGate: Array<() => void> = [];
+    let sawDataRangeRead = false;
+    let notifyDataRangeStarted: (() => void) | null = null;
+    const dataRangeStarted = new Promise<void>((resolve) => {
+      notifyDataRangeStarted = resolve;
+    });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), "http://localhost");
+        const headers = new Headers(init?.headers);
+        const sig = init?.signal;
+        sig?.throwIfAborted();
+        if (url.pathname === "/api/files") {
+          return Response.json({
+            files: [
+              {
+                key: relKey,
+                start: fromIso,
+                end: toIso,
+                size: widePiiBytes.byteLength,
+                rows,
+                etag: "\"etag-wide-alice\"",
+              },
+            ],
+            next_cursor: null,
+            complete: true,
+            catalog_generation: 1,
+          });
+        }
+        if (url.pathname === "/api/file") {
+          const range = headers.get("range");
+          if (range) {
+            const m = /^bytes=(\d+)-(\d+)$/.exec(range)!;
+            const start = Number(m[1]);
+            const end = Number(m[2]);
+            // Let the tail footer read complete immediately; hold the column chunk range read open across logout!
+            const isFooterTail = end === widePiiBytes.byteLength - 1 && start > 0;
+            if (!isFooterTail) {
+              sawDataRangeRead = true;
+              notifyDataRangeStarted?.();
+              await new Promise<void>((resolve, reject) => {
+                const onAbort = () => reject(sig?.reason ?? new DOMException("Aborted", "AbortError"));
+                if (sig?.aborted) {
+                  onAbort();
+                  return;
+                }
+                sig?.addEventListener("abort", onAbort, { once: true });
+                pendingDataGate.push(() => {
+                  sig?.removeEventListener("abort", onAbort);
+                  resolve();
+                });
+              });
+            }
+            sig?.throwIfAborted();
+            return new Response(widePiiBytes.slice(start, end + 1), {
+              status: 206,
+              headers: {
+                "content-range": `bytes ${start}-${end}/${widePiiBytes.byteLength}`,
+                etag: "\"etag-wide-alice\"",
+              },
+            });
+          }
+          // Also hold whole-file fetch open across logout to test fetchFile / storeQueue epoch guard!
+          await new Promise<void>((resolve) => {
+            pendingDataGate.push(resolve);
+          });
+          return new Response(widePiiBytes.slice(0), { status: 200 });
+        }
+        return new Response("Not Found", { status: 404 });
+      }),
+    );
+
+    await setDashboardCacheIdentity("alice:admin");
+    const inFlightRangePromise = ensureCloudRange(
+      fromIso,
+      toIso,
+      new AbortController().signal,
+      ["request"],
+      { serviceId: "svc-alice", projection: { columns: ["timestamp", "ip"] } },
+    ).then(
+      () => "RESOLVED",
+      () => "REJECTED",
+    );
+    const inFlightWholePromise = cloudFileSource("svc-alice")
+      .fetchFile(relKey, undefined, { identity: "whole-inflight-alice" })
+      .then(
+        () => "RESOLVED",
+        () => "REJECTED",
+      );
+
+    await dataRangeStarted;
+    expect(sawDataRangeRead).toBe(true);
+
+    // Sign out Alice while both <65% fetchRange and whole-file fetchFile are in flight!
+    await clearDashboardData();
+
+    // Release any mock network gates in case unpatched code didn't abort them
+    while (pendingDataGate.length > 0) {
+      pendingDataGate.shift()?.();
+    }
+    const rangeOutcome = await inFlightRangePromise;
+    await inFlightWholePromise;
+    await flushStore();
+    await flushStore();
+
+    expect(rangeOutcome).toBe("REJECTED");
+    const duckRowsAfter = await getDuckDBEngine()
+      .readContext()
+      .executeSql("SELECT count(*) AS cnt FROM requests");
+    expect(duckRowsAfter).toEqual([{ cnt: 0 }]);
+    expect([...stores.keys()]).toEqual([]);
   });
 
   it("tracks post-bootstrap cacheScope updates so warm reloads hit derived file cache", async () => {

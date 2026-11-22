@@ -1137,8 +1137,13 @@ def _is_postfix_factorial_tok(tokens: list[_Tok], pos: int) -> bool:
     return (
         0 < pos < len(tokens)
         and tokens[pos].kind == "OTHER"
-        and tokens[pos].val == "!"
-        and not _is_on_operator_tok_at(tokens, pos - 1)
+        and bool(tokens[pos].val)
+        and tokens[pos].val.strip("!") == ""
+        and (
+            _is_select_head_signed_top_end_tok(tokens, pos - 1)
+            or _is_postfix_factorial_tok(tokens, pos - 1)
+            or not _is_on_operator_tok_at(tokens, pos - 1)
+        )
     )
 
 
@@ -1166,6 +1171,8 @@ def _cannot_end_aliasable_tok(tokens: list[_Tok], pos: int, r: int, after_as_idx
     if tk.kind in ("COMMA", "SEMI", "LPAREN", "LBRACK", "LBRACE"):
         return True
     if tk.kind == "OTHER" and not _is_num_tok_val(tk.val):
+        if tk.val == "!" and (r % 2) == 0:
+            return False
         return not _is_postfix_factorial_tok(tokens, pos)
     if _is_select_head_modifier_end_tok(tokens, pos):
         if (r % 2) == 0:

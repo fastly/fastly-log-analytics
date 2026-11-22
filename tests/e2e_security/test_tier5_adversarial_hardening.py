@@ -731,6 +731,17 @@ fn main() {
     ok_sc["scoring_keys_store_id"] = k_ok["id"].clone();
     ok_sc["scoring_config_store_id"] = c_ok["id"].clone();
     ok_sc["scoring_matrix_store_id"] = m_ok["id"].clone();
+    rt_dr08.admin.seed_resource(
+        "fixtureService",
+        "logging/fos",
+        json!({
+            "name": "Fastly Object Storage Logs",
+            "bucket_name": "fos-fixture-logs",
+            "region": "us-east-1",
+            "path": "raw/",
+            "response_condition": "log_analytics_condition"
+        }),
+    );
     rt_dr08.admin.seed_object_bytes(
         "fos-fixture-logs",
         "meta/cloud_dr_state.json",
@@ -776,6 +787,12 @@ fn main() {
             "fos_region": "us-east-1"
         }),
     );
+    let cold_sc_owned_eps = rt_dr08
+        .admin
+        .records()
+        .get("svc:fixtureService")
+        .map(|r| r.value["owned_endpoint_names"].clone())
+        .unwrap_or(Value::Null);
 
     let rt_heal = ProbeRt::new();
     let _ = rt_heal.admin.cas("svc:fixtureService", None, &json!({
@@ -862,6 +879,156 @@ fn main() {
         "page": "/dashboard\n"
     }));
 
+    // Iteration-17 WS1: BUG-CLOUD-DR-10 (PROBE_1F1/1F2/1F3) & BUG-CLOUD-DR-11 (preseed_views=true + post-DR reconcile self-heal)
+    let seed_coexist = |p: &ProbeRt| {
+        for (res, body) in [
+            ("snippet", json!({"name": "Fastly Log Analytics - vcl_recv", "type": "recv", "priority": "10", "content": "# gce-recv"})),
+            ("snippet", json!({"name": "Fastly Log Analytics - vcl_deliver", "type": "deliver", "priority": "10", "content": "# gce-deliver"})),
+            ("snippet", json!({"name": "flp-owner-fixtureApp", "type": "recv", "priority": "0", "content": "# flp-owner:fixtureApp:fixtureService"})),
+            ("condition", json!({"name": "log_analytics_condition", "type": "RESPONSE", "priority": "10", "statement": "!segmented_caching.is_inner_req"})),
+            ("condition", json!({"name": "flp_cloud_log_condition", "type": "RESPONSE", "priority": "10", "statement": "!segmented_caching.is_inner_req"})),
+            ("logging/fos", json!({"name": "Fastly Object Storage Logs", "bucket_name": "fos-gce-logs", "region": "us-east-1", "path": "raw/", "response_condition": "log_analytics_condition"})),
+            ("logging/fos", json!({"name": "FLP Cloud Logs", "bucket_name": "fos-fixture-logs", "region": "us-east-1", "path": "raw/request/year=%Y/", "response_condition": "flp_cloud_log_condition"})),
+        ] {
+            p.admin.seed_resource("fixtureService", res, body);
+        }
+    };
+    let rt_1f1 = ProbeRt::new();
+    seed_coexist(&rt_1f1);
+    rt_1f1.admin.seed_object_bytes(
+        "fos-fixture-logs",
+        "meta/cloud_dr_state.json",
+        serde_json::to_vec(&CloudDrState {
+            schema_version: SCHEMA_VERSION,
+            updated_at: 1_800_000_000,
+            service_id: "fixtureService".into(),
+            service: json!({"capture": "managed", "logging_enabled": true, "logging_endpoint_name": "Cloud Temp Logs"}),
+            views: vec![],
+            catalog_head: None,
+            floor_key: None,
+            rum_stats: None,
+        }).unwrap(),
+    );
+    let (st_1f1_dr, _) = rt_1f1.call("POST", "/api/admin/provision/recover", json!({
+        "token": "fixture-token", "service_id": "fixtureService", "fos_bucket": "fos-fixture-logs", "fos_region": "us-east-1"
+    }));
+
+    let rt_1f2 = ProbeRt::new();
+    seed_coexist(&rt_1f2);
+    let (st_1f2_min, _) = rt_1f2.call("POST", "/api/admin/provision/recover", json!({
+        "token": "fixture-token", "service_id": "fixtureService", "fos_bucket": "fos-fixture-logs", "fos_region": "us-east-1"
+    }));
+    let min_1f2_capture = rt_1f2.admin.records().get("svc:fixtureService").and_then(|r| r.value["capture"].as_str().map(str::to_owned));
+    let min_1f2_owned = rt_1f2.admin.records().get("svc:fixtureService").map(|r| r.value["owned_endpoint_names"].clone()).unwrap_or(Value::Null);
+
+    let rt_1f3 = ProbeRt::new();
+    rt_1f3.admin.seed_resource("fixtureService", "logging/fos", json!({
+        "name": "Fastly Object Storage Logs", "bucket_name": "fos-fixture-logs", "region": "us-east-1", "path": "hs/raw/", "response_condition": "log_analytics_condition"
+    }));
+    rt_1f3.admin.seed_object_bytes(
+        "fos-fixture-logs",
+        "cloud/meta/cloud_dr_state.json",
+        serde_json::to_vec(&CloudDrState {
+            schema_version: SCHEMA_VERSION,
+            updated_at: 1_800_000_000,
+            service_id: "fixtureService".into(),
+            service: json!({"capture": "managed", "logging_enabled": true, "logging_endpoint_name": "Fastly Object Storage Logs", "fos_prefix": "cloud/"}),
+            views: vec![],
+            catalog_head: None,
+            floor_key: None,
+            rum_stats: None,
+        }).unwrap(),
+    );
+    let (st_1f3_prefix, _) = rt_1f3.call("POST", "/api/admin/provision/recover", json!({
+        "token": "fixture-token", "service_id": "fixtureService", "fos_bucket": "fos-fixture-logs", "fos_region": "us-east-1", "fos_prefix": "cloud/"
+    }));
+
+    // BUG-CLOUD-DR-11: preseed_views=true on cold-start scoring DR + post-DR reconcile self-heal when owned_endpoint_names == []
+    let rt_pre = ProbeRt::new();
+    let (_, sc_svc_pre) = rt_pre.admin.api(ApiRequest {
+        method: "POST", path: "/service", token: "fixture-token",
+        body: Some(json!({"name": "Session Scoring Service for fixtureService", "type": "wasm"})),
+        timeout: std::time::Duration::from_secs(5), query: "",
+    }).unwrap();
+    let sc_sid_pre = sc_svc_pre["id"].as_str().unwrap().to_owned();
+    let (_, k_pre) = rt_pre.admin.api(ApiRequest {
+        method: "POST", path: "/resources/stores/config", token: "fixture-token",
+        body: Some(json!({"name": format!("scoring_keys_{sc_sid_pre}")})),
+        timeout: std::time::Duration::from_secs(5), query: "",
+    }).unwrap();
+    let (_, c_pre) = rt_pre.admin.api(ApiRequest {
+        method: "POST", path: "/resources/stores/config", token: "fixture-token",
+        body: Some(json!({"name": format!("scoring_config_{sc_sid_pre}")})),
+        timeout: std::time::Duration::from_secs(5), query: "",
+    }).unwrap();
+    let (_, m_pre) = rt_pre.admin.api(ApiRequest {
+        method: "POST", path: "/resources/stores/kv", token: "fixture-token",
+        body: Some(json!({"name": format!("scoring_matrix_{sc_sid_pre}")})),
+        timeout: std::time::Duration::from_secs(5), query: "",
+    }).unwrap();
+    let _ = rt_pre.admin.api(ApiRequest {
+        method: "POST", path: "/resources/object-storage/access-keys", token: "fixture-token",
+        body: Some(json!({"permission": "read-write-objects", "description": "flp-fixtureApp-fixtureService", "buckets": ["fos-fixture-logs"]})),
+        timeout: std::time::Duration::from_secs(5), query: "",
+    }).unwrap();
+    let _ = rt_pre.admin.cas("views:fixtureService", None, &json!({"views": [], "updated_at": 1}));
+    rt_pre.admin.seed_resource("fixtureService", "snippet", json!({"name": "flp-owner-fixtureApp", "type": "recv", "priority": "0", "content": "# flp-owner:fixtureApp:fixtureService"}));
+    rt_pre.admin.seed_resource("fixtureService", "logging/fos", json!({
+        "name": "Fastly Object Storage Logs", "bucket_name": "fos-fixture-logs", "region": "us-east-1",
+        "path": "raw/request/year=%Y/month=%m/day=%d/hour=%H/minute=%M/", "response_condition": "log_analytics_condition"
+    }));
+    let mut pre_sc = base_sc.clone();
+    pre_sc["enabled"] = json!(false);
+    pre_sc["scoring_service_id"] = json!(sc_sid_pre);
+    pre_sc["scoring_keys_store_id"] = k_pre["id"].clone();
+    pre_sc["scoring_config_store_id"] = c_pre["id"].clone();
+    pre_sc["scoring_matrix_store_id"] = m_pre["id"].clone();
+    rt_pre.admin.seed_object_bytes(
+        "fos-fixture-logs",
+        "meta/cloud_dr_state.json",
+        serde_json::to_vec(&CloudDrState {
+            schema_version: SCHEMA_VERSION,
+            updated_at: 1_800_000_000,
+            service_id: "fixtureService".into(),
+            service: json!({"scoring": pre_sc}),
+            views: vec![SavedView {
+                id: "pre-v".into(), service_id: "fixtureService".into(), name: "Ops View".into(),
+                filters_json: r#"{"status":500}"#.into(), time_range_type: Some("1h".into()),
+                start_time: None, end_time: None, page: Some("/dashboard".into()), created_at: Some("2026-11-21T00:00:00Z".into()),
+            }],
+            catalog_head: Some(fastly_log_analytics::ingest::catalog::Head {
+                version: fastly_log_analytics::ingest::catalog::VERSION, generation: 9,
+                manifest: Some("processed/_catalog/manifest=9-fixtureService.json".into()),
+                recent: vec![fastly_log_analytics::ingest::catalog::Event {
+                    cursor: "fixtureService:9".into(), generation: 9,
+                    committed_at: Some("2026-11-21T00:00:00Z".into()),
+                    manifest: Some("processed/_catalog/manifest=9-fixtureService.json".into()),
+                }],
+                ..Default::default()
+            }),
+            floor_key: Some("raw/2026/f.zst".into()),
+            rum_stats: Some(json!({"rows": 7})),
+        }).unwrap(),
+    );
+    let (st_preseed_views_dr, _) = rt_pre.call("POST", "/api/admin/provision/recover", json!({
+        "token": "fixture-token", "service_id": "fixtureService", "fos_bucket": "fos-fixture-logs", "fos_region": "us-east-1"
+    }));
+    let reconcile_self_heal_status = if st_preseed_views_dr == 200 {
+        let gen_pre = rt_pre.admin.get("svc:fixtureService").unwrap().unwrap().generation;
+        let (_, start_b) = rt_pre.call("POST", "/api/admin/services/fixtureService/reconcile", json!({"generation": gen_pre}));
+        let mut jb = start_b["job"].clone();
+        for _ in 0..25 {
+            if jb["status"] == "complete" || jb["status"] == "failed" {
+                break;
+            }
+            let (_, step_b) = rt_pre.call("POST", &format!("/api/admin/jobs/{}/step", jb["id"].as_str().unwrap()), json!({}));
+            jb = step_b["job"].clone();
+        }
+        jb["status"].as_str().unwrap_or("unknown").to_owned()
+    } else {
+        "dr_failed".to_owned()
+    };
+
     println!("{}", json!({
         "st_trav": st_trav,
         "st_own_svc": st_own_svc,
@@ -883,12 +1050,20 @@ fn main() {
         "st_absent_ep_dr": st_absent_ep_dr,
         "absent_owned_eps": absent_owned_eps,
         "st_cold_sc_dr": st_cold_sc_dr,
+        "cold_sc_owned_eps": cold_sc_owned_eps,
         "cold_sc_front_synced": body_cold_sc_dr["front_synced"],
         "st_partial_heal_dr": st_partial_heal_dr,
         "st_dup_after_heal_dr": st_dup_after_heal_dr,
         "st_save_dupkey_view": st_save_dupkey_view,
         "st_save_ctrl_name_view": st_save_ctrl_name_view,
         "st_save_ctrl_page_view": st_save_ctrl_page_view,
+        "st_1f1_dr": st_1f1_dr,
+        "st_1f2_min": st_1f2_min,
+        "min_1f2_capture": min_1f2_capture,
+        "min_1f2_owned": min_1f2_owned,
+        "st_1f3_prefix": st_1f3_prefix,
+        "st_preseed_views_dr": st_preseed_views_dr,
+        "reconcile_self_heal_status": reconcile_self_heal_status,
     }));
 }
 """,
@@ -929,12 +1104,20 @@ fn main() {
     assert dr14["st_absent_ep_dr"] == 200
     assert dr14["absent_owned_eps"] == []
     assert dr14["st_cold_sc_dr"] == 200
-    assert dr14["cold_sc_front_synced"] is True
+    assert dr14["cold_sc_owned_eps"] == ["Fastly Object Storage Logs"]
+    assert dr14["cold_sc_front_synced"] is False
     assert dr14["st_partial_heal_dr"] == 200
     assert dr14["st_dup_after_heal_dr"] == 409
     assert dr14["st_save_dupkey_view"] == 400
     assert dr14["st_save_ctrl_name_view"] == 400
     assert dr14["st_save_ctrl_page_view"] == 400
+    assert dr14["st_1f1_dr"] == 409
+    assert dr14["st_1f2_min"] == 200
+    assert dr14["min_1f2_capture"] == "attached"
+    assert dr14["min_1f2_owned"] == ["FLP Cloud Logs"]
+    assert dr14["st_1f3_prefix"] == 409
+    assert dr14["st_preseed_views_dr"] == 200
+    assert dr14["reconcile_self_heal_status"] == "complete"
 
 
 def test_t5_c04_c12_cloud_disabled_rum_faro_cdn_shield_reconcile_cookie_and_fos_guards(
@@ -3546,12 +3729,21 @@ def test_t5_hs03_hs12_py08_sql_console_table_filter_parser_differentials_union_s
         "SELECT DISTINCT ON (1) top - 1 AS as FROM ops_secret",
         "WITH x AS AS SELECT top - 0 AS AS AS as FROM ops_secret",
         "SELECT string_agg(chr(x.as), '' ORDER BY x.i) FROM (SELECT top - 0 AS as, g.i FROM ops_secret, generate_series(1, length(ops_secret.secret_col)) AS g(i), LATERAL (SELECT ord(ops_secret.secret_col[g.i]) AS top)) AS x",
+        "SELECT top + 0! AS as FROM ops_secret",
+        "SELECT top - 0! AS as FROM ops_secret",
+        "SELECT ALL top + 0! AS as FROM ops_secret",
+        "SELECT DISTINCT top - 0! AS as FROM ops_secret",
+        "SELECT DISTINCT ON (1) top + 0! AS as FROM ops_secret",
+        "SELECT top + 0 ! ! AS as FROM ops_secret",
+        "SELECT top + 0!! AS as FROM ops_secret",
+        "SELECT string_agg(chr(ch::INT), '' ORDER BY pos) AS stolen FROM (SELECT pos, ch, ch AS top FROM range(1, 25) t1(pos), range(32, 127) t2(ch), logs) AS grid WHERE (SELECT top + 0! AS as FROM ops_secret WHERE ascii(substring(secret_col, pos, 1)) = ch) IS NOT NULL",
     ):
         with pytest.raises(SQLValidationError):
             validate_user_sql(iter16_duck_blocked, allowed_tables={"logs"})
 
     for iter16_hs_blocked in (
         "SELECT top - 0 AS as FROM high_scale_batch_publications",
+        "SELECT top + 0! AS as FROM high_scale_batch_publications",
         "WITH secret_meta AS as SELECT TOP + 1 as select FROM high_scale_batch_publications",
     ):
         r_i16_blk = c.post("/api/query", json={"service_id": "svc-a", "sql": iter16_hs_blocked})
@@ -3560,10 +3752,13 @@ def test_t5_hs03_hs12_py08_sql_console_table_filter_parser_differentials_union_s
     for iter16_benign_duck in (
         "SELECT top - 1 AS where FROM logs",
         "SELECT top - 1 AS select FROM logs",
+        "SELECT top + 0! AS as FROM logs",
+        "SELECT top - 0! AS where FROM logs",
     ):
         assert validate_user_sql(iter16_benign_duck, allowed_tables={"logs"}).parse_tree.get("statements")
 
     for iter16_rf_sql in (
+        "WITH 1 AS top SELECT top - 1 AS as FROM request_facts WHERE service_id = 'svc-b'",
         "WITH 1 AS top SELECT top - 1 AS where, url FROM request_facts WHERE service_id = 'svc-b'",
         "WITH 1 AS top SELECT top - 1 AS select, url FROM request_facts WHERE service_id = 'svc-b'",
     ):
@@ -4738,3 +4933,22 @@ console.log('NODE_PROXY_AND_CSV_PARITY_OK');
         check=False,
     )
     assert node_probe.returncode == 0 and "NODE_PROXY_AND_CSV_PARITY_OK" in node_probe.stdout, node_probe.stderr
+
+    # Iteration-17 WS3 behavioral check: run Vitest on logout DuckDB reset + in-flight fetchRange/storeQueue epoch isolation
+    vitest_logout_probe = subprocess.run(
+        [
+            "npx",
+            "vitest",
+            "run",
+            "--no-cache",
+            "lib/cloud-engine/dashboard/sources.test.ts",
+            "-t",
+            "wipes range-loader singleton|aborts in-flight",
+        ],
+        cwd=str(REPO_ROOT / "frontend"),
+        capture_output=True,
+        text=True,
+        timeout=45,
+        check=False,
+    )
+    assert vitest_logout_probe.returncode == 0, f"{vitest_logout_probe.stdout}\n{vitest_logout_probe.stderr}"
