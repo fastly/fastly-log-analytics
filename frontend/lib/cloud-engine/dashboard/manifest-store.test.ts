@@ -68,6 +68,37 @@ describe("manifest snapshots", () => {
     );
   });
 
+  it("round-trips a listing with inline summaries under its summaries scope", async () => {
+    fakeCaches();
+    const summariesKey = JSON.stringify([scope, "request", "raw", true]);
+    const withSummaries: ManifestSnapshot = {
+      ...snapshot(),
+      manifest: {
+        ...snapshot().manifest,
+        summaryFiles: [
+          { key: "s1", start: from, end: to, size: 5, rows: 1, kind: "day" },
+        ],
+        summaryRange: { from, to },
+      },
+    };
+    await persistManifestSnapshot(summariesKey, withSummaries);
+    expect(await readManifestSnapshot(summariesKey, Date.now())).toEqual(
+      withSummaries,
+    );
+    await persistManifestSnapshot(cacheKey, withSummaries);
+    expect(await readManifestSnapshot(cacheKey, Date.now())).toBeNull();
+    const otherRange = {
+      ...withSummaries,
+      manifest: {
+        ...withSummaries.manifest,
+        summaryRange: { from, to: "2026-01-12T00:00:00.000Z" },
+      },
+    };
+    const otherKey = JSON.stringify(["other", "request", "raw", true]);
+    await persistManifestSnapshot(otherKey, otherRange);
+    expect(await readManifestSnapshot(otherKey, Date.now())).toBeNull();
+  });
+
   it.each([
     "not-json",
     JSON.stringify([scope, "request", "summary", false]),
@@ -457,5 +488,43 @@ describe("manifest snapshots", () => {
     await expect(deleteManifestSnapshots()).resolves.toBe(true);
 
     expect(deleted).toHaveBeenCalledWith(MANIFEST_SNAPSHOT_CACHE);
+  });
+
+  it("skips CacheStorage and error telemetry writes when bumpStoreMetaEpoch runs during persistManifestSnapshot or storageEstimate", async () => {
+    const { bumpStoreMetaEpoch } = await import("./file-store");
+    const { entries, open } = fakeCaches();
+
+    let releaseEstimate: () => void = () => {};
+    let notifyEstimateStarted: () => void = () => {};
+    vi.stubGlobal("navigator", {
+      storage: {
+        estimate: async () => {
+          notifyEstimateStarted?.();
+          await new Promise<void>((r) => {
+            releaseEstimate = r;
+          });
+          return { usage: 50, quota: 1_000_000 };
+        },
+      },
+    });
+
+    open.mockImplementationOnce(async (name: string) => {
+      if (name === MANIFEST_SNAPSHOT_CACHE) {
+        throw new Error("401 unauthorized manifest write");
+      }
+      return { match: vi.fn(), put: vi.fn(), delete: vi.fn() } as unknown as Cache;
+    });
+
+    const estimateStarted = new Promise<void>((r) => {
+      notifyEstimateStarted = r;
+    });
+    const pendingPersist = persistManifestSnapshot(cacheKey, snapshot());
+    await estimateStarted;
+    bumpStoreMetaEpoch();
+    releaseEstimate?.();
+    await pendingPersist;
+
+    expect(entries.size).toBe(0);
+    expect(await readStoreError()).toBeNull();
   });
 });

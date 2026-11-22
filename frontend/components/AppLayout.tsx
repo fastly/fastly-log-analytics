@@ -20,6 +20,7 @@ import {
 } from '@/hooks/useBootstrap'
 import { PlotlyPrewarm, MapPrewarm } from '@/components/PlotlyChart'
 import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
+import { CLOUD_RAW_SCAN_PREFIXES, matchesCloudRoute } from '@/lib/cloud-engine/boot-routes'
 import { CloudLoadingProgress } from '@/components/LoadingProgress'
 import packageJson from '../package.json'
 import {
@@ -216,16 +217,19 @@ export function AppLayout({
   // Other analytical routes scan in the page's own DuckDB; a dashboard worker
   // there would download and compile a second copy of the WASM for nothing.
   const needsDashboardEngine = matchesPrefix(pathname, ['/dashboard'])
+  const needsCloudBoot = needsPlotlyPrewarm || matchesCloudRoute(pathname, CLOUD_RAW_SCAN_PREFIXES)
   const cloudIdentity = isSuccess && bootstrapData ? cloudCacheIdentity(bootstrapData) : null
   React.useEffect(() => {
-    if (!IS_CLOUD_MODE || !needsPlotlyPrewarm || needsLogin || cloudIdentity === null) return
+    if (!IS_CLOUD_MODE || !needsCloudBoot || needsLogin || cloudIdentity === null) return
     // Setting a new session identity terminates the engine worker, so a worker
     // prewarmed before it would be killed mid-download.
     void import('@/lib/cloud-engine/dashboard/client').then(async ({ setDashboardCacheIdentity, prewarmDashboardEngine }) => {
       await setDashboardCacheIdentity(cloudIdentity)
       if (needsDashboardEngine) prewarmDashboardEngine()
+      const { bootCloudEngine } = await import('@/lib/cloud-engine/boot')
+      bootCloudEngine(pathname)
     })
-  }, [needsPlotlyPrewarm, needsDashboardEngine, needsLogin, cloudIdentity])
+  }, [needsCloudBoot, needsDashboardEngine, needsLogin, cloudIdentity, pathname])
 
   const isLoginPage = pathname.startsWith('/share-login')
   if (isLoginPage || needsLogin) {

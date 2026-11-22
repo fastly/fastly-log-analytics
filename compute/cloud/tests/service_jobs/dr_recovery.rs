@@ -4855,3 +4855,730 @@ fn bug_cloud_dr_12_13_14_coexistence_scoring_teardown_minimal_attached_and_cold_
         }
     }
 }
+
+#[test]
+fn bug_cloud_dr_15_16_coexistence_scoring_mutation_routes_catalog_scan_and_foreign_owner_local_teardown(
+) {
+    struct RichFosReset;
+    impl Drop for RichFosReset {
+        fn drop(&mut self) {
+            RICH_FOS.with(|r| r.set(false));
+            MTIMES.with(|m| m.borrow_mut().clear());
+        }
+    }
+
+    let seed_gce_coexist_with_scoring =
+        |p: &Platform, n_keys: usize| -> (String, String, String, String) {
+            for (res, body) in [
+                (
+                    "snippet",
+                    json!({
+                        "name": "Fastly Log Analytics - vcl_recv",
+                        "type": "recv",
+                        "priority": "10",
+                        "content": "# gce-primary-recv"
+                    }),
+                ),
+                (
+                    "snippet",
+                    json!({
+                        "name": "Fastly Log Analytics - vcl_deliver",
+                        "type": "deliver",
+                        "priority": "10",
+                        "content": "# gce-primary-deliver"
+                    }),
+                ),
+                (
+                    "snippet",
+                    json!({
+                        "name": "Fastly Log Analytics - Session Scoring (vcl_recv)",
+                        "type": "recv",
+                        "priority": "20",
+                        "content": "# gce-scoring-recv"
+                    }),
+                ),
+                (
+                    "snippet",
+                    json!({
+                        "name": "Fastly Log Analytics - Session Scoring (vcl_pass)",
+                        "type": "pass",
+                        "priority": "20",
+                        "content": "# gce-scoring-pass"
+                    }),
+                ),
+                (
+                    "condition",
+                    json!({
+                        "name": "log_analytics_condition",
+                        "type": "RESPONSE",
+                        "priority": "10",
+                        "statement": "!segmented_caching.is_inner_req"
+                    }),
+                ),
+                (
+                    "logging/fos",
+                    json!({
+                        "name": "Fastly Object Storage Logs",
+                        "bucket_name": "fos-gce-logs",
+                        "region": "us-east-1",
+                        "path": "raw/",
+                        "response_condition": "log_analytics_condition"
+                    }),
+                ),
+                (
+                    "backend",
+                    json!({
+                        "name": "session_scorer",
+                        "address": "gce-scorer.edgecompute.app",
+                        "port": 443,
+                        "use_ssl": true,
+                        "ssl_check_cert": true
+                    }),
+                ),
+            ] {
+                p.adapter.seed_resource("fixtureService", res, body);
+            }
+            let (_, sc_svc) = p
+                .adapter
+                .api(fastly_log_analytics::admin::ApiRequest {
+                    method: "POST",
+                    path: "/service",
+                    token: "fixture-token",
+                    body: Some(json!({
+                        "name": "Session Scoring Service for fixtureService",
+                        "type": "wasm"
+                    })),
+                    timeout: std::time::Duration::from_secs(5),
+                    query: "",
+                })
+                .unwrap();
+            let scorer_sid = sc_svc["id"].as_str().unwrap().to_owned();
+            let (_, k_resp) = p
+                .adapter
+                .api(fastly_log_analytics::admin::ApiRequest {
+                    method: "POST",
+                    path: "/resources/stores/config",
+                    token: "fixture-token",
+                    body: Some(json!({"name": format!("scoring_keys_{scorer_sid}")})),
+                    timeout: std::time::Duration::from_secs(5),
+                    query: "",
+                })
+                .unwrap();
+            let k_id = k_resp["id"].as_str().unwrap().to_owned();
+            let _ = p
+                .adapter
+                .api(fastly_log_analytics::admin::ApiRequest {
+                    method: "POST",
+                    path: &format!("/resources/stores/config/{k_id}/item"),
+                    token: "fixture-token",
+                    body: Some(
+                        json!({"item_key": "current_key_hex", "item_value": "GCE_ORIG_AES_KEY"}),
+                    ),
+                    timeout: std::time::Duration::from_secs(5),
+                    query: "",
+                })
+                .unwrap();
+            let _ = p
+                .adapter
+                .api(fastly_log_analytics::admin::ApiRequest {
+                    method: "POST",
+                    path: &format!("/resources/stores/config/{k_id}/item"),
+                    token: "fixture-token",
+                    body: Some(
+                        json!({"item_key": "request_secret", "item_value": "GCE_ORIG_REQ_SECRET"}),
+                    ),
+                    timeout: std::time::Duration::from_secs(5),
+                    query: "",
+                })
+                .unwrap();
+            let (_, c_resp) = p
+                .adapter
+                .api(fastly_log_analytics::admin::ApiRequest {
+                    method: "POST",
+                    path: "/resources/stores/config",
+                    token: "fixture-token",
+                    body: Some(json!({"name": format!("scoring_config_{scorer_sid}")})),
+                    timeout: std::time::Duration::from_secs(5),
+                    query: "",
+                })
+                .unwrap();
+            let c_id = c_resp["id"].as_str().unwrap().to_owned();
+            let _ = p
+                .adapter
+                .api(fastly_log_analytics::admin::ApiRequest {
+                    method: "POST",
+                    path: &format!("/resources/stores/config/{c_id}/item"),
+                    token: "fixture-token",
+                    body: Some(json!({"item_key": "enforce_threshold", "item_value": "95"})),
+                    timeout: std::time::Duration::from_secs(5),
+                    query: "",
+                })
+                .unwrap();
+            let _ = p
+                .adapter
+                .api(fastly_log_analytics::admin::ApiRequest {
+                    method: "POST",
+                    path: &format!("/resources/stores/config/{c_id}/item"),
+                    token: "fixture-token",
+                    body: Some(json!({"item_key": "l2_enforce_enabled", "item_value": "0"})),
+                    timeout: std::time::Duration::from_secs(5),
+                    query: "",
+                })
+                .unwrap();
+            let (_, m_resp) = p
+                .adapter
+                .api(fastly_log_analytics::admin::ApiRequest {
+                    method: "POST",
+                    path: "/resources/stores/kv",
+                    token: "fixture-token",
+                    body: Some(json!({"name": format!("scoring_matrix_{scorer_sid}")})),
+                    timeout: std::time::Duration::from_secs(5),
+                    query: "",
+                })
+                .unwrap();
+            let m_id = m_resp["id"].as_str().unwrap().to_owned();
+            let _ = p
+                .adapter
+                .api_raw(fastly_log_analytics::admin::ApiRawRequest {
+                    method: "PUT",
+                    path: &format!("/resources/stores/kv/{m_id}/keys/matrix"),
+                    token: "fixture-token",
+                    content_type: "application/octet-stream",
+                    body: b"GCE-TRAINED-MATRIX-SENTINEL",
+                    timeout: std::time::Duration::from_secs(5),
+                })
+                .unwrap();
+            for _ in 0..n_keys {
+                let _ = p
+                    .adapter
+                    .api(fastly_log_analytics::admin::ApiRequest {
+                        method: "POST",
+                        path: "/resources/object-storage/access-keys",
+                        token: "fixture-token",
+                        body: Some(json!({
+                            "permission": "read-write-objects",
+                            "description": "flp-fixtureApp-fixtureService",
+                            "buckets": ["fos-fixture-logs"]
+                        })),
+                        timeout: std::time::Duration::from_secs(5),
+                        query: "",
+                    })
+                    .unwrap();
+            }
+            (scorer_sid, k_id, c_id, m_id)
+        };
+
+    // --- 1A. BUG-CLOUD-DR-15: All 7 synchronous /scoring/* mutation routes on wedged n_keys=3 Capture::Managed + scoring ---
+    let p_dr15 = Platform::new();
+    let (sc15_sid, k15_id, c15_id, m15_id) = seed_gce_coexist_with_scoring(&p_dr15, 3);
+    // Also seed foreign owner marker `# flp-owner:otherApp:fixtureService` to pin Wave-18 Auditor Challenge 2 (`fn teardown` in mod.rs:1427-1451)
+    p_dr15.adapter.seed_resource(
+        "fixtureService",
+        "snippet",
+        json!({
+            "name": "flp-owner-otherApp",
+            "type": "recv",
+            "priority": "0",
+            "content": "# flp-owner:otherApp:fixtureService"
+        }),
+    );
+    let head15 = Head {
+        version: VERSION,
+        generation: 7,
+        manifest: Some("processed/_catalog/manifest=7-fixtureService.json".into()),
+        recent: vec![Event {
+            cursor: "fixtureService:7".into(),
+            generation: 7,
+            committed_at: Some("2026-11-21T00:00:00Z".into()),
+            manifest: Some("processed/_catalog/manifest=7-fixtureService.json".into()),
+        }],
+        ..Head::default()
+    };
+    p_dr15.adapter.seed_object_bytes(
+        "fos-fixture-logs",
+        "processed/scoring/matrices/2026-11-21-hijack.json",
+        serde_json::to_vec(&json!({
+            "version": "2026-11-21-hijack",
+            "vocab_size": 1,
+            "session_count": 1,
+            "transition_count": 1,
+            "counts": {"/": {"/": 1}},
+            "row_totals": {"/": 1}
+        }))
+        .unwrap(),
+    );
+    p_dr15.adapter.seed_object_bytes(
+        "fos-fixture-logs",
+        "meta/cloud_dr_state.json",
+        serde_json::to_vec(&CloudDrState {
+            schema_version: SCHEMA_VERSION,
+            updated_at: 1_800_000_000,
+            service_id: "fixtureService".into(),
+            service: json!({
+                "capture": "managed",
+                "scoring": {
+                    "enabled": true,
+                    "scoring_service_id": sc15_sid,
+                    "scoring_service_name": "Session Scoring Service for fixtureService",
+                    "scoring_domain": "gce-scorer.edgecompute.app",
+                    "scoring_keys_store_id": k15_id,
+                    "scoring_config_store_id": c15_id,
+                    "scoring_matrix_store_id": m15_id,
+                    "enabled_at": "2026-11-20T00:00:00Z",
+                    "deployed_package_sha": "abc",
+                    "deployed_package_files_hash": "def",
+                    "deployed_vcl_sha": "ghi",
+                    "exclude_url_regex": ""
+                }
+            }),
+            views: vec![SavedView {
+                id: "v-dr15".into(),
+                service_id: "fixtureService".into(),
+                name: "V15".into(),
+                filters_json: "{}".into(),
+                time_range_type: Some("1h".into()),
+                start_time: None,
+                end_time: None,
+                page: Some("/dashboard".into()),
+                created_at: Some("2026-11-21T00:00:00Z".into()),
+            }],
+            catalog_head: Some(head15),
+            floor_key: Some("raw/2026/f.zst".into()),
+            rum_stats: Some(json!({"rows": 3})),
+        })
+        .unwrap(),
+    );
+    assert_eq!(
+        p_dr15
+            .call(
+                "POST",
+                "/api/admin/provision/recover",
+                json!({
+                    "token": "fixture-token",
+                    "service_id": "fixtureService",
+                    "fos_bucket": "fos-fixture-logs",
+                    "fos_region": "us-east-1"
+                }),
+            )
+            .status,
+        200
+    );
+
+    for (label, method, path, payload) in [
+        (
+            "exclude-regex",
+            "PUT",
+            "/api/admin/services/fixtureService/scoring/exclude-regex?confirm=true",
+            json!({"exclude_url_regex": r"^/hijacked$"}),
+        ),
+        (
+            "enforce-status-code",
+            "PUT",
+            "/api/admin/services/fixtureService/scoring/enforce-status-code?confirm=true",
+            json!({"status_code": 403}),
+        ),
+        (
+            "enforce-threshold",
+            "PUT",
+            "/api/admin/services/fixtureService/scoring/enforce-threshold?confirm=true",
+            json!({"enforce_threshold": 0}),
+        ),
+        (
+            "l2-enforce",
+            "PUT",
+            "/api/admin/services/fixtureService/scoring/l2-enforce?confirm=true",
+            json!({"enabled": true}),
+        ),
+        (
+            "rotate-key",
+            "POST",
+            "/api/admin/services/fixtureService/scoring/rotate-key?confirm=true",
+            json!({}),
+        ),
+        (
+            "retrain",
+            "POST",
+            "/api/admin/services/fixtureService/scoring/retrain",
+            json!({
+                "matrix": {
+                    "version": "2026-11-22-hijack",
+                    "vocab_size": 1,
+                    "session_count": 1,
+                    "transition_count": 1,
+                    "counts": {"/": {"/": 1}},
+                    "row_totals": {"/": 1}
+                }
+            }),
+        ),
+        (
+            "restore",
+            "POST",
+            "/api/admin/services/fixtureService/scoring/matrix/versions/restore?confirm=true",
+            json!({"version": "2026-11-21-hijack"}),
+        ),
+    ] {
+        let resp = p_dr15.call(method, path, payload);
+        assert_eq!(
+            resp.status,
+            409,
+            "BUG-CLOUD-DR-15 [{label}]: expected 409 managed_resources_not_owned, got {}: {}",
+            resp.status,
+            String::from_utf8_lossy(&resp.body)
+        );
+        let parsed: Value = serde_json::from_slice(&resp.body).unwrap_or(Value::Null);
+        assert_eq!(
+            parsed["error"], "managed_resources_not_owned",
+            "BUG-CLOUD-DR-15 [{label}]"
+        );
+    }
+
+    // Verify ZERO GCE VCL snippets, ConfigStore items, AES keys, or trained Markov matrix bytes were mutated!
+    let snips15 = p_dr15.adapter.resources("fixtureService", "snippet");
+    assert!(
+        !snips15.iter().any(|s| s["name"] == "Session Scoring - Recv" || s["name"] == "Session Scoring - Enforce"),
+        "BUG-CLOUD-DR-15: Cloud must NOT inject Session Scoring - Recv/Enforce onto GCE VM customer service!"
+    );
+    assert_eq!(
+        p_dr15
+            .adapter
+            .config_store_value(&c15_id, "enforce_threshold")
+            .as_deref(),
+        Some("95"),
+        "BUG-CLOUD-DR-15: GCE enforce_threshold must remain 95!"
+    );
+    assert_eq!(
+        p_dr15
+            .adapter
+            .config_store_value(&c15_id, "l2_enforce_enabled")
+            .as_deref(),
+        Some("0"),
+        "BUG-CLOUD-DR-15: GCE l2_enforce_enabled must remain 0!"
+    );
+    assert_eq!(
+        p_dr15
+            .adapter
+            .config_store_value(&k15_id, "current_key_hex")
+            .as_deref(),
+        Some("GCE_ORIG_AES_KEY"),
+        "BUG-CLOUD-DR-15: GCE AES cookie key must remain untouched!"
+    );
+    assert_eq!(
+        p_dr15.adapter.kv_store_value(&m15_id, "matrix").as_deref(),
+        Some(b"GCE-TRAINED-MATRIX-SENTINEL".as_slice()),
+        "BUG-CLOUD-DR-15: GCE trained Markov matrix must remain untouched!"
+    );
+
+    // Wave-18 Auditor Challenge 2: with foreign `# flp-owner:otherApp:fixtureService` present,
+    // local-only teardown(remove_logging=false, remove_snippets=false) bypasses preflight in `fn teardown` (mod.rs:1427-1451) and completes cleanly!
+    let td_foreign_local = p_dr15.call(
+        "POST",
+        "/api/admin/provision/teardown",
+        json!({
+            "service_id": "fixtureService",
+            "confirm_service_id": "fixtureService",
+            "token": "fixture-token",
+            "generation": p_dr15.service()["generation"],
+            "remove_logging": false,
+            "remove_snippets": false,
+            "delete_fos_keys": false
+        }),
+    );
+    assert_eq!(
+        td_foreign_local.status,
+        200,
+        "Auditor Challenge 2: local-only teardown with foreign flp-owner-otherApp must pass fn teardown preflight bypass: {}",
+        String::from_utf8_lossy(&td_foreign_local.body)
+    );
+    let td_foreign_job: Value = serde_json::from_slice(&td_foreign_local.body).unwrap();
+    let td_foreign_done = p_dr15.drain(td_foreign_job["job"].clone());
+    assert_eq!(td_foreign_done["status"], "complete");
+    assert!(p_dr15.adapter.has_service(&sc15_sid));
+
+    // --- 1B. BUG-CLOUD-DR-15: POST /scoring/enable & ensure_scorer_service_step on wedged n_keys=8 Capture::Managed (scoring: null) ---
+    let p_en15 = Platform::new();
+    let (_en_sc_sid, en_k_id, _en_c_id, en_m_id) = seed_gce_coexist_with_scoring(&p_en15, 8);
+    p_en15.adapter.seed_object_bytes(
+        "fos-fixture-logs",
+        "meta/cloud_dr_state.json",
+        serde_json::to_vec(&CloudDrState {
+            schema_version: SCHEMA_VERSION,
+            updated_at: 1_800_000_000,
+            service_id: "fixtureService".into(),
+            service: json!({"capture": "managed"}),
+            views: vec![],
+            catalog_head: None,
+            floor_key: None,
+            rum_stats: None,
+        })
+        .unwrap(),
+    );
+    assert_eq!(
+        p_en15
+            .call(
+                "POST",
+                "/api/admin/provision/recover",
+                json!({
+                    "token": "fixture-token",
+                    "service_id": "fixtureService",
+                    "fos_bucket": "fos-fixture-logs",
+                    "fos_region": "us-east-1"
+                }),
+            )
+            .status,
+        200
+    );
+    let en_resp = p_en15.call(
+        "POST",
+        "/api/admin/services/fixtureService/scoring/enable",
+        json!({}),
+    );
+    assert_eq!(
+        en_resp.status,
+        409,
+        "BUG-CLOUD-DR-15 [enable]: POST /scoring/enable must fail synchronously with 409 managed_resources_not_owned, got {}: {}",
+        en_resp.status,
+        String::from_utf8_lossy(&en_resp.body)
+    );
+    let en_body: Value = serde_json::from_slice(&en_resp.body).unwrap_or(Value::Null);
+    assert_eq!(en_body["error"], "managed_resources_not_owned");
+    assert_eq!(
+        p_en15.adapter.kv_store_value(&en_m_id, "matrix").as_deref(),
+        Some(b"GCE-TRAINED-MATRIX-SENTINEL".as_slice()),
+        "BUG-CLOUD-DR-15 [enable]: GCE matrix must NOT be wiped!"
+    );
+    assert!(
+        p_en15
+            .adapter
+            .secret("scoring_request_secret.fixtureService")
+            .unwrap()
+            .is_none(),
+        "BUG-CLOUD-DR-15 [enable]: GCE request_secret must NOT be copied into Cloud Secret Store!"
+    );
+    assert_eq!(
+        p_en15
+            .adapter
+            .config_store_value(&en_k_id, "current_key_hex")
+            .as_deref(),
+        Some("GCE_ORIG_AES_KEY")
+    );
+
+    // Also test `ensure_scorer_service_step` defense-in-depth directly if a `scoring_enable` job was queued before ownership was lost:
+    let p_step15 = Platform::new();
+    let prov_step15 = p_step15.provision();
+    p_step15.drain(prov_step15["job"].clone());
+    let en_queued = p_step15.json(
+        "POST",
+        "/api/admin/services/fixtureService/scoring/enable",
+        json!({}),
+    )["job"]
+        .clone();
+    // Simulate concurrent GCE VM takeover before `scorer_service` step runs:
+    let (_, _, _, step_m_id) = seed_gce_coexist_with_scoring(&p_step15, 0);
+    let step_res = p_step15.json(
+        "POST",
+        &format!("/api/admin/jobs/{}/step", en_queued["id"].as_str().unwrap()),
+        json!({}),
+    )["job"]
+        .clone();
+    assert_eq!(
+        step_res["status"], "failed",
+        "BUG-CLOUD-DR-15 [ensure_scorer_service_step]: must fail closed before adopting GCE scorer!"
+    );
+    assert_eq!(step_res["error"], "managed_resources_not_owned");
+    assert_eq!(step_res["completed_steps"], json!([]));
+    assert_eq!(
+        p_step15
+            .adapter
+            .kv_store_value(&step_m_id, "matrix")
+            .as_deref(),
+        Some(b"GCE-TRAINED-MATRIX-SENTINEL".as_slice())
+    );
+
+    // --- 2. BUG-CLOUD-DR-16: RICH_FOS = true "catalog_scan" reserve across n_days = 1..=6, n_keys = 0..=3, with_ep = false & true, modern & legacy GCE endpoint names ---
+    let _rich_guard = RichFosReset;
+    for primary_ep_name in ["Fastly Object Storage Logs", "Fastly Log Analytics"] {
+        for with_ep in [false, true] {
+            for n_days in [1usize, 4, 5, 6] {
+                for n_keys in 0..=3usize {
+                    let p_cat = Platform::new();
+                    RICH_FOS.with(|r| r.set(true));
+                    MTIMES.with(|m| m.borrow_mut().clear());
+
+                    for (res, body) in [
+                        (
+                            "snippet",
+                            json!({
+                                "name": "Fastly Log Analytics - vcl_recv",
+                                "type": "recv",
+                                "priority": "10",
+                                "content": "# gce-recv"
+                            }),
+                        ),
+                        (
+                            "snippet",
+                            json!({
+                                "name": "Fastly Log Analytics - vcl_deliver",
+                                "type": "deliver",
+                                "priority": "10",
+                                "content": "# gce-deliver"
+                            }),
+                        ),
+                        (
+                            "condition",
+                            json!({
+                                "name": "log_analytics_condition",
+                                "type": "RESPONSE",
+                                "priority": "10",
+                                "statement": "!segmented_caching.is_inner_req"
+                            }),
+                        ),
+                        (
+                            "logging/fos",
+                            json!({
+                                "name": primary_ep_name,
+                                "bucket_name": "fos-gce-logs",
+                                "region": "us-east-1",
+                                "path": "raw/",
+                                "response_condition": "log_analytics_condition"
+                            }),
+                        ),
+                    ] {
+                        p_cat.adapter.seed_resource("fixtureService", res, body);
+                    }
+                    if with_ep {
+                        p_cat.adapter.seed_resource(
+                            "fixtureService",
+                            "condition",
+                            json!({
+                                "name": "flp_cloud_log_condition",
+                                "type": "RESPONSE",
+                                "priority": "10",
+                                "statement": "!segmented_caching.is_inner_req"
+                            }),
+                        );
+                        p_cat.adapter.seed_resource(
+                            "fixtureService",
+                            "logging/fos",
+                            json!({
+                                "name": "FLP Cloud Logs",
+                                "bucket_name": "fos-fixture-logs",
+                                "region": "us-east-1",
+                                "path": "raw/request/year=%Y/month=%m/day=%d/hour=%H/minute=%M/",
+                                "response_condition": "flp_cloud_log_condition"
+                            }),
+                        );
+                    }
+                    for _ in 0..n_keys {
+                        let _ = p_cat
+                            .adapter
+                            .api(fastly_log_analytics::admin::ApiRequest {
+                                method: "POST",
+                                path: "/resources/object-storage/access-keys",
+                                token: "fixture-token",
+                                body: Some(json!({
+                                    "permission": "read-write-objects",
+                                    "description": "flp-fixtureApp-fixtureService",
+                                    "buckets": ["fos-fixture-logs"]
+                                })),
+                                timeout: std::time::Duration::from_secs(5),
+                                query: "",
+                            })
+                            .unwrap();
+                    }
+                    for d in 1..=n_days {
+                        let day_ts = 1_700_006_400i64 + ((d as i64 - 1) * 86_400);
+                        let day_key = format!("processed/_catalog/day{d}.json");
+                        let day = Day {
+                            version: VERSION,
+                            hours: BTreeMap::from([(
+                                day_ts,
+                                Reference {
+                                    key: format!("processed/_catalog/block{d}.json"),
+                                    generation: d as u64,
+                                },
+                            )]),
+                            statistics: Statistics {
+                                earliest: Some(day_ts),
+                                latest: Some(day_ts + 3599),
+                                earliest_log: None,
+                                latest_log: None,
+                                rows: 100,
+                            },
+                            ..Day::default()
+                        };
+                        p_cat.adapter.seed_object_bytes(
+                            "fos-fixture-logs",
+                            &day_key,
+                            serde_json::to_vec(&day).unwrap(),
+                        );
+                        MTIMES.with(|m| {
+                            m.borrow_mut()
+                                .insert(day_key, 1_800_000_000 + (d as u64) * 10);
+                        });
+                    }
+                    let manifest_key = "processed/_catalog/manifest99.json";
+                    let manifest = Manifest {
+                        version: VERSION,
+                        service_id: "fixtureService".into(),
+                        generation: 99,
+                        batch: "b99".into(),
+                        schema: "v2".into(),
+                        committed_at: "2026-11-21T00:00:00Z".into(),
+                        previous: None,
+                        files: vec![],
+                        summaries: vec![],
+                        sources: vec![],
+                        replaces: vec![],
+                        bytes: 512,
+                        rows: 100,
+                        parents: BTreeMap::new(),
+                    };
+                    p_cat.adapter.seed_object_bytes(
+                        "fos-fixture-logs",
+                        manifest_key,
+                        serde_json::to_vec(&manifest).unwrap(),
+                    );
+                    MTIMES.with(|m| {
+                        m.borrow_mut().insert(manifest_key.into(), 1_800_009_999);
+                    });
+
+                    let r_cat = p_cat.call(
+                        "POST",
+                        "/api/admin/provision/recover",
+                        json!({
+                            "token": "fixture-token",
+                            "service_id": "fixtureService",
+                            "fos_bucket": "fos-fixture-logs",
+                            "fos_region": "us-east-1"
+                        }),
+                    );
+                    assert_eq!(
+                        r_cat.status,
+                        200,
+                        "BUG-CLOUD-DR-16 [ep={primary_ep_name}, with_ep={with_ep}, n_days={n_days}, n_keys={n_keys}] must succeed 200: {}",
+                        String::from_utf8_lossy(&r_cat.body)
+                    );
+                    let r_cat_json: Value = serde_json::from_slice(&r_cat.body).unwrap();
+                    assert_eq!(
+                        r_cat_json["source"], "catalog_scan",
+                        "BUG-CLOUD-DR-16 [ep={primary_ep_name}, with_ep={with_ep}, n_days={n_days}, n_keys={n_keys}] must use catalog_scan"
+                    );
+                    let svc_cat = &p_cat.adapter.records()["svc:fixtureService"].value;
+                    assert_eq!(
+                        svc_cat["capture"],
+                        "attached",
+                        "BUG-CLOUD-DR-16 [ep={primary_ep_name}, with_ep={with_ep}, n_days={n_days}, n_keys={n_keys}] must infer Capture::Attached, got: {}",
+                        svc_cat["capture"]
+                    );
+                    let expected_owned = if with_ep {
+                        json!(["FLP Cloud Logs"])
+                    } else {
+                        json!([])
+                    };
+                    assert_eq!(svc_cat["owned_endpoint_names"], expected_owned);
+                }
+            }
+        }
+    }
+    drop(_rich_guard);
+}

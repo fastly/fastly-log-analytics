@@ -4,6 +4,7 @@ import { subDays, formatISO } from 'date-fns'
 import type { FilterPill, FilterMode } from '@/types/api'
 import type { PopGeo } from '@/components/DataTable'
 import { setActiveServiceCookie } from '@/lib/utils'
+import type { ServerTimingEntry } from '@/lib/call-timeline'
 
 export type ComparePreset =
   | 'previous'
@@ -310,6 +311,9 @@ export interface ApiCallEntry {
   cache?: 'network' | 'cdn' | 'memory' | 'cache-storage' | 'hit' | 'miss' | 'browser' | null
   details?: string
   timestamp?: string
+  /** Epoch milliseconds, comparable across the page and its workers. */
+  start_ms?: number
+  server_timing?: ServerTimingEntry[]
 }
 
 export interface QueryTelemetryEntry {

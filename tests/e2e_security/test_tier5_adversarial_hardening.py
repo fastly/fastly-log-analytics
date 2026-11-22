@@ -259,6 +259,9 @@ struct ProbeRt {
     admin: FixtureAdapter,
     now_s: AtomicU64,
     rng: AtomicU64,
+    rich_fos: std::cell::Cell<bool>,
+    mtimes: std::cell::RefCell<BTreeMap<String, String>>,
+    budget: std::cell::Cell<Option<u32>>,
 }
 
 impl ProbeRt {
@@ -292,7 +295,25 @@ impl ProbeRt {
             admin: FixtureAdapter::new(),
             now_s: AtomicU64::new(1_800_000_000),
             rng: AtomicU64::new(1),
+            rich_fos: std::cell::Cell::new(false),
+            mtimes: std::cell::RefCell::new(BTreeMap::new()),
+            budget: std::cell::Cell::new(None),
         }
+    }
+    fn spend_budget(&self) -> Result<(), String> {
+        if let Some(used) = self.budget.get() {
+            if used >= 32 {
+                return Err("backend_budget_exhausted".into());
+            }
+            self.budget.set(Some(used + 1));
+        }
+        Ok(())
+    }
+    fn call_budgeted(&self, method: &str, path: &str, body: Value) -> (u16, Value) {
+        self.budget.set(Some(0));
+        let res = self.call(method, path, body);
+        self.budget.set(None);
+        res
     }
     fn call(&self, method: &str, path: &str, body: Value) -> (u16, Value) {
         let resp = admin::handle(
@@ -331,13 +352,72 @@ impl Runtime for ProbeRt {
     fn versions(&self) -> Result<Value, String> { Ok(json!({})) }
     fn compute_service_id(&self) -> Option<String> { Some("fixtureApp".into()) }
     fn compute_service_version(&self) -> Option<String> { Some("1".into()) }
-    fn admin_get(&self, key: &str) -> Result<Option<Record>, String> { self.admin.get(key) }
+    fn admin_get(&self, key: &str) -> Result<Option<Record>, String> {
+        if self.budget.get().is_some() {
+            if let Some(cached) = self.admin.cached_get(key) {
+                return Ok(cached);
+            }
+        }
+        self.spend_budget()?;
+        self.admin.get(key)
+    }
+    fn admin_get_fresh(&self, key: &str, _: &str) -> Result<Option<Record>, String> {
+        self.spend_budget()?;
+        self.admin.confirm(key)
+    }
     fn admin_cas(&self, key: &str, generation: Option<&str>, value: &Value) -> Result<bool, String> {
+        if self.budget.get().is_some() {
+            self.admin.cache_invalidate(key);
+        }
+        self.spend_budget()?;
         self.admin.cas(key, generation, value)
     }
-    fn admin_api(&self, req: ApiRequest<'_>) -> Result<ApiResponse, String> { self.admin.api(req).map(Into::into) }
-    fn admin_api_raw(&self, req: ApiRawRequest<'_>) -> Result<ApiResponse, String> { self.admin.api_raw(req).map(Into::into) }
-    fn admin_fos(&self, req: FosRequest<'_>) -> Result<FosResponse, String> { self.admin.fos(req) }
+    fn admin_api(&self, req: ApiRequest<'_>) -> Result<ApiResponse, String> {
+        self.spend_budget()?;
+        self.admin.api(req).map(Into::into)
+    }
+    fn admin_api_raw(&self, req: ApiRawRequest<'_>) -> Result<ApiResponse, String> {
+        self.spend_budget()?;
+        self.admin.api_raw(req).map(Into::into)
+    }
+    fn admin_remaining_calls(&self) -> u32 {
+        match self.budget.get() {
+            Some(used) => 32u32.saturating_sub(used),
+            None => 32,
+        }
+    }
+    fn admin_fos(&self, req: FosRequest<'_>) -> Result<FosResponse, String> {
+        self.spend_budget()?;
+        if self.rich_fos.get() && req.method == "GET" && req.key.is_empty() && req.query.contains("list-type=2") {
+            let objects = self.admin.bucket_objects(req.bucket);
+            let mut prefix = String::new();
+            for part in req.query.split('&') {
+                if let Some(val) = part.strip_prefix("prefix=") {
+                    prefix = val.replace("%2F", "/").replace("%3D", "=");
+                }
+            }
+            let mut contents = String::new();
+            let mtimes = self.mtimes.borrow();
+            for (k, body) in &objects {
+                if !k.starts_with(&prefix) {
+                    continue;
+                }
+                let ts = mtimes.get(k).map(String::as_str).unwrap_or("2026-11-21T00:00:00Z");
+                contents.push_str(&format!(
+                    "<Contents><Key>{k}</Key><Size>{}</Size><LastModified>{ts}</LastModified></Contents>",
+                    body.len()
+                ));
+            }
+            return Ok(FosResponse {
+                cdn_cache: None,
+                status: 200,
+                body: format!("<ListBucketResult><IsTruncated>false</IsTruncated>{contents}</ListBucketResult>").into_bytes(),
+                retry_after: None,
+            });
+        }
+        self.admin.fos(req)
+    }
+    fn scorer_package(&self) -> Option<Vec<u8>> { Some(b"fixture-session-scorer-wasm-tar-gz".to_vec()) }
 }
 
 fn recover_status(dr_state: CloudDrState) -> u16 {
@@ -1123,11 +1203,38 @@ fn main() {
 
     let rt_att_sc = ProbeRt::new();
     seed_coexist(&rt_att_sc);
+    let (_, att_sc_svc) = rt_att_sc.admin.api(ApiRequest {
+        method: "POST", path: "/service", token: "fixture-token",
+        body: Some(json!({"name": "Session Scoring Service for fixtureService", "type": "wasm"})),
+        timeout: std::time::Duration::from_secs(5), query: "",
+    }).unwrap();
+    let att_sc_sid = att_sc_svc["id"].as_str().unwrap().to_owned();
+    let (_, att_k) = rt_att_sc.admin.api(ApiRequest {
+        method: "POST", path: "/resources/stores/config", token: "fixture-token",
+        body: Some(json!({"name": format!("scoring_keys_{att_sc_sid}")})),
+        timeout: std::time::Duration::from_secs(5), query: "",
+    }).unwrap();
+    let (_, att_c) = rt_att_sc.admin.api(ApiRequest {
+        method: "POST", path: "/resources/stores/config", token: "fixture-token",
+        body: Some(json!({"name": format!("scoring_config_{att_sc_sid}")})),
+        timeout: std::time::Duration::from_secs(5), query: "",
+    }).unwrap();
+    let (_, att_m) = rt_att_sc.admin.api(ApiRequest {
+        method: "POST", path: "/resources/stores/kv", token: "fixture-token",
+        body: Some(json!({"name": format!("scoring_matrix_{att_sc_sid}")})),
+        timeout: std::time::Duration::from_secs(5), query: "",
+    }).unwrap();
+    let mut att_sc_cfg = base_sc.clone();
+    att_sc_cfg["enabled"] = json!(true);
+    att_sc_cfg["scoring_service_id"] = json!(att_sc_sid);
+    att_sc_cfg["scoring_keys_store_id"] = att_k["id"].clone();
+    att_sc_cfg["scoring_config_store_id"] = att_c["id"].clone();
+    att_sc_cfg["scoring_matrix_store_id"] = att_m["id"].clone();
     rt_att_sc.admin.seed_object_bytes(
         "fos-fixture-logs", "meta/cloud_dr_state.json",
         serde_json::to_vec(&CloudDrState {
             schema_version: SCHEMA_VERSION, updated_at: 1_800_000_000, service_id: "fixtureService".into(),
-            service: json!({"capture": "attached", "logging_endpoint_name": "FLP Cloud Logs", "scoring": base_sc.clone()}),
+            service: json!({"capture": "attached", "logging_endpoint_name": "FLP Cloud Logs", "scoring": att_sc_cfg}),
             views: vec![], catalog_head: None, floor_key: None, rum_stats: None,
         }).unwrap(),
     );
@@ -1230,6 +1337,530 @@ fn main() {
         "token": "fixture-token", "service_id": "fixtureService", "fos_bucket": "fos-fixture-logs", "fos_region": "us-east-1"
     }));
 
+    // BUG-CLOUD-DR-15: All 8 non-teardown /scoring/* mutation & enable paths fail closed 409 on wedged Capture::Managed coexistence
+    let rt_dr15 = ProbeRt::new();
+    seed_coexist(&rt_dr15);
+    let (_, sc15_svc) = rt_dr15.admin.api(ApiRequest {
+        method: "POST", path: "/service", token: "fixture-token",
+        body: Some(json!({"name": "Session Scoring Service for fixtureService", "type": "wasm"})),
+        timeout: std::time::Duration::from_secs(5), query: "",
+    }).unwrap();
+    let sc15_sid = sc15_svc["id"].as_str().unwrap().to_owned();
+    let (_, k15) = rt_dr15.admin.api(ApiRequest {
+        method: "POST", path: "/resources/stores/config", token: "fixture-token",
+        body: Some(json!({"name": format!("scoring_keys_{sc15_sid}")})),
+        timeout: std::time::Duration::from_secs(5), query: "",
+    }).unwrap();
+    let k15_id = k15["id"].as_str().unwrap().to_owned();
+    let _ = rt_dr15.admin.api(ApiRequest {
+        method: "POST", path: &format!("/resources/stores/config/{k15_id}/item"), token: "fixture-token",
+        body: Some(json!({"item_key": "current_key_hex", "item_value": "GCE_AES_SENTINEL"})),
+        timeout: std::time::Duration::from_secs(5), query: "",
+    }).unwrap();
+    let (_, c15) = rt_dr15.admin.api(ApiRequest {
+        method: "POST", path: "/resources/stores/config", token: "fixture-token",
+        body: Some(json!({"name": format!("scoring_config_{sc15_sid}")})),
+        timeout: std::time::Duration::from_secs(5), query: "",
+    }).unwrap();
+    let c15_id = c15["id"].as_str().unwrap().to_owned();
+    let (_, m15) = rt_dr15.admin.api(ApiRequest {
+        method: "POST", path: "/resources/stores/kv", token: "fixture-token",
+        body: Some(json!({"name": format!("scoring_matrix_{sc15_sid}")})),
+        timeout: std::time::Duration::from_secs(5), query: "",
+    }).unwrap();
+    let m15_id = m15["id"].as_str().unwrap().to_owned();
+    let _ = rt_dr15.admin.api_raw(ApiRawRequest {
+        method: "PUT", path: &format!("/resources/stores/kv/{m15_id}/keys/matrix"), token: "fixture-token",
+        content_type: "application/octet-stream", body: b"GCE-MATRIX-SENTINEL",
+        timeout: std::time::Duration::from_secs(5),
+    }).unwrap();
+    for _ in 0..3 {
+        let _ = rt_dr15.admin.api(ApiRequest {
+            method: "POST", path: "/resources/object-storage/access-keys", token: "fixture-token",
+            body: Some(json!({"permission": "read-write-objects", "description": "flp-fixtureApp-fixtureService", "buckets": ["fos-fixture-logs"]})),
+            timeout: std::time::Duration::from_secs(5), query: "",
+        }).unwrap();
+    }
+    let mut sc15_cfg = base_sc.clone();
+    sc15_cfg["enabled"] = json!(true);
+    sc15_cfg["scoring_service_id"] = json!(sc15_sid);
+    sc15_cfg["scoring_keys_store_id"] = json!(k15_id.clone());
+    sc15_cfg["scoring_config_store_id"] = json!(c15_id.clone());
+    sc15_cfg["scoring_matrix_store_id"] = json!(m15_id.clone());
+    rt_dr15.admin.seed_object_bytes("fos-fixture-logs", "processed/scoring/matrices/2026-11-21-v1.json", serde_json::to_vec(&json!({
+        "version": "2026-11-21-v1", "vocab_size": 1, "session_count": 1, "transition_count": 1, "counts": {"/": {"/": 1}}, "row_totals": {"/": 1}
+    })).unwrap());
+    rt_dr15.admin.seed_object_bytes(
+        "fos-fixture-logs", "meta/cloud_dr_state.json",
+        serde_json::to_vec(&CloudDrState {
+            schema_version: SCHEMA_VERSION, updated_at: 1_800_000_000, service_id: "fixtureService".into(),
+            service: json!({"capture": "managed", "scoring": sc15_cfg}),
+            views: vec![SavedView {
+                id: "v15".into(), service_id: "fixtureService".into(), name: "V15".into(),
+                filters_json: "{}".into(), time_range_type: Some("1h".into()),
+                start_time: None, end_time: None, page: Some("/dashboard".into()), created_at: Some("2026-11-21T00:00:00Z".into()),
+            }],
+            catalog_head: Some(fastly_log_analytics::ingest::catalog::Head {
+                version: fastly_log_analytics::ingest::catalog::VERSION, generation: 9,
+                manifest: Some("processed/_catalog/manifest=9-fixtureService.json".into()),
+                recent: vec![], ..Default::default()
+            }),
+            floor_key: Some("raw/2026/f.zst".into()),
+            rum_stats: Some(json!({"rows": 1})),
+        }).unwrap(),
+    );
+    let _ = rt_dr15.call("POST", "/api/admin/provision/recover", json!({
+        "token": "fixture-token", "service_id": "fixtureService", "fos_bucket": "fos-fixture-logs", "fos_region": "us-east-1"
+    }));
+    let mut dr15_statuses = Vec::new();
+    for (m, p, b) in [
+        ("PUT", "/api/admin/services/fixtureService/scoring/exclude-regex?confirm=true", json!({"exclude_url_regex": "^/pwn$"})),
+        ("PUT", "/api/admin/services/fixtureService/scoring/enforce-status-code?confirm=true", json!({"status_code": 403})),
+        ("PUT", "/api/admin/services/fixtureService/scoring/enforce-threshold?confirm=true", json!({"enforce_threshold": 0})),
+        ("PUT", "/api/admin/services/fixtureService/scoring/l2-enforce?confirm=true", json!({"enabled": true})),
+        ("POST", "/api/admin/services/fixtureService/scoring/rotate-key?confirm=true", json!({})),
+        ("POST", "/api/admin/services/fixtureService/scoring/retrain", json!({"matrix": {"version": "2026-11-22-v2", "vocab_size": 1, "session_count": 1, "transition_count": 1, "counts": {"/": {"/": 1}}, "row_totals": {"/": 1}}})),
+        ("POST", "/api/admin/services/fixtureService/scoring/matrix/versions/restore?confirm=true", json!({"version": "2026-11-21-v1"})),
+    ] {
+        dr15_statuses.push(rt_dr15.call(m, p, b).0);
+    }
+    let rt_dr15_en = ProbeRt::new();
+    seed_coexist(&rt_dr15_en);
+    let (_, sc15e_svc) = rt_dr15_en.admin.api(ApiRequest {
+        method: "POST", path: "/service", token: "fixture-token",
+        body: Some(json!({"name": "Session Scoring Service for fixtureService", "type": "wasm"})),
+        timeout: std::time::Duration::from_secs(5), query: "",
+    }).unwrap();
+    let sc15e_sid = sc15e_svc["id"].as_str().unwrap().to_owned();
+    let (_, m15e) = rt_dr15_en.admin.api(ApiRequest {
+        method: "POST", path: "/resources/stores/kv", token: "fixture-token",
+        body: Some(json!({"name": format!("scoring_matrix_{sc15e_sid}")})),
+        timeout: std::time::Duration::from_secs(5), query: "",
+    }).unwrap();
+    let m15e_id = m15e["id"].as_str().unwrap().to_owned();
+    let _ = rt_dr15_en.admin.api_raw(ApiRawRequest {
+        method: "PUT", path: &format!("/resources/stores/kv/{m15e_id}/keys/matrix"), token: "fixture-token",
+        content_type: "application/octet-stream", body: b"GCE-MATRIX-SENTINEL",
+        timeout: std::time::Duration::from_secs(5),
+    }).unwrap();
+    for _ in 0..8 {
+        let _ = rt_dr15_en.admin.api(ApiRequest {
+            method: "POST", path: "/resources/object-storage/access-keys", token: "fixture-token",
+            body: Some(json!({"permission": "read-write-objects", "description": "flp-fixtureApp-fixtureService", "buckets": ["fos-fixture-logs"]})),
+            timeout: std::time::Duration::from_secs(5), query: "",
+        }).unwrap();
+    }
+    rt_dr15_en.admin.seed_object_bytes(
+        "fos-fixture-logs", "meta/cloud_dr_state.json",
+        serde_json::to_vec(&CloudDrState {
+            schema_version: SCHEMA_VERSION, updated_at: 1_800_000_000, service_id: "fixtureService".into(),
+            service: json!({"capture": "managed"}),
+            views: vec![], catalog_head: None, floor_key: None, rum_stats: None,
+        }).unwrap(),
+    );
+    let _ = rt_dr15_en.call("POST", "/api/admin/provision/recover", json!({
+        "token": "fixture-token", "service_id": "fixtureService", "fos_bucket": "fos-fixture-logs", "fos_region": "us-east-1"
+    }));
+    dr15_statuses.push(rt_dr15_en.call("POST", "/api/admin/services/fixtureService/scoring/enable", json!({})).0);
+    let dr15_gce_matrix_intact = rt_dr15.admin.kv_store_value(&m15_id, "matrix").as_deref() == Some(b"GCE-MATRIX-SENTINEL".as_slice())
+        && rt_dr15_en.admin.kv_store_value(&m15e_id, "matrix").as_deref() == Some(b"GCE-MATRIX-SENTINEL".as_slice())
+        && rt_dr15.admin.config_store_value(&k15_id, "current_key_hex").as_deref() == Some("GCE_AES_SENTINEL");
+
+    // BUG-CLOUD-DR-16: RICH_FOS catalog_scan with n_days=5, n_keys=3, with_ep=false on both modern & legacy GCE endpoint names
+    let mut dr16_results = Vec::new();
+    for ep_name in ["Fastly Object Storage Logs", "Fastly Log Analytics"] {
+        let rt_dr16 = ProbeRt::new();
+        rt_dr16.rich_fos.set(true);
+        for (res, body) in [
+            ("snippet", json!({"name": "Fastly Log Analytics - vcl_recv", "type": "recv", "priority": "10", "content": "# gce-recv"})),
+            ("snippet", json!({"name": "Fastly Log Analytics - vcl_deliver", "type": "deliver", "priority": "10", "content": "# gce-deliver"})),
+            ("condition", json!({"name": "log_analytics_condition", "type": "RESPONSE", "priority": "10", "statement": "!segmented_caching.is_inner_req"})),
+            ("logging/fos", json!({"name": ep_name, "bucket_name": "fos-gce-logs", "region": "us-east-1", "path": "raw/", "response_condition": "log_analytics_condition"})),
+        ] {
+            rt_dr16.admin.seed_resource("fixtureService", res, body);
+        }
+        for _ in 0..3 {
+            let _ = rt_dr16.admin.api(ApiRequest {
+                method: "POST", path: "/resources/object-storage/access-keys", token: "fixture-token",
+                body: Some(json!({"permission": "read-write-objects", "description": "flp-fixtureApp-fixtureService", "buckets": ["fos-fixture-logs"]})),
+                timeout: std::time::Duration::from_secs(5), query: "",
+            }).unwrap();
+        }
+        for d in 1..=5usize {
+            let day_ts = 1_700_006_400i64 + ((d as i64 - 1) * 86_400);
+            let day_key = format!("processed/_catalog/day{d}.json");
+            let day = fastly_log_analytics::ingest::catalog::Day {
+                version: fastly_log_analytics::ingest::catalog::VERSION,
+                hours: BTreeMap::from([(day_ts, fastly_log_analytics::ingest::catalog::Reference { key: format!("processed/_catalog/b{d}.json"), generation: d as u64 })]),
+                statistics: fastly_log_analytics::ingest::catalog::Statistics { earliest: Some(day_ts), latest: Some(day_ts + 3599), earliest_log: None, latest_log: None, rows: 10 },
+                ..Default::default()
+            };
+            rt_dr16.admin.seed_object_bytes("fos-fixture-logs", &day_key, serde_json::to_vec(&day).unwrap());
+            rt_dr16.mtimes.borrow_mut().insert(day_key, format!("2026-11-21T00:0{d}:00Z"));
+        }
+        let m_key = "processed/_catalog/manifest99.json";
+        let mf = fastly_log_analytics::ingest::catalog::Manifest {
+            version: fastly_log_analytics::ingest::catalog::VERSION,
+            service_id: "fixtureService".into(), generation: 99, batch: "b99".into(), schema: "v2".into(),
+            committed_at: "2026-11-21T01:00:00Z".into(), previous: None, files: vec![], summaries: vec![],
+            sources: vec![], replaces: vec![], bytes: 100, rows: 10, parents: BTreeMap::new(),
+        };
+        rt_dr16.admin.seed_object_bytes("fos-fixture-logs", m_key, serde_json::to_vec(&mf).unwrap());
+        rt_dr16.mtimes.borrow_mut().insert(m_key.into(), "2026-11-21T01:00:00Z".into());
+        let (st16, b16) = rt_dr16.call("POST", "/api/admin/provision/recover", json!({
+            "token": "fixture-token", "service_id": "fixtureService", "fos_bucket": "fos-fixture-logs", "fos_region": "us-east-1"
+        }));
+        let cap16 = rt_dr16.admin.records().get("svc:fixtureService").and_then(|r| r.value["capture"].as_str().map(str::to_owned));
+        dr16_results.push(json!({"status": st16, "source": b16["source"], "capture": cap16}));
+    }
+
+    // Iteration-20 WS1 (BUG-CLOUD-DR-17): 32-call budgeted scoring_enable (0 HTTP 503s), _job_checkpoint atomicity,
+    // single domain/placeholder_origin/3 store links, and failed scoring_enable supersede by PATCH & retry.
+    let rt_dr17 = ProbeRt::new();
+    let (_, prov17) = rt_dr17.call("POST", "/api/admin/provision/execute", json!({
+        "token": "fixture-token",
+        "service_id": "fixtureService",
+        "fos_bucket": "fos-fixture-logs",
+        "fos_region": "us-east-1",
+        "log_fields": {"groups": ["A", "C"], "custom_fields": [], "field_overrides": {}, "field_limits": {}}
+    }));
+    let mut jb_prov17 = prov17["job"].clone();
+    for _ in 0..40 {
+        if jb_prov17["status"] == "complete" || jb_prov17["status"] == "failed" {
+            break;
+        }
+        if let Some(at) = jb_prov17["retry_at"].as_u64() {
+            rt_dr17.now_s.fetch_max(at, Ordering::SeqCst);
+        }
+        let (_, sb) = rt_dr17.call("POST", &format!("/api/admin/jobs/{}/step", jb_prov17["id"].as_str().unwrap()), json!({}));
+        jb_prov17 = sb["job"].clone();
+    }
+    assert_eq!(jb_prov17["status"], "complete", "{jb_prov17}");
+    let (_, sc17_fail_start) = rt_dr17.call_budgeted("POST", "/api/services/fixtureService/scoring/enable", json!({}));
+    let fail_job_id = sc17_fail_start["job"]["id"].as_str().unwrap().to_owned();
+    let fail_job_rec = rt_dr17.admin.get(&format!("job:{fail_job_id}")).unwrap().unwrap();
+    let mut poisoned_job = fail_job_rec.value.clone();
+    poisoned_job["status"] = json!("failed");
+    poisoned_job["error"] = json!("fastly_api_failed");
+    rt_dr17.admin.cas(&format!("job:{fail_job_id}"), Some(&fail_job_rec.generation), &poisoned_job).unwrap();
+    let gen17_patch = rt_dr17.admin.get("svc:fixtureService").unwrap().unwrap().generation;
+    let (dr17_patch_after_fail_st, _) = rt_dr17.call("PATCH", "/api/admin/services/fixtureService", json!({
+        "generation": gen17_patch,
+        "log_period": 120
+    }));
+    let (dr17_en_start_st, sc17_en_start) = rt_dr17.call_budgeted("POST", "/api/services/fixtureService/scoring/enable", json!({}));
+    let mut jb_sc17 = sc17_en_start["job"].clone();
+    let mut dr17_step_503s = 0usize;
+    let mut dr17_saw_checkpoint = false;
+    for _ in 0..40 {
+        if jb_sc17["status"] == "complete" || jb_sc17["status"] == "failed" {
+            break;
+        }
+        if let Some(at) = jb_sc17["retry_at"].as_u64() {
+            rt_dr17.now_s.fetch_max(at, Ordering::SeqCst);
+        }
+        let (st_step, sb) = rt_dr17.call_budgeted("POST", &format!("/api/admin/jobs/{}/step", jb_sc17["id"].as_str().unwrap()), json!({}));
+        if st_step == 503 {
+            dr17_step_503s += 1;
+            break;
+        }
+        if rt_dr17.admin.get("svc:fixtureService").unwrap().unwrap().value.get("_job_checkpoint").is_some() {
+            dr17_saw_checkpoint = true;
+        }
+        jb_sc17 = sb["job"].clone();
+    }
+    let dr17_sc_status = jb_sc17["status"].as_str().unwrap_or("").to_owned();
+    let svc17_after = rt_dr17.admin.get("svc:fixtureService").unwrap().unwrap().value;
+    let sc17_sid = svc17_after["scoring"]["scoring_service_id"].as_str().unwrap_or("").to_owned();
+    let dr17_domains = rt_dr17.admin.resources(&sc17_sid, "domain").len();
+    let dr17_backends = rt_dr17.admin.resources(&sc17_sid, "backend").len();
+    let dr17_links = rt_dr17.admin.resources(&sc17_sid, "resource").len();
+
+    // Iteration-21 WS1 (BUG-CLOUD-DR-18A/B/C):
+    // 1) 4-matrix cleanup_scoring_state_step on scoring/disable(delete_matrices=true) without livelock,
+    // 2) rollback_failed_enable rewind to logging_reconcile on validate failure + retry!
+    let mut dr18_versions = Vec::new();
+    for n in 1..=4usize {
+        let ver = format!("2027-03-01-e2e-{n}");
+        rt_dr17.admin.seed_object_bytes(
+            "fos-fixture-logs",
+            &format!("processed/scoring/matrices/{ver}.json"),
+            serde_json::to_vec(&json!({"version": ver, "vocab_size": 1})).unwrap(),
+        );
+        dr18_versions.push(json!({"version": ver, "vocab_size": 1}));
+    }
+    rt_dr17.admin.seed_object_bytes(
+        "fos-fixture-logs",
+        "processed/scoring/matrices/index.json",
+        serde_json::to_vec(&json!({"versions": dr18_versions})).unwrap(),
+    );
+    let (_, dr18_dis_start) = rt_dr17.call_budgeted(
+        "POST",
+        "/api/services/fixtureService/scoring/disable",
+        json!({"delete_matrices": true}),
+    );
+    let mut jb_dr18_dis = dr18_dis_start["job"].clone();
+    for _ in 0..30 {
+        if jb_dr18_dis["status"] == "complete" || jb_dr18_dis["status"] == "failed" {
+            break;
+        }
+        let (st_step, sb) = rt_dr17.call_budgeted(
+            "POST",
+            &format!("/api/admin/jobs/{}/step", jb_dr18_dis["id"].as_str().unwrap()),
+            json!({}),
+        );
+        assert_eq!(st_step, 200, "{sb}");
+        jb_dr18_dis = sb["job"].clone();
+    }
+    let dr18c_dis_status = jb_dr18_dis["status"].as_str().unwrap_or("").to_owned();
+    let dr18c_matrices_gone = !rt_dr17
+        .admin
+        .object_keys("fos-fixture-logs")
+        .iter()
+        .any(|k| k.starts_with("processed/scoring/matrices/"));
+
+    let (_, dr18_en_start) = rt_dr17.call_budgeted("POST", "/api/services/fixtureService/scoring/enable", json!({}));
+    let mut jb_dr18_en = dr18_en_start["job"].clone();
+    let dr18_en_id = jb_dr18_en["id"].as_str().unwrap().to_owned();
+    let mut dr18_injected = false;
+    for _ in 0..45 {
+        if jb_dr18_en["status"] == "complete" || jb_dr18_en["status"] == "failed" {
+            break;
+        }
+        if jb_dr18_en["step"] == "validate" && !dr18_injected {
+            rt_dr17.admin.invalid_draft(true);
+            dr18_injected = true;
+        }
+        let (st_step, sb) = rt_dr17.call_budgeted("POST", &format!("/api/admin/jobs/{dr18_en_id}/step"), json!({}));
+        assert_eq!(st_step, 200, "{sb}");
+        jb_dr18_en = sb["job"].clone();
+    }
+    rt_dr17.admin.invalid_draft(false);
+    rt_dr17.now_s.fetch_add(65, Ordering::SeqCst);
+    let (_, dr18_retried) = rt_dr17.call_budgeted("POST", &format!("/api/admin/jobs/{dr18_en_id}/retry"), json!({}));
+    let mut jb_dr18_rt = dr18_retried["job"].clone();
+    for _ in 0..40 {
+        if jb_dr18_rt["status"] == "complete" || jb_dr18_rt["status"] == "failed" {
+            break;
+        }
+        let (st_step, sb) = rt_dr17.call_budgeted("POST", &format!("/api/admin/jobs/{dr18_en_id}/step"), json!({}));
+        assert_eq!(st_step, 200, "{sb}");
+        jb_dr18_rt = sb["job"].clone();
+    }
+    let dr18b_retry_status = jb_dr18_rt["status"].as_str().unwrap_or("").to_owned();
+    let dr18b_enabled_after = rt_dr17.call("GET", "/api/services/fixtureService/scoring/status", json!({})).1["scoring"]["enabled"] == json!(true);
+
+    // Iteration-22 WS1 (BUG-CLOUD-DR-19A, 19B, 19C):
+    // 19A: customer VCL backend "session_scorer" created even when rum.enabled == false!
+    let dr19a_customer_backends: Vec<String> = rt_dr17
+        .admin
+        .resources("fixtureService", "backend")
+        .into_iter()
+        .filter_map(|b| b["name"].as_str().map(str::to_owned))
+        .collect();
+
+    // 19B: fail scoring_enable at validate, customer clones & activates newer v_cust with custom snippet,
+    // retry ignores stale job-tagged draft (< v_cust) and clones fresh preserving customer snippet!
+    let drain_job = |rt: &ProbeRt, mut jb: Value| -> Value {
+        for _ in 0..120 {
+            if jb["status"] == "complete" || jb["status"] == "failed" { break; }
+            if let Some(at) = jb["retry_at"].as_u64() {
+                rt.now_s.fetch_max(at, Ordering::SeqCst);
+            }
+            jb = rt.call_budgeted("POST", &format!("/api/admin/jobs/{}/step", jb["id"].as_str().unwrap()), json!({})).1["job"].clone();
+        }
+        jb
+    };
+    let rt_dr19b = ProbeRt::new();
+    let (_, prov19b) = rt_dr19b.call_budgeted("POST", "/api/admin/provision/execute", json!({
+        "token": "fixture-token", "service_id": "fixtureService", "fos_bucket": "fos-fixture-logs", "fos_region": "us-east-1"
+    }));
+    assert_eq!(drain_job(&rt_dr19b, prov19b["job"].clone())["status"], "complete");
+    let (_, en19b) = rt_dr19b.call_budgeted("POST", "/api/services/fixtureService/scoring/enable", json!({}));
+    let mut jb_19b = en19b["job"].clone();
+    let id_19b = jb_19b["id"].as_str().unwrap().to_owned();
+    let mut inj_19b = false;
+    for _ in 0..80 {
+        if jb_19b["status"] == "complete" || jb_19b["status"] == "failed" { break; }
+        if jb_19b["step"] == "validate" && !inj_19b {
+            rt_dr19b.admin.invalid_draft(true);
+            inj_19b = true;
+        }
+        jb_19b = rt_dr19b.call_budgeted("POST", &format!("/api/admin/jobs/{id_19b}/step"), json!({})).1["job"].clone();
+    }
+    rt_dr19b.admin.invalid_draft(false);
+    let _ = rt_dr19b.admin.api(ApiRequest {
+        method: "PUT", path: "/service/fixtureService/version/2/clone", token: "fixture-token",
+        body: None, timeout: std::time::Duration::from_secs(5), query: "",
+    }).unwrap();
+    let _ = rt_dr19b.admin.api(ApiRequest {
+        method: "POST", path: "/service/fixtureService/version/4/snippet", token: "fixture-token",
+        body: Some(json!({"name": "Customer Critical Auth v4", "type": "recv", "priority": 1, "content": "set req.http.X-Cust = \"v4\";"})),
+        timeout: std::time::Duration::from_secs(5), query: "",
+    }).unwrap();
+    let _ = rt_dr19b.admin.api(ApiRequest {
+        method: "PUT", path: "/service/fixtureService/version/4/activate", token: "fixture-token",
+        body: None, timeout: std::time::Duration::from_secs(5), query: "",
+    }).unwrap();
+    rt_dr19b.now_s.fetch_add(65, Ordering::SeqCst);
+    let jb_19b_rt = drain_job(
+        &rt_dr19b,
+        rt_dr19b.call_budgeted("POST", &format!("/api/admin/jobs/{id_19b}/retry"), json!({})).1["job"].clone(),
+    );
+    assert_eq!(jb_19b_rt["status"], "complete");
+    let dr19b_active_ver = rt_dr19b.admin.api(ApiRequest {
+        method: "GET", path: "/service/fixtureService/version", token: "fixture-token",
+        body: None, timeout: std::time::Duration::from_secs(5), query: "",
+    }).unwrap().1.as_array().unwrap().iter().find(|v| v["active"] == true).and_then(|v| v["number"].as_u64()).unwrap_or(0);
+    let dr19b_customer_v4_preserved = rt_dr19b
+        .admin
+        .resources("fixtureService", "snippet")
+        .iter()
+        .any(|s| s["name"] == "Customer Critical Auth v4");
+
+    // 19C: low-budget post-logging_reconcile failure defers to scoring_rollback, rolls back svc, and retries cleanly!
+    let rt_dr19c = ProbeRt::new();
+    let (_, prov19c) = rt_dr19c.call_budgeted("POST", "/api/admin/provision/execute", json!({
+        "token": "fixture-token", "service_id": "fixtureService", "fos_bucket": "fos-fixture-logs", "fos_region": "us-east-1", "rum_enabled": true
+    }));
+    assert_eq!(drain_job(&rt_dr19c, prov19c["job"].clone())["status"], "complete");
+    let (_, en19c) = rt_dr19c.call_budgeted("POST", "/api/services/fixtureService/scoring/enable", json!({}));
+    let mut jb_19c = en19c["job"].clone();
+    let id_19c = jb_19c["id"].as_str().unwrap().to_owned();
+    for _ in 0..40 {
+        if jb_19c["step"] == "discover" { break; }
+        jb_19c = rt_dr19c.call_budgeted("POST", &format!("/api/admin/jobs/{id_19c}/step"), json!({})).1["job"].clone();
+    }
+    rt_dr19c.admin.seed_resource("fixtureService", "logging/fos", json!({
+        "name": "Fastly Object Storage Logs", "bucket_name": "fos-other-bucket", "region": "us-east-1", "path": "raw/", "response_condition": "log_analytics_condition"
+    }));
+    rt_dr19c.admin.cache_invalidate("svc:fixtureService");
+    rt_dr19c.budget.set(Some(14));
+    let (_, low_19c_res) = rt_dr19c.call("POST", &format!("/api/admin/jobs/{id_19c}/step"), json!({}));
+    rt_dr19c.budget.set(None);
+    let dr19c_deferred_step = low_19c_res["job"]["step"].as_str().unwrap_or("").to_owned();
+    let (_, rb_19c_res) = rt_dr19c.call_budgeted("POST", &format!("/api/admin/jobs/{id_19c}/step"), json!({}));
+    let dr19c_failed_status = rb_19c_res["job"]["status"].as_str().unwrap_or("").to_owned();
+    let dr19c_failed_enabled = rt_dr19c.admin.get("svc:fixtureService").unwrap().unwrap().value["scoring"]["enabled"] == json!(true);
+    rt_dr19c.admin.seed_resource("fixtureService", "logging/fos", json!({
+        "name": "Fastly Object Storage Logs", "bucket_name": "fos-fixture-logs", "region": "us-east-1",
+        "path": "raw/request/year=%Y/month=%m/day=%d/hour=%H/minute=%M/", "response_condition": "log_analytics_condition"
+    }));
+    rt_dr19c.now_s.fetch_add(65, Ordering::SeqCst);
+    let jb_19c_rt = drain_job(
+        &rt_dr19c,
+        rt_dr19c.call_budgeted("POST", &format!("/api/admin/jobs/{id_19c}/retry"), json!({})).1["job"].clone(),
+    );
+    let dr19c_retry_status = jb_19c_rt["status"].as_str().unwrap_or("").to_owned();
+
+    // 20A..20D + Minor Finding 1 (Iter 23):
+    // 20A: cold-start DR recover without scoring_request_secret.<sid> -> reconcile recovers secret from scoring_keys store!
+    let rt_dr20 = ProbeRt::new();
+    let (_, prov20) = rt_dr20.call_budgeted("POST", "/api/admin/provision/execute", json!({
+        "token": "fixture-token", "service_id": "fixtureService", "fos_bucket": "fos-fixture-logs", "fos_region": "us-east-1"
+    }));
+    assert_eq!(drain_job(&rt_dr20, prov20["job"].clone())["status"], "complete");
+    let (_, en20) = rt_dr20.call_budgeted("POST", "/api/services/fixtureService/scoring/enable", json!({}));
+    assert_eq!(drain_job(&rt_dr20, en20["job"].clone())["status"], "complete");
+    for k in rt_dr20.admin.records().into_keys() {
+        rt_dr20.admin.cache_invalidate(&k);
+        rt_dr20.admin.delete(&k).unwrap();
+    }
+    for sec in ["fastly_token.fixtureService", "fos_ak.fixtureService", "fos_sk.fixtureService", "scoring_request_secret.fixtureService"] {
+        let _ = rt_dr20.admin.api(ApiRequest {
+            method: "DELETE", path: &format!("/resources/stores/secret/fixtureSecrets/secrets/{sec}"),
+            token: "fixture-token", body: None, timeout: std::time::Duration::from_secs(5), query: "",
+        }).unwrap();
+    }
+    let (recov_st, recov_body) = rt_dr20.call_budgeted("POST", "/api/admin/provision/recover", json!({
+        "token": "fixture-token", "service_id": "fixtureService", "fos_bucket": "fos-fixture-logs", "fos_region": "us-east-1"
+    }));
+    assert_eq!(recov_st, 200);
+    assert_eq!(recov_body["source"], "dr_state");
+    let gen20a = rt_dr20.admin.record_snapshot("svc:fixtureService").unwrap().generation;
+    let (_, rec20a) = rt_dr20.call_budgeted("POST", "/api/admin/services/fixtureService/reconcile", json!({"generation": gen20a}));
+    let done20a = drain_job(&rt_dr20, rec20a["job"].clone());
+    let dr20a_reconcile_status = done20a["status"].as_str().unwrap_or("").to_owned();
+    let dr20a_secret_backfilled = rt_dr20.admin.secret("scoring_request_secret.fixtureService").unwrap().is_some();
+
+    // 20B: mutating /scoring/* and /labels routes return 409 during active job!
+    let gen20b = rt_dr20.admin.record_snapshot("svc:fixtureService").unwrap().generation;
+    let (_, rec20b) = rt_dr20.call_budgeted("POST", "/api/admin/services/fixtureService/reconcile", json!({"generation": gen20b}));
+    let mut dr20b_statuses = Vec::new();
+    for (m, pth, pay) in [
+        ("PUT", "/api/services/fixtureService/scoring/threshold", json!({"threshold": 60})),
+        ("PUT", "/api/services/fixtureService/scoring/enforce-threshold?confirm=1", json!({"enforce_threshold": 75})),
+        ("PUT", "/api/services/fixtureService/scoring/l2-enforce?confirm=1", json!({"enabled": true})),
+        ("PUT", "/api/services/fixtureService/scoring/exclude-regex?confirm=1", json!({"exclude_url_regex": "^/ok$"})),
+        ("PUT", "/api/services/fixtureService/scoring/enforce-status-code?confirm=1", json!({"status_code": 403})),
+        ("POST", "/api/services/fixtureService/scoring/rotate-key?confirm=1", json!({})),
+        ("POST", "/api/services/fixtureService/scoring/retrain", json!({"matrix": {"version": "v1", "vocab_size": 1, "session_count": 1, "transition_count": 1, "counts": {}, "row_totals": {}}})),
+        ("POST", "/api/services/fixtureService/scoring/matrix/versions/restore?confirm=1", json!({"version": "v1"})),
+        ("POST", "/api/services/fixtureService/scoring/labels", json!({"edge_sid": "s1", "label": "bad"})),
+    ] {
+        dr20b_statuses.push(rt_dr20.call_budgeted(m, pth, pay).0);
+    }
+    assert_eq!(drain_job(&rt_dr20, rec20b["job"].clone())["status"], "complete");
+
+    // 20D: scoring_strip_activate refuses to overwrite newer customer vCL and retries cleanly!
+    let (_, dis20d) = rt_dr20.call_budgeted("POST", "/api/services/fixtureService/scoring/disable", json!({}));
+    let mut jb_20d = dis20d["job"].clone();
+    let id_20d = jb_20d["id"].as_str().unwrap().to_owned();
+    for _ in 0..20 {
+        if jb_20d["step"] == "scoring_strip_activate" { break; }
+        jb_20d = rt_dr20.call_budgeted("POST", &format!("/api/admin/jobs/{id_20d}/step"), json!({})).1["job"].clone();
+    }
+    let cur_act_20d = rt_dr20.admin.api(ApiRequest {
+        method: "GET", path: "/service/fixtureService/version", token: "fixture-token",
+        body: None, timeout: std::time::Duration::from_secs(5), query: "",
+    }).unwrap().1.as_array().unwrap().iter().find(|v| v["active"] == true).and_then(|v| v["number"].as_u64()).unwrap();
+    let v_cust = rt_dr20.admin.api(ApiRequest {
+        method: "PUT", path: &format!("/service/fixtureService/version/{cur_act_20d}/clone"), token: "fixture-token",
+        body: None, timeout: std::time::Duration::from_secs(5), query: "",
+    }).unwrap().1["number"].as_u64().unwrap();
+    let _ = rt_dr20.admin.api(ApiRequest {
+        method: "POST", path: &format!("/service/fixtureService/version/{v_cust}/snippet"), token: "fixture-token",
+        body: Some(json!({"name": "Customer Critical Auth v20d", "type": "recv", "priority": 1, "content": "set req.http.X-C20D = \"1\";"})),
+        timeout: std::time::Duration::from_secs(5), query: "",
+    }).unwrap();
+    let _ = rt_dr20.admin.api(ApiRequest {
+        method: "PUT", path: &format!("/service/fixtureService/version/{v_cust}/activate"), token: "fixture-token",
+        body: None, timeout: std::time::Duration::from_secs(5), query: "",
+    }).unwrap();
+    let (_, act_20d_res) = rt_dr20.call_budgeted("POST", &format!("/api/admin/jobs/{id_20d}/step"), json!({}));
+    let dr20d_refused_error = act_20d_res["job"]["error"].as_str().unwrap_or("").to_owned();
+    rt_dr20.now_s.fetch_add(65, Ordering::SeqCst);
+    let done_20d = drain_job(
+        &rt_dr20,
+        rt_dr20.call_budgeted("POST", &format!("/api/admin/jobs/{id_20d}/retry"), json!({})).1["job"].clone(),
+    );
+    let dr20d_retry_status = done_20d["status"].as_str().unwrap_or("").to_owned();
+    let dr20d_customer_preserved = rt_dr20.admin.resources("fixtureService", "snippet").iter().any(|s| s["name"] == "Customer Critical Auth v20d");
+
+    // 20C: _audit_outbox == 4096 rollback at validate succeeds without livelock + superseded scoring_enable skips rollback!
+    let rt_dr20c = ProbeRt::new();
+    let (_, prov20c) = rt_dr20c.call_budgeted("POST", "/api/admin/provision/execute", json!({
+        "token": "fixture-token", "service_id": "fixtureService", "fos_bucket": "fos-fixture-logs", "fos_region": "us-east-1"
+    }));
+    assert_eq!(drain_job(&rt_dr20c, prov20c["job"].clone())["status"], "complete");
+    let snap20c = rt_dr20c.admin.record_snapshot("svc:fixtureService").unwrap();
+    let mut seeded20c = snap20c.value.clone();
+    seeded20c["_audit_outbox"] = Value::Array((0..4089).map(|i| json!({"actor": "a", "at": 1800000000u64 + i, "event": "s", "config_version": 1})).collect());
+    rt_dr20c.admin.cache_invalidate("svc:fixtureService");
+    rt_dr20c.admin.cas("svc:fixtureService", Some(&snap20c.generation), &seeded20c).unwrap();
+    let (_, en20c) = rt_dr20c.call_budgeted("POST", "/api/services/fixtureService/scoring/enable", json!({}));
+    let mut jb_20c = en20c["job"].clone();
+    let id_20c = jb_20c["id"].as_str().unwrap().to_owned();
+    for _ in 0..50 {
+        if jb_20c["status"] == "failed" || jb_20c["status"] == "complete" { break; }
+        if jb_20c["step"] == "validate" { rt_dr20c.admin.invalid_draft(true); }
+        jb_20c = rt_dr20c.call_budgeted("POST", &format!("/api/admin/jobs/{id_20c}/step"), json!({})).1["job"].clone();
+    }
+    rt_dr20c.admin.invalid_draft(false);
+    let dr20c_status = jb_20c["status"].as_str().unwrap_or("").to_owned();
+    let dr20c_error = jb_20c["error"].as_str().unwrap_or("").to_owned();
+    let dr20c_enabled = rt_dr20c.admin.get("svc:fixtureService").unwrap().unwrap().value["scoring"]["enabled"] == json!(true);
+
     println!("{}", json!({
         "st_trav": st_trav,
         "st_own_svc": st_own_svc,
@@ -1277,6 +1908,37 @@ fn main() {
         "dr13_capture": dr13_capture,
         "dr13_owned": dr13_owned,
         "st_dr14_all3": st_dr14_all3,
+        "dr15_statuses": dr15_statuses,
+        "dr15_gce_matrix_intact": dr15_gce_matrix_intact,
+        "dr16_results": dr16_results,
+        "dr17_patch_after_fail_st": dr17_patch_after_fail_st,
+        "dr17_en_start_st": dr17_en_start_st,
+        "dr17_step_503s": dr17_step_503s,
+        "dr17_saw_checkpoint": dr17_saw_checkpoint,
+        "dr17_sc_status": dr17_sc_status,
+        "dr17_domains": dr17_domains,
+        "dr17_backends": dr17_backends,
+        "dr17_links": dr17_links,
+        "dr18c_dis_status": dr18c_dis_status,
+        "dr18c_matrices_gone": dr18c_matrices_gone,
+        "dr18b_retry_status": dr18b_retry_status,
+        "dr18b_enabled_after": dr18b_enabled_after,
+        "dr19a_customer_backends": dr19a_customer_backends,
+        "dr19b_active_ver": dr19b_active_ver,
+        "dr19b_customer_v4_preserved": dr19b_customer_v4_preserved,
+        "dr19c_deferred_step": dr19c_deferred_step,
+        "dr19c_failed_status": dr19c_failed_status,
+        "dr19c_failed_enabled": dr19c_failed_enabled,
+        "dr19c_retry_status": dr19c_retry_status,
+        "dr20a_reconcile_status": dr20a_reconcile_status,
+        "dr20a_secret_backfilled": dr20a_secret_backfilled,
+        "dr20b_statuses": dr20b_statuses,
+        "dr20c_status": dr20c_status,
+        "dr20c_error": dr20c_error,
+        "dr20c_enabled": dr20c_enabled,
+        "dr20d_refused_error": dr20d_refused_error,
+        "dr20d_retry_status": dr20d_retry_status,
+        "dr20d_customer_preserved": dr20d_customer_preserved,
     }));
 }
 """,
@@ -1343,6 +2005,40 @@ fn main() {
     assert dr14["dr13_capture"] == "attached"
     assert dr14["dr13_owned"] == ["FLP Cloud Logs"]
     assert dr14["st_dr14_all3"] == 200
+    assert dr14["dr15_statuses"] == [409, 409, 409, 409, 409, 409, 409, 409]
+    assert dr14["dr15_gce_matrix_intact"] is True
+    assert dr14["dr16_results"] == [
+        {"status": 200, "source": "catalog_scan", "capture": "attached"},
+        {"status": 200, "source": "catalog_scan", "capture": "attached"},
+    ]
+    assert dr14["dr17_patch_after_fail_st"] == 200
+    assert dr14["dr17_en_start_st"] == 200
+    assert dr14["dr17_step_503s"] == 0
+    assert dr14["dr17_saw_checkpoint"] is True
+    assert dr14["dr17_sc_status"] == "complete"
+    assert dr14["dr17_domains"] == 1
+    assert dr14["dr17_backends"] == 1
+    assert dr14["dr17_links"] == 3
+    assert dr14["dr18c_dis_status"] == "complete"
+    assert dr14["dr18c_matrices_gone"] is True
+    assert dr14["dr18b_retry_status"] == "complete"
+    assert dr14["dr18b_enabled_after"] is True
+    assert dr14["dr19a_customer_backends"] == ["session_scorer"]
+    assert dr14["dr19b_active_ver"] == 5
+    assert dr14["dr19b_customer_v4_preserved"] is True
+    assert dr14["dr19c_deferred_step"] == "scoring_rollback"
+    assert dr14["dr19c_failed_status"] == "failed"
+    assert dr14["dr19c_failed_enabled"] is False
+    assert dr14["dr19c_retry_status"] == "complete"
+    assert dr14["dr20a_reconcile_status"] == "complete"
+    assert dr14["dr20a_secret_backfilled"] is True
+    assert dr14["dr20b_statuses"] == [409] * 9
+    assert dr14["dr20c_status"] == "failed"
+    assert dr14["dr20c_error"] == "draft_validation_failed"
+    assert dr14["dr20c_enabled"] is False
+    assert dr14["dr20d_refused_error"] == "active_version_changed"
+    assert dr14["dr20d_retry_status"] == "complete"
+    assert dr14["dr20d_customer_preserved"] is True
 
 
 def test_t5_c04_c12_cloud_disabled_rum_faro_cdn_shield_reconcile_cookie_and_fos_guards(
@@ -5159,7 +5855,8 @@ console.log('NODE_PROXY_AND_CSV_PARITY_OK');
     )
     assert node_probe.returncode == 0 and "NODE_PROXY_AND_CSV_PARITY_OK" in node_probe.stdout, node_probe.stderr
 
-    # Iteration-17 WS3 behavioral check: run Vitest on logout DuckDB reset + in-flight fetchRange/storeQueue epoch isolation
+    # Iteration-17..20 WS2 behavioral check: run Vitest on logout DuckDB reset + multi-step caller resumption + identity-switch + manifest/telemetry/metadata/stats/ops/security-rollup drain
+    cloud_vitest_env = {**os.environ, "STATIC_EXPORT": "1", "NEXT_PUBLIC_DEPLOYMENT_MODE": "cloud"}
     vitest_logout_probe = subprocess.run(
         [
             "npx",
@@ -5167,13 +5864,40 @@ console.log('NODE_PROXY_AND_CSV_PARITY_OK');
             "run",
             "--no-cache",
             "lib/cloud-engine/dashboard/sources.test.ts",
+            "lib/cloud-engine/dashboard/rollup-query.test.ts",
+            "lib/cloud-engine/dashboard/filtered-cache.test.ts",
+            "lib/cloud-engine/dashboard/manifest-store.test.ts",
+            "lib/cloud-engine/value-stats.test.ts",
+            "lib/cloud-engine/security-rollup.test.ts",
+            "lib/cloud-engine/telemetry/client.test.ts",
+            "lib/cloud-engine/adapter.test.ts",
             "-t",
-            "wipes range-loader singleton|aborts in-flight|blocks post-logout OPFS persistFile",
+            "wipes range-loader singleton|aborts in-flight|blocks post-logout OPFS persistFile|blocks multi-step runDashboard|aborts in-flight queryRollup|suppresses pending write|skips CacheStorage and error telemetry|isolates cached service stats|clears decoded SecuritySummary|fences in-flight ops CacheStorage|resets activeOpsUser to null|uses volatile-ops scope|aborts multi-step handleCloudAnalyticalRequest|allows concurrent Compare Mode|allows concurrent same-session writes|fences POST /api/dashboard/bundle|scopes /api/usage/",
+        ],
+        cwd=str(REPO_ROOT / "frontend"),
+        env=cloud_vitest_env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+        check=False,
+    )
+    assert vitest_logout_probe.returncode == 0, f"{vitest_logout_probe.stdout}\n{vitest_logout_probe.stderr}"
+    vitest_hook_logout_probe = subprocess.run(
+        [
+            "npx",
+            "vitest",
+            "run",
+            "--no-cache",
+            "__tests__/hooks/useBootstrap.test.ts",
+            "-t",
+            "wipes Cloud dashboard and ops caches|hydrates Cloud dashboardCacheIdentity before syncOpsCacheForSession",
         ],
         cwd=str(REPO_ROOT / "frontend"),
         capture_output=True,
         text=True,
-        timeout=45,
+        timeout=60,
         check=False,
     )
-    assert vitest_logout_probe.returncode == 0, f"{vitest_logout_probe.stdout}\n{vitest_logout_probe.stderr}"
+    assert vitest_hook_logout_probe.returncode == 0, (
+        f"{vitest_hook_logout_probe.stdout}\n{vitest_hook_logout_probe.stderr}"
+    )

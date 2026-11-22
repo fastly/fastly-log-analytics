@@ -1,4 +1,5 @@
 import { answerFromRollup } from "../rollup-answer";
+import { clearSecurityRollupCache } from "../security-rollup";
 import { createWorkerRpcHost } from "../worker-rpc";
 import { getDuckDBEngine } from "./duckdb";
 import {
@@ -13,6 +14,7 @@ import {
   type SearchFieldOptions,
 } from "./engine";
 import { clearManifestCache } from "./manifest";
+import { clearRollupQueryCache } from "./rollup-query";
 import { browserSource, type BrowserSourceCallEvent } from "./sources";
 
 type RunMessage = {
@@ -161,7 +163,10 @@ self.onmessage = createWorkerRpcHost<WorkerRequest>(async (msg, ctx) => {
   if (msg.type === "clearCache") {
     clearDashboardMemo();
     clearManifestCache();
+    clearRollupQueryCache();
+    clearSecurityRollupCache();
     sharedSource?.clearMemoryCache?.();
+    rollupBase?.clearMemoryCache?.();
     await getDuckDBEngine().reset();
     ctx.post({ id: msg.id, type: "result", result: null });
     return;
@@ -169,6 +174,8 @@ self.onmessage = createWorkerRpcHost<WorkerRequest>(async (msg, ctx) => {
   if (msg.type === "catalogChanged") {
     clearDashboardMemo();
     clearManifestCache();
+    clearRollupQueryCache();
+    clearSecurityRollupCache();
     sharedSource?.clearMemoryCache?.();
     rollupBase?.clearMemoryCache?.();
     return;

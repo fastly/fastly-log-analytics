@@ -139,14 +139,12 @@ fn asset_entry(root: &Path, path: &Path, cache_dir: &Path) -> AssetEntry {
     let (mut keep_identity, mut gzip, mut br) = (true, None, None);
     if compressible(mime) {
         gzip = precompress(&raw, cache_dir, &digest, Codec::Gzip);
-        if mime == "application/wasm" {
-            // Brotli 11 of DuckDB's 36 MB module takes minutes in an unoptimized build script.
-            // Its identity copy would dominate the package, so it ships only gzipped.
-            if gzip.is_some() {
-                keep_identity = false;
-            }
-        } else {
-            br = precompress(&raw, cache_dir, &digest, Codec::Brotli);
+        // DuckDB's 36 MB module is ~8 MB gzipped but ~5.4 MB as Brotli 11; the encode is slow
+        // (about a minute, build scripts run at opt-level 3) but cached by content digest.
+        br = precompress(&raw, cache_dir, &digest, Codec::Brotli);
+        // The wasm identity copy would dominate the package, so it ships only compressed.
+        if mime == "application/wasm" && (gzip.is_some() || br.is_some()) {
+            keep_identity = false;
         }
     }
     let identity = keep_identity.then(|| {

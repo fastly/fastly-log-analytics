@@ -404,6 +404,8 @@ export interface InsightCard {
   items: InsightItem[];
   /** Not evaluated yet: a follow-up request (`detectors`) computes it. */
   placeholder?: boolean;
+  /** Not evaluated: its raw scan exceeds the browser scan budget. */
+  not_evaluated?: { reason: "scan_budget"; unit: "bytes" | "files"; needed: number; limit: number };
 }
 
 export interface InsightsEnvelope {

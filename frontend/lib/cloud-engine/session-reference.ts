@@ -15,6 +15,20 @@ export function saveCloudSessionReference(reference: string, token: string): voi
 
 export function readCloudSessionReference(reference: string): string | null {
   if (!/^[0-9a-f-]{36}$/i.test(reference)) return null
-  const saved = references()[reference]
-  return typeof saved === 'string' ? saved : null
+  try {
+    const saved = references()[reference]
+    return typeof saved === 'string' ? saved : null
+  } catch {
+    return null
+  }
+}
+
+export function clearCloudSessionReferences(): void {
+  try {
+    if (typeof sessionStorage !== 'undefined') {
+      sessionStorage.removeItem(STORAGE_KEY)
+    }
+  } catch {
+    /* Storage disabled or unavailable. */
+  }
 }

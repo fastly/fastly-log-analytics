@@ -4,6 +4,7 @@ import { parquetWriteBuffer } from "hyparquet-writer";
 import { createNodeBackend, DuckDBAnalyticalEngine, FIELD_DUCKDB_TYPES } from "./duckdb";
 import { parquetFixture } from "./test-fixtures";
 import { Aggregator } from "./engine";
+import { CARD_FIELDS } from "./summaries";
 
 describe("bounded complete Parquet bindings", () => {
   it("answers the complete filtered range without materializing unused wide columns", async () => {
@@ -546,7 +547,7 @@ describe("bounded complete Parquet bindings", () => {
         const backend = await createNodeBackend();
         return { ...backend, query: async (sql, signal) => {
           const table = await backend.query(sql, signal);
-          if (sql.includes("GROUPING SETS")) valueRows.push(table.numRows);
+          if (sql.includes(" AS cnt ")) valueRows.push(table.numRows);
           return table;
         } };
       },
@@ -579,6 +580,54 @@ describe("bounded complete Parquet bindings", () => {
     expect(Math.max(...valueRows)).toBeLessThanOrEqual(6);
     await engine.reset();
   });
+
+  it("aggregates every dashboard card of a hot raw hour within a fraction of the engine memory limit", async () => {
+    // A load-test burst: one hour compact with ~265k rows whose ttl and age are
+    // nearly unique per row ran the browser out of its 256 MB. Holding one hash
+    // table per card in a single statement costs ~128 MB before any data.
+    const engine = new DuckDBAnalyticalEngine();
+    const t = 1700000000000;
+    const rows = 60_000;
+    const fields = CARD_FIELDS.filter((field) => field in FIELD_DUCKDB_TYPES);
+    const column = (name: string, type: string) => {
+      const at = (i: number) =>
+        ["ttl", "age", "hits", "conn_requests"].includes(name) ? i
+          : ["url", "digest"].includes(name) ? i % 1500
+            : i % 7;
+      if (type === "DOUBLE") return { name, type: "DOUBLE" as const, data: Array.from({ length: rows }, (_, i) => at(i) + 0.5) };
+      if (type === "BIGINT") return { name, type: "INT64" as const, data: Array.from({ length: rows }, (_, i) => BigInt(at(i))) };
+      if (type === "BOOLEAN") return { name, type: "BOOLEAN" as const, data: Array.from({ length: rows }, (_, i) => at(i) % 2 === 0) };
+      return { name, type: "STRING" as const, data: Array.from({ length: rows }, (_, i) => `${name}-${at(i)}`) };
+    };
+    const bytes = parquetWriteBuffer({
+      codec: "SNAPPY",
+      columnData: [
+        { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: rows }, (_, i) => new Date(t + i)) },
+        { name: "resp_bytes", type: "INT64", data: Array.from({ length: rows }, () => BigInt(100)) },
+        ...fields.map((field) => column(field, FIELD_DUCKDB_TYPES[field])),
+      ],
+    });
+    await engine.executeSql("SET memory_limit = '64MB'");
+    try {
+      const whole = new Aggregator(t, t + 3_600_000, fields);
+      await engine.queryParquetIntoAggregator(
+        { kind: "buffer", bytes }, t, t + 3_600_000, [], whole, { topK: null, allValuesFields: ["country"] },
+      );
+      const perFile = new Aggregator(-Infinity, Infinity, fields);
+      await engine.queryParquetPerFile(
+        [{ access: { kind: "buffer", bytes }, target: perFile, fromMs: -Infinity, toMs: Infinity }], [], { topK: null },
+      );
+      for (const result of [whole.result(), perFile.result()]) {
+        expect(result.totalRequests).toBe(rows);
+        expect(result.cards.ttl).toMatchObject({ total: rows, approximate: true });
+        expect(result.cards.url).toMatchObject({ total: rows, distinct: 1500 });
+        expect(result.cards.url.approximate).toBeFalsy();
+        expect(result.cards.country.top[0]).toEqual({ value: "country-0", count: Math.ceil(rows / 7) });
+      }
+    } finally {
+      await engine.reset();
+    }
+  }, 90_000);
 
   it("retains the query error when selective-file cleanup also fails", async () => {
     let fail = false, queryFailures = 0;

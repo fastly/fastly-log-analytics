@@ -11,6 +11,7 @@ import pytest
 import release
 from release import (
     check_static_assets,
+    extract_early_hints,
     frozen_source,
     prepare_static_export_tree,
     restore_node_modules,
@@ -203,6 +204,91 @@ def test_static_export_without_maplibre_worker_fails_the_build(tmp_path: Path) -
     check_static_assets(out)
 
 
+HEAD = (
+    '<!DOCTYPE html><html><head><meta charset="utf-8"/>'
+    '<link rel="stylesheet" href="/_next/static/chunks/a.css" data-precedence="next"/>'
+    '<link rel="preload" href="/fastly.svg" as="image"/>'
+    '<link rel="preload" href="/_next/static/media/f.woff2" as="font" type="font/woff2"/>'
+    '<link rel="stylesheet" href="https://cdn.example/evil.css"/>'
+    '<link rel="stylesheet" href="/print.css" media="print"/>'
+    '<script src="/_next/static/chunks/polyfills.js" noModule=""></script>'
+    '<script type="module" src="/_next/static/chunks/mod.js"></script>'
+    "{scripts}"
+    '</head><body><script src="/_next/static/chunks/late.js"></script></body></html>'
+)
+
+
+def write_export(out: Path, pages: dict[str, int]) -> None:
+    for relative, count in pages.items():
+        scripts = "".join(f'<script src="/_next/static/chunks/{n}.js" async=""></script>' for n in range(count))
+        page = out / relative
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text(HEAD.replace("{scripts}", scripts))
+    duckdb = out / "duckdb/1.2.3"
+    (duckdb / "extensions/v1/wasm_eh").mkdir(parents=True)
+    (duckdb / "duckdb-browser-eh.worker.js").write_text("w")
+    (duckdb / "duckdb-eh.wasm").write_text("m")
+    (duckdb / "extensions/v1/wasm_eh/parquet.duckdb_extension.wasm").write_text("p")
+
+
+CSS = "</_next/static/chunks/a.css>; rel=preload; as=style"
+FONT = "</_next/static/media/f.woff2>; rel=preload; as=font; type=font/woff2; crossorigin"
+DUCKDB = [
+    "</duckdb/1.2.3/duckdb-browser-eh.worker.js>; rel=preload; as=script; fetchpriority=low",
+    "</duckdb/1.2.3/duckdb-eh.wasm>; rel=preload; as=fetch; crossorigin; fetchpriority=low",
+]
+
+
+def script(n: int) -> str:
+    return f"</_next/static/chunks/{n}.js>; rel=preload; as=script"
+
+
+def test_early_hints_order_css_boot_scripts_fonts_then_duckdb_within_ten_links(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    write_export(
+        out,
+        {"index.html": 9, "dashboard.html": 9, "admin/rum.html": 1, "404.html": 3, "_not-found.html": 3},
+    )
+
+    routes = extract_early_hints(out, ["/dashboard"])["routes"]
+
+    assert routes == {
+        "/": [CSS, *map(script, range(6)), FONT],
+        "/admin/rum": [CSS, script(0), FONT],
+        "/dashboard": [CSS, *map(script, range(6)), FONT, *DUCKDB],
+    }
+
+
+def test_early_hints_skip_routes_with_too_little_to_hint(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    write_export(out, {"dashboard.html": 0, "usage.html": 0})
+    (out / "usage.html").write_text("<html><head></head><body></body></html>")
+
+    routes = extract_early_hints(out, ["/dashboard"])["routes"]
+
+    assert routes == {"/dashboard": [CSS, FONT, *DUCKDB]}
+
+
+@pytest.mark.parametrize("page", ["api/x.html", "bad route.html"])
+def test_early_hints_reject_unsafe_exported_routes(tmp_path: Path, page: str) -> None:
+    out = tmp_path / "out"
+    write_export(out, {"dashboard.html": 1, page: 1})
+
+    with pytest.raises(RuntimeError, match="Unsafe exported route"):
+        extract_early_hints(out, ["/dashboard"])
+
+
+def test_early_hints_require_every_duckdb_route_and_one_duckdb_version(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    write_export(out, {"dashboard.html": 1})
+
+    with pytest.raises(RuntimeError, match="no early hints for /origin"):
+        extract_early_hints(out, ["/dashboard", "/origin"])
+    (out / "duckdb/9.9.9").mkdir()
+    with pytest.raises(RuntimeError, match="exactly one"):
+        extract_early_hints(out, ["/dashboard"])
+
+
 def test_web_out_cache_key_changes_when_build_recipe_changes() -> None:
     assert web_out_cache_key("tree-sha-1", b"recipe-1") == web_out_cache_key("tree-sha-1", b"recipe-1")
     assert web_out_cache_key("tree-sha-1", b"recipe-1") != web_out_cache_key("tree-sha-1", b"recipe-2")
@@ -377,3 +463,5 @@ def test_explicit_build_still_runs_frozen_frontend_and_compute_builds(
     assert json.loads(capsys.readouterr().out)["build_sha"] == frozen_source(repository)
     assert (repository / "app/pkg/flp.tar.gz").is_file()
     assert not (repository / "target/release-cache/work").exists()
+    assert not (repository / "app/pkg/early-hints.json").exists()
+    assert "early_hints_sha256" not in json.loads((repository / "app/pkg/provenance.json").read_text())

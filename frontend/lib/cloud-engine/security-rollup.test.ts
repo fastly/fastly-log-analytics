@@ -700,4 +700,101 @@ describe("securityFromRollup on projected summaries", () => {
     }
     expect(unchanged).toEqual([]);
   });
+
+  it("clears decoded SecuritySummary RAM and aborts in-flight summary projection across clearSecurityRollupCache and clearDashboardData", async () => {
+    const secMod = await import("./security-rollup");
+    const { clearDashboardData } = await import("./dashboard/client");
+    const clearFn = (secMod as Record<string, unknown>).clearSecurityRollupCache as (() => void) | undefined;
+    expect(typeof clearFn).toBe("function");
+
+    const { listed, buffers } = await listing(RUST_WINDOWS, true);
+    let rangeReads = 0;
+    let derivedWrites = 0;
+    let pauseFirstDerived = false;
+    let notifyPaused!: () => void;
+    let releasePaused!: () => void;
+
+    const base = projectingSource(
+      fixtureSource([fixturePage(RUST_RAW)], buffers, { json: [], files: [] }, [fixturePage(listed)]),
+      buffers,
+    );
+    const tracked = {
+      ...base,
+      cacheScope: "alice-sec-scope:svc-alice",
+      fetchRange: async (file: ManifestFile, start: number, end: number, sig?: AbortSignal) => {
+        sig?.throwIfAborted();
+        rangeReads += 1;
+        return base.fetchRange(file, start, end, sig);
+      },
+      readDerivedFile: async (key: string, id: string) => {
+        if (pauseFirstDerived) {
+          pauseFirstDerived = false;
+          notifyPaused?.();
+          await new Promise<void>((r) => { releasePaused = r; });
+        }
+        return base.readDerivedFile?.(key, id) ?? null;
+      },
+      writeDerivedFile: async () => {
+        derivedWrites += 1;
+      },
+    };
+
+    // 1. Populate decoded RAM, then clearDashboardData() must evict decoded RAM so replay re-fetches:
+    const initial = await secMod.querySecurityRollup(tracked, {
+      fromMs: T0,
+      toMs: T1,
+      hourly: false,
+      spec: SECURITY_SUMMARY_SPEC,
+    });
+    expect(initial).not.toBeNull();
+    expect(rangeReads).toBeGreaterThan(0);
+
+    rangeReads = 0;
+    await clearDashboardData();
+    const replay = await secMod.querySecurityRollup(tracked, {
+      fromMs: T0,
+      toMs: T1,
+      hourly: false,
+      spec: SECURITY_SUMMARY_SPEC,
+    });
+    expect(replay).not.toBeNull();
+    expect(rangeReads).toBeGreaterThan(0);
+
+    // 2. Caller signal abort mid-projection stops range fetches and derived writes:
+    clearFn!();
+    rangeReads = 0;
+    derivedWrites = 0;
+    pauseFirstDerived = true;
+    const paused1 = new Promise<void>((r) => { notifyPaused = r; });
+    const caller = new AbortController();
+    const pendingCallerAbort = secMod.querySecurityRollup(tracked, {
+      fromMs: T0,
+      toMs: T1,
+      hourly: false,
+      spec: SECURITY_SUMMARY_SPEC,
+      signal: caller.signal,
+    }).then(() => "RESOLVED", () => "REJECTED");
+    await paused1;
+    caller.abort(new DOMException("Caller aborted", "AbortError"));
+    releasePaused();
+    expect(await pendingCallerAbort).toBe("REJECTED");
+    expect(rangeReads).toBe(0);
+    expect(derivedWrites).toBe(0);
+
+    // 3. Un-signaled querySecurityRollup aborted by clearSecurityRollupCache() alone:
+    pauseFirstDerived = true;
+    const paused2 = new Promise<void>((r) => { notifyPaused = r; });
+    const pendingClearAbort = secMod.querySecurityRollup(tracked, {
+      fromMs: T0,
+      toMs: T1,
+      hourly: false,
+      spec: SECURITY_SUMMARY_SPEC,
+    }).then(() => "RESOLVED", () => "REJECTED");
+    await paused2;
+    clearFn!();
+    releasePaused();
+    expect(await pendingClearAbort).toBe("REJECTED");
+    expect(rangeReads).toBe(0);
+    expect(derivedWrites).toBe(0);
+  });
 });

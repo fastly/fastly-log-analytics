@@ -1,7 +1,13 @@
+import { dashboardCacheIdentity } from "../dashboard/sources";
 import { createSharedRequests } from "../shared-request";
 import { reconcileStorage, adminRequest } from "../telemetry/admin";
 import type { LogsRange } from "../telemetry/kinds";
-import { activeOpsUser } from "../telemetry/sources";
+import {
+  activeOpsUser,
+  assertOpsEpoch,
+  currentOpsCacheEpoch,
+  currentOpsIdentity,
+} from "../telemetry/sources";
 import { DAY_MS, LIST_RATES } from "./rates";
 
 const readLogs: UsageLogReader = async (...args) =>
@@ -14,10 +20,24 @@ const sharedSettings = createSharedRequests<unknown>();
 const SETTINGS_TTL_MS = 15_000;
 let settledSettings: { key: string; at: number; value: unknown } | null = null;
 let settingsResets = 0;
+const activeSettingsControllers = new Set<AbortController>();
 
-export function resetUsageSettingsCache(): void {
+function settingsAbortError(): DOMException {
+  return new DOMException("The operation was aborted.", "AbortError");
+}
+
+export function resetUsageSettingsCache(
+  options: { abortActive?: boolean } = {},
+): void {
+  const abortActive = options.abortActive ?? true;
   settledSettings = null;
   settingsResets += 1;
+  if (abortActive) {
+    for (const controller of activeSettingsControllers) {
+      controller.abort(settingsAbortError());
+    }
+    activeSettingsControllers.clear();
+  }
 }
 
 export async function fetchIngestDeletedBytes(
@@ -84,22 +104,42 @@ export async function fetchIngestDeletedBytes(
 
 /** Readers of the usage-logging settings share one request per user. */
 const readUsageLogging = async (signal?: AbortSignal): Promise<unknown> => {
-  const key = JSON.stringify([activeOpsUser()]);
+  const startOpsEpoch = currentOpsCacheEpoch();
+  const resets = settingsResets;
+  assertOpsEpoch(startOpsEpoch, signal);
+  const key = JSON.stringify([
+    resets,
+    dashboardCacheIdentity(),
+    activeOpsUser(),
+  ]);
   const cached = settledSettings;
   if (cached?.key === key && Date.now() - cached.at < SETTINGS_TTL_MS) {
-    signal?.throwIfAborted();
     return cached.value;
   }
-  const resets = settingsResets;
-  const value = await sharedSettings(
-    key,
-    (shared) =>
-      adminRequest<unknown>("/api/admin/usage-logging", { signal: shared }),
-    { signal },
-  );
-  // A write that landed while this was in flight may have changed the answer.
-  if (resets === settingsResets) settledSettings = { key, at: Date.now(), value };
-  return value;
+  const controller = new AbortController();
+  activeSettingsControllers.add(controller);
+  const onCallerAbort = () =>
+    controller.abort(signal?.reason ?? settingsAbortError());
+  if (signal) {
+    signal.addEventListener("abort", onCallerAbort, { once: true });
+  }
+  try {
+    const value = await sharedSettings(
+      key,
+      (shared) =>
+        adminRequest<unknown>("/api/admin/usage-logging", { signal: shared }),
+      { signal: controller.signal },
+    );
+    assertOpsEpoch(startOpsEpoch, signal);
+    // A write that landed while this was in flight may have changed the answer.
+    if (resets === settingsResets && startOpsEpoch === currentOpsCacheEpoch()) {
+      settledSettings = { key, at: Date.now(), value };
+    }
+    return value;
+  } finally {
+    signal?.removeEventListener("abort", onCallerAbort);
+    activeSettingsControllers.delete(controller);
+  }
 };
 
 export type OpClass = "A" | "B" | "CDN_HIT";
@@ -1396,11 +1436,14 @@ function parseRows(
  */
 export async function fetchUsageInput(
   days: number,
-  identity: { user: string; role: string },
+  identity: { user?: string; role?: string } = currentOpsIdentity(),
   read: UsageLogReader = readLogs,
   signal?: AbortSignal,
   bounds?: { from: number; to: number },
 ): Promise<UsageInput> {
+  const startOpsEpoch = currentOpsCacheEpoch();
+  assertOpsEpoch(startOpsEpoch, signal);
+  const resolvedIdentity = currentOpsIdentity(identity);
   const now = bounds?.to ?? Date.now();
   const from = bounds?.from ?? now - days * DAY_MS;
   const range = {
@@ -1409,8 +1452,11 @@ export async function fetchUsageInput(
   };
   const [settings, ...results] = await Promise.all([
     readUsageLogging(signal),
-    ...USAGE_KINDS.map((kind) => read(kind, range, { ...identity, signal })),
+    ...USAGE_KINDS.map((kind) =>
+      read(kind, range, { ...resolvedIdentity, signal }),
+    ),
   ]);
+  assertOpsEpoch(startOpsEpoch, signal);
   const raw = Object.fromEntries(
     USAGE_KINDS.map((kind, index) => [
       kind,
@@ -1443,7 +1489,7 @@ export async function fetchUsageSettings(
 export async function fetchUsageKind<K extends UsageKind>(
   kind: K,
   range: { from: number; to: number },
-  identity: { user: string; role: string },
+  identity: { user?: string; role?: string } = currentOpsIdentity(),
   read: UsageLogReader = readLogs,
   signal?: AbortSignal,
 ): Promise<UsageInput["rows"][K]> {
@@ -1454,18 +1500,22 @@ export async function fetchUsageKind<K extends UsageKind>(
 export async function fetchUsageKindWithCoverage<K extends UsageKind>(
   kind: K,
   range: { from: number; to: number },
-  identity: { user: string; role: string },
+  identity: { user?: string; role?: string } = currentOpsIdentity(),
   read: UsageLogReader = readLogs,
   signal?: AbortSignal,
 ): Promise<{ rows: UsageInput["rows"][K]; complete: boolean }> {
+  const startOpsEpoch = currentOpsCacheEpoch();
+  assertOpsEpoch(startOpsEpoch, signal);
+  const resolvedIdentity = currentOpsIdentity(identity);
   const result = await read(
     kind,
     {
       from: new Date(range.from).toISOString(),
       to: new Date(range.to).toISOString(),
     },
-    { ...identity, signal },
+    { ...resolvedIdentity, signal },
   );
+  assertOpsEpoch(startOpsEpoch, signal);
   const raw = Object.fromEntries(
     USAGE_KINDS.map((k) => [
       k,
@@ -1992,7 +2042,7 @@ export async function fetchUsageSummary(options: {
   const days = Math.max(1, (toMs - fromMs) / DAY_MS);
   const input = await fetchUsageInput(
     days,
-    { user: "default", role: "admin" },
+    currentOpsIdentity(),
     readLogs,
     options.signal,
     { from: fromMs, to: toMs },

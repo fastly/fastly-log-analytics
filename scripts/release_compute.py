@@ -14,7 +14,9 @@ import subprocess
 import sys
 import tarfile
 import time
+from html.parser import HTMLParser
 from pathlib import Path
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -146,6 +148,133 @@ def check_static_assets(out: Path) -> None:
         raise RuntimeError(f"Static export is missing {', '.join(missing)}; map pages cannot load their worker")
 
 
+EARLY_HINTS_FILE = "early-hints.json"
+# Chrome acts on at most a handful of 103 preloads usefully; past ~10 they compete with the HTML.
+EARLY_HINTS_MAX_LINKS = 10
+EARLY_HINTS_MAX_SCRIPTS = 6
+EARLY_HINTS_MAX_BYTES = 4096
+_HINT_HREF = re.compile(r"/(?!/)[A-Za-z0-9._~/%-]+")
+_HINT_ROUTE = re.compile(r"/(?:[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*)?")
+_HINT_RESERVED = {"api", "auth", "fos", "_tick", "_flush", "_next", "duckdb", "geo"}
+
+
+class _HeadResources(HTMLParser):
+    """Collect the render-critical resources a Next static export declares in <head>."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.in_head = True
+        self.styles: list[str] = []
+        self.fonts: list[str] = []
+        self.scripts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if not self.in_head:
+            return
+        if tag == "body":
+            self.in_head = False
+            return
+        attr = {name.lower(): value for name, value in attrs}
+        if tag == "link":
+            href = attr.get("href") or ""
+            rel = (attr.get("rel") or "").lower().split()
+            if not _HINT_HREF.fullmatch(href):
+                return
+            if "stylesheet" in rel and attr.get("media") in (None, "", "all"):
+                crossorigin = "; crossorigin" if "crossorigin" in attr else ""
+                self.styles.append(f"<{href}>; rel=preload; as=style{crossorigin}")
+            elif "preload" in rel and attr.get("as") == "font":
+                kind = attr.get("type") or ""
+                type_param = f"; type={kind}" if re.fullmatch(r"font/[a-z0-9.+-]+", kind) else ""
+                # Fonts are always fetched in CORS mode; without crossorigin the preload is wasted.
+                self.fonts.append(f"<{href}>; rel=preload; as=font{type_param}; crossorigin")
+        elif tag == "script":
+            src = attr.get("src") or ""
+            # Chrome ignores modulepreload in a 103, and nomodule scripts never run in modern browsers.
+            if "nomodule" in attr or attr.get("type") not in (None, "", "text/javascript"):
+                return
+            if _HINT_HREF.fullmatch(src):
+                crossorigin = "; crossorigin" if "crossorigin" in attr else ""
+                self.scripts.append(f"<{src}>; rel=preload; as=script{crossorigin}")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "head":
+            self.in_head = False
+
+
+def _route_for(out: Path, page: Path) -> str:
+    relative = page.relative_to(out).with_suffix("").as_posix()
+    return "/" if relative == "index" else f"/{relative}"
+
+
+def _duckdb_links(out: Path) -> list[str]:
+    versions = sorted(path for path in (out / "duckdb").glob("*") if path.is_dir())
+    if len(versions) != 1:
+        raise RuntimeError("Static export must contain exactly one /duckdb/<version>/ directory")
+    worker = versions[0] / "duckdb-browser-eh.worker.js"
+    wasm = versions[0] / "duckdb-eh.wasm"
+    missing = [path.name for path in (worker, wasm) if not path.is_file()]
+    if missing:
+        raise RuntimeError(f"Static export is missing DuckDB assets: {', '.join(missing)}")
+    hrefs = ["/" + path.relative_to(out).as_posix() for path in (worker, wasm)]
+    if not all(_HINT_HREF.fullmatch(href) for href in hrefs):
+        raise RuntimeError(f"Unsafe DuckDB asset path for early hints: {hrefs}")
+    # A document preload is never handed to new Worker() or to the worker's fetch(); both only
+    # warm the HTTP cache (/duckdb/ is public), so they go last at low priority.
+    return [
+        f"<{hrefs[0]}>; rel=preload; as=script; fetchpriority=low",
+        f"<{hrefs[1]}>; rel=preload; as=fetch; crossorigin; fetchpriority=low",
+    ]
+
+
+def _hints_size(links: list[str]) -> int:
+    return sum(len("Link: ") + len(link) + 2 for link in links)
+
+
+def extract_early_hints(out: Path, duckdb_routes: list[str]) -> dict[str, Any]:
+    """Derive per-route 103 Link values from the exported HTML so hints always match the build.
+
+    Order: stylesheets, the first boot scripts, fonts, then DuckDB's worker and wasm for routes
+    that start the engine on load.
+    """
+    data_routes = set(duckdb_routes)
+    duckdb: list[str] | None = None
+    routes: dict[str, list[str]] = {}
+    for page in sorted(out.rglob("*.html")):
+        route = _route_for(out, page)
+        if route == "/404" or any(part.startswith("_") for part in route.split("/")):
+            continue
+        if not _HINT_ROUTE.fullmatch(route) or route.split("/")[1] in _HINT_RESERVED:
+            raise RuntimeError(f"Unsafe exported route for early hints: {route}")
+        parser = _HeadResources()
+        parser.feed(page.read_text())
+        tail: list[str] = []
+        if route in data_routes:
+            if duckdb is None:
+                duckdb = _duckdb_links(out)
+            tail = duckdb
+        styles = list(dict.fromkeys(parser.styles))
+        fonts = list(dict.fromkeys(parser.fonts))
+        room = EARLY_HINTS_MAX_LINKS - len(styles) - len(fonts) - len(tail)
+        scripts = list(dict.fromkeys(parser.scripts))[: max(0, min(EARLY_HINTS_MAX_SCRIPTS, room))]
+        links = [*[*styles, *scripts, *fonts][: EARLY_HINTS_MAX_LINKS - len(tail)], *tail]
+        if _hints_size(links) > EARLY_HINTS_MAX_BYTES:
+            raise RuntimeError(f"Early hints for {route} exceed {EARLY_HINTS_MAX_BYTES} bytes")
+        # The front VCL emits one early_hints() argument per link and needs at least two.
+        if len(links) >= 2:
+            routes[route] = links
+    missing = sorted(data_routes - routes.keys())
+    if missing:
+        raise RuntimeError(f"Static export produced no early hints for {', '.join(missing)}")
+    return {"version": 1, "routes": routes}
+
+
+def render_early_hints(web: Path) -> bytes:
+    policy = json.loads((web / "static-export-policy.json").read_text())
+    hints = extract_early_hints(web / "out", policy["earlyHintsDuckdbRoutes"])
+    return (json.dumps(hints, indent=2, sort_keys=True) + "\n").encode()
+
+
 def restore_node_modules(web: Path, cache_dir: Path) -> None:
     lock_sha = hashlib.sha256((web / "package-lock.json").read_bytes()).hexdigest()
     cached_nm = cache_dir / "node_modules"
@@ -246,6 +375,7 @@ def build(root: Path, crate: str = "cloud") -> str:
     web_out_key = web_out_cache_key(git(root, "rev-parse", f"{sha}:{web_rel}"), Path(__file__).read_bytes())
     npm_ready = False
     web_out_ready = False
+    early_hints: bytes | None = None
     try:
         snapshot_sources(root, sha, snapshot)
         stabilize_mtimes(snapshot / crate_rel, cache_dir / "source-mtimes.json")
@@ -277,6 +407,7 @@ def build(root: Path, crate: str = "cloud") -> str:
                     web_out_ready = True
             if web_rel == "frontend":
                 check_static_assets(web / "out")
+                early_hints = render_early_hints(web)
                 subprocess.run(
                     ["node", "scripts/check-static-budget.mjs", "out/dashboard.html"],
                     cwd=web,
@@ -305,6 +436,12 @@ def build(root: Path, crate: str = "cloud") -> str:
         "build_sha": sha,
         "package_sha256": hashlib.sha256(package.read_bytes()).hexdigest(),
     }
+    hints_path = package.parent / EARLY_HINTS_FILE
+    if early_hints is None:
+        hints_path.unlink(missing_ok=True)
+    else:
+        hints_path.write_bytes(early_hints)
+        provenance["early_hints_sha256"] = hashlib.sha256(early_hints).hexdigest()
     (package.parent / "provenance.json").write_text(json.dumps(provenance) + "\n")
     print(json.dumps({"event": "release.built", **provenance}))
     return sha

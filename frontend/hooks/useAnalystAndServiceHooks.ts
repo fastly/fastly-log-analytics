@@ -258,17 +258,18 @@ export function useAnalystLogout(): { logout: () => Promise<void>; isLoggingOut:
     if (isLoggingOut) return
     setIsLoggingOut(true)
     try {
-      const { IS_CLOUD_MODE } = await import('@/lib/cloud-engine/mode')
-      if (IS_CLOUD_MODE) {
+      const { isCloudMode } = await import('@/lib/cloud-engine/mode')
+      if (isCloudMode()) {
         const [{ clearDashboardData }, { clearOpsCaches }] = await Promise.all([
           import('@/lib/cloud-engine/dashboard/client'),
           import('@/lib/cloud-engine/telemetry/sources'),
         ])
-        await Promise.allSettled([
-          analystFetch('/api/auth/logout', { method: 'POST' }, 10_000),
-          clearDashboardData(),
-          clearOpsCaches(),
-        ])
+        const logoutRequest = analystFetch('/api/auth/logout', { method: 'POST' }, 10_000).catch(
+          () => {},
+        )
+        await Promise.allSettled([clearDashboardData(), clearOpsCaches()])
+        await logoutRequest
+        await Promise.allSettled([clearDashboardData(), clearOpsCaches()])
       } else {
         await analystFetch('/api/share/logout', { method: 'POST' }, 10_000)
       }

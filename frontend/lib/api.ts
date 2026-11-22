@@ -5,6 +5,7 @@ import { useDebugStore, useServiceStore, useSessionRoleStore } from "@/stores/fi
 import { parseExtentMs, showReadOnlyToast, showBusyToast, showToast, isUserActive } from "@/lib/utils";
 import { IS_CLOUD_MODE, isCloudMode } from "@/lib/cloud-engine/mode";
 import { parseVcpuMsHeader } from "@/lib/cloud-engine/dashboard/sources";
+import { parseServerTiming } from "@/lib/call-timeline";
 
 export * from "./apiSsrProxy";
 export * from "./apiQueryKeys";
@@ -329,8 +330,11 @@ const SERVICELESS_PATH_PREFIXES = [
   "/rum/versions",
 ];
 
+const requestStarts = new WeakMap<Request, number>();
+
 client.use({
   async onRequest({ request }) {
+    requestStarts.set(request, performance.timeOrigin + performance.now());
     const activeServiceId = stampClientContextHeaders(request.headers);
     request.headers.set("X-User-Active", isUserActive() ? "1" : "0");
     if (activeServiceId || IS_CLOUD_MODE || isCloudMode()) return request;
@@ -349,13 +353,17 @@ client.use({
         const parsedUrl = new URL(String(request.url), "http://localhost");
         const path = `${parsedUrl.pathname}${parsedUrl.search}`;
         const vcpuMs = parseVcpuMsHeader(response.headers.get("x-flp-vcpu-ms"));
+        const startMs = requestStarts.get(request);
+        const endMs = performance.timeOrigin + performance.now();
         debugState.addApiCall({
           source: "Compute",
           method: request.method || "GET",
           path,
           endpoint: `${request.method || "GET"} ${parsedUrl.pathname}`,
           status: response.status,
-          duration_ms: 0,
+          duration_ms: startMs === undefined ? 0 : Math.max(0, Math.round(endMs - startMs)),
+          start_ms: startMs,
+          server_timing: parseServerTiming(response.headers.get("server-timing")),
           vcpu_ms: vcpuMs,
           timestamp: new Date().toISOString(),
         });

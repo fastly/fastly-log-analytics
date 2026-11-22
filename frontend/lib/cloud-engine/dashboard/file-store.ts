@@ -30,6 +30,10 @@ export function bumpStoreMetaEpoch(): void {
   metaStoreEpoch += 1;
 }
 
+export function currentStoreMetaEpoch(): number {
+  return metaStoreEpoch;
+}
+
 export async function resetAndDrainStoreMeta(): Promise<void> {
   metaStoreEpoch += 1;
   if (activeMetaFlushes.size > 0) {
@@ -94,8 +98,10 @@ export function readStoreError(): Promise<StoreError | null> {
   return readJson<StoreError>(ERROR_URL);
 }
 
-export async function recordStoreError(error: StoreError): Promise<void> {
-  const callMetaEpoch = metaStoreEpoch;
+export async function recordStoreError(
+  error: StoreError,
+  callMetaEpoch = metaStoreEpoch,
+): Promise<void> {
   if (callMetaEpoch !== metaStoreEpoch) return;
   try {
     await writeJson(ERROR_URL, error, callMetaEpoch);

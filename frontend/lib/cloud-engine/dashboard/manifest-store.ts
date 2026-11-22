@@ -5,6 +5,7 @@ import {
   type ManifestBudget,
 } from "./catalog-manifest";
 import {
+  currentStoreMetaEpoch,
   describeError,
   recordStoreError,
   storageEstimate,
@@ -38,29 +39,31 @@ function validIso(value: unknown): value is string {
   return typeof value === "string" && Number.isFinite(Date.parse(value));
 }
 
-function validCacheKey(value: unknown): value is string {
-  if (typeof value !== "string") return false;
+/** Whether `value` is a persistable key, and for which summaries setting. */
+function cacheKeySummaries(value: unknown): boolean | null {
+  if (typeof value !== "string") return null;
   let key: unknown;
   try {
     key = JSON.parse(value);
   } catch {
-    return false;
+    return null;
   }
-  return (
-    Array.isArray(key) &&
+  return Array.isArray(key) &&
     key.length === 4 &&
     typeof key[0] === "string" &&
     key[0].length > 0 &&
     key[1] === "request" &&
     key[2] === "raw" &&
-    key[3] === false
-  );
+    typeof key[3] === "boolean"
+    ? key[3]
+    : null;
 }
 
 function validFile(
   value: unknown,
   from: string,
   to: string,
+  summary = false,
 ): value is ManifestFile {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const file = value as Partial<ManifestFile>;
@@ -83,7 +86,11 @@ function validFile(
       typeof file.schema_version === "string" ||
       (typeof file.schema_version === "number" &&
         Number.isFinite(file.schema_version))) &&
-    file.kind === undefined &&
+    (file.kind === undefined ||
+      (summary &&
+        (file.kind === "day" ||
+          file.kind === "hour" ||
+          file.kind === "window"))) &&
     (file.sources === undefined ||
       (typeof file.sources === "number" &&
         Number.isSafeInteger(file.sources) &&
@@ -96,8 +103,9 @@ function parseSnapshot(
   cacheKey: string,
   now: number,
 ): ManifestSnapshot | null {
+  const summaries = cacheKeySummaries(cacheKey);
   if (
-    !validCacheKey(cacheKey) ||
+    summaries === null ||
     !Number.isFinite(now) ||
     !body ||
     typeof body !== "object" ||
@@ -134,17 +142,26 @@ function parseSnapshot(
     manifest.complete !== true ||
     manifest.catalogGeneration !== generation ||
     !Array.isArray(manifest.files) ||
-    manifest.summaryFiles !== undefined ||
-    manifest.summaryRange !== undefined
+    (summaries
+      ? !Array.isArray(manifest.summaryFiles) ||
+        manifest.summaryRange?.from !== rangeFrom ||
+        manifest.summaryRange?.to !== rangeTo
+      : manifest.summaryFiles !== undefined ||
+        manifest.summaryRange !== undefined)
   )
     return null;
 
   const files = manifest.files;
-  if (!files.every((file) => validFile(file, rangeFrom, rangeTo))) return null;
+  const summaryFiles = manifest.summaryFiles ?? [];
+  if (
+    !files.every((file) => validFile(file, rangeFrom, rangeTo)) ||
+    !summaryFiles.every((file) => validFile(file, rangeFrom, rangeTo, true))
+  )
+    return null;
 
   const budget: ManifestBudget = { bytes: 0, identities: new Set() };
   try {
-    accountManifestPage({ files }, budget);
+    accountManifestPage({ files, summary_files: summaryFiles }, budget);
   } catch {
     return null;
   }
@@ -189,8 +206,11 @@ async function report(
   cacheKey: string,
   bytes: number,
   error: unknown,
+  callMetaEpoch = currentStoreMetaEpoch(),
 ): Promise<void> {
+  if (callMetaEpoch !== currentStoreMetaEpoch()) return;
   const estimate = await storageEstimate();
+  if (callMetaEpoch !== currentStoreMetaEpoch()) return;
   const detail = {
     at: Date.now(),
     cache: MANIFEST_SNAPSHOT_CACHE,
@@ -201,7 +221,7 @@ async function report(
     quota: estimate.quota,
   } satisfies StoreError;
   try {
-    await recordStoreError(detail);
+    await recordStoreError(detail, callMetaEpoch);
   } catch (telemetryError) {
     console.warn(
       "flp: browser cache error telemetry failed",
@@ -214,14 +234,23 @@ export async function readManifestSnapshot(
   cacheKey: string,
   now = Date.now(),
 ): Promise<ManifestSnapshot | null> {
+  const callMetaEpoch = currentStoreMetaEpoch();
   let bytes = 0;
   try {
-    if (typeof caches === "undefined") return null;
+    if (typeof caches === "undefined" || callMetaEpoch !== currentStoreMetaEpoch()) {
+      return null;
+    }
     const cache = await caches.open(MANIFEST_SNAPSHOT_CACHE);
+    if (callMetaEpoch !== currentStoreMetaEpoch()) return null;
     const url = manifestSnapshotUrl(cacheKey);
     const response = await cache.match(url);
     if (!response) return null;
+    if (callMetaEpoch !== currentStoreMetaEpoch()) {
+      await response.body?.cancel();
+      return null;
+    }
     const raw = await boundedBody(response, MAX_MANIFEST_BYTES);
+    if (callMetaEpoch !== currentStoreMetaEpoch()) return null;
     if (!raw) {
       await cache.delete(url);
       return null;
@@ -231,14 +260,16 @@ export async function readManifestSnapshot(
     try {
       body = JSON.parse(new TextDecoder().decode(raw));
     } catch {
-      await cache.delete(url);
+      if (callMetaEpoch === currentStoreMetaEpoch()) await cache.delete(url);
       return null;
     }
     const snapshot = parseSnapshot(body, cacheKey, now);
-    if (!snapshot) await cache.delete(url);
-    return snapshot;
+    if (!snapshot && callMetaEpoch === currentStoreMetaEpoch()) {
+      await cache.delete(url);
+    }
+    return callMetaEpoch === currentStoreMetaEpoch() ? snapshot : null;
   } catch (error) {
-    await report("read", cacheKey, bytes, error);
+    await report("read", cacheKey, bytes, error, callMetaEpoch);
     return null;
   }
 }
@@ -247,9 +278,12 @@ export async function persistManifestSnapshot(
   cacheKey: string,
   snapshot: ManifestSnapshot,
 ): Promise<void> {
+  const callMetaEpoch = currentStoreMetaEpoch();
   let bytes = 0;
   try {
-    if (typeof caches === "undefined") return;
+    if (typeof caches === "undefined" || callMetaEpoch !== currentStoreMetaEpoch()) {
+      return;
+    }
     const now = Date.now();
     const record = {
       formatVersion: FORMAT_VERSION,
@@ -263,34 +297,38 @@ export async function persistManifestSnapshot(
     bytes = (await response.clone().arrayBuffer()).byteLength;
     if (bytes > MAX_MANIFEST_BYTES)
       throw new Error("File manifest exceeded the metadata byte limit");
+    if (callMetaEpoch !== currentStoreMetaEpoch()) return;
     const cache = await caches.open(MANIFEST_SNAPSHOT_CACHE);
+    if (callMetaEpoch !== currentStoreMetaEpoch()) return;
     await cache.put(manifestSnapshotUrl(cacheKey), response);
   } catch (error) {
-    await report("write", cacheKey, bytes, error);
+    await report("write", cacheKey, bytes, error, callMetaEpoch);
   }
 }
 
 export async function deleteManifestSnapshot(
   cacheKey: string,
 ): Promise<boolean> {
+  const callMetaEpoch = currentStoreMetaEpoch();
   try {
     if (typeof caches === "undefined") return true;
     const cache = await caches.open(MANIFEST_SNAPSHOT_CACHE);
     await cache.delete(manifestSnapshotUrl(cacheKey));
     return true;
   } catch (error) {
-    await report("delete", cacheKey, 0, error);
+    await report("delete", cacheKey, 0, error, callMetaEpoch);
     return false;
   }
 }
 
 export async function deleteManifestSnapshots(): Promise<boolean> {
+  const callMetaEpoch = currentStoreMetaEpoch();
   try {
     if (typeof caches === "undefined") return true;
     await caches.delete(MANIFEST_SNAPSHOT_CACHE);
     return true;
   } catch (error) {
-    await report("clear", "*", 0, error);
+    await report("clear", "*", 0, error, callMetaEpoch);
     return false;
   }
 }

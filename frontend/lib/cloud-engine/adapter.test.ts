@@ -1362,18 +1362,109 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     vi.mocked(ensureCloudRange).mockClear();
     vi.mocked(insightsBaselineFromRollup).mockClear();
     expect((await followUp())?.status).toBe(200);
-    expect(insightsBaselineFromRollup).not.toHaveBeenCalled();
     const [[start, end, , , options]] = vi.mocked(ensureCloudRange).mock.calls;
     expect([start, end]).toEqual([new Date(Date.parse("2026-11-06T00:00:00Z") - 192 * 3_600_000).toISOString(),
       "2026-11-06T00:00:00Z"]);
     expect(options?.projection?.columns).toEqual(insightScanColumns([], detectors));
     expect(options?.projection?.columns).not.toContain("ua");
 
+    // Over budget with and without the wider window columns: the baseline shortens.
     const budget = new CloudBudgetError("over budget");
-    vi.mocked(ensureCloudRange).mockClear().mockRejectedValueOnce(budget);
+    vi.mocked(ensureCloudRange).mockClear().mockRejectedValueOnce(budget).mockRejectedValueOnce(budget);
     const shortened = await followUp();
     expect((await shortened!.json() as { baseline_hours: number }).baseline_hours).toBe(24);
-    expect(vi.mocked(ensureCloudRange).mock.calls).toHaveLength(2);
+    expect(vi.mocked(ensureCloudRange).mock.calls).toHaveLength(3);
+  });
+
+  it("reads an IP-detector follow-up's baseline from ins_ip summaries, so only the window loads raw", async () => {
+    const hour = 3_600_000;
+    const end = Date.parse("2026-11-06T00:00:00Z");
+    const iso = (ms: number) => new Date(ms).toISOString();
+    const detectors = ["credential_enumeration", "content_discovery"];
+    const followUp = () => handleCloudAnalyticalRequest(new Request("http://localhost/api/insights", {
+      method: "POST", headers: { "content-type": "application/json", "x-service-id": "svc-1" },
+      body: JSON.stringify({ window_size_hrs: 24, baseline_hours: 168, filters: {}, end_time: iso(end), detectors }),
+    }));
+    const withIp = mergeRollups([]);
+    withIp.present = new Set(["ins_ip/ip"]);
+    withIp.groups = new Map([["ins_ip", new Map([["ip", new Map()]])]]);
+    vi.mocked(ensureCloudRange).mockClear();
+    vi.mocked(insightsBaselineFromRollup).mockClear().mockResolvedValueOnce({
+      rollup: withIp, dataFromMs: end - 192 * hour, dataThroughMs: end - 24 * hour,
+    });
+    const res = await followUp();
+    expect(res?.status).toBe(200);
+    expect(vi.mocked(ensureCloudRange).mock.calls.map(([from]) => from)).toEqual([iso(end - 24 * hour)]);
+    expect((await res!.json() as { deferred_detectors?: string[] }).deferred_detectors).toEqual([]);
+
+    // A rollup without ins_ip can't serve them: the baseline stays raw.
+    vi.mocked(ensureCloudRange).mockClear();
+    vi.mocked(insightsBaselineFromRollup).mockClear().mockResolvedValueOnce({
+      rollup: mergeRollups([]), dataFromMs: end - 192 * hour, dataThroughMs: end - 24 * hour,
+    });
+    expect((await followUp())?.status).toBe(200);
+    expect(vi.mocked(ensureCloudRange).mock.calls.map(([from]) => from)).toEqual([iso(end - 192 * hour)]);
+  });
+
+  it("retries a follow-up's window without the wider columns when they exceed the budget", async () => {
+    const detectors = ["credential_enumeration"];
+    vi.mocked(ensureCloudRange).mockClear()
+      .mockRejectedValueOnce(new CloudBudgetError("over", { unit: "bytes", needed: 90 << 20, limit: 64 << 20 }));
+    const res = await handleCloudAnalyticalRequest(new Request("http://localhost/api/insights", {
+      method: "POST", headers: { "content-type": "application/json", "x-service-id": "svc-1" },
+      body: JSON.stringify({ window_size_hrs: 24, baseline_hours: 168, filters: {},
+        end_time: "2026-11-06T00:00:00Z", detectors }),
+    }));
+    expect(res?.status).toBe(200);
+    const calls = vi.mocked(ensureCloudRange).mock.calls;
+    expect(calls).toHaveLength(2);
+    expect(calls[0][4]?.projection?.wider).toBeDefined();
+    expect(calls[1][0]).toBe(calls[0][0]);
+    expect(calls[1][4]?.projection).toEqual({ columns: insightScanColumns([], detectors) });
+  });
+
+  it("marks follow-up detectors not evaluated, rather than failing the page, when even their window exceeds the budget", async () => {
+    const detectors = ["credential_enumeration", "content_discovery"];
+    const followUp = () => handleCloudAnalyticalRequest(new Request("http://localhost/api/insights", {
+      method: "POST", headers: { "content-type": "application/json", "x-service-id": "svc-1" },
+      body: JSON.stringify({ window_size_hrs: 24, baseline_hours: 168, filters: {},
+        end_time: "2026-11-06T00:00:00Z", detectors }),
+    }));
+    const detail = { unit: "bytes" as const, needed: 90 << 20, limit: 64 << 20 };
+    vi.mocked(ensureCloudRange).mockClear().mockRejectedValue(new CloudBudgetError("over", detail));
+    try {
+      const res = await followUp();
+      expect(res?.status).toBe(200);
+      const json = await res!.json() as {
+        insights: { id: string; severity: string; summary: string; placeholder?: boolean; not_evaluated?: unknown }[];
+        unevaluated_detectors: unknown[];
+        window_end: string;
+      };
+      expect(json.window_end).toBe("2026-11-06T00:00:00.000Z");
+      expect(json.insights.map((card) => card.id)).toEqual(detectors);
+      for (const card of json.insights) {
+        expect(card).toMatchObject({ severity: "info", placeholder: false,
+          not_evaluated: { reason: "scan_budget", ...detail } });
+        expect(card.summary).toMatch(/^Not evaluated: .*90\.0 MiB.*64\.0 MiB/);
+      }
+      expect(json.unevaluated_detectors).toEqual(detectors.map((id) => ({ id, reason: "scan_budget", ...detail })));
+    } finally {
+      vi.mocked(ensureCloudRange).mockReset().mockImplementation(async () => getDuckDBEngine().readContext());
+    }
+
+    // Other failures stay errors, and a full request over budget still reports 413.
+    vi.mocked(ensureCloudRange).mockClear().mockRejectedValueOnce(new Error("listing failed"));
+    await expect(followUp()).rejects.toThrow("listing failed");
+    vi.mocked(ensureCloudRange).mockClear().mockRejectedValue(new CloudBudgetError("over", detail));
+    try {
+      const full = await handleCloudAnalyticalRequest(new Request("http://localhost/api/insights", {
+        method: "POST", headers: { "content-type": "application/json", "x-service-id": "svc-1" },
+        body: JSON.stringify({ window_size_hrs: 24, baseline_hours: 168, filters: { country: { mode: "include", values: ["US"] } } }),
+      }));
+      expect(full?.status).toBe(413);
+    } finally {
+      vi.mocked(ensureCloudRange).mockReset().mockImplementation(async () => getDuckDBEngine().readContext());
+    }
   });
 
   it("loads /origin, /fastly-value, /assets-shield and /performance scans as their routes' column projections", async () => {
@@ -1620,5 +1711,957 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       globalThis.fetch = origFetch;
       vi.useRealTimers();
     }
+  });
+
+  it("clears settled platform bundle and compute billing caches on clearDashboardData and setDashboardCacheIdentity", async () => {
+    const { clearDashboardData, setDashboardCacheIdentity } = await import("./dashboard/client");
+    const from = Date.parse("2026-11-10T00:00:00Z");
+    const to = from + 3_600_000;
+    const params = new URLSearchParams({
+      start_time: new Date(from).toISOString(),
+      end_time: new Date(to).toISOString(),
+    });
+    let allowAdmin = true;
+    let platformFetches = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/admin/usage/platform")) {
+          platformFetches += 1;
+          if (!allowAdmin) {
+            return Response.json({ detail: "forbidden" }, { status: 403 });
+          }
+          return Response.json({
+            platform: { source: "fastly", storage: {}, compute: {}, ngwaf: {} },
+            compute_billing: {
+              services: [
+                {
+                  role: "app",
+                  compute_requests: 42,
+                  compute_requests_buckets: [{ start_time: from / 1000, compute_requests: 42 }],
+                  compute_execution_time_ms: 420,
+                  compute_execution_time_ms_buckets: [{ start_time: from / 1000, compute_execution_time_ms: 420 }],
+                  compute_request_time_billed_ms: 840,
+                  compute_request_time_billed_ms_buckets: [
+                    { start_time: from / 1000, compute_request_time_billed_ms: 840 },
+                  ],
+                  bandwidth: 0,
+                  kv_store_class_a_operations: 0,
+                  kv_store_class_b_operations: 0,
+                },
+              ],
+            },
+          });
+        }
+        return new Response("not found", { status: 404 });
+      }),
+    );
+
+    await setDashboardCacheIdentity("alice:admin");
+    const adminRes = await handleCloudAnalyticalRequest(
+      new Request(`http://localhost/api/usage/compute?${params}`),
+    );
+    expect(await adminRes!.json()).toMatchObject({ source: "fastly", requests: 42 });
+    expect(platformFetches).toBe(1);
+
+    // Switch identity to non-admin Bob within the 15s TTL: must NOT serve Alice's settled bundle!
+    allowAdmin = false;
+    await setDashboardCacheIdentity("bob:analyst");
+    const bobRes = await handleCloudAnalyticalRequest(
+      new Request(`http://localhost/api/usage/compute?${params}`),
+    );
+    expect(await bobRes!.json()).toMatchObject({ source: "unavailable" });
+    expect(platformFetches).toBe(2);
+
+    // Re-seed as Admin, then logout via clearDashboardData(): must also invalidate settled caches!
+    allowAdmin = true;
+    await setDashboardCacheIdentity("alice:admin");
+    const adminRes2 = await handleCloudAnalyticalRequest(
+      new Request(`http://localhost/api/usage/compute?${params}`),
+    );
+    expect(await adminRes2!.json()).toMatchObject({ source: "fastly", requests: 42 });
+
+    allowAdmin = false;
+    await clearDashboardData();
+    const loggedOutRes = await handleCloudAnalyticalRequest(
+      new Request(`http://localhost/api/usage/compute?${params}`),
+    );
+    expect(await loggedOutRes!.json()).toMatchObject({ source: "unavailable" });
+  });
+
+  it("aborts multi-step handleCloudAnalyticalRequest across fetchCloudMetadata and analyticalQueue on clearDashboardData while allowing /api/bootstrap identity updates", async () => {
+    const { clearDashboardData, setDashboardCacheIdentity } = await import("./dashboard/client");
+    const { getDuckDBEngine } = await import("./dashboard/duckdb");
+
+    vi.stubGlobal("Worker", undefined);
+    ops.resetOpsLogsClient();
+    const cacheBuckets = new Map<string, Map<string, Response>>();
+    vi.stubGlobal("caches", {
+      async open(name: string) {
+        let b = cacheBuckets.get(name);
+        if (!b) {
+          b = new Map();
+          cacheBuckets.set(name, b);
+        }
+        return {
+          async match(k: RequestInfo | URL) { return b!.get(String(k))?.clone(); },
+          async put(k: RequestInfo | URL, v: Response) { b!.set(String(k), v.clone()); },
+          async delete(k: RequestInfo | URL) { return b!.delete(String(k)); },
+          async keys() { return [...b!.keys()].map((u) => new Request(u)); },
+        };
+      },
+      async keys() { return [...cacheBuckets.keys()]; },
+      async delete(name: string) { return cacheBuckets.delete(name); },
+    });
+
+    // 1. /api/bootstrap intentionally calls setDashboardCacheIdentity and MUST still return 200 OK:
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json({
+          runtime_mode: "cloud",
+          user: { id: "alice", role: "admin" },
+          services: [{ service_id: "svc-alice" }],
+          active_service_id: "svc-alice",
+          active_log_field_ids: [],
+          log_fields_catalog: { fields: [] },
+          views: [],
+          build_sha: "baef6e7bb",
+          ngwaf_configured: false,
+          fastly_bots_available: false,
+          settings: { needs_login: false },
+          debug_state: {},
+        }),
+      ),
+    );
+    const bootRes = await handleCloudAnalyticalRequest(new Request("http://localhost/api/bootstrap"));
+    expect(bootRes?.status).toBe(200);
+
+    // 2. N3a: Request paused inside fetchCloudMetadata('/api/log-extents') across clearDashboardData()
+    // (with caller request.signal still un-aborted!) must abort fetchRetrying and reject without post-logout fetches:
+    let resolveExtents!: (res: Response) => void;
+    let notifyExtentsStarted!: () => void;
+    let extentsSignal: AbortSignal | undefined;
+    let postLogoutFilesFetched = 0;
+    const extentsStarted = new Promise<void>((r) => { notifyExtentsStarted = r; });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url.includes("/api/log-extents")) {
+          extentsSignal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+          notifyExtentsStarted();
+          return new Promise<Response>((resolve) => {
+            resolveExtents = resolve;
+          });
+        }
+        if (url.includes("/api/files")) {
+          postLogoutFilesFetched += 1;
+          return Promise.resolve(Response.json({ files: [], complete: true, next_cursor: null }));
+        }
+        return Promise.resolve(Response.json({ fields: [] }));
+      }),
+    );
+
+    const n3aPending = handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/network/bundle?service_id=svc-alice"),
+    ).then(() => "RESOLVED", () => "REJECTED");
+
+    await extentsStarted;
+    await clearDashboardData();
+    expect(extentsSignal?.aborted).toBe(true);
+    resolveExtents(Response.json({ earliest_log_at: "2026-11-10T00:00:00Z", latest_log_at: "2026-11-10T01:00:00Z" }));
+    expect(await n3aPending).toBe("REJECTED");
+    expect(postLogoutFilesFetched).toBe(0);
+    expect([...cacheBuckets.keys()]).toEqual([]);
+
+    // 3. N3b: Scan #2 queued behind Scan #1 in analyticalQueue (`await previous`) across clearDashboardData()
+    // must reject immediately upon waking from `await previous` without invoking prepareInsightsScan / ensureCloudRange!
+    await setDashboardCacheIdentity("alice:admin");
+    let notifyScan1InRange!: () => void;
+    let releaseScan1Range!: () => void;
+    let ensureRangeCalls = 0;
+    const scan1InRange = new Promise<void>((r) => { notifyScan1InRange = r; });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url.includes("/api/log-fields/catalog")) {
+          return Promise.resolve(Response.json({ fields: [] }));
+        }
+        if (url.includes("/api/services")) {
+          return Promise.resolve(Response.json({ services: [{ service_id: "svc-alice" }] }));
+        }
+        return Promise.resolve(new Response("not found", { status: 404 }));
+      }),
+    );
+
+    vi.mocked(ensureCloudRange).mockImplementation(async () => {
+      ensureRangeCalls += 1;
+      if (ensureRangeCalls === 1) {
+        notifyScan1InRange();
+        await new Promise<void>((resolve) => {
+          releaseScan1Range = resolve;
+        });
+      }
+      return {
+        assertCurrent: () => {},
+        release: vi.fn(),
+        getPresentColumns: () => new Set(["timestamp", "ip", "cookie_session", "url"]),
+        getCustomColumnTypes: () => new Map(),
+        executeSql: async () => [{ ip: "203.0.113.88", cookie_session: "ALICE_QUEUED_COOKIE_888", url: "/secret" }],
+      } as unknown as DuckDBReadContext;
+    });
+
+    const scan1 = handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/query", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          sql: "SELECT url FROM logs LIMIT 5",
+          start_time: "2026-11-10T00:00:00Z",
+          end_time: "2026-11-10T01:00:00Z",
+          service_id: "svc-alice",
+        }),
+      }),
+    ).then(() => "RESOLVED", () => "REJECTED");
+
+    await scan1InRange;
+
+    // Enqueue Scan #2 in analyticalQueue (`await previous`) BEFORE clearDashboardData()!
+    const scan2 = handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/query", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          sql: "SELECT ip, cookie_session, url FROM logs LIMIT 5",
+          start_time: "2026-11-10T00:00:00Z",
+          end_time: "2026-11-10T01:00:00Z",
+          service_id: "svc-alice",
+        }),
+      }),
+    ).then(() => "RESOLVED", () => "REJECTED");
+
+    await new Promise((r) => setTimeout(r, 10));
+    await clearDashboardData();
+    releaseScan1Range?.();
+
+    expect(await scan1).toBe("REJECTED");
+    expect(await scan2).toBe("REJECTED");
+    expect(ensureRangeCalls).toBe(1);
+    expect([...cacheBuckets.keys()]).toEqual([]);
+    const rowsAfter = await getDuckDBEngine().readContext().executeSql("SELECT count(*) AS cnt FROM requests");
+    expect(rowsAfter).toEqual([{ cnt: 0 }]);
+  });
+
+  it("allows concurrent Compare Mode POST /api/dashboard/bundle + POST /api/dashboard/aggregates + POST /api/dashboard/field-values + POST /api/web-vitals + GET /api/log-extents without aborting shared metadataCache", async () => {
+    const { setDashboardCacheIdentity } = await import("./dashboard/client");
+    const dashboardClient = await import("./dashboard/client");
+    await setDashboardCacheIdentity("alice:admin");
+
+    vi.spyOn(dashboardClient, "runInWorker").mockResolvedValue({
+      totalRequests: 10,
+      buckets: [],
+      cards: {},
+      stats: { rows: 10, bytes: 512, listed: 1, fetched: 0, cached: 1, cdnHits: 1 },
+    } as never);
+    vi.spyOn(dashboardClient, "searchFieldValuesInWorker").mockResolvedValue([
+      { value: "v1", count: 4 },
+    ]);
+
+    let resolveCatalog!: (res: Response) => void;
+    let resolveExtents!: (res: Response) => void;
+    let notifyCatalogStarted!: () => void;
+    let notifyExtentsStarted!: () => void;
+    let catalogFetches = 0;
+    let extentsFetches = 0;
+    const catalogStarted = new Promise<void>((r) => { notifyCatalogStarted = r; });
+    const extentsStarted = new Promise<void>((r) => { notifyExtentsStarted = r; });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url.includes("/api/log-fields/catalog")) {
+          catalogFetches += 1;
+          notifyCatalogStarted();
+          return new Promise<Response>((r) => { resolveCatalog = r; });
+        }
+        if (url.includes("/api/log-extents")) {
+          extentsFetches += 1;
+          notifyExtentsStarted();
+          return new Promise<Response>((r) => { resolveExtents = r; });
+        }
+        if (url.includes("/api/services")) {
+          return Promise.resolve(
+            Response.json({
+              services: [
+                {
+                  service_id: "svc-alice",
+                  log_fields: {
+                    custom_fields: [{ name: "x_tenant", sql_type: "VARCHAR" }],
+                  },
+                },
+              ],
+            }),
+          );
+        }
+        return Promise.resolve(Response.json({ ok: true }));
+      }),
+    );
+
+    const bundleReq = handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/dashboard/bundle?service_id=svc-alice", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          start_time: "2026-11-10T00:00:00Z",
+          end_time: "2026-11-10T01:00:00Z",
+          custom_filters: { x_tenant: { mode: "include", values: ["acme"] } },
+        }),
+      }),
+    );
+    const extentsReq = handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/log-extents"),
+    );
+
+    await Promise.all([catalogStarted, extentsStarted]);
+
+    // Fire concurrent Compare Mode aggregates, field-values, web-vitals, and ux-events while metadata is in flight:
+    const compareAggsReq = handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/dashboard/aggregates?service_id=svc-alice", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          start_time: "2026-11-09T23:00:00Z",
+          end_time: "2026-11-10T00:00:00Z",
+          custom_filters: { x_tenant: { mode: "include", values: ["acme"] } },
+        }),
+      }),
+    );
+    const fieldValuesReq = handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/dashboard/field-values?service_id=svc-alice", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          field: "x_tenant",
+          start_time: "2026-11-10T00:00:00Z",
+          end_time: "2026-11-10T01:00:00Z",
+        }),
+      }),
+    );
+    const webVitalsRes = await handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/web-vitals", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "LCP", value: 120 }),
+      }),
+    );
+    const uxEventsRes = await handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/ux-events", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ event: "click" }),
+      }),
+    );
+
+    expect(webVitalsRes?.status).toBe(204);
+    expect(uxEventsRes?.status).toBe(204);
+
+    resolveCatalog(Response.json({ groups: [], fields: [] }));
+    resolveExtents(
+      Response.json({
+        earliest_log_at: "2026-11-10T00:00:00Z",
+        latest_log_at: "2026-11-10T01:00:00Z",
+      }),
+    );
+
+    const [bundleRes, extentsRes, compareAggsRes, fieldValuesRes] = await Promise.all([
+      bundleReq,
+      extentsReq,
+      compareAggsReq,
+      fieldValuesReq,
+    ]);
+    expect(bundleRes?.status).toBe(200);
+    expect(extentsRes?.status).toBe(200);
+    expect(compareAggsRes?.status).toBe(200);
+    expect(fieldValuesRes?.status).toBe(200);
+    expect(catalogFetches).toBe(1);
+    expect(extentsFetches).toBe(1);
+  });
+
+  it("fences POST /api/dashboard/bundle, POST /api/dashboard/aggregates, and POST /api/dashboard/field-values across clearDashboardData without re-populating CacheStorage", async () => {
+    const { clearDashboardData, setDashboardCacheIdentity } = await import("./dashboard/client");
+    const dashboardClient = await import("./dashboard/client");
+    await setDashboardCacheIdentity("alice:admin");
+
+    vi.stubGlobal("Worker", undefined);
+    ops.resetOpsLogsClient();
+    const cacheBuckets = new Map<string, Map<string, Response>>();
+    vi.stubGlobal("caches", {
+      async open(name: string) {
+        let b = cacheBuckets.get(name);
+        if (!b) {
+          b = new Map();
+          cacheBuckets.set(name, b);
+        }
+        return {
+          async match(k: RequestInfo | URL) { return b!.get(String(k))?.clone(); },
+          async put(k: RequestInfo | URL, v: Response) { b!.set(String(k), v.clone()); },
+          async delete(k: RequestInfo | URL) { return b!.delete(String(k)); },
+          async keys() { return [...b!.keys()].map((u) => new Request(u)); },
+        };
+      },
+      async keys() { return [...cacheBuckets.keys()]; },
+      async delete(name: string) { return cacheBuckets.delete(name); },
+    });
+
+    const runSpy = vi.spyOn(dashboardClient, "runInWorker").mockImplementation(async () => {
+      await caches.open("flp-parquet-v1");
+      return {
+        totalRequests: 1,
+        buckets: [],
+        cards: {},
+        stats: { rows: 1, bytes: 64, listed: 1, fetched: 1, cached: 0, cdnHits: 0 },
+      } as never;
+    });
+    const searchSpy = vi.spyOn(dashboardClient, "searchFieldValuesInWorker").mockImplementation(async () => {
+      await caches.open("flp-manifest-v1");
+      return [];
+    });
+
+    const makeSuspendedPost = (url: string, payload: Record<string, unknown>) => {
+      let notifyCloning!: () => void;
+      let releaseJson!: () => void;
+      const cloning = new Promise<void>((r) => { notifyCloning = r; });
+      let cloneCount = 0;
+      const req = new Request(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const origClone = req.clone.bind(req);
+      vi.spyOn(req, "clone").mockImplementation(() => {
+        cloneCount += 1;
+        const cloned = origClone();
+        // Suspend at dispatchCloudRequest's body parse (clone #2 for DASHBOARD_PATH, clone #1 for field-values)
+        const targetClone = url.includes("field-values") ? 1 : 2;
+        if (cloneCount === targetClone) {
+          vi.spyOn(cloned, "json").mockImplementation(async () => {
+            notifyCloning();
+            await new Promise<void>((r) => { releaseJson = r; });
+            return payload;
+          });
+        }
+        return cloned;
+      });
+      return { req, cloning, release: () => releaseJson() };
+    };
+
+    const sBundle = makeSuspendedPost("http://localhost/api/dashboard/bundle", {
+      start_time: "2026-11-10T00:00:00Z",
+      end_time: "2026-11-10T01:00:00Z",
+    });
+    const sAggs = makeSuspendedPost("http://localhost/api/dashboard/aggregates", {
+      start_time: "2026-11-10T00:00:00Z",
+      end_time: "2026-11-10T01:00:00Z",
+    });
+    const sFieldVals = makeSuspendedPost("http://localhost/api/dashboard/field-values", {
+      field: "url",
+      start_time: "2026-11-10T00:00:00Z",
+      end_time: "2026-11-10T01:00:00Z",
+    });
+
+    const pBundle = handleCloudAnalyticalRequest(sBundle.req);
+    const pAggs = handleCloudAnalyticalRequest(sAggs.req);
+    const pFieldVals = handleCloudAnalyticalRequest(sFieldVals.req);
+
+    await Promise.all([sBundle.cloning, sAggs.cloning, sFieldVals.cloning]);
+    await clearDashboardData();
+
+    sBundle.release();
+    sAggs.release();
+    sFieldVals.release();
+
+    await expect(pBundle).rejects.toMatchObject({ name: "AbortError" });
+    await expect(pAggs).rejects.toMatchObject({ name: "AbortError" });
+    await expect(pFieldVals).rejects.toMatchObject({ name: "AbortError" });
+    expect(runSpy).not.toHaveBeenCalled();
+    expect(searchSpy).not.toHaveBeenCalled();
+    expect([...cacheBuckets.keys()]).toEqual([]);
+  });
+
+  it("scopes /api/usage/* ops caches to the signed-in bootstrap identity (never default:admin) and fences GET /api/cron-runs and GET /api/usage/prefill across clearDashboardData + clearOpsCaches", async () => {
+    vi.restoreAllMocks();
+    const { clearDashboardData } = await import("./dashboard/client");
+    const { activeOpsUser, clearOpsCaches } = await import("./telemetry/sources");
+
+    vi.stubGlobal("Worker", undefined);
+    ops.resetOpsLogsClient();
+    const cacheBuckets = new Map<string, Map<string, Response>>();
+    vi.stubGlobal("caches", {
+      async open(name: string) {
+        let b = cacheBuckets.get(name);
+        if (!b) {
+          b = new Map();
+          cacheBuckets.set(name, b);
+        }
+        return {
+          async match(k: RequestInfo | URL) { return b!.get(String(k))?.clone(); },
+          async put(k: RequestInfo | URL, v: Response) { b!.set(String(k), v.clone()); },
+          async delete(k: RequestInfo | URL) { return b!.delete(String(k)); },
+          async keys() { return [...b!.keys()].map((u) => new Request(u)); },
+        };
+      },
+      async keys() { return [...cacheBuckets.keys()]; },
+      async delete(name: string) { return cacheBuckets.delete(name); },
+    });
+
+    // 1. Bootstrap as alice:admin -> must sync activeOpsUser to "alice" and scope /api/usage/current-storage to alice:admin (never default:admin)
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url.includes("/api/bootstrap")) {
+          return Response.json({
+            runtime_mode: "cloud",
+            user: { id: "alice", role: "admin" },
+            services: [{ service_id: "svc-alice" }],
+            active_service_id: "svc-alice",
+            active_log_field_ids: [],
+            log_fields_catalog: { fields: [] },
+            views: [],
+            build_sha: "796123d2e",
+            ngwaf_configured: false,
+            fastly_bots_available: false,
+            settings: { needs_login: false },
+            debug_state: {},
+          });
+        }
+        if (url.includes("/api/admin/usage-logging")) {
+          return Response.json(fixtureUsageInput.settings);
+        }
+        const startSec = Math.floor(Date.parse("2026-11-10T00:00:00Z") / 1000);
+        if (url.includes("/api/files")) {
+          return Response.json({
+            files: [
+              {
+                key: `processed/ops/fos_usage/year=2026/month=11/day=10/hour=00/window=${startSec}-${startSec + 600}-s1-n1.parquet`,
+                start: "2026-11-10T00:00:00Z",
+                end: "2026-11-10T00:10:00Z",
+                size: 4,
+                rows: 1,
+              },
+            ],
+            next_cursor: null,
+            complete: true,
+          });
+        }
+        if (url.includes("/api/logs") || url.includes("/api/admin/logs")) {
+          return Response.json({ rows: [], next_cursor: null });
+        }
+        if (url.includes("/fos/pq/") || url.includes("/api/file")) {
+          return new Response(new Uint8Array([80, 65, 82, 49]), {
+            status: 200,
+            headers: { etag: '"e1"' },
+          });
+        }
+        if (url.includes("/api/admin/usage/platform-bundle")) {
+          return Response.json({
+            platform: { storage: { status: "ok", bytes: 0 }, compute: { status: "ok", requests: 0 }, ngwaf: { status: "not_configured" } },
+            compute_billing: { services: [] },
+          });
+        }
+        return Response.json({});
+      }),
+    );
+
+    const boot = await handleCloudAnalyticalRequest(new Request("http://localhost/api/bootstrap"));
+    expect(boot?.status).toBe(200);
+    expect(activeOpsUser()).toBe("alice");
+
+    await handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/usage/current-storage?start=2026-11-10T00:00:00Z&end=2026-11-10T01:00:00Z"),
+    ).catch(() => null);
+    expect([...cacheBuckets.keys()].some((k) => k.includes("default:admin"))).toBe(false);
+    expect([...cacheBuckets.keys()]).toContain("flp-ops-parquet-v1:alice:admin");
+
+    // 2. Pause GET /api/cron-runs in nativePages and GET /api/usage/prefill in fetchUsageSettings across clearDashboardData + clearOpsCaches:
+    let notifyCronPageStarted!: () => void;
+    let releaseCronPage!: (res: Response) => void;
+    let notifyPrefillSettingsStarted!: () => void;
+    let releasePrefillSettings!: (res: Response) => void;
+    const cronPageStarted = new Promise<void>((r) => { notifyCronPageStarted = r; });
+    const prefillSettingsStarted = new Promise<void>((r) => { notifyPrefillSettingsStarted = r; });
+
+    usage.resetUsageSettingsCache();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url.includes("/api/cron-runs")) {
+          notifyCronPageStarted();
+          return new Promise<Response>((r) => { releaseCronPage = r; });
+        }
+        if (url.includes("/api/admin/usage-logging")) {
+          notifyPrefillSettingsStarted();
+          return new Promise<Response>((r) => { releasePrefillSettings = r; });
+        }
+        if (url.includes("/api/admin/logs/")) {
+          return Promise.resolve(
+            Response.json({
+              live_rows: [],
+              live_truncated: false,
+              files: ["processed/ops/cron_runs/2026-11-10T00-00Z.parquet"],
+            }),
+          );
+        }
+        if (url.includes("/fos/pq/") || url.includes("/api/file")) {
+          return Promise.resolve(
+            new Response(new Uint8Array([80, 65, 82, 49]), {
+              status: 200,
+              headers: { etag: '"e2"' },
+            }),
+          );
+        }
+        return Promise.resolve(Response.json({ days: [], services: [] }));
+      }),
+    );
+
+    const cronPending = handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/cron-runs"),
+    );
+    const prefillPending = handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/usage/prefill"),
+    );
+
+    await Promise.all([cronPageStarted, prefillSettingsStarted]);
+    await clearDashboardData();
+    await clearOpsCaches();
+    expect(activeOpsUser()).toBeNull();
+    expect([...cacheBuckets.keys()]).toEqual([]);
+
+    releaseCronPage?.(
+      Response.json({ service_id: "svc-alice", runs: [], complete: true, next_cursor: null }),
+    );
+    releasePrefillSettings?.(Response.json(fixtureUsageInput.settings));
+
+    await expect(cronPending).rejects.toMatchObject({ name: "AbortError" });
+    await expect(prefillPending).rejects.toMatchObject({ name: "AbortError" });
+    expect([...cacheBuckets.keys()]).toEqual([]);
+
+    // 3. Challenge 1 polish: calling clearOpsCaches() + resetUsageSettingsCache() ALONE (without clearDashboardData())
+    // must still abort in-flight GET /api/usage/prefill via the inner opsCacheEpoch / activeSettingsControllers layer:
+    let notifyInnerPrefillStarted!: () => void;
+    let releaseInnerPrefill!: (res: Response) => void;
+    const innerPrefillStarted = new Promise<void>((r) => { notifyInnerPrefillStarted = r; });
+    usage.resetUsageSettingsCache();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url.includes("/api/admin/usage-logging")) {
+          notifyInnerPrefillStarted();
+          return new Promise<Response>((r) => { releaseInnerPrefill = r; });
+        }
+        return Promise.resolve(Response.json({ days: [], services: [] }));
+      }),
+    );
+    const innerPrefillPending = handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/usage/prefill"),
+    );
+    await innerPrefillStarted;
+    await clearOpsCaches();
+    usage.resetUsageSettingsCache();
+    releaseInnerPrefill?.(Response.json(fixtureUsageInput.settings));
+    await expect(innerPrefillPending).rejects.toMatchObject({ name: "AbortError" });
+    expect([...cacheBuckets.keys()]).toEqual([]);
+  });
+
+  it("allows concurrent same-session writes and validation POSTs without aborting active metadata readers while evicting metadataCache on writes and still aborting on clearDashboardData", async () => {
+    const { clearDashboardData, setDashboardCacheIdentity } = await import("./dashboard/client");
+    const { resetCloudMetadataCache } = await import("./metadata-cache");
+    const dashboardClient = await import("./dashboard/client");
+    await setDashboardCacheIdentity("alice:admin");
+    resetCloudMetadataCache();
+
+    vi.spyOn(dashboardClient, "runInWorker").mockResolvedValue({
+      totalRequests: 5,
+      buckets: [],
+      cards: {},
+      stats: { rows: 5, bytes: 256, listed: 1, fetched: 0, cached: 1, cdnHits: 1 },
+    } as never);
+
+    let resolveCatalog!: (res: Response) => void;
+    let resolveExtents!: (res: Response) => void;
+    let notifyCatalogStarted!: () => void;
+    let notifyExtentsStarted!: () => void;
+    let catalogFetches = 0;
+    let extentsFetches = 0;
+    let catalogStarted = new Promise<void>((r) => { notifyCatalogStarted = r; });
+    let extentsStarted = new Promise<void>((r) => { notifyExtentsStarted = r; });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url.includes("/api/log-fields/catalog")) {
+          catalogFetches += 1;
+          notifyCatalogStarted();
+          return new Promise<Response>((r) => { resolveCatalog = r; });
+        }
+        if (url.includes("/api/log-extents")) {
+          extentsFetches += 1;
+          notifyExtentsStarted();
+          return new Promise<Response>((r) => { resolveExtents = r; });
+        }
+        if (url.includes("/api/services") && !url.includes("/validate")) {
+          return Promise.resolve(
+            Response.json({
+              services: [
+                {
+                  service_id: "svc-alice",
+                  log_fields: {
+                    custom_fields: [{ name: "x_tenant", sql_type: "VARCHAR" }],
+                  },
+                },
+              ],
+            }),
+          );
+        }
+        return Promise.resolve(Response.json({ ok: true }));
+      }),
+    );
+
+    // Phase A: Read-only validation & telemetry POST routes neither abort active readers nor evict metadataCache:
+    const bundleReq1 = handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/dashboard/bundle?service_id=svc-alice", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          start_time: "2026-11-10T00:00:00Z",
+          end_time: "2026-11-10T01:00:00Z",
+          custom_filters: { x_tenant: { mode: "include", values: ["acme"] } },
+        }),
+      }),
+    );
+    const extentsReq1 = handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/log-extents"),
+    );
+    await Promise.all([catalogStarted, extentsStarted]);
+
+    for (const roPath of [
+      "/api/telemetry/query",
+      "/api/provision/validate",
+      "/api/admin/log-fields/preview",
+      "/api/admin/log-fields/custom/validate",
+      "/api/services/svc-alice/scoring/exclude-regex/validate",
+      "/api/services/svc-alice/custom-fields/validate-vcl",
+    ]) {
+      const roRes = await handleCloudAnalyticalRequest(
+        new Request(`http://localhost${roPath}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({}),
+        }),
+      );
+      expect(roRes === null || roRes.status <= 501).toBe(true);
+    }
+
+    resolveCatalog(Response.json({ groups: [], fields: [] }));
+    resolveExtents(
+      Response.json({
+        earliest_log_at: "2026-11-10T00:00:00Z",
+        latest_log_at: "2026-11-10T01:00:00Z",
+      }),
+    );
+    const [bundleOut1, extentsOut1] = await Promise.allSettled([bundleReq1, extentsReq1]);
+    expect(bundleOut1).toMatchObject({ status: "fulfilled", value: expect.objectContaining({ status: 200 }) });
+    expect(extentsOut1).toMatchObject({ status: "fulfilled", value: expect.objectContaining({ status: 200 }) });
+    expect(extentsFetches).toBe(1);
+
+    // Cached follow-up read hits metadataCache without re-fetching because validation POSTs did not evict it:
+    const cachedExtentsRes = await handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/log-extents"),
+    );
+    expect(cachedExtentsRes?.status).toBe(200);
+    expect(extentsFetches).toBe(1);
+
+    // Phase B: Concurrent same-session writes (POST /api/views/, PATCH /api/admin/debug-settings)
+    // evict metadataCache WITHOUT throwing AbortError on active same-session readers!
+    resetCloudMetadataCache();
+    catalogStarted = new Promise<void>((r) => { notifyCatalogStarted = r; });
+    extentsStarted = new Promise<void>((r) => { notifyExtentsStarted = r; });
+
+    const bundleReq2 = handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/dashboard/bundle?service_id=svc-alice", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          start_time: "2026-11-10T00:00:00Z",
+          end_time: "2026-11-10T01:00:00Z",
+          custom_filters: { x_tenant: { mode: "include", values: ["acme"] } },
+        }),
+      }),
+    );
+    const extentsReq2 = handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/log-extents"),
+    );
+    await Promise.all([catalogStarted, extentsStarted]);
+
+    const saveViewRes = await handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/views/", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "Saved", service_id: "svc-alice", filters_json: "{}" }),
+      }),
+    );
+    const patchDebugRes = await handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/admin/debug-settings", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      }),
+    );
+    expect(saveViewRes === null || saveViewRes.status <= 501).toBe(true);
+    expect(patchDebugRes === null || patchDebugRes.status <= 501).toBe(true);
+
+    resolveCatalog(Response.json({ groups: [], fields: [] }));
+    resolveExtents(
+      Response.json({
+        earliest_log_at: "2026-11-10T00:00:00Z",
+        latest_log_at: "2026-11-10T01:05:00Z",
+      }),
+    );
+    const [bundleOut2, extentsOut2] = await Promise.allSettled([bundleReq2, extentsReq2]);
+    expect(bundleOut2).toMatchObject({ status: "fulfilled", value: expect.objectContaining({ status: 200 }) });
+    expect(extentsOut2).toMatchObject({ status: "fulfilled", value: expect.objectContaining({ status: 200 }) });
+    expect(catalogFetches).toBe(2);
+    expect(extentsFetches).toBe(2);
+
+    // Subsequent GET /api/log-extents must re-fetch because the concurrent writes invalidated metadataCache:
+    extentsStarted = new Promise<void>((r) => { notifyExtentsStarted = r; });
+    const extentsReq3 = handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/log-extents"),
+    );
+    await extentsStarted;
+    resolveExtents(
+      Response.json({
+        earliest_log_at: "2026-11-10T00:00:00Z",
+        latest_log_at: "2026-11-10T01:10:00Z",
+      }),
+    );
+    const extentsRes3 = await extentsReq3;
+    expect(extentsRes3?.status).toBe(200);
+    expect(extentsFetches).toBe(3);
+
+    // Phase C: Hard reset via clearDashboardData() (abortActive: true) STILL immediately rejects in-flight readers with AbortError:
+    resetCloudMetadataCache();
+    extentsStarted = new Promise<void>((r) => { notifyExtentsStarted = r; });
+    const abortedExtentsReq = handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/log-extents"),
+    );
+    await extentsStarted;
+    await clearDashboardData();
+    await expect(abortedExtentsReq).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("uses volatile-ops scope after unauthenticated /api/bootstrap and never creates shared flp-ops-parquet-v1:anonymous:admin", async () => {
+    vi.restoreAllMocks();
+    const { dashboardCacheIdentity } = await import("./dashboard/sources");
+    const { activeOpsUser } = await import("./telemetry/sources");
+
+    vi.stubGlobal("Worker", undefined);
+    ops.resetOpsLogsClient();
+    const cacheBuckets = new Map<string, Map<string, Response>>();
+    vi.stubGlobal("caches", {
+      async open(name: string) {
+        let b = cacheBuckets.get(name);
+        if (!b) {
+          b = new Map();
+          cacheBuckets.set(name, b);
+        }
+        return {
+          async match(k: RequestInfo | URL) { return b!.get(String(k))?.clone(); },
+          async put(k: RequestInfo | URL, v: Response) { b!.set(String(k), v.clone()); },
+          async delete(k: RequestInfo | URL) { return b!.delete(String(k)); },
+          async keys() { return [...b!.keys()].map((u) => new Request(u)); },
+        };
+      },
+      async keys() { return [...cacheBuckets.keys()]; },
+      async delete(name: string) { return cacheBuckets.delete(name); },
+    });
+
+    const startSec = Math.floor(Date.parse("2026-11-10T00:00:00Z") / 1000);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url.includes("/api/bootstrap")) {
+          return Response.json({
+            runtime_mode: "cloud",
+            user: null,
+            services: [],
+            active_service_id: null,
+            active_log_field_ids: [],
+            log_fields_catalog: { fields: [] },
+            views: [],
+            build_sha: "f021210b7",
+            ngwaf_configured: false,
+            fastly_bots_available: false,
+            settings: { needs_login: true, is_remote_analyst: false },
+            debug_state: {},
+          });
+        }
+        if (url.includes("/api/admin/logs/")) {
+          return Response.json({
+            live_rows: [],
+            live_truncated: false,
+            files: [`processed/ops/audit_log/year=2026/month=11/day=10/hour=00/window=${startSec}-${startSec + 600}-s1-n1.parquet`],
+          });
+        }
+        if (url.includes("/api/files")) {
+          return Response.json({
+            files: [
+              {
+                key: `processed/ops/fos_usage/year=2026/month=11/day=10/hour=00/window=${startSec}-${startSec + 600}-s1-n1.parquet`,
+                start: "2026-11-10T00:00:00Z",
+                end: "2026-11-10T00:10:00Z",
+                size: 4,
+                rows: 1,
+              },
+            ],
+            next_cursor: null,
+            complete: true,
+          });
+        }
+        if (url.includes("/fos/pq/") || url.includes("/api/file")) {
+          return new Response(new Uint8Array([80, 65, 82, 49]), {
+            status: 200,
+            headers: { etag: '"anon-e1"' },
+          });
+        }
+        return Response.json({ rows: [], next_cursor: null });
+      }),
+    );
+
+    const boot = await handleCloudAnalyticalRequest(new Request("http://localhost/api/bootstrap"));
+    expect(boot?.status).toBe(200);
+    expect(dashboardCacheIdentity()).toBe("anonymous");
+    expect(activeOpsUser()).toBeNull();
+
+    await ops
+      .readLogs("fos_usage", {
+        from: "2026-11-10T00:00:00Z",
+        to: "2026-11-10T01:00:00Z",
+      })
+      .catch(() => null);
+
+    const names = [...cacheBuckets.keys()];
+    expect(names.some((k) => k.includes("anonymous"))).toBe(false);
+    expect(names.some((k) => /^flp-ops-parquet-v1:volatile-ops-\d+:admin$/.test(k))).toBe(true);
   });
 });

@@ -4,7 +4,11 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { DuckDBAnalyticalEngine, duckdbAssetUrls } from "./duckdb";
+import {
+  DUCKDB_WASM_VERSION,
+  DuckDBAnalyticalEngine,
+  duckdbAssetUrls,
+} from "./duckdb";
 import { fixtureEngine } from "./test-fixtures";
 
 describe("DuckDB browser assets", () => {
@@ -26,6 +30,7 @@ describe("DuckDB browser assets", () => {
     expect(read("package.json").dependencies["@duckdb/duckdb-wasm"]).toBe(
       installed,
     );
+    expect(DUCKDB_WASM_VERSION).toBe(installed);
   });
 
   it("vendor the parquet extension built for the bundled DuckDB engine", () => {

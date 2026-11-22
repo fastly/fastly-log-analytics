@@ -254,6 +254,8 @@ pub struct Job {
     pub delete_matrices: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub scorer_ownership_verified: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_failure: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

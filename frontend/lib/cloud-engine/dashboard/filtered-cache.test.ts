@@ -134,4 +134,48 @@ describe("FilteredResultCache", () => {
     cache.entries.clear();
     expect(await memory.read("a")).toEqual(result(1));
   });
+
+  it("suppresses pending write and debounced index flush when clearMemory runs mid-flight on a standalone instance", async () => {
+    const cache = new FakeCache();
+    let releaseHash: () => void = () => {};
+    let notifyHashStarted: () => void = () => {};
+    let pauseNextHash = false;
+
+    const standalone = store(cache, {
+      memoryBytes: 1024 * 1024,
+      hash: async (id) => {
+        if (pauseNextHash) {
+          pauseNextHash = false;
+          notifyHashStarted?.();
+          await new Promise<void>((r) => {
+            releaseHash = r;
+          });
+        }
+        return `hash-${id}`;
+      },
+    });
+
+    // 1. Completed write schedules a debounced flushTimer; clearMemory() must cancel the timer before it flushes the index
+    await standalone.write("pre-logout", result(2, "secret.example"));
+    cache.entries.clear();
+    standalone.clearMemory();
+    await standalone.drain();
+    expect(cache.entries.size).toBe(0);
+    expect(await standalone.read("pre-logout")).toBeNull();
+
+    // 2. Mid-flight write() paused at async boundary when clearMemory() runs must NOT put entry or index into CacheStorage
+    pauseNextHash = true;
+    const hashStarted = new Promise<void>((r) => {
+      notifyHashStarted = r;
+    });
+    const inFlightWrite = standalone.write("mid-logout", result(5, "alice.example"));
+    await hashStarted;
+    standalone.clearMemory();
+    releaseHash?.();
+    await inFlightWrite;
+    await standalone.drain();
+    expect(cache.entries.size).toBe(0);
+    expect(standalone.persistedBytes()).toBe(0);
+    expect(await standalone.read("mid-logout")).toBeNull();
+  });
 });

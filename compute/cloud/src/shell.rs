@@ -390,6 +390,7 @@ pub struct Shell<'a, R: Runtime, S: StateStore> {
     state: &'a S,
     assets: &'a [Asset],
     trace: std::cell::RefCell<Trace>,
+    timings: std::cell::RefCell<Vec<(&'static str, std::time::Duration)>>,
 }
 
 pub fn unauthenticated_probe_status(
@@ -416,7 +417,15 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
             state,
             assets,
             trace: Default::default(),
+            timings: Default::default(),
         }
+    }
+
+    fn timed<T>(&self, phase: &'static str, run: impl FnOnce() -> T) -> T {
+        let started = std::time::Instant::now();
+        let value = run();
+        self.timings.borrow_mut().push((phase, started.elapsed()));
+        value
     }
 
     fn front_authorized(&self, request: &Request) -> bool {
@@ -466,7 +475,10 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
                 response = response.cookie(auth::clear_host_cdn_cookie());
             }
         }
-        self.record_request(request, response, started, vcpu)
+        let response = self.record_request(request, response, started, vcpu);
+        let mut timing = vec![("app", started.elapsed())];
+        timing.append(&mut self.timings.borrow_mut());
+        response.server_timing(&timing)
     }
 
     fn record_request(
@@ -507,9 +519,7 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
         }
         if trace.actor.is_some() && request.header("x-debug-responses") == Some("1") {
             if let Some(trace_id) = trace_id_from_parent(request.header("traceparent")) {
-                response = response
-                    .header("x-flp-trace-id", trace_id)
-                    .header("server-timing", format!("compute;dur={duration_ms}"));
+                response = response.header("x-flp-trace-id", trace_id);
             }
         }
         let normalized = api::normalize_path(path);
@@ -722,6 +732,7 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
                 Response::redirect("/setup")
             });
         }
+        let auth_started = std::time::Instant::now();
         let config = self.auth_config(!control_plane)?;
         let auth = AuthService::new(self.state, &config);
         let ip = request
@@ -794,6 +805,9 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
                     Err(other) => Some(Err(other)),
                 })
                 .transpose()?;
+            self.timings
+                .borrow_mut()
+                .push(("auth", auth_started.elapsed()));
             let auth_epoch = authenticated.as_ref().map_or(0, |(_, epoch)| *epoch);
             let user = authenticated.map(|(user, _)| user);
             self.trace.borrow_mut().actor = user.as_ref().map(|user| user.id.clone());
@@ -967,9 +981,13 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
                             Err(_) => error(503, "Ingestion catalog is unavailable."),
                         }
                     }
-                    "/api/files" => api_json(api::files(self.runtime, &service, query, started)),
+                    "/api/files" => api_json(self.timed("list", || {
+                        api::files(self.runtime, &service, query, started)
+                    })),
                     "/api/file" => {
-                        match api::file(self.runtime, &service, query, request.header("range")) {
+                        match self.timed("resolve", || {
+                            api::file(self.runtime, &service, query, request.header("range"))
+                        }) {
                             Ok(mut upstream) => {
                                 upstream.head_only = request.method == "HEAD";
                                 Response::streamed(upstream)
@@ -3032,6 +3050,40 @@ mod tests {
                 .is_empty());
             assert!(!body.to_string().contains("PRIVATE_"));
         }
+    }
+
+    #[test]
+    fn responses_carry_server_timing_with_app_auth_and_list_phases() {
+        let platform = platform(true);
+        seed_bootstrap_service(&platform);
+        let (state, cookie) = signed_bootstrap_state(Role::Admin);
+        let shell = Shell::new(&platform, &state, &[]);
+        let metric = |value: &str, name: &str| {
+            value.split(", ").any(|entry| {
+                entry
+                    .strip_prefix(name)
+                    .and_then(|rest| rest.strip_prefix(";dur="))
+                    .is_some_and(|dur| dur.parse::<f64>().is_ok_and(|ms| ms >= 0.0))
+            })
+        };
+
+        let files = shell.handle(&bootstrap_request(
+            concat!(
+                "/api/files",
+                "?dataset=request&start=2026-11-01T00:00:00Z&end=2026-11-01T01:00:00Z"
+            ),
+            Some(&format!("flp_session={cookie}")),
+        ));
+        let timing = files.headers.get("server-timing").expect("server-timing");
+        assert!(timing.starts_with("app;dur="), "{timing}");
+        for name in ["app", "auth", "list"] {
+            assert!(metric(timing, name), "missing {name} in {timing}");
+        }
+
+        let asset = shell.handle(&bootstrap_request("/fastly.svg", None));
+        let timing = asset.headers.get("server-timing").expect("server-timing");
+        assert!(metric(timing, "app"), "{timing}");
+        assert!(!timing.contains("auth;") && !timing.contains("list;"));
     }
 
     #[test]

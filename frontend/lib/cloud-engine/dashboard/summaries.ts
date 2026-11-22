@@ -383,6 +383,12 @@ export function planSummaries(
       Number(b.match[3]) - Number(a.match[3]) ||
       Number(b.match[5]) - Number(a.match[5]),
   );
+  // Discovery lists an open bundle with only the windows its coverage leaves out, so the
+  // windows without a listed summary are the set it must name exactly; late windows sorting
+  // inside its range stay with their own summaries.
+  const listedWindows = new Set(
+    byKind(WINDOW_SUMMARY).map(({ match }) => `${match[1]}${match[2]}`),
+  );
   for (const { file, match } of openBundles) {
     const endMs = Number(match[3]);
     const windows = unclaimed(
@@ -392,6 +398,16 @@ export function planSummaries(
         Date.parse(w.file.end) <= endMs,
     );
     if (windows.length === 0) continue;
+    const unlisted = windows.filter(([id]) => !listedWindows.has(id));
+    if (
+      unlisted.length > 0 &&
+      unlisted.every(([, w]) => !w.compacted) &&
+      unlisted.reduce((sum, [, w]) => sum + w.rows, 0) === Number(match[6]) &&
+      hourBundleName(unlisted.map(([, w]) => w)) === match[4]
+    ) {
+      claim(file, unlisted);
+      continue;
+    }
     const list = windows.map(([, w]) => w);
     const rows = list.reduce((sum, w) => sum + w.rows, 0);
     if (rows !== Number(match[6])) continue;
@@ -471,7 +487,8 @@ export function planCoarsestFirst(
   const windows = summaryFiles.filter((f) => f.key.includes("/summary="));
   const p1 = planSummaries(rawFiles, days, fromMs, toMs);
   const p2 = planSummaries(p1.raw, hours, fromMs, toMs);
-  const p2b = planSummaries(p2.raw, open, fromMs, toMs);
+  // Window summaries ride along so the open bundle's set proof sees which are listed.
+  const p2b = planSummaries(p2.raw, [...open, ...windows], fromMs, toMs);
   const p3 = planSummaries(p2b.raw, windows, fromMs, toMs);
   const p4 = planSummaries(p3.raw, summaryFiles, fromMs, toMs);
   return {

@@ -449,12 +449,21 @@ export function duckdbAssetUrls(origin: string, version: string) {
   };
 }
 
+/** Pinned in package.json; lets the worker start before the SDK module loads. */
+export const DUCKDB_WASM_VERSION = "1.33.1-dev57.0";
+
 export async function createBrowserBackend(): Promise<DuckDBBackend> {
-  const duckdb = await import("@duckdb/duckdb-wasm");
   const origin =
     typeof self !== "undefined" && self.location ? self.location.origin : "";
-  const assets = duckdbAssetUrls(origin, duckdb.PACKAGE_VERSION);
+  const assets = duckdbAssetUrls(origin, DUCKDB_WASM_VERSION);
   const worker = new Worker(assets.worker);
+  let duckdb: typeof import("@duckdb/duckdb-wasm");
+  try {
+    duckdb = await import("@duckdb/duckdb-wasm");
+  } catch (error) {
+    worker.terminate();
+    throw error;
+  }
   const logger = new duckdb.VoidLogger();
   let db: InstanceType<typeof duckdb.AsyncDuckDB>;
   try {
@@ -645,11 +654,6 @@ function toScalarValue(value: unknown): Scalar | null {
   if (typeof value === "string" || typeof value === "boolean") return value;
   if (typeof value === "number") return Number.isNaN(value) ? null : value;
   return String(value);
-}
-
-function firstNumber(table: ArrowTableLike, column: string): number | null {
-  const value = table.getChild(column)?.toJSON()?.[0];
-  return value === null || value === undefined ? null : Number(value);
 }
 
 export function interpolateSqlParams(
@@ -1011,7 +1015,7 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
           : sqlIdent(field),
       )
       .join(", ");
-    const base = `WITH base AS (SELECT ${FILE_COLUMN}, ts_ms, ${projection} FROM ${relation} WHERE ${where})`;
+    const base = `WITH base AS NOT MATERIALIZED (SELECT ${FILE_COLUMN}, ts_ms, ${projection} FROM ${relation} WHERE ${where})`;
     const bucketTable = await backend.query(
       `${base} SELECT ${FILE_COLUMN} AS file, (floor(ts_ms / ${MINUTE_MS}) * ${MINUTE_MS})::BIGINT AS t, COUNT(*)::BIGINT AS requests, COALESCE(SUM("resp_bytes"), 0)::DOUBLE AS bytes, (COUNT(*) FILTER (WHERE "status" >= 500 AND "status" < 600))::BIGINT AS s5xx, (COUNT(*) FILTER (WHERE "status" >= 400 AND NOT ("status" >= 500 AND "status" < 600)))::BIGINT AS s4xx, COUNT("cache")::BIGINT AS cache_rows, (COUNT(*) FILTER (WHERE starts_with(upper("cache"), 'HIT')))::BIGINT AS hits, MIN(ts_ms)::BIGINT AS min_ts, MAX(ts_ms)::BIGINT AS max_ts FROM base GROUP BY 1, 2 ORDER BY 1, 2`,
       signal,
@@ -1059,15 +1063,10 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
     }
 
     if (fields.length > 0) {
-      const valueExprs = fields.map(sqlIdent);
-      const valueSelect = valueExprs.map((expr, i) => `${expr} AS ${sqlIdent(fields[i])}`);
+      const typeOf: FieldTypeOf = (field) =>
+        FIELD_DUCKDB_TYPES[field] ?? customTypes.get(field)!;
       const statsTable = await backend.query(
-        `${base} SELECT ${FILE_COLUMN} AS file, ${valueExprs
-          .map(
-            (expr, i) =>
-              `COUNT(${expr})::BIGINT AS nn_${i}, COUNT(DISTINCT CASE WHEN CAST(${expr} AS VARCHAR) != '' THEN ${expr} END)::BIGINT AS d_${i}, MAX(length(CASE WHEN CAST(${expr} AS VARCHAR) != '' THEN CAST(${expr} AS VARCHAR) END))::BIGINT AS ml_${i}`,
-          )
-          .join(", ")} FROM base GROUP BY 1`,
+        `${base} ${fieldStatsSql(fields, true, true)}`,
         signal,
       );
       signal?.throwIfAborted();
@@ -1075,30 +1074,36 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
       const candidateLimit = Math.min(4096, Math.floor(150_000 / fields.length));
       const fieldByteCap = Math.floor((32 * 1024 * 1024) / fields.length);
 
+      const sf = column(statsTable, "file");
+      const si = column(statsTable, "field_idx");
+      const snn = column(statsTable, "nn");
+      const sd = column(statsTable, "d");
+      const sml = column(statsTable, "ml");
+      const sizes = new Map<number, { rows: number; bytes: number }>();
+      for (let r = 0; r < statsTable.numRows; r++) {
+        const file = Number(sf[r]);
+        const i = Number(si[r]);
+        const distinct = Number(sd[r] ?? 0);
+        const keyBytes = 48 + 4 * Number(sml[r] ?? 0);
+        const kept = Math.min(distinct, candidateLimit);
+        let size = sizes.get(file);
+        if (!size) sizes.set(file, (size = { rows: 0, bytes: 0 }));
+        size.rows += kept;
+        size.bytes += Math.min(kept * keyBytes, fieldByteCap + keyBytes);
+        partOf(file).fields[fields[i]] = {
+          nonNull: Number(snn[r] ?? 0),
+          distinct,
+          entries: [],
+          complete: false,
+        };
+      }
+
       // Each file may return its own bounded values, so files share a values
       // pass only while their worst case fits the browser's result budget.
       const chunks: number[][] = [];
       let chunkRows = 0;
       let chunkBytes = 0;
-      const sf = column(statsTable, "file");
-      for (let r = 0; r < statsTable.numRows; r++) {
-        const file = Number(sf[r]);
-        const part = partOf(file);
-        let rows = 0;
-        let bytes = 0;
-        fields.forEach((field, i) => {
-          const distinct = Number(column(statsTable, `d_${i}`)[r] ?? 0);
-          const keyBytes = 48 + 4 * Number(column(statsTable, `ml_${i}`)[r] ?? 0);
-          const kept = Math.min(distinct, candidateLimit);
-          rows += kept;
-          bytes += Math.min(kept * keyBytes, fieldByteCap + keyBytes);
-          part.fields[field] = {
-            nonNull: Number(column(statsTable, `nn_${i}`)[r] ?? 0),
-            distinct,
-            entries: [],
-            complete: false,
-          };
-        });
+      for (const [file, { rows, bytes }] of [...sizes].sort(([a], [b]) => a - b)) {
         if (
           chunks.length === 0 ||
           chunkRows + rows > this.valuesBudget.rows ||
@@ -1113,22 +1118,18 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
         chunkBytes += bytes;
       }
 
-      const cols = fields.map(sqlIdent);
-      const fieldIdx = `CASE ${valueExprs.map((c, i) => `WHEN GROUPING(${c}) = 0 THEN ${i}`).join(" ")} END`;
-      const nonNull = `CASE field_idx ${cols.map((c, i) => `WHEN ${i} THEN ${c} IS NOT NULL`).join(" ")} END`;
-      const keyBytes = `48 + CASE field_idx ${cols.map((col, i) => `WHEN ${i} THEN 4 * length(CAST(${col} AS VARCHAR))`).join(" ")} ELSE 0 END`;
-      const window = `PARTITION BY ${FILE_COLUMN}, field_idx ORDER BY cnt DESC`;
+      const qualify = boundedQualify(fields, candidateLimit, fieldByteCap);
       for (const chunk of chunks) {
-        const only = chunks.length > 1 ? ` WHERE ${FILE_COLUMN} IN (${chunk.join(", ")})` : "";
+        const only = chunks.length > 1 ? ` AND ${FILE_COLUMN} IN (${chunk.join(", ")})` : "";
         const valuesTable = await backend.query(
-          `${base} SELECT ${FILE_COLUMN} AS file, field_idx, cnt, ${cols.join(", ")} FROM (SELECT ${FILE_COLUMN}, ${fieldIdx} AS field_idx, ${valueSelect.join(", ")}, COUNT(*)::BIGINT AS cnt FROM base${only} GROUP BY GROUPING SETS (${valueExprs.map((c) => `(${FILE_COLUMN}, ${c})`).join(", ")})) WHERE ${nonNull} QUALIFY row_number() OVER (${window}) <= ${candidateLimit} AND sum(${keyBytes}) OVER (${window} ROWS UNBOUNDED PRECEDING) <= ${fieldByteCap}`,
+          `${base} ${fieldValuesSql(fields, typeOf, true, only, qualify)}`,
           signal,
         );
         signal?.throwIfAborted();
         const vf = column(valuesTable, "file");
         const idxCol = column(valuesTable, "field_idx");
         const cntCol = column(valuesTable, "cnt");
-        const valueCols = fields.map((field) => column(valuesTable, field));
+        const valueCols = fields.map((field) => column(valuesTable, valueColumn(typeOf(field))));
         for (let r = 0; r < valuesTable.numRows; r++) {
           const i = Number(idxCol[r]);
           const value = toScalarValue(valueCols[i][r]);
@@ -1184,7 +1185,7 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
       /^[ -~]*$/.test(search.query)
       ? ` AND contains(lower(CAST(${sqlIdent(search.field)} AS VARCHAR)), ${sqlString(search.query.trim().toLowerCase())})`
       : "";
-    const base = `WITH base AS (SELECT ts_ms, ${projection} FROM ${relation} WHERE ${where}${searchWhere})`;
+    const base = `WITH base AS NOT MATERIALIZED (SELECT ts_ms, ${projection} FROM ${relation} WHERE ${where}${searchWhere})`;
 
     const bucketTable = await backend.query(
       `${base} SELECT (floor(ts_ms / ${MINUTE_MS}) * ${MINUTE_MS})::BIGINT AS t, COUNT(*)::BIGINT AS requests, COALESCE(SUM("resp_bytes"), 0)::DOUBLE AS bytes, (COUNT(*) FILTER (WHERE "status" >= 500 AND "status" < 600))::BIGINT AS s5xx, (COUNT(*) FILTER (WHERE "status" >= 400 AND NOT ("status" >= 500 AND "status" < 600)))::BIGINT AS s4xx, COUNT("cache")::BIGINT AS cache_rows, (COUNT(*) FILTER (WHERE starts_with(upper("cache"), 'HIT')))::BIGINT AS hits, MIN(ts_ms)::BIGINT AS min_ts, MAX(ts_ms)::BIGINT AS max_ts FROM base GROUP BY 1 ORDER BY 1`,
@@ -1227,14 +1228,10 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
 
     const fieldAggregates: Record<string, FieldAggregate> = {};
     if (fields.length > 0) {
-      const statsExprs = fields.map(sqlIdent);
+      const typeOf: FieldTypeOf = (field) =>
+        FIELD_DUCKDB_TYPES[field] ?? customTypes.get(field)!;
       const statsTable = await backend.query(
-        `${base} SELECT ${statsExprs
-          .map(
-            (expr, i) =>
-              `COUNT(${expr})::BIGINT AS nn_${i}, COUNT(DISTINCT CASE WHEN CAST(${expr} AS VARCHAR) != '' THEN ${expr} END)::BIGINT AS d_${i}`,
-          )
-          .join(", ")} FROM base`,
+        `${base} ${fieldStatsSql(fields, false, false)}`,
         signal,
       );
       signal?.throwIfAborted();
@@ -1242,52 +1239,51 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
       const topK =
         options.topK != null && aggregator.isPristine() ? options.topK : null;
       const allValues = new Set(options.allValuesFields ?? []);
-      const fullIdx = fields.flatMap((field, i) =>
-        topK === null || allValues.has(field) ? [i] : [],
+      const fullSet = new Set(
+        fields.flatMap((field, i) =>
+          topK === null || allValues.has(field) ? [i] : [],
+        ),
       );
-      const cols = fields.map(sqlIdent);
-      const valueExprs = fields.map(sqlIdent);
-      const valueSelect = valueExprs.map((expr, i) => `${expr} AS ${cols[i]}`);
-      const fieldIdx = `CASE ${valueExprs.map((c, i) => `WHEN GROUPING(${c}) = 0 THEN ${i}`).join(" ")} END`;
-      const nonNull = `CASE field_idx ${cols.map((c, i) => `WHEN ${i} THEN ${c} IS NOT NULL`).join(" ")} END`;
       // RANK keeps every value tied at the K-th count, so the final order can
       // use Intl.Collator in JavaScript, which DuckDB collations can't match.
-      const candidateLimit = Math.min(
-        4096,
-        Math.floor(150_000 / fields.length),
-      );
-      const keyBytes = `48 + CASE field_idx ${cols.map((col, i) => `WHEN ${i} THEN 4 * length(CAST(${col} AS VARCHAR))`).join(" ")} ELSE 0 END`;
       const rankLimit = (k: number) => Math.max(0, Math.floor(k));
-      const ranked = fields.flatMap((field, i) => {
+      const topLimit = (field: string) => {
         const k = options.rankedFields?.[field];
-        return k !== undefined && k > (topK ?? 0) ? [`WHEN ${i} THEN ${rankLimit(k)}`] : [];
-      });
-      const topLimit = ranked.length > 0
-        ? `CASE field_idx ${ranked.join(" ")} ELSE ${rankLimit(topK ?? 0)} END`
-        : `${rankLimit(topK ?? 0)}`;
+        return rankLimit(k !== undefined && k > (topK ?? 0) ? k : (topK ?? 0));
+      };
       const qualify = bounded
-        ? ` QUALIFY row_number() OVER (PARTITION BY field_idx ORDER BY cnt DESC) <= ${candidateLimit} AND sum(${keyBytes}) OVER (PARTITION BY field_idx ORDER BY cnt DESC ROWS UNBOUNDED PRECEDING) <= ${Math.floor((32 * 1024 * 1024) / fields.length)}`
-        : fullIdx.length === fields.length
-          ? ""
-          : ` QUALIFY ${fullIdx.length > 0 ? `field_idx IN (${fullIdx.join(", ")}) OR ` : ""}rank() OVER (PARTITION BY field_idx ORDER BY cnt DESC) <= ${topLimit}`;
+        ? boundedQualify(
+            fields,
+            Math.min(4096, Math.floor(150_000 / fields.length)),
+            Math.floor((32 * 1024 * 1024) / fields.length),
+          )
+        : (i: number, window: string) =>
+            fullSet.has(i) ? "" : `rank() OVER (${window}) <= ${topLimit(fields[i])}`;
       const valuesTable = await backend.query(
-        `${base} SELECT field_idx, cnt, ${cols.join(", ")} FROM (SELECT ${fieldIdx} AS field_idx, ${valueSelect.join(", ")}, COUNT(*)::BIGINT AS cnt FROM base GROUP BY GROUPING SETS (${valueExprs.map((c) => `(${c})`).join(", ")})) WHERE ${nonNull}${qualify}`,
+        `${base} ${fieldValuesSql(fields, typeOf, false, "", qualify)}`,
         signal,
       );
       signal?.throwIfAborted();
 
-      const fullSet = new Set(fullIdx);
       fields.forEach((field, i) => {
         fieldAggregates[field] = {
-          nonNull: firstNumber(statsTable, `nn_${i}`) ?? 0,
-          distinct: firstNumber(statsTable, `d_${i}`) ?? 0,
+          nonNull: 0,
+          distinct: 0,
           entries: [],
           complete: fullSet.has(i),
         };
       });
+      const si = column(statsTable, "field_idx");
+      const snn = column(statsTable, "nn");
+      const sd = column(statsTable, "d");
+      for (let r = 0; r < statsTable.numRows; r++) {
+        const aggregate = fieldAggregates[fields[Number(si[r])]];
+        aggregate.nonNull = Number(snn[r] ?? 0);
+        aggregate.distinct = Number(sd[r] ?? 0);
+      }
       const idxCol = column(valuesTable, "field_idx");
       const cntCol = column(valuesTable, "cnt");
-      const valueCols = fields.map((field) => column(valuesTable, field));
+      const valueCols = fields.map((field) => column(valuesTable, valueColumn(typeOf(field))));
       for (let r = 0; r < valuesTable.numRows; r++) {
         const i = Number(idxCol[r]);
         const value = toScalarValue(valueCols[i][r]);
@@ -1333,6 +1329,74 @@ function customTypesOf(customFields: readonly CustomField[]): CustomTypes {
   return new Map(
     customFields.map((field) => [field.id, CUSTOM_DUCKDB_TYPES[field.type]]),
   );
+}
+
+/*
+ * Card statistics and values are computed one field per UNION ALL branch over
+ * an unmaterialized `base`, so DuckDB holds one narrow hash table at a time.
+ * A single statement with a COUNT(DISTINCT) or grouping set per card held
+ * every card's table at once: ~128 MB before any data, and past the browser's
+ * 256 MB when one hot hour of near-unique ttl/age values arrived.
+ */
+type FieldTypeOf = (field: string) => DuckDBColumnType;
+
+const valueColumn = (type: DuckDBColumnType) => `v_${type.toLowerCase()}`;
+
+function valueTypes(fields: readonly string[], typeOf: FieldTypeOf) {
+  return [...new Set(fields.map(typeOf))];
+}
+
+/** One row per field (and file): `field_idx`, `nn`, `d`, and `ml` when asked. */
+function fieldStatsSql(
+  fields: readonly string[],
+  file: boolean,
+  maxLength: boolean,
+): string {
+  return fields
+    .map((field, i) => {
+      const f = sqlIdent(field);
+      const text = `CASE WHEN CAST(${f} AS VARCHAR) != '' THEN ${f} END`;
+      return `SELECT ${file ? `${FILE_COLUMN} AS file, ` : ""}${i} AS field_idx, COUNT(${f})::BIGINT AS nn, COUNT(DISTINCT ${text})::BIGINT AS d${maxLength ? `, MAX(length(CAST(${text} AS VARCHAR)))::BIGINT AS ml` : ""} FROM base${file ? ` GROUP BY ${FILE_COLUMN}` : ""}`;
+    })
+    .join(" UNION ALL ");
+}
+
+/**
+ * Non-null value counts per field (and file), with the value in the column of
+ * its type class. `qualify(i, window)` bounds field `i` given its window spec.
+ */
+function fieldValuesSql(
+  fields: readonly string[],
+  typeOf: FieldTypeOf,
+  file: boolean,
+  where: string,
+  qualify: (i: number, window: string) => string,
+): string {
+  const types = valueTypes(fields, typeOf);
+  const window = `${file ? `PARTITION BY ${FILE_COLUMN} ` : ""}ORDER BY COUNT(*) DESC`;
+  return fields
+    .map((field, i) => {
+      const f = sqlIdent(field);
+      const values = types
+        .map(
+          (type) =>
+            `${type === typeOf(field) ? `CAST(${f} AS ${type})` : `NULL::${type}`} AS ${valueColumn(type)}`,
+        )
+        .join(", ");
+      const q = qualify(i, window);
+      return `SELECT ${file ? `${FILE_COLUMN} AS file, ` : ""}${i} AS field_idx, ${values}, COUNT(*)::BIGINT AS cnt FROM base WHERE ${f} IS NOT NULL${where} GROUP BY ${file ? `${FILE_COLUMN}, ` : ""}${f}${q ? ` QUALIFY ${q}` : ""}`;
+    })
+    .join(" UNION ALL ");
+}
+
+/** The bounded-mode cap: the top candidates whose keys fit the field's byte share. */
+function boundedQualify(
+  fields: readonly string[],
+  candidateLimit: number,
+  fieldByteCap: number,
+) {
+  return (i: number, window: string) =>
+    `row_number() OVER (${window}) <= ${candidateLimit} AND sum(48 + 4 * length(CAST(${sqlIdent(fields[i])} AS VARCHAR))) OVER (${window} ROWS UNBOUNDED PRECEDING) <= ${fieldByteCap}`;
 }
 
 /**

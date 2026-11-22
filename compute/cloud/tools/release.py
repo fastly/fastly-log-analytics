@@ -15,6 +15,7 @@ from scripts.release_compute import (  # noqa: E402, F401
     build,
     check_clean_app_tree,
     check_static_assets,
+    extract_early_hints,
     frozen_source,
     git,
     prepare_static_export_tree,

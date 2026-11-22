@@ -10,6 +10,21 @@ ratecounter auth_challenge_rc {}
 
 #RATELIMIT_END
 
+#EARLYHINTS_BEGIN
+# Release deploys replace this block with per-route Link hints from the frozen static export.
+sub flp_early_hints {
+}
+
+sub flp_hint_links {
+}
+#EARLYHINTS_END
+
+#BUILDKEY_BEGIN
+# Release deploys add the build SHA to the cache key so a new build never serves old HTML.
+sub flp_build_hash {
+}
+#BUILDKEY_END
+
 sub vcl_recv {
   if (!req.is_ssl && req.url.path !~ "^/_tick$|^/_flush$") {
     unset req.http.x-flp-fos-service;
@@ -17,6 +32,7 @@ sub vcl_recv {
     error 801 "Force TLS";
   }
   if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {
+    h3.alt_svc();
     set req.http.Fastly-Client-IP = client.ip;
     if (req.url ~ "^//") {
       set req.url = regsub(req.url, "^/+", "/");
@@ -31,6 +47,7 @@ sub vcl_recv {
     unset req.http.x-flp-fos-service;
     unset req.http.x-flp-fos-bucket;
     unset req.http.x-flp-fos-region;
+    unset req.http.x-flp-shell;
     set req.http.x-flp-front-key = table.lookup(flp_front_auth, "front_key", "");
     if (req.http.x-flp-front-key == "") {
       error 620 "Front not configured";
@@ -62,6 +79,16 @@ sub vcl_recv {
       }
     }
     #RATELIMIT_END
+    # 103 hints only help h2/h3 top-level navigations while the browser waits on Compute.
+    if (
+      req.method == "GET" &&
+      (fastly_info.is_h2 || fastly_info.is_h3) &&
+      (req.http.Sec-Fetch-Dest == "document" || (!req.http.Sec-Fetch-Dest && req.http.Accept ~ "text/html")) &&
+      req.url.path !~ "^/+(api|auth|fos|_tick|_flush|_next|duckdb|geo)(/|$)" &&
+      req.url.ext != "parquet"
+    ) {
+      call flp_early_hints;
+    }
     declare local var.cdn_cookie STRING;
     if (req.http.Cookie:__Host-flp_cdn && req.http.Cookie:__Host-flp_cdn != "") {
       set var.cdn_cookie = req.http.Cookie:__Host-flp_cdn;
@@ -69,6 +96,44 @@ sub vcl_recv {
       set var.cdn_cookie = req.http.Cookie:flp_cdn;
     } else {
       set var.cdn_cookie = "";
+    }
+    # Admin page shells hold no data; a verified admin CDN credential may read them from cache.
+    # Any failed check falls back to Compute, which owns the redirect, 403 and cookie clearing.
+    if (
+      (req.method == "GET" || req.method == "HEAD") &&
+      req.url.path ~ "^/(admin|logs|provision|log-fields|services)(\.(html|txt)|/|$)" &&
+      var.cdn_cookie != "" &&
+      req.http.Cookie:flp_session &&
+      var.cdn_cookie ~ "^(([A-Za-z0-9]{22})~admin~([0-9]{10})~([0-9a-f]{16})(?:~([0-9]{1,20}))?~([A-Za-z0-9._/-]*))~([0-9a-f]{64})$"
+    ) {
+      declare local var.shell_payload STRING;
+      declare local var.shell_exp STRING;
+      declare local var.shell_shash STRING;
+      declare local var.shell_epoch STRING;
+      declare local var.shell_msg STRING;
+      declare local var.shell_sig STRING;
+      declare local var.shell_secret STRING;
+      declare local var.shell_auth_epoch STRING;
+      set var.shell_payload = re.group.1;
+      set var.shell_exp = re.group.3;
+      set var.shell_shash = re.group.4;
+      set var.shell_epoch = if(re.group.5 && re.group.5 != "", re.group.5, "0");
+      set var.shell_msg = if(re.group.5 && re.group.5 != "", "flp-cdn-v2~" + var.shell_payload, "flp-cdn-v1~" + var.shell_payload);
+      set var.shell_sig = re.group.7;
+      set var.shell_secret = table.lookup(flp_front_auth, "cdn_key", "");
+      set var.shell_auth_epoch = table.lookup(flp_front_auth, "auth_epoch", "0");
+      if (var.shell_auth_epoch == "" || var.shell_auth_epoch !~ "^[0-9]{1,20}$") {
+        set var.shell_auth_epoch = "0";
+      }
+      if (
+        var.shell_secret != "" &&
+        digest.secure_is_equal(digest.hmac_sha256(var.shell_secret, var.shell_msg), "0x" + var.shell_sig) &&
+        var.shell_shash == substr(digest.hash_sha256(req.http.Cookie:flp_session), 0, 16) &&
+        var.shell_epoch == var.shell_auth_epoch &&
+        std.atoi(var.shell_exp) > std.atoi(strftime({"%s"}, now))
+      ) {
+        set req.http.x-flp-shell = "admin";
+      }
     }
     declare local var.browser_file_key STRING;
     set var.browser_file_key = "";
@@ -263,7 +328,19 @@ sub vcl_recv {
   if (req.method != "GET" && req.method != "HEAD") {
     return(pass);
   }
-  if (req.url.path ~ "^/(api|auth|setup|share-login|admin|dashboard|origin|performance|security|network|fastly-value|assets-shield|rum|streaming|sessions|query|insights|logs|provision|log-fields|services|cloud-files)(\.(html|txt)|/|$)") {
+  if (req.url.path ~ "^/(api|auth|setup|share-login)(\.(html|txt)|/|$)") {
+    return(pass);
+  }
+  # Compute serves these static shells to everyone; the APIs enforce data access.
+  if (req.url.path ~ "^/(dashboard|origin|performance|security|network|fastly-value|assets-shield|rum|streaming|sessions|query|insights|cloud-files)(\.(html|txt)|/|$)") {
+    set req.url = req.url.path;
+    return(lookup);
+  }
+  if (req.url.path ~ "^/(admin|logs|provision|log-fields|services)(\.(html|txt)|/|$)") {
+    if (req.http.x-flp-shell == "admin") {
+      set req.url = req.url.path;
+      return(lookup);
+    }
     return(pass);
   }
   if (req.url.path ~ "^/(_next/static|duckdb|geo)/" || req.url.path ~ "^/maplibre-gl-") {
@@ -280,6 +357,16 @@ sub vcl_hash {
   if (req.http.x-flp-fos-service) {
     set req.hash += req.http.x-flp-fos-bucket;
     set req.hash += req.http.x-flp-fos-region;
+  } else if (
+    req.http.x-flp-tick != "1" &&
+    req.url.path !~ "^/(_next/static|duckdb|geo)/" &&
+    req.url.path !~ "^/maplibre-gl-"
+  ) {
+    if (req.http.x-flp-shell) {
+      set req.hash += "shell:";
+      set req.hash += req.http.x-flp-shell;
+    }
+    call flp_build_hash;
   }
   return(hash);
 }
@@ -389,14 +476,37 @@ sub vcl_fetch {
     }
     unset beresp.http.x-compress-hint;
   }
+  # Compute marks admin shells private for browsers; only edge-verified admins share this copy.
   if (
-    req.url.path ~ "^/(api|auth|setup|share-login|admin|dashboard|origin|performance|security|network|fastly-value|assets-shield|rum|streaming|sessions|query|insights|logs|provision|log-fields|services|cloud-files)(\.(html|txt)|/|$)" ||
+    req.http.x-flp-shell == "admin" &&
+    req.url.path ~ "^/(admin|logs|provision|log-fields|services)(\.(html|txt)|/|$)" &&
+    beresp.status == 200 &&
+    !beresp.http.Set-Cookie &&
+    beresp.http.Content-Type ~ "^text/(html|plain)"
+  ) {
+    set beresp.cacheable = true;
+    set beresp.ttl = 60s;
+    set beresp.http.Vary = "Accept-Encoding";
+    set beresp.http.Surrogate-Key = "flp-html";
+    return(deliver);
+  }
+  if (
+    req.url.path ~ "^/(api|auth|setup|share-login|admin|logs|provision|log-fields|services)(\.(html|txt)|/|$)" ||
     beresp.http.Cache-Control ~ "(?i)(private|no-store)"
   ) {
     set beresp.cacheable = false;
     return(pass);
   }
   if (req.url.path ~ "^/_next/static/" && beresp.status == 200) {
+    unset beresp.http.Set-Cookie;
+    set beresp.cacheable = true;
+    set beresp.ttl = 31536000s;
+    set beresp.http.Cache-Control = "public, max-age=31536000, immutable";
+    set beresp.http.Surrogate-Key = "flp-static";
+    return(deliver);
+  }
+  # DuckDB's worker and wasm live under the npm package version, so their bytes never change.
+  if (req.url.path ~ "^/duckdb/[^/]+/duckdb-[^/]+$" && beresp.status == 200) {
     unset beresp.http.Set-Cookie;
     set beresp.cacheable = true;
     set beresp.ttl = 31536000s;
@@ -460,6 +570,13 @@ sub vcl_deliver {
   #RATELIMIT_END
   if (fastly.ff.visits_this_service == 0) {
     unset resp.http.x-flp-auth-fail;
+    if (req.http.x-flp-shell == "admin" && resp.status == 200 && resp.http.Content-Type ~ "^text/(html|plain)") {
+      set resp.http.Vary = "Cookie";
+    }
+    # Same preloads as the 103, for clients that ignore Early Hints (Safari, HTTP/1.1).
+    if (req.method == "GET" && resp.status == 200 && resp.http.Content-Type ~ "^text/html" && !req.http.x-flp-fos-service) {
+      call flp_hint_links;
+    }
   }
   unset resp.http.x-flp-front-key;
   unset resp.http.x-flp-front-rl;
@@ -500,6 +617,23 @@ sub vcl_deliver {
       } else {
         set resp.http.Cache-Control = "no-cache";
       }
+    }
+  }
+  # Edge timing for the browser's PerformanceResourceTiming.serverTiming; appended after any
+  # Compute phases. `cdn-cache` is the shield-aware FOS object outcome, `edge` this node's state.
+  # A cached response (here or at the shield, so a non-zero Age) replaces the stored value:
+  # its Compute phases timed an earlier request.
+  if (fastly.ff.visits_this_service == 0) {
+    declare local var.edge_timing STRING;
+    set var.edge_timing = "edge;desc=" + fastly_info.state + ";dur=" + time.elapsed.msec;
+    if (req.http.x-flp-fos-service && resp.http.x-flp-fos-cache) {
+      set var.edge_timing = "cdn-cache;desc=" + resp.http.x-flp-fos-cache + ", " + var.edge_timing;
+    }
+    if (resp.http.Server-Timing && obj.hits == 0 && fastly_info.state !~ "^HIT"
+        && std.atoi(resp.http.Age) == 0) {
+      set resp.http.Server-Timing = resp.http.Server-Timing + ", " + var.edge_timing;
+    } else {
+      set resp.http.Server-Timing = var.edge_timing;
     }
   }
   return(deliver);
