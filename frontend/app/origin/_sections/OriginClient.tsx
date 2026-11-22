@@ -324,6 +324,7 @@ export default function OriginClient({
       description="Real-time backend health, fetch timing, and error analysis."
       icon={Server}
       defaultInterval="1 minute"
+      syncMetricFromUrl={false}
     >
       {(props) => (
         <OriginReportContent

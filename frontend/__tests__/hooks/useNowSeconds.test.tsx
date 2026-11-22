@@ -5,7 +5,8 @@
  * @vitest-environment jsdom
  */
 import React from 'react'
-import { renderHook, act, waitFor } from '@testing-library/react'
+import { render, renderHook, act, waitFor } from '@testing-library/react'
+import { Server } from 'lucide-react'
 import { http, HttpResponse } from 'msw/http'
 import { withNuqsTestingAdapter, type OnUrlUpdateFunction } from 'nuqs/adapters/testing'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
@@ -29,6 +30,7 @@ const mockStore = {
   addFilter: mockAddFilter, clearFilters: mockClearFilters, setRange: mockSetRange,
   setRelativeRange: vi.fn(), toggleEdgeOnly: vi.fn(), toggleCompareMode: vi.fn(),
   setCompareRange: vi.fn(), edgeOnly: false, compareMode: false,
+  filters: [], startTime: '2026-01-01T00:00:00Z', endTime: '2026-01-01T01:00:00Z',
 }
 const mockServiceStore = { activeServiceId: 'test-service-id', services: [] }
 vi.mock('@/stores/filterStore', async (importOriginal) => ({
@@ -352,6 +354,32 @@ describe('useViewMetricUrlSync', () => {
     renderHook(() => useViewMetricUrlSync(), viewMetricAdapter('?metric=ttlb&service=svc-1'))
     await new Promise((r) => setTimeout(r, 20))
     expect(onUrlUpdate).not.toHaveBeenCalled()
+  })
+
+  it('ReportLayout with syncMetricFromUrl={false} preserves ?metric=ttlb while default strips it', async () => {
+    const { ReportLayout } = await import('@/components/ReportLayout')
+    const { wrapper: WrapperFalse } = viewMetricAdapter('?metric=ttlb&service=svc-1')
+    const { unmount } = render(
+      <WrapperFalse>
+        <ReportLayout title="Origin Performance" description="" icon={Server} syncMetricFromUrl={false}>
+          {() => <div data-testid="origin-body">ok</div>}
+        </ReportLayout>
+      </WrapperFalse>,
+    )
+    await new Promise((r) => setTimeout(r, 20))
+    expect(onUrlUpdate).not.toHaveBeenCalled()
+    unmount()
+
+    const { wrapper: WrapperDefault } = viewMetricAdapter('?metric=ttlb&service=svc-1')
+    render(
+      <WrapperDefault>
+        <ReportLayout title="Dashboard" description="" icon={Server}>
+          {() => <div data-testid="dash-body">ok</div>}
+        </ReportLayout>
+      </WrapperDefault>,
+    )
+    await waitFor(() => expect(onUrlUpdate).toHaveBeenCalled())
+    expect(onUrlUpdate.mock.calls.at(-1)![0].searchParams.get('metric')).toBeNull()
   })
 
   it('loads a saved view by id and clears URL view param', async () => {
