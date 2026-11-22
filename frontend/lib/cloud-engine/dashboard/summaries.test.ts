@@ -1227,6 +1227,46 @@ describe("pivot slices", () => {
     expectMatchesRaw(fallback, await rawFiltered(filters));
   });
 
+  it("answers an open hour's compacts from their window summaries unfiltered", async () => {
+    // The open bundle lags the compacts, so only the window summaries the compact names hold
+    // their rows; a group with an unreadable summary reads its compact raw and counts nothing else.
+    const pair = RAW.filter((f) => f.key.includes("/hour=09/")).slice(0, 2);
+    const names = pair.map((w) => /window=(.+)\.parquet$/.exec(w.key)![1]);
+    const tags = names.map((n) => fnv1a32(`window=${n}.parquet`).toString(16).padStart(8, "0"));
+    const compact: ManifestFile = {
+      ...pair[0],
+      key: pair[0].key.replace(/window=.*$/, `compact=1800003600-1800005400-c2-n${pair[0].rows! + pair[1].rows!}-${tags.join("")}.parquet`),
+      end: pair[1].end,
+      rows: pair[0].rows! + pair[1].rows!,
+      sources: 2,
+    };
+    let second: Record<string, unknown>[] = [];
+    await editSummaryRows(BUFFERS[pair[1].key], (rows) => (second = rows));
+    const buffers = { ...BUFFERS, [compact.key]: await editSummaryRows(BUFFERS[pair[0].key], (rows) => [...rows, ...second]) };
+    const raw = [...RAW.filter((f) => !pair.includes(f)), compact];
+    const summaries = [
+      ...pick("hour", (e) => !e.early && e.key.includes("hour_bundle=08")),
+      ...pick("window", (e) => e.key.includes("/hour=09/")),
+    ];
+    const exact = await runDashboard(fixtureSource([page(raw)], buffers), { from, to });
+    clearDashboardMemo();
+
+    const source = fixtureSource([page(raw)], buffers, { json: [], files: [] }, [page(summaries)]);
+    const cold = await runDashboard(source, { from, to });
+    expect(source.log.files.filter((k) => !k.includes("summary"))).toEqual([]);
+    expectMatchesRaw(cold, exact);
+    const warm = await runDashboard(source, { from, to });
+    expect(source.log.files.filter((k) => !k.includes("summary"))).toEqual([]);
+    expectMatchesRaw(warm, exact);
+    clearDashboardMemo();
+
+    const [unreadable] = summaries.filter((f) => f.key.includes(names[1]));
+    const broken = fixtureSource([page(raw)], { ...buffers, [unreadable.key]: new ArrayBuffer(8) }, { json: [], files: [] }, [page(summaries)]);
+    const fallback = await runDashboard(broken, { from, to });
+    expect(broken.log.files.filter((k) => !k.includes("summary"))).toEqual([compact.key]);
+    expectMatchesRaw(fallback, exact);
+  });
+
   it("reads raw for summaries written before slices", async () => {
     const hours = pick("hour", (e) => !e.early);
     const buffers = { ...BUFFERS };

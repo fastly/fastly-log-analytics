@@ -299,7 +299,11 @@ It plans summaries like the unfiltered rollup (`planFilteredSummaries`:
 coarsest first, then an open hour's compacts from the window summaries or
 open bundle that hold their rows, as `planRollup` does). Several summaries
 that answer the same compacts form one group: all of them answer from slices,
-or the compacts read raw and none of them is counted.
+or the compacts read raw and none of them is counted. The unfiltered dashboard
+plans the same way after `planSummaries`, so an open hour whose `open_bundle=`
+lags its compacts reads their window summaries rather than raw Parquet; such
+groups are never kept in the incremental memo, so each run re-plans them.
+Field search adds the same uses and reports partial if one fails.
 
 Where raw reads remain:
 
