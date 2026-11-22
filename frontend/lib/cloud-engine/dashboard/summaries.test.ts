@@ -13,12 +13,15 @@ import {
   planCoarsestFirst,
   planCompactsFromWindows,
   planSummaries,
+  SLICE_GROUPS,
   summaryValue,
 } from "./summaries";
 import {
   classifySummaryAgainstFilters,
   clearDashboardMemo,
+  DASHBOARD_FILTERED_SUMMARY_SPEC,
   DASHBOARD_SUMMARY_SPEC,
+  resolveSummaryFromSlices,
   runDashboard,
   searchFieldSummaries,
   searchFieldValues,
@@ -28,7 +31,7 @@ import type { DashboardFilter } from "./filters";
 import { Hll } from "./hll";
 import type { ManifestFile } from "./manifest";
 import { readColumns } from "./parquet";
-import { LAYOUT_B, withSummaryLayout } from "./summary-layout-fixture";
+import { editSummaryRows, LAYOUT_B, withSummaryLayout } from "./summary-layout-fixture";
 import { defineSummarySpec, readSummaryProjection, summaryProjectionLimits } from "./summary-projection";
 import { fixtureSource, parquetFixture, projectingSource } from "./test-fixtures";
 
@@ -1035,6 +1038,157 @@ describe("summary readers", () => {
   });
 });
 
+describe("pivot slices", () => {
+  afterEach(() => clearDashboardMemo());
+  const from = "2027-01-15T08:00:00Z";
+  const to = "2027-01-15T10:00:00Z";
+  const rawFiltered = (filters: DashboardFilter[], edgeOnly = false) =>
+    runDashboard(fixtureSource([page(RAW)], BUFFERS), {
+      from,
+      to,
+      filters,
+      edgeOnly,
+    });
+  const coldFiltered = async (
+    summaries: ManifestFile[],
+    filters: DashboardFilter[],
+    edgeOnly = false,
+    range = { from, to },
+  ) => {
+    const source = fixtureSource(
+      [page(RAW)],
+      BUFFERS,
+      { json: [], files: [] },
+      [page(summaries)],
+    );
+    const result = await runDashboard(source, { ...range, filters, edgeOnly });
+    return { result, files: source.log.files };
+  };
+  const status = (value: string, mode: DashboardFilter["mode"] = "include") =>
+    ({ field: "status", value, mode }) as DashboardFilter;
+
+  it("splits every summary's time-series rows across its status slices", async () => {
+    for (const file of INDEX.filter((e) => e.kind !== "raw").map(entry)) {
+      const decoded = (await decodeSummary(BUFFERS[file.key], 0, 4e12, [], {
+        slices: true,
+      }))!;
+      const pivot = decoded.slices?.get("status");
+      expect(pivot, file.key).toBeDefined();
+      expect(pivot!.truncated).toBe(false);
+      const slices = [...pivot!.values.values()];
+      expect(
+        slices.reduce((sum, s) => sum + s.rollup.totalRequests, 0),
+        file.key,
+      ).toBe(decoded.rollup.totalRequests);
+      expect(
+        (await decodeSummary(BUFFERS[file.key], 0, 4e12))!.slices,
+      ).toBeUndefined();
+    }
+  });
+
+  it.each([
+    ["one value", [status("200")]],
+    ["several values", [status("200"), status("304")]],
+    ["a wildcard", [status("5*")]],
+    ["an exclude", [status("200", "exclude")]],
+    ["include and exclude", [status("*"), status("404", "exclude")]],
+    ["no value present", [status("418")]],
+  ])(
+    "answers a status filter with %s from cold hour bundles without raw reads",
+    async (_, filters) => {
+      const hours = pick("hour", (e) => !e.early);
+      const { result, files } = await coldFiltered(hours, filters);
+      expect(files.sort()).toEqual(hours.map((f) => f.key).sort());
+      expect(result.stats).toMatchObject({ listed: 2, fetched: 2, cached: 0 });
+      const raw = await rawFiltered(filters);
+      expectMatchesRaw(result, raw);
+      expect(result.cards.ip.distinct).toBeGreaterThanOrEqual(
+        filters[0].value === "418" ? 0 : 1,
+      );
+    },
+  );
+
+  it("answers from windows and from the day bundle as from raw", async () => {
+    const filters = [status("200"), status("503")];
+    const windows = pick("window");
+    const fromWindows = await coldFiltered(windows, filters);
+    expect(fromWindows.files.every((k) => k.includes("/summary="))).toBe(true);
+    // Windows are summarized whole, so even approximate cards are exact.
+    expect(expectMatchesRaw(fromWindows.result, await rawFiltered(filters))).toEqual(
+      [],
+    );
+    const range = { from: "2027-01-15T00:00:00Z", to: "2027-01-16T00:00:00Z" };
+    const day = await coldFiltered(pick("day"), filters, false, range);
+    expect(day.files).toEqual(pick("day").map((f) => f.key));
+    expectMatchesRaw(
+      day.result,
+      await runDashboard(fixtureSource([page(RAW)], BUFFERS), {
+        ...range,
+        filters,
+      }),
+    );
+  });
+
+  it("narrows by other filters within a slice, and reads raw when the slice only partly matches them", async () => {
+    const hours = pick("hour", (e) => !e.early);
+    // Every 404 row is `GET`, so the slice matches the method filter whole.
+    const whole = [status("404"), { field: "method", value: "GET", mode: "include" } as const];
+    const sliced = await coldFiltered(hours, whole);
+    expect(sliced.files.every((k) => k.includes("hour_bundle="))).toBe(true);
+    expectMatchesRaw(sliced.result, await rawFiltered(whole));
+    const none = [status("404"), { field: "method", value: "POST", mode: "include" } as const];
+    const pruned = await coldFiltered(hours, none);
+    expect(pruned.result.totalRequests).toBe(0);
+    expect(pruned.files.every((k) => k.includes("hour_bundle="))).toBe(true);
+    const partial = [status("200"), { field: "country", value: "US", mode: "include" } as const];
+    const mixed = await coldFiltered(hours, partial);
+    expect(mixed.files.some((k) => k.includes("/window="))).toBe(true);
+    expectMatchesRaw(mixed.result, await rawFiltered(partial));
+    const edge = await coldFiltered(hours, [status("200")], true);
+    expectMatchesRaw(edge.result, await rawFiltered([status("200")], true));
+  });
+
+  it("leaves cut pivots, and excludes over rows no slice holds, to the whole summary", async () => {
+    const [hour] = pick("hour", (e) => !e.early);
+    const decoded = (await decodeSummary(BUFFERS[hour.key], 0, 4e12, [], {
+      slices: true,
+    }))!;
+    const pivot = decoded.slices!.get("status")!;
+    const ok = resolveSummaryFromSlices(decoded, [status("200")]);
+    expect(ok).not.toBeNull();
+    expect(ok).not.toBe("none");
+    const cut = { ...decoded, slices: new Map([["status", { ...pivot, truncated: true }]]) };
+    expect(resolveSummaryFromSlices(cut, [status("200")])).toBeNull();
+    // As if the 304 rows had no status: includes still answer, excludes keep them.
+    const values = new Map(pivot.values);
+    values.delete("304");
+    const nulls = { ...decoded, slices: new Map([["status", { ...pivot, values }]]) };
+    expect(resolveSummaryFromSlices(nulls, [status("200")])).toEqual(ok);
+    expect(resolveSummaryFromSlices(nulls, [status("200", "exclude")])).toBeNull();
+    expect(resolveSummaryFromSlices(decoded, [status("200", "exclude")])).not.toBeNull();
+  });
+
+  it("reads raw for summaries written before slices", async () => {
+    const hours = pick("hour", (e) => !e.early);
+    const buffers = { ...BUFFERS };
+    const old = await Promise.all(
+      hours.map(async (file) => {
+        buffers[file.key] = await editSummaryRows(BUFFERS[file.key], (rows) =>
+          rows.filter((row) => !SLICE_GROUPS.includes(String(row.bundle))),
+        );
+        return { ...file, size: buffers[file.key].byteLength };
+      }),
+    );
+    const source = fixtureSource([page(RAW)], buffers, { json: [], files: [] }, [
+      page(old),
+    ]);
+    const filters = [status("200")];
+    const result = await runDashboard(source, { from, to, filters });
+    expect(source.log.files.filter((k) => k.includes("/window="))).toHaveLength(8);
+    expectMatchesRaw(result, await rawFiltered(filters));
+  });
+});
+
 describe("custom cards", () => {
   it("drops system-managed and load-test fields", () => {
     const ids = customCards(
@@ -1184,6 +1338,12 @@ describe("projected dashboard summaries", () => {
         const whole = await decodeSummary(bytes, 0, 4e12);
         expect(whole?.ipSketch, file.key).toBeTruthy();
         expect(await decodeSummary(await projected(file, bytes), 0, 4e12), file.key).toEqual(whole);
+        const sliced = await decodeSummary(bytes, 0, 4e12, [], { slices: true });
+        expect(sliced?.slices?.get("status")?.values.size, file.key).toBeGreaterThan(1);
+        expect(
+          await decodeSummary(await projected(file, bytes, DASHBOARD_FILTERED_SUMMARY_SPEC), 0, 4e12, [], { slices: true }),
+          file.key,
+        ).toEqual(sliced);
       }
     }
   });

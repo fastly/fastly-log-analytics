@@ -1118,13 +1118,32 @@ mod summary_bundles {
         keys[0].clone()
     }
 
+    type Rows = Vec<Map<String, Value>>;
+
+    /// Pivot slice rows in a stable order, and the other rows in file order.
+    fn split_slices(rows: Rows) -> (Rows, Rows) {
+        let (mut slices, rest): (Vec<_>, Vec<_>) = rows.into_iter().partition(|r| {
+            let b = r["bundle"].as_str().unwrap();
+            b == "pivot_totals" || b.starts_with("slice_")
+        });
+        let sort_key = |r: &Map<String, Value>| {
+            ["bundle", "pivot", "pivot_value", "field", "bucket", "value"]
+                .map(|k| r.get(k).map(Value::to_string).unwrap_or_default())
+        };
+        slices.sort_by_key(sort_key);
+        (slices, rest)
+    }
+
     /// Row-by-row equality; floats to 1e-9 relative, and a merged sketch's estimate stands in
     /// for the exact distinct count a single-pass summary records.
     fn assert_same(got: &[Map<String, Value>], want: &[Map<String, Value>]) {
         assert_eq!(got.len(), want.len());
         for (n, (g, w)) in got.iter().zip(want).enumerate() {
             let mut w = w.clone();
-            if let Some(sketch) = w.get("ip_sketch").and_then(Value::as_str) {
+            if let (Some(sketch), true) = (
+                w.get("ip_sketch").and_then(Value::as_str),
+                w.contains_key("ip_count_observed"),
+            ) {
                 let hll = summary::Hll::from_bytes(&hex::decode(sketch).unwrap()).unwrap();
                 w.insert("ip_count_observed".into(), (hll.count() as i64).into());
             }
@@ -1649,7 +1668,12 @@ mod summary_bundles {
         let refs: Vec<&RecordBatch> = batches.iter().collect();
         let want = read(&summary::write_summary(&refs, BASE).unwrap());
         let got = read(&fake.bucket.borrow()[&key]);
+        // Bundles write pivot slices as their own trailing row group; windows interleave them.
+        let (got_slices, got) = split_slices(got);
+        let (want_slices, want) = split_slices(want);
+        assert!(!want_slices.is_empty());
         assert_same(&got, &want);
+        assert_same(&got_slices, &want_slices);
         let name = bundle::parse_name(&key).unwrap();
         assert_eq!((name.unit, name.count), (8, 12));
         assert_eq!(

@@ -33,7 +33,11 @@ import {
   normalizeDashboardValue,
   planCoarsestFirst,
   planSummaries,
+  PIVOT_FIELDS,
+  SLICE_COLUMNS,
+  SLICE_GROUPS,
   SUMMARY_COLUMNS,
+  summaryValue,
   type CardField,
   type CustomField,
   type DecodedSummary,
@@ -54,17 +58,20 @@ export const DASHBOARD_SUMMARY_SPEC = defineSummarySpec({
   only: { ip_sketch: ["overview"] },
 });
 
+/** `DASHBOARD_SUMMARY_SPEC` plus the pivot slices that answer filtered runs. */
+export const DASHBOARD_FILTERED_SUMMARY_SPEC = defineSummarySpec({
+  groups: [...DASHBOARD_SUMMARY_SPEC.groups, ...SLICE_GROUPS],
+  columns: [...SUMMARY_COLUMNS, ...SLICE_COLUMNS, "ip_sketch"],
+  only: { ip_sketch: ["overview", "slice_overview"] },
+});
+
 const readDashboardSummary = async (
   source: FileSource,
   file: ManifestFile,
   signal?: AbortSignal,
+  spec = DASHBOARD_SUMMARY_SPEC,
 ) => {
-  const read = await readSummaryProjection(
-    source,
-    file,
-    DASHBOARD_SUMMARY_SPEC,
-    signal,
-  );
+  const read = await readSummaryProjection(source, file, spec, signal);
   return {
     ...read,
     byteLength: read.parts.reduce((sum, part) => sum + part.byteLength, 0),
@@ -1073,6 +1080,113 @@ export function classifySummaryAgainstFilters(
   return allMatch ? "all" : "partial";
 }
 
+function mergeDecoded(parts: readonly DecodedSummary[]): DecodedSummary {
+  const buckets = new Map<number, MinuteBucket>();
+  const counts = new Map<string, Map<Scalar, number>>();
+  const nonNull: Record<string, number> = {};
+  const truncated = new Set<string>();
+  let ipSketch: Hll | null = null;
+  let totalRequests = 0;
+  for (const { rollup, truncated: cut, ipSketch: sketch } of parts) {
+    totalRequests += rollup.totalRequests;
+    for (const b of rollup.buckets) {
+      const into = buckets.get(b.t);
+      if (!into) {
+        buckets.set(b.t, { ...b });
+        continue;
+      }
+      into.requests += b.requests;
+      into.bytes += b.bytes;
+      into.s4xx += b.s4xx;
+      into.s5xx += b.s5xx;
+      into.hits += b.hits;
+      into.cacheRows += b.cacheRows;
+    }
+    for (const [field, entries] of Object.entries(rollup.counts)) {
+      const map = counts.get(field) ?? new Map<Scalar, number>();
+      for (const [value, count] of entries) {
+        map.set(value, (map.get(value) ?? 0) + count);
+      }
+      counts.set(field, map);
+    }
+    for (const [field, n] of Object.entries(rollup.nonNull)) {
+      nonNull[field] = (nonNull[field] ?? 0) + n;
+    }
+    for (const field of cut) truncated.add(field);
+    if (sketch) {
+      if (ipSketch) ipSketch.merge(sketch);
+      else ipSketch = sketch.clone();
+    }
+  }
+  const sorted = [...buckets.values()].sort((a, b) => a.t - b.t);
+  return {
+    rollup: {
+      minTs: sorted.length ? sorted[0].t : Infinity,
+      maxTs: sorted.length ? sorted[sorted.length - 1].t : -Infinity,
+      totalRequests,
+      hasBytes: true,
+      buckets: sorted,
+      counts: Object.fromEntries(
+        [...counts].map(([field, map]) => [field, [...map]]),
+      ),
+      nonNull,
+    },
+    truncated: [...truncated],
+    ipSketch,
+  };
+}
+
+/**
+ * Answers `filters` exactly from the pivot slices of `summary`: the slices of
+ * a filtered pivot field whose values pass its filters, merged, when the
+ * other filters then keep all or none of their rows. A pivot with cut values
+ * can't say which rows the filter keeps, nor can an exclude when some rows
+ * lack the field (excludes keep them, and no slice holds them). Null when the
+ * slices can't answer, so the caller classifies the whole summary instead.
+ */
+export function resolveSummaryFromSlices(
+  summary: DecodedSummary,
+  filters: readonly DashboardFilter[],
+  edgeOnly = false,
+): DecodedSummary | "none" | null {
+  if (!summary.slices) return null;
+  for (const [field, pivot] of summary.slices) {
+    const own = filters.filter((f) => f.field === field && f.value !== "");
+    if (own.length === 0 || pivot.truncated) continue;
+    const includes = own
+      .filter((f) => f.mode === "include")
+      .map((f) => createValueMatcher(f.value));
+    const excludes = own
+      .filter((f) => f.mode === "exclude")
+      .map((f) => createValueMatcher(f.value));
+    const values = [...pivot.values].map(
+      ([text, slice]) => [summaryValue(field, text), slice] as const,
+    );
+    if (excludes.length > 0) {
+      const sliced = values.reduce(
+        (sum, [, slice]) => sum + slice.rollup.totalRequests,
+        0,
+      );
+      if (sliced !== summary.rollup.totalRequests) continue;
+    }
+    const kept = values
+      .filter(
+        ([value]) =>
+          value !== null &&
+          (includes.length === 0 || includes.some((m) => m(value))) &&
+          !excludes.some((m) => m(value)),
+      )
+      .map(([, slice]) => slice);
+    if (kept.length === 0) return "none";
+    const merged = mergeDecoded(kept);
+    const rest = filters.filter((f) => f.field !== field);
+    const match = classifySummaryAgainstFilters(merged, rest, edgeOnly);
+    if (match === "none") return "none";
+    if (match === "all") return merged;
+  }
+  return null;
+}
+
 type UnitMeta = {
   minTs: number;
   maxTs: number;
@@ -1289,9 +1403,19 @@ async function collectAggregator(
   // from a separate chain of pages. File reads wait for the whole listing:
   // the planner needs every raw and summary file to know which raw files
   // summaries cover, and a delta listing only resolves once replayed.
+  // A filter on a pivot field is answered from the summaries' slices, so it
+  // lists them like an unfiltered run rather than only reusing cached ones.
+  const sliceable =
+    hasFilters &&
+    countedFilters &&
+    topK !== null &&
+    fields.length === cardFields.length &&
+    toMs - fromMs >= SUMMARY_MIN_RANGE_MS &&
+    (options.filters ?? []).some((filter) =>
+      PIVOT_FIELDS.includes(filter.field),
+    );
   const wantSummaries =
-    !hasFilters &&
-    !edgeOnly &&
+    ((!hasFilters && !edgeOnly) || sliceable) &&
     topK !== null &&
     fields.length === cardFields.length &&
     toMs - fromMs >= SUMMARY_MIN_RANGE_MS;
@@ -1331,7 +1455,8 @@ async function collectAggregator(
       (file) =>
         Date.parse(file.start) >= fromMs && Date.parse(file.end) <= toMs,
     );
-  if (!hasFilters && !edgeOnly && canUseSummaries) {
+  let slicedListing: ManifestFile[] | null = null;
+  if (((!hasFilters && !edgeOnly) || sliceable) && canUseSummaries) {
     const inlineSummaries =
       manifest.summaryFiles &&
       (!manifest.summaryRange ||
@@ -1372,9 +1497,13 @@ async function collectAggregator(
       for (const file of listing.files) {
         setScopeEntry(summaryListings, scope, file.key, file);
       }
-      const plan = planSummaries(files, listing.files, fromMs, toMs);
-      files = plan.raw;
-      summaryUses = plan.summaries;
+      if (sliceable) {
+        slicedListing = listing.files;
+      } else {
+        const plan = planSummaries(files, listing.files, fromMs, toMs);
+        files = plan.raw;
+        summaryUses = plan.summaries;
+      }
     }
   }
   const incremental =
@@ -1419,7 +1548,7 @@ async function collectAggregator(
       }
     : null;
   const next = memo;
-  const keptRows = { cached: 0, rows: 0, bytes: 0 };
+  const keptRows = { cached: 0, fetched: 0, rows: 0, bytes: 0, downloaded: 0 };
   const scopeListings = summaryListings.get(scope);
   const scopeDecoded = decodedSummaries.get(scope);
   assertActive();
@@ -1444,11 +1573,12 @@ async function collectAggregator(
     (hasFilters || edgeOnly) &&
     countedFilters &&
     canUseSummaries &&
-    scopeListings &&
-    scopeListings.size > 0
+    (slicedListing || (scopeListings && scopeListings.size > 0))
   ) {
-    const cachedSummaryFiles: ManifestFile[] = [];
-    for (const file of scopeListings.values()) {
+    const cachedSummaryFiles: ManifestFile[] = slicedListing
+      ? [...slicedListing]
+      : [];
+    for (const file of slicedListing ? [] : scopeListings!.values()) {
       assertActive();
       if (
         scopeDecoded?.get(file.key)?.variant === variant ||
@@ -1478,9 +1608,11 @@ async function collectAggregator(
         let decoded: DecodedSummary | null = null;
         let summaryBytes = 0;
         const mem = decodedSummaries.get(scope)?.get(use.file.key);
+        let downloaded = 0;
         if (
           mem &&
           mem.variant === variant &&
+          (!sliceable || mem.decoded.slices !== undefined) &&
           mem.decoded.rollup.buckets.every(
             (b) => b.t >= fromMs && b.t + MINUTE_MS <= toMs,
           )
@@ -1489,14 +1621,23 @@ async function collectAggregator(
           summaryBytes = mem.byteLength;
         } else {
           try {
-            const read = await readDashboardSummary(source, use.file, signal);
+            const read = await readDashboardSummary(
+              source,
+              use.file,
+              signal,
+              sliceable
+                ? DASHBOARD_FILTERED_SUMMARY_SPEC
+                : DASHBOARD_SUMMARY_SPEC,
+            );
             assertActive();
             summaryBytes = read.byteLength;
+            downloaded = read.cached ? 0 : read.downloadedBytes;
             decoded = await decodeSummary(
               read.parts,
               fromMs,
               toMs,
               customFields,
+              { slices: sliceable },
             );
             assertActive();
             if (decoded) {
@@ -1511,9 +1652,26 @@ async function collectAggregator(
           }
         }
         assertActive();
-        const matchClass = decoded
-          ? classifySummaryAgainstFilters(decoded, filterList, edgeOnly)
-          : "partial";
+        const fromSlices =
+          decoded && sliceable
+            ? resolveSummaryFromSlices(decoded, filterList, edgeOnly)
+            : null;
+        const matchClass =
+          fromSlices === "none"
+            ? "none"
+            : fromSlices
+              ? "all"
+              : decoded
+                ? classifySummaryAgainstFilters(decoded, filterList, edgeOnly)
+                : "partial";
+        const count = () => {
+          if (downloaded > 0) {
+            keptRows.fetched++;
+            keptRows.downloaded += downloaded;
+          } else {
+            keptRows.cached++;
+          }
+        };
         const interiorBuckets =
           decoded !== null &&
           decoded.rollup.buckets.every(
@@ -1523,15 +1681,17 @@ async function collectAggregator(
           if (decoded.rollup.hasBytes) aggregator.hasBytes = true;
           let rows = 0;
           for (const covered of use.covers) rows += covered.rows ?? 0;
-          keptRows.cached++;
+          count();
           keptRows.rows += rows;
           keptRows.bytes += summaryBytes;
           resolvedSummaries++;
         } else if (decoded && matchClass === "all" && interiorBuckets) {
-          aggregator.mergeSummary(decoded);
+          aggregator.mergeSummary(
+            fromSlices && fromSlices !== "none" ? fromSlices : decoded,
+          );
           let rows = 0;
           for (const covered of use.covers) rows += covered.rows ?? 0;
-          keptRows.cached++;
+          count();
           keptRows.rows += rows;
           keptRows.bytes += summaryBytes;
           resolvedSummaries++;
@@ -1565,7 +1725,7 @@ async function collectAggregator(
   const duckdbScopedKeys: string[] = [];
   const stats: FetchStats = {
     listed,
-    fetched: 0,
+    fetched: keptRows.fetched,
     cached: keptRows.cached,
     cdnHits: 0,
     rows: keptRows.rows,
@@ -1581,8 +1741,8 @@ async function collectAggregator(
     toFetch: 0,
     toDecode: 0,
     done: 0,
-    downloadedBytes: 0,
-    cachedBytes: keptRows.bytes,
+    downloadedBytes: keptRows.downloaded,
+    cachedBytes: keptRows.bytes - keptRows.downloaded,
   };
   let reportProgress = false;
   // Quick runs stay silent so the UI doesn't flash; downloads report at once.
