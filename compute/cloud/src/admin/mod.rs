@@ -1188,6 +1188,27 @@ fn save_job_service(
     event: &str,
     next: &str,
 ) -> Result<(), Error> {
+    save_job_service_with_limit(context, record, service, job, event, next, 4096)
+}
+fn save_job_service_recovery(
+    context: &Context<'_, impl Runtime>,
+    record: &Record,
+    service: &Service,
+    job: &Job,
+    event: &str,
+    next: &str,
+) -> Result<(), Error> {
+    save_job_service_with_limit(context, record, service, job, event, next, 4104)
+}
+fn save_job_service_with_limit(
+    context: &Context<'_, impl Runtime>,
+    record: &Record,
+    service: &Service,
+    job: &Job,
+    event: &str,
+    next: &str,
+    max_outbox: usize,
+) -> Result<(), Error> {
     context.confirm_with_secret(&service.fastly_token_ref);
     let mut value = serialize(service)?;
     value["_audit"] = json!({"actor":job.actor,"at":context.runtime.now(),"event":event,"job_id":job.id,"config_version":service.config_version});
@@ -1195,7 +1216,7 @@ fn save_job_service(
         .as_array()
         .cloned()
         .unwrap_or_default();
-    if audit.len() >= 4096 {
+    if audit.len() >= max_outbox {
         return Err(Error::new(409, "audit_archive_required"));
     }
     audit.push(value["_audit"].clone());
@@ -1636,6 +1657,21 @@ fn step(context: &Context<'_, impl Runtime>, id: &str, retry: bool) -> Result<Va
         if job.retry.as_ref().is_some_and(|retry| retry.at > 0) {
             job.status = "pending".into();
             job.error = None;
+        } else if failure.code == "service_changed_rerun"
+            || cached_service
+                .as_ref()
+                .is_some_and(|(_, svc)| svc.pending_job_id.as_deref() != Some(job.id.as_str()))
+        {
+            job.pending_failure = None;
+            job.status = "failed".into();
+            job.error = Some(failure.code.into());
+        } else if previous_step == "scoring_rollback" {
+            let orig_error = job
+                .pending_failure
+                .take()
+                .unwrap_or_else(|| failure.code.into());
+            job.status = "failed".into();
+            job.error = Some(orig_error);
         } else if scoring::needs_failed_enable_rollback(&job, &previous_step) {
             let rolled_back = if let Some((svc_rec, mut svc)) = cached_service {
                 scoring::rollback_failed_enable(context, &mut svc, &svc_rec, &mut job)
@@ -1649,18 +1685,29 @@ fn step(context: &Context<'_, impl Runtime>, id: &str, retry: bool) -> Result<Va
                 false
             };
             if rolled_back {
-                job.pending_failure = None;
+                let orig_error = job
+                    .pending_failure
+                    .take()
+                    .unwrap_or_else(|| failure.code.into());
                 job.status = "failed".into();
-                job.error = Some(failure.code.into());
+                job.error = Some(orig_error);
             } else {
-                job.pending_failure = Some(failure.code.into());
+                job.pending_failure
+                    .get_or_insert_with(|| failure.code.into());
                 job.step = "scoring_rollback".into();
                 job.status = "pending".into();
                 job.error = None;
             }
         } else {
+            if scoring::needs_failed_strip_rewind(&job, &previous_step) {
+                scoring::rewind_failed_strip_vcl(&mut job);
+            }
+            let orig_error = job
+                .pending_failure
+                .take()
+                .unwrap_or_else(|| failure.code.into());
             job.status = "failed".into();
-            job.error = Some(failure.code.into());
+            job.error = Some(orig_error);
         }
     } else if job.status != "complete" && job.status != "failed" {
         job.status = "pending".into();

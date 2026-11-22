@@ -775,6 +775,40 @@ pub fn request_secret_ref(sid: &str) -> String {
     format!("scoring_request_secret.{sid}")
 }
 
+pub(super) fn load_or_recover_request_secret(
+    context: &Context<'_, impl Runtime>,
+    service: &Service,
+    token: &str,
+) -> Result<Option<String>, Error> {
+    let secret_ref = request_secret_ref(&service.service_id);
+    match context.secret(&secret_ref) {
+        Ok(secret) => return Ok(Some(secret)),
+        Err(err) if err.code != "credentials_pending" => return Err(err),
+        Err(_) => {}
+    }
+    let sc = service
+        .scoring
+        .as_ref()
+        .filter(|sc| !sc.scoring_keys_store_id.is_empty())
+        .ok_or_else(|| Error::new(409, "credentials_pending"))?;
+    if context.remaining_calls() < 14 {
+        return Ok(None);
+    }
+    verify_scoring_resources(context, &service.service_id, sc, token)?;
+    let recovered = config_store_get_item(
+        context,
+        &sc.scoring_keys_store_id,
+        REQUEST_SECRET_KEY,
+        token,
+    )?;
+    if recovered.trim().is_empty() {
+        return Err(Error::new(409, "credentials_pending"));
+    }
+    validate_vcl_literal(&recovered, false)?;
+    put_secret(context, token, &secret_ref, &recovered)?;
+    Ok(Some(recovered))
+}
+
 fn resolve_brokered_token(
     context: &Context<'_, impl Runtime>,
     service: &Service,
@@ -1243,6 +1277,22 @@ fn checkpoint_scoring_job_service(
     next: &str,
 ) -> Result<(), Error> {
     save_job_service(context, record, service, job, event, next)?;
+    let updated = context
+        .get(&format!("svc:{}", service.service_id))?
+        .ok_or_else(|| Error::new(503, "state_unavailable"))?;
+    job.expected_generation = updated.generation;
+    Ok(())
+}
+
+fn checkpoint_scoring_rollback_service(
+    context: &Context<'_, impl Runtime>,
+    record: &Record,
+    service: &Service,
+    job: &mut Job,
+    event: &str,
+    next: &str,
+) -> Result<(), Error> {
+    save_job_service_recovery(context, record, service, job, event, next)?;
     let updated = context
         .get(&format!("svc:{}", service.service_id))?
         .ok_or_else(|| Error::new(503, "state_unavailable"))?;
@@ -2050,18 +2100,68 @@ fn strip_logging_vcl_step(
     // Verify customer VCL ownership & absence of primary/attach coexistence BEFORE cloning customer VCL
     // or deleting any Compute scorer WASM service or stores.
     let active = reconcile::verify_managed_customer_vcl_ownership(context, service, token)?;
-    let cloned = context.api(
-        "PUT",
-        &format!("/service/{}/version/{active}/clone", service.service_id),
+    let versions = context.api(
+        "GET",
+        &format!("/service/{}/version", service.service_id),
         token,
         None,
     )?;
-    let draft = cloned["number"]
-        .as_u64()
-        .ok_or_else(|| Error::new(502, "logging_clone_failed"))?;
-    job.source_version = Some(active);
-    job.draft_version = Some(draft);
-    advance(job, "scoring_strip_apply");
+    let versions = list(&versions)?;
+    let tag = format!("flp-job:{}", job.id);
+    if let Some(draft) = versions
+        .iter()
+        .filter(|v| v["comment"] == tag && v["active"] != true && v["locked"] != true)
+        .filter_map(|v| v["number"].as_u64())
+        .filter(|&n| n > active)
+        .max()
+    {
+        job.source_version = Some(active);
+        job.draft_version = Some(draft);
+        job.clone_intent = None;
+        advance(job, "scoring_strip_apply");
+        return Ok(());
+    }
+    if let Some(intent) = job.clone_intent {
+        if versions
+            .iter()
+            .any(|v| v["number"].as_u64().is_some_and(|n| n > intent))
+        {
+            return Err(Error::new(409, "uncheckpointed_clone_requires_review"));
+        }
+        if Some(active) != job.source_version {
+            return Err(Error::new(409, "active_version_changed"));
+        }
+        if context.remaining_calls() < 6 {
+            return Ok(());
+        }
+        let cloned = context.api(
+            "PUT",
+            &format!("/service/{}/version/{active}/clone", service.service_id),
+            token,
+            None,
+        )?;
+        let draft = cloned["number"]
+            .as_u64()
+            .ok_or_else(|| Error::new(502, "logging_clone_failed"))?;
+        context.api(
+            "PUT",
+            &format!("/service/{}/version/{draft}", service.service_id),
+            token,
+            Some(json!({"comment": tag})),
+        )?;
+        job.draft_version = Some(draft);
+        job.clone_intent = None;
+        advance(job, "scoring_strip_apply");
+    } else {
+        job.source_version = Some(active);
+        job.clone_intent = Some(
+            versions
+                .iter()
+                .filter_map(|v| v["number"].as_u64())
+                .max()
+                .unwrap_or(active),
+        );
+    }
     Ok(())
 }
 
@@ -2136,34 +2236,43 @@ fn strip_logging_activate_step(
     let draft = job
         .draft_version
         .ok_or_else(|| Error::new(409, "draft_missing"))?;
-    let validate = context.api(
-        "GET",
-        &format!("/service/{}/version/{draft}/validate", service.service_id),
-        token,
-        None,
-    )?;
-    if validate["status"] != "ok" {
-        return Err(Error::new(400, "draft_validation_failed"));
-    }
-    context.api(
-        "PUT",
-        &format!("/service/{}/version/{draft}/activate", service.service_id),
-        token,
-        None,
-    )?;
-    if job.kind == "scoring_disable" {
-        remove_scoring_custom_fields(&mut service.log_fields);
-        service.config_version += 1;
-        service.updated_at = context.runtime.now();
-        checkpoint_scoring_job_service(
-            context,
-            record,
-            service,
-            job,
-            "scoring.strip_logging_vcl",
-            "scoring_delete_resources",
+    let active = reconcile::active_version(context, &service.service_id, token)?;
+    if active != draft {
+        if Some(active) != job.source_version {
+            return Err(Error::new(409, "active_version_changed"));
+        }
+        let validate = context.api(
+            "GET",
+            &format!("/service/{}/version/{draft}/validate", service.service_id),
+            token,
+            None,
+        )?;
+        if validate["status"] != "ok" {
+            return Err(Error::new(400, "draft_validation_failed"));
+        }
+        reconcile::activation_generation(context, job)?;
+        fence(context, job)?;
+        context.api(
+            "PUT",
+            &format!("/service/{}/version/{draft}/activate", service.service_id),
+            token,
+            None,
         )?;
     }
+    if let Some(sc) = service.scoring.as_mut() {
+        sc.enabled = false;
+    }
+    remove_scoring_custom_fields(&mut service.log_fields);
+    service.config_version += 1;
+    service.updated_at = context.runtime.now();
+    checkpoint_scoring_job_service(
+        context,
+        record,
+        service,
+        job,
+        "scoring.strip_logging_vcl",
+        "scoring_delete_resources",
+    )?;
     advance(job, "scoring_delete_resources");
     Ok(())
 }
@@ -2565,12 +2674,39 @@ pub fn run_step(
 
 pub fn needs_failed_enable_rollback(job: &Job, failed_step: &str) -> bool {
     job.kind == "scoring_enable"
+        && failed_step != "scoring_rollback"
         && !job.completed_steps.iter().any(|s| s == "activate")
         && (job.completed_steps.iter().any(|s| s == "logging_reconcile")
             || matches!(
                 failed_step,
-                "discover" | "clone" | "apply" | "validate" | "activate" | "scoring_rollback"
+                "discover" | "clone" | "apply" | "validate" | "activate"
             ))
+}
+
+pub fn needs_failed_strip_rewind(job: &Job, failed_step: &str) -> bool {
+    matches!(
+        job.kind.as_str(),
+        "scoring_disable" | "scoring_teardown" | "teardown"
+    ) && matches!(
+        failed_step,
+        "scoring_strip_logging_vcl" | "scoring_strip_apply" | "scoring_strip_activate"
+    ) && !job
+        .completed_steps
+        .iter()
+        .any(|s| s == "scoring_strip_activate")
+}
+
+pub fn rewind_failed_strip_vcl(job: &mut Job) {
+    job.step = "scoring_strip_logging_vcl".into();
+    job.completed_steps.retain(|s| {
+        !matches!(
+            s.as_str(),
+            "scoring_strip_logging_vcl" | "scoring_strip_apply" | "scoring_strip_activate"
+        )
+    });
+    job.source_version = None;
+    job.draft_version = None;
+    job.clone_intent = None;
 }
 
 fn has_scoring_custom_fields(log_fields: &Value) -> bool {
@@ -2592,11 +2728,14 @@ fn rollback_failed_enable_step(
     if service.scoring.as_ref().is_some_and(|sc| sc.enabled)
         || has_scoring_custom_fields(&service.log_fields)
     {
+        if context.remaining_calls() < 6 {
+            return Ok(());
+        }
         if let Some(sc) = service.scoring.as_mut() {
             sc.enabled = false;
         }
         remove_scoring_custom_fields(&mut service.log_fields);
-        checkpoint_scoring_job_service(
+        checkpoint_scoring_rollback_service(
             context,
             record,
             service,
@@ -2640,6 +2779,9 @@ pub fn rollback_failed_enable(
         }
         record
     };
+    if service.pending_job_id.as_deref() != Some(job.id.as_str()) {
+        return false;
+    }
     let passed_logging_reconcile = job.kind == "scoring_enable"
         && (job.completed_steps.iter().any(|s| s == "logging_reconcile")
             || matches!(
@@ -2665,7 +2807,7 @@ pub fn rollback_failed_enable(
             sc.enabled = false;
         }
         remove_scoring_custom_fields(&mut service.log_fields);
-        if checkpoint_scoring_job_service(
+        if checkpoint_scoring_rollback_service(
             context,
             rec,
             service,
@@ -2799,6 +2941,22 @@ fn require_scoring_enabled(service: &Service) -> Result<&ScoringConfig, Error> {
         .ok_or_else(|| Error::new(400, "scoring_not_enabled"))
 }
 
+fn require_scoring_mutable(
+    context: &Context<'_, impl Runtime>,
+    sid: &str,
+    service: &Service,
+) -> Result<(), Error> {
+    if service.status == "torn_down" {
+        return Err(Error::new(409, "service_torn_down"));
+    }
+    reject_blocking_job(context, service)?;
+    check_unlocked(context, sid)?;
+    if service.data_reset.is_some() {
+        return Err(Error::new(409, "data_reset_in_progress"));
+    }
+    Ok(())
+}
+
 fn require_confirm(query: &str) -> Result<(), Error> {
     let confirmed = url::form_urlencoded::parse(query.as_bytes())
         .any(|(k, v)| k == "confirm" && matches!(v.as_ref(), "true" | "1" | "yes"));
@@ -2888,8 +3046,7 @@ pub fn route(
             if service.status == "torn_down" {
                 return Err(Error::new(409, "service_torn_down"));
             }
-            reject_blocking_job(context, &service)?;
-            check_unlocked(context, sid)?;
+            require_scoring_mutable(context, sid, &service)?;
             let token = resolve_brokered_token(context, &service, input["token"].as_str())?;
             let active =
                 reconcile::verify_managed_customer_vcl_ownership(context, &service, &token)?;
@@ -2910,9 +3067,8 @@ pub fn route(
             if service.capture == Capture::Attached {
                 return Err(Error::new(409, "scoring_not_supported_in_attach_mode"));
             }
+            require_scoring_mutable(context, sid, &service)?;
             require_scoring_enabled(&service)?;
-            reject_blocking_job(context, &service)?;
-            check_unlocked(context, sid)?;
             let _ = resolve_brokered_token(context, &service, input["token"].as_str())?;
             let mut job = new_job(context, actor, &service, "scoring_disable", false, true)?;
             job.step = "scoring_strip_logging_vcl".into();
@@ -2932,8 +3088,7 @@ pub fn route(
             if service.scoring.is_none() {
                 return Err(Error::new(400, "scoring_not_provisioned"));
             }
-            reject_blocking_job(context, &service)?;
-            check_unlocked(context, sid)?;
+            require_scoring_mutable(context, sid, &service)?;
             let _ = resolve_brokered_token(context, &service, input["token"].as_str())?;
             let mut job = new_job(context, actor, &service, "scoring_teardown", false, true)?;
             job.step = "scoring_strip_logging_vcl".into();
@@ -2953,6 +3108,7 @@ pub fn route(
                 .map(|v| v as u8)
                 .ok_or_else(|| Error::new(400, "invalid_threshold"))?;
             let (record, mut service) = load_service(context, sid)?;
+            require_scoring_mutable(context, sid, &service)?;
             let mut sc = require_scoring_enabled(&service)?.clone();
             sc.threshold = Some(threshold);
             service.scoring = Some(sc);
@@ -2996,6 +3152,7 @@ pub fn route(
                 }
             };
             let (_, service) = load_service(context, sid)?;
+            require_scoring_mutable(context, sid, &service)?;
             let sc = require_scoring_enabled(&service)?;
             let token = resolve_brokered_token(context, &service, None)?;
             reconcile::verify_managed_customer_vcl_ownership(context, &service, &token)?;
@@ -3053,6 +3210,7 @@ pub fn route(
                 .as_bool()
                 .ok_or_else(|| Error::new(400, "invalid_input"))?;
             let (_, service) = load_service(context, sid)?;
+            require_scoring_mutable(context, sid, &service)?;
             let sc = require_scoring_enabled(&service)?;
             let token = resolve_brokered_token(context, &service, None)?;
             reconcile::verify_managed_customer_vcl_ownership(context, &service, &token)?;
@@ -3144,6 +3302,7 @@ pub fn route(
             let cleaned = validate_exclude_url_regex(raw)
                 .map_err(|_| Error::new(400, "invalid_exclude_regex"))?;
             let (record, mut service) = load_service(context, sid)?;
+            require_scoring_mutable(context, sid, &service)?;
             let mut sc = require_scoring_enabled(&service)?.clone();
             let token = resolve_brokered_token(context, &service, None)?;
             context.confirm_with_token(&token);
@@ -3192,6 +3351,7 @@ pub fn route(
                 .filter(|&c| (400..=599).contains(&c))
                 .ok_or_else(|| Error::new(400, "invalid_status_code"))?;
             let (record, mut service) = load_service(context, sid)?;
+            require_scoring_mutable(context, sid, &service)?;
             let mut sc = require_scoring_enabled(&service)?.clone();
             let token = resolve_brokered_token(context, &service, None)?;
             context.confirm_with_token(&token);
@@ -3227,6 +3387,7 @@ pub fn route(
         ("POST", ["rotate-key"]) => {
             require_confirm(query)?;
             let (_, service) = load_service(context, sid)?;
+            require_scoring_mutable(context, sid, &service)?;
             let sc = require_scoring_enabled(&service)?;
             let token = resolve_brokered_token(context, &service, None)?;
             reconcile::verify_managed_customer_vcl_ownership(context, &service, &token)?;
@@ -3269,6 +3430,7 @@ pub fn route(
                 .ok_or_else(|| Error::new(400, "invalid_matrix_version"))?
                 .to_owned();
             let (record, mut service) = load_service(context, sid)?;
+            require_scoring_mutable(context, sid, &service)?;
             let mut sc = require_scoring_enabled(&service)?.clone();
             let token = resolve_brokered_token(context, &service, None)?;
             context.confirm_with_token(&token);
@@ -3380,6 +3542,7 @@ pub fn route(
                 .ok_or_else(|| Error::new(400, "invalid_matrix_version"))?
                 .to_owned();
             let (record, mut service) = load_service(context, sid)?;
+            require_scoring_mutable(context, sid, &service)?;
             let mut sc = require_scoring_enabled(&service)?.clone();
             let token = resolve_brokered_token(context, &service, None)?;
             context.confirm_with_token(&token);
@@ -3445,6 +3608,7 @@ pub fn route(
                 return Err(Error::new(400, "invalid_label"));
             }
             let (_, service) = load_service(context, sid)?;
+            require_scoring_mutable(context, sid, &service)?;
             let labels_key = format!("{}labels.json", scoring_fos_prefix(&service));
             let mut labels = fos_json_get(context, &service, &labels_key)?
                 .and_then(|v| v["labels"].as_array().cloned())
@@ -3474,6 +3638,7 @@ pub fn route(
         ("PATCH", ["labels", label_id]) => {
             let input: Value = body(request)?;
             let (_, service) = load_service(context, sid)?;
+            require_scoring_mutable(context, sid, &service)?;
             let labels_key = format!("{}labels.json", scoring_fos_prefix(&service));
             let mut labels = fos_json_get(context, &service, &labels_key)?
                 .and_then(|v| v["labels"].as_array().cloned())
@@ -3496,6 +3661,7 @@ pub fn route(
         }
         ("DELETE", ["labels", label_id]) => {
             let (_, service) = load_service(context, sid)?;
+            require_scoring_mutable(context, sid, &service)?;
             let labels_key = format!("{}labels.json", scoring_fos_prefix(&service));
             let mut labels = fos_json_get(context, &service, &labels_key)?
                 .and_then(|v| v["labels"].as_array().cloned())

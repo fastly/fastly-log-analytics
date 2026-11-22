@@ -1753,6 +1753,114 @@ fn main() {
     );
     let dr19c_retry_status = jb_19c_rt["status"].as_str().unwrap_or("").to_owned();
 
+    // 20A..20D + Minor Finding 1 (Iter 23):
+    // 20A: cold-start DR recover without scoring_request_secret.<sid> -> reconcile recovers secret from scoring_keys store!
+    let rt_dr20 = ProbeRt::new();
+    let (_, prov20) = rt_dr20.call_budgeted("POST", "/api/admin/provision/execute", json!({
+        "token": "fixture-token", "service_id": "fixtureService", "fos_bucket": "fos-fixture-logs", "fos_region": "us-east-1"
+    }));
+    assert_eq!(drain_job(&rt_dr20, prov20["job"].clone())["status"], "complete");
+    let (_, en20) = rt_dr20.call_budgeted("POST", "/api/services/fixtureService/scoring/enable", json!({}));
+    assert_eq!(drain_job(&rt_dr20, en20["job"].clone())["status"], "complete");
+    for k in rt_dr20.admin.records().into_keys() {
+        rt_dr20.admin.cache_invalidate(&k);
+        rt_dr20.admin.delete(&k).unwrap();
+    }
+    for sec in ["fastly_token.fixtureService", "fos_ak.fixtureService", "fos_sk.fixtureService", "scoring_request_secret.fixtureService"] {
+        let _ = rt_dr20.admin.api(ApiRequest {
+            method: "DELETE", path: &format!("/resources/stores/secret/fixtureSecrets/secrets/{sec}"),
+            token: "fixture-token", body: None, timeout: std::time::Duration::from_secs(5), query: "",
+        }).unwrap();
+    }
+    let (recov_st, recov_body) = rt_dr20.call_budgeted("POST", "/api/admin/provision/recover", json!({
+        "token": "fixture-token", "service_id": "fixtureService", "fos_bucket": "fos-fixture-logs", "fos_region": "us-east-1"
+    }));
+    assert_eq!(recov_st, 200);
+    assert_eq!(recov_body["source"], "dr_state");
+    let gen20a = rt_dr20.admin.record_snapshot("svc:fixtureService").unwrap().generation;
+    let (_, rec20a) = rt_dr20.call_budgeted("POST", "/api/admin/services/fixtureService/reconcile", json!({"generation": gen20a}));
+    let done20a = drain_job(&rt_dr20, rec20a["job"].clone());
+    let dr20a_reconcile_status = done20a["status"].as_str().unwrap_or("").to_owned();
+    let dr20a_secret_backfilled = rt_dr20.admin.secret("scoring_request_secret.fixtureService").unwrap().is_some();
+
+    // 20B: mutating /scoring/* and /labels routes return 409 during active job!
+    let gen20b = rt_dr20.admin.record_snapshot("svc:fixtureService").unwrap().generation;
+    let (_, rec20b) = rt_dr20.call_budgeted("POST", "/api/admin/services/fixtureService/reconcile", json!({"generation": gen20b}));
+    let mut dr20b_statuses = Vec::new();
+    for (m, pth, pay) in [
+        ("PUT", "/api/services/fixtureService/scoring/threshold", json!({"threshold": 60})),
+        ("PUT", "/api/services/fixtureService/scoring/enforce-threshold?confirm=1", json!({"enforce_threshold": 75})),
+        ("PUT", "/api/services/fixtureService/scoring/l2-enforce?confirm=1", json!({"enabled": true})),
+        ("PUT", "/api/services/fixtureService/scoring/exclude-regex?confirm=1", json!({"exclude_url_regex": "^/ok$"})),
+        ("PUT", "/api/services/fixtureService/scoring/enforce-status-code?confirm=1", json!({"status_code": 403})),
+        ("POST", "/api/services/fixtureService/scoring/rotate-key?confirm=1", json!({})),
+        ("POST", "/api/services/fixtureService/scoring/retrain", json!({"matrix": {"version": "v1", "vocab_size": 1, "session_count": 1, "transition_count": 1, "counts": {}, "row_totals": {}}})),
+        ("POST", "/api/services/fixtureService/scoring/matrix/versions/restore?confirm=1", json!({"version": "v1"})),
+        ("POST", "/api/services/fixtureService/scoring/labels", json!({"edge_sid": "s1", "label": "bad"})),
+    ] {
+        dr20b_statuses.push(rt_dr20.call_budgeted(m, pth, pay).0);
+    }
+    assert_eq!(drain_job(&rt_dr20, rec20b["job"].clone())["status"], "complete");
+
+    // 20D: scoring_strip_activate refuses to overwrite newer customer vCL and retries cleanly!
+    let (_, dis20d) = rt_dr20.call_budgeted("POST", "/api/services/fixtureService/scoring/disable", json!({}));
+    let mut jb_20d = dis20d["job"].clone();
+    let id_20d = jb_20d["id"].as_str().unwrap().to_owned();
+    for _ in 0..20 {
+        if jb_20d["step"] == "scoring_strip_activate" { break; }
+        jb_20d = rt_dr20.call_budgeted("POST", &format!("/api/admin/jobs/{id_20d}/step"), json!({})).1["job"].clone();
+    }
+    let cur_act_20d = rt_dr20.admin.api(ApiRequest {
+        method: "GET", path: "/service/fixtureService/version", token: "fixture-token",
+        body: None, timeout: std::time::Duration::from_secs(5), query: "",
+    }).unwrap().1.as_array().unwrap().iter().find(|v| v["active"] == true).and_then(|v| v["number"].as_u64()).unwrap();
+    let v_cust = rt_dr20.admin.api(ApiRequest {
+        method: "PUT", path: &format!("/service/fixtureService/version/{cur_act_20d}/clone"), token: "fixture-token",
+        body: None, timeout: std::time::Duration::from_secs(5), query: "",
+    }).unwrap().1["number"].as_u64().unwrap();
+    let _ = rt_dr20.admin.api(ApiRequest {
+        method: "POST", path: &format!("/service/fixtureService/version/{v_cust}/snippet"), token: "fixture-token",
+        body: Some(json!({"name": "Customer Critical Auth v20d", "type": "recv", "priority": 1, "content": "set req.http.X-C20D = \"1\";"})),
+        timeout: std::time::Duration::from_secs(5), query: "",
+    }).unwrap();
+    let _ = rt_dr20.admin.api(ApiRequest {
+        method: "PUT", path: &format!("/service/fixtureService/version/{v_cust}/activate"), token: "fixture-token",
+        body: None, timeout: std::time::Duration::from_secs(5), query: "",
+    }).unwrap();
+    let (_, act_20d_res) = rt_dr20.call_budgeted("POST", &format!("/api/admin/jobs/{id_20d}/step"), json!({}));
+    let dr20d_refused_error = act_20d_res["job"]["error"].as_str().unwrap_or("").to_owned();
+    rt_dr20.now_s.fetch_add(65, Ordering::SeqCst);
+    let done_20d = drain_job(
+        &rt_dr20,
+        rt_dr20.call_budgeted("POST", &format!("/api/admin/jobs/{id_20d}/retry"), json!({})).1["job"].clone(),
+    );
+    let dr20d_retry_status = done_20d["status"].as_str().unwrap_or("").to_owned();
+    let dr20d_customer_preserved = rt_dr20.admin.resources("fixtureService", "snippet").iter().any(|s| s["name"] == "Customer Critical Auth v20d");
+
+    // 20C: _audit_outbox == 4096 rollback at validate succeeds without livelock + superseded scoring_enable skips rollback!
+    let rt_dr20c = ProbeRt::new();
+    let (_, prov20c) = rt_dr20c.call_budgeted("POST", "/api/admin/provision/execute", json!({
+        "token": "fixture-token", "service_id": "fixtureService", "fos_bucket": "fos-fixture-logs", "fos_region": "us-east-1"
+    }));
+    assert_eq!(drain_job(&rt_dr20c, prov20c["job"].clone())["status"], "complete");
+    let snap20c = rt_dr20c.admin.record_snapshot("svc:fixtureService").unwrap();
+    let mut seeded20c = snap20c.value.clone();
+    seeded20c["_audit_outbox"] = Value::Array((0..4089).map(|i| json!({"actor": "a", "at": 1800000000u64 + i, "event": "s", "config_version": 1})).collect());
+    rt_dr20c.admin.cache_invalidate("svc:fixtureService");
+    rt_dr20c.admin.cas("svc:fixtureService", Some(&snap20c.generation), &seeded20c).unwrap();
+    let (_, en20c) = rt_dr20c.call_budgeted("POST", "/api/services/fixtureService/scoring/enable", json!({}));
+    let mut jb_20c = en20c["job"].clone();
+    let id_20c = jb_20c["id"].as_str().unwrap().to_owned();
+    for _ in 0..50 {
+        if jb_20c["status"] == "failed" || jb_20c["status"] == "complete" { break; }
+        if jb_20c["step"] == "validate" { rt_dr20c.admin.invalid_draft(true); }
+        jb_20c = rt_dr20c.call_budgeted("POST", &format!("/api/admin/jobs/{id_20c}/step"), json!({})).1["job"].clone();
+    }
+    rt_dr20c.admin.invalid_draft(false);
+    let dr20c_status = jb_20c["status"].as_str().unwrap_or("").to_owned();
+    let dr20c_error = jb_20c["error"].as_str().unwrap_or("").to_owned();
+    let dr20c_enabled = rt_dr20c.admin.get("svc:fixtureService").unwrap().unwrap().value["scoring"]["enabled"] == json!(true);
+
     println!("{}", json!({
         "st_trav": st_trav,
         "st_own_svc": st_own_svc,
@@ -1822,6 +1930,15 @@ fn main() {
         "dr19c_failed_status": dr19c_failed_status,
         "dr19c_failed_enabled": dr19c_failed_enabled,
         "dr19c_retry_status": dr19c_retry_status,
+        "dr20a_reconcile_status": dr20a_reconcile_status,
+        "dr20a_secret_backfilled": dr20a_secret_backfilled,
+        "dr20b_statuses": dr20b_statuses,
+        "dr20c_status": dr20c_status,
+        "dr20c_error": dr20c_error,
+        "dr20c_enabled": dr20c_enabled,
+        "dr20d_refused_error": dr20d_refused_error,
+        "dr20d_retry_status": dr20d_retry_status,
+        "dr20d_customer_preserved": dr20d_customer_preserved,
     }));
 }
 """,
@@ -1913,6 +2030,15 @@ fn main() {
     assert dr14["dr19c_failed_status"] == "failed"
     assert dr14["dr19c_failed_enabled"] is False
     assert dr14["dr19c_retry_status"] == "complete"
+    assert dr14["dr20a_reconcile_status"] == "complete"
+    assert dr14["dr20a_secret_backfilled"] is True
+    assert dr14["dr20b_statuses"] == [409] * 9
+    assert dr14["dr20c_status"] == "failed"
+    assert dr14["dr20c_error"] == "draft_validation_failed"
+    assert dr14["dr20c_enabled"] is False
+    assert dr14["dr20d_refused_error"] == "active_version_changed"
+    assert dr14["dr20d_retry_status"] == "complete"
+    assert dr14["dr20d_customer_preserved"] is True
 
 
 def test_t5_c04_c12_cloud_disabled_rum_faro_cdn_shield_reconcile_cookie_and_fos_guards(
