@@ -1529,16 +1529,18 @@ describe("persistent Parquet store", () => {
     // Sign out Alice while both <65% fetchRange and whole-file fetchFile are in flight!
     await clearDashboardData();
 
-    // Release any mock network gates in case unpatched code didn't abort them
+    // Auditor Challenge 3: prove inFlightRanges aborted immediately BEFORE releasing pendingDataGate!
+    const rangeOutcome = await inFlightRangePromise;
+    expect(rangeOutcome).toBe("REJECTED");
+
+    // Release any mock network gates for whole-file fetch and verify rejection outcome too!
     while (pendingDataGate.length > 0) {
       pendingDataGate.shift()?.();
     }
-    const rangeOutcome = await inFlightRangePromise;
-    await inFlightWholePromise;
+    expect(await inFlightWholePromise).toBe("REJECTED");
     await flushStore();
     await flushStore();
 
-    expect(rangeOutcome).toBe("REJECTED");
     const duckRowsAfter = await getDuckDBEngine()
       .readContext()
       .executeSql("SELECT count(*) AS cnt FROM requests");
@@ -1624,6 +1626,397 @@ describe("persistent Parquet store", () => {
     expect(new Uint8Array(b2)).toEqual(new Uint8Array(16).fill(42));
     // Distinct buffers so transferring one to a Worker cannot detach the other.
     expect(b1).not.toBe(b2);
+  });
+
+  it("blocks post-logout OPFS persistFile raw-PII writes and StoreIndex/writeRollup/readDerivedFile CacheStorage re-creation across clearDashboardData and setDashboardCacheIdentity", async () => {
+    const ls = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (k: string) => ls.get(k) ?? null,
+      setItem: (k: string, v: string) => {
+        ls.set(k, v);
+      },
+      removeItem: (k: string) => {
+        ls.delete(k);
+      },
+    });
+
+    // In-memory OPFS + Web Locks mock faithful to browser semantics
+    type MemNode = { kind: "file"; bytes: Uint8Array } | { kind: "dir"; children: Map<string, MemNode> };
+    const opfsRootTree: Map<string, MemNode> = new Map();
+    const makeFileHandle = (name: string, fileNode: { kind: "file"; bytes: Uint8Array }): FileSystemFileHandle =>
+      ({
+        kind: "file",
+        name,
+        async getFile() {
+          const snapshot = new Uint8Array(fileNode.bytes.byteLength);
+          snapshot.set(fileNode.bytes);
+          return new File([snapshot], name);
+        },
+        async createWritable() {
+          const chunks: Uint8Array[] = [];
+          return {
+            async write(chunk: unknown) {
+              if (typeof chunk === "string") chunks.push(new TextEncoder().encode(chunk));
+              else if (ArrayBuffer.isView(chunk)) {
+                const copy = new Uint8Array(chunk.byteLength);
+                copy.set(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength));
+                chunks.push(copy);
+              } else if (chunk instanceof ArrayBuffer) {
+                chunks.push(new Uint8Array(chunk.slice(0)));
+              }
+            },
+            async close() {
+              const total = chunks.reduce((s, c) => s + c.byteLength, 0);
+              const merged = new Uint8Array(total);
+              let off = 0;
+              for (const c of chunks) {
+                merged.set(c, off);
+                off += c.byteLength;
+              }
+              fileNode.bytes = merged;
+            },
+            async abort() {
+              chunks.length = 0;
+            },
+          } as unknown as FileSystemWritableFileStream;
+        },
+      }) as unknown as FileSystemFileHandle;
+    const makeDirHandle = (dirMap: Map<string, MemNode>): FileSystemDirectoryHandle =>
+      ({
+        kind: "directory",
+        async getDirectoryHandle(name: string, opts?: { create?: boolean }) {
+          let child = dirMap.get(name);
+          if (!child) {
+            if (!opts?.create) throw new DOMException("Directory not found", "NotFoundError");
+            child = { kind: "dir", children: new Map() };
+            dirMap.set(name, child);
+          }
+          if (child.kind !== "dir") throw new DOMException("Type mismatch", "TypeMismatchError");
+          return makeDirHandle(child.children);
+        },
+        async getFileHandle(name: string, opts?: { create?: boolean }) {
+          let child = dirMap.get(name);
+          if (!child) {
+            if (!opts?.create) throw new DOMException("File not found", "NotFoundError");
+            child = { kind: "file", bytes: new Uint8Array(0) };
+            dirMap.set(name, child);
+          }
+          if (child.kind !== "file") throw new DOMException("Type mismatch", "TypeMismatchError");
+          return makeFileHandle(name, child);
+        },
+        async removeEntry(name: string, opts?: { recursive?: boolean }) {
+          const child = dirMap.get(name);
+          if (!child) throw new DOMException("Entry not found", "NotFoundError");
+          if (child.kind === "dir" && child.children.size > 0 && !opts?.recursive) {
+            throw new DOMException("Directory not empty", "InvalidModificationError");
+          }
+          dirMap.delete(name);
+        },
+        async *entries() {
+          for (const [k, v] of [...dirMap.entries()]) {
+            if (v.kind === "dir") yield [k, makeDirHandle(v.children)];
+            else yield [k, makeFileHandle(k, v)];
+          }
+        },
+      }) as unknown as FileSystemDirectoryHandle;
+
+    const lockQueues = new Map<string, Promise<void>>();
+    const locksMock = {
+      async request<T>(
+        name: string,
+        optsOrCb: LockOptions | ((lock: Lock | null) => Promise<T>),
+        maybeCb?: (lock: Lock | null) => Promise<T>,
+      ): Promise<T> {
+        const opts = typeof optsOrCb === "function" ? {} : optsOrCb;
+        const cb = typeof optsOrCb === "function" ? optsOrCb : maybeCb!;
+        opts.signal?.throwIfAborted();
+        const prev = lockQueues.get(name) ?? Promise.resolve();
+        let release!: () => void;
+        const gate = new Promise<void>((r) => {
+          release = r;
+        });
+        lockQueues.set(
+          name,
+          prev.then(
+            () => gate,
+            () => gate,
+          ),
+        );
+        await prev;
+        try {
+          opts.signal?.throwIfAborted();
+          return await cb({ name, mode: opts.mode ?? "exclusive" } as Lock);
+        } finally {
+          release();
+        }
+      },
+    } as unknown as LockManager;
+
+    vi.stubGlobal("navigator", {
+      storage: {
+        getDirectory: async () => makeDirHandle(opfsRootTree),
+        estimate: async () => ({ usage: 100, quota: 1_000_000_000 }),
+      },
+      locks: locksMock,
+    });
+
+    const { stores } = fakeCacheStorage({});
+    const baseCaches = globalThis.caches;
+    let holdMetaOpenGate = null as (() => void) | null;
+    let pauseNextMetaOpen = false;
+    let holdDerivedMatchGate = null as (() => void) | null;
+    let pauseNextDerivedMatch = false;
+    let notifyDerivedPaused = null as (() => void) | null;
+
+    vi.stubGlobal("caches", {
+      ...baseCaches,
+      keys: () => baseCaches.keys(),
+      delete: (name: string) => baseCaches.delete(name),
+      open: async (name: string) => {
+        if (name === STORE_META_CACHE && pauseNextMetaOpen) {
+          pauseNextMetaOpen = false;
+          await new Promise<void>((r) => {
+            holdMetaOpenGate = r;
+          });
+        }
+        const rawCache = await baseCaches.open(name);
+        if (name !== CACHE_NAME) return rawCache;
+        return {
+          ...rawCache,
+          keys: () => rawCache.keys(),
+          put: (req: RequestInfo | URL, resp: Response) => rawCache.put(req, resp),
+          delete: (req: RequestInfo | URL) => rawCache.delete(req),
+          match: async (req: RequestInfo | URL) => {
+            if (pauseNextDerivedMatch && String(req).includes("derived%3A")) {
+              pauseNextDerivedMatch = false;
+              notifyDerivedPaused?.();
+              await new Promise<void>((r) => {
+                holdDerivedMatchGate = r;
+              });
+            }
+            return rawCache.match(req);
+          },
+        };
+      },
+    });
+
+    const { parquetWriteBuffer } = await import("hyparquet-writer");
+    const { ensureCloudRange, cloudFileSource } = await import("../range-loader");
+    const { clearManifestCache } = await import("./manifest");
+    const { getDuckDBEngine } = await import("./duckdb");
+    const { clearDashboardData, setDashboardCacheIdentity } = await import("./client");
+    const { StoreIndex } = await import("./file-store");
+    const { OPFS_DIRECTORY } = await import("./store-index");
+
+    clearManifestCache();
+    await getDuckDBEngine().reset();
+
+    const fromIso = "2026-11-21T04:00:00.000Z";
+    const toIso = "2026-11-21T05:00:00.000Z";
+    const rawPiiParquet = parquetWriteBuffer({
+      codec: "UNCOMPRESSED",
+      rowGroupSize: 10,
+      columnData: [
+        { name: "timestamp", type: "TIMESTAMP", data: [new Date(Date.parse(fromIso) + 100)] },
+        { name: "ip", type: "STRING", data: ["203.0.113.55"] },
+        { name: "cookie_session", type: "STRING", data: ["ALICE_RAW_COOKIE_999"] },
+        { name: "url", type: "STRING", data: ["/alice-confidential-inline-dashboard"] },
+      ],
+    });
+
+    const persistKey = "svc-alice/raw/year=2026/month=11/day=21/hour=04/window=inline.parquet";
+    const pendingPersistFetchGates: Array<() => void> = [];
+    let notifyPersistFetchStarted: (() => void) | null = null;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), "http://localhost");
+        const headers = new Headers(init?.headers);
+        if (url.pathname === "/api/files") {
+          return Response.json({
+            files: [
+              {
+                key: persistKey,
+                start: fromIso,
+                end: toIso,
+                size: rawPiiParquet.byteLength,
+                rows: 1,
+                etag: "\"etag-opfs-alice\"",
+              },
+            ],
+            next_cursor: null,
+            complete: true,
+            catalog_generation: 1,
+          });
+        }
+        if (url.pathname.startsWith("/fos/") || url.pathname === "/api/file") {
+          const range = headers.get("range");
+          if (range) {
+            const m = /^bytes=(\d+)-(\d+)$/.exec(range)!;
+            const start = Number(m[1]);
+            const end = Number(m[2]);
+            return new Response(rawPiiParquet.slice(start, end + 1), {
+              status: 206,
+              headers: {
+                "content-range": `bytes ${start}-${end}/${rawPiiParquet.byteLength}`,
+                etag: "\"etag-opfs-alice\"",
+              },
+            });
+          }
+          notifyPersistFetchStarted?.();
+          await new Promise<void>((resolve) => {
+            pendingPersistFetchGates.push(resolve);
+          });
+          return new Response(rawPiiParquet.slice(0), {
+            status: 200,
+            headers: { etag: "\"etag-opfs-alice\"" },
+          });
+        }
+        return new Response("Not Found", { status: 404 });
+      }),
+    );
+
+    const listOpfsFiles = (): string[] => {
+      const dir = opfsRootTree.get(OPFS_DIRECTORY);
+      if (!dir || dir.kind !== "dir") return [];
+      return [...dir.children.keys()];
+    };
+
+    // 1. REPRO_C across clearDashboardData(): in-flight persistFile (with slow non-abort-cooperative fetch) must NOT write raw PII to OPFS!
+    await setDashboardCacheIdentity("alice:admin");
+    const fetchStarted1 = new Promise<void>((r) => {
+      notifyPersistFetchStarted = r;
+    });
+    const srcAlice = cloudFileSource("svc-alice");
+    const persistPromise1 = srcAlice
+      .persistFile!(
+        {
+          key: persistKey,
+          start: fromIso,
+          end: toIso,
+          size: rawPiiParquet.byteLength,
+          rows: 1,
+          etag: "\"etag-opfs-alice\"",
+        },
+        undefined,
+      )
+      .then(
+        () => "RESOLVED",
+        () => "REJECTED",
+      );
+    await fetchStarted1;
+    await clearDashboardData();
+    while (pendingPersistFetchGates.length > 0) pendingPersistFetchGates.shift()?.();
+    expect(await persistPromise1).toBe("REJECTED");
+    await flushStore();
+    await flushStore();
+    expect(listOpfsFiles()).toEqual([]);
+    expect([...opfsRootTree.keys()]).toEqual([]);
+    expect(await globalThis.caches.keys()).toEqual([]);
+
+    // Also verify REPRO_C across setDashboardCacheIdentity("bob:analyst-no-pii"):
+    await setDashboardCacheIdentity("alice:admin");
+    const fetchStarted2 = new Promise<void>((r) => {
+      notifyPersistFetchStarted = r;
+    });
+    const persistPromise2 = cloudFileSource("svc-alice")
+      .persistFile!(
+        {
+          key: persistKey,
+          start: fromIso,
+          end: toIso,
+          size: rawPiiParquet.byteLength,
+          rows: 1,
+          etag: "\"etag-opfs-alice\"",
+        },
+        undefined,
+      )
+      .then(
+        () => "RESOLVED",
+        () => "REJECTED",
+      );
+    await fetchStarted2;
+    await setDashboardCacheIdentity("bob:analyst-no-pii");
+    while (pendingPersistFetchGates.length > 0) pendingPersistFetchGates.shift()?.();
+    expect(await persistPromise2).toBe("REJECTED");
+    await flushStore();
+    expect(listOpfsFiles()).toEqual([]);
+    expect([...opfsRootTree.keys()]).toEqual([]);
+    expect(await globalThis.caches.keys()).toEqual([]);
+
+    // 2. REPRO_A: StoreIndex.flush() already fired and awaiting openMeta() across clearDashboardData()
+    await setDashboardCacheIdentity("alice:admin");
+    const idx = new StoreIndex();
+    idx.touch("svc-alice/raw/first-file.parquet", 4);
+    await idx.flush(); // 1st flush resolves this.loaded
+    idx.touch("svc-alice/raw/ALICE_TOP_SECRET_TENANT_KEY.parquet", 4);
+    pauseNextMetaOpen = true;
+    const flushInFlight = idx.flush();
+    // Yield so flushInFlight reaches openMeta() gate before logout
+    await flushStore();
+    idx.reset();
+    const clearPromiseA = clearDashboardData();
+    // Release openMeta() gate while clearDashboardData is draining / or right after
+    await flushStore();
+    holdMetaOpenGate?.();
+    await Promise.all([clearPromiseA, flushInFlight]);
+    await flushStore();
+    expect(await globalThis.caches.keys()).toEqual([]);
+    expect([...stores.keys()]).toEqual([]);
+
+    // 3. REPRO_B: writeRollup with OPFS mock in flight across clearDashboardData() must NOT recordStoreError into flp-parquet-meta-v1!
+    await setDashboardCacheIdentity("alice:admin");
+    const rollupSrc = browserSource("", { serviceId: "svc-alice" }, { cacheScope: "alice-scope" });
+    const fakeRollup = {
+      version: 1 as const,
+      key: "svc-alice/raw/ALICE_SECRET_ROLLUP_OBJECT.parquet",
+      minTs: 1_793_268_000_000,
+      maxTs: 1_793_268_060_000,
+      rawRows: 1,
+      byteLength: 100,
+      totalRequests: 1,
+      hasBytes: true,
+      buckets: [],
+      counts: {},
+      nonNull: {},
+    };
+    const writeRollupPromise = rollupSrc.writeRollup!(
+      "svc-alice/raw/ALICE_SECRET_ROLLUP_OBJECT.parquet",
+      fakeRollup,
+    );
+    await clearDashboardData();
+    await writeRollupPromise;
+    await flushStore();
+    await flushStore();
+    expect([...opfsRootTree.keys()]).toEqual([]);
+    expect(await globalThis.caches.keys()).toEqual([]);
+
+    // 4. S3: ensureCloudRange paused in readDerivedFile(scopedKey) across clearDashboardData() must NOT re-create flp-parquet-v1!
+    await setDashboardCacheIdentity("alice:admin");
+    pauseNextDerivedMatch = true;
+    const derivedPaused = new Promise<void>((r) => {
+      notifyDerivedPaused = r;
+    });
+    const s3RangePromise = ensureCloudRange(
+      fromIso,
+      toIso,
+      new AbortController().signal,
+      ["request"],
+      { serviceId: "svc-alice", projection: { columns: ["timestamp", "ip"] } },
+    ).then(
+      () => "RESOLVED",
+      () => "REJECTED",
+    );
+    await derivedPaused;
+    await clearDashboardData();
+    holdDerivedMatchGate?.();
+    expect(await s3RangePromise).toBe("REJECTED");
+    await flushStore();
+    await flushStore();
+    expect(await globalThis.caches.keys()).toEqual([]);
+    expect([...stores.keys()]).toEqual([]);
+    expect([...opfsRootTree.keys()]).toEqual([]);
   });
 });
 

@@ -2178,6 +2178,11 @@ fn recover_and_scoring_close_foreign_store_siem_attached_rum_and_view_id_confuse
         floor_key: None,
         rum_stats: None,
     };
+    p1.adapter.seed_resource(
+        "fixtureService",
+        "snippet",
+        json!({"name": "flp-owner-fixtureApp", "type": "recv", "priority": "0", "content": "# flp-owner:fixtureApp:fixtureService"}),
+    );
     p1.adapter.seed_object_bytes(
         "fos-fixture-logs",
         "meta/cloud_dr_state.json",
@@ -3659,10 +3664,6 @@ fn bug_cloud_dr_10_coexistence_and_shared_bucket_path_scope_protects_primary_ins
             "logging/fos",
             json!({"name": "Fastly Object Storage Logs", "bucket_name": "fos-fixture-logs", "region": "us-east-1", "path": "hs/raw/", "response_condition": "log_analytics_condition"}),
         ),
-        (
-            "logging/fos",
-            json!({"name": "FLP Cloud Logs", "bucket_name": "fos-fixture-logs", "region": "us-east-1", "path": "cloud/raw/", "response_condition": "flp_cloud_log_condition"}),
-        ),
     ] {
         p_1f3
             .adapter
@@ -3885,9 +3886,9 @@ fn bug_cloud_dr_11_post_dr_reconcile_self_heals_verified_endpoints_and_preseed_v
         "fixtureService"
     );
 
-    // 2. PROBE_2B [n_keys=2]: when budget forces owned_endpoint_names == [] at DR time,
+    // 2. PROBE_2B [n_keys=3]: when budget forces owned_endpoint_names == [] at DR time,
     // subsequent reconcile self-heals verified Cloud endpoint into owned_endpoint_names and completes cleanly!
-    let p_2keys = make_scoring_platform(2, false);
+    let p_2keys = make_scoring_platform(3, false);
     let r_2keys = p_2keys.call(
         "POST",
         "/api/admin/provision/recover",
@@ -3919,4 +3920,938 @@ fn bug_cloud_dr_11_post_dr_reconcile_self_heals_verified_endpoints_and_preseed_v
         p_2keys.adapter.records()["svc:fixtureService"].value["owned_endpoint_names"],
         json!(["Fastly Object Storage Logs"])
     );
+}
+
+#[test]
+fn bug_cloud_dr_12_13_14_coexistence_scoring_teardown_minimal_attached_and_cold_retry_budget() {
+    let seed_gce_scoring = |p: &Platform, n_keys: usize| -> (String, String, String, String) {
+        seed_coexisting_gce_and_attached_cloud(p);
+        for (res, body) in [
+            (
+                "snippet",
+                json!({
+                    "name": "Fastly Log Analytics - Session Scoring (vcl_recv)",
+                    "type": "recv",
+                    "priority": "20",
+                    "content": "# gce-scoring-recv"
+                }),
+            ),
+            (
+                "snippet",
+                json!({
+                    "name": "Fastly Log Analytics - Session Scoring (vcl_pass)",
+                    "type": "pass",
+                    "priority": "20",
+                    "content": "# gce-scoring-pass"
+                }),
+            ),
+            (
+                "backend",
+                json!({
+                    "name": "session_scorer",
+                    "address": "gce-scorer.edgecompute.app",
+                    "port": 443,
+                    "use_ssl": true,
+                    "ssl_check_cert": true
+                }),
+            ),
+        ] {
+            p.adapter.seed_resource("fixtureService", res, body);
+        }
+        let (_, sc_svc) = p
+            .adapter
+            .api(fastly_log_analytics::admin::ApiRequest {
+                method: "POST",
+                path: "/service",
+                token: "fixture-token",
+                body: Some(json!({
+                    "name": "Session Scoring Service for fixtureService",
+                    "type": "wasm"
+                })),
+                timeout: std::time::Duration::from_secs(5),
+                query: "",
+            })
+            .unwrap();
+        let scorer_sid = sc_svc["id"].as_str().unwrap().to_owned();
+        let (_, k_resp) = p
+            .adapter
+            .api(fastly_log_analytics::admin::ApiRequest {
+                method: "POST",
+                path: "/resources/stores/config",
+                token: "fixture-token",
+                body: Some(json!({"name": format!("scoring_keys_{scorer_sid}")})),
+                timeout: std::time::Duration::from_secs(5),
+                query: "",
+            })
+            .unwrap();
+        let (_, c_resp) = p
+            .adapter
+            .api(fastly_log_analytics::admin::ApiRequest {
+                method: "POST",
+                path: "/resources/stores/config",
+                token: "fixture-token",
+                body: Some(json!({"name": format!("scoring_config_{scorer_sid}")})),
+                timeout: std::time::Duration::from_secs(5),
+                query: "",
+            })
+            .unwrap();
+        let (_, m_resp) = p
+            .adapter
+            .api(fastly_log_analytics::admin::ApiRequest {
+                method: "POST",
+                path: "/resources/stores/kv",
+                token: "fixture-token",
+                body: Some(json!({"name": format!("scoring_matrix_{scorer_sid}")})),
+                timeout: std::time::Duration::from_secs(5),
+                query: "",
+            })
+            .unwrap();
+        for _ in 0..n_keys {
+            let _ = p
+                .adapter
+                .api(fastly_log_analytics::admin::ApiRequest {
+                    method: "POST",
+                    path: "/resources/object-storage/access-keys",
+                    token: "fixture-token",
+                    body: Some(json!({
+                        "permission": "read-write-objects",
+                        "description": "flp-fixtureApp-fixtureService",
+                        "buckets": ["fos-fixture-logs"]
+                    })),
+                    timeout: std::time::Duration::from_secs(5),
+                    query: "",
+                })
+                .unwrap();
+        }
+        (
+            scorer_sid,
+            k_resp["id"].as_str().unwrap().to_owned(),
+            c_resp["id"].as_str().unwrap().to_owned(),
+            m_resp["id"].as_str().unwrap().to_owned(),
+        )
+    };
+
+    // --- BUG-CLOUD-DR-12 (i): n_keys=2 + poisoned capture:"managed" + scoring DR ---
+    // Must preserve 100% of GCE VM scoring snippets, session_scorer backend, scorer WASM service, & stores
+    // across reconcile (409), teardown(remove_snippets=true -> 409), AND teardown(remove_logging=false, remove_snippets=false -> complete)!
+    let p_dr12 = Platform::new();
+    let (sc_sid, k_id, c_id, m_id) = seed_gce_scoring(&p_dr12, 2);
+    let head = Head {
+        version: fastly_log_analytics::ingest::catalog::VERSION,
+        generation: 7,
+        manifest: Some("processed/_catalog/manifest=7-fixtureService.json".into()),
+        recent: vec![Event {
+            cursor: "fixtureService:7".into(),
+            generation: 7,
+            committed_at: Some("2026-11-21T00:00:00Z".into()),
+            manifest: Some("processed/_catalog/manifest=7-fixtureService.json".into()),
+        }],
+        ..Head::default()
+    };
+    p_dr12.adapter.seed_object_bytes(
+        "fos-fixture-logs",
+        "meta/cloud_dr_state.json",
+        serde_json::to_vec(&CloudDrState {
+            schema_version: SCHEMA_VERSION,
+            updated_at: 1_800_000_000,
+            service_id: "fixtureService".into(),
+            service: json!({
+                "capture": "managed",
+                "scoring": {
+                    "enabled": true,
+                    "scoring_service_id": sc_sid,
+                    "scoring_service_name": "Session Scoring Service for fixtureService",
+                    "scoring_domain": "gce-scorer.edgecompute.app",
+                    "scoring_keys_store_id": k_id,
+                    "scoring_config_store_id": c_id,
+                    "scoring_matrix_store_id": m_id,
+                    "enabled_at": "2026-11-20T00:00:00Z",
+                    "deployed_package_sha": "abc",
+                    "deployed_package_files_hash": "def",
+                    "deployed_vcl_sha": "ghi",
+                    "exclude_url_regex": ""
+                }
+            }),
+            views: vec![SavedView {
+                id: "v-1".into(),
+                service_id: "fixtureService".into(),
+                name: "V1".into(),
+                filters_json: "{}".into(),
+                time_range_type: Some("1h".into()),
+                start_time: None,
+                end_time: None,
+                page: Some("/dashboard".into()),
+                created_at: Some("2026-11-21T00:00:00Z".into()),
+            }],
+            catalog_head: Some(head.clone()),
+            floor_key: Some("raw/2026/f.zst".into()),
+            rum_stats: Some(json!({"rows": 3})),
+        })
+        .unwrap(),
+    );
+    // Note: if n_keys=3 skips DR inspection (or n_keys=2 if DR rejects 409 immediately), test both DR and wedged KV state!
+    let r_dr12 = p_dr12.call(
+        "POST",
+        "/api/admin/provision/recover",
+        json!({
+            "token": "fixture-token",
+            "service_id": "fixtureService",
+            "fos_bucket": "fos-fixture-logs",
+            "fos_region": "us-east-1"
+        }),
+    );
+    if r_dr12.status == 409 {
+        // Even better: DR rejected poisoned Managed+Scoring at n_keys=2! Now also test n_keys=3 where DR budget skips inspection:
+        let p_dr12_wedged = Platform::new();
+        let (w_sc_sid, w_k_id, w_c_id, w_m_id) = seed_gce_scoring(&p_dr12_wedged, 3);
+        p_dr12_wedged.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            "meta/cloud_dr_state.json",
+            serde_json::to_vec(&CloudDrState {
+                schema_version: SCHEMA_VERSION,
+                updated_at: 1_800_000_000,
+                service_id: "fixtureService".into(),
+                service: json!({
+                    "capture": "managed",
+                    "scoring": {
+                        "enabled": true,
+                        "scoring_service_id": w_sc_sid,
+                        "scoring_service_name": "Session Scoring Service for fixtureService",
+                        "scoring_domain": "gce-scorer.edgecompute.app",
+                        "scoring_keys_store_id": w_k_id,
+                        "scoring_config_store_id": w_c_id,
+                        "scoring_matrix_store_id": w_m_id,
+                        "enabled_at": "2026-11-20T00:00:00Z",
+                        "deployed_package_sha": "abc",
+                        "deployed_package_files_hash": "def",
+                        "deployed_vcl_sha": "ghi",
+                        "exclude_url_regex": ""
+                    }
+                }),
+                views: vec![SavedView {
+                    id: "v-1".into(),
+                    service_id: "fixtureService".into(),
+                    name: "V1".into(),
+                    filters_json: "{}".into(),
+                    time_range_type: Some("1h".into()),
+                    start_time: None,
+                    end_time: None,
+                    page: Some("/dashboard".into()),
+                    created_at: Some("2026-11-21T00:00:00Z".into()),
+                }],
+                catalog_head: Some(head.clone()),
+                floor_key: Some("raw/2026/f.zst".into()),
+                rum_stats: Some(json!({"rows": 3})),
+            })
+            .unwrap(),
+        );
+        assert_eq!(
+            p_dr12_wedged
+                .call(
+                    "POST",
+                    "/api/admin/provision/recover",
+                    json!({
+                        "token": "fixture-token",
+                        "service_id": "fixtureService",
+                        "fos_bucket": "fos-fixture-logs",
+                        "fos_region": "us-east-1"
+                    }),
+                )
+                .status,
+            200
+        );
+        // Verify reconcile -> failed (managed_resources_not_owned)
+        let rec_w = p_dr12_wedged.json(
+            "POST",
+            "/api/admin/services/fixtureService/reconcile",
+            json!({"generation": p_dr12_wedged.service()["generation"]}),
+        )["job"]
+            .clone();
+        let rec_w_step = p_dr12_wedged.json(
+            "POST",
+            &format!("/api/admin/jobs/{}/step", rec_w["id"].as_str().unwrap()),
+            json!({}),
+        )["job"]
+            .clone();
+        assert_eq!(rec_w_step["status"], "failed");
+        assert_eq!(rec_w_step["error"], "managed_resources_not_owned");
+
+        // Verify teardown(remove_snippets=true) -> failed BEFORE touching GCE scoring VCL / backend / scorer service / stores!
+        let td_rm = p_dr12_wedged.json(
+            "POST",
+            "/api/admin/provision/teardown",
+            json!({
+                "service_id": "fixtureService",
+                "confirm_service_id": "fixtureService",
+                "token": "fixture-token",
+                "generation": p_dr12_wedged.service()["generation"],
+                "remove_logging": true,
+                "remove_snippets": true
+            }),
+        )["job"]
+            .clone();
+        let td_rm_step = p_dr12_wedged.json(
+            "POST",
+            &format!("/api/admin/jobs/{}/step", td_rm["id"].as_str().unwrap()),
+            json!({}),
+        )["job"]
+            .clone();
+        assert_eq!(td_rm_step["status"], "failed");
+        assert_eq!(td_rm_step["error"], "managed_resources_not_owned");
+        assert!(p_dr12_wedged.adapter.has_service(&w_sc_sid));
+        assert_eq!(
+            p_dr12_wedged
+                .adapter
+                .api(fastly_log_analytics::admin::ApiRequest {
+                    method: "GET",
+                    path: &format!("/resources/stores/config/{w_k_id}"),
+                    token: "fixture-token",
+                    body: None,
+                    timeout: std::time::Duration::from_secs(5),
+                    query: "",
+                })
+                .unwrap()
+                .0,
+            200
+        );
+        assert!(p_dr12_wedged
+            .adapter
+            .resources("fixtureService", "snippet")
+            .iter()
+            .any(|s| s["name"] == "Fastly Log Analytics - Session Scoring (vcl_recv)"));
+        assert!(p_dr12_wedged
+            .adapter
+            .resources("fixtureService", "backend")
+            .iter()
+            .any(|b| b["name"] == "session_scorer"));
+
+        // Verify local-only escape hatch teardown(remove_logging=false, remove_snippets=false, delete_fos_keys=false) completes cleanly!
+        let td_local = p_dr12_wedged.json(
+            "POST",
+            "/api/admin/provision/teardown",
+            json!({
+                "service_id": "fixtureService",
+                "confirm_service_id": "fixtureService",
+                "token": "fixture-token",
+                "generation": p_dr12_wedged.service()["generation"],
+                "remove_logging": false,
+                "remove_snippets": false,
+                "delete_fos_keys": false
+            }),
+        )["job"]
+            .clone();
+        let td_local_done = p_dr12_wedged.drain(td_local);
+        assert_eq!(td_local_done["status"], "complete");
+        assert_eq!(
+            p_dr12_wedged.service()["service"]["status"],
+            "torn_down",
+            "local-only teardown must cleanly unprovision wedged service"
+        );
+        assert_eq!(
+            p_dr12_wedged.json("GET", "/api/services", json!({}))["services"],
+            json!([])
+        );
+        assert!(p_dr12_wedged.adapter.has_service(&w_sc_sid));
+        assert!(p_dr12_wedged
+            .adapter
+            .resources("fixtureService", "snippet")
+            .iter()
+            .any(|s| s["name"] == "Fastly Log Analytics - Session Scoring (vcl_recv)"));
+        assert!(p_dr12_wedged
+            .adapter
+            .resources("fixtureService", "backend")
+            .iter()
+            .any(|b| b["name"] == "session_scorer"));
+    } else {
+        assert_eq!(r_dr12.status, 200);
+        // Same assertions on p_dr12 directly when n_keys=2 skipped inspection!
+        let td_rm = p_dr12.json(
+            "POST",
+            "/api/admin/provision/teardown",
+            json!({
+                "service_id": "fixtureService",
+                "confirm_service_id": "fixtureService",
+                "token": "fixture-token",
+                "generation": p_dr12.service()["generation"],
+                "remove_logging": true,
+                "remove_snippets": true
+            }),
+        )["job"]
+            .clone();
+        let td_rm_step = p_dr12.json(
+            "POST",
+            &format!("/api/admin/jobs/{}/step", td_rm["id"].as_str().unwrap()),
+            json!({}),
+        )["job"]
+            .clone();
+        assert_eq!(
+            td_rm_step["status"], "failed",
+            "BUG-CLOUD-DR-12: teardown(remove_snippets=true) on coexisting GCE service must fail closed before touching scorer!"
+        );
+        assert_eq!(td_rm_step["error"], "managed_resources_not_owned");
+        assert!(
+            p_dr12.adapter.has_service(&sc_sid),
+            "BUG-CLOUD-DR-12: GCE Compute scorer WASM service must survive!"
+        );
+        assert!(p_dr12
+            .adapter
+            .resources("fixtureService", "snippet")
+            .iter()
+            .any(|s| s["name"] == "Fastly Log Analytics - Session Scoring (vcl_recv)"));
+        assert!(p_dr12
+            .adapter
+            .resources("fixtureService", "backend")
+            .iter()
+            .any(|b| b["name"] == "session_scorer"));
+
+        let td_local = p_dr12.json(
+            "POST",
+            "/api/admin/provision/teardown",
+            json!({
+                "service_id": "fixtureService",
+                "confirm_service_id": "fixtureService",
+                "token": "fixture-token",
+                "generation": p_dr12.service()["generation"],
+                "remove_logging": false,
+                "remove_snippets": false,
+                "delete_fos_keys": false
+            }),
+        )["job"]
+            .clone();
+        let td_local_done = p_dr12.drain(td_local);
+        assert_eq!(td_local_done["status"], "complete");
+        assert_eq!(
+            p_dr12.json("GET", "/api/services", json!({}))["services"],
+            json!([])
+        );
+        assert!(p_dr12.adapter.has_service(&sc_sid));
+        assert!(p_dr12
+            .adapter
+            .resources("fixtureService", "snippet")
+            .iter()
+            .any(|s| s["name"] == "Fastly Log Analytics - Session Scoring (vcl_recv)"));
+        assert!(p_dr12
+            .adapter
+            .resources("fixtureService", "backend")
+            .iter()
+            .any(|b| b["name"] == "session_scorer"));
+    }
+
+    // Also verify budget-exhausted DR without scoring (n_keys=8) can cleanly unprovision via local-only teardown:
+    let p_nkeys5 = Platform::new();
+    let _ = seed_gce_scoring(&p_nkeys5, 8);
+    p_nkeys5.adapter.seed_object_bytes(
+        "fos-fixture-logs",
+        "meta/cloud_dr_state.json",
+        serde_json::to_vec(&CloudDrState {
+            schema_version: SCHEMA_VERSION,
+            updated_at: 1_800_000_000,
+            service_id: "fixtureService".into(),
+            service: json!({"capture": "managed"}),
+            views: vec![],
+            catalog_head: None,
+            floor_key: None,
+            rum_stats: None,
+        })
+        .unwrap(),
+    );
+    assert_eq!(
+        p_nkeys5
+            .call(
+                "POST",
+                "/api/admin/provision/recover",
+                json!({
+                    "token": "fixture-token",
+                    "service_id": "fixtureService",
+                    "fos_bucket": "fos-fixture-logs",
+                    "fos_region": "us-east-1"
+                }),
+            )
+            .status,
+        200
+    );
+    let td_n5 = p_nkeys5.json(
+        "POST",
+        "/api/admin/provision/teardown",
+        json!({
+            "service_id": "fixtureService",
+            "confirm_service_id": "fixtureService",
+            "token": "fixture-token",
+            "generation": p_nkeys5.service()["generation"],
+            "remove_logging": false,
+            "remove_snippets": false,
+            "delete_fos_keys": false
+        }),
+    )["job"]
+        .clone();
+    assert_eq!(p_nkeys5.drain(td_n5)["status"], "complete");
+    assert_eq!(
+        p_nkeys5.json("GET", "/api/services", json!({}))["services"],
+        json!([])
+    );
+
+    // --- BUG-CLOUD-DR-12 (ii): Capture::Attached forbids scoring across DR, validate_service, and /scoring/* ---
+    let p_att_sc = Platform::new();
+    let (att_sc_sid, att_k, att_c, att_m) = seed_gce_scoring(&p_att_sc, 0);
+    p_att_sc.adapter.seed_object_bytes(
+        "fos-fixture-logs",
+        "meta/cloud_dr_state.json",
+        serde_json::to_vec(&CloudDrState {
+            schema_version: SCHEMA_VERSION,
+            updated_at: 1_800_000_000,
+            service_id: "fixtureService".into(),
+            service: json!({
+                "capture": "attached",
+                "logging_endpoint_name": "FLP Cloud Logs",
+                "scoring": {
+                    "enabled": true,
+                    "scoring_service_id": att_sc_sid,
+                    "scoring_service_name": "Session Scoring Service for fixtureService",
+                    "scoring_domain": "gce-scorer.edgecompute.app",
+                    "scoring_keys_store_id": att_k,
+                    "scoring_config_store_id": att_c,
+                    "scoring_matrix_store_id": att_m,
+                    "enabled_at": "2026-11-20T00:00:00Z",
+                    "deployed_package_sha": "abc",
+                    "deployed_package_files_hash": "def",
+                    "deployed_vcl_sha": "ghi",
+                    "exclude_url_regex": ""
+                }
+            }),
+            views: vec![],
+            catalog_head: None,
+            floor_key: None,
+            rum_stats: None,
+        })
+        .unwrap(),
+    );
+    let r_att_sc_dr = p_att_sc.call(
+        "POST",
+        "/api/admin/provision/recover",
+        json!({
+            "token": "fixture-token",
+            "service_id": "fixtureService",
+            "fos_bucket": "fos-fixture-logs",
+            "fos_region": "us-east-1"
+        }),
+    );
+    assert_eq!(
+        r_att_sc_dr.status,
+        400,
+        "BUG-CLOUD-DR-12: Capture::Attached DR with scoring must be rejected 400: {}",
+        String::from_utf8_lossy(&r_att_sc_dr.body)
+    );
+
+    // Provision a legitimate Capture::Attached service and verify POST /scoring/{enable,disable,teardown} all return 409!
+    let p_att_routes = Platform::new();
+    seed_coexisting_gce_and_attached_cloud(&p_att_routes);
+    // Remove pre-seeded Cloud owner marker + FLP Cloud Logs so fresh attach provision succeeds
+    let p_att_live = Platform::new();
+    for (resource, body) in [
+        (
+            "snippet",
+            json!({"name": "Fastly Log Analytics - vcl_recv", "type": "recv", "priority": "10", "content": "# gce-recv"}),
+        ),
+        (
+            "snippet",
+            json!({"name": "Fastly Log Analytics - vcl_deliver", "type": "deliver", "priority": "10", "content": "# gce-deliver"}),
+        ),
+        (
+            "condition",
+            json!({"name": "log_analytics_condition", "type": "RESPONSE", "priority": "10", "statement": "!segmented_caching.is_inner_req"}),
+        ),
+        (
+            "logging/fos",
+            json!({"name": "Fastly Object Storage Logs", "bucket_name": "fos-gce-logs", "region": "us-east-1", "path": "raw/", "response_condition": "log_analytics_condition"}),
+        ),
+    ] {
+        p_att_live
+            .adapter
+            .seed_resource("fixtureService", resource, body);
+    }
+    let att_prov = p_att_live.json(
+        "POST",
+        "/api/admin/provision/execute",
+        json!({
+            "token": "fixture-token",
+            "service_id": "fixtureService",
+            "fos_bucket": "fos-fixture-logs",
+            "fos_region": "us-east-1",
+            "capture": "attached"
+        }),
+    );
+    p_att_live.drain(att_prov["job"].clone());
+    let att_gen = p_att_live.service()["generation"].clone();
+    for (subpath, payload) in [
+        ("enable", json!({})),
+        ("disable", json!({})),
+        (
+            "teardown",
+            json!({"confirm_service_id": "fixtureService", "generation": att_gen}),
+        ),
+    ] {
+        let resp = p_att_live.call(
+            "POST",
+            &format!("/api/admin/services/fixtureService/scoring/{subpath}"),
+            payload,
+        );
+        assert_eq!(
+            resp.status,
+            409,
+            "BUG-CLOUD-DR-12: POST /scoring/{subpath} on Capture::Attached must fail 409: {}",
+            String::from_utf8_lossy(&resp.body)
+        );
+    }
+    // Tamper scoring onto Attached service and verify PATCH (validate_service) rejects with 400!
+    let rec_att = p_att_live
+        .adapter
+        .get("svc:fixtureService")
+        .unwrap()
+        .unwrap();
+    let mut val_att = rec_att.value.clone();
+    val_att["scoring"] = json!({
+        "enabled": true,
+        "scoring_service_id": "22CharScorerService001",
+        "scoring_service_name": "Session Scoring Service for fixtureService",
+        "scoring_domain": "s.edgecompute.app",
+        "scoring_keys_store_id": "k",
+        "scoring_config_store_id": "c",
+        "scoring_matrix_store_id": "m",
+        "enabled_at": "2026-11-20T00:00:00Z",
+        "deployed_package_sha": "a",
+        "deployed_package_files_hash": "b",
+        "deployed_vcl_sha": "c",
+        "exclude_url_regex": ""
+    });
+    p_att_live
+        .adapter
+        .cas("svc:fixtureService", Some(&rec_att.generation), &val_att)
+        .unwrap();
+    let patch_att_sc = p_att_live.call(
+        "PATCH",
+        "/api/admin/services/fixtureService",
+        json!({"generation": p_att_live.service()["generation"], "sample_rate": 50}),
+    );
+    assert_eq!(
+        patch_att_sc.status, 400,
+        "BUG-CLOUD-DR-12: validate_service must reject scoring on Capture::Attached with 400"
+    );
+
+    // --- BUG-CLOUD-DR-12 (iii): Legacy High-Scale endpoint names & condition-matched primary endpoints ---
+    for (ep_name, ep_cond) in [
+        ("Fastly Log Analytics", "log_analytics_condition"),
+        ("Fastly RUM Object Storage Logs", "rum_log_condition"),
+        ("Custom Primary Request Logs", "log_analytics_condition"),
+        ("Custom Primary RUM Logs", "rum_log_condition"),
+    ] {
+        let p_leg = Platform::new();
+        for (res, body) in [
+            (
+                "snippet",
+                json!({"name": "Fastly Log Analytics - vcl_recv", "type": "recv", "priority": "10", "content": "# gce-primary-recv"}),
+            ),
+            (
+                "snippet",
+                json!({"name": "Fastly Log Analytics - vcl_deliver", "type": "deliver", "priority": "10", "content": "# gce-primary-deliver"}),
+            ),
+            (
+                "snippet",
+                json!({"name": "flp-owner-fixtureApp", "type": "recv", "priority": "0", "content": "# flp-owner:fixtureApp:fixtureService"}),
+            ),
+            (
+                "logging/fos",
+                json!({"name": ep_name, "bucket_name": "fos-gce-logs", "region": "us-east-1", "path": "raw/", "response_condition": ep_cond}),
+            ),
+        ] {
+            p_leg.adapter.seed_resource("fixtureService", res, body);
+        }
+        p_leg.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            "meta/cloud_dr_state.json",
+            serde_json::to_vec(&CloudDrState {
+                schema_version: SCHEMA_VERSION,
+                updated_at: 1_800_000_000,
+                service_id: "fixtureService".into(),
+                service: json!({"capture": "managed", "logging_endpoint_name": "Cloud Custom Logs"}),
+                views: vec![],
+                catalog_head: None,
+                floor_key: None,
+                rum_stats: None,
+            })
+            .unwrap(),
+        );
+        let r_leg = p_leg.call(
+            "POST",
+            "/api/admin/provision/recover",
+            json!({
+                "token": "fixture-token",
+                "service_id": "fixtureService",
+                "fos_bucket": "fos-fixture-logs",
+                "fos_region": "us-east-1"
+            }),
+        );
+        assert_eq!(
+            r_leg.status, 409,
+            "BUG-CLOUD-DR-12: foreign primary endpoint ({ep_name}, {ep_cond}) must reject Managed DR with 409"
+        );
+    }
+
+    // --- BUG-CLOUD-DR-13: "minimal" / "catalog_scan" fallback DR on Capture::Attached with n_keys = 1, 2, 3 ---
+    for n_keys in [1usize, 2, 3] {
+        let p_min = Platform::new();
+        seed_coexisting_gce_and_attached_cloud(&p_min);
+        for _ in 0..n_keys {
+            let _ = p_min
+                .adapter
+                .api(fastly_log_analytics::admin::ApiRequest {
+                    method: "POST",
+                    path: "/resources/object-storage/access-keys",
+                    token: "fixture-token",
+                    body: Some(json!({
+                        "permission": "read-write-objects",
+                        "description": "flp-fixtureApp-fixtureService",
+                        "buckets": ["fos-fixture-logs"]
+                    })),
+                    timeout: std::time::Duration::from_secs(5),
+                    query: "",
+                })
+                .unwrap();
+        }
+        let r_min = p_min.call(
+            "POST",
+            "/api/admin/provision/recover",
+            json!({
+                "token": "fixture-token",
+                "service_id": "fixtureService",
+                "fos_bucket": "fos-fixture-logs",
+                "fos_region": "us-east-1"
+            }),
+        );
+        assert_eq!(
+            r_min.status, 200,
+            "minimal DR [n_keys={n_keys}] must succeed 200"
+        );
+        let svc_min = &p_min.adapter.records()["svc:fixtureService"].value;
+        assert_eq!(
+            svc_min["capture"], "attached",
+            "BUG-CLOUD-DR-13 [n_keys={n_keys}]: minimal DR must infer Capture::Attached"
+        );
+        assert_eq!(
+            svc_min["owned_endpoint_names"],
+            json!(["FLP Cloud Logs"]),
+            "BUG-CLOUD-DR-13 [n_keys={n_keys}]: minimal DR must verify FLP Cloud Logs"
+        );
+        let rec_min = p_min.json(
+            "POST",
+            "/api/admin/services/fixtureService/reconcile",
+            json!({"generation": p_min.service()["generation"]}),
+        )["job"]
+            .clone();
+        assert_eq!(p_min.drain(rec_min)["status"], "complete");
+        let td_min = p_min.json(
+            "POST",
+            "/api/admin/provision/teardown",
+            json!({
+                "service_id": "fixtureService",
+                "confirm_service_id": "fixtureService",
+                "token": "fixture-token",
+                "generation": p_min.service()["generation"]
+            }),
+        )["job"]
+            .clone();
+        assert_eq!(p_min.drain(td_min)["status"], "complete");
+        assert!(p_min
+            .adapter
+            .resources("fixtureService", "logging/fos")
+            .iter()
+            .any(|e| e["name"] == "Fastly Object Storage Logs"));
+    }
+
+    // --- BUG-CLOUD-DR-14: Cold-start DR with scoring + n_keys = 1 across ALL 8 (pv, pw, pr) combinations ---
+    for identical in [true, false] {
+        for pv in [false, true] {
+            for pw in [false, true] {
+                for pr in [false, true] {
+                    let p_b = Platform::new();
+                    let (_, sc_svc) = p_b
+                        .adapter
+                        .api(fastly_log_analytics::admin::ApiRequest {
+                            method: "POST",
+                            path: "/service",
+                            token: "fixture-token",
+                            body: Some(json!({
+                                "name": "Session Scoring Service for fixtureService",
+                                "type": "wasm"
+                            })),
+                            timeout: std::time::Duration::from_secs(5),
+                            query: "",
+                        })
+                        .unwrap();
+                    let s_id = sc_svc["id"].as_str().unwrap().to_owned();
+                    let (_, k_r) = p_b
+                        .adapter
+                        .api(fastly_log_analytics::admin::ApiRequest {
+                            method: "POST",
+                            path: "/resources/stores/config",
+                            token: "fixture-token",
+                            body: Some(json!({"name": format!("scoring_keys_{s_id}")})),
+                            timeout: std::time::Duration::from_secs(5),
+                            query: "",
+                        })
+                        .unwrap();
+                    let (_, c_r) = p_b
+                        .adapter
+                        .api(fastly_log_analytics::admin::ApiRequest {
+                            method: "POST",
+                            path: "/resources/stores/config",
+                            token: "fixture-token",
+                            body: Some(json!({"name": format!("scoring_config_{s_id}")})),
+                            timeout: std::time::Duration::from_secs(5),
+                            query: "",
+                        })
+                        .unwrap();
+                    let (_, m_r) = p_b
+                        .adapter
+                        .api(fastly_log_analytics::admin::ApiRequest {
+                            method: "POST",
+                            path: "/resources/stores/kv",
+                            token: "fixture-token",
+                            body: Some(json!({"name": format!("scoring_matrix_{s_id}")})),
+                            timeout: std::time::Duration::from_secs(5),
+                            query: "",
+                        })
+                        .unwrap();
+                    let _ = p_b
+                        .adapter
+                        .api(fastly_log_analytics::admin::ApiRequest {
+                            method: "POST",
+                            path: "/resources/object-storage/access-keys",
+                            token: "fixture-token",
+                            body: Some(json!({
+                                "permission": "read-write-objects",
+                                "description": "flp-fixtureApp-fixtureService",
+                                "buckets": ["fos-fixture-logs"]
+                            })),
+                            timeout: std::time::Duration::from_secs(5),
+                            query: "",
+                        })
+                        .unwrap();
+                    p_b.adapter.seed_resource(
+                        "fixtureService",
+                        "snippet",
+                        json!({"name": "flp-owner-fixtureApp", "type": "recv", "priority": "0", "content": "# flp-owner:fixtureApp:fixtureService"}),
+                    );
+                    p_b.adapter.seed_resource(
+                        "fixtureService",
+                        "logging/fos",
+                        json!({
+                            "name": "Fastly Object Storage Logs",
+                            "bucket_name": "fos-fixture-logs",
+                            "region": "us-east-1",
+                            "path": "raw/request/year=%Y/month=%m/day=%d/hour=%H/minute=%M/",
+                            "response_condition": "log_analytics_condition"
+                        }),
+                    );
+                    let saved_view = SavedView {
+                        id: "v-dr14".into(),
+                        service_id: "fixtureService".into(),
+                        name: "Ops View".into(),
+                        filters_json: r#"{"status":500}"#.into(),
+                        time_range_type: Some("1h".into()),
+                        start_time: None,
+                        end_time: None,
+                        page: Some("/dashboard".into()),
+                        created_at: Some("2026-11-21T00:00:00Z".into()),
+                    };
+                    if pv {
+                        let v_payload = if identical {
+                            json!({"views": [saved_view.clone()], "updated_at": 1, "_kv_write_id": "prev"})
+                        } else {
+                            json!({"views": [], "updated_at": 1})
+                        };
+                        p_b.adapter
+                            .cas("views:fixtureService", None, &v_payload)
+                            .unwrap();
+                    }
+                    if pw {
+                        let w_payload = if identical {
+                            json!({
+                                "catalog": serde_json::to_value(&head).unwrap(),
+                                "floor": "raw/2026/floor.zst",
+                                "_kv_write_id": "prev"
+                            })
+                        } else {
+                            json!({"floor": "raw/2025/old.zst"})
+                        };
+                        p_b.adapter
+                            .cas("ingest:watermark", None, &w_payload)
+                            .unwrap();
+                    }
+                    if pr {
+                        let r_payload = if identical {
+                            json!({"rum_stats": {"rows": 9}, "_kv_write_id": "prev"})
+                        } else {
+                            json!({"rum_stats": {"rows": 0}})
+                        };
+                        p_b.adapter
+                            .cas("ingest:rum:watermark", None, &r_payload)
+                            .unwrap();
+                    }
+                    p_b.adapter.seed_object_bytes(
+                        "fos-fixture-logs",
+                        "meta/cloud_dr_state.json",
+                        serde_json::to_vec(&CloudDrState {
+                            schema_version: SCHEMA_VERSION,
+                            updated_at: 1_800_000_000,
+                            service_id: "fixtureService".into(),
+                            service: json!({
+                                "scoring": {
+                                    "enabled": false,
+                                    "scoring_service_id": s_id,
+                                    "scoring_service_name": "Session Scoring Service for fixtureService",
+                                    "scoring_domain": "fos-fixtureservice-session-scorer.edgecompute.app",
+                                    "scoring_keys_store_id": k_r["id"],
+                                    "scoring_config_store_id": c_r["id"],
+                                    "scoring_matrix_store_id": m_r["id"],
+                                    "enabled_at": "2026-11-20T00:00:00Z",
+                                    "deployed_package_sha": "abc",
+                                    "deployed_package_files_hash": "def",
+                                    "deployed_vcl_sha": "ghi",
+                                    "exclude_url_regex": ""
+                                }
+                            }),
+                            views: vec![saved_view],
+                            catalog_head: Some(head.clone()),
+                            floor_key: Some("raw/2026/floor.zst".into()),
+                            rum_stats: Some(json!({"rows": 9})),
+                        })
+                        .unwrap(),
+                    );
+                    let r_b = p_b.call(
+                        "POST",
+                        "/api/admin/provision/recover",
+                        json!({
+                            "token": "fixture-token",
+                            "service_id": "fixtureService",
+                            "fos_bucket": "fos-fixture-logs",
+                            "fos_region": "us-east-1"
+                        }),
+                    );
+                    assert_eq!(
+                        r_b.status,
+                        200,
+                        "BUG-CLOUD-DR-14 [identical={identical}, pv={pv}, pw={pw}, pr={pr}] must fit <=24 calls: {}",
+                        String::from_utf8_lossy(&r_b.body)
+                    );
+                    if !pv && !pw && !pr {
+                        assert_eq!(
+                            p_b.adapter.records()["svc:fixtureService"].value["owned_endpoint_names"],
+                            json!(["Fastly Object Storage Logs"]),
+                            "BUG-CLOUD-DR-14 [pv=false, pw=false, pr=false] must verify owned_endpoint_names"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }

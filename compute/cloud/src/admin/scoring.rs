@@ -994,26 +994,85 @@ pub(super) fn verify_scoring_resources(
     {
         return Err(Error::new(400, "invalid_scoring_service_id"));
     }
-    for (kind, store_id, expected_name) in [
-        (
-            "config",
-            sc.scoring_keys_store_id.as_str(),
-            keys_store_name(&sc.scoring_service_id),
-        ),
-        (
-            "config",
-            sc.scoring_config_store_id.as_str(),
-            config_store_name(&sc.scoring_service_id),
-        ),
-        (
-            "kv",
-            sc.scoring_matrix_store_id.as_str(),
-            matrix_store_name(&sc.scoring_service_id),
-        ),
-    ] {
-        if sc.enabled || !store_id.is_empty() {
-            verify_single_store_ownership(context, kind, store_id, &expected_name, token, false)?;
+    let need_keys = sc.enabled || !sc.scoring_keys_store_id.is_empty();
+    let need_cfg = sc.enabled || !sc.scoring_config_store_id.is_empty();
+    let need_matrix = sc.enabled || !sc.scoring_matrix_store_id.is_empty();
+    let keys_expected = keys_store_name(&sc.scoring_service_id);
+    let cfg_expected = config_store_name(&sc.scoring_service_id);
+    if need_keys && need_cfg {
+        check_scoring_store_id(context.runtime, &sc.scoring_keys_store_id)?;
+        check_scoring_store_id(context.runtime, &sc.scoring_config_store_id)?;
+        let (cfg_status, cfg_resp) =
+            context.api_status("GET", "/resources/stores/config", token, None)?;
+        if cfg_status == 401 || cfg_status == 403 {
+            return Err(Error::new(403, "fastly_token_scope_insufficient"));
         }
+        if !(200..300).contains(&cfg_status) {
+            return Err(Error::new(502, "store_lookup_failed"));
+        }
+        let items: &[Value] = if let Some(arr) = cfg_resp.as_array() {
+            arr.as_slice()
+        } else if let Some(arr) = cfg_resp["data"].as_array() {
+            arr.as_slice()
+        } else {
+            &[]
+        };
+        for (store_id, expected_name) in [
+            (sc.scoring_keys_store_id.as_str(), keys_expected.as_str()),
+            (sc.scoring_config_store_id.as_str(), cfg_expected.as_str()),
+        ] {
+            if let Some(found) = items
+                .iter()
+                .find(|it| store_id_of(it).as_deref() == Some(store_id))
+            {
+                let actual_name = found["name"]
+                    .as_str()
+                    .or_else(|| found["data"]["name"].as_str());
+                if actual_name != Some(expected_name) {
+                    return Err(Error::new(400, "invalid_scoring_store_id"));
+                }
+            } else {
+                verify_single_store_ownership(
+                    context,
+                    "config",
+                    store_id,
+                    expected_name,
+                    token,
+                    false,
+                )?;
+            }
+        }
+    } else {
+        if need_keys {
+            verify_single_store_ownership(
+                context,
+                "config",
+                &sc.scoring_keys_store_id,
+                &keys_expected,
+                token,
+                false,
+            )?;
+        }
+        if need_cfg {
+            verify_single_store_ownership(
+                context,
+                "config",
+                &sc.scoring_config_store_id,
+                &cfg_expected,
+                token,
+                false,
+            )?;
+        }
+    }
+    if need_matrix {
+        verify_single_store_ownership(
+            context,
+            "kv",
+            &sc.scoring_matrix_store_id,
+            &matrix_store_name(&sc.scoring_service_id),
+            token,
+            false,
+        )?;
     }
     Ok(())
 }
@@ -1616,12 +1675,46 @@ fn logging_reconcile_step(
 fn strip_logging_vcl_step(
     context: &Context<'_, impl Runtime>,
     job: &mut Job,
-    service: &Service,
+    record: &Record,
+    service: &mut Service,
     token: &str,
 ) -> Result<(), Error> {
-    // Strip scoring snippets + session_scorer backend from the logging service BEFORE
-    // deleting any Compute scorer or store. If any step fails, abort without deleting.
-    let active = reconcile::active_version(context, &service.service_id, token)?;
+    if job.kind == "teardown" && !job.options.remove_snippets {
+        if !job.options.remove_logging {
+            service.scoring = None;
+            remove_scoring_custom_fields(&mut service.log_fields);
+            service.config_version += 1;
+            service.updated_at = context.runtime.now();
+            let next_gen = save_scoring_service(
+                context,
+                record,
+                service,
+                &job.actor,
+                "scoring.local_teardown",
+            )?;
+            job.expected_generation = next_gen;
+            advance(job, "remove_front");
+            return Ok(());
+        }
+        reconcile::verify_managed_customer_vcl_ownership(context, service, token)?;
+        service.scoring = None;
+        remove_scoring_custom_fields(&mut service.log_fields);
+        service.config_version += 1;
+        service.updated_at = context.runtime.now();
+        let next_gen = save_scoring_service(
+            context,
+            record,
+            service,
+            &job.actor,
+            "scoring.keep_snippets_teardown",
+        )?;
+        job.expected_generation = next_gen;
+        advance(job, "discover");
+        return Ok(());
+    }
+    // Verify customer VCL ownership & absence of primary/attach coexistence BEFORE cloning customer VCL
+    // or deleting any Compute scorer WASM service or stores.
+    let active = reconcile::verify_managed_customer_vcl_ownership(context, service, token)?;
     let cloned = context.api(
         "PUT",
         &format!("/service/{}/version/{active}/clone", service.service_id),
@@ -2028,7 +2121,7 @@ pub fn run_step(
             Ok(true)
         }
         "scoring_strip_logging_vcl" => {
-            strip_logging_vcl_step(context, job, service, token)?;
+            strip_logging_vcl_step(context, job, record, service, token)?;
             Ok(true)
         }
         "scoring_strip_apply" => {
@@ -2251,6 +2344,9 @@ pub fn route(
                 body(request)?
             };
             let (record, mut service) = load_service(context, sid)?;
+            if service.capture == Capture::Attached {
+                return Err(Error::new(409, "scoring_not_supported_in_attach_mode"));
+            }
             if service.status == "torn_down" {
                 return Err(Error::new(409, "service_torn_down"));
             }
@@ -2271,6 +2367,9 @@ pub fn route(
                 body(request)?
             };
             let (record, mut service) = load_service(context, sid)?;
+            if service.capture == Capture::Attached {
+                return Err(Error::new(409, "scoring_not_supported_in_attach_mode"));
+            }
             require_scoring_enabled(&service)?;
             reject_blocking_job(context, &service)?;
             check_unlocked(context, sid)?;
@@ -2286,6 +2385,9 @@ pub fn route(
                 return Err(Error::new(400, "typed_service_id_required"));
             }
             let (record, mut service) = load_service(context, sid)?;
+            if service.capture == Capture::Attached {
+                return Err(Error::new(409, "scoring_not_supported_in_attach_mode"));
+            }
             check_generation(&record, &input)?;
             if service.scoring.is_none() {
                 return Err(Error::new(400, "scoring_not_provisioned"));

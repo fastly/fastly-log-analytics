@@ -974,6 +974,9 @@ describe("Cloud first-page analytical range loading", () => {
         projection: { columns: ["timestamp", "status", "ua"] },
       }),
     ).rejects.toThrow();
+    expect(
+      source.writeDerivedFile.mock.calls.filter(([, id]) => String(id).includes("\"projection\"")),
+    ).toEqual([]);
     source.writeDerivedFile.mockClear();
 
     // 3. <65% range projection (line 275): aborting during the final projected range read must skip writeDerivedFile(scopedKey)

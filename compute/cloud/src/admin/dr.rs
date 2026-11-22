@@ -493,6 +493,9 @@ fn hydrate_service(
     if matches!(service.wire_format.as_str(), "" | "json") {
         service.wire_format = "array".into();
     }
+    if service.capture == Capture::Attached && service.scoring.is_some() {
+        return Err(Error::new(400, "invalid_dr_scoring_config"));
+    }
     if service.capture == Capture::Attached
         && (!service.rum.enabled || service.rum.endpoint_name == "Fastly RUM Logs")
     {
@@ -610,21 +613,54 @@ fn scan_catalog_head(
     }
 }
 
+fn kv_payload_matches(key: &str, existing: &Value, desired: &Value) -> bool {
+    if key.starts_with("views:") {
+        return existing.get("views") == desired.get("views");
+    }
+    match (existing.as_object(), desired.as_object()) {
+        (Some(ex_map), Some(des_map)) => {
+            let ex_filtered = ex_map
+                .iter()
+                .filter(|(k, _)| !matches!(k.as_str(), "_kv_write_id" | "_kv_written_ms"));
+            let des_filtered = des_map
+                .iter()
+                .filter(|(k, _)| !matches!(k.as_str(), "_kv_write_id" | "_kv_written_ms"));
+            ex_filtered.eq(des_filtered)
+        }
+        _ => existing == desired,
+    }
+}
+
 fn upsert_kv(
     context: &Context<'_, impl Runtime>,
     key: &str,
     value: &Value,
-    try_insert_first: bool,
+    allow_insert_first: bool,
+    try_insert_first: &mut bool,
+    remaining_upserts: u32,
 ) -> Result<(), Error> {
-    if try_insert_first {
+    if *try_insert_first {
         match context.cas(key, None, value) {
-            Ok(()) => return Ok(()),
+            Ok(()) => {
+                *try_insert_first =
+                    allow_insert_first && context.remaining_calls() > 2 + 2 * remaining_upserts;
+                return Ok(());
+            }
             Err(err) if err.status == 409 => {}
             Err(err) => return Err(err),
         }
     }
     let existing = context.get(key)?;
-    context.cas(key, existing.as_ref().map(|r| r.generation.as_str()), value)
+    let res = if existing
+        .as_ref()
+        .is_some_and(|r| kv_payload_matches(key, &r.value, value))
+    {
+        Ok(())
+    } else {
+        context.cas(key, existing.as_ref().map(|r| r.generation.as_str()), value)
+    };
+    *try_insert_first = allow_insert_first && context.remaining_calls() > 2 + 2 * remaining_upserts;
+    res
 }
 
 fn verify_candidate_endpoints(
@@ -675,10 +711,11 @@ fn inspect_active_version_for_dr(
     service: &mut Service,
     token: &str,
     candidate_names: &[String],
-    scope: &str,
     minimal_fallback: bool,
     reserve_after: u32,
+    mandatory_reserve: u32,
 ) -> Result<(), Error> {
+    let scope = crate::ingest::scope(service);
     let ver = match super::reconcile::active_version(context, &service.service_id, token) {
         Ok(ver) => ver,
         Err(err) if err.status == 403 => {
@@ -737,9 +774,9 @@ fn inspect_active_version_for_dr(
     if !coexist
         && (minimal_fallback || service.capture == Capture::Managed)
         && super::reconcile::has_foreign_primary_endpoint(
-            service, scope, s3_items, fos_items, false,
+            service, &scope, s3_items, fos_items, false,
         )
-        && context.remaining_calls() > reserve_after
+        && context.remaining_calls() > mandatory_reserve
     {
         let (snip_st, snip_val) = context.api_status(
             "GET",
@@ -768,7 +805,7 @@ fn inspect_active_version_for_dr(
                 vec![ATTACH_ENDPOINT.to_owned(), ATTACH_RUM_ENDPOINT.to_owned()];
             service.owned_endpoint_names = verify_candidate_endpoints(
                 service,
-                scope,
+                &scope,
                 &attach_candidates,
                 s3_items,
                 fos_items,
@@ -777,7 +814,7 @@ fn inspect_active_version_for_dr(
             let managed_candidates = vec![service.logging_endpoint_name.clone()];
             service.owned_endpoint_names = verify_candidate_endpoints(
                 service,
-                scope,
+                &scope,
                 &managed_candidates,
                 s3_items,
                 fos_items,
@@ -790,7 +827,7 @@ fn inspect_active_version_for_dr(
         return Err(Error::new(409, "resource_name_collision"));
     }
     service.owned_endpoint_names =
-        verify_candidate_endpoints(service, scope, candidate_names, s3_items, fos_items)?;
+        verify_candidate_endpoints(service, &scope, candidate_names, s3_items, fos_items)?;
     Ok(())
 }
 
@@ -1002,9 +1039,9 @@ pub(super) fn recover(
                 &mut service,
                 &input.token,
                 &candidate_names,
-                &scope,
                 false,
                 conservative_post + scan_needed,
+                mandatory_post,
             )?;
             inspected = true;
         } else if !should_inspect || context.remaining_calls() < mandatory_post + scan_needed + 3 {
@@ -1021,29 +1058,15 @@ pub(super) fn recover(
             inspected,
         )
     } else {
-        let mut min_svc = fallback_svc.clone();
-        let min_scope = crate::ingest::scope(&min_svc);
-        let min_reserve = 5 + PER_UPSERT + 3;
-        if context.remaining_calls() >= min_reserve + 3 {
-            inspect_active_version_for_dr(
-                context,
-                &mut min_svc,
-                &input.token,
-                &[],
-                &min_scope,
-                true,
-                min_reserve,
-            )?;
-        }
         (
-            min_svc,
+            fallback_svc.clone(),
             Vec::new(),
             None,
             None,
             None,
             "minimal",
             Vec::new(),
-            true,
+            false,
         )
     };
 
@@ -1056,7 +1079,7 @@ pub(super) fn recover(
         if rum_stats.is_some() {
             reserve += PER_UPSERT;
         }
-        reserve += 3; // inline Front dictionary sync
+        reserve += 3; // inline Front dictionary sync (or post-upsert active-version inspection)
         if let Some(scanned) =
             scan_catalog_head(context, &service, &creds, reserve, foreign_dr_state)?
         {
@@ -1067,22 +1090,29 @@ pub(super) fn recover(
         }
     }
 
-    let num_upserts = u32::from(!views.is_empty())
+    let mut remaining_upserts = u32::from(!views.is_empty())
         + u32::from(catalog_head.is_some() || floor_key.is_some())
         + u32::from(rum_stats.is_some());
-    let try_insert_first = cold_start && context.remaining_calls() < 5 + 2 * num_upserts;
+    let initial_try_insert_first =
+        cold_start && context.remaining_calls() < 5 + 2 * remaining_upserts;
+    let mut try_insert_first = initial_try_insert_first
+        && context.remaining_calls() > 2 + 2 * remaining_upserts.saturating_sub(1);
 
     let views_restored = views.len();
     if !views.is_empty() {
+        remaining_upserts -= 1;
         upsert_kv(
             context,
             &crate::views::key(&input.service_id),
             &json!({"views": views, "updated_at": now}),
-            try_insert_first,
+            initial_try_insert_first,
+            &mut try_insert_first,
+            remaining_upserts,
         )?;
     }
 
     if catalog_head.is_some() || floor_key.is_some() {
+        remaining_upserts -= 1;
         let mut wm = serde_json::Map::new();
         if let Some(ref head) = catalog_head {
             wm.insert("catalog".into(), serialize(head)?);
@@ -1094,30 +1124,39 @@ pub(super) fn recover(
             context,
             crate::ingest::WATERMARK_KEY,
             &Value::Object(wm),
-            try_insert_first,
+            initial_try_insert_first,
+            &mut try_insert_first,
+            remaining_upserts,
         )?;
     }
 
     if let Some(ref stats) = rum_stats {
+        remaining_upserts -= 1;
         upsert_kv(
             context,
             &crate::ingest::watermark_key(crate::ingest::rum::STREAM),
             &json!({ crate::ingest::RUM_STATS_FIELD: stats }),
-            try_insert_first,
+            initial_try_insert_first,
+            &mut try_insert_first,
+            remaining_upserts,
         )?;
     }
 
-    let post_upsert_floor = if try_insert_first { 2 + 3 } else { 5 + 3 };
+    let post_upsert_floor = if initial_try_insert_first || source != "dr_state" {
+        2 + 3
+    } else {
+        5 + 3
+    };
     if !inspected_active && context.remaining_calls() >= post_upsert_floor {
-        let scope = crate::ingest::scope(&service);
+        let reserve_after = if context.remaining_calls() >= 8 { 5 } else { 2 };
         inspect_active_version_for_dr(
             context,
             &mut service,
             &input.token,
             &candidate_names,
-            &scope,
-            false,
-            if try_insert_first { 2 } else { 5 },
+            source != "dr_state",
+            reserve_after,
+            2,
         )?;
         inspected_active = true;
     }

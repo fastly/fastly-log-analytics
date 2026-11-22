@@ -8,6 +8,27 @@ const MAX_FILES = 128;
 const MAX_ACTIVE_FILES = 8;
 let activeFiles = 0;
 const pinWaiters: Array<() => void> = [];
+let opfsEpoch = 0;
+const activeOpfsDiskWrites = new Set<Promise<unknown>>();
+
+export function bumpOpfsEpoch(): void {
+  opfsEpoch += 1;
+}
+
+function abortError(): DOMException {
+  return new DOMException("The operation was aborted.", "AbortError");
+}
+
+function isCancellationError(error: unknown): boolean {
+  if (error instanceof DOMException && error.name === "AbortError") return true;
+  if (
+    error instanceof Error &&
+    (error.name === "AbortError" || error.message === "Cache cleared")
+  ) {
+    return true;
+  }
+  return false;
+}
 
 function acquirePin(signal?: AbortSignal): Promise<() => void> {
   signal?.throwIfAborted();
@@ -127,6 +148,9 @@ async function completeFile(
 
 export class OPFSParquetStore {
   private readonly root: Options["root"];
+  private readonly readOnlyRoot:
+    | (() => Promise<FileSystemDirectoryHandle | null>)
+    | undefined;
   private readonly locks: LockManager | undefined;
   private readonly budget: number;
   private readonly fileBudget: number;
@@ -144,6 +168,29 @@ export class OPFSParquetStore {
               OPFS_DIRECTORY,
               { create: true },
             )
+        : undefined;
+    this.readOnlyRoot = options
+      ? options.root
+        ? async () => {
+            try {
+              return await options.root!();
+            } catch (error) {
+              if (missing(error)) return null;
+              throw error;
+            }
+          }
+        : undefined
+      : typeof globalThis.navigator?.storage?.getDirectory === "function"
+        ? async () => {
+            try {
+              return await (
+                await navigator.storage.getDirectory()
+              ).getDirectoryHandle(OPFS_DIRECTORY);
+            } catch (error) {
+              if (missing(error)) return null;
+              throw error;
+            }
+          }
         : undefined;
     this.locks = options ? options.locks : globalThis.navigator?.locks;
     this.budget = options?.maxBytes ?? DEFAULT_BUDGET;
@@ -165,9 +212,9 @@ export class OPFSParquetStore {
     });
   }
 
-  private async available(): Promise<boolean> {
+  private async available(callOpfsEpoch = opfsEpoch): Promise<boolean> {
     if (this.root && this.locks) return true;
-    if (!this.reportedUnavailable) {
+    if (!this.reportedUnavailable && callOpfsEpoch === opfsEpoch) {
       this.reportedUnavailable = true;
       await this.report(
         "",
@@ -185,8 +232,10 @@ export class OPFSParquetStore {
     bytes: number,
     signal?: AbortSignal,
   ): Promise<boolean> {
+    const callOpfsEpoch = opfsEpoch;
     signal?.throwIfAborted();
-    if (!(await this.available())) return false;
+    if (callOpfsEpoch !== opfsEpoch) throw abortError();
+    if (!(await this.available(callOpfsEpoch))) return false;
     const id = await digest(JSON.stringify([this.scope, key]));
     try {
       return await this.locks!.request(
@@ -194,21 +243,30 @@ export class OPFSParquetStore {
         { mode: "shared", signal },
         async () => {
           signal?.throwIfAborted();
-          const found = await completeFile(await this.root!(), id, bytes);
+          if (callOpfsEpoch !== opfsEpoch) throw abortError();
+          const root = await this.readOnlyRoot!();
+          if (!root) return false;
+          const found = await completeFile(root, id, bytes);
           signal?.throwIfAborted();
+          if (callOpfsEpoch !== opfsEpoch) throw abortError();
           return found;
         },
       );
     } catch (error) {
       if (signal?.aborted) throw signal.reason;
+      if (callOpfsEpoch !== opfsEpoch || isCancellationError(error)) {
+        throw abortError();
+      }
       await this.report(key, bytes, error);
       return false;
     }
   }
 
   async open(key: string, signal?: AbortSignal): Promise<PinnedFile | null> {
+    const callOpfsEpoch = opfsEpoch;
     signal?.throwIfAborted();
-    if (!(await this.available())) return null;
+    if (callOpfsEpoch !== opfsEpoch) throw abortError();
+    if (!(await this.available(callOpfsEpoch))) return null;
     const id = await digest(JSON.stringify([this.scope, key]));
     const releasePin = await acquirePin(signal);
     let unlock!: () => void;
@@ -223,10 +281,18 @@ export class OPFSParquetStore {
               `${LOCK}:${id}`,
               { mode: "exclusive", signal },
               async () => {
-                const root = await this.root!();
                 signal?.throwIfAborted();
+                if (callOpfsEpoch !== opfsEpoch) throw abortError();
+                const root = await this.readOnlyRoot!();
+                if (!root) {
+                  resolve(null);
+                  return;
+                }
+                signal?.throwIfAborted();
+                if (callOpfsEpoch !== opfsEpoch) throw abortError();
                 const entry = await metadata(root, id);
                 signal?.throwIfAborted();
+                if (callOpfsEpoch !== opfsEpoch) throw abortError();
                 if (!entry) {
                   resolve(null);
                   return;
@@ -236,11 +302,17 @@ export class OPFSParquetStore {
                   resolve(null);
                   return;
                 }
+                if (callOpfsEpoch !== opfsEpoch) throw abortError();
                 await writeMetadata(root, id, {
                   ...entry,
                   used: Date.now(),
-                }).catch((error) => this.report(key, entry.bytes, error));
+                }).catch((error) =>
+                  callOpfsEpoch === opfsEpoch && !isCancellationError(error)
+                    ? this.report(key, entry.bytes, error)
+                    : undefined,
+                );
                 signal?.throwIfAborted();
+                if (callOpfsEpoch !== opfsEpoch) throw abortError();
                 let done = false;
                 resolve({
                   handle,
@@ -256,8 +328,16 @@ export class OPFSParquetStore {
           }),
         )
         .catch(async (error) => {
-          await this.report(key, 0, error);
+          if (
+            !signal?.aborted &&
+            callOpfsEpoch === opfsEpoch &&
+            !isCancellationError(error)
+          ) {
+            await this.report(key, 0, error);
+          }
           if (signal?.aborted) reject(signal.reason);
+          else if (callOpfsEpoch !== opfsEpoch || isCancellationError(error))
+            reject(abortError());
           else resolve(null);
         })
         .finally(releasePin);
@@ -270,35 +350,52 @@ export class OPFSParquetStore {
     fetchFile: () => Promise<Response>,
     signal?: AbortSignal,
   ): Promise<void> {
-    if (!(await this.available()))
+    const callOpfsEpoch = opfsEpoch;
+    const ensureCurrent = () => {
+      signal?.throwIfAborted();
+      if (callOpfsEpoch !== opfsEpoch) throw abortError();
+    };
+    ensureCurrent();
+    if (!(await this.available(callOpfsEpoch)))
       throw new Error("OPFS persistence unavailable");
+    ensureCurrent();
     if (!Number.isSafeInteger(bytes) || bytes <= 0 || bytes > this.fileBudget) {
       const error = new Error("Selected file exceeds the OPFS file budget");
-      await this.report(key, bytes, error);
+      if (callOpfsEpoch === opfsEpoch && !signal?.aborted) {
+        await this.report(key, bytes, error);
+      }
       throw error;
     }
     const id = await digest(JSON.stringify([this.scope, key]));
+    ensureCurrent();
     try {
       await this.locks!.request(
         `${LOCK}:download:${id}`,
         { mode: "exclusive", signal },
         async () => {
-          signal?.throwIfAborted();
-          if (await completeFile(await this.root!(), id, bytes)) return;
+          ensureCurrent();
+          const existingRoot = await this.readOnlyRoot!();
+          if (existingRoot && (await completeFile(existingRoot, id, bytes))) {
+            return;
+          }
+          ensureCurrent();
           const response = await fetchFile();
           try {
+            ensureCurrent();
             const body = response.body;
             if (response.status !== 200 || !body) {
               throw new Error(
                 `Selected file download failed (${response.status}); a complete response is required`,
               );
             }
-            await this.locks!.request(
+            const writePhase = this.locks!.request(
               LOCK,
               { mode: "exclusive", signal },
               async () => {
-                signal?.throwIfAborted();
+                // Check epoch & signal BEFORE `this.root()` so OPFS_DIRECTORY is never re-created after logout.
+                ensureCurrent();
                 const root = await this.root!();
+                ensureCurrent();
                 // Cache contents and quota may change while HTTP is in flight.
                 if (await completeFile(root, id, bytes)) return;
                 const entries: [string, Entry][] = [];
@@ -306,6 +403,7 @@ export class OPFSParquetStore {
                   entries(): AsyncIterableIterator<[string, FileSystemHandle]>;
                 };
                 for await (const [name, handle] of directory.entries()) {
+                  ensureCurrent();
                   if (
                     handle.kind === "file" &&
                     /^[a-f0-9]{64}\.data$/.test(name)
@@ -326,6 +424,7 @@ export class OPFSParquetStore {
                 }
                 entries.sort((a, b) => a[1].used - b[1].used);
                 const estimate = await storageEstimate();
+                ensureCurrent();
                 const quotaRoom =
                   estimate.quota === null || estimate.usage === null
                     ? Infinity
@@ -349,6 +448,7 @@ export class OPFSParquetStore {
                 }
                 if (used + bytes > this.budget || quotaRoom + reclaimed < bytes)
                   throw new Error("Insufficient OPFS storage quota");
+                ensureCurrent();
                 await remove(root, `${id}.json`);
                 let writer: FileSystemWritableFileStream;
                 try {
@@ -362,18 +462,26 @@ export class OPFSParquetStore {
                 }
                 const reader = body.getReader();
                 const onAbort = () => {
-                  void reader
-                    .cancel(signal?.reason)
-                    .catch((error) => this.report(key, bytes, error));
+                  void reader.cancel(signal?.reason).catch((error) => {
+                    if (
+                      callOpfsEpoch === opfsEpoch &&
+                      !signal?.aborted &&
+                      !isCancellationError(error)
+                    ) {
+                      return this.report(key, bytes, error);
+                    }
+                    return undefined;
+                  });
                 };
                 signal?.addEventListener("abort", onAbort, { once: true });
                 let received = 0;
                 let closed = false;
                 try {
                   for (;;) {
-                    signal?.throwIfAborted();
+                    ensureCurrent();
                     const chunk = await reader.read();
                     if (chunk.done) break;
+                    ensureCurrent();
                     received += chunk.value.byteLength;
                     if (received > bytes)
                       throw new Error(
@@ -381,14 +489,14 @@ export class OPFSParquetStore {
                       );
                     await writer.write(chunk.value as FileSystemWriteChunkType);
                   }
-                  signal?.throwIfAborted();
+                  ensureCurrent();
                   if (received !== bytes)
                     throw new Error(
                       "Downloaded file length does not match manifest length",
                     );
                   await writer.close();
                   closed = true;
-                  signal?.throwIfAborted();
+                  ensureCurrent();
                   await writeMetadata(root, id, { bytes, used: Date.now() });
                 } catch (error) {
                   const cleanup = await Promise.allSettled([
@@ -413,26 +521,47 @@ export class OPFSParquetStore {
                 }
               },
             );
+            activeOpfsDiskWrites.add(writePhase);
+            try {
+              await writePhase;
+            } finally {
+              activeOpfsDiskWrites.delete(writePhase);
+            }
           } finally {
             if (!response.bodyUsed) await response.body?.cancel();
           }
         },
       );
     } catch (error) {
-      await this.report(key, bytes, error);
+      if (
+        !signal?.aborted &&
+        callOpfsEpoch === opfsEpoch &&
+        !isCancellationError(error)
+      ) {
+        await this.report(key, bytes, error);
+      }
       throw error;
     }
   }
 }
 
 export async function clearOPFSParquetStore(): Promise<void> {
-  if (!globalThis.navigator?.storage?.getDirectory || !navigator.locks) return;
-  await navigator.locks.request(LOCK, { mode: "exclusive" }, async () => {
+  opfsEpoch += 1;
+  if (activeOpfsDiskWrites.size > 0) {
+    await Promise.allSettled([...activeOpfsDiskWrites]);
+  }
+  if (!globalThis.navigator?.storage?.getDirectory) return;
+  const removeDirectory = async () => {
     const root = await navigator.storage.getDirectory();
     try {
       await root.removeEntry(OPFS_DIRECTORY, { recursive: true });
     } catch (error) {
       if (!missing(error)) throw error;
     }
-  });
+  };
+  if (globalThis.navigator?.locks) {
+    await navigator.locks.request(LOCK, { mode: "exclusive" }, removeDirectory);
+  } else {
+    await removeDirectory();
+  }
 }

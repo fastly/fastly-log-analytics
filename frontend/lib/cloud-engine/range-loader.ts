@@ -24,6 +24,7 @@ const PREFETCH_CONCURRENCY = 6;
 const RANGE_CONCURRENCY = 16;
 const source = browserSource("");
 const requestReads = new WeakMap<Request, DuckDBReadContext>();
+const activeRangeDownloads = new Set<AbortController>();
 
 /** What a refused range needed against its limit, in bytes or files. */
 export type CloudBudgetDetail = { unit: "bytes" | "files"; needed: number; limit: number };
@@ -57,6 +58,10 @@ export function cloudFileSource(serviceId?: string) {
 }
 
 export function resetRangeLoaderCache(): void {
+  for (const downloads of activeRangeDownloads) {
+    downloads.abort(new DOMException("The operation was aborted.", "AbortError"));
+  }
+  activeRangeDownloads.clear();
   source.clearMemoryCache?.();
 }
 
@@ -159,6 +164,7 @@ export async function ensureCloudRange(
       throw overBudget({ unit: "bytes", needed: wholeBytes, limit: MAX_RANGE_BYTES });
     }
     const downloads = new AbortController();
+    activeRangeDownloads.add(downloads);
     const abortDownloads = () => downloads.abort(signal.reason);
     signal.addEventListener("abort", abortDownloads, { once: true });
     if (signal.aborted) abortDownloads();
@@ -189,10 +195,16 @@ export async function ensureCloudRange(
     };
     // Footers persist under the file's own identity, so any projection of it reuses them.
     const readFooter = async (file: typeof files[number]) => {
+      generation.assertCurrent();
+      downloads.signal.throwIfAborted();
       const cached = await fileSource.readDerivedFile(file.key, file.footerKey);
+      generation.assertCurrent();
+      downloads.signal.throwIfAborted();
       const tailStart = cached ? Number(cached.meta) : NaN;
       const tail = cached && Number.isSafeInteger(tailStart) && tailStart >= 0
         ? { start: tailStart, bytes: await cached.bytes() } : null;
+      generation.assertCurrent();
+      downloads.signal.throwIfAborted();
       const footer = await readParquetFooter(file.size, (start, end) =>
         tail && start >= tail.start && end <= tail.start + tail.bytes.byteLength
           ? Promise.resolve(tail.bytes.slice(start - tail.start, end - tail.start)) : fetchRange(file, start, end));
@@ -209,7 +221,11 @@ export async function ensureCloudRange(
         const unknown = files.filter((file) => !engine.getFileMeta(file.scopedKey));
         if (unknown.some((file) => !(file.size > 0))) throw new Error("Cloud file listing has no file size to project");
         await Promise.all(unknown.map(async (file) => {
+          generation.assertCurrent();
+          downloads.signal.throwIfAborted();
           const stored = await fileSource.readDerivedFile(file.key, file.scopedKey);
+          generation.assertCurrent();
+          downloads.signal.throwIfAborted();
           if (stored) persisted.set(file.scopedKey, stored);
           else plans.set(file.scopedKey, planParquetProjection(await readFooter(file), file.columns!));
         }));
@@ -349,6 +365,7 @@ export async function ensureCloudRange(
         if (!handedOff) lease.release();
       }
     } finally {
+      activeRangeDownloads.delete(downloads);
       signal.removeEventListener("abort", abortDownloads);
       downloads.abort();
     }

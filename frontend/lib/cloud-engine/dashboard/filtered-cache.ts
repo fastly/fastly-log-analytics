@@ -64,6 +64,7 @@ export class FilteredResultCache {
 
   private readonly memory = new Map<string, { result: FilteredFileResult; bytes: number }>();
   private memoryTotal = 0;
+  private epoch = 0;
 
   constructor(options: FilteredResultCacheOptions) {
     this.cacheName = options.cacheName ?? FILTERED_CACHE_NAME;
@@ -81,6 +82,7 @@ export class FilteredResultCache {
   }
 
   async read(id: string): Promise<FilteredFileResult | null> {
+    const callEpoch = this.epoch;
     const remembered = this.memory.get(id);
     if (remembered) {
       this.memory.delete(id);
@@ -88,24 +90,28 @@ export class FilteredResultCache {
       return remembered.result;
     }
     const url = this.prefix + (await this.hash(id));
-    const index = await this.loadIndex();
+    if (callEpoch !== this.epoch) return null;
+    const index = await this.loadIndex(callEpoch);
+    if (callEpoch !== this.epoch) return null;
     const entry = index.get(url);
     if (!entry) return null;
-    const cache = await this.open();
+    const cache = await this.open(callEpoch);
+    if (callEpoch !== this.epoch) return null;
     if (this.now() - entry[0] > this.maxAgeMs) {
       this.drop(index, url);
       await cache.delete(url);
-      this.scheduleFlush();
+      if (callEpoch === this.epoch) this.scheduleFlush();
       return null;
     }
     const response = await cache.match(url);
+    if (callEpoch !== this.epoch) return null;
     if (!response) {
       this.drop(index, url);
       this.scheduleFlush();
       return null;
     }
     const decoded = await decodeRollup(new Uint8Array(await response.arrayBuffer()));
-    if (!decoded) return null;
+    if (!decoded || callEpoch !== this.epoch) return null;
     let stored: unknown;
     try {
       stored = JSON.parse(decoded.key);
@@ -134,8 +140,12 @@ export class FilteredResultCache {
   }
 
   async write(id: string, result: FilteredFileResult): Promise<void> {
+    const callEpoch = this.epoch;
+    if (callEpoch !== this.epoch) return;
     const url = this.prefix + (await this.hash(id));
-    const index = await this.loadIndex();
+    if (callEpoch !== this.epoch) return;
+    const index = await this.loadIndex(callEpoch);
+    if (callEpoch !== this.epoch) return;
     const bytes = await encodeRollup({
       version: 1,
       key: JSON.stringify([id, result.truncated]),
@@ -143,9 +153,11 @@ export class FilteredResultCache {
       byteLength: result.byteLength,
       ...result.data,
     });
+    if (callEpoch !== this.epoch) return;
     this.remember(id, result);
     if (bytes.byteLength > this.maxBytes) return;
-    const cache = await this.open();
+    const cache = await this.open(callEpoch);
+    if (callEpoch !== this.epoch) return;
     this.drop(index, url);
     const now = this.now();
     const evicted: string[] = [];
@@ -165,6 +177,7 @@ export class FilteredResultCache {
       evicted.push(key);
     }
     await Promise.all(evicted.map((key) => cache.delete(key)));
+    if (callEpoch !== this.epoch) return;
     await cache.put(
       url,
       new Response(bytes as BlobPart, {
@@ -174,6 +187,7 @@ export class FilteredResultCache {
         },
       }),
     );
+    if (callEpoch !== this.epoch) return;
     index.set(url, [now, bytes.byteLength]);
     this.removed.delete(url);
     this.totalBytes += bytes.byteLength;
@@ -182,12 +196,20 @@ export class FilteredResultCache {
 
   /** Writes the LRU index now; pending debounced writes are folded in. */
   async flush(): Promise<void> {
+    const callEpoch = this.epoch;
     if (this.flushTimer !== null) {
       clearTimeout(this.flushTimer);
       this.flushTimer = null;
     }
-    this.flushing = this.flushing.then(() => this.writeIndex());
+    this.flushing = this.flushing.then(() => this.writeIndex(callEpoch));
     await this.flushing;
+  }
+
+  drain(): Promise<void> {
+    return this.flushing.then(
+      () => undefined,
+      () => undefined,
+    );
   }
 
   persistedBytes(): number {
@@ -195,13 +217,30 @@ export class FilteredResultCache {
   }
 
   clearMemory(): void {
+    this.epoch += 1;
     this.memory.clear();
     this.memoryTotal = 0;
+    this.cache = null;
+    this.index = null;
+    this.loading = null;
+    this.removed.clear();
+    this.totalBytes = 0;
+    if (this.flushTimer !== null) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
   }
 
-  private open(): Promise<Cache> {
+  private open(callEpoch = this.epoch): Promise<Cache> {
+    if (callEpoch !== this.epoch) {
+      return Promise.reject(new Error("Cache cleared"));
+    }
     this.cache ??= Promise.resolve()
-      .then(this.openCache)
+      .then(() =>
+        callEpoch === this.epoch
+          ? this.openCache()
+          : Promise.reject(new Error("Cache cleared")),
+      )
       .catch((error: unknown) => {
         this.cache = null;
         throw error;
@@ -237,12 +276,15 @@ export class FilteredResultCache {
     }
   }
 
-  private loadIndex(): Promise<Map<string, IndexEntry>> {
+  private loadIndex(callEpoch = this.epoch): Promise<Map<string, IndexEntry>> {
+    if (callEpoch !== this.epoch) return Promise.reject(new Error("Cache cleared"));
     if (this.index) return Promise.resolve(this.index);
-    this.loading ??= this.reconcile().then(
+    this.loading ??= this.reconcile(callEpoch).then(
       (index) => {
-        this.index = index;
-        this.totalBytes = [...index.values()].reduce((sum, [, bytes]) => sum + bytes, 0);
+        if (callEpoch === this.epoch) {
+          this.index = index;
+          this.totalBytes = [...index.values()].reduce((sum, [, bytes]) => sum + bytes, 0);
+        }
         return index;
       },
       (error: unknown) => {
@@ -274,11 +316,13 @@ export class FilteredResultCache {
     }
   }
 
-  private async reconcile(): Promise<Map<string, IndexEntry>> {
-    const cache = await this.open();
+  private async reconcile(callEpoch = this.epoch): Promise<Map<string, IndexEntry>> {
+    const cache = await this.open(callEpoch);
+    if (callEpoch !== this.epoch) throw new Error("Cache cleared");
     const stored = await this.storedIndex(cache);
     const index = new Map<string, IndexEntry>();
     for (const request of await cache.keys()) {
+      if (callEpoch !== this.epoch) throw new Error("Cache cleared");
       const url = typeof request === "string" ? request : request.url;
       if (!url.startsWith(this.prefix)) continue;
       const known = stored.get(url);
@@ -295,19 +339,23 @@ export class FilteredResultCache {
 
   private scheduleFlush(): void {
     if (this.flushTimer !== null) return;
+    const scheduledEpoch = this.epoch;
     this.flushTimer = setTimeout(() => {
       this.flushTimer = null;
-      this.flushing = this.flushing.then(() => this.writeIndex()).catch(() => undefined);
+      if (scheduledEpoch !== this.epoch) return;
+      this.flushing = this.flushing.then(() => this.writeIndex(scheduledEpoch)).catch(() => undefined);
     }, FLUSH_DELAY_MS);
     // Node keeps the process alive on a pending timer; browsers ignore this.
     (this.flushTimer as { unref?: () => void }).unref?.();
   }
 
-  private async writeIndex(): Promise<void> {
-    if (!this.index) return;
-    const cache = await this.open();
+  private async writeIndex(callEpoch = this.epoch): Promise<void> {
+    if (!this.index || callEpoch !== this.epoch) return;
+    const cache = await this.open(callEpoch);
+    if (callEpoch !== this.epoch || !this.index) return;
     // Another tab may have flushed entries this one never saw.
     const merged = await this.storedIndex(cache);
+    if (callEpoch !== this.epoch || !this.index) return;
     for (const url of this.removed) merged.delete(url);
     for (const [url, entry] of this.index) {
       const other = merged.get(url);

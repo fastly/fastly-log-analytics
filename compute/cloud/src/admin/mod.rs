@@ -850,6 +850,9 @@ fn validate_service(
         return Err(Error::new(400, "log_period_exceeds_window_capacity"));
     }
     if service.capture == Capture::Attached {
+        if service.scoring.is_some() {
+            return Err(Error::new(400, "invalid_scoring_settings"));
+        }
         // Older installs find their endpoints by name or substring and would adopt or delete ours.
         let check_reserved = |raw: &str| {
             let name = raw.to_ascii_lowercase();
@@ -1410,8 +1413,6 @@ fn teardown(
             .secret(&service.fastly_token_ref)
             .map_err(|_| Error::new(400, "invalid_input"))?,
     };
-    preflight(context, &token, &sid, None, Capture::Managed)?;
-    context.confirm_with_token(&token);
     check_generation(&record, &input)?;
     if service.status == "torn_down" {
         return Err(Error::new(409, "service_torn_down"));
@@ -1423,6 +1424,32 @@ fn teardown(
         object.remove(key);
     }
     let options: Teardown = decode(input)?;
+    if !options.remove_logging && !options.remove_snippets {
+        if !valid_service_id(&sid) {
+            return Err(Error::new(400, "invalid_service_id"));
+        }
+        if own_services(context.runtime)?.iter().any(|v| v == &sid) {
+            return Err(Error::new(400, "install_service_forbidden"));
+        }
+        let (customer, _) = validate_token_with_info(context, &token, Some(&sid))?;
+        let remote_svc = context.api("GET", &format!("/service/{sid}"), &token, None)?;
+        if remote_svc["customer_id"] != customer {
+            return Err(Error::new(403, "wrong_account"));
+        }
+        if remote_svc["type"] != "vcl" {
+            return Err(Error::new(400, "vcl_service_required"));
+        }
+        context
+            .api("GET", "/enabled-products/v1/object_storage", &token, None)
+            .map_err(|_| Error::new(400, "object_storage_required"))?;
+        let (_, reservation) = install(context)?;
+        if reservation.service_id.as_deref().is_some_and(|v| v != sid) {
+            return Err(Error::new(409, "install_already_reserved"));
+        }
+    } else {
+        preflight(context, &token, &sid, None, Capture::Managed)?;
+    }
+    context.confirm_with_token(&token);
     if (!options.remove_logging || !options.remove_snippets)
         && (options.delete_fos_keys || options.delete_data || options.delete_fos_bucket)
     {

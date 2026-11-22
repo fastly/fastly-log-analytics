@@ -6,9 +6,11 @@ import type { FileRollup, FileSource } from "./engine";
 import {
   STORE_META_CACHE,
   StoreIndex,
+  bumpStoreMetaEpoch,
   describeError,
   getStoreStats,
   recordStoreError,
+  resetAndDrainStoreMeta,
   storageEstimate,
 } from "./file-store";
 import { FILTERED_CACHE_NAME, FilteredResultCache } from "./filtered-cache";
@@ -23,6 +25,7 @@ import {
 import {
   OPFS_DIRECTORY,
   OPFSParquetStore,
+  bumpOpfsEpoch,
   clearOPFSParquetStore,
 } from "./store-index";
 
@@ -87,6 +90,8 @@ const sourceKeepAlive = new WeakMap<object, ActiveSourceClosure>();
 const pendingSourceClosures = new Set<ActiveSourceClosure>();
 
 export function clearBrowserSourceMemoryCaches(): void {
+  bumpStoreMetaEpoch();
+  bumpOpfsEpoch();
   for (const ref of activeSources) {
     const instance = ref.deref();
     if (!instance) {
@@ -288,6 +293,7 @@ export async function deleteCaches(
 export async function clearRequestLogCaches(): Promise<void> {
   clearBrowserSourceMemoryCaches();
   await drainBrowserSourceStoreQueues();
+  await resetAndDrainStoreMeta();
   await clearOPFSParquetStore();
   await deleteCaches(
     (name) =>
@@ -570,6 +576,7 @@ export function browserSource(
   };
   const inFlightFiles = new Map<string, InFlightFile>();
   const inFlightRanges = new Map<string, InFlightRange>();
+  const activeRangeControllers = new Set<AbortController>();
   let cacheEpoch = 0;
   const waitSharedRange = (
     entry: InFlightRange,
@@ -659,6 +666,7 @@ export function browserSource(
   };
   // One write at a time, so each quota check sees the previous write's usage.
   let storeQueue: Promise<void> = Promise.resolve();
+  const activeOpfsWrites = new Set<Promise<unknown>>();
   let pendingStoreWrites = 0;
   let storeIndexFlushPinTimer: ReturnType<typeof setTimeout> | null = null;
   const clearClosureMemory = () => {
@@ -671,6 +679,8 @@ export function browserSource(
       request.controller.abort();
     }
     inFlightRanges.clear();
+    for (const controller of activeRangeControllers) controller.abort();
+    activeRangeControllers.clear();
     memoryRollups.clear();
     memoryRollupBytes = 0;
     memoryFiles.clear();
@@ -689,16 +699,19 @@ export function browserSource(
   };
   const closureHandle: ActiveSourceClosure = {
     clearMemoryCache: clearClosureMemory,
-    drainStoreQueue: () =>
-      storeQueue.then(
-        () => undefined,
-        () => undefined,
-      ),
+    drainStoreQueue: async () => {
+      await Promise.allSettled([
+        storeQueue,
+        ...activeOpfsWrites,
+        ...[...filteredCaches.values()].map((c) => c.drain()),
+      ]);
+    },
   };
   activeSources.add(new WeakRef(closureHandle));
   function syncClosurePin(): void {
     if (
       pendingStoreWrites > 0 ||
+      activeOpfsWrites.size > 0 ||
       storeIndexFlushPinTimer !== null ||
       inFlightFiles.size > 0 ||
       inFlightRanges.size > 0
@@ -749,25 +762,42 @@ export function browserSource(
   };
 
   const getFileCache = (): Promise<Cache | null> => {
-    if (!fileCachePromise) fileCachePromise = openCache(CACHE_NAME);
-    return fileCachePromise;
+    const openEpoch = cacheEpoch;
+    if (!fileCachePromise) {
+      const pending = openCache(CACHE_NAME).then((cache) =>
+        openEpoch === cacheEpoch ? cache : null,
+      );
+      if (openEpoch === cacheEpoch) fileCachePromise = pending;
+      return pending;
+    }
+    return fileCachePromise.then((cache) =>
+      openEpoch === cacheEpoch ? cache : null,
+    );
   };
 
   const getRollupCache = (): Promise<Cache | null> => {
+    const openEpoch = cacheEpoch;
     if (!rollupCachePromise) {
-      rollupCachePromise = deleteCaches(
+      const pending = deleteCaches(
         (name) =>
           name.startsWith(ROLLUP_CACHE_PREFIX) && name !== ROLLUP_CACHE_NAME,
       )
-        .then(() => openCache(ROLLUP_CACHE_NAME))
+        .then(() =>
+          openEpoch === cacheEpoch ? openCache(ROLLUP_CACHE_NAME) : null,
+        )
         .then((cache) => {
+          if (!cache || openEpoch !== cacheEpoch) return null;
           void cache
             ?.delete?.(`${baseUrl}/__flp_rollup_snapshot?v=1`)
             .catch(() => {});
           return cache;
         });
+      if (openEpoch === cacheEpoch) rollupCachePromise = pending;
+      return pending;
     }
-    return rollupCachePromise;
+    return rollupCachePromise.then((cache) =>
+      openEpoch === cacheEpoch ? cache : null,
+    );
   };
 
   const rollupMemoryKey = (key: string, scope?: string) =>
@@ -947,8 +977,15 @@ export function browserSource(
   const sourceWith = (options?: BrowserSourceOptions): BrowserFileSource => {
     const instance: BrowserFileSource = {
     async readDerivedFile(key, identity) {
+      const callEpoch = cacheEpoch;
+      if (callEpoch !== cacheEpoch) return null;
       const cache = await getFileCache();
-      const hit = await cache?.match(derivedCacheUrl(key, identity, options));
+      if (!cache || callEpoch !== cacheEpoch) return null;
+      const hit = await cache.match(derivedCacheUrl(key, identity, options));
+      if (callEpoch !== cacheEpoch) {
+        await hit?.body?.cancel();
+        return null;
+      }
       const byteLength = Number(hit?.headers.get(DERIVED_BYTES_HEADER));
       if (!hit || !Number.isSafeInteger(byteLength) || byteLength < 0) {
         await hit?.body?.cancel();
@@ -958,8 +995,15 @@ export function browserSource(
         byteLength,
         meta: decodeURIComponent(hit.headers.get(DERIVED_META_HEADER) ?? ""),
         bytes: async () => {
+          if (callEpoch !== cacheEpoch) {
+            await hit.body?.cancel();
+            throw new DOMException("The operation was aborted.", "AbortError");
+          }
           const start = performance.now();
           const bytes = await hit.arrayBuffer();
+          if (callEpoch !== cacheEpoch) {
+            throw new DOMException("The operation was aborted.", "AbortError");
+          }
           if (bytes.byteLength !== byteLength) throw new Error(`Cached derived file for ${key} is truncated`);
           touchStoreIndex(key);
           options?.onApiCall?.({
@@ -1016,7 +1060,11 @@ export function browserSource(
     },
     withOptions: (next) => sourceWith(next),
     async openParquet(file, signal, variant) {
+      const callEpoch = cacheEpoch;
       signal?.throwIfAborted();
+      if (callEpoch !== cacheEpoch) {
+        throw new DOMException("The operation was aborted.", "AbortError");
+      }
       const origin = globalThis.location?.origin;
       const reqPath = fileRequestPath(file.key);
       const path = fileDisplayPath(file.key);
@@ -1025,78 +1073,134 @@ export function browserSource(
         throw new Error(
           "Selective Parquet reads require the authenticated same-origin file route",
         );
-      const local = await opfsStore(variant).open(fileIdentity(file), signal);
-      if (local)
-        return {
-          kind: "opfs",
-          ...local,
-          cached: true,
-          fallbackUrl: url.href,
-          onPersistenceError: async (error) =>
-            recordStoreError({
-              at: Date.now(),
-              cache: OPFS_DIRECTORY,
-              key: file.key,
-              bytes: file.size,
-              message: `OPFS read unavailable; using nonpersistent selective HTTP reads: ${describeError(error)}`,
-              ...(await storageEstimate()),
-            }),
-        };
-      const start = performance.now();
-      const response = await fetchRetrying(url.href, {
-        credentials: "same-origin",
-        cache: "no-store",
-        signal,
-        headers: buildRequestHeaders(options, { Range: "bytes=0-0" }),
-      });
-      try {
-        const range = /^bytes 0-0\/(\d+)$/.exec(
-          response.headers.get("content-range") ?? "",
-        );
-        if (
-          response.status !== 206 ||
-          !range ||
-          !Number.isSafeInteger(Number(range[1])) ||
-          Number(range[1]) <= 0 ||
-          (file.size > 0 && Number(range[1]) !== file.size)
-        ) {
-          throw new Error(
-            `Selective file ${file.key} failed (${response.status}): a valid 206 Content-Range with matching object length is required`,
+      const controller = new AbortController();
+      const onCallerAbort = () => controller.abort(signal?.reason);
+      if (signal) {
+        if (signal.aborted) controller.abort(signal.reason);
+        else signal.addEventListener("abort", onCallerAbort, { once: true });
+      }
+      activeRangeControllers.add(controller);
+      syncClosurePin();
+      let onOpAbort: (() => void) | undefined;
+      const aborted = new Promise<never>((_, reject) => {
+        onOpAbort = () =>
+          reject(
+            controller.signal.reason ??
+              new DOMException("The operation was aborted.", "AbortError"),
           );
+        if (controller.signal.aborted) onOpAbort();
+        else controller.signal.addEventListener("abort", onOpAbort, { once: true });
+      });
+      const openWork = (async () => {
+        const local = await opfsStore(variant).open(
+          fileIdentity(file),
+          controller.signal,
+        );
+        if (callEpoch !== cacheEpoch) {
+          local?.release();
+          throw new DOMException("The operation was aborted.", "AbortError");
         }
-        if (file.etag && response.headers.get("etag") !== file.etag)
-          throw new Error(`Immutable file identity changed: ${file.key}`);
-        const probe = await response.arrayBuffer();
-        if (probe.byteLength !== 1)
-          throw new Error("Invalid HTTP Range response length");
-        const cdn = response.headers.get("x-flp-cdn-cache");
-        const cdnHit = isCdnHit(cdn);
-        const vcpuMs = parseVcpuMsHeader(response.headers);
-        options?.onApiCall?.({
-          source: cdnHit
-            ? "CDN Cache"
-            : cdn !== null && vcpuMs === null
-              ? "FOS S3"
-              : "Compute API",
-          method: "GET",
-          path,
-          status: 206,
-          duration_ms: Math.round(performance.now() - start),
-          bytes: 1,
-          vcpu_ms: vcpuMs,
-          cache: cdnHit ? "cdn" : "miss",
-          endpoint: "GET /api/file",
-          page_load_id: options?.getPageLoadId?.(),
+        if (local)
+          return {
+            kind: "opfs" as const,
+            ...local,
+            cached: true,
+            fallbackUrl: url.href,
+            onPersistenceError: async (error: unknown) => {
+              if (callEpoch !== cacheEpoch) return;
+              await recordStoreError({
+                at: Date.now(),
+                cache: OPFS_DIRECTORY,
+                key: file.key,
+                bytes: file.size,
+                message: `OPFS read unavailable; using nonpersistent selective HTTP reads: ${describeError(error)}`,
+                ...(await storageEstimate()),
+              });
+            },
+          };
+        const start = performance.now();
+        const response = await fetchRetrying(url.href, {
+          credentials: "same-origin",
+          cache: "no-store",
+          signal: controller.signal,
+          headers: buildRequestHeaders(options, { Range: "bytes=0-0" }),
         });
-        return { kind: "http", url: url.href, cached: false };
+        try {
+          if (callEpoch !== cacheEpoch) {
+            throw new DOMException("The operation was aborted.", "AbortError");
+          }
+          const range = /^bytes 0-0\/(\d+)$/.exec(
+            response.headers.get("content-range") ?? "",
+          );
+          if (
+            response.status !== 206 ||
+            !range ||
+            !Number.isSafeInteger(Number(range[1])) ||
+            Number(range[1]) <= 0 ||
+            (file.size > 0 && Number(range[1]) !== file.size)
+          ) {
+            throw new Error(
+              `Selective file ${file.key} failed (${response.status}): a valid 206 Content-Range with matching object length is required`,
+            );
+          }
+          if (file.etag && response.headers.get("etag") !== file.etag)
+            throw new Error(`Immutable file identity changed: ${file.key}`);
+          const probe = await response.arrayBuffer();
+          if (callEpoch !== cacheEpoch) {
+            throw new DOMException("The operation was aborted.", "AbortError");
+          }
+          if (probe.byteLength !== 1)
+            throw new Error("Invalid HTTP Range response length");
+          const cdn = response.headers.get("x-flp-cdn-cache");
+          const cdnHit = isCdnHit(cdn);
+          const vcpuMs = parseVcpuMsHeader(response.headers);
+          options?.onApiCall?.({
+            source: cdnHit
+              ? "CDN Cache"
+              : cdn !== null && vcpuMs === null
+                ? "FOS S3"
+                : "Compute API",
+            method: "GET",
+            path,
+            status: 206,
+            duration_ms: Math.round(performance.now() - start),
+            bytes: 1,
+            vcpu_ms: vcpuMs,
+            cache: cdnHit ? "cdn" : "miss",
+            endpoint: "GET /api/file",
+            page_load_id: options?.getPageLoadId?.(),
+          });
+          return { kind: "http" as const, url: url.href, cached: false };
+        } finally {
+          if (!response.bodyUsed) await response.body?.cancel();
+        }
+      })();
+      openWork.catch(() => {});
+      try {
+        return await Promise.race([openWork, aborted]);
       } finally {
-        if (!response.bodyUsed) await response.body?.cancel();
+        activeRangeControllers.delete(controller);
+        syncClosurePin();
+        if (signal) signal.removeEventListener("abort", onCallerAbort);
+        if (onOpAbort) controller.signal.removeEventListener("abort", onOpAbort);
       }
     },
     async hasPersistentFile(file, signal, variant) {
-      return opfsStore(variant).has(fileIdentity(file), file.size, signal);
+      const callEpoch = cacheEpoch;
+      if (callEpoch !== cacheEpoch) return false;
+      const found = await opfsStore(variant).has(
+        fileIdentity(file),
+        file.size,
+        signal,
+      );
+      return callEpoch === cacheEpoch && found;
     },
     async persistFile(file, signal, variant) {
+      const callEpoch = cacheEpoch;
+      signal?.throwIfAborted();
+      if (callEpoch !== cacheEpoch) {
+        throw new DOMException("The operation was aborted.", "AbortError");
+      }
       const reqPath = fileRequestPath(file.key);
       const path = fileDisplayPath(file.key);
       const origin = globalThis.location?.origin;
@@ -1106,73 +1210,112 @@ export function browserSource(
           "Persistent Parquet reads require the authenticated same-origin file route",
         );
       }
-      let response: Response | undefined;
-      let started = 0;
-      let failure: unknown;
-      try {
-        await opfsStore(variant).persist(
-          fileIdentity(file),
-          file.size,
-          async () => {
-            started = performance.now();
-            response = await fetchRetrying(url.href, {
-              credentials: "same-origin",
-              cache: "no-store",
-              signal,
-              headers: buildRequestHeaders(
-                options,
-                limits.foldFileTelemetry
-                  ? { "X-FLP-Fold-Telemetry": "1" }
-                  : undefined,
-              ),
-            });
-            if (file.etag && response.headers.get("etag") !== file.etag) {
-              await response.body?.cancel();
-              throw new Error(`Immutable file identity changed: ${file.key}`);
-            }
-            return response;
-          },
-          signal,
-        );
-        return { downloaded: response !== undefined };
-      } catch (error) {
-        failure = error;
-        throw error;
-      } finally {
-        if (response) {
-          const vcpuMs = parseVcpuMsHeader(response.headers);
-          const cdn = response.headers.get("x-flp-cdn-cache");
-          const cdnHit = isCdnHit(cdn);
-          const directCdn = cdn !== null && vcpuMs === null;
-          if (limits.foldFileTelemetry && !directCdn) {
-            folded.requests++;
-            if (vcpuMs !== null) folded.vcpuMs += vcpuMs;
-          }
-          const pageLoadId = options?.getPageLoadId?.();
-          options?.onApiCall?.({
-            source: cdnHit
-              ? "CDN Cache"
-              : directCdn
-                ? "FOS S3"
-                : "Compute API",
-            method: "GET",
-            path,
-            status: response.status,
-            duration_ms: Math.round(performance.now() - started),
-            bytes: failure ? null : file.size,
-            vcpu_ms: vcpuMs,
-            cache: cdnHit ? "cdn" : "miss",
-            error: failure ? describeError(failure) : null,
-            endpoint: "GET /api/file",
-            page_load_id: pageLoadId,
-          });
-          emitDebugSubCalls(
-            response,
-            "GET /api/file",
-            pageLoadId,
-            options?.onApiCall,
+      const controller = new AbortController();
+      const onCallerAbort = () => controller.abort(signal?.reason);
+      if (signal) {
+        if (signal.aborted) controller.abort(signal.reason);
+        else signal.addEventListener("abort", onCallerAbort, { once: true });
+      }
+      activeRangeControllers.add(controller);
+      syncClosurePin();
+      let onPersistAbort: (() => void) | undefined;
+      const aborted = new Promise<never>((_, reject) => {
+        onPersistAbort = () =>
+          reject(
+            controller.signal.reason ??
+              new DOMException("The operation was aborted.", "AbortError"),
           );
+        if (controller.signal.aborted) onPersistAbort();
+        else controller.signal.addEventListener("abort", onPersistAbort, { once: true });
+      });
+      const persistWork = (async () => {
+        let response: Response | undefined;
+        let started = 0;
+        let failure: unknown;
+        try {
+          await opfsStore(variant).persist(
+            fileIdentity(file),
+            file.size,
+            async () => {
+              if (callEpoch !== cacheEpoch) {
+                throw new DOMException("The operation was aborted.", "AbortError");
+              }
+              started = performance.now();
+              response = await fetchRetrying(url.href, {
+                credentials: "same-origin",
+                cache: "no-store",
+                signal: controller.signal,
+                headers: buildRequestHeaders(
+                  options,
+                  limits.foldFileTelemetry
+                    ? { "X-FLP-Fold-Telemetry": "1" }
+                    : undefined,
+                ),
+              });
+              if (callEpoch !== cacheEpoch) {
+                await response.body?.cancel();
+                throw new DOMException("The operation was aborted.", "AbortError");
+              }
+              if (file.etag && response.headers.get("etag") !== file.etag) {
+                await response.body?.cancel();
+                throw new Error(`Immutable file identity changed: ${file.key}`);
+              }
+              return response;
+            },
+            controller.signal,
+          );
+          if (callEpoch !== cacheEpoch) {
+            throw new DOMException("The operation was aborted.", "AbortError");
+          }
+          return { downloaded: response !== undefined };
+        } catch (error) {
+          failure = error;
+          throw error;
+        } finally {
+          if (response && callEpoch === cacheEpoch) {
+            const vcpuMs = parseVcpuMsHeader(response.headers);
+            const cdn = response.headers.get("x-flp-cdn-cache");
+            const cdnHit = isCdnHit(cdn);
+            const directCdn = cdn !== null && vcpuMs === null;
+            if (limits.foldFileTelemetry && !directCdn) {
+              folded.requests++;
+              if (vcpuMs !== null) folded.vcpuMs += vcpuMs;
+            }
+            const pageLoadId = options?.getPageLoadId?.();
+            options?.onApiCall?.({
+              source: cdnHit
+                ? "CDN Cache"
+                : directCdn
+                  ? "FOS S3"
+                  : "Compute API",
+              method: "GET",
+              path,
+              status: response.status,
+              duration_ms: Math.round(performance.now() - started),
+              bytes: failure ? null : file.size,
+              vcpu_ms: vcpuMs,
+              cache: cdnHit ? "cdn" : "miss",
+              error: failure ? describeError(failure) : null,
+              endpoint: "GET /api/file",
+              page_load_id: pageLoadId,
+            });
+            emitDebugSubCalls(
+              response,
+              "GET /api/file",
+              pageLoadId,
+              options?.onApiCall,
+            );
+          }
         }
+      })();
+      persistWork.catch(() => {});
+      try {
+        return await Promise.race([persistWork, aborted]);
+      } finally {
+        activeRangeControllers.delete(controller);
+        syncClosurePin();
+        if (signal) signal.removeEventListener("abort", onCallerAbort);
+        if (onPersistAbort) controller.signal.removeEventListener("abort", onPersistAbort);
       }
     },
     fetchJson: Object.assign(
@@ -1572,17 +1715,23 @@ export function browserSource(
       }
     },
     async hasFile(key) {
+      const callEpoch = cacheEpoch;
       const requestScope = fileMemoryIdentity(options);
       if (
         memoryFiles.has(key) &&
         memoryFileIdentities.get(key) === requestScope
       ) return true;
       try {
+        if (callEpoch !== cacheEpoch) return false;
         const cache = await getFileCache();
+        if (!cache || callEpoch !== cacheEpoch) return false;
         const url = `${baseUrl}${fileRequestPath(key)}`;
-        return Boolean(
-          await cache?.match(scopedCacheUrl(url, fileOwnerScope(options))),
-        );
+        const hit = await cache.match(scopedCacheUrl(url, fileOwnerScope(options)));
+        if (callEpoch !== cacheEpoch) {
+          await hit?.body?.cancel();
+          return false;
+        }
+        return Boolean(hit);
       } catch {
         return false;
       }
@@ -1599,17 +1748,17 @@ export function browserSource(
       }
       try {
         if (rollupScope) {
+          if (callEpoch !== cacheEpoch) return null;
           const access = await opfsStore(`rollup:${rollupScope}:${variant}`).open(key);
           if (access) {
             try {
+              if (callEpoch !== cacheEpoch) return null;
               const file = await access.handle.getFile();
               const decoded = await decodeRollup(
                 new Uint8Array(await file.arrayBuffer()),
               );
-              if (decoded && decoded.key === key) {
-                if (callEpoch === cacheEpoch) {
-                  rememberRollup(key, decoded, variant, undefined, rollupScope);
-                }
+              if (decoded && decoded.key === key && callEpoch === cacheEpoch) {
+                rememberRollup(key, decoded, variant, undefined, rollupScope);
                 return decoded;
               }
             } finally {
@@ -1623,7 +1772,10 @@ export function browserSource(
         const hit = await cache.match(
           scopedCacheUrl(rollupCacheUrl(baseUrl, key, variant), rollupScope),
         );
-        if (!hit || callEpoch !== cacheEpoch) return null;
+        if (!hit || callEpoch !== cacheEpoch) {
+          await hit?.body?.cancel();
+          return null;
+        }
         const decoded = await decodeRollup(
           new Uint8Array(await hit.arrayBuffer()),
         );
@@ -1640,19 +1792,36 @@ export function browserSource(
       const rollupScope = fileScope(options);
       rememberRollup(key, rollup, variant, undefined, rollupScope);
       if (rollupScope) {
-        const body = await encodeRollup(rollup);
-        if (callEpoch !== cacheEpoch) return;
+        const controller = new AbortController();
+        activeRangeControllers.add(controller);
+        syncClosurePin();
+        const op = (async () => {
+          try {
+            const body = await encodeRollup(rollup);
+            if (callEpoch !== cacheEpoch || controller.signal.aborted) return;
+            await opfsStore(`rollup:${rollupScope}:${variant}`).persist(
+              key,
+              body.byteLength,
+              async () => {
+                if (callEpoch !== cacheEpoch || controller.signal.aborted) {
+                  throw new DOMException("The operation was aborted.", "AbortError");
+                }
+                return new Response(body as BodyInit);
+              },
+              controller.signal,
+            );
+          } catch {
+            /* The OPFS store records genuine failures; memory remains usable. */
+          }
+        })();
+        activeOpfsWrites.add(op);
+        syncClosurePin();
         try {
-          await opfsStore(`rollup:${rollupScope}:${variant}`).persist(
-            key,
-            body.byteLength,
-            async () => {
-              if (callEpoch !== cacheEpoch) throw new Error("Cache cleared");
-              return new Response(body as BodyInit);
-            },
-          );
-        } catch {
-          /* The OPFS store records failures; memory remains usable. */
+          await op;
+        } finally {
+          activeRangeControllers.delete(controller);
+          activeOpfsWrites.delete(op);
+          syncClosurePin();
         }
         return;
       }
@@ -1702,6 +1871,8 @@ export function browserSource(
       }
     },
     async pruneCache(manifest, fromMs, toMs) {
+      const callEpoch = cacheEpoch;
+      if (callEpoch !== cacheEpoch) return;
       pinManifestStoreIndex([
         ...manifest.files.map((file) => file.key),
         ...(manifest.summaryFiles ?? []).map((file) => file.key),
@@ -1713,11 +1884,13 @@ export function browserSource(
           getFileCache(),
           getRollupCache(),
         ]);
+        if (callEpoch !== cacheEpoch) return;
         for (const key of fileCache
           ? await pruneRequestCache(fileCache, manifest, fromMs, toMs, {
               scope: fileOwnerScope(options),
             })
           : []) {
+          if (callEpoch !== cacheEpoch) return;
           if (fileMemoryIdentityOwnedBy(memoryFileIdentities.get(key), options)) {
             forgetFile(key);
           }
@@ -1728,6 +1901,7 @@ export function browserSource(
               scope: fileScope(options),
             })
           : []) {
+          if (callEpoch !== cacheEpoch) return;
           forgetRollup(key, fileScope(options));
         }
       } catch {

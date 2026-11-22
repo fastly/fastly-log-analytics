@@ -22,6 +22,25 @@ export type StoreError = {
   quota: number | null;
 };
 
+let metaStoreEpoch = 0;
+let metaWriteQueue: Promise<void> = Promise.resolve();
+const activeMetaFlushes = new Set<Promise<void>>();
+
+export function bumpStoreMetaEpoch(): void {
+  metaStoreEpoch += 1;
+}
+
+export async function resetAndDrainStoreMeta(): Promise<void> {
+  metaStoreEpoch += 1;
+  if (activeMetaFlushes.size > 0) {
+    await Promise.allSettled([...activeMetaFlushes]);
+  }
+  await metaWriteQueue.then(
+    () => undefined,
+    () => undefined,
+  );
+}
+
 async function openMeta(): Promise<Cache | null> {
   try {
     return typeof caches === "undefined"
@@ -33,22 +52,41 @@ async function openMeta(): Promise<Cache | null> {
 }
 
 async function readJson<T>(url: string): Promise<T | null> {
+  const callMetaEpoch = metaStoreEpoch;
   try {
-    const hit = await (await openMeta())?.match(url);
-    return hit ? ((await hit.json()) as T) : null;
+    if (callMetaEpoch !== metaStoreEpoch) return null;
+    const meta = await openMeta();
+    if (!meta || callMetaEpoch !== metaStoreEpoch) return null;
+    const hit = await meta.match(url);
+    if (!hit || callMetaEpoch !== metaStoreEpoch) return null;
+    return (await hit.json()) as T;
   } catch {
     return null;
   }
 }
 
-async function writeJson(url: string, value: unknown): Promise<void> {
-  const meta = await openMeta();
-  await meta?.put(
-    url,
-    new Response(JSON.stringify(value), {
-      headers: { "content-type": "application/json" },
-    }),
+function writeJson(
+  url: string,
+  value: unknown,
+  callMetaEpoch = metaStoreEpoch,
+): Promise<void> {
+  if (callMetaEpoch !== metaStoreEpoch) return Promise.resolve();
+  const pending = metaWriteQueue.then(async () => {
+    if (callMetaEpoch !== metaStoreEpoch) return;
+    const meta = await openMeta();
+    if (!meta || callMetaEpoch !== metaStoreEpoch) return;
+    await meta.put(
+      url,
+      new Response(JSON.stringify(value), {
+        headers: { "content-type": "application/json" },
+      }),
+    );
+  });
+  metaWriteQueue = pending.then(
+    () => undefined,
+    () => undefined,
   );
+  return pending;
 }
 
 /** The most recent failed or skipped store write, if any. */
@@ -57,8 +95,10 @@ export function readStoreError(): Promise<StoreError | null> {
 }
 
 export async function recordStoreError(error: StoreError): Promise<void> {
+  const callMetaEpoch = metaStoreEpoch;
+  if (callMetaEpoch !== metaStoreEpoch) return;
   try {
-    await writeJson(ERROR_URL, error);
+    await writeJson(ERROR_URL, error, callMetaEpoch);
   } catch {
     // Storage is full enough that even the error note failed; the console keeps it.
     console.warn("flp: browser cache write failed", error);
@@ -103,11 +143,14 @@ export class StoreIndex {
   private loaded: Promise<void> | null = null;
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
   private clock = 0;
+  private epoch = 0;
 
   private load(): Promise<void> {
     if (!this.loaded) {
+      const loadEpoch = this.epoch;
       this.loaded = readJson<Record<string, IndexEntry>>(INDEX_URL).then(
         (stored) => {
+          if (loadEpoch !== this.epoch) return;
           for (const [key, entry] of Object.entries(stored ?? {})) {
             if (!this.entries.has(key)) this.entries.set(key, entry);
             this.clock = Math.max(this.clock, entry[0]);
@@ -142,6 +185,7 @@ export class StoreIndex {
   }
 
   reset(): void {
+    this.epoch += 1;
     this.entries.clear();
     this.pinned.clear();
     this.loaded = null;
@@ -151,18 +195,36 @@ export class StoreIndex {
 
   private scheduleFlush(): void {
     if (this.flushTimer) return;
+    const scheduledEpoch = this.epoch;
     this.flushTimer = setTimeout(() => {
       this.flushTimer = null;
+      if (scheduledEpoch !== this.epoch) return;
       void this.flush();
     }, INDEX_FLUSH_MS);
   }
 
   async flush(): Promise<void> {
+    const callEpoch = this.epoch;
+    const callMetaEpoch = metaStoreEpoch;
+    if (callEpoch !== this.epoch || callMetaEpoch !== metaStoreEpoch) return;
+    const op = (async () => {
+      try {
+        await this.load();
+        if (callEpoch !== this.epoch || callMetaEpoch !== metaStoreEpoch) return;
+        await writeJson(
+          INDEX_URL,
+          Object.fromEntries(this.entries),
+          callMetaEpoch,
+        );
+      } catch {
+        // The index only orders eviction; losing a flush is harmless.
+      }
+    })();
+    activeMetaFlushes.add(op);
     try {
-      await this.load();
-      await writeJson(INDEX_URL, Object.fromEntries(this.entries));
-    } catch {
-      // The index only orders eviction; losing a flush is harmless.
+      await op;
+    } finally {
+      activeMetaFlushes.delete(op);
     }
   }
 

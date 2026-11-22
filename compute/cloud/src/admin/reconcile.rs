@@ -9,6 +9,7 @@ pub fn managed_name(name: &str) -> bool {
             name,
             "Fastly Object Storage Logs"
                 | "Fastly RUM Logs"
+                | "Fastly RUM Object Storage Logs"
                 | "log_analytics_condition"
                 | "rum_log_condition"
                 | "fastly_log_analytics_false"
@@ -54,6 +55,18 @@ pub(super) fn has_attach_condition_marker(conditions: &[Value]) -> bool {
     })
 }
 
+fn primary_endpoint_expected_condition(name: &str, cond: &str) -> Option<&'static str> {
+    match name {
+        "Fastly Object Storage Logs" | "Fastly Log Analytics" => Some("log_analytics_condition"),
+        "Fastly RUM Logs" | "Fastly RUM Object Storage Logs" => Some("rum_log_condition"),
+        _ => match cond {
+            "log_analytics_condition" => Some("log_analytics_condition"),
+            "rum_log_condition" => Some("rum_log_condition"),
+            _ => None,
+        },
+    }
+}
+
 pub(super) fn has_foreign_primary_endpoint(
     service: &Service,
     scope: &str,
@@ -62,16 +75,12 @@ pub(super) fn has_foreign_primary_endpoint(
     allow_owned_legacy_s3: bool,
 ) -> bool {
     for item in fos_items {
-        let Some(name) = item["name"].as_str() else {
+        let name = item["name"].as_str().unwrap_or("");
+        let cond = item["response_condition"].as_str().unwrap_or("");
+        let Some(expected_cond) = primary_endpoint_expected_condition(name, cond) else {
             continue;
         };
-        let expected_cond = match name {
-            "Fastly Object Storage Logs" => "log_analytics_condition",
-            "Fastly RUM Logs" => "rum_log_condition",
-            _ => continue,
-        };
         let path = item["path"].as_str().unwrap_or("");
-        let cond = item["response_condition"].as_str().unwrap_or("");
         if item["bucket_name"].as_str() != Some(service.fos_bucket.as_str())
             || !endpoint_path_matches_scope(path, scope)
             || cond != expected_cond
@@ -80,19 +89,15 @@ pub(super) fn has_foreign_primary_endpoint(
         }
     }
     for item in s3_items {
-        let Some(name) = item["name"].as_str() else {
+        let name = item["name"].as_str().unwrap_or("");
+        let cond = item["response_condition"].as_str().unwrap_or("");
+        let Some(expected_cond) = primary_endpoint_expected_condition(name, cond) else {
             continue;
-        };
-        let expected_cond = match name {
-            "Fastly Object Storage Logs" => "log_analytics_condition",
-            "Fastly RUM Logs" => "rum_log_condition",
-            _ => continue,
         };
         if !allow_owned_legacy_s3 || !service.owned_endpoint_names.iter().any(|n| n == name) {
             return true;
         }
         let path = item["path"].as_str().unwrap_or("");
-        let cond = item["response_condition"].as_str().unwrap_or("");
         if item["bucket_name"].as_str() != Some(service.fos_bucket.as_str())
             || !endpoint_path_matches_scope(path, scope)
             || cond != expected_cond
@@ -101,6 +106,59 @@ pub(super) fn has_foreign_primary_endpoint(
         }
     }
     false
+}
+
+pub(super) fn verify_managed_customer_vcl_ownership(
+    context: &Context<'_, impl Runtime>,
+    service: &Service,
+    token: &str,
+) -> Result<u64, Error> {
+    if service.capture == Capture::Attached {
+        return Err(Error::new(409, "managed_resources_not_owned"));
+    }
+    let version = active_version(context, &service.service_id, token)?;
+    let mut current = BTreeMap::new();
+    for resource in ["snippet", "logging/s3", "logging/fos", "condition"] {
+        let value = context.api(
+            "GET",
+            &format!(
+                "/service/{}/version/{version}/{resource}",
+                service.service_id
+            ),
+            token,
+            None,
+        )?;
+        current.insert(resource.to_owned(), list(&value)?.clone());
+    }
+    let snippets = &current["snippet"];
+    if snippets.iter().any(|v| {
+        v["name"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("flp-owner-") && s != marker(service))
+    }) {
+        return Err(Error::new(409, "managed_resources_not_owned"));
+    }
+    let own_marker = snippets.iter().any(|v| {
+        v["name"] == marker(service)
+            && v["content"].as_str().or_else(|| v["body"].as_str())
+                == Some(&format!("# {}", resource_owner(service)))
+    });
+    let scope = crate::ingest::scope(service);
+    if !own_marker
+        || has_attach_condition_marker(&current["condition"])
+        || has_attach_endpoint_marker(&current["logging/s3"], &current["logging/fos"])
+        || (capture_present(snippets)
+            && has_foreign_primary_endpoint(
+                service,
+                &scope,
+                &current["logging/s3"],
+                &current["logging/fos"],
+                true,
+            ))
+    {
+        return Err(Error::new(409, "managed_resources_not_owned"));
+    }
+    Ok(version)
 }
 
 fn verified_cloud_fos_endpoint(
@@ -499,6 +557,12 @@ fn discover(
     service: &Service,
     token: &str,
 ) -> Result<(), Error> {
+    if job.kind == "teardown" && !job.options.remove_logging && !job.options.remove_snippets {
+        job.changes.clear();
+        job.change_cursor = 0;
+        advance(job, "remove_front");
+        return Ok(());
+    }
     let version = active_version(context, &service.service_id, token)?;
     let mut target = desired(context, service)?;
     let desired_fos_endpoints = target.get("logging/fos").cloned().unwrap_or_default();
