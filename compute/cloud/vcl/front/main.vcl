@@ -504,13 +504,16 @@ sub vcl_deliver {
   }
   # Edge timing for the browser's PerformanceResourceTiming.serverTiming; appended after any
   # Compute phases. `cdn-cache` is the shield-aware FOS object outcome, `edge` this node's state.
+  # A cached response (here or at the shield, so a non-zero Age) replaces the stored value:
+  # its Compute phases timed an earlier request.
   if (fastly.ff.visits_this_service == 0) {
     declare local var.edge_timing STRING;
     set var.edge_timing = "edge;desc=" + fastly_info.state + ";dur=" + time.elapsed.msec;
     if (req.http.x-flp-fos-service && resp.http.x-flp-fos-cache) {
       set var.edge_timing = "cdn-cache;desc=" + resp.http.x-flp-fos-cache + ", " + var.edge_timing;
     }
-    if (resp.http.Server-Timing) {
+    if (resp.http.Server-Timing && obj.hits == 0 && fastly_info.state !~ "^HIT"
+        && std.atoi(resp.http.Age) == 0) {
       set resp.http.Server-Timing = resp.http.Server-Timing + ", " + var.edge_timing;
     } else {
       set resp.http.Server-Timing = var.edge_timing;

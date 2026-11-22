@@ -442,6 +442,16 @@ sub edge_delivery_keeps_compute_server_timing_first() {
 }
 
 
+// @scope: deliver
+sub edge_cached_response_replaces_stale_server_timing() {
+  testing.inject_variable("fastly.ff.visits_this_service", "0");
+  set resp.http.Age = "30";
+  set resp.http.Server-Timing = "app;dur=4.2";
+  testing.call_subroutine("vcl_deliver");
+  assert.match(resp.http.Server-Timing, "^edge;desc=[A-Z-]+;dur=[0-9]+$");
+}
+
+
 // @scope: recv
 sub direct_fos_parquet_path_with_valid_cdn_cookie_rewrites_to_service_fos_lookup() {
   testing.inject_variable("req.is_ssl", true);
