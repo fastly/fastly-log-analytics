@@ -416,9 +416,13 @@ export function planSummaries(
       claim(file, unlisted);
       continue;
     }
-    const list = windows.map(([, w]) => w);
-    const rows = list.reduce((sum, w) => sum + w.rows, 0);
-    if (rows !== Number(match[6])) continue;
+    const rowsOf = (set: [string, RawWindow][]) => set.reduce((sum, [, w]) => sum + w.rows, 0);
+    // Under steady ingest, windows ending at the bundle's last slot may land after it
+    // was built: those carry their own listed summaries, and the bundle holds the rest.
+    const held = rowsOf(windows) === Number(match[6]) ? windows
+      : unlisted.some(([, w]) => w.compacted) && rowsOf(unlisted) === Number(match[6]) ? unlisted : null;
+    if (!held) continue;
+    const list = held.map(([, w]) => w);
     const hasCompact = list.some((w) => w.compacted);
     // A live tail window that starts after the bundle and crosses `toMs`
     // leaves the bundle's own rows wholly inside the range.
@@ -428,7 +432,7 @@ export function planSummaries(
         list.reduce((sum, w) => sum + w.sources, 0) <= Number(match[5])
       : hourBundleName(list) === match[4];
     if (matchesOpen) {
-      claim(file, windows);
+      claim(file, held);
     }
   }
   for (const { file, match } of byKind(WINDOW_SUMMARY)) {

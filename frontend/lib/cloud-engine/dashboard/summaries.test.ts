@@ -1337,4 +1337,50 @@ describe("projected dashboard summaries", () => {
       [openBundle.key, compactedWin1.key, compactedWin2.key].sort(),
     );
   });
+
+  it("answers an open hour's compacts and bundled windows from its open_bundle while late windows keep their own summaries", () => {
+    // Live shape under ingest: the bundle holds the hour's compacts and two windows
+    // without listed summaries; three later windows ending at the same slot have their own.
+    const fromMs = Date.parse("2026-11-22T18:00:00Z");
+    const toMs = Date.parse("2026-11-22T18:57:00Z");
+    const hourDir = "processed/request/year=2026/month=11/day=22/hour=18/";
+    const sumDir = "processed/summary/request/year=2026/month=11/day=22/hour=18/";
+    const raw = (name: string, start: string, end: string, rows: number, sources?: number): ManifestFile => ({
+      key: `${hourDir}${name}`, start: `2026-11-22T${start}:00Z`, end: `2026-11-22T${end}:00Z`, size: 10_000, rows,
+      ...sources ? { sources } : {},
+    });
+    const compacts = [
+      raw("compact=1795370400-1795371600-c32-n300-aa.parquet", "18:00", "18:20", 300, 32),
+      raw("compact=1795371600-1795373040-c13-n200-bb.parquet", "18:20", "18:44", 200, 13),
+    ];
+    const bundled = [
+      raw("window=1795373280-1795373400-a6s1-n30.parquet", "18:48", "18:50", 30),
+      raw("window=1795373280-1795373400-a6s2-n20.parquet", "18:48", "18:50", 20),
+    ];
+    const late = [
+      raw("window=1795373280-1795373400-b1s0-n1.parquet", "18:48", "18:50", 1),
+      raw("window=1795373280-1795373400-c1s0-n41.parquet", "18:48", "18:50", 41),
+    ];
+    const openBundle: ManifestFile = {
+      key: "processed/summary_bundle/request/year=2026/month=11/day=22/open_bundle=18-1795373400000-c47-n550-h0123456789abcdef.parquet",
+      start: "2026-11-22T18:00:00Z", end: "2026-11-22T18:50:00Z", size: 20_000, rows: 550, kind: "hour",
+    };
+    const lateSummaries = late.map((file): ManifestFile => ({
+      ...file, key: file.key.replace(hourDir, sumDir).replace("/window=", "/summary="), kind: "window",
+    }));
+
+    const plan = planSummaries([...compacts, ...bundled, ...late], [openBundle, ...lateSummaries], fromMs, toMs);
+
+    expect(plan.raw).toEqual([]);
+    expect(plan.summaries.map((use) => use.file.key).sort()).toEqual(
+      [openBundle.key, ...lateSummaries.map((file) => file.key)].sort());
+    expect(plan.summaries.find((use) => use.file === openBundle)?.covers.map((file) => file.key).sort())
+      .toEqual([...compacts, ...bundled].map((file) => file.key).sort());
+
+    // One more row than the bundle names: its holdings are not proven, so the hour reads raw.
+    const short = planSummaries([...compacts, ...bundled, ...late], [
+      { ...openBundle, key: openBundle.key.replace("-n550-", "-n549-") }, ...lateSummaries,
+    ], fromMs, toMs);
+    expect(short.raw.map((file) => file.key).sort()).toEqual([...compacts, ...bundled].map((file) => file.key).sort());
+  });
 });
