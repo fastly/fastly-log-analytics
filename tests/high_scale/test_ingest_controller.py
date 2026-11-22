@@ -1918,21 +1918,37 @@ def test_unsupported_domain_is_rejected() -> None:
 # ── Merged from test_projections.py ──
 
 
+@pytest.mark.no_postgres
 def test_cmcd_projection_preserves_request_identity_and_full_session_id() -> None:
+    cmcd_sid = "cmcd-session-" + "c" * 40
     request = {
         "event_id": "request-event-1",
         "service_id": "svc",
         "timestamp": "2026-09-01T00:00:00Z",
         "cmcd_version": "v2",
         "sid": "session-" + "x" * 64,
-        "cmcd": {"br": 1200, "d": 4000},
+        "cmcd": {"sid": cmcd_sid, "br": 1200, "d": 4000},
     }
     projection = project_cmcd(request)
     assert (
         projection is not None and projection["request_event_id"] == "request-event-1" and projection["projection_key"]
     )
-    assert projection["sid"] == request["sid"] and projection["cmcd_version"] == "v2"
-    assert projection["fields"] == {"br": 1200, "d": 4000}
+    assert projection["sid"] == cmcd_sid and projection["cmcd_version"] == "v2"
+    assert projection["fields"] == {"sid": cmcd_sid, "br": 1200, "d": 4000}
+
+
+@pytest.mark.no_postgres
+def test_cmcd_projection_never_reuses_the_generic_request_session_id() -> None:
+    projection = project_cmcd(
+        {
+            "event_id": "request-event-1",
+            "service_id": "svc",
+            "timestamp": "2026-09-01T00:00:00Z",
+            "sid": "generic-request-session",
+            "cmcd": {"br": 1200, "d": 4000},
+        }
+    )
+    assert projection is not None and projection["sid"] == ""
 
 
 def test_cmcd_projection_is_absent_when_request_has_no_cmcd() -> None:
