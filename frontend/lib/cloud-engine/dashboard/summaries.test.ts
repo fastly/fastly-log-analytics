@@ -28,6 +28,7 @@ import {
   type DashboardResult,
 } from "./engine";
 import type { DashboardFilter } from "./filters";
+import { fnv1a32 } from "../parquet-key";
 import { Hll } from "./hll";
 import type { ManifestFile } from "./manifest";
 import { readColumns } from "./parquet";
@@ -1166,6 +1167,64 @@ describe("pivot slices", () => {
     expect(resolveSummaryFromSlices(nulls, [status("200")])).toEqual(ok);
     expect(resolveSummaryFromSlices(nulls, [status("200", "exclude")])).toBeNull();
     expect(resolveSummaryFromSlices(decoded, [status("200", "exclude")])).not.toBeNull();
+  });
+
+  it("answers an open hour's compacts from the window summaries they name", async () => {
+    // The ingest worker compacts an open hour's windows before its bundle catches up; their
+    // summaries stay listed and the compact's name tags them.
+    const windows09 = RAW.filter((f) => f.key.includes("/hour=09/"));
+    const compacts = windows09.slice(0, 2).map((window): ManifestFile => {
+      const name = /window=(\d+)-(\d+)-(.+)-n(\d+)\.parquet$/.exec(window.key)!;
+      const tag = fnv1a32(`window=${name[1]}-${name[2]}-${name[3]}-n${name[4]}.parquet`)
+        .toString(16)
+        .padStart(8, "0");
+      return {
+        ...window,
+        key: window.key.replace(/window=.*$/, `compact=${name[1]}-${name[2]}-c1-n${name[4]}-${tag}.parquet`),
+        sources: 1,
+      };
+    });
+    const raw = [...RAW.filter((f) => !windows09.slice(0, 2).includes(f)), ...compacts];
+    const buffers = { ...BUFFERS };
+    compacts.forEach((compact, i) => (buffers[compact.key] = BUFFERS[windows09[i].key]));
+    const summaries = [
+      ...pick("hour", (e) => !e.early && e.key.includes("hour_bundle=08")),
+      ...pick("window", (e) => e.key.includes("/hour=09/")),
+    ];
+    const filters = [status("200"), status("304")];
+    const source = fixtureSource([page(raw)], buffers, { json: [], files: [] }, [page(summaries)]);
+    const result = await runDashboard(source, { from, to, filters });
+    expect(source.log.files.filter((k) => !k.includes("summary"))).toEqual([]);
+    expectMatchesRaw(result, await rawFiltered(filters));
+
+    // One compact of two windows, one of whose summaries predates slices: the compact reads
+    // raw and neither summary counts its rows.
+    const pair = windows09.slice(0, 2);
+    const names = pair.map((w) => /window=(.+)\.parquet$/.exec(w.key)![1]);
+    const tags = names.map((n) => fnv1a32(`window=${n}.parquet`).toString(16).padStart(8, "0"));
+    const compact: ManifestFile = {
+      ...pair[0],
+      key: pair[0].key.replace(/window=.*$/, `compact=1800003600-1800005400-c2-n${pair[0].rows! + pair[1].rows!}-${tags.join("")}.parquet`),
+      end: pair[1].end,
+      rows: pair[0].rows! + pair[1].rows!,
+      sources: 2,
+    };
+    let second: Record<string, unknown>[] = [];
+    await editSummaryRows(BUFFERS[pair[1].key], (rows) => (second = rows));
+    const mixed = { ...BUFFERS, [compact.key]: await editSummaryRows(BUFFERS[pair[0].key], (rows) => [...rows, ...second]) };
+    const [, unsliced] = summaries.filter((f) => f.key.includes("/hour=09/"));
+    mixed[unsliced.key] = await editSummaryRows(BUFFERS[unsliced.key], (rows) =>
+      rows.filter((row) => !SLICE_GROUPS.includes(String(row.bundle))),
+    );
+    const mixedSource = fixtureSource(
+      [page([...RAW.filter((f) => !pair.includes(f)), compact])],
+      mixed,
+      { json: [], files: [] },
+      [page(summaries.map((f) => (f.key === unsliced.key ? { ...f, size: mixed[f.key].byteLength } : f)))],
+    );
+    const fallback = await runDashboard(mixedSource, { from, to, filters });
+    expect(mixedSource.log.files.filter((k) => !k.includes("summary"))).toEqual([compact.key]);
+    expectMatchesRaw(fallback, await rawFiltered(filters));
   });
 
   it("reads raw for summaries written before slices", async () => {

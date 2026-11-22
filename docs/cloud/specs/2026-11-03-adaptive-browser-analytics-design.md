@@ -295,6 +295,20 @@ The filtered dashboard uses slices only for ranges of at least an hour
 whose filters include a pivot field and whose cards are all
 summary-backed; other filters keep the raw path.
 
+It plans summaries like the unfiltered rollup (`planFilteredSummaries`:
+coarsest first, then an open hour's compacts from the window summaries or
+open bundle that hold their rows, as `planRollup` does). Several summaries
+that answer the same compacts form one group: all of them answer from slices,
+or the compacts read raw and none of them is counted.
+
+Where raw reads remain:
+
+- hours whose summaries predate slices, until they age out of the range;
+- an hour that crosses the range's start: its compacts also hold rows
+  before the range, so it reads raw (one hour of a 24h range, but nearly all
+  of a rolling 1h range);
+- filters on fields other than pivots, and ranges under an hour.
+
 Cost (bench `summary_bench`, release, native; noisy shared machine):
 
 | | before | with status slices |
