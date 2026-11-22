@@ -2070,6 +2070,185 @@ mod summary_bundles {
             .any(|k| k.contains("hour_bundle=08-c3-")));
     }
 
+    const CMCD_WINDOWS: &str = "processed/request/cmcd_summary/";
+    const CMCD_BUNDLES: &str = "processed/summary_bundle/cmcd_summary/";
+
+    /// Writes a CMCD window summary of `n` rows for the minute at `start`; returns its key.
+    fn cmcd_window(fake: &Fake, start: i64, shard: u32, n: i64) -> String {
+        use arrow_schema::{DataType, Field, Schema, TimeUnit};
+        let schema = std::sync::Arc::new(Schema::new(vec![
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
+                false,
+            ),
+            Field::new("cmcd_sid", DataType::Utf8, true),
+            Field::new("cmcd_br", DataType::Int64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                std::sync::Arc::new(
+                    TimestampMillisecondArray::from(
+                        (0..n)
+                            .map(|i| start * 1000 + i * 977 % 60_000)
+                            .collect::<Vec<_>>(),
+                    )
+                    .with_timezone("UTC"),
+                ),
+                std::sync::Arc::new(StringArray::from(
+                    (0..n)
+                        .map(|i| Some(format!("s{}", i % 3)))
+                        .collect::<Vec<_>>(),
+                )),
+                std::sync::Arc::new(Int64Array::from(
+                    (0..n).map(|i| Some(1000 + i * 10)).collect::<Vec<_>>(),
+                )),
+            ],
+        )
+        .unwrap();
+        let key = ingest::cmcd_summary::cmcd_summary_key(
+            CMCD_WINDOWS,
+            start,
+            start + 60,
+            &format!("p1s{shard}"),
+            n as u64,
+        );
+        fake.bucket.borrow_mut().insert(
+            key.clone(),
+            ingest::cmcd_summary::write_cmcd_summary(&[&batch], start).unwrap(),
+        );
+        key
+    }
+
+    fn settle_cmcd(fake: &Fake) {
+        let svc = service();
+        for _ in 0..40 {
+            fake.new_request();
+            let report = bundle::cmcd_summary_bundle(&store(fake, &svc), "ck", 1).unwrap();
+            assert!(report.errors.is_empty(), "{:?}", report.errors);
+            if !report.more_pending {
+                return;
+            }
+        }
+        panic!("CMCD bundling did not settle");
+    }
+
+    fn cmcd_view(fake: &Fake, from: i64, to: i64) -> Vec<(String, String, u64)> {
+        let page = files_page(
+            fake,
+            &format!(
+                "dataset=cmcd_summary&view=summary&from={}&to={}",
+                iso_url(from),
+                iso_url(to)
+            ),
+        )
+        .unwrap();
+        assert_eq!(page["complete"], true, "{page}");
+        page["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| {
+                (
+                    f["kind"].as_str().unwrap().to_owned(),
+                    f["key"].as_str().unwrap().to_owned(),
+                    f["rows"].as_u64().unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn cmcd_summary_view_reads_hour_bundles_plus_windows_written_after_them() {
+        let fake = Fake::new(BASE + 3 * HOUR);
+        watermark(&fake, BASE + 3 * HOUR);
+        let windows: Vec<String> = (0..4)
+            .map(|m| cmcd_window(&fake, BASE + m * 60, 0, 5))
+            .collect();
+        settle_cmcd(&fake);
+        let bundles: Vec<String> = fake
+            .keys(CMCD_BUNDLES)
+            .into_iter()
+            .filter(|k| k.contains("hour_bundle=08-c4-n20-"))
+            .collect();
+        assert_eq!(bundles.len(), 1, "{:?}", fake.keys(CMCD_BUNDLES));
+
+        let view = cmcd_view(&fake, BASE, BASE + HOUR);
+        assert_eq!(view, [("hour".to_owned(), bundles[0].clone(), 20)]);
+
+        // A window written after the bundle is read on top of it.
+        let late = cmcd_window(&fake, BASE + 600, 1, 2);
+        fake.mtimes
+            .borrow_mut()
+            .insert(late.clone(), BASE + 2 * HOUR);
+        let view = cmcd_view(&fake, BASE, BASE + HOUR);
+        assert_eq!(
+            view,
+            [
+                ("hour".to_owned(), bundles[0].clone(), 20),
+                ("window".to_owned(), late.clone(), 2)
+            ]
+        );
+
+        // A window the bundle does not name but listed no later than it breaks the proof, so
+        // every window is read instead.
+        fake.mtimes.borrow_mut().remove(&late);
+        let view = cmcd_view(&fake, BASE, BASE + HOUR);
+        assert!(view.iter().all(|v| v.0 == "window"), "{view:?}");
+        assert_eq!(view.len(), 5);
+
+        // A range starting inside the hour reads its overlapping windows, not the bundle.
+        let view = cmcd_view(&fake, BASE + 120, BASE + HOUR);
+        let keys: Vec<&str> = view.iter().map(|v| v.1.as_str()).collect();
+        assert_eq!(
+            keys,
+            [windows[2].as_str(), windows[3].as_str(), late.as_str()]
+        );
+
+        // The raw CMCD listing is unchanged.
+        let raw = files_page(
+            &fake,
+            &format!(
+                "dataset=cmcd_summary&from={}&to={}",
+                iso_url(BASE),
+                iso_url(BASE + HOUR)
+            ),
+        )
+        .unwrap();
+        assert_eq!(raw["files"].as_array().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn the_tick_bundles_cmcd_summaries_after_request_summaries() {
+        let fake = Fake::new(BASE + 3 * HOUR);
+        tick_runtime(&fake);
+        watermark(&fake, BASE + 3 * HOUR);
+        seed_hour(&fake, BASE, 3);
+        for m in 0..3 {
+            cmcd_window(&fake, BASE + m * 60, 0, 4);
+        }
+        fake.kv.borrow_mut().insert(
+            "retention:last_sweep".into(),
+            (1, json!({"at": BASE + 3 * HOUR, "complete": true})),
+        );
+        for _ in 0..24 {
+            fake.now.set(fake.now.get() + 120);
+            watermark(&fake, fake.now.get() as i64);
+            run_tick(&fake);
+        }
+        assert!(of(&fake, "hour_bundle=")
+            .iter()
+            .any(|k| k.contains("hour_bundle=08-c3-")));
+        assert!(
+            fake.keys(CMCD_BUNDLES)
+                .iter()
+                .any(|k| k.contains("hour_bundle=08-c3-n12-")),
+            "{:?}",
+            fake.keys(CMCD_BUNDLES)
+        );
+    }
+
     #[test]
     fn summary_bundle_work_left_brings_the_next_maintenance_tick_forward() {
         use fastly_log_analytics::admin::schedule;

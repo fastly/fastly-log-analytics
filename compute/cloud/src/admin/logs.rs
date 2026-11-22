@@ -1472,30 +1472,65 @@ fn bundle_stage<R: Runtime>(store: &Store<'_, R>) -> Option<StageRow> {
     let span = VcpuSpan::start(runtime);
     let began = Instant::now();
     let before = runtime.admin_remaining_calls();
-    match bundle::summary_bundle(store, &cdn_key, TAIL + 1) {
+    let request = bundle::summary_bundle(store, &cdn_key, TAIL + 1);
+    // CMCD bundles share the execution's calls and vCPU gates and go second, so a request
+    // backlog that hits a limit holds them until it clears.
+    let cmcd = match &request {
+        Ok(report) if report.stopped.is_none() && enough(runtime, MIN_BUNDLE_CALLS) => {
+            Some(bundle::cmcd_summary_bundle(store, &cdn_key, TAIL + 1))
+        }
+        _ => None,
+    };
+    match request {
         Ok(report) => {
-            row.listed = report.sources;
-            row.files = u64::from(report.hours + report.days + report.partials);
-            row.rows = report.rows;
-            row.bytes = report.bytes_written;
-            row.deleted = report.deleted;
-            row.more_pending = report.more_pending;
-            row.error = report.errors.first().cloned();
+            let cmcd = match cmcd {
+                Some(Ok(cmcd)) => Some(cmcd),
+                Some(Err(error)) => {
+                    row.error = Some(error);
+                    None
+                }
+                None => None,
+            };
+            let both = cmcd
+                .as_ref()
+                .map_or(report.clone(), |c| bundle::BundleReport {
+                    hours: report.hours + c.hours,
+                    days: report.days + c.days,
+                    partials: report.partials + c.partials,
+                    sources: report.sources + c.sources,
+                    rows: report.rows + c.rows,
+                    bytes_written: report.bytes_written + c.bytes_written,
+                    deleted: report.deleted + c.deleted,
+                    more_pending: report.more_pending || c.more_pending,
+                    stopped: report.stopped.or(c.stopped),
+                    backend_calls: report.backend_calls + c.backend_calls,
+                    errors: report.errors.iter().chain(&c.errors).cloned().collect(),
+                });
+            row.listed = both.sources;
+            row.files = u64::from(both.hours + both.days + both.partials);
+            row.rows = both.rows;
+            row.bytes = both.bytes_written;
+            row.deleted = both.deleted;
+            row.more_pending = both.more_pending;
+            row.error = both.errors.first().cloned().or(row.error.take());
             row.details = Some(json!({
                 "hours": report.hours,
                 "days": report.days,
                 "partials": report.partials,
                 "stopped": report.stopped,
+                "cmcd": cmcd.as_ref().map(|c| json!({
+                    "hours": c.hours,
+                    "days": c.days,
+                    "partials": c.partials,
+                    "stopped": c.stopped,
+                    "more_pending": c.more_pending,
+                })),
             }));
-            if row.files > 0 || report.deleted > 0 {
-                row.outcome = if report.more_pending {
-                    "partial"
-                } else {
-                    "done"
-                };
+            if row.files > 0 || both.deleted > 0 {
+                row.outcome = if both.more_pending { "partial" } else { "done" };
             } else if row.error.is_some() {
                 row.outcome = "error";
-            } else if report.more_pending {
+            } else if both.more_pending {
                 row.outcome = "partial";
             }
         }

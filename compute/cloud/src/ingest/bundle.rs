@@ -49,6 +49,7 @@
 //! makes the bundle `mixed`, which readers treat as unknown.
 
 use super::{
+    cmcd_summary,
     hist::Hist,
     hour_dir, raw_key_minute, raw_prefix, scope,
     storage::{Object, Store, CDN_READ_LIMIT},
@@ -96,7 +97,10 @@ pub const REVISIT_INTERVAL_S: i64 = 6 * 3600;
 /// listed it can still read it.
 pub const RETIRE_GRACE_S: i64 = 600;
 pub const STATE_KEY: &str = "summary:bundle_state";
+/// The CMCD bundler's state.
+pub const CMCD_STATE_KEY: &str = "summary:cmcd_bundle_state";
 const TABLE: &str = "request";
+const CMCD_TABLE: &str = "cmcd_summary";
 const HOUR_S: i64 = 3600;
 const DAY_S: i64 = 86_400;
 /// Stop starting work this far into the execution; the Compute limit is 60 s.
@@ -339,9 +343,19 @@ fn newest_first(a: &Object, b: &Object) -> Ordering {
 /// its `LastModified` are exactly its sources (`c` and `fp`); later windows are read on top. With
 /// no valid bundle every window is read.
 pub fn hour_view(hour: u32, windows: &[Object], bundles: &[Object]) -> HourView {
+    hour_view_marked("summary=", hour, windows, bundles)
+}
+
+/// [`hour_view`] over window files whose names start with `marker` (`window=` for CMCD).
+pub fn hour_view_marked(
+    marker: &str,
+    hour: u32,
+    windows: &[Object],
+    bundles: &[Object],
+) -> HourView {
     let windows: Vec<&Object> = windows
         .iter()
-        .filter(|o| file_name(&o.key).starts_with("summary="))
+        .filter(|o| file_name(&o.key).starts_with(marker))
         .collect();
     let mut candidates: Vec<&Object> = bundles
         .iter()
@@ -2088,6 +2102,70 @@ pub fn merge(sources: &[&[u8]], start: i64, unit: Unit) -> Result<Vec<u8>, Strin
     acc.write(start, Some(unit), unit.label())
 }
 
+/// What a bundle build folds sources into: request summaries ([`Acc`]) or CMCD summaries
+/// ([`cmcd_summary::BundleAcc`]). Folding a source then pruning must give the same state whether
+/// or not the build was resumed from a partial.
+trait Fold: Sized {
+    fn fresh(unit: Unit) -> Self;
+    fn fold_source(&mut self, bytes: Vec<u8>) -> Result<(), String>;
+    fn prune_state(&mut self);
+    /// A raw partial, starting with [`PARTIAL_MAGIC`].
+    fn encode(&self) -> Result<Vec<u8>, String>;
+    fn decode(raw: &[u8], unit: Unit) -> Result<Self, String>;
+    fn finish(&self, start: i64, unit: Unit) -> Result<Vec<u8>, String>;
+}
+
+impl Fold for Acc {
+    fn fresh(unit: Unit) -> Self {
+        Acc::new(unit)
+    }
+    fn fold_source(&mut self, bytes: Vec<u8>) -> Result<(), String> {
+        self.fold(bytes, 1)
+    }
+    fn prune_state(&mut self) {
+        self.prune()
+    }
+    fn encode(&self) -> Result<Vec<u8>, String> {
+        Ok(self.encode_partial())
+    }
+    fn decode(raw: &[u8], unit: Unit) -> Result<Self, String> {
+        Acc::decode_partial(raw, unit)
+    }
+    fn finish(&self, start: i64, unit: Unit) -> Result<Vec<u8>, String> {
+        self.write(start, Some(unit), unit.label())
+    }
+}
+
+/// A CMCD partial is [`PARTIAL_MAGIC`] then the bundle Parquet of its state, which folds back
+/// to the same state.
+impl Fold for cmcd_summary::BundleAcc {
+    fn fresh(_: Unit) -> Self {
+        Self::default()
+    }
+    fn fold_source(&mut self, bytes: Vec<u8>) -> Result<(), String> {
+        self.fold(bytes)
+    }
+    fn prune_state(&mut self) {
+        self.prune()
+    }
+    fn encode(&self) -> Result<Vec<u8>, String> {
+        let mut raw = PARTIAL_MAGIC.to_vec();
+        raw.extend(self.write()?);
+        Ok(raw)
+    }
+    fn decode(raw: &[u8], _: Unit) -> Result<Self, String> {
+        let body = raw
+            .strip_prefix(PARTIAL_MAGIC.as_slice())
+            .ok_or("partial_unreadable")?;
+        let mut acc = Self::default();
+        acc.fold(body.to_vec())?;
+        Ok(acc)
+    }
+    fn finish(&self, _: i64, _: Unit) -> Result<Vec<u8>, String> {
+        self.write()
+    }
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct BundleReport {
     /// Hour and day bundles written.
@@ -2145,6 +2223,8 @@ struct Ctx<'s, 'a, R: Runtime> {
     reserve: u32,
     windows: String,
     bundles: String,
+    /// File-name prefix of the dataset's window sources (`summary=` or `window=`).
+    marker: &'static str,
     now: i64,
     /// Hours with a window folder, per day listed this execution.
     present: HashMap<i64, BTreeSet<i64>>,
@@ -2154,7 +2234,7 @@ struct Ctx<'s, 'a, R: Runtime> {
 }
 
 /// A partial's state and object count, `Err` when it cannot be read, `None` when out of calls.
-type Resume = Option<Result<(Acc, usize), String>>;
+type Resume<A> = Option<Result<(A, usize), String>>;
 
 /// An open hour's build: its state, how many windows its current snapshot covers and the end
 /// (seconds) up to which its windows are settled.
@@ -2328,7 +2408,7 @@ impl<R: Runtime> Ctx<'_, '_, R> {
     /// Folds what the job's best partial and its remaining sources allow this execution, then
     /// writes the bundle or a partial to resume from (and for open hours, an `open_bundle=`
     /// Parquet snapshot every [`OPEN_BUNDLE_MIN`] new closed windows).
-    fn build(&mut self, job: Job<'_>, mut open: Option<Open<'_>>) -> Result<Step, String> {
+    fn build<A: Fold>(&mut self, job: Job<'_>, mut open: Option<Open<'_>>) -> Result<Step, String> {
         let mut sources = job.sources;
         sources.sort_unstable_by(|a, b| file_name(a).cmp(file_name(b)));
         let names: Vec<&str> = sources.iter().map(|k| file_name(k)).collect();
@@ -2381,14 +2461,14 @@ impl<R: Runtime> Ctx<'_, '_, R> {
                 return Ok(Step::Pending);
             }
         }
-        let mut acc = Acc::new(job.unit);
+        let mut acc = A::fresh(job.unit);
         let mut done = 0;
         let mut extra = 0;
         for (count, key) in candidates {
             if !self.room(3) {
                 return Ok(Step::Pending);
             }
-            match self.read_partial(key, job.unit)? {
+            match self.read_partial::<A>(key, job.unit)? {
                 Some(Ok((state, parts))) => {
                     acc = state;
                     done = count;
@@ -2434,8 +2514,9 @@ impl<R: Runtime> Ctx<'_, '_, R> {
                     .push(format!("summary_vanished:{source}"));
                 break;
             };
-            acc.fold(bytes, 1).map_err(|e| format!("{e}:{source}"))?;
-            acc.prune();
+            acc.fold_source(bytes)
+                .map_err(|e| format!("{e}:{source}"))?;
+            acc.prune_state();
             done += 1;
             self.report.sources += 1;
         }
@@ -2444,17 +2525,21 @@ impl<R: Runtime> Ctx<'_, '_, R> {
         if defer_final && self.report.stopped.is_none() {
             self.report.stopped = Some("vcpu");
         }
+        // A snapshot cut short by the limits keeps its settled folds as a partial, so a backlog
+        // larger than one execution's folds still advances instead of refolding every time.
+        let snapshot_cut =
+            job.final_key.is_none() && !need_partial && done < sources.len() && done <= foldable;
         let mut wrote_partial = false;
         let (key, mut objects, is_final) = match job
             .final_key
             .filter(|_| done == sources.len() && !defer_final)
         {
             Some(final_key) => {
-                let body = acc.write(job.start, Some(job.unit), job.unit.label())?;
+                let body = acc.finish(job.start, job.unit)?;
                 (Some(final_key.to_owned()), vec![body], true)
             }
-            None if (job.final_key.is_some() || need_partial) && done > resumed => {
-                let objects = pack_partial(&acc.encode_partial(), CDN_READ_LIMIT)?;
+            None if (job.final_key.is_some() || need_partial || snapshot_cut) && done > resumed => {
+                let objects = pack_partial(&acc.encode()?, CDN_READ_LIMIT)?;
                 if !self.room(objects.len() as u32) {
                     return Ok(Step::Pending);
                 }
@@ -2534,7 +2619,7 @@ impl<R: Runtime> Ctx<'_, '_, R> {
                     .max()
                     .unwrap_or(job.start * 1000);
                 let open_key = open_bundle_key(&self.bundles, job.start, end_ms, &sources[..done]);
-                let body = acc.write(job.start, Some(Unit::Hour), Unit::Hour.label())?;
+                let body = acc.finish(job.start, Unit::Hour)?;
                 self.report.bytes_written += body.len() as u64;
                 if self.catalog.version == super::catalog::VERSION {
                     let hash = hex::encode(Sha256::digest(&body));
@@ -2578,7 +2663,7 @@ impl<R: Runtime> Ctx<'_, '_, R> {
 
     /// The state saved in the partial at `key` and how many objects hold it; `Some(Err)` when it
     /// can never be read as stored, `None` when out of calls.
-    fn read_partial(&self, key: &str, unit: Unit) -> Result<Resume, String> {
+    fn read_partial<A: Fold>(&self, key: &str, unit: Unit) -> Result<Resume<A>, String> {
         let get = |key: &str| match self.store.get(self.cdn_key, key, CDN_READ_LIMIT) {
             Ok(Some(bytes)) => Ok(Ok(bytes)),
             Ok(None) => Ok(Err("partial_vanished".to_owned())),
@@ -2609,9 +2694,7 @@ impl<R: Runtime> Ctx<'_, '_, R> {
         } else {
             return Ok(Some(Err("partial_unreadable".into())));
         };
-        Ok(Some(
-            Acc::decode_partial(&raw, unit).map(|acc| (acc, parts)),
-        ))
+        Ok(Some(A::decode(&raw, unit).map(|acc| (acc, parts))))
     }
 
     fn retire(&self, state: &mut State, old: Option<String>, new: Option<&str>) {
@@ -2621,7 +2704,7 @@ impl<R: Runtime> Ctx<'_, '_, R> {
     }
 
     /// Brings hour `hour`'s bundle up to date with its windows.
-    fn hour(&mut self, state: &mut State, hour: i64) -> Result<Step, String> {
+    fn hour<A: Fold>(&mut self, state: &mut State, hour: i64) -> Result<Step, String> {
         let day = hour.div_euclid(DAY_S) * DAY_S;
         let had = state.hours.get(&hour).cloned();
         let present = match self.present(day)? {
@@ -2643,7 +2726,7 @@ impl<R: Runtime> Ctx<'_, '_, R> {
         let (mut windows, mut partials) = (Vec::new(), Vec::new());
         for o in listed {
             let name = file_name(&o.key);
-            if name.starts_with("summary=") {
+            if name.starts_with(self.marker) {
                 windows.push(o.key);
             } else if name.starts_with("partial=") {
                 partials.push(o.key);
@@ -2678,7 +2761,7 @@ impl<R: Runtime> Ctx<'_, '_, R> {
                 built_generation: self.catalog.generation,
             }
         });
-        let step = self.build(
+        let step = self.build::<A>(
             Job {
                 sources: windows,
                 partials,
@@ -2707,7 +2790,12 @@ impl<R: Runtime> Ctx<'_, '_, R> {
 
     /// Pre-folds full batches of an open hour's windows into a resumable `partial=` without
     /// writing `hour_bundle=`, so closing the hour only has the final tail left to fold.
-    fn open_hour(&mut self, state: &mut State, hour: i64, settled: i64) -> Result<Step, String> {
+    fn open_hour<A: Fold>(
+        &mut self,
+        state: &mut State,
+        hour: i64,
+        settled: i64,
+    ) -> Result<Step, String> {
         let day = hour.div_euclid(DAY_S) * DAY_S;
         if let Some(hours) = self.present.get(&day) {
             if !hours.contains(&hour) {
@@ -2726,7 +2814,7 @@ impl<R: Runtime> Ctx<'_, '_, R> {
         let (mut windows, mut partials) = (Vec::new(), Vec::new());
         for o in listed {
             let name = file_name(&o.key);
-            if name.starts_with("summary=") {
+            if name.starts_with(self.marker) {
                 windows.push(o.key);
             } else if name.starts_with("partial=") {
                 partials.push(o.key);
@@ -2746,7 +2834,7 @@ impl<R: Runtime> Ctx<'_, '_, R> {
             .and_then(|key| parse_name(key))
             .filter(|name| name.kind == NameKind::Open && name.count <= windows.len())
             .map_or(0, |name| name.count);
-        let step = self.build(
+        let step = self.build::<A>(
             Job {
                 sources: windows,
                 partials,
@@ -2769,7 +2857,7 @@ impl<R: Runtime> Ctx<'_, '_, R> {
     }
 
     /// Brings day `day`'s bundle up to date with its hour bundles.
-    fn day(&mut self, state: &mut State, day: i64) -> Result<Step, String> {
+    fn day<A: Fold>(&mut self, state: &mut State, day: i64) -> Result<Step, String> {
         let mut sources: Vec<String> = state
             .hours
             .range(day..day + DAY_S)
@@ -2815,7 +2903,7 @@ impl<R: Runtime> Ctx<'_, '_, R> {
             .map(|o| o.key)
             .filter(|k| file_name(k).starts_with("partial="))
             .collect();
-        let step = self.build(
+        let step = self.build::<A>(
             Job {
                 sources,
                 partials,
@@ -2884,15 +2972,79 @@ pub fn summary_bundle<R: Runtime>(
     cdn_key: &str,
     reserve: u32,
 ) -> Result<BundleReport, String> {
+    let scope = scope(store.service);
+    run::<R, Acc>(
+        store,
+        cdn_key,
+        reserve,
+        Spec {
+            windows: summary::summary_prefix(&scope, TABLE),
+            bundles: bundle_prefix(&scope, TABLE),
+            marker: "summary=",
+            state_key: STATE_KEY,
+            catalog: true,
+            caller: "cron:summary_bundle",
+        },
+    )
+}
+
+/// [`summary_bundle`] for the CMCD window summaries ([`cmcd_summary`]): hour, open-hour and day
+/// bundles under `summary_bundle/cmcd_summary/`, built from the `window=` files of
+/// `{table}/cmcd_summary/` by the same schedule, limits and name-based coverage proofs. CMCD
+/// files are outside the catalog, so readers prove coverage from LIST alone.
+pub fn cmcd_summary_bundle<R: Runtime>(
+    store: &Store<'_, R>,
+    cdn_key: &str,
+    reserve: u32,
+) -> Result<BundleReport, String> {
+    // Its windows are listed from the bucket rather than a reset catalog head, so a bundle written
+    // before Delete Data cleanup finishes could fold pre-reset windows and outlive the reset.
+    if store.service.data_reset.is_some() {
+        return Ok(BundleReport::default());
+    }
+    let scope = scope(store.service);
+    run::<R, cmcd_summary::BundleAcc>(
+        store,
+        cdn_key,
+        reserve,
+        Spec {
+            windows: cmcd_summary::cmcd_summary_prefix(&scope, TABLE),
+            bundles: bundle_prefix(&scope, CMCD_TABLE),
+            marker: "window=",
+            state_key: CMCD_STATE_KEY,
+            catalog: false,
+            caller: "cron:summary_bundle",
+        },
+    )
+}
+
+/// One dataset's bundling: where its windows and bundles live, how window files are named, its
+/// state key, and whether its windows are committed through the catalog.
+struct Spec {
+    windows: String,
+    bundles: String,
+    marker: &'static str,
+    state_key: &'static str,
+    catalog: bool,
+    caller: &'static str,
+}
+
+fn run<R: Runtime, A: Fold>(
+    store: &Store<'_, R>,
+    cdn_key: &str,
+    reserve: u32,
+    spec: Spec,
+) -> Result<BundleReport, String> {
     let runtime = store.runtime;
     let started_with = runtime.admin_remaining_calls();
-    let scope = scope(store.service);
+    let state_key = spec.state_key;
     let mut ctx = Ctx {
         store,
         cdn_key,
         reserve,
-        windows: summary::summary_prefix(&scope, TABLE),
-        bundles: bundle_prefix(&scope, TABLE),
+        windows: spec.windows,
+        bundles: spec.bundles,
+        marker: spec.marker,
         now: runtime.now() as i64,
         present: HashMap::new(),
         report: BundleReport::default(),
@@ -2904,9 +3056,9 @@ pub fn summary_bundle<R: Runtime>(
         return Ok(ctx.report);
     }
     if let Some(usage) = runtime.usage_agg() {
-        usage.set_caller("cron:summary_bundle");
+        usage.set_caller(spec.caller);
     }
-    let record = runtime.admin_get(STATE_KEY)?;
+    let record = runtime.admin_get(state_key)?;
     let mut state: State = record
         .as_ref()
         .and_then(|r| serde_json::from_value(r.value.clone()).ok())
@@ -2959,7 +3111,7 @@ pub fn summary_bundle<R: Runtime>(
         // Out of calls right after publishing: save that and resume next execution.
         if state != original {
             let _ = runtime.admin_cas(
-                STATE_KEY,
+                state_key,
                 record.as_ref().map(|r| r.generation.as_str()),
                 &serde_json::to_value(&state).map_err(|_| "bundle_state_encode")?,
             )?;
@@ -2969,12 +3121,16 @@ pub fn summary_bundle<R: Runtime>(
         return Ok(ctx.report);
     }
     let watermark = runtime.admin_get(WATERMARK_KEY)?;
-    let fetched_catalog = super::catalog::head(
-        watermark
-            .as_ref()
-            .map(|r| &r.value)
-            .unwrap_or(&serde_json::Value::Null),
-    )?;
+    let fetched_catalog = if spec.catalog {
+        super::catalog::head(
+            watermark
+                .as_ref()
+                .map(|r| &r.value)
+                .unwrap_or(&serde_json::Value::Null),
+        )?
+    } else {
+        super::catalog::Head::default()
+    };
     // Fastly KV reads immediately after `bundles::publish` can still serve the pre-commit
     // watermark; keep the just-committed catalog head so any bundle built in this execution
     // carries the new generation instead of failing `catalog_bundle_not_active` on the next tick.
@@ -2986,7 +3142,7 @@ pub fn summary_bundle<R: Runtime>(
     } else {
         fetched_catalog
     };
-    if !stale_watermark {
+    if spec.catalog && !stale_watermark {
         ctx.report.deleted +=
             super::catalog::bundles::cleanup(store, watermark.as_ref(), reserve + 1)?;
     }
@@ -3027,7 +3183,7 @@ pub fn summary_bundle<R: Runtime>(
                     ctx.report.more_pending = true;
                     return Ok(());
                 }
-                match ctx.hour(state, next) {
+                match ctx.hour::<A>(state, next) {
                     Ok(Step::Done) => {}
                     Ok(Step::Pending) => {
                         ctx.report.more_pending = true;
@@ -3058,7 +3214,7 @@ pub fn summary_bundle<R: Runtime>(
                     ctx.report.more_pending = true;
                     return Ok(());
                 }
-                match ctx.hour(state, hour) {
+                match ctx.hour::<A>(state, hour) {
                     Ok(Step::Done) => {}
                     Ok(Step::Pending) => {
                         state.revisit = Some(hour);
@@ -3083,7 +3239,7 @@ pub fn summary_bundle<R: Runtime>(
                 ctx.report.more_pending = true;
                 return Ok(());
             }
-            match ctx.day(state, day) {
+            match ctx.day::<A>(state, day) {
                 Ok(Step::Done) => {
                     state.dirty.remove(&day);
                 }
@@ -3104,7 +3260,7 @@ pub fn summary_bundle<R: Runtime>(
                 if ctx.report.stopped.is_some() || ctx.report.bytes_written > 0 {
                     break;
                 }
-                match ctx.open_hour(state, open, settled) {
+                match ctx.open_hour::<A>(state, open, settled) {
                     Ok(Step::Done) => {}
                     Ok(Step::Pending) => {
                         ctx.report.more_pending = true;
@@ -3143,7 +3299,7 @@ pub fn summary_bundle<R: Runtime>(
     if state != original {
         let value = serde_json::to_value(&state).map_err(|_| "bundle_state_encode")?;
         if !runtime.admin_cas(
-            STATE_KEY,
+            state_key,
             record.as_ref().map(|r| r.generation.as_str()),
             &value,
         )? {

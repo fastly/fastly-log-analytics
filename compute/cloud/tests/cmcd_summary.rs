@@ -309,3 +309,144 @@ fn cmcd_summary_matches_cmcd_ts_aggregates() {
     assert_eq!(ot_v["reqs"], 3);
     assert!(!rows1.iter().any(|r| r["kind"] == "ot" && r["key"] == ""));
 }
+
+/// A CMCD window summary over `(offset_ms, sid, br, country, asn, as_name)` rows from `start_s`.
+fn cmcd_window(start_s: i64, rows: &[(i64, &str, i64, &str, i64, &str)]) -> Vec<u8> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            "timestamp",
+            DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
+            false,
+        ),
+        Field::new("geo_country", DataType::Utf8, true),
+        Field::new("client_asn", DataType::Int64, true),
+        Field::new("as_name", DataType::Utf8, true),
+        Field::new("cmcd_sid", DataType::Utf8, true),
+        Field::new("cmcd_br", DataType::Int64, true),
+        Field::new("cmcd_ot", DataType::Utf8, true),
+    ]));
+    let ts: Vec<i64> = rows.iter().map(|r| start_s * 1000 + r.0).collect();
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(TimestampMillisecondArray::from(ts).with_timezone("UTC")),
+            Arc::new(StringArray::from(
+                rows.iter().map(|r| Some(r.3)).collect::<Vec<_>>(),
+            )),
+            Arc::new(Int64Array::from(
+                rows.iter().map(|r| Some(r.4)).collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter().map(|r| Some(r.5)).collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter().map(|r| Some(r.1)).collect::<Vec<_>>(),
+            )),
+            Arc::new(Int64Array::from(
+                rows.iter().map(|r| Some(r.2)).collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter().map(|_| Some("v")).collect::<Vec<_>>(),
+            )),
+        ],
+    )
+    .unwrap();
+    cmcd_summary::write_cmcd_summary(&[&batch], start_s).unwrap()
+}
+
+fn find<'a>(rows: &'a [Map<String, Value>], kind: &str, key: &str) -> &'a Map<String, Value> {
+    rows.iter()
+        .find(|r| r["kind"] == kind && r.get("key").and_then(Value::as_str) == Some(key))
+        .unwrap_or_else(|| panic!("no {kind} {key}"))
+}
+
+#[test]
+fn bundle_merge_is_the_lossless_union_of_its_windows() {
+    let w1 = cmcd_window(
+        BASE,
+        &[
+            (1_000, "s1", 2000, "US", 15169, "Google"),
+            (2_000, "s2", 4000, "CA", 13335, "Cloudflare"),
+        ],
+    );
+    let w2 = cmcd_window(
+        BASE,
+        &[
+            (3_000, "s1", 3000, "US", 15169, "Alphabet"),
+            (4_000, "s3", 1000, "US", 15169, "Google"),
+        ],
+    );
+    let w3 = cmcd_window(BASE + WINDOW, &[(1_000, "s1", 5000, "US", 15169, "Google")]);
+    let wide: Vec<(i64, String)> = (0..cmcd_summary::SESSION_K as i64 + 1)
+        .map(|i| (i, format!("w{i:05}")))
+        .collect();
+    let w4 = cmcd_window(
+        BASE + 2 * WINDOW,
+        &wide
+            .iter()
+            .map(|(i, sid)| (*i, sid.as_str(), 100, "DE", 3320, "DTAG"))
+            .collect::<Vec<_>>(),
+    );
+    let merged = cmcd_summary::merge_windows(&[&w1, &w2, &w3, &w4]).unwrap();
+    let rows = read_rows(&merged);
+
+    let first = rows
+        .iter()
+        .find(|r| r["kind"] == "bucket" && r["bucket"] == BASE * 1000)
+        .unwrap();
+    assert_eq!(first["reqs"], 4);
+    assert_eq!(first["br_n"], 4);
+    assert_eq!(first["br_sum"].as_f64().unwrap(), 10_000.0);
+    assert_eq!(hll_count(first["sid_hll"].as_str().unwrap()), 3);
+    assert_eq!(first["min_ts"], BASE * 1000 + 1_000);
+    assert_eq!(first["max_ts"], BASE * 1000 + 4_000);
+    let second = rows
+        .iter()
+        .find(|r| r["kind"] == "bucket" && r["bucket"] == (BASE + WINDOW) * 1000)
+        .unwrap();
+    assert_eq!(second["reqs"], 1);
+
+    let s1 = find(&rows, "session", "s1");
+    assert_eq!(s1["reqs"], 3);
+    assert_eq!(s1["first_ts"], BASE * 1000 + 1_000);
+    assert_eq!(s1["last_ts"], (BASE + WINDOW) * 1000 + 1_000);
+    assert_eq!(find(&rows, "country", "US")["reqs"], 4);
+    assert_eq!(find(&rows, "country", "CA")["reqs"], 1);
+    let google = find(&rows, "asn", "15169");
+    assert_eq!(google["reqs"], 4);
+    assert_eq!(google["label"], "Alphabet");
+    assert_eq!(
+        find(&rows, "ot", "v")["reqs"],
+        5 + cmcd_summary::SESSION_K as i64 + 1
+    );
+    // The wide window kept SESSION_K of its sessions; the bundle keeps them and its flag.
+    assert_eq!(
+        rows.iter().filter(|r| r["kind"] == "session").count(),
+        3 + cmcd_summary::SESSION_K
+    );
+    assert_eq!(find(&rows, "totals", "session")["truncated"], true);
+    assert_eq!(find(&rows, "totals", "country")["truncated"], false);
+
+    // Every per-row request count is the sum over the windows, as a reader merging them sees.
+    let reqs = |bytes: &[u8], kind: &str| -> i64 {
+        read_rows(bytes)
+            .iter()
+            .filter(|r| r["kind"] == kind)
+            .map(|r| r["reqs"].as_i64().unwrap())
+            .sum()
+    };
+    for kind in ["bucket", "session", "content", "country", "asn", "ot", "sf"] {
+        let windows: i64 = [&w1, &w2, &w3, &w4].iter().map(|w| reqs(w, kind)).sum();
+        assert_eq!(reqs(&merged, kind), windows, "{kind}");
+    }
+    // The same windows in any order give the same bytes.
+    assert_eq!(
+        cmcd_summary::merge_windows(&[&w4, &w3, &w1, &w2]).unwrap(),
+        merged
+    );
+    assert_eq!(
+        cmcd_summary::merge_windows(&[&merged]).unwrap(),
+        merged,
+        "a bundle folds back to itself"
+    );
+}

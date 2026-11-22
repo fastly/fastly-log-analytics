@@ -214,6 +214,7 @@ async function listCmcdSummaryFiles(
   toMs: number,
   maxFiles: number,
   signal?: AbortSignal,
+  view?: "summary",
 ): Promise<ManifestFile[] | null> {
   const byKey = new Map<string, ManifestFile>();
   let cursor: string | null = null;
@@ -224,6 +225,7 @@ async function listCmcdSummaryFiles(
       to: toIso,
       dataset: "cmcd_summary",
     });
+    if (view) params.set("view", view);
     if (cursor) params.set("cursor", cursor);
     const page = (await fetchJson(`/api/files?${params}`, signal)) as {
       files?: ManifestFile[];
@@ -242,6 +244,45 @@ async function listCmcdSummaryFiles(
   return null;
 }
 
+/**
+ * The fewest CMCD summary files for the range: `view=summary` replaces each hour whose
+ * `hour_bundle` covers exactly its listed windows (and whole days likewise) with that bundle.
+ * Bundles merge their windows losslessly, so either listing gives the same aggregates. A server
+ * without CMCD bundles rejects the view, and the per-window listing answers instead.
+ */
+async function listCmcdRollupFiles(
+  fetchJson: CmcdRollupSource["fetchJson"],
+  fromIso: string,
+  toIso: string,
+  fromMs: number,
+  toMs: number,
+  signal?: AbortSignal,
+): Promise<ManifestFile[] | null> {
+  try {
+    return await listCmcdSummaryFiles(
+      fetchJson,
+      fromIso,
+      toIso,
+      fromMs,
+      toMs,
+      MAX_CMCD_ROLLUP_FILES,
+      signal,
+      "summary",
+    );
+  } catch (error) {
+    if (signal?.aborted) throw error;
+  }
+  return listCmcdSummaryFiles(
+    fetchJson,
+    fromIso,
+    toIso,
+    fromMs,
+    toMs,
+    MAX_CMCD_ROLLUP_FILES,
+    signal,
+  );
+}
+
 export async function cmcdFromRollup(
   params: CmcdQueryParams,
   source: CmcdRollupSource,
@@ -254,13 +295,12 @@ export async function cmcdFromRollup(
 
   const fromIso = new Date(fromMs).toISOString();
   const toIso = new Date(toMs).toISOString();
-  const files = await listCmcdSummaryFiles(
+  const files = await listCmcdRollupFiles(
     source.fetchJson,
     fromIso,
     toIso,
     fromMs,
     toMs,
-    MAX_CMCD_ROLLUP_FILES,
     signal,
   );
   if (!files || files.length === 0) return null;

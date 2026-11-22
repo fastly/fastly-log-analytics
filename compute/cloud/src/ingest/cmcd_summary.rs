@@ -1007,3 +1007,356 @@ fn build_batch(rows: &[RowOut]) -> Result<RecordBatch, String> {
     ];
     RecordBatch::try_new(schema(), columns).map_err(|e| format!("cmcd_summary batch: {e}"))
 }
+
+/// Summed integer columns of a merged row, after `reqs`.
+const INT_SUMS: [&str; 20] = [
+    "rebuffer_events",
+    "has_bs",
+    "has_su",
+    "has_ot",
+    "has_bl",
+    "has_br",
+    "has_mtp",
+    "has_cid",
+    "br_n",
+    "tb_n",
+    "bl_n",
+    "mtp_n",
+    "v_br_n",
+    "v_tb_n",
+    "v_bl_n",
+    "util_n",
+    "util_all_n",
+    "startup_requests",
+    "su_bl_n",
+    "su_ttfb_n",
+];
+const FLOAT_SUMS: [&str; 11] = [
+    "br_sum",
+    "tb_sum",
+    "bl_sum",
+    "mtp_sum",
+    "v_br_sum",
+    "v_tb_sum",
+    "v_bl_sum",
+    "util_sum",
+    "util_all_sum",
+    "su_bl_sum",
+    "su_ttfb_sum",
+];
+const HLLS: [&str; 2] = ["sid_hll", "rebuffer_sid_hll"];
+const HISTS: [&str; 4] = ["v_bl_hist", "bl_hist", "v_mtp_hist", "mtp_hist"];
+const MINS: [&str; 2] = ["min_ts", "first_ts"];
+const MAXES: [&str; 2] = ["max_ts", "last_ts"];
+
+/// Memory bounds of a bundle accumulator per row kind: far above what an hour of window
+/// summaries keeps (`SESSION_K`, `CONTENT_K`, ... per window), so they bind only on a runaway
+/// hour or day. Past one, the rows with the fewest requests go and `totals.truncated` is set.
+pub const BUNDLE_SESSION_CAP: usize = 100_000;
+const BUNDLE_ROW_CAP: usize = 20_000;
+
+/// One merged non-session row.
+#[derive(Default, Clone)]
+struct MergeRow {
+    label: Option<String>,
+    reqs: Option<i64>,
+    ints: [Option<i64>; INT_SUMS.len()],
+    floats: [Option<f64>; FLOAT_SUMS.len()],
+    hlls: [Option<Hll>; HLLS.len()],
+    hists: [Option<Hist>; HISTS.len()],
+    mins: [Option<i64>; MINS.len()],
+    maxes: [Option<i64>; MAXES.len()],
+}
+
+/// `(kind, bucket, key)` of a merged row.
+type RowKey = (String, Option<i64>, Option<String>);
+
+/// Lossless merge of CMCD window summaries into an hour or day bundle, in the window schema:
+/// a reader merging the bundle gets what it gets merging its windows, since every metric it
+/// reads is a sum, a min/max, a sketch union or a histogram sum per `(kind, bucket, key)`, and
+/// `asn` labels keep the smallest non-empty one as readers do. `totals` rows keep `truncated`
+/// set when any source (or a cap here) dropped rows of that kind.
+#[derive(Default, Clone)]
+pub struct BundleAcc {
+    rows: BTreeMap<RowKey, MergeRow>,
+    /// `(reqs, first_ts, last_ts)` per session id.
+    sessions: BTreeMap<String, (i64, Option<i64>, Option<i64>)>,
+    /// `(truncated, reqs)` per `totals` key.
+    totals: BTreeMap<String, (bool, i64)>,
+}
+
+fn add<T: std::ops::Add<Output = T> + Copy>(into: &mut Option<T>, v: Option<T>) {
+    if let Some(v) = v {
+        *into = Some(into.map_or(v, |a| a + v));
+    }
+}
+
+struct Read<'a> {
+    batch: &'a RecordBatch,
+}
+
+impl<'a> Read<'a> {
+    fn col<T: 'static>(&self, name: &str) -> Option<&'a T> {
+        self.batch
+            .column_by_name(name)?
+            .as_any()
+            .downcast_ref::<T>()
+    }
+    fn i(&self, name: &str) -> Option<&'a Int64Array> {
+        self.col(name)
+    }
+}
+
+fn opt_i(col: Option<&Int64Array>, i: usize) -> Option<i64> {
+    col.and_then(|a| a.is_valid(i).then(|| a.value(i)))
+}
+
+fn opt_f(col: Option<&Float64Array>, i: usize) -> Option<f64> {
+    col.and_then(|a| a.is_valid(i).then(|| a.value(i)))
+}
+
+fn opt_bin(col: Option<&arrow_array::BinaryArray>, i: usize) -> Option<&[u8]> {
+    col.and_then(|a| a.is_valid(i).then(|| a.value(i)))
+}
+
+impl BundleAcc {
+    /// Folds one window summary or bundle.
+    pub fn fold(&mut self, bytes: Vec<u8>) -> Result<(), String> {
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(bytes))
+            .map_err(|_| "cmcd_summary_unreadable")?
+            .build()
+            .map_err(|_| "cmcd_summary_unreadable")?;
+        for batch in reader {
+            let batch = batch.map_err(|_| "cmcd_summary_unreadable")?;
+            self.fold_batch(&batch)?;
+        }
+        Ok(())
+    }
+
+    fn fold_batch(&mut self, batch: &RecordBatch) -> Result<(), String> {
+        let r = Read { batch };
+        let kind = r
+            .col::<StringArray>("kind")
+            .ok_or("cmcd_summary_unreadable")?;
+        let key = r.col::<StringArray>("key");
+        let label = r.col::<StringArray>("label");
+        let truncated = r.col::<BooleanArray>("truncated");
+        let bucket = r.i("bucket");
+        let reqs = r.i("reqs");
+        let ints: Vec<_> = INT_SUMS.iter().map(|c| r.i(c)).collect();
+        let floats: Vec<_> = FLOAT_SUMS
+            .iter()
+            .map(|c| r.col::<Float64Array>(c))
+            .collect();
+        let hlls: Vec<_> = HLLS
+            .iter()
+            .map(|c| r.col::<arrow_array::BinaryArray>(c))
+            .collect();
+        let hists: Vec<_> = HISTS
+            .iter()
+            .map(|c| r.col::<arrow_array::BinaryArray>(c))
+            .collect();
+        let mins: Vec<_> = MINS.iter().map(|c| r.i(c)).collect();
+        let maxes: Vec<_> = MAXES.iter().map(|c| r.i(c)).collect();
+        for i in 0..batch.num_rows() {
+            if !kind.is_valid(i) {
+                continue;
+            }
+            let k = kind.value(i);
+            let key_at = get_str(key, i);
+            match k {
+                "totals" => {
+                    let Some(name) = key_at else { continue };
+                    let t = self.totals.entry(name.to_owned()).or_default();
+                    t.0 |= truncated.is_some_and(|a| a.is_valid(i) && a.value(i));
+                    t.1 = t.1.max(opt_i(reqs, i).unwrap_or(0));
+                }
+                "session" => {
+                    let Some(sid) = key_at else { continue };
+                    let s = self
+                        .sessions
+                        .entry(sid.to_owned())
+                        .or_insert((0, None, None));
+                    s.0 += opt_i(reqs, i).unwrap_or(0);
+                    if let Some(f) = opt_i(mins[1], i) {
+                        s.1 = Some(s.1.map_or(f, |a| a.min(f)));
+                    }
+                    if let Some(l) = opt_i(maxes[1], i) {
+                        s.2 = Some(s.2.map_or(l, |a| a.max(l)));
+                    }
+                }
+                _ => {
+                    let row = self
+                        .rows
+                        .entry((k.to_owned(), opt_i(bucket, i), key_at.map(str::to_owned)))
+                        .or_default();
+                    if let Some(l) = get_str(label, i) {
+                        let better = match row.label.as_deref() {
+                            None => true,
+                            Some(cur) => !l.is_empty() && (cur.is_empty() || l < cur),
+                        };
+                        if better {
+                            row.label = Some(l.to_owned());
+                        }
+                    }
+                    add(&mut row.reqs, opt_i(reqs, i));
+                    for (n, col) in ints.iter().enumerate() {
+                        add(&mut row.ints[n], opt_i(*col, i));
+                    }
+                    for (n, col) in floats.iter().enumerate() {
+                        add(&mut row.floats[n], opt_f(*col, i));
+                    }
+                    for (n, col) in hlls.iter().enumerate() {
+                        if let Some(blob) = opt_bin(*col, i) {
+                            let hll = row.hlls[n].get_or_insert_with(Hll::default);
+                            if !hll.merge_bytes(blob) {
+                                return Err("cmcd_summary_sketch_invalid".into());
+                            }
+                        }
+                    }
+                    for (n, col) in hists.iter().enumerate() {
+                        if let Some(blob) = opt_bin(*col, i) {
+                            let hist = row.hists[n].get_or_insert_with(Hist::default);
+                            if !hist.merge_bytes(blob) {
+                                return Err("cmcd_summary_hist_invalid".into());
+                            }
+                        }
+                    }
+                    for (n, col) in mins.iter().enumerate() {
+                        if let Some(v) = opt_i(*col, i) {
+                            row.mins[n] = Some(row.mins[n].map_or(v, |a| a.min(v)));
+                        }
+                    }
+                    for (n, col) in maxes.iter().enumerate() {
+                        if let Some(v) = opt_i(*col, i) {
+                            row.maxes[n] = Some(row.maxes[n].map_or(v, |a| a.max(v)));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Applies the memory caps: per kind, the rows with the most requests (then the smallest key)
+    /// stay. Buckets are bounded by time and never cut.
+    pub fn prune(&mut self) {
+        if self.sessions.len() > BUNDLE_SESSION_CAP {
+            let mut ranked: Vec<(Reverse<i64>, String)> = self
+                .sessions
+                .iter()
+                .map(|(k, s)| (Reverse(s.0), k.clone()))
+                .collect();
+            ranked.select_nth_unstable(BUNDLE_SESSION_CAP);
+            for (_, k) in &ranked[BUNDLE_SESSION_CAP..] {
+                self.sessions.remove(k);
+            }
+            self.totals.entry("session".into()).or_default().0 = true;
+        }
+        let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+        for (kind, _, _) in self.rows.keys() {
+            *counts.entry(kind.as_str()).or_default() += 1;
+        }
+        let over: Vec<String> = counts
+            .into_iter()
+            .filter(|(kind, n)| *kind != "bucket" && *n > BUNDLE_ROW_CAP)
+            .map(|(kind, _)| kind.to_owned())
+            .collect();
+        for kind in over {
+            let mut ranked: Vec<(Reverse<i64>, RowKey)> = self
+                .rows
+                .iter()
+                .filter(|(k, _)| k.0 == kind)
+                .map(|(k, row)| (Reverse(row.reqs.unwrap_or(0)), k.clone()))
+                .collect();
+            ranked.select_nth_unstable(BUNDLE_ROW_CAP);
+            for (_, k) in &ranked[BUNDLE_ROW_CAP..] {
+                self.rows.remove(k);
+            }
+            self.totals.entry(kind).or_default().0 = true;
+        }
+    }
+
+    /// The merged rows as a CMCD summary Parquet file.
+    pub fn write(&self) -> Result<Vec<u8>, String> {
+        let mut kept: BTreeMap<&str, i64> = BTreeMap::new();
+        for (kind, _, _) in self.rows.keys() {
+            *kept.entry(kind.as_str()).or_default() += 1;
+        }
+        kept.insert("session", self.sessions.len() as i64);
+        let mut out = Vec::with_capacity(self.rows.len() + self.sessions.len() + 8);
+        for (name, (truncated, reqs)) in &self.totals {
+            out.push(RowOut {
+                kind: "totals".into(),
+                key: Some(name.clone()),
+                truncated: Some(*truncated),
+                reqs: Some((*reqs).max(kept.get(name.as_str()).copied().unwrap_or(0))),
+                ..Default::default()
+            });
+        }
+        for (sid, (reqs, first, last)) in &self.sessions {
+            out.push(RowOut {
+                kind: "session".into(),
+                key: Some(sid.clone()),
+                reqs: Some(*reqs),
+                first_ts: *first,
+                last_ts: *last,
+                ..Default::default()
+            });
+        }
+        for ((kind, bucket, key), row) in &self.rows {
+            let mut o = RowOut {
+                kind: kind.clone(),
+                bucket: *bucket,
+                key: key.clone(),
+                label: row.label.clone(),
+                reqs: row.reqs,
+                ..Default::default()
+            };
+            let [rebuffer_events, has_bs, has_su, has_ot, has_bl, has_br, has_mtp, has_cid, br_n, tb_n, bl_n, mtp_n, v_br_n, v_tb_n, v_bl_n, util_n, util_all_n, startup_requests, su_bl_n, su_ttfb_n] =
+                row.ints;
+            (o.rebuffer_events, o.has_bs, o.has_su, o.has_ot, o.has_bl) =
+                (rebuffer_events, has_bs, has_su, has_ot, has_bl);
+            (o.has_br, o.has_mtp, o.has_cid) = (has_br, has_mtp, has_cid);
+            (o.br_n, o.tb_n, o.bl_n, o.mtp_n) = (br_n, tb_n, bl_n, mtp_n);
+            (o.v_br_n, o.v_tb_n, o.v_bl_n) = (v_br_n, v_tb_n, v_bl_n);
+            (o.util_n, o.util_all_n, o.startup_requests) = (util_n, util_all_n, startup_requests);
+            (o.su_bl_n, o.su_ttfb_n) = (su_bl_n, su_ttfb_n);
+            let [br_sum, tb_sum, bl_sum, mtp_sum, v_br_sum, v_tb_sum, v_bl_sum, util_sum, util_all_sum, su_bl_sum, su_ttfb_sum] =
+                row.floats;
+            (o.br_sum, o.tb_sum, o.bl_sum, o.mtp_sum) = (br_sum, tb_sum, bl_sum, mtp_sum);
+            (o.v_br_sum, o.v_tb_sum, o.v_bl_sum) = (v_br_sum, v_tb_sum, v_bl_sum);
+            (o.util_sum, o.util_all_sum) = (util_sum, util_all_sum);
+            (o.su_bl_sum, o.su_ttfb_sum) = (su_bl_sum, su_ttfb_sum);
+            let hll = |h: &Option<Hll>| h.as_ref().and_then(hll_opt);
+            let hist = |h: &Option<Hist>| h.as_ref().and_then(hist_opt);
+            (o.sid_hll, o.rebuffer_sid_hll) = (hll(&row.hlls[0]), hll(&row.hlls[1]));
+            (o.v_bl_hist, o.bl_hist) = (hist(&row.hists[0]), hist(&row.hists[1]));
+            (o.v_mtp_hist, o.mtp_hist) = (hist(&row.hists[2]), hist(&row.hists[3]));
+            (o.min_ts, o.first_ts) = (row.mins[0], row.mins[1]);
+            (o.max_ts, o.last_ts) = (row.maxes[0], row.maxes[1]);
+            out.push(o);
+        }
+        let batch = build_batch(&out)?;
+        convert::encode_record_batch(
+            schema(),
+            &batch,
+            vec![KeyValue::new(
+                "flp_cmcd_summary".to_string(),
+                CMCD_SUMMARY_VERSION.to_string(),
+            )],
+        )
+    }
+}
+
+/// Merges CMCD window summaries (or bundles) the way `bundle::cmcd_summary_bundle` does,
+/// folding in file order with the caps applied after each fold.
+pub fn merge_windows(sources: &[&[u8]]) -> Result<Vec<u8>, String> {
+    let mut acc = BundleAcc::default();
+    for source in sources {
+        acc.fold(source.to_vec())?;
+        acc.prune();
+    }
+    acc.write()
+}
