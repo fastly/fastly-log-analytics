@@ -589,6 +589,49 @@ describe("Feature F24 — CMCD Streaming Media cloud-engine", () => {
     expect(res?.summary.total_requests).toBe(hours * windowsPerHour);
   });
 
+  it("counts only per-window CMCD summaries against the cap, so hour bundles plus the open hour's windows stay on summaries", async () => {
+    const t0 = Date.parse("2026-01-01T00:00:00Z");
+    const hours = 23;
+    const openWindows = MAX_CMCD_ROLLUP_FILES - 10;
+    const bundles = Array.from({ length: hours }, (_, h) => ({
+      kind: "hour",
+      key: `processed/summary_bundle/cmcd_summary/hour_bundle=${h}.parquet`,
+      start: new Date(t0 + h * 3_600_000).toISOString(),
+      end: new Date(t0 + (h + 1) * 3_600_000).toISOString(),
+      size: 20_000,
+      rows: 1,
+      sources: 138,
+    }));
+    const open = t0 + hours * 3_600_000;
+    const windows = Array.from({ length: openWindows }, (_, i) => ({
+      kind: "window",
+      key: `processed/request/cmcd_summary/window=${i}.parquet`,
+      start: new Date(open + i * 10_000).toISOString(),
+      end: new Date(open + (i + 1) * 10_000).toISOString(),
+      size: 14_000,
+      rows: 1,
+    }));
+    let fetched = 0;
+    const res = await cmcdFromRollup(
+      {
+        start_time: new Date(t0).toISOString(),
+        end_time: new Date(t0 + (hours + 1) * 3_600_000).toISOString(),
+        bucket_seconds: 300,
+      },
+      {
+        async fetchJson() {
+          return { files: [...bundles, ...windows], next_cursor: null, complete: true };
+        },
+        async fetchFile() {
+          fetched++;
+          return { bytes: oneBucketSummary(t0, 1), cached: false };
+        },
+      },
+    );
+    expect(fetched).toBe(hours + openWindows);
+    expect(res?.summary.total_requests).toBe(hours + openWindows);
+  });
+
   it("falls back to the per-window CMCD listing when the server rejects the summary view", async () => {
     const t0 = Date.parse("2026-01-01T00:00:00Z");
     const key = "processed/request/cmcd_summary/window=only.parquet";
