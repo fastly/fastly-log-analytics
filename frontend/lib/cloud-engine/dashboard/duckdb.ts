@@ -1119,22 +1119,33 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
       }
 
       const qualify = boundedQualify(fields, candidateLimit, fieldByteCap);
+      // Every branch's per-file window holds its partitions until the statement
+      // ends, so one statement over all cards ran out of memory on a batch of
+      // small files; a few cards share each statement instead.
+      const fieldGroups: number[][] = [];
+      for (let i = 0; i < fields.length; i += PER_FILE_VALUES_FIELDS) {
+        fieldGroups.push(
+          fields.slice(i, i + PER_FILE_VALUES_FIELDS).map((_, j) => i + j),
+        );
+      }
       for (const chunk of chunks) {
         const only = chunks.length > 1 ? ` AND ${FILE_COLUMN} IN (${chunk.join(", ")})` : "";
-        const valuesTable = await backend.query(
-          `${base} ${fieldValuesSql(fields, typeOf, true, only, qualify)}`,
-          signal,
-        );
-        signal?.throwIfAborted();
-        const vf = column(valuesTable, "file");
-        const idxCol = column(valuesTable, "field_idx");
-        const cntCol = column(valuesTable, "cnt");
-        const valueCols = fields.map((field) => column(valuesTable, valueColumn(typeOf(field))));
-        for (let r = 0; r < valuesTable.numRows; r++) {
-          const i = Number(idxCol[r]);
-          const value = toScalarValue(valueCols[i][r]);
-          if (value === null) continue;
-          parts.get(Number(vf[r]))?.fields[fields[i]]?.entries.push([value, Number(cntCol[r])]);
+        for (const group of fieldGroups) {
+          const valuesTable = await backend.query(
+            `${base} ${fieldValuesSql(fields, typeOf, true, only, qualify, group)}`,
+            signal,
+          );
+          signal?.throwIfAborted();
+          const vf = column(valuesTable, "file");
+          const idxCol = column(valuesTable, "field_idx");
+          const cntCol = column(valuesTable, "cnt");
+          const valueCols = fields.map((field) => column(valuesTable, valueColumn(typeOf(field))));
+          for (let r = 0; r < valuesTable.numRows; r++) {
+            const i = Number(idxCol[r]);
+            const value = toScalarValue(valueCols[i][r]);
+            if (value === null) continue;
+            parts.get(Number(vf[r]))?.fields[fields[i]]?.entries.push([value, Number(cntCol[r])]);
+          }
         }
       }
       for (const part of parts.values()) {
@@ -1324,6 +1335,8 @@ type ParquetGroup = {
 };
 
 const FILE_COLUMN = `"__flp_file"`;
+const FILENAME_COLUMN = "__flp_filename";
+const PER_FILE_VALUES_FIELDS = 8;
 
 function customTypesOf(customFields: readonly CustomField[]): CustomTypes {
   return new Map(
@@ -1371,11 +1384,13 @@ function fieldValuesSql(
   file: boolean,
   where: string,
   qualify: (i: number, window: string) => string,
+  include: readonly number[] = fields.map((_, i) => i),
 ): string {
   const types = valueTypes(fields, typeOf);
   const window = `${file ? `PARTITION BY ${FILE_COLUMN} ` : ""}ORDER BY COUNT(*) DESC`;
-  return fields
-    .map((field, i) => {
+  return include
+    .map((i) => {
+      const field = fields[i];
       const f = sqlIdent(field);
       const values = types
         .map(
@@ -1430,10 +1445,10 @@ function parquetRelation(
     ];
   });
   const native = tsType.startsWith("TIMESTAMP") && !tsType.includes("TIME ZONE");
-  const selects = parts.map(({ names, fromMs, toMs, file }) => {
-    // The native timestamp predicate can prune row groups; the millisecond
-    // predicate remains authoritative for all timestamp encodings.
-    const nativeBounds = native
+  // The native timestamp predicate can prune row groups; the millisecond
+  // predicate remains authoritative for all timestamp encodings.
+  const nativeBounds = (fromMs: number, toMs: number) =>
+    native
       ? [
           ...(Number.isFinite(fromMs)
             ? [`"timestamp" >= epoch_ms(${Math.floor(fromMs) - 1}::BIGINT)`]
@@ -1443,17 +1458,49 @@ function parquetRelation(
             : []),
         ]
       : [];
-    const msBounds = [
-      ...(Number.isFinite(fromMs) ? [`ts_ms >= ${Math.floor(fromMs)}`] : []),
-      ...(Number.isFinite(toMs) ? [`ts_ms < ${Math.ceil(toMs)}`] : []),
-    ];
-    const tag = file === undefined ? "" : `${file} AS ${FILE_COLUMN}, `;
-    const select = `SELECT ${tag}${tsExpr} AS ts_ms, ${columns.join(", ")} FROM read_parquet([${names.map(sqlString).join(", ")}])${nativeBounds.length ? ` WHERE ${nativeBounds.join(" AND ")}` : ""}`;
-    return msBounds.length
-      ? `SELECT * FROM (${select}) WHERE ${msBounds.join(" AND ")}`
-      : select;
-  });
-  return `(${selects.join(" UNION ALL ")})`;
+  const msBounds = (fromMs: number, toMs: number) => [
+    ...(Number.isFinite(fromMs) ? [`ts_ms >= ${Math.floor(fromMs)}`] : []),
+    ...(Number.isFinite(toMs) ? [`ts_ms < ${Math.ceil(toMs)}`] : []),
+  ];
+  const scan = (names: readonly string[], tag: string, where: string[]) =>
+    `SELECT ${tag}${tsExpr} AS ts_ms, ${columns.join(", ")} FROM read_parquet([${names.map(sqlString).join(", ")}]${tag ? `, filename = ${sqlString(FILENAME_COLUMN)}` : ""})${where.length ? ` WHERE ${where.join(" AND ")}` : ""}`;
+  const tagged = parts.filter((part) => part.file !== undefined);
+  if (tagged.length === 0) {
+    const selects = parts.map(({ names, fromMs, toMs }) => {
+      const select = scan(names, "", nativeBounds(fromMs, toMs));
+      const bounds = msBounds(fromMs, toMs);
+      return bounds.length
+        ? `SELECT * FROM (${select}) WHERE ${bounds.join(" AND ")}`
+        : select;
+    });
+    return `(${selects.join(" UNION ALL ")})`;
+  }
+  if (tagged.length !== parts.length) {
+    throw new Error("Per-file relations must tag every part");
+  }
+  // One scan tags each row with its file. A scan per file is inlined into
+  // every card's branch of the unmaterialized base, so files × cards parquet
+  // readers each held their own buffers.
+  const fileOf = `CASE ${sqlIdent(FILENAME_COLUMN)} ${tagged
+    .flatMap(({ names, file }) => names.map((name) => `WHEN ${sqlString(name)} THEN ${file}`))
+    .join(" ")} END`;
+  const lowest = Math.min(...tagged.map((part) => part.fromMs));
+  const highest = Math.max(...tagged.map((part) => part.toMs));
+  const perFile = tagged
+    .map(({ fromMs, toMs, file }) => {
+      const bounds = msBounds(fromMs, toMs);
+      return bounds.length
+        ? `(${FILE_COLUMN} = ${file} AND ${bounds.join(" AND ")})`
+        : `${FILE_COLUMN} = ${file}`;
+    });
+  const select = scan(
+    tagged.flatMap((part) => part.names),
+    `${fileOf} AS ${FILE_COLUMN}, `,
+    nativeBounds(lowest, highest),
+  );
+  return perFile.some((clause) => clause.includes(" AND "))
+    ? `(SELECT * FROM (${select}) WHERE ${perFile.join(" OR ")})`
+    : `(${select})`;
 }
 
 function selectiveWhere(
