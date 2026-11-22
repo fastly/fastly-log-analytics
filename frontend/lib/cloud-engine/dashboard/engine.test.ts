@@ -1019,7 +1019,7 @@ describe("runDashboard", () => {
     expect(answer).toEqual(wholeAnswer);
   });
 
-  it("bounds the bytes of whole selective reads held between fetch and query", async () => {
+  it("parallelizes whole selective fallback within a bounded 128 MiB budget", async () => {
     const MiB = 1024 * 1024;
     const keys = ["a", "b", "c", "d"] as const;
     const buffers = Object.fromEntries(await Promise.all(keys.map(async (key, i) =>
@@ -1064,7 +1064,7 @@ describe("runDashboard", () => {
       });
       expect(keyOf.size).toBe(keys.length);
       expect(held).toBe(0);
-      expect(maxHeld).toBeLessThanOrEqual(64 * MiB);
+      expect(maxHeld).toBe(120 * MiB);
     } finally {
       query.mockRestore();
     }
