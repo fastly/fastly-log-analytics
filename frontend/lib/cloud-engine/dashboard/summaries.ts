@@ -322,6 +322,9 @@ export function planSummaries(
   const rawIds = new Map<string, string>();
   const partialHours = new Set<string>();
   const partialDays = new Set<string>();
+  // Earliest start of an hour's raw files outside the range: an open bundle
+  // ending at or before it cannot hold their rows.
+  const outsideFrom = new Map<string, number>();
   for (const file of rawFiles) {
     const windowMatch = RAW_WINDOW.exec(file.key);
     const compactMatch = windowMatch ? null : RAW_COMPACT.exec(file.key);
@@ -329,8 +332,13 @@ export function planSummaries(
     const day = (windowMatch ?? compactMatch)![1];
     const hour = (windowMatch ?? compactMatch)![2];
     if (Date.parse(file.start) < fromMs || Date.parse(file.end) > toMs) {
-      partialHours.add(`${day}hour=${hour}/`);
+      const hourKey = `${day}hour=${hour}/`;
+      partialHours.add(hourKey);
       partialDays.add(day);
+      outsideFrom.set(
+        hourKey,
+        Math.min(outsideFrom.get(hourKey) ?? Infinity, Date.parse(file.start)),
+      );
       continue;
     }
     if (windowMatch) {
@@ -412,8 +420,11 @@ export function planSummaries(
     const rows = list.reduce((sum, w) => sum + w.rows, 0);
     if (rows !== Number(match[6])) continue;
     const hasCompact = list.some((w) => w.compacted);
+    // A live tail window that starts after the bundle and crosses `toMs`
+    // leaves the bundle's own rows wholly inside the range.
     const matchesOpen = hasCompact
-      ? !partialHours.has(`${match[1]}hour=${match[2]}/`) &&
+      ? endMs <= toMs &&
+        endMs <= (outsideFrom.get(`${match[1]}hour=${match[2]}/`) ?? Infinity) &&
         list.reduce((sum, w) => sum + w.sources, 0) <= Number(match[5])
       : hourBundleName(list) === match[4];
     if (matchesOpen) {

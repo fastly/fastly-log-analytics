@@ -140,8 +140,12 @@ The fence waits `FENCE_WAIT_S` = the svc read-cache TTL (300s) + the plan lease 
 5. The same reset applies to `ingest:rum:watermark` and `ingest:rum:plan`.
    These are cleared or reset:
    - `ingest:backfill`, `ingest:deleteq:*` and `ingest:quarantine:*`;
-   - `ingest:compact_state` and `summary:bundle_state`;
+   - `ingest:compact_state`, `summary:bundle_state` and `summary:cmcd_bundle_state`;
    - `retention:{request,rum,summary:request,summary_bundle:request}`.
+   - CMCD bundling (`bundle::cmcd_summary_bundle`) does nothing while any
+     reset marker exists: CMCD windows are listed from the bucket, so a
+     bundle written during cleanup could fold pre-reset windows and outlive
+     the reset.
 
    `retention:last_sweep` and `retention:purge` are left as they are.
    `history:*`, `logs:*`, `cron:state`, `flp-sched-v1` and `job:*` are kept.
@@ -161,7 +165,8 @@ every maintenance tick, until the job is complete.
    - `raw/request/` and `raw/rum/` keys whose minute is before `T`;
    - `processed/request/` and `processed/rum/` objects not referenced by the
      new head;
-   - `processed/summary/request/` and `processed/summary_bundle/request/`;
+   - `processed/summary/request/`, `processed/summary_bundle/request/` and
+     `processed/summary_bundle/cmcd_summary/`;
    - `processed/_catalog/`, except the objects the new head references;
    - `processed/_sources/`, `processed/_inflight/` and
      `processed/_compact_work/`.

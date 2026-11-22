@@ -550,6 +550,11 @@ pub fn datasets(
         super::bundle::bundle_prefix(&scope, "request"),
         service.log_retention_days,
     ));
+    out.push((
+        "summary_bundle:cmcd_summary".to_owned(),
+        super::bundle::bundle_prefix(&scope, "cmcd_summary"),
+        service.log_retention_days,
+    ));
     out
 }
 

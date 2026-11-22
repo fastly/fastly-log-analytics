@@ -357,18 +357,27 @@ pub fn files<R: Runtime>(runtime: &R, service: &Service, query: &str, started: I
     }
     match param("view") {
         None | Some("raw") => {}
-        Some("summary") if dataset == "request" => {
+        Some("summary") => {
+            let kind = match dataset {
+                "request" => REQUEST_SUMMARIES,
+                "cmcd_summary" => CMCD_SUMMARIES,
+                _ => {
+                    return Err((
+                        400,
+                        "Summaries exist only for the request and cmcd_summary datasets",
+                    ))
+                }
+            };
             return summary_files(
                 runtime,
                 service,
-                from,
-                to,
+                (from, to),
                 &secret,
                 param("cursor"),
                 started,
+                kind,
             );
         }
-        Some("summary") => return Err((400, "Summaries exist only for the request dataset")),
         Some(_) => return Err((400, "view must be raw or summary")),
     }
     let (mut day, mut token, mut after) = (0usize, None, None);
@@ -885,7 +894,15 @@ fn inline_summary_files<R: Runtime>(
                 hours.entry(hour).or_default().push(object);
             }
         }
-        push_day_summary_files(&mut files, at, (from, to), true, &hours, &bundles);
+        push_day_summary_files(
+            &mut files,
+            at,
+            (from, to),
+            true,
+            &hours,
+            &bundles,
+            "summary=",
+        );
         if files.len() >= FILES_PAGE {
             return None;
         }
@@ -936,7 +953,12 @@ fn summary_semantics() -> Value {
 
 /// `(start, end, rows)` of a `summary={start}-{end}-{run}-n{rows}.parquet` key.
 fn summary_window(key: &str) -> Option<(i64, i64, u64)> {
-    let name = key.rsplit('/').next()?.strip_prefix("summary=")?;
+    summary_window_marked("summary=", key)
+}
+
+/// [`summary_window`] for window files named `{marker}{start}-{end}-{run}-n{rows}.parquet`.
+fn summary_window_marked(marker: &str, key: &str) -> Option<(i64, i64, u64)> {
+    let name = key.rsplit('/').next()?.strip_prefix(marker)?;
     let name = name.strip_suffix(".parquet")?;
     let (head, rows) = name.rsplit_once("-n")?;
     let mut parts = head.splitn(3, '-');
@@ -956,6 +978,7 @@ fn push_day_summary_files(
     allow_day: bool,
     hours: &std::collections::BTreeMap<u32, Vec<Object>>,
     bundles: &[Object],
+    marker: &str,
 ) {
     use super::bundle;
     let current = bundle::current_hours(bundles);
@@ -965,7 +988,7 @@ fn push_day_summary_files(
         .filter(|_| {
             hours.keys().eq(current.keys())
                 && hours.iter().all(|(hour, ws)| {
-                    let view = bundle::hour_view(*hour, ws, bundles);
+                    let view = bundle::hour_view_marked(marker, *hour, ws, bundles);
                     view.windows.is_empty()
                         && view.bundle == current.get(hour).map(|o| o.key.clone())
                 })
@@ -987,10 +1010,11 @@ fn push_day_summary_files(
             let inside = (start >= from && start + 3600 <= to)
                 || (!ws.is_empty()
                     && ws.iter().all(|o| {
-                        summary_window(&o.key).is_some_and(|(a, b, _)| a >= from && b <= to)
+                        summary_window_marked(marker, &o.key)
+                            .is_some_and(|(a, b, _)| a >= from && b <= to)
                     }));
             let view = if inside {
-                bundle::hour_view(*hour, ws, bundles)
+                bundle::hour_view_marked(marker, *hour, ws, bundles)
             } else {
                 bundle::HourView {
                     bundle: None,
@@ -1010,7 +1034,7 @@ fn push_day_summary_files(
                 ));
             }
             for object in ws.iter().filter(|o| view.windows.contains(&o.key)) {
-                let (a, b, rows) = summary_window(&object.key).expect("retained");
+                let (a, b, rows) = summary_window_marked(marker, &object.key).expect("retained");
                 if a < to && b > from {
                     files.push(summary_entry("window", object, a, b, rows, 1));
                 }
@@ -1038,6 +1062,32 @@ fn summary_entry(
     })
 }
 
+/// A dataset with window summaries and `summary_bundle` hour and day bundles.
+#[derive(Clone, Copy)]
+struct SummaryKind {
+    dataset: &'static str,
+    /// File-name prefix of its window summaries.
+    marker: &'static str,
+    windows: fn(&str) -> String,
+    /// Whether closed hours of its window listing come from Core Cache.
+    cached: bool,
+}
+
+const REQUEST_SUMMARIES: SummaryKind = SummaryKind {
+    dataset: "request",
+    marker: "summary=",
+    windows: |scope| super::summary::summary_prefix(scope, "request"),
+    cached: true,
+};
+
+/// CMCD window summaries are merged losslessly, so their bundles carry no approximation.
+const CMCD_SUMMARIES: SummaryKind = SummaryKind {
+    dataset: "cmcd_summary",
+    marker: "window=",
+    windows: |scope| super::cmcd_summary::cmcd_summary_prefix(scope, "request"),
+    cached: false,
+};
+
 /// `GET /api/files?view=summary&from&to&cursor`: the fewest summary files that answer
 /// `[from, to)` exactly. Per UTC day it lists the day's `summary_bundle` folder and its window
 /// summaries, then returns the day bundle for a whole day inside the range when it covers
@@ -1047,19 +1097,20 @@ fn summary_entry(
 fn summary_files<R: Runtime>(
     runtime: &R,
     service: &Service,
-    from: i64,
-    to: i64,
+    (from, to): (i64, i64),
     secret: &str,
     cursor: Option<&str>,
     started: Instant,
+    kind: SummaryKind,
 ) -> Api {
-    use super::{bundle, summary};
+    use super::bundle;
+    let marker = kind.marker;
     let (mut day, mut token) = (0usize, None::<String>);
     if let Some(value) = cursor {
         let cursor = decode_cursor(secret.as_bytes(), value)?;
         if cursor.from != from
             || cursor.to != to
-            || cursor.dataset != "request"
+            || cursor.dataset != kind.dataset
             || cursor.view.as_deref() != Some("summary")
         {
             return Err((400, "Invalid cursor"));
@@ -1070,8 +1121,8 @@ fn summary_files<R: Runtime>(
     let (start_day, start_token) = (day, token.clone());
     let store = open(runtime, service, started)?;
     let scope = scope(service);
-    let windows_root = summary::summary_prefix(&scope, "request");
-    let bundles_root = bundle::bundle_prefix(&scope, "request");
+    let windows_root = (kind.windows)(&scope);
+    let bundles_root = bundle::bundle_prefix(&scope, kind.dataset);
     let first_day = day_start(from - 3600);
     let last_day = day_start(to - 1);
     let day_count = usize::try_from((last_day - first_day) / 86_400 + 1).unwrap_or(0);
@@ -1085,7 +1136,7 @@ fn summary_files<R: Runtime>(
         &store,
         service,
         &windows_root,
-        true,
+        kind.cached,
         (first_hour, last_hour),
         &mut calls,
     );
@@ -1138,12 +1189,16 @@ fn summary_files<R: Runtime>(
                 }
             }
         }
-        windows.retain(|o| summary_window(&o.key).is_some());
+        windows.retain(|o| summary_window_marked(marker, &o.key).is_some());
         // Blocks end at hour boundaries unless one hour fills a LIST page.
         let at_boundary = !windows_done && pos.ends_with('/') && Some(&pos) != token.as_ref();
         // An unfinished listing resolves only the hours before its last listed hour.
         let resume_hour = (!windows_done && !at_boundary)
-            .then(|| windows.last().and_then(|o| summary_window(&o.key)))
+            .then(|| {
+                windows
+                    .last()
+                    .and_then(|o| summary_window_marked(marker, &o.key))
+            })
             .flatten()
             .map(|(start, _, _)| start - start.rem_euclid(3600));
         if at_boundary {
@@ -1151,17 +1206,20 @@ fn summary_files<R: Runtime>(
         } else if !windows_done {
             let Some(hour) = resume_hour.filter(|h| {
                 windows.first().is_some_and(|o| {
-                    summary_window(&o.key).is_some_and(|(s, _, _)| s - s.rem_euclid(3600) < *h)
+                    summary_window_marked(marker, &o.key)
+                        .is_some_and(|(s, _, _)| s - s.rem_euclid(3600) < *h)
                 })
             }) else {
                 break;
             };
-            windows.retain(|o| summary_window(&o.key).is_some_and(|(s, _, _)| s < hour));
+            windows.retain(|o| {
+                summary_window_marked(marker, &o.key).is_some_and(|(s, _, _)| s < hour)
+            });
             token = Some(format!("{windows_root}{}", super::hour_dir(hour)));
         }
         let mut hours: std::collections::BTreeMap<u32, Vec<Object>> = Default::default();
         for object in windows {
-            let (start, _, _) = summary_window(&object.key).expect("retained");
+            let (start, _, _) = summary_window_marked(marker, &object.key).expect("retained");
             let hour = (start.rem_euclid(86_400) / 3600) as u32;
             hours.entry(hour).or_default().push(object);
         }
@@ -1172,6 +1230,7 @@ fn summary_files<R: Runtime>(
             whole_day && windows_done,
             &hours,
             &bundles,
+            marker,
         );
         if windows_done {
             day += 1;
@@ -1192,7 +1251,7 @@ fn summary_files<R: Runtime>(
                 to,
                 day,
                 token,
-                dataset: "request".to_owned(),
+                dataset: kind.dataset.to_owned(),
                 view: Some("summary".to_owned()),
                 after: None,
                 table: None,
@@ -1204,7 +1263,7 @@ fn summary_files<R: Runtime>(
         "files": files,
         "next_cursor": next_cursor,
         "complete": complete,
-        "approximate": summary_semantics(),
+        "approximate": if kind.dataset == "request" { summary_semantics() } else { Value::Null },
     }))
 }
 
