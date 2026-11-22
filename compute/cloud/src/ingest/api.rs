@@ -312,47 +312,78 @@ pub fn files<R: Runtime>(runtime: &R, service: &Service, query: &str, started: I
             }
             return Ok(page);
         }
-        let page = super::catalog::discovery::pinned_page_precise(
-            &store,
-            from,
-            to,
-            summary,
-            param("summaries") == Some("1"),
-            cursor.as_ref().and_then(|cursor| cursor.token.as_deref()),
-            None,
-            summary_bounds,
-        )
-        .map_err(|error| match error.as_str() {
+        let cursor_token = cursor.as_ref().and_then(|cursor| cursor.token.as_deref());
+        let discovery_error = |error: String| match error.as_str() {
             "catalog_cursor_expired" => (409, "Catalog snapshot expired; restart discovery"),
             "catalog_cursor_invalid" => (400, "Invalid cursor"),
             _ => {
                 runtime.admin_event(json!({"event":"catalog.discovery_error","error":error}));
                 (503, "Catalog discovery unavailable; retry")
             }
-        })?;
+        };
+        let seal = |token: String| {
+            encode_cursor(
+                secret.as_bytes(),
+                &Cursor {
+                    from,
+                    to,
+                    day: 0,
+                    token: Some(token),
+                    dataset: dataset.to_owned(),
+                    view: Some(marker.to_owned()),
+                    after: None,
+                    table: None,
+                },
+            )
+        };
+        let approximate = if summary {
+            summary_semantics()
+        } else {
+            Value::Null
+        };
+        let page = if cursor_token.is_none() && param("fork") == Some("1") {
+            match super::catalog::discovery::forked_page(
+                &store,
+                from,
+                to,
+                summary,
+                param("summaries") == Some("1"),
+                summary_bounds,
+            )
+            .map_err(discovery_error)?
+            {
+                super::catalog::discovery::Start::Page(page) => page,
+                super::catalog::discovery::Start::Forks { tokens, generation } => {
+                    let forks = tokens
+                        .into_iter()
+                        .map(seal)
+                        .collect::<Result<Vec<_>, _>>()?;
+                    // Incomplete without a cursor, so a client that ignores forks fails closed.
+                    return Ok(json!({
+                        "files":[], "summary_files":[], "next_cursor":null, "complete":false,
+                        "forks":forks, "catalog_generation":generation, "approximate":approximate,
+                    }));
+                }
+            }
+        } else {
+            super::catalog::discovery::pinned_page_precise(
+                &store,
+                from,
+                to,
+                summary,
+                param("summaries") == Some("1"),
+                cursor_token,
+                None,
+                summary_bounds,
+            )
+            .map_err(discovery_error)?
+        };
         let complete = page.next.is_none();
-        let next = page
-            .next
-            .map(|token| {
-                encode_cursor(
-                    secret.as_bytes(),
-                    &Cursor {
-                        from,
-                        to,
-                        day: 0,
-                        token: Some(token),
-                        dataset: dataset.to_owned(),
-                        view: Some(marker.to_owned()),
-                        after: None,
-                        table: None,
-                    },
-                )
-            })
-            .transpose()?;
+        let next = page.next.map(seal).transpose()?;
         return Ok(json!({
             "files":page.files, "summary_files":page.summaries,
             "next_cursor":next, "complete":complete, "catalog_generation":page.generation,
-            "approximate": if summary { summary_semantics() } else { Value::Null },
+            "approximate":approximate,
         }));
     }
     match param("view") {

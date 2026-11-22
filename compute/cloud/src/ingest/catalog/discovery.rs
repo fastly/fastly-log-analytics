@@ -16,7 +16,7 @@ const STATE_LIMIT: usize = 4 * 1024 * 1024;
 const IDENTITY_LIMIT: usize = 16_384;
 pub const SNAPSHOT_SECONDS: u64 = 600;
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Default, Clone, Serialize, Deserialize)]
 struct State {
     version: u32,
     service: String,
@@ -55,6 +55,9 @@ struct State {
     day_bundle_ready: bool,
     #[serde(default)]
     summary_bounds: Option<(i64, i64)>,
+    /// A fork after the first of its day, whose day bundle an earlier fork lists.
+    #[serde(default)]
+    day_bundle_listed: bool,
 }
 
 pub struct Page {
@@ -238,51 +241,145 @@ pub fn pinned_page_precise<R: Runtime>(
     root: Option<Head>,
     summary_bounds: (i64, i64),
 ) -> Result<Page, String> {
-    let mut state = if let Some(key) = checkpoint {
-        if !key.starts_with(&format!(
-            "{}processed/_catalog/",
-            crate::ingest::scope(store.service)
-        )) {
-            return Err("catalog_cursor_invalid".into());
-        }
-        let body = store
-            .get_direct(key, STATE_LIMIT)?
-            .ok_or("catalog_cursor_expired")?;
-        let state: State = serde_json::from_slice(&body).map_err(|_| "catalog_cursor_invalid")?;
-        if state.version != VERSION
-            || state.service != store.service.service_id
-            || state.from != from
-            || state.to != to
-            || state.summary != summary
-            || state.summary_bounds.unwrap_or((state.from, state.to)) != summary_bounds
-        {
-            return Err("catalog_cursor_invalid".into());
-        }
-        if state.created.saturating_add(SNAPSHOT_SECONDS) <= store.runtime.now() {
-            return Err("catalog_cursor_expired".into());
-        }
-        state
+    let state = if let Some(token) = checkpoint {
+        load(store, token, from, to, summary, summary_bounds)?
     } else {
-        let root = if let Some(root) = root {
-            root
-        } else {
-            let record = store.runtime.admin_get(WATERMARK_KEY)?;
-            head(record.as_ref().map(|r| &r.value).unwrap_or(&Value::Null))?
-        };
-        let mut state = initial(
-            root,
-            store.service.service_id.clone(),
-            from,
-            to,
-            summary,
-            store.runtime.now(),
-        );
-        state.summary_bounds = Some(summary_bounds);
-        state
+        fresh(store, root, from, to, summary, summary_bounds)?
     };
+    walk(
+        store,
+        state,
+        include_summaries,
+        summary_bounds,
+        Prefetched::new(),
+    )
+}
+
+/// The walk state a cursor token names: a checkpoint key, or `{key}#{i}` for fork `i` of a
+/// forked listing's setup.
+fn load<R: Runtime>(
+    store: &Store<'_, R>,
+    token: &str,
+    from: i64,
+    to: i64,
+    summary: bool,
+    summary_bounds: (i64, i64),
+) -> Result<State, String> {
+    let (key, fork) = match token.rsplit_once('#') {
+        Some((key, index)) => (
+            key,
+            Some(
+                index
+                    .parse::<usize>()
+                    .map_err(|_| "catalog_cursor_invalid")?,
+            ),
+        ),
+        None => (token, None),
+    };
+    if !key.starts_with(&format!(
+        "{}processed/_catalog/",
+        crate::ingest::scope(store.service)
+    )) {
+        return Err("catalog_cursor_invalid".into());
+    }
+    let body = store
+        .get_direct(key, STATE_LIMIT)?
+        .ok_or("catalog_cursor_expired")?;
+    let state = match fork {
+        None => serde_json::from_slice::<State>(&body).ok(),
+        Some(index) => serde_json::from_slice::<Vec<State>>(&body)
+            .ok()
+            .and_then(|forks| forks.into_iter().nth(index)),
+    }
+    .ok_or("catalog_cursor_invalid")?;
+    if state.version != VERSION
+        || state.service != store.service.service_id
+        || state.from != from
+        || state.to != to
+        || state.summary != summary
+        || state.summary_bounds.unwrap_or((state.from, state.to)) != summary_bounds
+    {
+        return Err("catalog_cursor_invalid".into());
+    }
+    if state.created.saturating_add(SNAPSHOT_SECONDS) <= store.runtime.now() {
+        return Err("catalog_cursor_expired".into());
+    }
+    Ok(state)
+}
+
+fn fresh<R: Runtime>(
+    store: &Store<'_, R>,
+    root: Option<Head>,
+    from: i64,
+    to: i64,
+    summary: bool,
+    summary_bounds: (i64, i64),
+) -> Result<State, String> {
+    let root = if let Some(root) = root {
+        root
+    } else {
+        let record = store.runtime.admin_get(WATERMARK_KEY)?;
+        head(record.as_ref().map(|r| &r.value).unwrap_or(&Value::Null))?
+    };
+    let mut state = initial(
+        root,
+        store.service.service_id.clone(),
+        from,
+        to,
+        summary,
+        store.runtime.now(),
+    );
+    state.summary_bounds = Some(summary_bounds);
+    Ok(state)
+}
+
+/// Starts walking `state` at its next day: the hours of `index` inside the range.
+fn enter_day(
+    state: &mut State,
+    day: i64,
+    index: Day,
+    include_summaries: bool,
+    summary_bounds: (i64, i64),
+) {
+    let (from, to) = (state.from, state.to);
+    state.day_hours.clear();
+    state.day_bundle = if (state.summary || include_summaries)
+        && summary_bounds.0 <= day
+        && summary_bounds.1 >= day + 86_400
+    {
+        state.day_bundles.get(&day).cloned()
+    } else {
+        None
+    };
+    state.day_bundle_ready = false;
+    state.day_bundle_listed = false;
+    state.summary_counts = index.summary_counts;
+    state.hours = index
+        .hours
+        .into_iter()
+        .filter(|(hour, _)| *hour < to && hour.saturating_add(3600) > from.saturating_sub(3600))
+        .collect();
+    state.hour = 0;
+    state.current = state.hours.first().map(|(_, r)| r.clone());
+    state.offset = 0;
+    state.summary_offset = 0;
+    state.retired.clear();
+    state.seen.clear();
+    state.summaries_seen.clear();
+    state.summary_ready = false;
+    state.covered_windows.clear();
+}
+
+fn walk<R: Runtime>(
+    store: &Store<'_, R>,
+    mut state: State,
+    include_summaries: bool,
+    summary_bounds: (i64, i64),
+    mut prefetched: Prefetched,
+) -> Result<Page, String> {
+    let (from, to, summary) = (state.from, state.to, state.summary);
     let mut files = Vec::new();
     let mut summaries = Vec::new();
-    let mut prefetched = Prefetched::new();
     let affordable = |prefetched: &Prefetched, key: &str| {
         (already_sent(store, prefetched, key) || store.runtime.admin_remaining_calls() > 3)
             && admitted(store)
@@ -304,34 +401,8 @@ pub fn pinned_page_precise<R: Runtime>(
             if index.version != VERSION {
                 return Err("catalog_version_unsupported".into());
             }
-            state.day_hours.clear();
-            state.day_bundle = if (summary || include_summaries)
-                && summary_bounds.0 <= day
-                && summary_bounds.1 >= day + 86_400
-            {
-                state.day_bundles.get(&day).cloned()
-            } else {
-                None
-            };
-            state.day_bundle_ready = false;
-            state.summary_counts = index.summary_counts;
-            state.hours = index
-                .hours
-                .into_iter()
-                .filter(|(hour, _)| {
-                    *hour < to && hour.saturating_add(3600) > from.saturating_sub(3600)
-                })
-                .collect();
+            enter_day(&mut state, day, index, include_summaries, summary_bounds);
             state.day += 1;
-            state.hour = 0;
-            state.current = state.hours.first().map(|(_, r)| r.clone());
-            state.offset = 0;
-            state.summary_offset = 0;
-            state.retired.clear();
-            state.seen.clear();
-            state.summaries_seen.clear();
-            state.summary_ready = false;
-            state.covered_windows.clear();
             if state.hours.is_empty() {
                 continue;
             }
@@ -350,10 +421,12 @@ pub fn pinned_page_precise<R: Runtime>(
                 )?;
                 let coverage = bundles::parse(&bytes)?;
                 state.day_hours = coverage.hours;
-                if summary {
-                    files.push(entry(&coverage.file, state.generation));
-                } else {
-                    summaries.push(entry(&coverage.file, state.generation));
+                if !state.day_bundle_listed {
+                    if summary {
+                        files.push(entry(&coverage.file, state.generation));
+                    } else {
+                        summaries.push(entry(&coverage.file, state.generation));
+                    }
                 }
             }
             state.day_bundle_ready = true;
@@ -530,6 +603,146 @@ pub fn pinned_page_precise<R: Runtime>(
         next,
         generation: state.generation,
         open_hour,
+    })
+}
+
+/// Most concurrent chains one forked listing splits into.
+pub const MAX_FORKS: usize = 16;
+/// Most day indexes a fork setup reads to split the range by hour; a longer range splits by day.
+const FORK_DAY_INDEXES: usize = 12;
+/// Ranges this short list in one page, so forking would only add a round trip.
+const FORK_MIN_SECONDS: i64 = 2 * 3600;
+
+/// The first page of a listing that may fork.
+pub enum Start {
+    Page(Page),
+    /// Cursor tokens of independent chains that together list the range exactly once.
+    Forks {
+        tokens: Vec<String>,
+        generation: u64,
+    },
+}
+
+/// Splits the walk of `[from, to)` into chains that never share an hour, so a client can page
+/// them concurrently. Each chain is a whole-day or within-day run of hours of one pinned head;
+/// every per-hour and per-day walk state starts fresh at an hour or day, so walking the chains
+/// lists what one walk would. A range with one chain is walked here.
+pub fn forked_page<R: Runtime>(
+    store: &Store<'_, R>,
+    from: i64,
+    to: i64,
+    summary: bool,
+    include_summaries: bool,
+    summary_bounds: (i64, i64),
+) -> Result<Start, String> {
+    let base = fresh(store, None, from, to, summary, summary_bounds)?;
+    if to - from <= FORK_MIN_SECONDS {
+        return walk(
+            store,
+            base,
+            include_summaries,
+            summary_bounds,
+            Prefetched::new(),
+        )
+        .map(Start::Page);
+    }
+    let mut prefetched = Prefetched::new();
+    let mut shards = Vec::new();
+    if base.days.len() > FORK_DAY_INDEXES {
+        let size = base.days.len().div_ceil(MAX_FORKS);
+        for days in base.days.chunks(size) {
+            let (first, last) = (days[0].0, days[days.len() - 1].0 + 86_400);
+            let mut shard = base.clone();
+            shard.days = days.to_vec();
+            shard
+                .hour_bundles
+                .retain(|hour, _| (first..last).contains(hour));
+            shard
+                .open_bundles
+                .retain(|hour, _| (first..last).contains(hour));
+            shard
+                .day_bundles
+                .retain(|day, _| (first..last).contains(day));
+            shards.push(shard);
+        }
+    } else {
+        let keys: Vec<(String, usize)> = base
+            .days
+            .iter()
+            .map(|(_, key)| (key.clone(), MANIFEST_LIMIT))
+            .collect();
+        let mut days = Vec::new();
+        for (n, (day, key)) in base.days.iter().enumerate() {
+            if !admitted(store)
+                || !(already_sent(store, &prefetched, key)
+                    || store.runtime.admin_remaining_calls() > 3)
+            {
+                return Err("backend_budget_exhausted".into());
+            }
+            let bytes = fetch(store, &mut prefetched, key, MANIFEST_LIMIT, || {
+                keys[n + 1..].to_vec()
+            })?;
+            let index: Day =
+                serde_json::from_slice(&bytes).map_err(|_| "catalog_object_invalid")?;
+            if index.version != VERSION {
+                return Err("catalog_version_unsupported".into());
+            }
+            let mut state = base.clone();
+            state.days = Vec::new();
+            state.day = 0;
+            enter_day(&mut state, *day, index, include_summaries, summary_bounds);
+            if !state.hours.is_empty() {
+                days.push(state);
+            }
+        }
+        let total: usize = days.iter().map(|day| day.hours.len()).sum();
+        let mut size = total.div_ceil(MAX_FORKS).max(1);
+        while days
+            .iter()
+            .map(|day| day.hours.len().div_ceil(size))
+            .sum::<usize>()
+            > MAX_FORKS
+        {
+            size += 1;
+        }
+        for day in days {
+            for (n, hours) in day.hours.chunks(size).enumerate() {
+                let mut shard = day.clone();
+                shard.hours = hours.to_vec();
+                shard.current = hours.first().map(|(_, r)| r.clone());
+                shard.day_bundle_listed = n > 0;
+                let held = |hour: &i64| hours.iter().any(|(h, _)| h == hour);
+                shard.hour_bundles.retain(|hour, _| held(hour));
+                shard.open_bundles.retain(|hour, _| held(hour));
+                shard.day_bundles.clear();
+                shards.push(shard);
+            }
+        }
+    }
+    if shards.len() <= 1 {
+        let state = match shards.pop() {
+            Some(state) => state,
+            None => State {
+                days: Vec::new(),
+                ..base
+            },
+        };
+        return walk(store, state, include_summaries, summary_bounds, prefetched).map(Start::Page);
+    }
+    let generation = base.generation;
+    let body = serde_json::to_vec(&shards).map_err(|e| e.to_string())?;
+    if body.len() > STATE_LIMIT {
+        return Err("catalog_cursor_admission".into());
+    }
+    let digest = hex::encode(sha2::Sha256::digest(&body));
+    let key = format!(
+        "{}processed/_catalog/forks-{digest}.json",
+        crate::ingest::scope(store.service)
+    );
+    store.put_verified(&key, body)?;
+    Ok(Start::Forks {
+        tokens: (0..shards.len()).map(|i| format!("{key}#{i}")).collect(),
+        generation,
     })
 }
 

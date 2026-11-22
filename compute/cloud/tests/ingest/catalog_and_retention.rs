@@ -63,6 +63,140 @@ fn catalog_discovery_reads_an_active_day_in_few_concurrent_rounds() {
 }
 
 #[test]
+fn catalog_fork_listing_lists_the_sequential_walk_in_parallel_chains() {
+    let fake = Fake::new(BASE);
+    fake.heap_mib.set(Some(40));
+    let (query, want_files, want_summaries) = publish_active_day(&fake);
+    walk_files(&fake, &query);
+    let sequential = fake.fos_rounds.borrow().len();
+    let forked = walk_forked(&fake, &query);
+    assert_eq!(forked.files, want_files);
+    assert_eq!(forked.summaries, want_summaries);
+    assert!(forked.forks >= 4, "{} forks", forked.forks);
+    // Setup reads the range's two day indexes in one round, then writes the forks.
+    assert_eq!(forked.setup_rounds, 1);
+    assert!(
+        forked.setup_calls <= 7,
+        "{} setup calls",
+        forked.setup_calls
+    );
+    // Every fork finishes in one page; setup plus the slowest fork take fewer round trips than
+    // one walk of every hour.
+    assert_eq!(forked.longest, 1);
+    assert!(
+        forked.setup_rounds + forked.longest_rounds < sequential,
+        "{} + {} rounds forked, {sequential} sequential",
+        forked.setup_rounds,
+        forked.longest_rounds
+    );
+
+    // Forks are pinned to the generation setup read; a later commit shows up in the next listing.
+    let setup = files_page(&fake, &format!("{query}&fork=1")).unwrap();
+    let hour = BASE - BASE.rem_euclid(3600) - 3 * 3600;
+    let late = ingest::processed_key("processed/request/", hour + 60, hour + 120, "late", 3);
+    fake.bucket.borrow_mut().insert(late.clone(), vec![1]);
+    publish_files(&fake, std::slice::from_ref(&late), &[], &[]);
+    let mut pinned = BTreeSet::new();
+    for fork in setup["forks"].as_array().unwrap() {
+        let mut cursor = fork.as_str().map(str::to_owned);
+        while let Some(value) = cursor {
+            let page = files_page(&fake, &format!("{query}&cursor={value}")).unwrap();
+            assert_eq!(page["catalog_generation"], setup["catalog_generation"]);
+            for file in page["files"].as_array().unwrap() {
+                assert!(pinned.insert(file["key"].as_str().unwrap().to_owned()));
+            }
+            cursor = page["next_cursor"].as_str().map(str::to_owned);
+        }
+    }
+    assert_eq!(pinned, want_files);
+    assert!(walk_forked(&fake, &query).files.contains(&late));
+}
+
+#[test]
+fn catalog_fork_cursors_bind_their_range_and_expire_with_the_snapshot() {
+    let fake = Fake::new(BASE);
+    let (query, _, _) = publish_active_day(&fake);
+    let setup = files_page(&fake, &format!("{query}&fork=1")).unwrap();
+    let fork = setup["forks"][1].as_str().unwrap().to_owned();
+    let open = BASE - BASE.rem_euclid(3600);
+    let other = format!(
+        "summaries=1&from={}&to={}",
+        iso_url(open - 11 * 3600),
+        iso_url(open + 3600)
+    );
+    assert_eq!(
+        files_page(&fake, &format!("{other}&cursor={fork}"))
+            .unwrap_err()
+            .0,
+        400
+    );
+    fake.now
+        .set(fake.now.get() + ingest::catalog::discovery::SNAPSHOT_SECONDS);
+    assert_eq!(
+        files_page(&fake, &format!("{query}&cursor={fork}"))
+            .unwrap_err()
+            .0,
+        409
+    );
+}
+
+#[test]
+fn catalog_fork_is_skipped_when_the_range_has_one_shard() {
+    let fake = Fake::new(BASE);
+    publish_active_day(&fake);
+    let open = BASE - BASE.rem_euclid(3600);
+    let query = format!(
+        "fork=1&from={}&to={}",
+        iso_url(open - 3600),
+        iso_url(open - 1800)
+    );
+    let page = files_page(&fake, &query).unwrap();
+    assert!(page.get("forks").is_none_or(Value::is_null));
+    assert_eq!(page["complete"], true);
+    assert_eq!(page["files"].as_array().unwrap().len(), 4);
+}
+
+#[test]
+fn catalog_fork_listing_of_many_days_splits_by_day_and_stays_exact() {
+    let fake = Fake::new(BASE);
+    let mut want = BTreeSet::new();
+    for day in 0..20 {
+        let start = BASE - day * 86_400 - 7200;
+        let keys: Vec<String> = (0..3)
+            .map(|i| {
+                let key = ingest::processed_key(
+                    "processed/request/",
+                    start + i * 600,
+                    start + i * 600 + 60,
+                    "abc",
+                    1,
+                );
+                fake.bucket.borrow_mut().insert(key.clone(), vec![1]);
+                key
+            })
+            .collect();
+        want.extend(keys.iter().cloned());
+        publish_files(&fake, &keys, &[], &[]);
+    }
+    let query = format!(
+        "from={}&to={}",
+        iso_url(BASE - 21 * 86_400),
+        iso_url(BASE + 3600)
+    );
+    assert_eq!(walk_files(&fake, &query).0, want);
+    let forked = walk_forked(&fake, &query);
+    assert_eq!(forked.files, want);
+    assert!(forked.forks >= 8 && forked.forks <= 16, "{}", forked.forks);
+    // Splitting by day reads no day index; each fork reads its own.
+    assert_eq!(forked.setup_rounds, 0);
+    assert!(
+        forked.setup_calls <= 5,
+        "{} setup calls",
+        forked.setup_calls
+    );
+}
+
+#[test]
 fn catalog_prefetch_bounds_unread_reads_by_their_full_limits_across_batches() {
     let fake = Fake::new(BASE);
     let (query, want_files, want_summaries) = publish_active_day(&fake);

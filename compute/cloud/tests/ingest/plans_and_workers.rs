@@ -1370,6 +1370,22 @@ mod summary_bundles {
             day_rows(&fake) + open.num_rows() as u64
         );
 
+        // Forks of a whole-day summary view list its day bundle once, beside the same windows.
+        for (from, to) in [
+            (day, BASE + 17 * HOUR),
+            (day, day + 86_400),
+            (BASE, BASE + 9 * HOUR),
+        ] {
+            let query = format!("view=summary&from={}&to={}", iso_url(from), iso_url(to));
+            let sequential: BTreeSet<String> = summary_view(&fake, from, to, 30)
+                .into_iter()
+                .map(|entry| entry.1)
+                .collect();
+            let forked = walk_forked(&fake, &query);
+            assert!(forked.forks >= 2);
+            assert_eq!(forked.files, sequential);
+        }
+
         // A range that starts mid-day reads the hours inside it, never the day bundle.
         let view = summary_view(&fake, BASE + HOUR, BASE + 2 * HOUR, 30);
         assert_eq!(kinds(&view), ["hour"]);

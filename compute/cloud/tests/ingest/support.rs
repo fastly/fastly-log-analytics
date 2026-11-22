@@ -1764,6 +1764,80 @@ pub(super) fn walk_files(fake: &Fake, query: &str) -> (BTreeSet<String>, BTreeSe
     }
 }
 
+/// A walk of `query` with `fork=1`, following every fork's cursor chain: the files, summary
+/// files and page kinds, failing on a key two forks both return.
+pub(super) struct Forked {
+    pub(super) files: BTreeSet<String>,
+    pub(super) summaries: BTreeSet<String>,
+    pub(super) forks: usize,
+    /// Backend calls the setup page made.
+    pub(super) setup_calls: u32,
+    /// Concurrent object-read rounds the setup page made.
+    pub(super) setup_rounds: usize,
+    /// Pages of the longest fork chain, the walk's critical path after setup.
+    pub(super) longest: usize,
+    /// Object-read rounds of the slowest fork chain.
+    pub(super) longest_rounds: usize,
+}
+
+pub(super) fn walk_forked(fake: &Fake, query: &str) -> Forked {
+    fake.fos_rounds.borrow_mut().clear();
+    let setup = files_page(fake, &format!("{query}&fork=1")).unwrap();
+    let setup_calls = fake.calls.get();
+    let setup_rounds = fake.fos_rounds.borrow().len();
+    let generation = setup["catalog_generation"].clone();
+    let forks: Vec<String> = setup["forks"]
+        .as_array()
+        .expect("a forked listing")
+        .iter()
+        .map(|c| c.as_str().unwrap().to_owned())
+        .collect();
+    assert!(setup["next_cursor"].is_null());
+    assert_eq!(setup["complete"], false);
+    let (mut files, mut summaries, mut longest) = (BTreeSet::new(), BTreeSet::new(), 0);
+    for (field, out) in [("files", &mut files), ("summary_files", &mut summaries)] {
+        for file in setup[field].as_array().unwrap() {
+            assert!(out.insert(file["key"].as_str().unwrap().to_owned()));
+        }
+    }
+    let mut longest_rounds = 0;
+    for fork in &forks {
+        let mut cursor = fork.clone();
+        let mut pages = 0;
+        fake.fos_rounds.borrow_mut().clear();
+        loop {
+            let page = files_page(fake, &format!("{query}&cursor={cursor}")).unwrap();
+            pages += 1;
+            assert_eq!(page["catalog_generation"], generation);
+            assert!(page.get("forks").is_none_or(Value::is_null));
+            for (field, out) in [("files", &mut files), ("summary_files", &mut summaries)] {
+                for file in page[field].as_array().unwrap() {
+                    let key = file["key"].as_str().unwrap().to_owned();
+                    assert!(out.insert(key.clone()), "{key} listed twice");
+                }
+            }
+            match page["next_cursor"].as_str() {
+                Some(next) => cursor = next.to_owned(),
+                None => {
+                    assert_eq!(page["complete"], true);
+                    break;
+                }
+            }
+        }
+        longest = longest.max(pages);
+        longest_rounds = longest_rounds.max(fake.fos_rounds.borrow().len());
+    }
+    Forked {
+        files,
+        summaries,
+        forks: forks.len(),
+        setup_calls,
+        setup_rounds,
+        longest,
+        longest_rounds,
+    }
+}
+
 pub(super) fn iso_url(seconds: i64) -> String {
     ingest::rfc3339(seconds).replace(':', "%3A")
 }
