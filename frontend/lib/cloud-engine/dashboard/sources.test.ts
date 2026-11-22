@@ -18,6 +18,7 @@ import {
 } from "./sources";
 import { FILTERED_CACHE_NAME } from "./filtered-cache";
 import { rangedReadsOnly } from "./test-fixtures";
+import { MissingCloudFileError } from "./file-errors";
 import {
   STORE_META_CACHE,
   readStoreError,
@@ -126,6 +127,14 @@ describe("browserSource", () => {
       await expect(source.fetchRange(file, 10, 13)).rejects.toThrow(/a\.parquet/);
     }
     await expect(source.fetchRange(file, 10, 101)).rejects.toThrow(/outside/);
+  });
+
+  it("reports a listed file whose object is gone as missing, for range and whole reads", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("Not Found", { status: 404 })));
+    const source = browserSource("");
+    const file = { key: "flp/processed/summary_bundle/request/year=2026/open_bundle=21.parquet", start: "", end: "", size: 100, rows: 1 };
+    await expect(source.fetchRange(file, 10, 13)).rejects.toEqual(new MissingCloudFileError(file.key));
+    await expect(source.fetchFile(file.key)).rejects.toEqual(new MissingCloudFileError(file.key));
   });
 
   it("opens a listed file for selective reads without a size probe", async () => {

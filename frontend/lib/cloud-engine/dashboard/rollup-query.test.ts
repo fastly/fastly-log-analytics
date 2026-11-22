@@ -21,6 +21,7 @@ import {
 } from "./summary-fixtures";
 import { fixtureSource, projectingSource, rangedReadsOnly } from "./test-fixtures";
 import { INSIGHTS_RESIDUAL } from "../insights-residual";
+import { MissingCloudFileError } from "./file-errors";
 
 const HOUR = 3_600_000;
 const T0 = FIXTURE_START * 1000;
@@ -476,6 +477,23 @@ describe("queryRollup", () => {
     expect([...result.rollup.dims.keys()]).toEqual(["city"]);
     expect(result.rollup.present!.has("ins_url/url")).toBe(true);
     expect(result.missingRanges!.size).toBe(0);
+  });
+
+  it("plans around a listed summary whose object is gone, exactly", async () => {
+    rangedReadsOnly();
+    const gone = HOURS.find((f) => at(f) === T0)!;
+    const s = projectingSource(source([...WINDOWS, ...HOURS]), BUFFERS);
+    const fetchFile = s.fetchFile;
+    let goneReads = 0;
+    s.fetchFile = async (key, signal) => {
+      if (key === gone.key && ++goneReads) throw new MissingCloudFileError(key);
+      return fetchFile(key, signal);
+    };
+    const result = await queryRollup(s, { fromMs: T0, toMs: T0 + 2 * HOUR, residual: INSIGHTS_RESIDUAL });
+    expect(overall(result!.rollup)).toBe(overall(await decodeAll(WINDOWS)));
+    expect([result!.dataFromMs, result!.dataThroughMs]).toEqual([T0, T0 + 2 * HOUR]);
+    expect(goneReads).toBe(1);
+    expect(s.ranges).toEqual([]);
   });
 
   it("returns null, never zero, when a planned summary is not v3", async () => {
