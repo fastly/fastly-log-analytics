@@ -31,6 +31,8 @@ import {
   customFieldsKey,
   decodeSummary,
   normalizeDashboardValue,
+  groupByCovers,
+  planCompactsFromWindows,
   planFilteredSummaries,
   planSummaries,
   PIVOT_FIELDS,
@@ -1447,6 +1449,8 @@ async function collectAggregator(
   }
   let files: ManifestFile[] = filesOverlapping(manifest.files, fromMs, toMs);
   let summaryUses: SummaryUse[] = [];
+  // Uses answering the same compact together; resolved before files are read.
+  const compactGroups: SummaryUse[][] = [];
   let summaryListing: FetchStats["summaryListing"];
   const canUseSummaries =
     topK !== null &&
@@ -1502,8 +1506,21 @@ async function collectAggregator(
         slicedListing = listing.files;
       } else {
         const plan = planSummaries(files, listing.files, fromMs, toMs);
-        files = plan.raw;
+        // An open hour's compacts the open bundle cannot prove it holds are answered by the
+        // window summaries their names tag, as rollups do (`planRollup`).
+        const used = new Set(plan.summaries.map((use) => use.file.key));
+        const compacted = planCompactsFromWindows(
+          plan.raw,
+          listing.files.filter((file) => !used.has(file.key)),
+          fromMs,
+          toMs,
+        );
+        files = compacted.raw;
         summaryUses = plan.summaries;
+        for (const group of groupByCovers(compacted.summaries)) {
+          if (group.length === 1) summaryUses.push(group[0]);
+          else compactGroups.push(group);
+        }
       }
     }
   }
@@ -1732,6 +1749,78 @@ async function collectAggregator(
       files = files.filter((file) => remainingRaw.has(file.key));
       listed = files.length + summaryUses.length + resolvedSummaries;
     }
+  }
+  for (const group of compactGroups) {
+    const resolved: {
+      use: SummaryUse;
+      decoded: DecodedSummary;
+      byteLength: number;
+      downloaded: number;
+    }[] = [];
+    for (const use of group) {
+      assertActive();
+      const mem = decodedSummaries.get(scope)?.get(use.file.key);
+      let one: (typeof resolved)[number] | null = null;
+      if (
+        mem &&
+        mem.variant === variant &&
+        mem.decoded.rollup.buckets.every(
+          (b) => b.t >= fromMs && b.t + MINUTE_MS <= toMs,
+        )
+      ) {
+        one = { use, decoded: mem.decoded, byteLength: mem.byteLength, downloaded: 0 };
+      } else {
+        try {
+          const read = await readDashboardSummary(source, use.file, signal);
+          assertActive();
+          const decoded = await decodeSummary(read.parts, fromMs, toMs, customFields);
+          assertActive();
+          if (decoded) {
+            setScopeEntry(decodedSummaries, scope, use.file.key, {
+              variant,
+              decoded,
+              byteLength: read.byteLength,
+            });
+            one = {
+              use,
+              decoded,
+              byteLength: read.byteLength,
+              downloaded: read.cached ? 0 : read.downloadedBytes,
+            };
+          }
+        } catch {
+          assertActive();
+        }
+      }
+      if (!one) break;
+      resolved.push(one);
+    }
+    const covers = group[0].covers;
+    if (resolved.length < group.length) {
+      // Several summaries answer these raw files together, or none do.
+      files.push(...covers);
+      listed += covers.length;
+      continue;
+    }
+    const rows = covers.reduce((sum, file) => sum + (file.rows ?? 0), 0);
+    keptRows.rows += rows;
+    resolved.forEach(({ use, decoded, byteLength, downloaded }, i) => {
+      aggregator.mergeSummary(decoded);
+      // Not offered to `reuseMemo`, so the next run subtracts and plans these afresh.
+      next?.summaries.set(use.file.key, {
+        decoded,
+        rows: i === 0 ? rows : 0,
+        byteLength,
+      });
+      if (downloaded > 0) {
+        keptRows.fetched++;
+        keptRows.downloaded += downloaded;
+      } else {
+        keptRows.cached++;
+      }
+      keptRows.bytes += byteLength;
+    });
+    listed += group.length;
   }
   const buildFullRollup =
     topK !== null &&
@@ -2686,8 +2775,16 @@ export async function searchFieldSummaries(
     assertActive();
     if (listing?.complete) {
       const plan = planSummaries(files, listing.files, fromMs, toMs);
-      files = plan.raw;
-      summaryUses = plan.summaries;
+      const used = new Set(plan.summaries.map((use) => use.file.key));
+      // A summary that fails marks the search partial, so grouped uses need no fallback.
+      const compacted = planCompactsFromWindows(
+        plan.raw,
+        listing.files.filter((file) => !used.has(file.key)),
+        fromMs,
+        toMs,
+      );
+      files = compacted.raw;
+      summaryUses = [...plan.summaries, ...compacted.summaries];
     }
   }
   const aggregator = new Aggregator(from, to, [column]);

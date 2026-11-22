@@ -8,7 +8,8 @@ import {
   type DerivedFile,
 } from "./dashboard/sources";
 import {
-  assembleProjectedParquet, fetchProjectedRanges, planParquetProjection, readParquetFooter, type ParquetProjection,
+  assembleProjectedParquet, fetchProjectedRanges, planParquetProjection, readParquetFooter, readsWholeFirst,
+  readWholeParquetFooter, type ParquetProjection,
 } from "./dashboard/parquet-projection";
 import { beginCloudLoading } from "./loading-progress";
 import { fetchLanes } from "./fetch-lanes";
@@ -285,13 +286,13 @@ export async function ensureCloudRange(
     if (signal.aborted) abortDownloads();
     let slots = RANGE_CONCURRENCY;
     const waiting: (() => void)[] = [];
-    const fetchRange = async (file: typeof files[number], start: number, end: number) => {
+    const inSlot = async <T>(read: () => Promise<T>) => {
       if (slots === 0) await new Promise<void>((resolve) => waiting.push(resolve));
       else slots--;
       try {
         return await fetchLanes.run("raw", () => {
           downloads.signal.throwIfAborted();
-          return fileSource.fetchRange(file, start, end, downloads.signal, "low");
+          return read();
         });
       } finally {
         const next = waiting.shift();
@@ -299,6 +300,8 @@ export async function ensureCloudRange(
         else slots++;
       }
     };
+    const fetchRange = (file: typeof files[number], start: number, end: number) =>
+      inSlot(() => fileSource.fetchRange(file, start, end, downloads.signal, "low"));
     const canPersistDerived = () => {
       if (downloads.signal.aborted) return false;
       try {
@@ -313,13 +316,29 @@ export async function ensureCloudRange(
         generation.assertCurrent();
         downloads.signal.throwIfAborted();
       }, canPersistDerived);
+    const fetchWhole = async (file: typeof files[number]) => {
+      const fetched = await inSlot(() => fileSource.fetchFile(file.key, downloads.signal, { identity: file.wholeKey }));
+      if (fetched.bytes.byteLength !== file.size) {
+        throw new Error(`Whole-file read of ${file.key} returned ${fetched.bytes.byteLength} bytes, not ${file.size}`);
+      }
+      return fetched;
+    };
     try {
       const plans = new Map<string, ParquetProjection>();
       const persisted = new Map<string, DerivedFile>();
+      // Files read whole skip their footer reads. They download before the budget check, so they
+      // are read whole only when together they fit the budget.
+      const wholeFirst = new Set<string>();
+      const wholes = new Map<string, Awaited<ReturnType<typeof fetchWhole>>>();
       if (projectedColumns) {
         loading.update({ stage: "files" });
         const unknown = files.filter((file) => !engine.getFileMeta(file.scopedKey));
         if (unknown.some((file) => !(file.size > 0))) throw new Error("Cloud file listing has no file size to project");
+        const now = Date.now();
+        const candidates = unknown.filter((file) => readsWholeFirst(file, now));
+        if (candidates.reduce((total, file) => total + file.size, 0) <= byteLimit) {
+          for (const file of candidates) wholeFirst.add(file.scopedKey);
+        }
         await Promise.all(unknown.map(async (file) => {
           generation.assertCurrent();
           downloads.signal.throwIfAborted();
@@ -327,7 +346,13 @@ export async function ensureCloudRange(
           generation.assertCurrent();
           downloads.signal.throwIfAborted();
           if (stored) persisted.set(file.scopedKey, stored);
-          else plans.set(file.scopedKey, planParquetProjection(await readFooter(file), file.columns!));
+          else if (wholeFirst.has(file.scopedKey)) {
+            const whole = await fetchWhole(file);
+            generation.assertCurrent();
+            downloads.signal.throwIfAborted();
+            wholes.set(file.scopedKey, whole);
+            plans.set(file.scopedKey, planParquetProjection(await readWholeParquetFooter(whole.bytes), file.columns!));
+          } else plans.set(file.scopedKey, planParquetProjection(await readFooter(file), file.columns!));
         }));
         generation.assertCurrent();
         signal.throwIfAborted();
@@ -369,17 +394,22 @@ export async function ensureCloudRange(
           }
           return { bytes: await stored.bytes(), cached: true, presentColumns };
         }
+        let held = wholes.get(file.scopedKey);
+        wholes.delete(file.scopedKey);
+        let plan = plans.get(file.scopedKey);
         // Resident at the budget check but evicted since.
-        const plan = plans.get(file.scopedKey) ?? planParquetProjection(await readFooter(file), file.columns!);
+        if (!plan && readsWholeFirst(file)) {
+          held = await fetchWhole(file);
+          plan = planParquetProjection(await readWholeParquetFooter(held.bytes), file.columns!);
+        }
+        plan ??= planParquetProjection(await readFooter(file), file.columns!);
         const plannedRangeBytes = plan.ranges.reduce((sum, r) => sum + (r.end - r.start), 0);
         // When coalesced ranges already cover most of a file (e.g. heavily compacted multi-row-group
         // files), fetch the file once via `fileSource.fetchFile` so concurrent page sections share a
         // single in-flight/cached download instead of each pulling the file separately via ranges.
-        if (plan.ranges.length > 0 && file.size > 0 && file.size <= MAX_RANGE_BYTES && plannedRangeBytes >= file.size * 0.65) {
-          const fetched = await fileSource.fetchFile(file.key, downloads.signal, { identity: file.wholeKey });
-          if (fetched.bytes.byteLength !== file.size) {
-            throw new Error(`Whole-file read of ${file.key} returned ${fetched.bytes.byteLength} bytes, not ${file.size}`);
-          }
+        if (held || (plan.ranges.length > 0 && file.size > 0 && file.size <= MAX_RANGE_BYTES
+          && plannedRangeBytes >= file.size * 0.65)) {
+          const fetched = held ?? await fetchWhole(file);
           const parts = await fetchProjectedRanges(plan, async (start, end) => fetched.bytes.slice(start, end));
           const bytes = assembleProjectedParquet(plan, parts);
           if (canPersistDerived()) {

@@ -299,7 +299,11 @@ It plans summaries like the unfiltered rollup (`planFilteredSummaries`:
 coarsest first, then an open hour's compacts from the window summaries or
 open bundle that hold their rows, as `planRollup` does). Several summaries
 that answer the same compacts form one group: all of them answer from slices,
-or the compacts read raw and none of them is counted.
+or the compacts read raw and none of them is counted. The unfiltered dashboard
+plans the same way after `planSummaries`, so an open hour whose `open_bundle=`
+lags its compacts reads their window summaries rather than raw Parquet; such
+groups are never kept in the incremental memo, so each run re-plans them.
+Field search adds the same uses and reports partial if one fails.
 
 Where raw reads remain:
 
@@ -308,6 +312,15 @@ Where raw reads remain:
   before the range, so it reads raw (one hour of a 24h range, but nearly all
   of a rolling 1h range);
 - filters on fields other than pivots, and ranges under an hour.
+
+A summary or bundle the listing names but storage answers with 404 (a
+catalog entry that outlived its object) never fails a page. Its read throws
+`MissingCloudFileError`, and each reader covers its rows exactly another way:
+rollups (`runRollup`, behind /insights, /network, /origin, /performance,
+/assets and /fastly-value) and /security re-plan without it; /streaming
+re-lists that range per window when a CMCD bundle is gone; /rum reads raw
+Parquet, since each RUM summary is the only one for its window; and the
+dashboard engine reads the summary's raw files, as for any unreadable summary.
 
 Cost (bench `summary_bench`, release, native; noisy shared machine):
 

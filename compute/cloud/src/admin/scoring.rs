@@ -1300,6 +1300,14 @@ fn checkpoint_scoring_rollback_service(
     Ok(())
 }
 
+fn budget_yield(progressed: bool) -> Result<(), Error> {
+    if progressed {
+        Ok(())
+    } else {
+        Err(Error::new(503, "backend_budget"))
+    }
+}
+
 fn ensure_scorer_service_step(
     context: &Context<'_, impl Runtime>,
     job: &mut Job,
@@ -1307,9 +1315,11 @@ fn ensure_scorer_service_step(
     service: &mut Service,
     token: &str,
 ) -> Result<(), Error> {
+    let mut progressed = false;
     if !job.scorer_ownership_verified {
         reconcile::verify_managed_customer_vcl_ownership(context, service, token)?;
         job.scorer_ownership_verified = true;
+        progressed = true;
         if context.remaining_calls() < 16 {
             return Ok(());
         }
@@ -1337,7 +1347,7 @@ fn ensure_scorer_service_step(
         (sid, unlocked)
     } else {
         if context.remaining_calls() < 8 {
-            return Ok(());
+            return budget_yield(progressed);
         }
         let (status, created) = context.api_status(
             "POST",
@@ -1354,6 +1364,7 @@ fn ensure_scorer_service_step(
         if !(200..300).contains(&status) {
             return Err(Error::new(502, "scorer_service_create_failed"));
         }
+        progressed = true;
         let sid = required(&created, "id")?.to_owned();
         (sid, true)
     };
@@ -1371,7 +1382,7 @@ fn ensure_scorer_service_step(
             .any(|d| d["name"].as_str() == Some(domain.as_str()));
         if !has_domain {
             if context.remaining_calls() < 8 {
-                return Ok(());
+                return budget_yield(progressed);
             }
             let (status, _) = context.api_status(
                 "POST",
@@ -1389,6 +1400,7 @@ fn ensure_scorer_service_step(
                     "fastly_api_rejected",
                 ));
             }
+            progressed = true;
         }
         let backends = context.api(
             "GET",
@@ -1401,7 +1413,7 @@ fn ensure_scorer_service_step(
             .any(|b| b["name"].as_str() == Some("placeholder_origin"));
         if !has_backend {
             if context.remaining_calls() < 8 {
-                return Ok(());
+                return budget_yield(progressed);
             }
             let (status, _) = context.api_status(
                 "POST",
@@ -1424,11 +1436,12 @@ fn ensure_scorer_service_step(
                     "fastly_api_rejected",
                 ));
             }
+            progressed = true;
         }
     }
 
     if context.remaining_calls() < 6 {
-        return Ok(());
+        return budget_yield(progressed);
     }
     let mut sc = service.scoring.clone().unwrap_or_default();
     sc.scoring_service_id = scorer_sid;
@@ -1467,6 +1480,7 @@ fn ensure_scorer_stores_step(
     service: &mut Service,
     token: &str,
 ) -> Result<(), Error> {
+    let mut progressed = false;
     let mut sc = service
         .scoring
         .clone()
@@ -1490,7 +1504,7 @@ fn ensure_scorer_stores_step(
         store_id_of(found).ok_or_else(|| Error::new(502, "config_store_id_missing"))?
     } else {
         if context.remaining_calls() < 9 {
-            return Ok(());
+            return budget_yield(progressed);
         }
         let (status, created) = context.api_status(
             "POST",
@@ -1504,6 +1518,7 @@ fn ensure_scorer_stores_step(
         if !(200..300).contains(&status) {
             return Err(Error::new(502, "config_store_create_failed"));
         }
+        progressed = true;
         store_id_of(&created).ok_or_else(|| Error::new(502, "config_store_id_missing"))?
     };
     sc.scoring_keys_store_id = keys_store_id;
@@ -1513,16 +1528,19 @@ fn ensure_scorer_stores_step(
         store_id_of(found).ok_or_else(|| Error::new(502, "config_store_id_missing"))?
     } else {
         if context.remaining_calls() < 9 {
-            service.scoring = Some(sc);
-            checkpoint_scoring_job_service(
-                context,
-                record,
-                service,
-                job,
-                "scoring.scorer_stores",
-                "scorer_stores",
-            )?;
-            return Ok(());
+            if service.scoring.as_ref() != Some(&sc) && context.remaining_calls() >= 6 {
+                service.scoring = Some(sc);
+                checkpoint_scoring_job_service(
+                    context,
+                    record,
+                    service,
+                    job,
+                    "scoring.scorer_stores",
+                    "scorer_stores",
+                )?;
+                return Ok(());
+            }
+            return budget_yield(progressed);
         }
         let (status, created) = context.api_status(
             "POST",
@@ -1536,6 +1554,7 @@ fn ensure_scorer_stores_step(
         if !(200..300).contains(&status) {
             return Err(Error::new(502, "config_store_create_failed"));
         }
+        progressed = true;
         store_id_of(&created).ok_or_else(|| Error::new(502, "config_store_id_missing"))?
     };
     sc.scoring_config_store_id = cfg_store_id;
@@ -1547,16 +1566,19 @@ fn ensure_scorer_stores_step(
         store_id_of(&found).ok_or_else(|| Error::new(502, "kv_store_id_missing"))?
     } else {
         if context.remaining_calls() < 9 {
-            service.scoring = Some(sc);
-            checkpoint_scoring_job_service(
-                context,
-                record,
-                service,
-                job,
-                "scoring.scorer_stores",
-                "scorer_stores",
-            )?;
-            return Ok(());
+            if service.scoring.as_ref() != Some(&sc) && context.remaining_calls() >= 6 {
+                service.scoring = Some(sc);
+                checkpoint_scoring_job_service(
+                    context,
+                    record,
+                    service,
+                    job,
+                    "scoring.scorer_stores",
+                    "scorer_stores",
+                )?;
+                return Ok(());
+            }
+            return budget_yield(progressed);
         }
         let (status, created) = context.api_status(
             "POST",
@@ -1570,10 +1592,14 @@ fn ensure_scorer_stores_step(
         if !(200..300).contains(&status) {
             return Err(Error::new(502, "kv_store_create_failed"));
         }
+        progressed = true;
         store_id_of(&created).ok_or_else(|| Error::new(502, "kv_store_id_missing"))?
     };
 
     sc.scoring_matrix_store_id = matrix_store_id;
+    if context.remaining_calls() < 6 {
+        return budget_yield(progressed);
+    }
     service.scoring = Some(sc);
     checkpoint_scoring_job_service(
         context,
@@ -1594,6 +1620,7 @@ fn ensure_scorer_store_keys_step(
     service: &Service,
     token: &str,
 ) -> Result<(), Error> {
+    let mut progressed = false;
     let sc = service
         .scoring
         .as_ref()
@@ -1601,6 +1628,7 @@ fn ensure_scorer_store_keys_step(
     if !job.scorer_ownership_verified {
         verify_scoring_resources(context, &service.service_id, sc, token)?;
         job.scorer_ownership_verified = true;
+        progressed = true;
         if context.remaining_calls() < 14 {
             return Ok(());
         }
@@ -1612,7 +1640,7 @@ fn ensure_scorer_store_keys_step(
     let existing_aes = config_store_get_item(context, keys_store_id, CURRENT_KEY_HEX, token)?;
     if existing_aes.is_empty() {
         if context.remaining_calls() < 8 {
-            return Ok(());
+            return budget_yield(progressed);
         }
         let aes_key_hex = hex_random_32(context.runtime)?;
         context.api(
@@ -1621,6 +1649,7 @@ fn ensure_scorer_store_keys_step(
             token,
             Some(json!({"item_key": CURRENT_KEY_HEX, "item_value": aes_key_hex})),
         )?;
+        progressed = true;
     }
 
     // Shared VCL <-> scorer secret: stored in Cloud Secret Store AND scorer ConfigStore.
@@ -1631,7 +1660,7 @@ fn ensure_scorer_store_keys_step(
         existing_req_secret
     } else {
         if context.remaining_calls() < 8 {
-            return Ok(());
+            return budget_yield(progressed);
         }
         let secret = hex_random_32(context.runtime)?;
         context.api(
@@ -1640,10 +1669,11 @@ fn ensure_scorer_store_keys_step(
             token,
             Some(json!({"item_key": REQUEST_SECRET_KEY, "item_value": secret})),
         )?;
+        progressed = true;
         secret
     };
     if context.remaining_calls() < 8 {
-        return Ok(());
+        return budget_yield(progressed);
     }
     put_secret(context, token, &req_secret_ref, &req_secret)?;
 
@@ -1657,6 +1687,7 @@ fn ensure_scorer_store_config_step(
     service: &Service,
     token: &str,
 ) -> Result<(), Error> {
+    let mut progressed = false;
     let sc = service
         .scoring
         .as_ref()
@@ -1664,6 +1695,7 @@ fn ensure_scorer_store_config_step(
     if !job.scorer_ownership_verified {
         verify_scoring_resources(context, &service.service_id, sc, token)?;
         job.scorer_ownership_verified = true;
+        progressed = true;
         if context.remaining_calls() < 14 {
             return Ok(());
         }
@@ -1677,7 +1709,7 @@ fn ensure_scorer_store_config_step(
     // Config store defaults (write-once scoring_enabled_at).
     if config_store_get_item(context, cfg_store_id, DEBUG_LOG_KEY, token)?.is_empty() {
         if context.remaining_calls() < 8 {
-            return Ok(());
+            return budget_yield(progressed);
         }
         context.api(
             "POST",
@@ -1685,10 +1717,11 @@ fn ensure_scorer_store_config_step(
             token,
             Some(json!({"item_key": DEBUG_LOG_KEY, "item_value": "0"})),
         )?;
+        progressed = true;
     }
     if config_store_get_item(context, cfg_store_id, SCORING_ENABLED_AT_KEY, token)?.is_empty() {
         if context.remaining_calls() < 8 {
-            return Ok(());
+            return budget_yield(progressed);
         }
         let now_s = context.runtime.now().to_string();
         context.api(
@@ -1697,10 +1730,11 @@ fn ensure_scorer_store_config_step(
             token,
             Some(json!({"item_key": SCORING_ENABLED_AT_KEY, "item_value": now_s})),
         )?;
+        progressed = true;
     }
 
     if context.remaining_calls() < 6 {
-        return Ok(());
+        return budget_yield(progressed);
     }
     let versions = context.api(
         "GET",
@@ -1725,9 +1759,10 @@ fn ensure_scorer_store_config_step(
                 (MATRIX_RESOURCE_LINK_NAME, matrix_store_id.as_str()),
             ],
             token,
+            &mut progressed,
         )?
     {
-        return Ok(());
+        return budget_yield(progressed);
     }
 
     job.scorer_ownership_verified = false;
@@ -1741,9 +1776,14 @@ fn sync_scorer_resource_links(
     version: u64,
     links: [(&str, &str); 3],
     token: &str,
+    progressed: &mut bool,
 ) -> Result<bool, Error> {
     if context.remaining_calls() < 6 {
-        return Ok(false);
+        return if *progressed {
+            Ok(false)
+        } else {
+            Err(Error::new(503, "backend_budget"))
+        };
     }
     let existing_res = context.api(
         "GET",
@@ -1764,7 +1804,11 @@ fn sync_scorer_resource_links(
                 continue;
             }
             if context.remaining_calls() < 8 {
-                return Ok(false);
+                return if *progressed {
+                    Ok(false)
+                } else {
+                    Err(Error::new(503, "backend_budget"))
+                };
             }
             let link_id = existing["id"]
                 .as_str()
@@ -1782,9 +1826,14 @@ fn sync_scorer_resource_links(
             if !(200..300).contains(&del_status) && del_status != 404 {
                 return Err(Error::new(502, "scorer_resource_link_failed"));
             }
+            *progressed = true;
         }
         if context.remaining_calls() < 8 {
-            return Ok(false);
+            return if *progressed {
+                Ok(false)
+            } else {
+                Err(Error::new(503, "backend_budget"))
+            };
         }
         let (status, post_body) = context.api_status(
             "POST",
@@ -1793,6 +1842,7 @@ fn sync_scorer_resource_links(
             Some(json!({"name": link_name, "resource_id": res_id})),
         )?;
         if (200..300).contains(&status) {
+            *progressed = true;
             continue;
         }
         if status == 409 {
@@ -1830,6 +1880,7 @@ fn deploy_scorer_step(
     if service.capture == Capture::Attached {
         return Err(Error::new(409, "managed_resources_not_owned"));
     }
+    let mut progressed = false;
     let mut sc = service
         .scoring
         .clone()
@@ -1838,6 +1889,7 @@ fn deploy_scorer_step(
         reconcile::verify_managed_customer_vcl_ownership(context, service, token)?;
         verify_scoring_resources(context, &service.service_id, &sc, token)?;
         job.scorer_ownership_verified = true;
+        progressed = true;
         if context.remaining_calls() < 16 {
             return Ok(());
         }
@@ -1897,7 +1949,7 @@ fn deploy_scorer_step(
             });
         let deploy_ver = if base_is_locked {
             if context.remaining_calls() < 8 {
-                return Ok(());
+                return budget_yield(progressed);
             }
             let cloned = context.api(
                 "PUT",
@@ -1905,6 +1957,7 @@ fn deploy_scorer_step(
                 token,
                 None,
             )?;
+            progressed = true;
             cloned["number"]
                 .as_u64()
                 .ok_or_else(|| Error::new(502, "scorer_clone_failed"))?
@@ -1928,12 +1981,13 @@ fn deploy_scorer_step(
                 ),
             ],
             token,
+            &mut progressed,
         )? {
-            return Ok(());
+            return budget_yield(progressed);
         }
 
         if context.remaining_calls() < 11 {
-            return Ok(());
+            return budget_yield(progressed);
         }
         let boundary = "----flp-scorer-package-boundary";
         let mut body = Vec::new();
@@ -1960,6 +2014,7 @@ fn deploy_scorer_step(
             token,
             None,
         )?;
+        progressed = true;
         let (status, pkg_meta) = context.api_status(
             "GET",
             &format!("/service/{scorer_sid}/version/{deploy_ver}/package"),
@@ -1990,7 +2045,7 @@ fn deploy_scorer_step(
     }
 
     if context.remaining_calls() < 9 {
-        return Ok(());
+        return budget_yield(progressed);
     }
     // Seed initial matrix in KV if FOS has matrix_latest.json (or embedded empty default).
     let latest_key = format!("{}matrix_latest.json", scoring_fos_prefix(service));
@@ -2181,6 +2236,7 @@ fn strip_logging_apply_step(
     service: &Service,
     token: &str,
 ) -> Result<(), Error> {
+    let mut progressed = false;
     let draft = job
         .draft_version
         .ok_or_else(|| Error::new(409, "draft_missing"))?;
@@ -2199,7 +2255,7 @@ fn strip_logging_apply_step(
             continue;
         }
         if context.remaining_calls() < 8 {
-            return Ok(());
+            return budget_yield(progressed);
         }
         let encoded = encode(name);
         let (status, _) = context.api_status(
@@ -2214,10 +2270,11 @@ fn strip_logging_apply_step(
         if !(200..300).contains(&status) && status != 404 {
             return Err(Error::new(502, "scoring_snippet_delete_failed"));
         }
+        progressed = true;
     }
 
     if context.remaining_calls() < 8 {
-        return Ok(());
+        return budget_yield(progressed);
     }
     let (status, _) = context.api_status(
         "DELETE",
@@ -2481,6 +2538,7 @@ fn cleanup_scoring_state_step(
     service: &mut Service,
     token: &str,
 ) -> Result<(), Error> {
+    let mut progressed = false;
     // Delete scoring_request_secret.<sid> from Secret Store (best-effort).
     if let Ok(store) = config(context.runtime, "secret_store_id") {
         let req_secret_ref = request_secret_ref(&service.service_id);
@@ -2492,7 +2550,7 @@ fn cleanup_scoring_state_step(
             None,
         ) {
             if context.remaining_calls() < 8 {
-                return Ok(());
+                return budget_yield(progressed);
             }
             let _ = context.api_status(
                 "DELETE",
@@ -2501,6 +2559,7 @@ fn cleanup_scoring_state_step(
                 None,
             );
             context.invalidate_secret(&req_secret_ref);
+            progressed = true;
         }
     }
 
@@ -2510,7 +2569,7 @@ fn cleanup_scoring_state_step(
         || job.kind == "teardown"
     {
         if context.remaining_calls() < 11 {
-            return Ok(());
+            return budget_yield(progressed);
         }
         if let Ok(creds) = fos::credentials(context, service) {
             let prefix = scoring_fos_prefix(service);
@@ -2533,12 +2592,16 @@ fn cleanup_scoring_state_step(
                                 .as_str()
                                 .filter(|v| valid_matrix_version(v))
                             {
-                                let _ = fos::delete_object(
+                                if fos::delete_object(
                                     context,
                                     service,
                                     &creds,
                                     &format!("{prefix}matrices/{ver}.json"),
-                                );
+                                )
+                                .is_ok()
+                                {
+                                    progressed = true;
+                                }
                             }
                         }
                     }
@@ -2555,11 +2618,17 @@ fn cleanup_scoring_state_step(
                         {
                             return Ok(());
                         }
+                        if remaining.len() == total_versions && !progressed {
+                            return Err(Error::new(503, "backend_budget"));
+                        }
                         s3_write_failed = true;
                         need_index_delete = true;
                     } else {
                         let index_deleted =
                             fos::delete_object(context, service, &creds, &index_key).is_ok();
+                        if index_deleted {
+                            progressed = true;
+                        }
                         if index_deleted && context.remaining_calls() < 8 {
                             return Ok(());
                         }
@@ -2575,25 +2644,31 @@ fn cleanup_scoring_state_step(
             }
             if !s3_write_failed && context.remaining_calls() < if need_index_delete { 9 } else { 8 }
             {
-                return Ok(());
+                return budget_yield(progressed);
             }
-            if need_index_delete && context.remaining_calls() >= 7 {
-                let _ = fos::delete_object(context, service, &creds, &index_key);
+            if need_index_delete
+                && context.remaining_calls() >= 7
+                && fos::delete_object(context, service, &creds, &index_key).is_ok()
+            {
+                progressed = true;
             }
-            if context.remaining_calls() >= 7 {
-                let _ = fos::delete_object(context, service, &creds, &latest);
+            if context.remaining_calls() >= 7
+                && fos::delete_object(context, service, &creds, &latest).is_ok()
+            {
+                progressed = true;
             }
             if (job.kind == "scoring_teardown" || job.kind == "teardown")
                 && context.remaining_calls() >= 7
+                && fos::delete_object(context, service, &creds, &format!("{prefix}labels.json"))
+                    .is_ok()
             {
-                let _ =
-                    fos::delete_object(context, service, &creds, &format!("{prefix}labels.json"));
+                progressed = true;
             }
         }
     }
 
     if context.remaining_calls() < 6 {
-        return Ok(());
+        return budget_yield(progressed);
     }
     service.scoring = None;
     remove_scoring_custom_fields(&mut service.log_fields);
@@ -2746,7 +2821,7 @@ fn rollback_failed_enable_step(
         || has_scoring_custom_fields(&service.log_fields)
     {
         if context.remaining_calls() < 6 {
-            return Ok(());
+            return Err(Error::new(503, "backend_budget"));
         }
         if let Some(sc) = service.scoring.as_mut() {
             sc.enabled = false;
@@ -3064,6 +3139,9 @@ pub fn route(
                 return Err(Error::new(409, "service_torn_down"));
             }
             require_scoring_mutable(context, sid, &service)?;
+            if super::audit_outbox_len(&record) >= super::AUDIT_OUTBOX_LIMIT {
+                return Err(Error::new(409, "audit_archive_required"));
+            }
             let token = resolve_brokered_token(context, &service, input["token"].as_str())?;
             let active =
                 reconcile::verify_managed_customer_vcl_ownership(context, &service, &token)?;
@@ -3086,6 +3164,9 @@ pub fn route(
             }
             require_scoring_mutable(context, sid, &service)?;
             require_scoring_enabled(&service)?;
+            if super::audit_outbox_len(&record) >= super::AUDIT_OUTBOX_LIMIT {
+                return Err(Error::new(409, "audit_archive_required"));
+            }
             let _ = resolve_brokered_token(context, &service, input["token"].as_str())?;
             let mut job = new_job(context, actor, &service, "scoring_disable", false, true)?;
             job.step = "scoring_strip_logging_vcl".into();
@@ -3106,6 +3187,9 @@ pub fn route(
                 return Err(Error::new(400, "scoring_not_provisioned"));
             }
             require_scoring_mutable(context, sid, &service)?;
+            if super::audit_outbox_len(&record) >= super::AUDIT_OUTBOX_LIMIT {
+                return Err(Error::new(409, "audit_archive_required"));
+            }
             let _ = resolve_brokered_token(context, &service, input["token"].as_str())?;
             let mut job = new_job(context, actor, &service, "scoring_teardown", false, true)?;
             job.step = "scoring_strip_logging_vcl".into();
@@ -3127,6 +3211,9 @@ pub fn route(
             let (record, mut service) = load_service(context, sid)?;
             require_scoring_mutable(context, sid, &service)?;
             let mut sc = require_scoring_enabled(&service)?.clone();
+            if super::audit_outbox_len(&record) >= super::AUDIT_OUTBOX_LIMIT {
+                return Err(Error::new(409, "audit_archive_required"));
+            }
             sc.threshold = Some(threshold);
             service.scoring = Some(sc);
             service.updated_at = context.runtime.now();
@@ -3321,6 +3408,9 @@ pub fn route(
             let (record, mut service) = load_service(context, sid)?;
             require_scoring_mutable(context, sid, &service)?;
             let mut sc = require_scoring_enabled(&service)?.clone();
+            if super::audit_outbox_len(&record) >= super::AUDIT_OUTBOX_LIMIT {
+                return Err(Error::new(409, "audit_archive_required"));
+            }
             let token = resolve_brokered_token(context, &service, None)?;
             context.confirm_with_token(&token);
             let snippet_body = recv_snippet(Some(&cleaned))?;
@@ -3370,6 +3460,9 @@ pub fn route(
             let (record, mut service) = load_service(context, sid)?;
             require_scoring_mutable(context, sid, &service)?;
             let mut sc = require_scoring_enabled(&service)?.clone();
+            if super::audit_outbox_len(&record) >= super::AUDIT_OUTBOX_LIMIT {
+                return Err(Error::new(409, "audit_archive_required"));
+            }
             let token = resolve_brokered_token(context, &service, None)?;
             context.confirm_with_token(&token);
             let snippet_body = enforce_snippet(Some(code));
@@ -3449,6 +3542,9 @@ pub fn route(
             let (record, mut service) = load_service(context, sid)?;
             require_scoring_mutable(context, sid, &service)?;
             let mut sc = require_scoring_enabled(&service)?.clone();
+            if super::audit_outbox_len(&record) >= super::AUDIT_OUTBOX_LIMIT {
+                return Err(Error::new(409, "audit_archive_required"));
+            }
             let token = resolve_brokered_token(context, &service, None)?;
             context.confirm_with_token(&token);
             reconcile::verify_managed_customer_vcl_ownership(context, &service, &token)?;
@@ -3561,6 +3657,9 @@ pub fn route(
             let (record, mut service) = load_service(context, sid)?;
             require_scoring_mutable(context, sid, &service)?;
             let mut sc = require_scoring_enabled(&service)?.clone();
+            if super::audit_outbox_len(&record) >= super::AUDIT_OUTBOX_LIMIT {
+                return Err(Error::new(409, "audit_archive_required"));
+            }
             let token = resolve_brokered_token(context, &service, None)?;
             context.confirm_with_token(&token);
             reconcile::verify_managed_customer_vcl_ownership(context, &service, &token)?;

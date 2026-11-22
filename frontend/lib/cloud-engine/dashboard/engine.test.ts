@@ -17,6 +17,7 @@ import {
   fixtureSource,
   manifestEntry,
   parquetFixture,
+  rangedReadsOnly,
   type FixtureRow,
 } from "./test-fixtures";
 
@@ -878,6 +879,7 @@ describe("runDashboard", () => {
   });
 
   it("reads unpersisted filtered raw compacts as column-projected ranges with whole-file results", async () => {
+    rangedReadsOnly();
     // `rid` is read by no card or filter, and big enough that the footer probe doesn't cover the file.
     const compact = (offset: number) => {
       const n = 3000;
@@ -965,6 +967,7 @@ describe("runDashboard", () => {
   });
 
   it("reads only the row groups of an unfiltered edge compact whose timestamps reach into the range", async () => {
+    rangedReadsOnly();
     // An hour compact of six ten-minute row groups, like the closed hour a relative range starts in.
     const n = 1200;
     const at = (i: number) => T0 + Math.floor(i / 200) * 600_000 + (i % 200) * 3000;

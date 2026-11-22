@@ -7,6 +7,7 @@ import {
   assembleProjectedParquet, fetchProjectedRanges, FOOTER_PROBE_BYTES, planParquetProjection, readParquetFooter,
   RANGE_MERGE_GAP, RANGE_REQUEST_COST_BYTES,
 } from "./parquet-projection";
+import { projectedReader } from "./projected-read";
 
 const tableRows = (table: unknown) => (table as { toArray(): Record<string, unknown>[] }).toArray();
 
@@ -247,5 +248,60 @@ describe("column-projected Parquet", () => {
     const footer = await readParquetFooter(bytes.byteLength, ranged(bytes).fetchRange);
     expect(() => planParquetProjection({ ...footer, size: footer.footerLength + 100 }, new Set(["url"])))
       .toThrow(/outside the file/);
+  });
+});
+
+describe("whole-file reads of small finished-hour files", () => {
+  const smallFile = () => parquetWriteBuffer({
+    codec: "SNAPPY",
+    rowGroupSize: 200,
+    columnData: [
+      { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: 4000 }, (_, i) => new Date(1700000000000 + i * 1000)) },
+      { name: "wide", type: "STRING", data: Array.from({ length: 4000 }, () => noise(400)) },
+      { name: "status", type: "INT32", data: Array.from({ length: 4000 }, (_, i) => i % 11 ? 200 : 503) },
+    ],
+  });
+  const reader = (bytes: ArrayBuffer) => {
+    const calls = { ranges: 0, files: 0 };
+    const read = projectedReader({
+      cacheScope: "t",
+      fetchRange: async (_file, start, end) => {
+        calls.ranges++;
+        return bytes.slice(start, end);
+      },
+      fetchFile: async () => {
+        calls.files++;
+        return { bytes: bytes.slice(0), cached: false };
+      },
+    }, ["timestamp", "status"]);
+    return { calls, read };
+  };
+  const entry = (bytes: ArrayBuffer, endMs: number) => ({
+    key: "processed/request/f.parquet",
+    start: new Date(endMs - 600_000).toISOString(),
+    end: new Date(endMs).toISOString(),
+    size: bytes.byteLength,
+    rows: 4000,
+  });
+
+  it("fetches a closed-hour file below the threshold once, with no footer or column ranges", async () => {
+    const bytes = smallFile();
+    expect(bytes.byteLength).toBeGreaterThan(256 * 1024);
+    const { calls, read } = reader(bytes);
+    const projected = await (await read(entry(bytes, Date.now() - 2 * 3_600_000))).read();
+    expect(calls).toEqual({ ranges: 0, files: 1 });
+    expect(projected.downloaded).toBe(bytes.byteLength);
+    expect(await query({ "p.parquet": projected.bytes },
+      "SELECT count(*)::INT AS n, count(*) FILTER (WHERE status = 503)::INT AS errors FROM 'p.parquet'"))
+      .toEqual([{ n: 4000, errors: 364 }]);
+    expect(parquetMetadata(projected.bytes).schema.slice(1).map((field) => field.name)).toEqual(["timestamp", "status"]);
+  });
+
+  it("keeps footer-planned ranges for an open-hour file above the small-file size", async () => {
+    const bytes = smallFile();
+    const { calls, read } = reader(bytes);
+    await (await read(entry(bytes, Date.now() + 60_000))).read();
+    expect(calls.files).toBe(0);
+    expect(calls.ranges).toBeGreaterThan(1);
   });
 });

@@ -501,6 +501,29 @@ function isAdapterAbortError(error: unknown): boolean {
     (error instanceof Error && error.name === "AbortError");
 }
 
+class InvalidUriEncodingError extends Error {
+  constructor() {
+    super("Malformed percent-encoded parameter");
+    this.name = "InvalidUriEncodingError";
+  }
+}
+
+function decodeUriStrict(raw: string): string {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    throw new InvalidUriEncodingError();
+  }
+}
+
+function decodeUriOrRaw(raw: string): string {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
 function assertAdapterEpoch(request: Request, entryMetaEpoch: number): void {
   request.signal.throwIfAborted();
   if (entryMetaEpoch !== currentStoreMetaEpoch()) {
@@ -666,7 +689,7 @@ async function cloudNetworkRollup(
   }
   const { start } = queryRange({ ...params, end }, 24);
   const rawServiceId = params.service_id ?? request.headers.get("x-service-id");
-  const serviceId = rawServiceId ? decodeURIComponent(String(rawServiceId)) : undefined;
+  const serviceId = rawServiceId ? decodeUriStrict(String(rawServiceId)) : undefined;
   let answer: unknown;
   try {
     answer = await rollupAnswer(path, {
@@ -674,7 +697,7 @@ async function cloudNetworkRollup(
     }, serviceId, request.signal);
     assertAdapterEpoch(request, entryMetaEpoch);
   } catch (error) {
-    if (request.signal.aborted || entryMetaEpoch !== currentStoreMetaEpoch() || isAdapterAbortError(error)) {
+    if (request.signal.aborted || entryMetaEpoch !== currentStoreMetaEpoch() || isAdapterAbortError(error) || error instanceof InvalidUriEncodingError) {
       throw error;
     }
     console.warn("flp: /network summaries failed; reading raw Parquet", error);
@@ -739,7 +762,7 @@ async function cloudSectionRollup(
   }
   const { start } = queryRange({ ...params, end }, 24);
   const rawServiceId = params.service_id ?? request.headers.get("x-service-id");
-  const serviceId = rawServiceId ? decodeURIComponent(String(rawServiceId)) : undefined;
+  const serviceId = rawServiceId ? decodeUriStrict(String(rawServiceId)) : undefined;
   const finish = route.decorate?.(start, end, { ...params, ...serviceId ? { service_id: serviceId } : {} });
   try {
     const answer = await rollupAnswer(path, {
@@ -751,7 +774,7 @@ async function cloudSectionRollup(
     assertAdapterEpoch(request, entryMetaEpoch);
     return jsonResponse(decorated, request);
   } catch (error) {
-    if (request.signal.aborted || entryMetaEpoch !== currentStoreMetaEpoch() || isAdapterAbortError(error)) {
+    if (request.signal.aborted || entryMetaEpoch !== currentStoreMetaEpoch() || isAdapterAbortError(error) || error instanceof InvalidUriEncodingError) {
       throw error;
     }
     console.warn(`flp: ${route.label} summaries failed; reading raw Parquet`, error);
@@ -804,7 +827,7 @@ function networkBudgetError(error: CloudBudgetError, scans: readonly string[] | 
  */
 const insightsSummaryWindows: string[] = [];
 const insightsWindowKey = (serviceId: unknown, end: unknown) =>
-  `${currentStoreMetaEpoch()}|${serviceId == null ? "" : decodeURIComponent(String(serviceId))}|${Date.parse(String(end))}`;
+  `${currentStoreMetaEpoch()}|${serviceId == null ? "" : decodeUriOrRaw(String(serviceId))}|${Date.parse(String(end))}`;
 
 /**
  * Serves an unfiltered /api/insights read (without explicit `detectors`) from
@@ -844,7 +867,7 @@ async function cloudInsightsRollup(
     return null;
   }
   const rawServiceId = body.service_id ?? request.headers.get("x-service-id");
-  const serviceId = rawServiceId ? decodeURIComponent(String(rawServiceId)) : undefined;
+  const serviceId = rawServiceId ? decodeUriStrict(String(rawServiceId)) : undefined;
   const headerRole = request.headers.get("x-session-role");
   const maskIps = Boolean(body.mask_ips) || request.headers.get("x-mask-ips") === "1" ||
     headerRole === "analyst-no-pii" || useSessionRoleStore.getState().isRemoteAnalyst;
@@ -865,7 +888,7 @@ async function cloudInsightsRollup(
     }
     return jsonResponse(answer, request);
   } catch (error) {
-    if (request.signal.aborted || entryMetaEpoch !== currentStoreMetaEpoch() || isAdapterAbortError(error)) {
+    if (request.signal.aborted || entryMetaEpoch !== currentStoreMetaEpoch() || isAdapterAbortError(error) || error instanceof InvalidUriEncodingError) {
       throw error;
     }
     console.warn("flp: /insights summaries failed; reading raw Parquet", error);
@@ -899,7 +922,7 @@ async function cloudInsightsBaseline(
     assertAdapterEpoch(request, entryMetaEpoch);
   }
   const rawServiceId = body.service_id ?? request.headers.get("x-service-id");
-  const serviceId = rawServiceId ? decodeURIComponent(String(rawServiceId)) : undefined;
+  const serviceId = rawServiceId ? decodeUriStrict(String(rawServiceId)) : undefined;
   try {
     const baseline = await rollupAnswer("/api/insights", { ...body, clamp_end: end }, serviceId,
       request.signal) as RollupResult | null;
@@ -910,7 +933,7 @@ async function cloudInsightsBaseline(
     }
     return baseline;
   } catch (error) {
-    if (request.signal.aborted || entryMetaEpoch !== currentStoreMetaEpoch() || isAdapterAbortError(error)) {
+    if (request.signal.aborted || entryMetaEpoch !== currentStoreMetaEpoch() || isAdapterAbortError(error) || error instanceof InvalidUriEncodingError) {
       throw error;
     }
     console.warn("flp: /insights baseline summaries failed; reading raw Parquet", error);
@@ -941,7 +964,7 @@ async function cloudInsightAvailability(request: Request, entryMetaEpoch: number
     throw new Error("Invalid Cloud query time range");
   }
   const columns = await cloudRangePresentColumns(start, end, request.signal, {
-    serviceId: serviceId ? decodeURIComponent(String(serviceId)) : undefined,
+    serviceId: serviceId ? decodeUriStrict(String(serviceId)) : undefined,
     isCurrent: () => assertAdapterEpoch(request, entryMetaEpoch),
   });
   assertAdapterEpoch(request, entryMetaEpoch);
@@ -966,13 +989,14 @@ async function prepareCloudScan(
   const dataset = params.dataset;
   const rum = /\/rum\//.test(url.pathname) || url.pathname === "/api/usage/rum-breakdown" ||
     dataset === "client_vitals" || dataset === "client_errors";
-  const serviceId = url.pathname.match(/^\/api\/services\/([^/]+)\//)?.[1] ??
+  const rawServiceId = url.pathname.match(/^\/api\/services\/([^/]+)\//)?.[1] ??
     params.service_id ?? request.headers.get("x-service-id") ?? token?.svc ?? undefined;
+  const decodedServiceId = rawServiceId ? decodeUriStrict(String(rawServiceId)) : undefined;
   // The field catalog doesn't depend on the range, so it loads alongside the range lookup.
   let catalogLoad: ReturnType<typeof loadCloudCatalog> | null = null;
-  if (!rum && serviceId) {
+  if (!rum && decodedServiceId) {
     const catalogUrl = new URL("/api/log-fields/catalog", request.url);
-    catalogUrl.searchParams.set("service_id", decodeURIComponent(String(serviceId)));
+    catalogUrl.searchParams.set("service_id", decodedServiceId);
     catalogLoad = loadCloudCatalog(new Request(catalogUrl, request), entryMetaEpoch);
     catalogLoad.catch(() => {});
   }
@@ -1046,7 +1070,7 @@ async function prepareCloudScan(
   const loadQuery = async (from: string) => {
     assertAdapterEpoch(request, entryMetaEpoch);
     return ensureCloudRange(from, scanEnd, request.signal, rum ? ["rum"] : ["request"], {
-      serviceId: serviceId ? decodeURIComponent(String(serviceId)) : undefined, customFields,
+      serviceId: decodedServiceId, customFields,
       ...queryPlan?.columns && !rum ? { projection: { columns: queryPlan.columns } } : {},
     }).catch((error: unknown) => {
       throw error instanceof CloudBudgetError ? queryBudgetError(error, rum ? null : queryPlan?.columns ?? null) : error;
@@ -1057,17 +1081,17 @@ async function prepareCloudScan(
     assertAdapterEpoch(request, entryMetaEpoch);
     return ensureCloudRange(
       new Date(fromMs).toISOString(), new Date(toMs).toISOString(), request.signal, ["request"], {
-        serviceId: serviceId ? decodeURIComponent(String(serviceId)) : undefined, customFields,
+        serviceId: decodedServiceId, customFields,
         ...columns ? { projection: { columns: [...columns] } } : {},
       });
   };
   const sessionsFrom = url.pathname === "/api/sessions"
     ? sessionsLoadFrom(params, Date.parse(scanStart), Date.parse(end)) : Date.parse(scanStart);
   const followUp = Boolean(detectors) && url.pathname === "/api/insights";
-  const widenFollowUp = followUp && !insightsSummaryWindows.includes(insightsWindowKey(serviceId, end));
+  const widenFollowUp = followUp && !insightsSummaryWindows.includes(insightsWindowKey(decodedServiceId, end));
   const loadRange = (wider: boolean) => ensureCloudRange(
     sessionsFrom > Date.parse(scanStart) ? new Date(sessionsFrom).toISOString() : scanStart, scanEnd, request.signal, rum ? ["rum"] : ["request"], {
-    serviceId: serviceId ? decodeURIComponent(String(serviceId)) : undefined, customFields,
+    serviceId: decodedServiceId, customFields,
     ...insights ? { projection: {
       columns: insightScanColumns(filters, detectors),
       maxBytes: request.headers.get("x-flp-cloud-prefetch") === "1"
@@ -1094,7 +1118,7 @@ async function prepareCloudScan(
     if (request.method === "POST") {
       const prepared = bindCloudReadContext(new Request(request, { body: JSON.stringify({ ...params,
         start_time: params.start_time ?? start, end_time: params.end_time ?? end,
-        ...(serviceId ? { service_id: decodeURIComponent(String(serviceId)) } : {}),
+        ...(decodedServiceId ? { service_id: decodedServiceId } : {}),
         ...(url.pathname.startsWith("/api/insights") ? { clamp_end: end } : {}),
       }) }), read);
       if (insightBaseline) insightBaselines.set(prepared, insightBaseline);
@@ -1120,7 +1144,7 @@ async function prepareCloudScan(
     }
     if (!url.searchParams.has("start_time")) url.searchParams.set("start_time", start);
     if (!url.searchParams.has("end_time")) url.searchParams.set("end_time", end);
-    if (serviceId && !url.searchParams.has("service_id")) url.searchParams.set("service_id", decodeURIComponent(String(serviceId)));
+    if (decodedServiceId && !url.searchParams.has("service_id")) url.searchParams.set("service_id", decodedServiceId);
     return bindCloudReadContext(new Request(url, request), read);
   } catch (error) {
     read.release?.();
@@ -1136,6 +1160,12 @@ export async function handleCloudAnalyticalRequest(
   const serviceId = url.searchParams.get("service_id") ?? request.headers.get("x-service-id");
   const origin = captureCloudQueryContext();
   const handle = () => handleCloudRequest(request, origin, entryMetaEpoch).catch((error: unknown) => {
+    if (error instanceof InvalidUriEncodingError) {
+      return Response.json(
+        { detail: { error: "invalid_uri_encoding", message: error.message } },
+        { status: 400 },
+      );
+    }
     if (!(error instanceof CloudBudgetError)) throw error;
     return Response.json({ detail: error.message }, { status: 413 });
   });
@@ -1276,7 +1306,7 @@ async function handleCloudRequestInner(
   }
   const listedViews = request.method === "GET" && path.match(/^\/api\/views\/([^/]+)\/?$/);
   if (listedViews) {
-    await migrateLegacySavedViews(decodeURIComponent(listedViews[1]));
+    await migrateLegacySavedViews(decodeUriStrict(listedViews[1]));
     return null;
   }
   if (request.method === "GET" && ["/api/log-fields/catalog", "/api/schema"].includes(path)) {
@@ -1683,7 +1713,7 @@ async function dispatchCloudRequest(
     /^\/api\/admin\/share\/invites\/([^/]+)$/,
   );
   if (revokeInviteMatch && method === "DELETE") {
-    const inviteId = decodeURIComponent(revokeInviteMatch[1]);
+    const inviteId = decodeUriStrict(revokeInviteMatch[1]);
     const res = await fetch(
       `/api/admin/invites/${encodeURIComponent(inviteId)}/revoke`,
       {
@@ -1701,7 +1731,7 @@ async function dispatchCloudRequest(
     /^\/api\/admin\/share\/sessions\/([^/]+)\/boot$/,
   );
   if (bootSessionMatch && method === "POST") {
-    const userId = decodeURIComponent(bootSessionMatch[1]);
+    const userId = decodeUriStrict(bootSessionMatch[1]);
     const res = await fetch(
       `/api/admin/users/${encodeURIComponent(userId)}/revoke`,
       {
@@ -2424,7 +2454,7 @@ async function dispatchCloudRequest(
   ) {
     const params = await parseRequestParams();
     const serviceId = rumServiceMatch
-      ? decodeURIComponent(rumServiceMatch[1])
+      ? decodeUriStrict(rumServiceMatch[1])
       : String(params.service_id ?? "default");
     const rumParams = {
       ...params,
@@ -2456,7 +2486,7 @@ async function dispatchCloudRequest(
   ) {
     const params = await parseRequestParams();
     const serviceId = cmcdServiceMatch
-      ? decodeURIComponent(cmcdServiceMatch[1])
+      ? decodeUriStrict(cmcdServiceMatch[1])
       : String(params.service_id ?? "default");
     const data = await handleCmcdRequest(pathname, {
       ...params,
@@ -2519,7 +2549,7 @@ async function dispatchCloudRequest(
     const params = await parseRequestParams();
     const { maskIps } = resolveMaskIpsAndRole(params);
     const serviceId = pathname.startsWith("/api/query/schema/")
-      ? decodeURIComponent(pathname.slice("/api/query/schema/".length))
+      ? decodeUriStrict(pathname.slice("/api/query/schema/".length))
       : String(params.service_id ?? "logs");
     return jsonResponse(getQuerySchema(serviceId, maskIps), request);
   }

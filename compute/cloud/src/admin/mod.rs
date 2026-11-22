@@ -1188,6 +1188,42 @@ fn save_service(
     actor: &str,
     event: &str,
 ) -> Result<(), Error> {
+    save_service_with_limit(
+        context,
+        record,
+        service,
+        actor,
+        event,
+        AUDIT_OUTBOX_LIMIT,
+        false,
+    )
+}
+fn save_service_recovery_capped(
+    context: &Context<'_, impl Runtime>,
+    record: &Record,
+    service: &Service,
+    actor: &str,
+    event: &str,
+) -> Result<(), Error> {
+    save_service_with_limit(
+        context,
+        record,
+        service,
+        actor,
+        event,
+        JOB_RECOVERY_OUTBOX_LIMIT,
+        true,
+    )
+}
+fn save_service_with_limit(
+    context: &Context<'_, impl Runtime>,
+    record: &Record,
+    service: &Service,
+    actor: &str,
+    event: &str,
+    max_outbox: usize,
+    cap_instead_of_fail: bool,
+) -> Result<(), Error> {
     context.confirm_with_secret(&service.fastly_token_ref);
     let mut value = serialize(service)?;
     value["_audit"] = json!({"actor":actor,"at":context.runtime.now(),"event":event,"config_version":service.config_version});
@@ -1195,10 +1231,11 @@ fn save_service(
         .as_array()
         .cloned()
         .unwrap_or_default();
-    if audit.len() >= AUDIT_OUTBOX_LIMIT {
+    if audit.len() < max_outbox {
+        audit.push(value["_audit"].clone());
+    } else if !cap_instead_of_fail {
         return Err(Error::new(409, "audit_archive_required"));
     }
-    audit.push(value["_audit"].clone());
     value["_audit_outbox"] = audit.into();
     value["_audit_outbox_base"] = record.value["_audit_outbox_base"].clone();
     context.cas(

@@ -256,7 +256,13 @@ export class StoreIndex {
       const key =
         parsed.searchParams.get("key") ??
         (parsed.pathname.startsWith("/fos/")
-          ? decodeURIComponent(parsed.pathname.slice(5))
+          ? (() => {
+              try {
+                return decodeURIComponent(parsed.pathname.slice(5));
+              } catch {
+                return null;
+              }
+            })()
           : null);
       if (!key || this.pinned.has(key)) continue;
       candidates.push({

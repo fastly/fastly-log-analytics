@@ -538,3 +538,67 @@ def test_sec08_console_access_masked_keys_matches_18_shared_pii_keys_and_masks_u
     )
     for key in ("c_ip", "fastly_client_ip", "oip", "true_client_ip", "x_forwarded_for"):
         assert f"'{key}'" in view_sql, f"Masked ClickHouse view missing PII key {key!r}"
+
+
+@pytest.mark.security_regression
+def test_sec_t5_iter24_05_console_access_cmcd_alias_masking_and_aliased_predicate_coercion() -> None:
+    from backend.config import ClickHouseConfig
+    from backend.core.share_db import CMCD_SESSION_ALIAS_KEYS, SHARED_PII_KEYS
+    from backend.high_scale.postgres_control import console_access
+    from backend.high_scale.query import _rewrite_console_sql
+
+    # 1. Exact 18-key contract on MASKED_KEYS preserved, while Map redaction covers CMCD_SESSION_ALIAS_KEYS + dotted forms:
+    assert len(console_access.MASKED_KEYS) == 18
+    assert console_access.MASKED_KEYS == tuple(sorted(SHARED_PII_KEYS))
+    columns = [
+        ("service_id", "String"),
+        ("publication_state", "String"),
+        ("batch_id", "String"),
+        ("event_timestamp", "DateTime64(3, 'UTC')"),
+        ("url", "String"),
+        ("client_ip", "String"),
+        ("custom_fields", "Map(String, String)"),
+        ("cmcd", "Map(String, String)"),
+    ]
+    masked_view_sql = console_access._view_select("default", "request_facts", columns, "svc_a", masked=True)
+    for alias_key in (*sorted(CMCD_SESSION_ALIAS_KEYS), "cmcd.sid", "cmcd.cid", "cmcd.session"):
+        assert f"'{alias_key}'" in masked_view_sql, f"Masked Map view DDL missing {alias_key!r}"
+
+    # Verify ConsoleClients._assert_isolated probes cmcd['cmcd_sid'|'cmcd_cid'|'cmcd_session'] & dotted forms too:
+    seen_queries: list[str] = []
+
+    class _FakeCH:
+        def execute(self, sql: str, *args: object, **kwargs: object) -> list[dict[str, int]]:
+            seen_queries.append(sql)
+            return [{"n": 0}]
+
+        def close(self) -> None:
+            pass
+
+    secret = bytes(range(40, 88))
+    clients = console_access.ConsoleClients(
+        settings=ClickHouseConfig(host="127.0.0.1", port=8123, database="default", user="default", password=""),
+        secret=secret,
+        client_factory=lambda _cfg: _FakeCH(),
+    )
+    assert clients.client_for("svc_a", masked=True) is not None
+    req_mask_check = next(q for q in seen_queries if "request_facts" in q and "client_ip !=" in q)
+    for check_expr in (
+        "cmcd['cmcd_sid']",
+        "cmcd['cmcd_cid']",
+        "cmcd['cmcd_session']",
+        "cmcd['cmcd.sid']",
+        "custom_fields['cmcd_sid']",
+    ):
+        assert check_expr in req_mask_check, f"_assert_isolated missing {check_expr} check in {req_mask_check}"
+
+    # 2. Aliased predicate coercion on JOIN queries must NOT emit invalid `a.lower(...)` or `a.toFloat64OrZero(...)`:
+    rewritten = _rewrite_console_sql(
+        "SELECT a.url, b.status FROM logs AS a JOIN logs AS b ON a.url = b.url WHERE a.edge = true AND a.status >= 200",
+        svc_table="`default`.`fla_cv_masked`",
+        names={"request_facts": "fla_cv_masked"},
+    )
+    assert "a.lower(" not in rewritten
+    assert "a.toFloat64OrZero(" not in rewritten
+    assert "lower(a.custom_fields['edge']) IN ('true', '1')" in rewritten
+    assert "toFloat64OrZero(a.custom_fields['status']) >= 200" in rewritten

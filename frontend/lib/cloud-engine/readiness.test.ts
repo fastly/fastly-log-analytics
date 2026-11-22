@@ -83,6 +83,15 @@ it("reports a bounded, redacted error message so a failed query can be diagnosed
     expect(reported.startsWith("Error: Binder Error: no column [redacted] at [url]")).toBe(true);
     expect(reported.length).toBeLessThanOrEqual(240);
     expect(reported).not.toMatch(/sentinel|10\.0\.0\.1|LINE 1/);
+
+    const quoteShift = new Error('Failed fetching "https://fos.example.com/a.parquet" for user "MyShortPass123" in query');
+    await expect(measureCloudQuery("dashboard.bundle", async () => { throw quoteShift; })).rejects.toBe(quoteShift);
+    expect(events[5].error).not.toContain("MyShortPass123");
+    expect(events[5].error).not.toContain("fos.example.com");
+
+    const basicAuth = new Error("Header Authorization: Basic YWRtaW46c2VjcmV0 rejected");
+    await expect(measureCloudQuery("dashboard.bundle", async () => { throw basicAuth; })).rejects.toBe(basicAuth);
+    expect(events[7].error).not.toContain("YWRtaW46c2VjcmV0");
   } finally {
     window.removeEventListener("fla:cloud-query", listener);
   }

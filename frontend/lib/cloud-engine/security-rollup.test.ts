@@ -6,6 +6,7 @@ import { type DuckDBReadContext, DuckDBAnalyticalEngine as ParquetEngine } from 
 import { Hll } from "./dashboard/hll";
 import type { ManifestFile } from "./dashboard/manifest";
 import { FIXTURE_START, fixturePage, loadSummaryFixtures } from "./dashboard/summary-fixtures";
+import { MissingCloudFileError } from "./dashboard/file-errors";
 import { editSummaryRows, withSummaryLayout } from "./dashboard/summary-layout-fixture";
 import { defineSummarySpec, summaryProjectionLimits, type SummarySpec } from "./dashboard/summary-projection";
 import { fixtureSource, projectingSource } from "./dashboard/test-fixtures";
@@ -376,6 +377,21 @@ describe("securityFromRollup", () => {
     expect(await securityFromRollup("/api/security/bundle", body({ sections, bucket_seconds: 3600, filters: { pop: { values: [] } } }), noIpv6))
       .not.toBeNull();
     expect(noIpv6.log.files).toEqual(RUST_DAY.map((f) => f.key));
+  });
+
+  it("plans around a listed day bundle whose object is gone, exactly from the windows", async () => {
+    const s = source();
+    const fetchFile = s.fetchFile;
+    let goneReads = 0;
+    s.fetchFile = async (key, signal, options) => {
+      if (key === RUST_DAY[0].key && ++goneReads) throw new MissingCloudFileError(key);
+      return fetchFile(key, signal, options);
+    };
+    const sections = SECTIONS.filter((x) => x !== "ipv6_adoption");
+    const params = body({ sections, bucket_seconds: 3600 });
+    expect(await securityFromRollup(PATH, params, s))
+      .toEqual(await securityAggregatesFromRollup(await rollupOf(RUST_WINDOWS), params));
+    expect(goneReads).toBe(1);
   });
 
   it("leaves filtered reads, unknown or unnamed sections, bad ranges and other routes to the raw scan", async () => {

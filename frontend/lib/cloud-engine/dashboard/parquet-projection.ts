@@ -25,6 +25,31 @@ export const RANGE_REQUEST_COST_BYTES = 32 * 1024;
  */
 export const MAX_RANGES_PER_FILE = 16;
 
+/**
+ * Projected reads of files up to these sizes fetch the whole file in one request instead of two
+ * footer reads and then up to [`MAX_RANGES_PER_FILE`] column ranges. Any file up to
+ * `anyUpToBytes` costs little more than its footer probe. A closed hour's compacted files up to
+ * `closedHourUpToBytes` held many row groups that needed 15–17 requests for about half their
+ * bytes; larger compacts (5–22 MiB) keep ranges, where a dashboard projection reads about a
+ * third. Open-hour compacts above `anyUpToBytes` keep ranges too.
+ */
+export const wholeReadLimits = { anyUpToBytes: 256 * 1024, closedHourUpToBytes: 3 * 1024 * 1024 };
+
+const HOUR_MS = 3_600_000;
+
+/** Whether a projected read of `file` should fetch it whole, per [`wholeReadLimits`]. */
+export function readsWholeFirst(file: { size: number; end: string }, nowMs = Date.now()): boolean {
+  if (!(Number.isSafeInteger(file.size) && file.size > 0)) return false;
+  if (file.size <= wholeReadLimits.anyUpToBytes) return true;
+  return file.size <= wholeReadLimits.closedHourUpToBytes
+    && Date.parse(file.end) <= Math.floor(nowMs / HOUR_MS) * HOUR_MS;
+}
+
+/** The footer of a Parquet file held whole. */
+export function readWholeParquetFooter(bytes: ArrayBuffer): Promise<ParquetFooter> {
+  return readParquetFooter(bytes.byteLength, async (start, end) => bytes.slice(start, end));
+}
+
 export type FetchRange = (start: number, end: number) => Promise<ArrayBuffer>;
 
 export type ParquetFooter = {

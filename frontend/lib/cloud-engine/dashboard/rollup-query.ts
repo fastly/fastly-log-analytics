@@ -1,5 +1,6 @@
 import { parquetMetadata } from "hyparquet";
 import type { FileSource } from "./engine";
+import { MissingCloudFileError } from "./file-errors";
 import { Histogram } from "./histogram";
 import { fetchManifestWithSummaries, filesOverlapping, type ManifestFile } from "./manifest";
 import { projectedReader } from "./projected-read";
@@ -1090,24 +1091,42 @@ async function runRollup(
   );
   assertRollupActive();
   if (!raw.complete || !summaries.complete) return null;
-  const plan = planRollup(
-    raw.files,
-    summaries.files,
-    fromMs,
-    toMs,
-    residual ? { residualBytes: residual.maxBytes } : {},
-  );
-  if (!plan) return null;
-  const [decodedParts, residualPart] = await Promise.all([
-    Promise.all(
-      plan.files.map((use) =>
-        decodeCached(source, use.file, spec, signal, callRollupEpoch),
-      ),
-    ),
-    residual && plan.residual?.length
-      ? readResidual(source, residual, plan.residual, fromMs, toMs, signal, assertRollupActive)
-      : null,
-  ]);
+  // A listed summary whose object is gone is planned around like an unlisted
+  // one: its raw files fall to other summaries or the residual, so it stays exact.
+  const missing = new Set<string>();
+  let plan: RollupPlan | null;
+  let decodedParts: (Rollup | null)[];
+  let residualPart: Rollup | null;
+  for (;;) {
+    plan = planRollup(
+      raw.files,
+      missing.size ? summaries.files.filter((file) => !missing.has(file.key)) : summaries.files,
+      fromMs,
+      toMs,
+      residual ? { residualBytes: residual.maxBytes } : {},
+    );
+    if (!plan) return null;
+    try {
+      [decodedParts, residualPart] = await Promise.all([
+        Promise.all(
+          plan.files.map((use) =>
+            decodeCached(source, use.file, spec, signal, callRollupEpoch),
+          ),
+        ),
+        residual && plan.residual?.length
+          ? readResidual(source, residual, plan.residual, fromMs, toMs, signal, assertRollupActive)
+          : null,
+      ]);
+    } catch (error) {
+      assertRollupActive();
+      if (!(error instanceof MissingCloudFileError) || missing.has(error.key)
+        || !plan.files.some((use) => use.file.key === error.key)) throw error;
+      console.warn(`flp: summary ${error.key} is listed but missing; planning without it`);
+      missing.add(error.key);
+      continue;
+    }
+    break;
+  }
   assertRollupActive();
   if (decodedParts.some((part) => part === null)) return null;
   const parts = [...(decodedParts as Rollup[]), ...(residualPart ? [residualPart] : [])];

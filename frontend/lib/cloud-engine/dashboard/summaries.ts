@@ -686,15 +686,23 @@ export function planFilteredSummaries(
     fromMs,
     toMs,
   );
+  return {
+    groups: [
+      ...coarse.summaries.map((use) => [use]),
+      ...groupByCovers(compacted.summaries),
+    ],
+    raw: compacted.raw,
+  };
+}
+
+/** Groups uses that answer the same raw files: all of a group answers them or none does. */
+export function groupByCovers(uses: readonly SummaryUse[]): SummaryUse[][] {
   const groups = new Map<string, SummaryUse[]>();
-  for (const use of compacted.summaries) {
+  for (const use of uses) {
     const key = use.covers.map((file) => file.key).sort().join("\n");
     groups.set(key, [...(groups.get(key) ?? []), use]);
   }
-  return {
-    groups: [...coarse.summaries.map((use) => [use]), ...groups.values()],
-    raw: compacted.raw,
-  };
+  return [...groups.values()];
 }
 
 export type DecodedSummary = {

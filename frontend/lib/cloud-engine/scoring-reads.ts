@@ -168,7 +168,14 @@ export async function queryCloudScoring(request: Request, route: string) {
   }
   if (route === "evaluation" || route === "evaluation/per-reason" || route === "curves") {
     const match = url.pathname.match(/^\/api\/services\/([^/]+)\/scoring\//);
-    const serviceId = match ? decodeURIComponent(match[1]) : "";
+    let serviceId = "";
+    if (match) {
+      try {
+        serviceId = decodeURIComponent(match[1]);
+      } catch {
+        serviceId = "";
+      }
+    }
     let labels: Array<{ edge_sid: string; label: string }> = [];
     if (serviceId) {
       const resp = await fetch(`/api/services/${encodeURIComponent(serviceId)}/scoring/labels`, {
@@ -227,7 +234,12 @@ export async function queryCloudScoring(request: Request, route: string) {
   const events = route.match(/^sessions\/([^/]+)\/events$/);
   if (events) {
     if (!cols.has("edge_sid")) return unavailable("edge_session_ids_not_recorded");
-    const sid = decodeURIComponent(events[1]);
+    let sid = events[1];
+    try {
+      sid = decodeURIComponent(events[1]);
+    } catch {
+      return unavailable("invalid_session_id");
+    }
     const rows = await query(`SELECT timestamp::VARCHAR AS ts, edge_score, edge_score_l1,
       edge_score_l2, edge_score_reason, edge_cookie_compliance, url, status FROM ${source}
       WHERE ${where} AND edge_sid = '${escapeSqlLiteral(sid)}'
