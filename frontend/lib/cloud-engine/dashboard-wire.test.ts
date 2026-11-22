@@ -174,6 +174,24 @@ describe("Cloud dashboard response contract", () => {
     expect(body.time_series[0].value).toBeCloseTo(value);
   });
 
+  it("looks up a scan's field catalog while its range is still resolving", async () => {
+    const requested: string[] = [];
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      requested.push(String(input));
+      return new Promise<Response>((_, reject) =>
+        init?.signal?.addEventListener("abort", () => reject(init.signal!.reason)));
+    }));
+    const controller = new AbortController();
+    const pending = handleCloudAnalyticalRequest(new Request("http://localhost/api/sessions", {
+      method: "POST", signal: controller.signal,
+      headers: { "x-service-id": "svc" }, body: JSON.stringify({}),
+    }));
+    await vi.waitFor(() => expect(requested).toEqual(
+      expect.arrayContaining(["/api/log-extents", "/api/log-fields/catalog"])));
+    controller.abort();
+    await expect(pending).rejects.toThrow();
+  });
+
   it.each(["/api/dashboard/aggregates", "/api/aggregates", "/api/dashboard/bundle"])(
     "delivers retained dimensions and every country to the consumer of %s",
     async (path) => {
