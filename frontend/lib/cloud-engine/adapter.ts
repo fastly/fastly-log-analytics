@@ -840,6 +840,19 @@ async function prepareCloudScan(
   generation.assertCurrent();
   assertAdapterEpoch(request, entryMetaEpoch);
   const token = typeof params.session_token === "string" ? openSessionToken(params.session_token) : null;
+  const dataset = params.dataset;
+  const rum = /\/rum\//.test(url.pathname) || url.pathname === "/api/usage/rum-breakdown" ||
+    dataset === "client_vitals" || dataset === "client_errors";
+  const serviceId = url.pathname.match(/^\/api\/services\/([^/]+)\//)?.[1] ??
+    params.service_id ?? request.headers.get("x-service-id") ?? token?.svc ?? undefined;
+  // The field catalog doesn't depend on the range, so it loads alongside the range lookup.
+  let catalogLoad: ReturnType<typeof loadCloudCatalog> | null = null;
+  if (!rum && serviceId) {
+    const catalogUrl = new URL("/api/log-fields/catalog", request.url);
+    catalogUrl.searchParams.set("service_id", decodeURIComponent(String(serviceId)));
+    catalogLoad = loadCloudCatalog(new Request(catalogUrl, request), entryMetaEpoch);
+    catalogLoad.catch(() => {});
+  }
   let end = String(params.end_time ?? params.end ?? params.clamp_end ?? token?.e ?? "");
   if (!end) {
     const response = await withLoading("range", () =>
@@ -861,18 +874,11 @@ async function prepareCloudScan(
       Date.parse(start) > Date.parse(end) || !token && Date.parse(start) === Date.parse(end)) {
     throw new Error("Invalid Cloud query time range");
   }
-  const dataset = params.dataset;
-  const rum = /\/rum\//.test(url.pathname) || url.pathname === "/api/usage/rum-breakdown" ||
-    dataset === "client_vitals" || dataset === "client_errors";
   const scanStart = url.pathname.startsWith("/api/insights")
     ? new Date(Math.min(Date.parse(start), Date.parse(end) - historyHours * 3_600_000)).toISOString() : start;
-  const serviceId = url.pathname.match(/^\/api\/services\/([^/]+)\//)?.[1] ??
-    params.service_id ?? request.headers.get("x-service-id") ?? token?.svc ?? undefined;
   let customFields: CustomField[] = [];
-  if (!rum && serviceId) {
-    const catalogUrl = new URL("/api/log-fields/catalog", request.url);
-    catalogUrl.searchParams.set("service_id", decodeURIComponent(String(serviceId)));
-    const catalog = await loadCloudCatalog(new Request(catalogUrl, request), entryMetaEpoch);
+  if (catalogLoad) {
+    const catalog = await catalogLoad;
     generation.assertCurrent();
     assertAdapterEpoch(request, entryMetaEpoch);
     if (catalog instanceof Response) throw new Error(`Cloud field discovery failed (${catalog.status})`);

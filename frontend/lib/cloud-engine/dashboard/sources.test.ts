@@ -127,6 +127,23 @@ describe("browserSource", () => {
     await expect(source.fetchRange(file, 10, 101)).rejects.toThrow(/outside/);
   });
 
+  it("opens a listed file for selective reads without a size probe", async () => {
+    vi.stubGlobal("location", new URL("http://localhost/"));
+    const fetcher = vi.fn(async () => new Response(new Uint8Array([1]), {
+      status: 206,
+      headers: { "content-range": "bytes 0-0/100", etag: "\"e1\"" },
+    }));
+    vi.stubGlobal("fetch", fetcher);
+    const source = browserSource("");
+    const listed = { key: "flp/processed/request/year=2026/a.parquet", start: "", end: "", size: 100, rows: 1 };
+    expect(await source.openParquet!(listed)).toMatchObject({ kind: "http", cached: false });
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(await source.openParquet!({ ...listed, size: 0 })).toMatchObject({ kind: "http" });
+    expect(new Headers((fetcher.mock.calls[0] as unknown as [string, RequestInit])[1].headers).get("range")).toBe("bytes=0-0");
+    await source.openParquet!({ ...listed, etag: "\"e1\"" });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
   it("reports whether a file can be served without the network", async () => {
     const store = new Map<string, Response>([
       ["/api/file?key=on-disk", new Response(new Uint8Array([2]))],

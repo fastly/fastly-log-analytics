@@ -353,6 +353,27 @@ describe("queryRollup", () => {
     expect(s.log.files.toSorted()).toEqual(HOURS.map((f) => f.key).toSorted());
   });
 
+  it("lists raw files and their summaries in one request", async () => {
+    const s = source([...WINDOWS, ...HOURS]);
+    const result = await queryRollup(s, { fromMs: T0, toMs: T0 + 2 * HOUR });
+    expect(result!.dataThroughMs).toBe(T0 + 2 * HOUR);
+    expect(s.log.summary).toBeUndefined();
+    expect(s.log.json).toHaveLength(1);
+    expect(new URL(s.log.json[0], "http://x").searchParams.get("summaries")).toBe("1");
+  });
+
+  it("lists summaries separately when the raw listing omits them", async () => {
+    const s = source([...WINDOWS, ...HOURS]);
+    const fetchJson = s.fetchJson;
+    s.fetchJson = async (url, signal) => {
+      const { summary_files: _omitted, ...page } = (await fetchJson(url, signal)) as Record<string, unknown>;
+      return page;
+    };
+    const result = await queryRollup(s, { fromMs: T0, toMs: T0 + 2 * HOUR });
+    expect(overall(result!.rollup)).toBe(overall(await decodeAll(WINDOWS)));
+    expect(s.log.summary).toHaveLength(1);
+  });
+
   it("returns null, never zero, when a planned summary is not v3", async () => {
     const stale = WINDOWS[0];
     const s = source(WINDOWS, { ...BUFFERS, [stale.key]: BUFFERS[RAW[0].key] });

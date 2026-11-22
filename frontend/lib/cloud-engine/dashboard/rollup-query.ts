@@ -1,7 +1,7 @@
 import { parquetMetadata } from "hyparquet";
 import type { FileSource } from "./engine";
 import { Histogram } from "./histogram";
-import { fetchManifest, filesOverlapping, type ManifestFile } from "./manifest";
+import { fetchManifestWithSummaries, filesOverlapping, type ManifestFile } from "./manifest";
 import {
   readSummaryColumns, readSummaryProjection, type SummaryProjectionSource, type SummarySpec,
 } from "./summary-projection";
@@ -1003,10 +1003,12 @@ async function runRollup(
   assertRollupActive();
   const from = new Date(fromMs).toISOString();
   const to = new Date(toMs).toISOString();
-  const [raw, summaries] = await Promise.all([
-    fetchManifest(source.fetchJson, from, to, signal),
-    fetchManifest(source.fetchJson, from, to, signal, undefined, "summary"),
-  ]);
+  const { raw, summaries } = await fetchManifestWithSummaries(
+    source.fetchJson,
+    from,
+    to,
+    signal,
+  );
   assertRollupActive();
   if (!raw.complete || !summaries.complete) return null;
   const plan = planRollup(raw.files, summaries.files, fromMs, toMs);

@@ -1,7 +1,7 @@
 import { parquetMetadata } from "hyparquet";
 import type { FileSource } from "./dashboard/engine";
 import { Hll } from "./dashboard/hll";
-import { fetchManifest, type ManifestFile } from "./dashboard/manifest";
+import { fetchManifestWithSummaries, type ManifestFile } from "./dashboard/manifest";
 import { planRollup } from "./dashboard/rollup-query";
 import { SUMMARY_VERSION } from "./dashboard/summaries";
 import {
@@ -378,10 +378,7 @@ export async function querySecurityRollup(
   try {
     const from = new Date(fromMs).toISOString();
     const to = new Date(toMs).toISOString();
-    const [raw, summaries] = await Promise.all([
-      fetchManifest(source.fetchJson, from, to, controller.signal),
-      fetchManifest(source.fetchJson, from, to, controller.signal, undefined, "summary"),
-    ]);
+    const { raw, summaries } = await fetchManifestWithSummaries(source.fetchJson, from, to, controller.signal);
     controller.signal.throwIfAborted();
     if (callEpoch !== securityRollupEpoch) throw securityRollupAbortError();
     if (!raw.complete || !summaries.complete) return null;

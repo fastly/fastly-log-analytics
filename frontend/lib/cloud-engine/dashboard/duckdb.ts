@@ -449,12 +449,21 @@ export function duckdbAssetUrls(origin: string, version: string) {
   };
 }
 
+/** Pinned in package.json; lets the worker start before the SDK module loads. */
+export const DUCKDB_WASM_VERSION = "1.33.1-dev57.0";
+
 export async function createBrowserBackend(): Promise<DuckDBBackend> {
-  const duckdb = await import("@duckdb/duckdb-wasm");
   const origin =
     typeof self !== "undefined" && self.location ? self.location.origin : "";
-  const assets = duckdbAssetUrls(origin, duckdb.PACKAGE_VERSION);
+  const assets = duckdbAssetUrls(origin, DUCKDB_WASM_VERSION);
   const worker = new Worker(assets.worker);
+  let duckdb: typeof import("@duckdb/duckdb-wasm");
+  try {
+    duckdb = await import("@duckdb/duckdb-wasm");
+  } catch (error) {
+    worker.terminate();
+    throw error;
+  }
   const logger = new duckdb.VoidLogger();
   let db: InstanceType<typeof duckdb.AsyncDuckDB>;
   try {

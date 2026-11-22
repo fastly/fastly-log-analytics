@@ -97,6 +97,12 @@ async function run(
   return { result, files: source.log.files };
 }
 
+/** A raw listing page as a server that omits inline summaries returns it. */
+function withoutInlineSummaries(body: unknown): unknown {
+  const { summary_files: _omitted, ...page } = body as Record<string, unknown>;
+  return page;
+}
+
 /** Summary answers equal raw answers, except the documented approximations. */
 function expectMatchesRaw(summary: DashboardResult, raw: DashboardResult) {
   expect(summary.totalRequests).toBe(raw.totalRequests);
@@ -681,7 +687,7 @@ describe("summary readers", () => {
       ...source,
       async fetchJson(url: string, signal?: AbortSignal) {
         if (url.includes("view=summary")) throw new Error("503");
-        return source.fetchJson(url, signal);
+        return withoutInlineSummaries(await source.fetchJson(url, signal));
       },
     };
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -717,9 +723,15 @@ describe("summary readers", () => {
         },
       ],
     );
+    const legacy = {
+      ...incomplete,
+      async fetchJson(url: string, signal?: AbortSignal) {
+        return withoutInlineSummaries(await incomplete.fetchJson(url, signal));
+      },
+    };
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
-      const result = await runDashboard(incomplete, { from, to });
+      const result = await runDashboard(legacy, { from, to });
       expect(expectMatchesRaw(result, raw.result)).toEqual([]);
       expect(result.stats).toMatchObject({
         summaryListing: "incomplete",
@@ -738,23 +750,29 @@ describe("summary readers", () => {
       pick("hour", (e) => !e.early),
     );
     expect(listed.result.stats).toMatchObject({
-      summaryListing: "listed",
+      summaryListing: "inline",
       summaryFiles: 2,
     });
   });
 
-  it("lists summaries when an unrequested raw catalog page carries an empty summary_files", async () => {
+  it("lists summaries when the raw listing omits them", async () => {
     const from = "2027-01-15T08:00:00Z";
     const to = "2027-01-15T10:00:00Z";
     const hours = pick("hour", (e) => !e.early);
-    // The catalog's raw pages always serialize `summary_files: []`.
     const source = fixtureSource(
-      [{ ...page(RAW), summary_files: [] } as ReturnType<typeof page>],
+      [page(RAW)],
       BUFFERS,
       { json: [], files: [] },
       [page(hours)],
     );
-    const result = await runDashboard(source, { from, to });
+    const legacy = {
+      ...source,
+      async fetchJson(url: string, signal?: AbortSignal) {
+        const body = await source.fetchJson(url, signal);
+        return url.includes("view=summary") ? body : withoutInlineSummaries(body);
+      },
+    };
+    const result = await runDashboard(legacy, { from, to });
     expect(source.log.summary).toHaveLength(1);
     expect(result.stats).toMatchObject({
       summaryListing: "listed",
@@ -762,6 +780,31 @@ describe("summary readers", () => {
     });
     const listed = await run(from, to, RAW, hours);
     expect(source.log.files.toSorted()).toEqual(listed.files.toSorted());
+  });
+
+  it("takes summaries from the raw listing instead of a separate summary listing", async () => {
+    const from = "2027-01-15T08:00:00Z";
+    const to = "2027-01-15T10:00:00Z";
+    const hours = pick("hour", (e) => !e.early);
+    const listed = await run(from, to, RAW, hours);
+    for (const search of [false, true]) {
+      const source = fixtureSource(
+        [page(RAW)],
+        BUFFERS,
+        { json: [], files: [] },
+        [page(hours)],
+      );
+      if (search) {
+        await searchFieldSummaries(source, { from, to, column: "host", query: "" });
+      } else {
+        const result = await runDashboard(source, { from, to });
+        expect(result.stats).toMatchObject({ summaryListing: "inline", summaryFiles: 2 });
+        expect(source.log.files.toSorted()).toEqual(listed.files.toSorted());
+      }
+      expect(source.log.summary).toBeUndefined();
+      expect(source.log.json).toHaveLength(1);
+      expect(new URL(source.log.json[0], "http://x").searchParams.get("summaries")).toBe("1");
+    }
   });
 
   it("classifies summaries against filters and edgeOnly while respecting truncated fields", async () => {

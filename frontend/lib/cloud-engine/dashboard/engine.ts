@@ -1285,9 +1285,27 @@ async function collectAggregator(
   const countedFilters = (options.filters ?? []).every((filter) =>
     cardFields.includes(filter.field),
   );
+  // Summaries come inline with the raw listing (and its deltas) rather than
+  // from a separate chain of pages. File reads wait for the whole listing:
+  // the planner needs every raw and summary file to know which raw files
+  // summaries cover, and a delta listing only resolves once replayed.
+  const wantSummaries =
+    !hasFilters &&
+    !edgeOnly &&
+    topK !== null &&
+    fields.length === cardFields.length &&
+    toMs - fromMs >= SUMMARY_MIN_RANGE_MS;
   const manifest =
     options.manifest ??
-    (await fetchManifest(source.fetchJson, from, to, signal));
+    (await fetchManifest(
+      source.fetchJson,
+      from,
+      to,
+      signal,
+      undefined,
+      undefined,
+      wantSummaries,
+    ));
   generation.assertCurrent();
   signal?.throwIfAborted();
   if (!manifest.complete) {
@@ -2441,7 +2459,15 @@ export async function searchFieldSummaries(
   const scope = source.cacheScope ?? "default";
   const manifest =
     options.manifest ??
-    (await fetchManifest(source.fetchJson, from, to, signal));
+    (await fetchManifest(
+      source.fetchJson,
+      from,
+      to,
+      signal,
+      undefined,
+      undefined,
+      toMs - fromMs >= SUMMARY_MIN_RANGE_MS,
+    ));
   assertActive();
   if (!manifest.complete) return { entries: [], partial: true };
   let files = filesOverlapping(manifest.files, fromMs, toMs);

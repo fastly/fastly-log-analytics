@@ -309,6 +309,19 @@ describe("Cloud first-page analytical range loading", () => {
     read.release?.();
   });
 
+  it("starts DuckDB while the range is still listing", async () => {
+    const engine = getDuckDBEngine();
+    const prewarm = vi.spyOn(engine, "prewarm");
+    let warmedBeforeListing = false;
+    vi.mocked(fetchManifest).mockImplementation(async () => {
+      warmedBeforeListing = prewarm.mock.calls.length > 0;
+      return { files: [], complete: true };
+    });
+    const read = await ensureCloudRange(from, to, signal);
+    read.release?.();
+    expect(warmedBeforeListing).toBe(true);
+  });
+
   it("aborts the prefetched downloads when the request is cancelled", async () => {
     const files = Array.from({ length: 12 }, (_, i) => ({ ...file, key: `processed/request/f${i}.parquet` }));
     vi.mocked(fetchManifest).mockResolvedValue({ files, complete: true });

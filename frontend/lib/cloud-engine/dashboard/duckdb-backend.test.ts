@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createBrowserBackend, DuckDBAnalyticalEngine } from "./duckdb";
+import { createBrowserBackend, DUCKDB_WASM_VERSION, DuckDBAnalyticalEngine } from "./duckdb";
 
 type MockReader = AsyncIterable<never> & { schema: { fields: never[] } };
 const state = vi.hoisted(() => ({
@@ -227,7 +227,7 @@ describe("DuckDB module URL", () => {
     const createObjectURL = vi.spyOn(URL, "createObjectURL");
     try {
       await (await createBrowserBackend()).dispose();
-      expect(state.modules).toEqual(["https://flp.test/duckdb/test/duckdb-eh.wasm"]);
+      expect(state.modules).toEqual([`https://flp.test/duckdb/${DUCKDB_WASM_VERSION}/duckdb-eh.wasm`]);
       expect(open).not.toHaveBeenCalled();
       expect(createObjectURL).not.toHaveBeenCalled();
     } finally {
