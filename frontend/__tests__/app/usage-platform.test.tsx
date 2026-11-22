@@ -52,6 +52,8 @@ const storage: StorageUsageData = {
   live_bytes: 1024 ** 3,
   live_files: 1,
   deleted_bytes: 0,
+  deleted_bytes_complete: true,
+  deleted_bytes_provenance: 'fos_usage_exact',
   quarantine_bytes: 0,
   total_billed_bytes: 1024 ** 3,
   archive_bytes: 0,
@@ -87,6 +89,23 @@ const statProps = {
 }
 
 describe('observed Platform usage', () => {
+  it('labels incomplete deletion accounting instead of presenting it as a measured zero', () => {
+    render(
+      <UsageStatCards
+        {...statProps}
+        storage={{
+          ...storage,
+          deleted_bytes: 0,
+          deleted_bytes_complete: false,
+          deleted_bytes_provenance: 'fos_usage_incomplete',
+        } as StorageUsageData}
+      />,
+    )
+
+    expect(screen.getByText('Incomplete')).toBeInTheDocument()
+    expect(screen.queryByText('0 B')).not.toBeInTheDocument()
+  })
+
   it('labels account-wide storage and summarizes counters without adding snapshots', () => {
     render(<PlatformUsageCards data={platform} cloudMode />)
 

@@ -80,6 +80,7 @@ export interface FosUsageRow {
   bytes_in: number;
   bytes_out: number;
   bytes_deleted: number;
+  bytes_deleted_complete?: boolean;
   est_cost_usd: number;
 }
 
@@ -484,6 +485,19 @@ function ranked(map: Map<string, RouteTotals>): RouteTotals[] {
 /** Bytes deleted since `from`; FOS still bills them for its minimum storage duration. */
 export function deletedBytesSince(rows: FosUsageRow[], from: number): number {
   return rows.reduce((sum, row) => (row.timestamp >= from ? sum + row.bytes_deleted : sum), 0);
+}
+
+export function deletedBytesAccountingSince(rows: FosUsageRow[], from: number) {
+  const since = rows.filter((row) => row.timestamp >= from);
+  const deletionRows = since.filter(
+    (row) => row.op === "DELETE" || row.op === "DELETE_OBJECTS",
+  );
+  const complete = deletionRows.every((row) => row.bytes_deleted_complete === true);
+  return {
+    bytes: deletionRows.reduce((sum, row) => sum + row.bytes_deleted, 0),
+    complete,
+    provenance: complete ? "fos_usage_exact" : "fos_usage_incomplete",
+  } as const;
 }
 
 export function reconcileSnapshot(runs: CronRunRow[]) {
@@ -1248,6 +1262,10 @@ function parseRows(
       bytes_in: num(row, "bytes_in", "fos_usage"),
       bytes_out: num(row, "bytes_out", "fos_usage"),
       bytes_deleted: num(row, "bytes_deleted", "fos_usage"),
+      bytes_deleted_complete:
+        typeof row.bytes_deleted_complete === "boolean"
+          ? row.bytes_deleted_complete
+          : undefined,
       est_cost_usd: num(row, "est_cost_usd", "fos_usage"),
     })),
     api_telemetry: rows(raw.api_telemetry, "api_telemetry", (row) => ({

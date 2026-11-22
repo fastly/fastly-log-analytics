@@ -89,6 +89,7 @@ fn specific(kind: LogKind) -> &'static [(&'static str, Kind)] {
             ("bytes_in", Int64),
             ("bytes_out", Int64),
             ("bytes_deleted", Int64),
+            ("bytes_deleted_complete", Bool),
             ("cdn_cache", Utf8),
             ("est_cost_usd", Float64),
             ("harness", Utf8),

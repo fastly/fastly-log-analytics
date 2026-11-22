@@ -2669,6 +2669,7 @@ fn fos_usage_aggregates_per_op_dataset_caller_status_and_cache_state() {
     let delete = find("DELETE", "DIRECT");
     assert_eq!(delete["op_class"], "A");
     assert_eq!(delete["bytes_deleted"], 777);
+    assert_eq!(delete["bytes_deleted_complete"], true);
     let hit = find("GET", "HIT");
     assert_eq!(hit["op_class"], "CDN_HIT");
     assert_eq!(hit["est_cost_usd"].as_f64(), Some(0.0));

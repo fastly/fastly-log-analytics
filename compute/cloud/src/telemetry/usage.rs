@@ -194,6 +194,7 @@ struct Row {
     bytes_in: u64,
     bytes_out: u64,
     bytes_deleted: u64,
+    bytes_deleted_complete: bool,
 }
 
 pub struct UsageAgg {
@@ -258,14 +259,65 @@ impl UsageAgg {
         }
     }
 
+    pub fn forget_sizes(&self, keys: &[String]) {
+        let mut sizes = self.sizes.borrow_mut();
+        for key in keys {
+            sizes.remove(key);
+        }
+    }
+
     /// Credits the remembered sizes of confirmed `DeleteObjects` keys to `bytes_deleted`.
     pub fn record_deleted(&self, keys: &[String]) {
         let mut sizes = self.sizes.borrow_mut();
-        let bytes: u64 = keys.iter().filter_map(|key| sizes.remove(key)).sum();
+        let (known, bytes) = keys.iter().fold((0, 0), |(known, bytes), key| {
+            sizes
+                .remove(key)
+                .map_or((known, bytes), |size| (known + 1, bytes + size))
+        });
         drop(sizes);
-        if let (Some(first), true) = (keys.first(), bytes > 0) {
-            self.add("DELETE_OBJECTS", first, Some(200), "DIRECT", 0, 0, 0, bytes);
+        if let Some(first) = keys.first() {
+            self.add_deleted(first, bytes, known == keys.len());
         }
+    }
+
+    pub fn record_deleted_bytes(&self, first: &str, bytes: u64) {
+        self.add_deleted_accounting(first, bytes, true, true);
+    }
+
+    fn add_deleted(&self, first: &str, bytes: u64, complete: bool) {
+        self.add_deleted_accounting(first, bytes, complete, false);
+    }
+
+    fn add_deleted_accounting(&self, first: &str, bytes: u64, complete: bool, authoritative: bool) {
+        let key = Key {
+            op: "DELETE_OBJECTS",
+            dataset: dataset_of(first),
+            caller: self.caller.get(),
+            status: 200,
+            cdn_cache: "DIRECT",
+        };
+        let mut rows = self.rows.borrow_mut();
+        if let Some(row) = rows.get_mut(&key) {
+            row.bytes_deleted += bytes;
+            row.bytes_deleted_complete = if authoritative {
+                complete
+            } else {
+                row.bytes_deleted_complete && complete
+            };
+            return;
+        }
+        drop(rows);
+        self.add(
+            "DELETE_OBJECTS",
+            first,
+            Some(200),
+            "DIRECT",
+            0,
+            0,
+            0,
+            bytes,
+            complete,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -279,6 +331,7 @@ impl UsageAgg {
         bytes_in: u64,
         bytes_out: u64,
         bytes_deleted: u64,
+        bytes_deleted_complete: bool,
     ) {
         let key = Key {
             op,
@@ -288,7 +341,10 @@ impl UsageAgg {
             cdn_cache,
         };
         let mut rows = self.rows.borrow_mut();
-        let row = rows.entry(key).or_default();
+        let row = rows.entry(key).or_insert_with(|| Row {
+            bytes_deleted_complete: true,
+            ..Default::default()
+        });
         if row.count == 0 {
             row.sample_key = path.to_owned();
         }
@@ -297,6 +353,7 @@ impl UsageAgg {
         row.bytes_in += bytes_in;
         row.bytes_out += bytes_out;
         row.bytes_deleted += bytes_deleted;
+        row.bytes_deleted_complete &= bytes_deleted_complete;
     }
 
     /// A direct S3 call. A GET with no key is a LIST; its `prefix` query decides the dataset.
@@ -328,9 +385,14 @@ impl UsageAgg {
             _ => return,
         };
         let deleted = if op == "DELETE" && status.is_some_and(|s| (200..300).contains(&s)) {
-            self.sizes.borrow_mut().remove(key).unwrap_or(0)
+            self.sizes.borrow_mut().remove(key)
         } else {
-            0
+            None
+        };
+        let deleted_complete = match op {
+            "DELETE" => deleted.is_some(),
+            "DELETE_OBJECTS" => true,
+            _ => true,
         };
         self.add(
             op,
@@ -340,7 +402,8 @@ impl UsageAgg {
             duration_ms,
             bytes_in,
             bytes_out,
-            deleted,
+            deleted.unwrap_or(0),
+            deleted_complete,
         );
     }
 
@@ -358,7 +421,17 @@ impl UsageAgg {
         } else {
             "MISS"
         };
-        self.add("GET", key, status, cache, duration_ms, 0, bytes_out, 0);
+        self.add(
+            "GET",
+            key,
+            status,
+            cache,
+            duration_ms,
+            0,
+            bytes_out,
+            0,
+            true,
+        );
     }
 
     pub fn is_empty(&self) -> bool {
@@ -388,6 +461,7 @@ impl UsageAgg {
                     "caller": caller, "status_code": key.status,
                     "duration_ms": row.duration_ms, "bytes_in": row.bytes_in,
                     "bytes_out": row.bytes_out, "bytes_deleted": row.bytes_deleted,
+                    "bytes_deleted_complete": row.bytes_deleted_complete,
                     "cdn_cache": key.cdn_cache, "est_cost_usd": unit * row.count as f64,
                 });
                 if let Some(label) = &harness {

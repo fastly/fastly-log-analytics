@@ -282,7 +282,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     vi.spyOn(Date, "now").mockReturnValue(now);
     const deletion = (ageDays: number, bytes: number) => ({
       ...fixtureUsageInput.rows.fos_usage[0], op: "DELETE_OBJECTS", timestamp: now - ageDays * 86_400_000,
-      bytes_in: 0, bytes_deleted: bytes,
+      bytes_in: 0, bytes_deleted: bytes, bytes_deleted_complete: true,
     });
     const fosUsage = [deletion(40, 9_000), deletion(1, 2_000), deletion(1 / 48, 500)];
     const input = { ...fixtureUsageInput, rows: { ...fixtureUsageInput.rows, fos_usage: rangeDays >= 30 ? fosUsage : [] } };
@@ -298,11 +298,48 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       new Request(`http://localhost/api/usage/current-storage?${params}`),
     );
 
-    expect(await response!.json()).toMatchObject({ deleted_bytes: 2_500 });
+    expect(await response!.json()).toMatchObject({
+      deleted_bytes: 2_500,
+      deleted_bytes_complete: true,
+      deleted_bytes_provenance: "fos_usage_exact",
+    });
     expect(fetchKind).toHaveBeenCalledTimes(kindReads);
     if (kindReads) {
       expect(fetchKind.mock.calls[0][1]).toEqual({ from: now - 30 * 86_400_000, to: now });
     }
+  });
+
+  it("marks legacy deletion usage as incomplete instead of proving a measured zero", async () => {
+    const now = fixtureUsageInput.now;
+    vi.spyOn(Date, "now").mockReturnValue(now);
+    const legacyDelete = {
+      ...fixtureUsageInput.rows.fos_usage[0],
+      op: "DELETE_OBJECTS",
+      timestamp: now - 60_000,
+      bytes_in: 0,
+      bytes_deleted: 0,
+    };
+    const input = {
+      ...fixtureUsageInput,
+      rows: { ...fixtureUsageInput.rows, fos_usage: [legacyDelete] },
+    };
+    vi.spyOn(usage, "fetchUsageSummary").mockResolvedValue({
+      ...usage.summarizeUsage(input),
+      input,
+      summary: usage.summarizeUsage(input),
+      lines: [],
+      totalUsd: 0,
+    });
+
+    const response = await handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/usage/current-storage"),
+    );
+
+    expect(await response!.json()).toMatchObject({
+      deleted_bytes: 0,
+      deleted_bytes_complete: false,
+      deleted_bytes_provenance: "fos_usage_incomplete",
+    });
   });
 
   const mockAuditRows = (rows: Array<Record<string, unknown>>) =>

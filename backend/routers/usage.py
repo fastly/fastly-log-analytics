@@ -643,11 +643,13 @@ def usage_current_storage(
 
         # Standard's cloud copy deletes superseded and expired files; FOS bills each for 30 days after deletion.
         cloud_copy_deleted_bytes = 0
+        cloud_copy_deleted_bytes_complete = True
         try:
             from backend.core.metadata.usage_log import cloud_copy_deleted_bytes_in_billing_window
 
             cloud_copy_deleted_bytes = cloud_copy_deleted_bytes_in_billing_window(src["name"])
         except Exception:
+            cloud_copy_deleted_bytes_complete = False
             logger.debug("usage_current_storage: cloud copy deletions failed (ignored)", exc_info=True)
 
         if "rum_bytes" in stats:
@@ -679,6 +681,10 @@ def usage_current_storage(
             live_bytes=live_bytes,
             live_files=live_files,
             deleted_bytes=deleted_bytes,
+            deleted_bytes_complete=cloud_copy_deleted_bytes_complete,
+            deleted_bytes_provenance=(
+                "metadata_ledgers" if cloud_copy_deleted_bytes_complete else "metadata_ledgers_incomplete"
+            ),
             quarantine_bytes=quarantine_bytes,
             total_billed_bytes=billed_bytes,
             total_billed_gb_hours=gb_hours,

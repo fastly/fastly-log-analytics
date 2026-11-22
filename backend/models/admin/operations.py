@@ -245,6 +245,8 @@ class CurrentStorageResponse(BaseResponse):
     live_bytes: int
     live_files: int
     deleted_bytes: int
+    deleted_bytes_complete: bool = False
+    deleted_bytes_provenance: str = "unknown"
     quarantine_bytes: int = 0
     total_billed_bytes: int
     total_billed_gb_hours: float

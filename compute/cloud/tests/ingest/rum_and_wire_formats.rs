@@ -1055,6 +1055,89 @@ mod request_compaction {
         panic!("resumable compaction failed to finish a bounded job");
     }
 
+    #[test]
+    fn persisted_deletion_queue_accounts_exact_source_bytes_after_a_complete_delete() {
+        let fake = Fake::new(NOW);
+        let sources = seed(&fake, 3);
+        let expected: u64 = sources
+            .iter()
+            .map(|key| fake.bucket.borrow()[key].len() as u64)
+            .sum();
+        finish(&fake, TARGET);
+        fake.usage
+            .drain_rows(&fastly_log_analytics::auth::settings::UsageLogging::default());
+        fake.now
+            .set(fake.now.get() + compaction::DELETE_GRACE_S + 1);
+
+        let report = run(&fake, TARGET);
+
+        assert_eq!(report.deleted, 3);
+        let rows = fake
+            .usage
+            .drain_rows(&fastly_log_analytics::auth::settings::UsageLogging::default());
+        assert_eq!(
+            rows.iter()
+                .map(|row| row["bytes_deleted"].as_u64().unwrap())
+                .sum::<u64>(),
+            expected
+        );
+        assert!(rows
+            .iter()
+            .filter(|row| row["op"] == "DELETE_OBJECTS")
+            .all(|row| row["bytes_deleted_complete"] == true));
+    }
+
+    #[test]
+    fn partial_compaction_delete_accounts_only_confirmed_source_bytes_without_recounting() {
+        let fake = Fake::new(NOW);
+        let sources = seed(&fake, 3);
+        let source_sizes: BTreeMap<String, u64> = sources
+            .iter()
+            .map(|key| (key.clone(), fake.bucket.borrow()[key].len() as u64))
+            .collect();
+        finish(&fake, TARGET);
+        let failed = sources[1].clone();
+        fake.fail_delete_keys.borrow_mut().insert(failed.clone());
+        fake.usage
+            .drain_rows(&fastly_log_analytics::auth::settings::UsageLogging::default());
+        fake.now
+            .set(fake.now.get() + compaction::DELETE_GRACE_S + 1);
+
+        let partial = run(&fake, TARGET);
+        let rows = fake
+            .usage
+            .drain_rows(&fastly_log_analytics::auth::settings::UsageLogging::default());
+        let failed_bytes = source_sizes[&failed];
+        let confirmed_bytes = sources
+            .iter()
+            .filter(|key| **key != failed)
+            .map(|key| source_sizes[key])
+            .sum::<u64>();
+
+        assert_eq!((partial.deleted, partial.failed), (2, 1));
+        assert_eq!(
+            rows.iter()
+                .map(|row| row["bytes_deleted"].as_u64().unwrap())
+                .sum::<u64>(),
+            confirmed_bytes
+        );
+        assert!(rows
+            .iter()
+            .filter(|row| row["op"] == "DELETE_OBJECTS")
+            .all(|row| row["bytes_deleted_complete"] == true));
+        fake.fail_delete_keys.borrow_mut().clear();
+        assert_eq!(run(&fake, TARGET).deleted, 1);
+        let rows = fake
+            .usage
+            .drain_rows(&fastly_log_analytics::auth::settings::UsageLogging::default());
+        assert_eq!(
+            rows.iter()
+                .map(|row| row["bytes_deleted"].as_u64().unwrap())
+                .sum::<u64>(),
+            failed_bytes
+        );
+    }
+
     pub(super) fn compacts(fake: &Fake) -> Vec<String> {
         fake.keys(ROOT)
             .into_iter()

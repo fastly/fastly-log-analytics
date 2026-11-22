@@ -7656,6 +7656,16 @@ export interface components {
             /** Deleted Bytes */
             deleted_bytes: number;
             /**
+             * Deleted Bytes Complete
+             * @default false
+             */
+            deleted_bytes_complete: boolean;
+            /**
+             * Deleted Bytes Provenance
+             * @default unknown
+             */
+            deleted_bytes_provenance: string;
+            /**
              * Quarantine Bytes
              * @default 0
              */

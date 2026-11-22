@@ -28,7 +28,7 @@ use parquet::file::metadata::ParquetMetaData;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const STATE_KEY: &str = "ingest:compact_state";
 pub const RUM_TABLES: [&str; 2] = [super::rum::ERRORS, super::rum::VITALS];
@@ -255,8 +255,22 @@ pub struct Queued {
     pub at: u64,
     #[serde(default)]
     pub bytes: u64,
+    #[serde(default)]
+    pub sizes: Vec<u64>,
+    #[serde(default)]
+    pub compact_bytes: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<super::file_metadata::Metadata>,
+}
+
+impl Queued {
+    fn output_bytes(&self) -> u64 {
+        if self.compact_bytes == 0 {
+            self.bytes
+        } else {
+            self.compact_bytes
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -766,10 +780,9 @@ fn commit_watermark<R: Runtime>(
             if receipt.replaces == sources
                 && receipt.files.len() == pending.len()
                 && pending.iter().all(|queued| {
-                    receipt
-                        .files
-                        .iter()
-                        .any(|file| file.key == queued.compact && file.bytes == queued.bytes)
+                    receipt.files.iter().any(|file| {
+                        file.key == queued.compact && file.bytes == queued.output_bytes()
+                    })
                 })
             {
                 for queued in pending.iter_mut() {
@@ -789,7 +802,7 @@ fn commit_watermark<R: Runtime>(
                 super::worker::Output {
                     key: queued.compact.clone(),
                     rows: name.map_or(0, |name| name.rows),
-                    bytes: queued.bytes,
+                    bytes: queued.output_bytes(),
                     metadata: queued.metadata.clone(),
                     ..Default::default()
                 }
@@ -1099,6 +1112,20 @@ impl<R: Runtime> Run<'_, '_, R> {
         if due.is_empty() || !self.affordable(1) {
             return;
         }
+        if let Some(usage) = self.store.runtime.usage_agg() {
+            usage.forget_sizes(&keys);
+        }
+        let exact: BTreeMap<String, u64> = due
+            .iter()
+            .flat_map(|&index| {
+                let queued = &self.state.queue[index];
+                queued
+                    .keys
+                    .iter()
+                    .cloned()
+                    .zip(queued.sizes.iter().copied())
+            })
+            .collect();
         let result = match self.store.delete_objects(&keys) {
             Ok(result) => result,
             Err(error) => {
@@ -1108,10 +1135,54 @@ impl<R: Runtime> Run<'_, '_, R> {
         };
         self.report.deleted += result.deleted.len() as u64;
         self.report.failed += result.failed.len() as u64;
+        if let (Some(usage), Some(first)) = (self.store.runtime.usage_agg(), result.deleted.first())
+        {
+            if result.failed.is_empty()
+                && due.iter().all(|&index| {
+                    let queued = &self.state.queue[index];
+                    queued.sizes.len() == queued.keys.len()
+                })
+            {
+                usage.record_deleted_bytes(
+                    first,
+                    due.iter().map(|&index| self.state.queue[index].bytes).sum(),
+                );
+            } else if result.deleted.iter().all(|key| exact.contains_key(key)) {
+                usage
+                    .record_deleted_bytes(first, result.deleted.iter().map(|key| exact[key]).sum());
+            } else {
+                usage.note_sizes(
+                    result
+                        .deleted
+                        .iter()
+                        .filter_map(|key| exact.get(key).map(|bytes| (key.as_str(), *bytes))),
+                );
+                usage.record_deleted(&result.deleted);
+            }
+        }
         let failed: BTreeSet<&String> = result.failed.iter().collect();
         for index in due.into_iter().rev() {
             let queued = &mut self.state.queue[index];
-            queued.keys.retain(|k| failed.contains(k));
+            let mut retained_sizes = Vec::new();
+            queued.keys = queued
+                .keys
+                .drain(..)
+                .enumerate()
+                .filter_map(|(position, key)| {
+                    if !failed.contains(&key) {
+                        return None;
+                    }
+                    if let Some(size) = queued.sizes.get(position) {
+                        retained_sizes.push(*size);
+                    }
+                    Some(key)
+                })
+                .collect();
+            if retained_sizes.len() != queued.keys.len() {
+                retained_sizes.clear();
+            }
+            queued.sizes = retained_sizes;
+            queued.bytes = queued.sizes.iter().sum();
             if queued.keys.is_empty() {
                 self.state.queue.remove(index);
             }
@@ -1351,10 +1422,17 @@ impl<R: Runtime> Run<'_, '_, R> {
                 .cloned()
                 .collect();
             if !lost.is_empty() {
+                let sizes = lost
+                    .iter()
+                    .filter_map(|key| objects.iter().find(|object| &object.key == key))
+                    .map(|object| object.size)
+                    .collect::<Vec<_>>();
                 self.state.queue.push(Queued {
                     compact: compact_key.clone(),
+                    bytes: sizes.iter().sum(),
                     keys: lost,
                     at: self.now,
+                    sizes,
                     ..Queued::default()
                 });
                 self.changed = true;
@@ -1617,7 +1695,9 @@ impl<R: Runtime> Run<'_, '_, R> {
             compact: job.upload.key.clone(),
             keys: job.sources.iter().map(|c| c.key.clone()).collect(),
             at: self.now,
-            bytes: job.bytes,
+            bytes: job.sources.iter().map(|c| c.size).sum(),
+            sizes: job.sources.iter().map(|c| c.size).collect(),
+            compact_bytes: job.bytes,
             metadata: job.metadata.clone(),
         });
         self.state.job = Some(job.clone());

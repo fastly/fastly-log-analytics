@@ -54250,6 +54250,16 @@
             "type": "integer",
             "title": "Deleted Bytes"
           },
+          "deleted_bytes_complete": {
+            "type": "boolean",
+            "title": "Deleted Bytes Complete",
+            "default": false
+          },
+          "deleted_bytes_provenance": {
+            "type": "string",
+            "title": "Deleted Bytes Provenance",
+            "default": "unknown"
+          },
           "quarantine_bytes": {
             "type": "integer",
             "title": "Quarantine Bytes",

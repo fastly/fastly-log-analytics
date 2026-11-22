@@ -113,6 +113,8 @@ export function UsageStatCards({
 }) {
   const observedStorageGbHours =
     platformStorage?.status === 'ok' ? platformStorage.gb_hours ?? null : null
+  const deletedBytesComplete = storage?.deleted_bytes_complete
+  const deletedBytesProvenance = storage?.deleted_bytes_provenance
   const billedGbHours = observedStorageGbHours ?? storage?.total_billed_gb_hours ?? 0
   const loadingLocalStorage = loadingStorage && observedStorageGbHours == null
   const roughCostA = (totalClassA / 1000) * rateA
@@ -217,7 +219,12 @@ export function UsageStatCards({
             </Tooltip>
           </TooltipProvider>
         ),
-        value: <strong>{formatBytes(storage?.deleted_bytes ?? 0)}</strong>,
+        value:
+          deletedBytesComplete === false ? (
+            <strong title={`Provenance: ${deletedBytesProvenance}`}>Incomplete</strong>
+          ) : (
+            <strong>{formatBytes(storage?.deleted_bytes ?? 0)}</strong>
+          ),
       },
       ...((storage?.cloud_copy_deleted_bytes ?? 0) > 0
         ? [
@@ -246,6 +253,8 @@ export function UsageStatCards({
       storage?.regular_log_bytes,
       storage?.quarantine_bytes,
       storage?.deleted_bytes,
+      deletedBytesComplete,
+      deletedBytesProvenance,
       storage?.cloud_copy_deleted_bytes,
       storage?.archive_expired_bytes,
       storage?.archive_bytes,
