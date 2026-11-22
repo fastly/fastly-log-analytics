@@ -496,8 +496,9 @@ describe("Feature F24 — CMCD Streaming Media cloud-engine", () => {
         bucket_seconds: 300,
       },
       {
-        async fetchJson() {
+        async fetchJson(url: string) {
           jsonCalls++;
+          expect(new URL(url, "http://x").searchParams.get("view")).toBe("summary");
           return { files, next_cursor: "page-2", complete: false };
         },
         async fetchFile() {
@@ -509,6 +510,113 @@ describe("Feature F24 — CMCD Streaming Media cloud-engine", () => {
     expect(res).toBeNull();
     expect(jsonCalls).toBe(1);
     expect(fileCalls).toBe(0);
+  });
+
+  function oneBucketSummary(bucketMs: number, reqs: number) {
+    const ints = [
+      "rebuffer_events", "has_bs", "has_su", "has_ot", "has_bl", "has_br", "has_mtp", "has_cid",
+      "br_n", "tb_n", "bl_n", "mtp_n", "v_br_n", "v_tb_n", "v_bl_n", "util_n", "util_all_n",
+      "startup_requests", "su_bl_n", "su_ttfb_n",
+    ];
+    const doubles = [
+      "br_sum", "tb_sum", "bl_sum", "mtp_sum", "v_br_sum", "v_tb_sum", "v_bl_sum", "util_sum",
+      "util_all_sum", "su_bl_sum", "su_ttfb_sum",
+    ];
+    const blobs = ["sid_hll", "rebuffer_sid_hll", "v_bl_hist", "bl_hist", "v_mtp_hist", "mtp_hist"];
+    return parquetWriteBuffer({
+      columnData: [
+        { name: "kind", type: "STRING", data: ["bucket"] },
+        { name: "bucket", type: "INT64", data: [BigInt(bucketMs)] },
+        { name: "key", type: "STRING", data: [null] },
+        { name: "label", type: "STRING", data: [null] },
+        { name: "truncated", type: "BOOLEAN", data: [false] },
+        { name: "reqs", type: "INT64", data: [BigInt(reqs)] },
+        ...ints.map((name) => ({ name, type: "INT64" as const, data: [BigInt(0)] })),
+        ...doubles.map((name) => ({ name, type: "DOUBLE" as const, data: [null] })),
+        ...blobs.map((name) => ({ name, type: "BYTE_ARRAY" as const, data: [null] })),
+        { name: "min_ts", type: "INT64", data: [BigInt(bucketMs)] },
+        { name: "max_ts", type: "INT64", data: [BigInt(bucketMs)] },
+        { name: "first_ts", type: "INT64", data: [null] },
+        { name: "last_ts", type: "INT64", data: [null] },
+      ],
+    });
+  }
+
+  it("reads CMCD hour bundles from the summary view instead of the per-window summaries they cover", async () => {
+    const t0 = Date.parse("2026-01-01T00:00:00Z");
+    const hours = 24;
+    const windowsPerHour = 75;
+    const bundles = Array.from({ length: hours }, (_, h) => ({
+      kind: "hour",
+      key: `processed/summary_bundle/cmcd_summary/hour_bundle=${h}.parquet`,
+      start: new Date(t0 + h * 3_600_000).toISOString(),
+      end: new Date(t0 + (h + 1) * 3_600_000).toISOString(),
+      size: 20_000,
+      rows: 1,
+      sources: windowsPerHour,
+    }));
+    const windows = Array.from({ length: hours * windowsPerHour }, (_, i) => ({
+      key: `processed/request/cmcd_summary/window=${i}.parquet`,
+      start: new Date(t0 + i * 48_000).toISOString(),
+      end: new Date(t0 + (i + 1) * 48_000).toISOString(),
+      size: 22_000,
+      rows: 1,
+    }));
+    const urls: string[] = [];
+    const fetched: string[] = [];
+    const res = await cmcdFromRollup(
+      {
+        start_time: new Date(t0).toISOString(),
+        end_time: new Date(t0 + hours * 3_600_000).toISOString(),
+        bucket_seconds: 300,
+      },
+      {
+        async fetchJson(url: string) {
+          urls.push(url);
+          const view = new URL(url, "http://x").searchParams.get("view");
+          return { files: view === "summary" ? bundles : windows, next_cursor: null, complete: true };
+        },
+        async fetchFile(key: string) {
+          fetched.push(key);
+          const h = Number(key.match(/hour_bundle=(\d+)/)?.[1]);
+          return { bytes: oneBucketSummary(t0 + h * 3_600_000, windowsPerHour), cached: false };
+        },
+      },
+    );
+    expect(urls).toHaveLength(1);
+    expect(new URL(urls[0], "http://x").searchParams.get("dataset")).toBe("cmcd_summary");
+    expect(fetched.sort()).toEqual(bundles.map((b) => b.key).sort());
+    expect(res?.summary.total_requests).toBe(hours * windowsPerHour);
+  });
+
+  it("falls back to the per-window CMCD listing when the server rejects the summary view", async () => {
+    const t0 = Date.parse("2026-01-01T00:00:00Z");
+    const key = "processed/request/cmcd_summary/window=only.parquet";
+    const views: (string | null)[] = [];
+    const res = await cmcdFromRollup(
+      {
+        start_time: new Date(t0).toISOString(),
+        end_time: new Date(t0 + 3_600_000).toISOString(),
+        bucket_seconds: 300,
+      },
+      {
+        async fetchJson(url: string) {
+          const view = new URL(url, "http://x").searchParams.get("view");
+          views.push(view);
+          if (view === "summary") throw new Error("400 Bad Request");
+          return {
+            files: [{ key, start: new Date(t0).toISOString(), end: new Date(t0 + 60_000).toISOString(), size: 1, rows: 1 }],
+            next_cursor: null,
+            complete: true,
+          };
+        },
+        async fetchFile() {
+          return { bytes: oneBucketSummary(t0, 7), cached: false };
+        },
+      },
+    );
+    expect(views).toEqual(["summary", null]);
+    expect(res?.summary.total_requests).toBe(7);
   });
 
   it("filters out cmcd_summary buckets outside [fromMs, toMs) and reports has_data=false when none remain", async () => {
