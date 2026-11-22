@@ -1179,6 +1179,103 @@ mod request_compaction {
             .collect()
     }
 
+    /// Request files `/api/files` lists from `from` to `to`, the count a browser range scan
+    /// registers.
+    fn visible(fake: &Fake, from: i64, to: i64) -> usize {
+        let now = fake.now.get();
+        let query = format!("from={}&to={}", iso_url(from), iso_url(to));
+        let count = catalog_keys(fake, &query).1.len();
+        fake.now.set(now);
+        count
+    }
+
+    /// Bursty ingest: `per_minute` small window files a minute for `hours`, compaction turns on
+    /// the 30 s maintenance cadence chaining passes as `request_compact_stage` does. Returns the
+    /// most files a 48 h browser range held at any quarter hour and the count when ingest ends.
+    fn burst(per_minute: u64, hours: i64) -> (usize, usize) {
+        let start = HOUR + 3600;
+        let fake = Fake::new(start);
+        let service = service();
+        let lines = [line(start, "a"), line(start + 1, "b")];
+        let rows = ingest::convert::convert_object(&gz(&lines), 60, start).unwrap();
+        let bytes = ingest::convert::write_parquet(&[&rows.windows[&start]]).unwrap();
+        let mut peak = 0;
+        let mut serial = 0u64;
+        let end = start + hours * 3600;
+        let mut t = start;
+        while t < end {
+            t += 30;
+            fake.now.set(t as u64);
+            if t % 60 == 0 {
+                let window = t - 60;
+                let keys: Vec<String> = (0..per_minute)
+                    .map(|_| {
+                        serial += 1;
+                        let key = ingest::processed_key(
+                            ROOT,
+                            window,
+                            window + 60,
+                            &format!("{serial:012x}"),
+                            2,
+                        );
+                        fake.bucket.borrow_mut().insert(key.clone(), bytes.clone());
+                        key
+                    })
+                    .collect();
+                publish_files(&fake, &keys, &[], &[]);
+                fake.now.set(t as u64);
+            }
+            fake.new_request();
+            let due = fake
+                .admin_get(ingest::WATERMARK_KEY)
+                .unwrap()
+                .map(|record| ingest::catalog::head(&record.value).unwrap())
+                .is_some_and(|head| head.compaction_due || head.next_compaction_check <= t as u64);
+            if due {
+                let id = format!("turn{t}");
+                for pass in 1..=8u32 {
+                    fake.new_request();
+                    fake.vcpu.set(0);
+                    let report = compaction::request_compact_pass(
+                        &store(&fake, &service),
+                        "ck",
+                        TARGET,
+                        1,
+                        Some(compaction::Turn {
+                            id: &id,
+                            pass,
+                            last: pass == 8,
+                        }),
+                    )
+                    .unwrap();
+                    assert!(report.errors.is_empty(), "{:?}", report.errors);
+                    let blocked = matches!(
+                        report.stopped.as_deref(),
+                        Some("lease_held" | "lease_conflict" | "state_lag")
+                    );
+                    if !report.more_pending || blocked {
+                        break;
+                    }
+                }
+                fake.now.set(t as u64);
+            }
+            if t % 900 == 0 {
+                peak = peak.max(visible(&fake, t - 48 * 3600, t));
+            }
+        }
+        (peak, visible(&fake, end - 48 * 3600, end))
+    }
+
+    /// A load test's burst, ~1,440 window files an hour for six hours, stays far below the
+    /// browser's 256-file range budget for a 24 h window and its 24 h baseline.
+    #[test]
+    fn bursty_ingest_keeps_a_48_hour_range_far_below_the_browser_file_budget() {
+        let (peak, last) = burst(24, 6);
+        eprintln!("48h visible files: peak {peak}, at end {last}");
+        assert!(peak <= 64, "peak {peak} visible files in 48 h");
+        assert!(last <= 64, "{last} visible files in 48 h");
+    }
+
     #[test]
     fn small_sources_merge_into_shared_row_groups_without_losing_rows() {
         let fake = Fake::new(NOW);

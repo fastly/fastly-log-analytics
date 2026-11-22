@@ -12,11 +12,15 @@ import {
   handleInsightAvailability,
   handleCacheCollapseDetail,
   CURRENT_WINDOW_INSIGHT_DETECTORS,
+  INSIGHT_DEFINITIONS,
+  build_insights_envelope,
   min_Baseline,
   resolveInsightWindow,
+  type InsightCard,
   type InsightsRequest,
   type CacheCollapseDetailRequest,
 } from "./insights";
+import { formatBudgetAmount, type CloudBudgetDetail } from "./range-loader";
 import { escapeSqlLiteral } from "./sql-validator";
 import type { RollupResult } from "./dashboard/rollup-query";
 import { INSIGHTS_DEFERRED, insightsDeferredDetectors, rollupInsightsBaseline } from "./insights-rollup";
@@ -151,6 +155,31 @@ export async function queryCloudInsights(
     unsupported_detectors: unavailable.filter((d) => d.reason === "cloud_detector_unsupported")
       .map(({ id, reason }) => ({ id, reason })),
     unavailable_detectors: unavailable,
+  };
+}
+
+/**
+ * The envelope of a detector follow-up whose raw scan, even shortened, exceeds
+ * the browser budget: each requested detector comes back as a finished card
+ * saying it was not evaluated and why, so the rest of the page still renders.
+ */
+export function insightsOverBudget(body: InsightsRequest & { end_time?: string }, detail: CloudBudgetDetail) {
+  const { windowHours, baselineHours, end, windowStart, start } = resolveInsightWindow({
+    ...body, clamp_end: body.clamp_end ?? body.end_time,
+  });
+  const ids = body.detectors ?? [];
+  const summary = `Not evaluated: this range needs ${formatBudgetAmount(detail.unit, detail.needed)
+  } of raw logs but the browser scan budget is ${formatBudgetAmount(detail.unit, detail.limit)
+  }; choose a shorter window or baseline.`;
+  const notEvaluated = { reason: "scan_budget" as const, ...detail };
+  const cards: InsightCard[] = INSIGHT_DEFINITIONS.filter((d) => ids.includes(d.id)).map((d) => ({
+    id: d.id, title: d.title, description: d.description, category: d.category,
+    severity: "info", summary, items: [], placeholder: false, not_evaluated: notEvaluated,
+  }));
+  return {
+    ...build_insights_envelope(cards, new Date(windowStart).toISOString(), new Date(end).toISOString(),
+      new Date(start).toISOString(), new Date(windowStart).toISOString(), windowHours, baselineHours),
+    unevaluated_detectors: cards.map(({ id }) => ({ id, ...notEvaluated })),
   };
 }
 

@@ -1352,18 +1352,109 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     vi.mocked(ensureCloudRange).mockClear();
     vi.mocked(insightsBaselineFromRollup).mockClear();
     expect((await followUp())?.status).toBe(200);
-    expect(insightsBaselineFromRollup).not.toHaveBeenCalled();
     const [[start, end, , , options]] = vi.mocked(ensureCloudRange).mock.calls;
     expect([start, end]).toEqual([new Date(Date.parse("2026-11-06T00:00:00Z") - 192 * 3_600_000).toISOString(),
       "2026-11-06T00:00:00Z"]);
     expect(options?.projection?.columns).toEqual(insightScanColumns([], detectors));
     expect(options?.projection?.columns).not.toContain("ua");
 
+    // Over budget with and without the wider window columns: the baseline shortens.
     const budget = new CloudBudgetError("over budget");
-    vi.mocked(ensureCloudRange).mockClear().mockRejectedValueOnce(budget);
+    vi.mocked(ensureCloudRange).mockClear().mockRejectedValueOnce(budget).mockRejectedValueOnce(budget);
     const shortened = await followUp();
     expect((await shortened!.json() as { baseline_hours: number }).baseline_hours).toBe(24);
-    expect(vi.mocked(ensureCloudRange).mock.calls).toHaveLength(2);
+    expect(vi.mocked(ensureCloudRange).mock.calls).toHaveLength(3);
+  });
+
+  it("reads an IP-detector follow-up's baseline from ins_ip summaries, so only the window loads raw", async () => {
+    const hour = 3_600_000;
+    const end = Date.parse("2026-11-06T00:00:00Z");
+    const iso = (ms: number) => new Date(ms).toISOString();
+    const detectors = ["credential_enumeration", "content_discovery"];
+    const followUp = () => handleCloudAnalyticalRequest(new Request("http://localhost/api/insights", {
+      method: "POST", headers: { "content-type": "application/json", "x-service-id": "svc-1" },
+      body: JSON.stringify({ window_size_hrs: 24, baseline_hours: 168, filters: {}, end_time: iso(end), detectors }),
+    }));
+    const withIp = mergeRollups([]);
+    withIp.present = new Set(["ins_ip/ip"]);
+    withIp.groups = new Map([["ins_ip", new Map([["ip", new Map()]])]]);
+    vi.mocked(ensureCloudRange).mockClear();
+    vi.mocked(insightsBaselineFromRollup).mockClear().mockResolvedValueOnce({
+      rollup: withIp, dataFromMs: end - 192 * hour, dataThroughMs: end - 24 * hour,
+    });
+    const res = await followUp();
+    expect(res?.status).toBe(200);
+    expect(vi.mocked(ensureCloudRange).mock.calls.map(([from]) => from)).toEqual([iso(end - 24 * hour)]);
+    expect((await res!.json() as { deferred_detectors?: string[] }).deferred_detectors).toEqual([]);
+
+    // A rollup without ins_ip can't serve them: the baseline stays raw.
+    vi.mocked(ensureCloudRange).mockClear();
+    vi.mocked(insightsBaselineFromRollup).mockClear().mockResolvedValueOnce({
+      rollup: mergeRollups([]), dataFromMs: end - 192 * hour, dataThroughMs: end - 24 * hour,
+    });
+    expect((await followUp())?.status).toBe(200);
+    expect(vi.mocked(ensureCloudRange).mock.calls.map(([from]) => from)).toEqual([iso(end - 192 * hour)]);
+  });
+
+  it("retries a follow-up's window without the wider columns when they exceed the budget", async () => {
+    const detectors = ["credential_enumeration"];
+    vi.mocked(ensureCloudRange).mockClear()
+      .mockRejectedValueOnce(new CloudBudgetError("over", { unit: "bytes", needed: 90 << 20, limit: 64 << 20 }));
+    const res = await handleCloudAnalyticalRequest(new Request("http://localhost/api/insights", {
+      method: "POST", headers: { "content-type": "application/json", "x-service-id": "svc-1" },
+      body: JSON.stringify({ window_size_hrs: 24, baseline_hours: 168, filters: {},
+        end_time: "2026-11-06T00:00:00Z", detectors }),
+    }));
+    expect(res?.status).toBe(200);
+    const calls = vi.mocked(ensureCloudRange).mock.calls;
+    expect(calls).toHaveLength(2);
+    expect(calls[0][4]?.projection?.wider).toBeDefined();
+    expect(calls[1][0]).toBe(calls[0][0]);
+    expect(calls[1][4]?.projection).toEqual({ columns: insightScanColumns([], detectors) });
+  });
+
+  it("marks follow-up detectors not evaluated, rather than failing the page, when even their window exceeds the budget", async () => {
+    const detectors = ["credential_enumeration", "content_discovery"];
+    const followUp = () => handleCloudAnalyticalRequest(new Request("http://localhost/api/insights", {
+      method: "POST", headers: { "content-type": "application/json", "x-service-id": "svc-1" },
+      body: JSON.stringify({ window_size_hrs: 24, baseline_hours: 168, filters: {},
+        end_time: "2026-11-06T00:00:00Z", detectors }),
+    }));
+    const detail = { unit: "bytes" as const, needed: 90 << 20, limit: 64 << 20 };
+    vi.mocked(ensureCloudRange).mockClear().mockRejectedValue(new CloudBudgetError("over", detail));
+    try {
+      const res = await followUp();
+      expect(res?.status).toBe(200);
+      const json = await res!.json() as {
+        insights: { id: string; severity: string; summary: string; placeholder?: boolean; not_evaluated?: unknown }[];
+        unevaluated_detectors: unknown[];
+        window_end: string;
+      };
+      expect(json.window_end).toBe("2026-11-06T00:00:00.000Z");
+      expect(json.insights.map((card) => card.id)).toEqual(detectors);
+      for (const card of json.insights) {
+        expect(card).toMatchObject({ severity: "info", placeholder: false,
+          not_evaluated: { reason: "scan_budget", ...detail } });
+        expect(card.summary).toMatch(/^Not evaluated: .*90\.0 MiB.*64\.0 MiB/);
+      }
+      expect(json.unevaluated_detectors).toEqual(detectors.map((id) => ({ id, reason: "scan_budget", ...detail })));
+    } finally {
+      vi.mocked(ensureCloudRange).mockReset().mockImplementation(async () => getDuckDBEngine().readContext());
+    }
+
+    // Other failures stay errors, and a full request over budget still reports 413.
+    vi.mocked(ensureCloudRange).mockClear().mockRejectedValueOnce(new Error("listing failed"));
+    await expect(followUp()).rejects.toThrow("listing failed");
+    vi.mocked(ensureCloudRange).mockClear().mockRejectedValue(new CloudBudgetError("over", detail));
+    try {
+      const full = await handleCloudAnalyticalRequest(new Request("http://localhost/api/insights", {
+        method: "POST", headers: { "content-type": "application/json", "x-service-id": "svc-1" },
+        body: JSON.stringify({ window_size_hrs: 24, baseline_hours: 168, filters: { country: { mode: "include", values: ["US"] } } }),
+      }));
+      expect(full?.status).toBe(413);
+    } finally {
+      vi.mocked(ensureCloudRange).mockReset().mockImplementation(async () => getDuckDBEngine().readContext());
+    }
   });
 
   it("loads /origin, /fastly-value, /assets-shield and /performance scans as their routes' column projections", async () => {
