@@ -7,11 +7,29 @@ import { fetchRetrying } from "./fetch-retry";
 const METADATA_TTL_MS = 15_000;
 const METADATA_MAX_AGE_MS = 60_000;
 type MetadataSnapshot = { status: number; contentType: string | null; body: string };
-type MetadataEntry = { at: number; usedAt: number; identity: string | null; value: Promise<MetadataSnapshot> };
+type MetadataEntry = {
+  at: number;
+  usedAt: number;
+  identity: string | null;
+  epoch: number;
+  controller: AbortController;
+  value: Promise<MetadataSnapshot>;
+};
+let metadataEpoch = 0;
+const activeMetadataControllers = new Set<AbortController>();
 const metadataCache = new Map<string, MetadataEntry>();
 const metadataInvalidationListeners = new Set<() => void>();
 
+function metadataAbortError(): DOMException {
+  return new DOMException("The operation was aborted.", "AbortError");
+}
+
 export function resetCloudMetadataCache(): void {
+  metadataEpoch += 1;
+  for (const controller of activeMetadataControllers) {
+    controller.abort(metadataAbortError());
+  }
+  activeMetadataControllers.clear();
   metadataCache.clear();
 }
 
@@ -31,35 +49,89 @@ export function invalidateCloudConfigMetadata(): void {
 
 export async function fetchCloudMetadata(path: string, signal: AbortSignal): Promise<Response> {
   signal.throwIfAborted();
+  const callEpoch = metadataEpoch;
   const now = Date.now();
   // Another tab signing in as someone else changes the shared identity; never hand them this one's answer.
   const identity = dashboardCacheIdentity();
   let entry = metadataCache.get(path);
-  if (entry && entry.identity === identity && now - entry.usedAt <= METADATA_TTL_MS &&
-      now - entry.at < METADATA_MAX_AGE_MS) {
+  if (
+    entry &&
+    entry.epoch === callEpoch &&
+    !entry.controller.signal.aborted &&
+    entry.identity === identity &&
+    now - entry.usedAt <= METADATA_TTL_MS &&
+    now - entry.at < METADATA_MAX_AGE_MS
+  ) {
     entry.usedAt = now;
   } else {
-    const value = fetchRetrying(path).then(async (response) => ({
-      status: response.status, contentType: response.headers.get("content-type"), body: await response.text(),
-    }));
-    const created = { at: now, usedAt: now, identity, value };
+    const controller = new AbortController();
+    activeMetadataControllers.add(controller);
+    const created: MetadataEntry = {
+      at: now,
+      usedAt: now,
+      identity,
+      epoch: callEpoch,
+      controller,
+      value: undefined as unknown as Promise<MetadataSnapshot>,
+    };
+    const evict = () => {
+      if (metadataCache.get(path) === created) metadataCache.delete(path);
+    };
+    const value = fetchRetrying(path, { signal: controller.signal })
+      .then(async (response) => ({
+        status: response.status,
+        contentType: response.headers.get("content-type"),
+        body: await response.text(),
+      }))
+      .finally(() => {
+        activeMetadataControllers.delete(controller);
+      });
+    created.value = value;
+    if (callEpoch === metadataEpoch && !controller.signal.aborted) {
+      metadataCache.set(path, created);
+    }
+    value.then(
+      (snapshot) => {
+        if (callEpoch !== metadataEpoch || snapshot.status < 200 || snapshot.status > 299) {
+          evict();
+        }
+      },
+      evict,
+    );
     entry = created;
-    metadataCache.set(path, created);
-    const evict = () => { if (metadataCache.get(path) === created) metadataCache.delete(path); };
-    value.then((snapshot) => { if (snapshot.status < 200 || snapshot.status > 299) evict(); }, evict);
   }
-  let onAbort!: () => void;
+  const activeEntry = entry;
+  let onCallerAbort!: () => void;
+  let onSharedAbort!: () => void;
   const aborted = new Promise<never>((_, reject) => {
-    onAbort = () => reject(signal.reason);
-    signal.addEventListener("abort", onAbort, { once: true });
+    onCallerAbort = () => reject(signal.reason ?? metadataAbortError());
+    onSharedAbort = () =>
+      reject(activeEntry.controller.signal.reason ?? metadataAbortError());
+    if (signal.aborted) {
+      onCallerAbort();
+      return;
+    }
+    if (activeEntry.controller.signal.aborted) {
+      onSharedAbort();
+      return;
+    }
+    signal.addEventListener("abort", onCallerAbort, { once: true });
+    activeEntry.controller.signal.addEventListener("abort", onSharedAbort, {
+      once: true,
+    });
   });
   try {
-    const snapshot = await Promise.race([entry.value, aborted]);
+    const snapshot = await Promise.race([activeEntry.value, aborted]);
+    signal.throwIfAborted();
+    if (callEpoch !== metadataEpoch || activeEntry.controller.signal.aborted) {
+      throw metadataAbortError();
+    }
     return new Response(snapshot.body, {
       status: snapshot.status,
       headers: snapshot.contentType ? { "content-type": snapshot.contentType } : undefined,
     });
   } finally {
-    signal.removeEventListener("abort", onAbort);
+    signal.removeEventListener("abort", onCallerAbort);
+    activeEntry.controller.signal.removeEventListener("abort", onSharedAbort);
   }
 }

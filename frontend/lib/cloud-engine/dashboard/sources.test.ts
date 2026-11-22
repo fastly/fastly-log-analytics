@@ -1546,6 +1546,69 @@ describe("persistent Parquet store", () => {
       .executeSql("SELECT count(*) AS cnt FROM requests");
     expect(duckRowsAfter).toEqual([{ cnt: 0 }]);
     expect([...stores.keys()]).toEqual([]);
+
+    // Auditor Challenge 2 + Reviewer Challenge 1:
+    // (a) Direct un-signaled fetchRange(file, 0, 64) aborts across clearDashboardData() without resetRangeLoaderCache signal.
+    // (b) Same-tick re-entry after sole caller aborts existing inFlightRanges starts a fresh range read instead of reusing aborted controller.
+    let directRangeCalls = 0;
+    const directGates: Array<() => void> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        directRangeCalls += 1;
+        init?.signal?.throwIfAborted();
+        return await new Promise<Response>((resolve, reject) => {
+          const onAbort = () => reject(init?.signal?.reason ?? new DOMException("Aborted", "AbortError"));
+          init?.signal?.addEventListener("abort", onAbort, { once: true });
+          directGates.push(() => {
+            init?.signal?.removeEventListener("abort", onAbort);
+            resolve(
+              new Response(widePiiBytes.slice(0, 64), {
+                status: 206,
+                headers: {
+                  "content-range": `bytes 0-63/${widePiiBytes.byteLength}`,
+                  etag: "\"etag-wide-alice\"",
+                },
+              }),
+            );
+          });
+        });
+      }),
+    );
+
+    await setDashboardCacheIdentity("alice:admin");
+    const directFile = {
+      key: relKey,
+      start: fromIso,
+      end: toIso,
+      size: widePiiBytes.byteLength,
+      rows: 1,
+      etag: "\"etag-wide-alice\"",
+    };
+    const unsignaledRange = cloudFileSource("svc-alice")
+      .fetchRange(directFile, 0, 64)
+      .then(() => "RESOLVED", () => "REJECTED");
+    await flushStore();
+    expect(directRangeCalls).toBe(1);
+    await clearDashboardData();
+    expect(await unsignaledRange).toBe("REJECTED");
+
+    // Same-tick re-entry after sole waiter aborts its own signal:
+    await setDashboardCacheIdentity("alice:admin");
+    directRangeCalls = 0;
+    const sigA = new AbortController();
+    const sigB = new AbortController();
+    const srcSameTick = cloudFileSource("svc-alice");
+    const pA = srcSameTick.fetchRange(directFile, 0, 64, sigA.signal).then(() => "RESOLVED", () => "REJECTED");
+    sigA.abort(new DOMException("Caller A aborted", "AbortError"));
+    // Synchronous same-tick re-entry BEFORE pA's .finally() microtask deletes inFlightRanges!
+    const pB = srcSameTick.fetchRange(directFile, 0, 64, sigB.signal);
+    expect(await pA).toBe("REJECTED");
+    expect(directRangeCalls).toBe(2);
+    while (directGates.length > 0) directGates.shift()?.();
+    const bytesB = await pB;
+    expect(bytesB.byteLength).toBe(64);
+    await clearDashboardData();
   });
 
   it("tracks post-bootstrap cacheScope updates so warm reloads hit derived file cache", async () => {

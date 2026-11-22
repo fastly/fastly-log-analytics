@@ -1234,6 +1234,22 @@ fn save_scoring_service(
     Ok(updated.generation)
 }
 
+fn checkpoint_scoring_job_service(
+    context: &Context<'_, impl Runtime>,
+    record: &Record,
+    service: &Service,
+    job: &mut Job,
+    event: &str,
+    next: &str,
+) -> Result<(), Error> {
+    save_job_service(context, record, service, job, event, next)?;
+    let updated = context
+        .get(&format!("svc:{}", service.service_id))?
+        .ok_or_else(|| Error::new(503, "state_unavailable"))?;
+    job.expected_generation = updated.generation;
+    Ok(())
+}
+
 fn ensure_scorer_service_step(
     context: &Context<'_, impl Runtime>,
     job: &mut Job,
@@ -1241,15 +1257,38 @@ fn ensure_scorer_service_step(
     service: &mut Service,
     token: &str,
 ) -> Result<(), Error> {
-    reconcile::verify_managed_customer_vcl_ownership(context, service, token)?;
+    if !job.scorer_ownership_verified {
+        reconcile::verify_managed_customer_vcl_ownership(context, service, token)?;
+        job.scorer_ownership_verified = true;
+        if context.remaining_calls() < 16 {
+            return Ok(());
+        }
+    }
     check_entitlement(context, token, "kv_store", "kv_store_not_enabled")?;
     let name = scoring_service_name(&service.service_id);
     let domain = scoring_domain(&service.service_id);
     let services = context.api("GET", "/service", token, None)?;
     let existing = list(&services)?.iter().find(|s| s["name"] == name).cloned();
-    let scorer_sid = if let Some(svc) = existing {
-        required(&svc, "id")?.to_owned()
+    let (scorer_sid, v1_unlocked) = if let Some(svc) = existing {
+        let sid = required(&svc, "id")?.to_owned();
+        let encoded_sid = encode(&sid);
+        let versions = context.api(
+            "GET",
+            &format!("/service/{encoded_sid}/version"),
+            token,
+            None,
+        )?;
+        let unlocked = list(&versions)?
+            .iter()
+            .find(|v| v["number"].as_u64() == Some(1))
+            .is_some_and(|v| {
+                v["active"].as_bool() != Some(true) && v["locked"].as_bool() != Some(true)
+            });
+        (sid, unlocked)
     } else {
+        if context.remaining_calls() < 8 {
+            return Ok(());
+        }
         let (status, created) = context.api_status(
             "POST",
             "/service",
@@ -1266,26 +1305,81 @@ fn ensure_scorer_service_step(
             return Err(Error::new(502, "scorer_service_create_failed"));
         }
         let sid = required(&created, "id")?.to_owned();
-        context.api(
-            "POST",
-            &format!("/service/{sid}/version/1/domain"),
-            token,
-            Some(json!({"name": domain})),
-        )?;
-        context.api(
-            "POST",
-            &format!("/service/{sid}/version/1/backend"),
-            token,
-            Some(json!({
-                "name": "placeholder_origin",
-                "address": "127.0.0.1",
-                "port": 80,
-                "override_host": "example.com"
-            })),
-        )?;
-        sid
+        (sid, true)
     };
 
+    if v1_unlocked {
+        let encoded_sid = encode(&scorer_sid);
+        let domains = context.api(
+            "GET",
+            &format!("/service/{encoded_sid}/version/1/domain"),
+            token,
+            None,
+        )?;
+        let has_domain = list(&domains)?
+            .iter()
+            .any(|d| d["name"].as_str() == Some(domain.as_str()));
+        if !has_domain {
+            if context.remaining_calls() < 8 {
+                return Ok(());
+            }
+            let (status, _) = context.api_status(
+                "POST",
+                &format!("/service/{encoded_sid}/version/1/domain"),
+                token,
+                Some(json!({"name": domain})),
+            )?;
+            if !(200..300).contains(&status) && status != 409 {
+                return Err(Error::new(
+                    if status == 401 || status == 403 {
+                        403
+                    } else {
+                        502
+                    },
+                    "fastly_api_rejected",
+                ));
+            }
+        }
+        let backends = context.api(
+            "GET",
+            &format!("/service/{encoded_sid}/version/1/backend"),
+            token,
+            None,
+        )?;
+        let has_backend = list(&backends)?
+            .iter()
+            .any(|b| b["name"].as_str() == Some("placeholder_origin"));
+        if !has_backend {
+            if context.remaining_calls() < 8 {
+                return Ok(());
+            }
+            let (status, _) = context.api_status(
+                "POST",
+                &format!("/service/{encoded_sid}/version/1/backend"),
+                token,
+                Some(json!({
+                    "name": "placeholder_origin",
+                    "address": "127.0.0.1",
+                    "port": 80,
+                    "override_host": "example.com"
+                })),
+            )?;
+            if !(200..300).contains(&status) && status != 409 {
+                return Err(Error::new(
+                    if status == 401 || status == 403 {
+                        403
+                    } else {
+                        502
+                    },
+                    "fastly_api_rejected",
+                ));
+            }
+        }
+    }
+
+    if context.remaining_calls() < 6 {
+        return Ok(());
+    }
     let mut sc = service.scoring.clone().unwrap_or_default();
     sc.scoring_service_id = scorer_sid;
     sc.scoring_service_name = name;
@@ -1294,16 +1388,26 @@ fn ensure_scorer_service_step(
         sc.exclude_url_regex = DEFAULT_ASSET_EXT_REGEX.to_owned();
     }
     service.scoring = Some(sc);
-    let next_gen = save_scoring_service(
+    checkpoint_scoring_job_service(
         context,
         record,
         service,
-        &job.actor,
+        job,
         "scoring.scorer_service",
+        "scorer_stores",
     )?;
-    job.expected_generation = next_gen;
     advance(job, "scorer_stores");
     Ok(())
+}
+
+fn store_items(resp: &Value) -> &[Value] {
+    if let Some(arr) = resp.as_array() {
+        arr.as_slice()
+    } else if let Some(arr) = resp["data"].as_array() {
+        arr.as_slice()
+    } else {
+        &[]
+    }
 }
 
 fn ensure_scorer_stores_step(
@@ -1319,12 +1423,25 @@ fn ensure_scorer_stores_step(
         .ok_or_else(|| Error::new(409, "scoring_config_missing"))?;
     let scorer_sid = sc.scoring_service_id.clone();
 
-    let keys_name = keys_store_name(&scorer_sid);
-    let keys_store_id = if let Some(found) =
-        find_store_by_name(context, "/resources/stores/config", &keys_name, token)?
-    {
-        store_id_of(&found).ok_or_else(|| Error::new(502, "config_store_id_missing"))?
+    // List /resources/stores/config once for both scoring_keys and scoring_config.
+    let (cfg_list_status, cfg_list_resp) =
+        context.api_status("GET", "/resources/stores/config", token, None)?;
+    if cfg_list_status == 401 || cfg_list_status == 403 {
+        return Err(Error::new(403, "fastly_token_scope_insufficient"));
+    }
+    let cfg_items = if (200..300).contains(&cfg_list_status) {
+        store_items(&cfg_list_resp)
     } else {
+        &[]
+    };
+
+    let keys_name = keys_store_name(&scorer_sid);
+    let keys_store_id = if let Some(found) = cfg_items.iter().find(|it| it["name"] == keys_name) {
+        store_id_of(found).ok_or_else(|| Error::new(502, "config_store_id_missing"))?
+    } else {
+        if context.remaining_calls() < 9 {
+            return Ok(());
+        }
         let (status, created) = context.api_status(
             "POST",
             "/resources/stores/config",
@@ -1339,13 +1456,24 @@ fn ensure_scorer_stores_step(
         }
         store_id_of(&created).ok_or_else(|| Error::new(502, "config_store_id_missing"))?
     };
+    sc.scoring_keys_store_id = keys_store_id;
 
     let cfg_name = config_store_name(&scorer_sid);
-    let cfg_store_id = if let Some(found) =
-        find_store_by_name(context, "/resources/stores/config", &cfg_name, token)?
-    {
-        store_id_of(&found).ok_or_else(|| Error::new(502, "config_store_id_missing"))?
+    let cfg_store_id = if let Some(found) = cfg_items.iter().find(|it| it["name"] == cfg_name) {
+        store_id_of(found).ok_or_else(|| Error::new(502, "config_store_id_missing"))?
     } else {
+        if context.remaining_calls() < 9 {
+            service.scoring = Some(sc);
+            checkpoint_scoring_job_service(
+                context,
+                record,
+                service,
+                job,
+                "scoring.scorer_stores",
+                "scorer_stores",
+            )?;
+            return Ok(());
+        }
         let (status, created) = context.api_status(
             "POST",
             "/resources/stores/config",
@@ -1360,6 +1488,7 @@ fn ensure_scorer_stores_step(
         }
         store_id_of(&created).ok_or_else(|| Error::new(502, "config_store_id_missing"))?
     };
+    sc.scoring_config_store_id = cfg_store_id;
 
     let matrix_name = matrix_store_name(&scorer_sid);
     let matrix_store_id = if let Some(found) =
@@ -1367,6 +1496,18 @@ fn ensure_scorer_stores_step(
     {
         store_id_of(&found).ok_or_else(|| Error::new(502, "kv_store_id_missing"))?
     } else {
+        if context.remaining_calls() < 9 {
+            service.scoring = Some(sc);
+            checkpoint_scoring_job_service(
+                context,
+                record,
+                service,
+                job,
+                "scoring.scorer_stores",
+                "scorer_stores",
+            )?;
+            return Ok(());
+        }
         let (status, created) = context.api_status(
             "POST",
             "/resources/stores/kv",
@@ -1382,18 +1523,16 @@ fn ensure_scorer_stores_step(
         store_id_of(&created).ok_or_else(|| Error::new(502, "kv_store_id_missing"))?
     };
 
-    sc.scoring_keys_store_id = keys_store_id;
-    sc.scoring_config_store_id = cfg_store_id;
     sc.scoring_matrix_store_id = matrix_store_id;
     service.scoring = Some(sc);
-    let next_gen = save_scoring_service(
+    checkpoint_scoring_job_service(
         context,
         record,
         service,
-        &job.actor,
+        job,
         "scoring.scorer_stores",
+        "scorer_store_keys",
     )?;
-    job.expected_generation = next_gen;
     job.scorer_ownership_verified = true;
     advance(job, "scorer_store_keys");
     Ok(())
@@ -1412,6 +1551,9 @@ fn ensure_scorer_store_keys_step(
     if !job.scorer_ownership_verified {
         verify_scoring_resources(context, &service.service_id, sc, token)?;
         job.scorer_ownership_verified = true;
+        if context.remaining_calls() < 14 {
+            return Ok(());
+        }
     }
     let keys_store_id = &sc.scoring_keys_store_id;
     let encoded_keys_store = encode(keys_store_id);
@@ -1419,6 +1561,9 @@ fn ensure_scorer_store_keys_step(
     // Write-only AES key: never stored in Cloud Secret Store or KV.
     let existing_aes = config_store_get_item(context, keys_store_id, CURRENT_KEY_HEX, token)?;
     if existing_aes.is_empty() {
+        if context.remaining_calls() < 8 {
+            return Ok(());
+        }
         let aes_key_hex = hex_random_32(context.runtime)?;
         context.api(
             "POST",
@@ -1435,6 +1580,9 @@ fn ensure_scorer_store_keys_step(
     let req_secret = if !existing_req_secret.is_empty() {
         existing_req_secret
     } else {
+        if context.remaining_calls() < 8 {
+            return Ok(());
+        }
         let secret = hex_random_32(context.runtime)?;
         context.api(
             "POST",
@@ -1444,6 +1592,9 @@ fn ensure_scorer_store_keys_step(
         )?;
         secret
     };
+    if context.remaining_calls() < 8 {
+        return Ok(());
+    }
     put_secret(context, token, &req_secret_ref, &req_secret)?;
 
     advance(job, "scorer_store_config");
@@ -1463,6 +1614,9 @@ fn ensure_scorer_store_config_step(
     if !job.scorer_ownership_verified {
         verify_scoring_resources(context, &service.service_id, sc, token)?;
         job.scorer_ownership_verified = true;
+        if context.remaining_calls() < 14 {
+            return Ok(());
+        }
     }
     let scorer_sid = encode(&sc.scoring_service_id);
     let keys_store_id = &sc.scoring_keys_store_id;
@@ -1472,6 +1626,9 @@ fn ensure_scorer_store_config_step(
 
     // Config store defaults (write-once scoring_enabled_at).
     if config_store_get_item(context, cfg_store_id, DEBUG_LOG_KEY, token)?.is_empty() {
+        if context.remaining_calls() < 8 {
+            return Ok(());
+        }
         context.api(
             "POST",
             &format!("/resources/stores/config/{encoded_cfg_store}/item"),
@@ -1480,6 +1637,9 @@ fn ensure_scorer_store_config_step(
         )?;
     }
     if config_store_get_item(context, cfg_store_id, SCORING_ENABLED_AT_KEY, token)?.is_empty() {
+        if context.remaining_calls() < 8 {
+            return Ok(());
+        }
         let now_s = context.runtime.now().to_string();
         context.api(
             "POST",
@@ -1489,20 +1649,54 @@ fn ensure_scorer_store_config_step(
         )?;
     }
 
-    // Link all 3 resources to scorer v1 (idempotent if 409/already linked).
-    for (link_name, res_id) in [
-        (KEYS_RESOURCE_LINK_NAME, keys_store_id.as_str()),
-        (CONFIG_RESOURCE_LINK_NAME, cfg_store_id.as_str()),
-        (MATRIX_RESOURCE_LINK_NAME, matrix_store_id.as_str()),
-    ] {
-        let (status, _) = context.api_status(
-            "POST",
+    if context.remaining_calls() < 6 {
+        return Ok(());
+    }
+    let versions = context.api(
+        "GET",
+        &format!("/service/{scorer_sid}/version"),
+        token,
+        None,
+    )?;
+    let v1_unlocked = list(&versions)?
+        .iter()
+        .find(|v| v["number"].as_u64() == Some(1))
+        .is_some_and(|v| {
+            v["active"].as_bool() != Some(true) && v["locked"].as_bool() != Some(true)
+        });
+    if v1_unlocked {
+        let existing_res = context.api(
+            "GET",
             &format!("/service/{scorer_sid}/version/1/resource"),
             token,
-            Some(json!({"name": link_name, "resource_id": res_id})),
+            None,
         )?;
-        if !(200..300).contains(&status) && status != 409 {
-            return Err(Error::new(502, "scorer_resource_link_failed"));
+        let existing_links = list(&existing_res)?;
+        for (link_name, res_id) in [
+            (KEYS_RESOURCE_LINK_NAME, keys_store_id.as_str()),
+            (CONFIG_RESOURCE_LINK_NAME, cfg_store_id.as_str()),
+            (MATRIX_RESOURCE_LINK_NAME, matrix_store_id.as_str()),
+        ] {
+            if res_id.is_empty() {
+                continue;
+            }
+            if existing_links.iter().any(|r| {
+                r["name"].as_str() == Some(link_name) && r["resource_id"].as_str() == Some(res_id)
+            }) {
+                continue;
+            }
+            if context.remaining_calls() < 8 {
+                return Ok(());
+            }
+            let (status, _) = context.api_status(
+                "POST",
+                &format!("/service/{scorer_sid}/version/1/resource"),
+                token,
+                Some(json!({"name": link_name, "resource_id": res_id})),
+            )?;
+            if !(200..300).contains(&status) && status != 409 {
+                return Err(Error::new(502, "scorer_resource_link_failed"));
+            }
         }
     }
 
@@ -1587,6 +1781,9 @@ fn deploy_scorer_step(
                 v["locked"].as_bool() == Some(true) || v["active"].as_bool() == Some(true)
             });
         let deploy_ver = if base_is_locked {
+            if context.remaining_calls() < 8 {
+                return Ok(());
+            }
             let cloned = context.api(
                 "PUT",
                 &format!("/service/{scorer_sid}/version/{base_ver}/clone"),
@@ -1599,16 +1796,67 @@ fn deploy_scorer_step(
         } else {
             base_ver
         };
-        if !sc.scoring_matrix_store_id.is_empty() {
+
+        if context.remaining_calls() < 6 {
+            return Ok(());
+        }
+        let existing_res = context.api(
+            "GET",
+            &format!("/service/{scorer_sid}/version/{deploy_ver}/resource"),
+            token,
+            None,
+        )?;
+        let existing_links = list(&existing_res)?;
+        for (link_name, res_id) in [
+            (KEYS_RESOURCE_LINK_NAME, sc.scoring_keys_store_id.as_str()),
+            (
+                CONFIG_RESOURCE_LINK_NAME,
+                sc.scoring_config_store_id.as_str(),
+            ),
+            (
+                MATRIX_RESOURCE_LINK_NAME,
+                sc.scoring_matrix_store_id.as_str(),
+            ),
+        ] {
+            if res_id.is_empty() {
+                continue;
+            }
+            if let Some(existing) = existing_links
+                .iter()
+                .find(|r| r["name"].as_str() == Some(link_name))
+            {
+                if existing["resource_id"].as_str() == Some(res_id) {
+                    continue;
+                }
+                if context.remaining_calls() < 8 {
+                    return Ok(());
+                }
+                let _ = context.api_status(
+                    "DELETE",
+                    &format!(
+                        "/service/{scorer_sid}/version/{deploy_ver}/resource/{}",
+                        encode(link_name)
+                    ),
+                    token,
+                    None,
+                )?;
+            }
+            if context.remaining_calls() < 8 {
+                return Ok(());
+            }
             let (status, _) = context.api_status(
                 "POST",
                 &format!("/service/{scorer_sid}/version/{deploy_ver}/resource"),
                 token,
-                Some(json!({"name": MATRIX_RESOURCE_LINK_NAME, "resource_id": sc.scoring_matrix_store_id})),
+                Some(json!({"name": link_name, "resource_id": res_id})),
             )?;
             if !(200..300).contains(&status) && status != 409 {
                 return Err(Error::new(502, "scorer_resource_link_failed"));
             }
+        }
+
+        if context.remaining_calls() < 11 {
+            return Ok(());
         }
         let boundary = "----flp-scorer-package-boundary";
         let mut body = Vec::new();
@@ -1648,8 +1896,25 @@ fn deploy_scorer_step(
                 .unwrap_or("")
                 .to_owned();
         }
+        if !files_hash.is_empty() {
+            sc.deployed_package_sha = pkg_sha;
+            sc.deployed_package_files_hash = files_hash;
+            service.scoring = Some(sc);
+            checkpoint_scoring_job_service(
+                context,
+                record,
+                service,
+                job,
+                "scoring.scorer_package_activated",
+                "scorer_deploy",
+            )?;
+            return Ok(());
+        }
     }
 
+    if context.remaining_calls() < 9 {
+        return Ok(());
+    }
     // Seed initial matrix in KV if FOS has matrix_latest.json (or embedded empty default).
     let latest_key = format!("{}matrix_latest.json", scoring_fos_prefix(service));
     let matrix = fos_json_get(context, service, &latest_key)?.unwrap_or_else(|| {
@@ -1669,14 +1934,14 @@ fn deploy_scorer_step(
     sc.deployed_package_sha = pkg_sha;
     sc.deployed_package_files_hash = files_hash;
     service.scoring = Some(sc);
-    let next_gen = save_scoring_service(
+    checkpoint_scoring_job_service(
         context,
         record,
         service,
-        &job.actor,
+        job,
         "scoring.scorer_deploy",
+        "logging_reconcile",
     )?;
-    job.expected_generation = next_gen;
     advance(job, "logging_reconcile");
     Ok(())
 }
@@ -1703,14 +1968,14 @@ fn logging_reconcile_step(
     merge_scoring_custom_fields(&mut service.log_fields);
     service.config_version += 1;
     service.updated_at = context.runtime.now();
-    let next_gen = save_scoring_service(
+    checkpoint_scoring_job_service(
         context,
         record,
         service,
-        &job.actor,
+        job,
         "scoring.logging_reconcile",
+        "discover",
     )?;
-    job.expected_generation = next_gen;
     advance(job, "discover");
     Ok(())
 }
@@ -1728,14 +1993,14 @@ fn strip_logging_vcl_step(
             remove_scoring_custom_fields(&mut service.log_fields);
             service.config_version += 1;
             service.updated_at = context.runtime.now();
-            let next_gen = save_scoring_service(
+            checkpoint_scoring_job_service(
                 context,
                 record,
                 service,
-                &job.actor,
+                job,
                 "scoring.local_teardown",
+                "remove_front",
             )?;
-            job.expected_generation = next_gen;
             advance(job, "remove_front");
             return Ok(());
         }
@@ -1744,14 +2009,14 @@ fn strip_logging_vcl_step(
         remove_scoring_custom_fields(&mut service.log_fields);
         service.config_version += 1;
         service.updated_at = context.runtime.now();
-        let next_gen = save_scoring_service(
+        checkpoint_scoring_job_service(
             context,
             record,
             service,
-            &job.actor,
+            job,
             "scoring.keep_snippets_teardown",
+            "discover",
         )?;
-        job.expected_generation = next_gen;
         advance(job, "discover");
         return Ok(());
     }
@@ -1796,6 +2061,9 @@ fn strip_logging_apply_step(
         if !present.contains(name) {
             continue;
         }
+        if context.remaining_calls() < 8 {
+            return Ok(());
+        }
         let encoded = encode(name);
         let (status, _) = context.api_status(
             "DELETE",
@@ -1811,6 +2079,9 @@ fn strip_logging_apply_step(
         }
     }
 
+    if context.remaining_calls() < 8 {
+        return Ok(());
+    }
     let (status, _) = context.api_status(
         "DELETE",
         &format!(
@@ -1838,20 +2109,6 @@ fn strip_logging_activate_step(
     let draft = job
         .draft_version
         .ok_or_else(|| Error::new(409, "draft_missing"))?;
-    if job.kind == "scoring_disable" {
-        remove_scoring_custom_fields(&mut service.log_fields);
-        service.config_version += 1;
-        service.updated_at = context.runtime.now();
-        let next_gen = save_scoring_service(
-            context,
-            record,
-            service,
-            &job.actor,
-            "scoring.strip_logging_vcl",
-        )?;
-        job.expected_generation = next_gen;
-    }
-
     let validate = context.api(
         "GET",
         &format!("/service/{}/version/{draft}/validate", service.service_id),
@@ -1867,6 +2124,19 @@ fn strip_logging_activate_step(
         token,
         None,
     )?;
+    if job.kind == "scoring_disable" {
+        remove_scoring_custom_fields(&mut service.log_fields);
+        service.config_version += 1;
+        service.updated_at = context.runtime.now();
+        checkpoint_scoring_job_service(
+            context,
+            record,
+            service,
+            job,
+            "scoring.strip_logging_vcl",
+            "scoring_delete_resources",
+        )?;
+    }
     advance(job, "scoring_delete_resources");
     Ok(())
 }
@@ -2067,26 +2337,45 @@ fn cleanup_scoring_state_step(
     // Delete scoring_request_secret.<sid> from Secret Store (best-effort).
     if let Ok(store) = config(context.runtime, "secret_store_id") {
         let req_secret_ref = request_secret_ref(&service.service_id);
-        let _ = context.api_status(
-            "DELETE",
-            &format!(
-                "/resources/stores/secret/{store}/secrets/{}",
-                encode(&req_secret_ref)
-            ),
+        let encoded_ref = encode(&req_secret_ref);
+        if let Ok((200..300, _)) = context.api_status(
+            "GET",
+            &format!("/resources/stores/secret/{store}/secrets/{encoded_ref}"),
             token,
             None,
-        );
+        ) {
+            if context.remaining_calls() < 8 {
+                return Ok(());
+            }
+            let _ = context.api_status(
+                "DELETE",
+                &format!("/resources/stores/secret/{store}/secrets/{encoded_ref}"),
+                token,
+                None,
+            );
+        }
     }
 
     // Delete processed/scoring/* in FOS on teardown, or on disable when delete_matrices is true.
-    if job.kind == "scoring_teardown" || job.kind == "teardown" || job.delete_matrices {
+    if job.kind == "scoring_teardown"
+        || job.kind == "scoring_disable" && job.delete_matrices
+        || job.kind == "teardown"
+    {
+        if context.remaining_calls() < 9 {
+            return Ok(());
+        }
         if let Ok(creds) = fos::credentials(context, service) {
             let prefix = scoring_fos_prefix(service);
             let latest = format!("{prefix}matrix_latest.json");
             let index_key = format!("{prefix}matrices/index.json");
-            if let Ok(Some(idx)) = fos_json_get(context, service, &index_key) {
+            if let Ok(Some(idx)) = fos_json_get_with_creds(context, service, &creds, &index_key) {
                 if let Some(versions) = idx["versions"].as_array() {
+                    let mut remaining = Vec::new();
                     for entry in versions {
+                        if context.remaining_calls() <= 7 {
+                            remaining.push(entry.clone());
+                            continue;
+                        }
                         if let Some(ver) = entry["version"]
                             .as_str()
                             .filter(|v| valid_matrix_version(v))
@@ -2099,7 +2388,20 @@ fn cleanup_scoring_state_step(
                             );
                         }
                     }
+                    if !remaining.is_empty() {
+                        let _ = fos_json_put_with_creds(
+                            context,
+                            service,
+                            &creds,
+                            &index_key,
+                            &json!({"versions": remaining}),
+                        );
+                        return Ok(());
+                    }
                 }
+            }
+            if context.remaining_calls() < 9 {
+                return Ok(());
             }
             let _ = fos::delete_object(context, service, &creds, &index_key);
             let _ = fos::delete_object(context, service, &creds, &latest);
@@ -2110,6 +2412,9 @@ fn cleanup_scoring_state_step(
         }
     }
 
+    if context.remaining_calls() < 6 {
+        return Ok(());
+    }
     service.scoring = None;
     remove_scoring_custom_fields(&mut service.log_fields);
     service.config_version += 1;
@@ -2119,14 +2424,14 @@ fn cleanup_scoring_state_step(
     } else {
         "finalize"
     };
-    let next_gen = save_scoring_service(
+    checkpoint_scoring_job_service(
         context,
         record,
         service,
-        &job.actor,
+        job,
         "scoring.cleanup_state",
+        next_step,
     )?;
-    job.expected_generation = next_gen;
     advance(job, next_step);
     Ok(())
 }
@@ -2199,18 +2504,19 @@ pub fn rollback_failed_enable(
     context: &Context<'_, impl Runtime>,
     service: &mut Service,
     record: &Record,
-    actor: &str,
+    job: &mut Job,
 ) {
     if let Some(sc) = service.scoring.as_mut() {
         if sc.enabled {
             sc.enabled = false;
             remove_scoring_custom_fields(&mut service.log_fields);
-            let _ = save_service(
+            let _ = save_job_service(
                 context,
                 record,
                 service,
-                actor,
+                job,
                 "scoring.enable_rolled_back",
+                &job.step,
             );
         }
     }
@@ -2812,6 +3118,9 @@ pub fn route(
             );
             if versions.len() > MAX_MATRIX_HISTORY {
                 for old in versions.drain(MAX_MATRIX_HISTORY..) {
+                    if context.remaining_calls() <= 7 {
+                        break;
+                    }
                     if let Some(old_ver) =
                         old["version"].as_str().filter(|v| valid_matrix_version(v))
                     {

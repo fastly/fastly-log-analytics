@@ -8,14 +8,31 @@ use fastly_log_analytics::{
 };
 use serde_json::{json, Value};
 use std::{
-    collections::BTreeMap,
-    sync::atomic::{AtomicU64, Ordering},
+    cell::{Cell, RefCell},
+    collections::{BTreeMap, BTreeSet},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
+
+thread_local! {
+    static REQ_CALLS: Cell<u32> = const { Cell::new(0) };
+    static REQ_SECRETS: RefCell<BTreeSet<String>> = const { RefCell::new(BTreeSet::new()) };
+}
+
+fn charge_backend() -> Result<(), String> {
+    REQ_CALLS.with(|calls| {
+        if calls.get() >= 32 {
+            return Err("backend_budget_exhausted".into());
+        }
+        calls.set(calls.get() + 1);
+        Ok(())
+    })
+}
 
 struct Platform {
     adapter: FixtureAdapter,
     clock: AtomicU64,
     random_counter: AtomicU64,
+    refuse_scorer_teardown: AtomicBool,
 }
 
 impl Platform {
@@ -24,10 +41,13 @@ impl Platform {
             adapter: FixtureAdapter::new(),
             clock: AtomicU64::new(1_800_000_000),
             random_counter: AtomicU64::new(1),
+            refuse_scorer_teardown: AtomicBool::new(false),
         }
     }
 
     fn call(&self, method: &str, path: &str, body: Value) -> (u16, Value) {
+        REQ_CALLS.with(|c| c.set(0));
+        REQ_SECRETS.with(|s| s.borrow_mut().clear());
         let resp = admin::handle(
             self,
             "fixtureAdmin",
@@ -64,14 +84,21 @@ impl Platform {
             let prev_step = job["step"].as_str().unwrap_or("").to_owned();
             let id = job["id"].as_str().unwrap();
             let (status, res) = self.call("POST", &format!("/api/admin/jobs/{id}/step"), json!({}));
-            if status == 503 {
-                self.clock.fetch_add(65, Ordering::SeqCst);
-                job = self.ok("GET", &format!("/api/admin/jobs/{id}"), json!({}))["job"].clone();
-                continue;
-            }
             assert_eq!(
                 status, 200,
-                "POST /api/admin/jobs/{id}/step -> {status}: {res}"
+                "POST /api/admin/jobs/{id}/step must not emit 503 or error -> {status}: {res}"
+            );
+            let lease_rec = self
+                .adapter
+                .record_snapshot("reconcile_lock:fixtureService");
+            assert_eq!(
+                lease_rec
+                    .as_ref()
+                    .and_then(|r| r.value["expires_at"].as_u64())
+                    .unwrap_or(0),
+                0,
+                "reconcile_lock:fixtureService must be released after every step: {:?}",
+                lease_rec.as_ref().map(|r| &r.value)
             );
             job = res["job"].clone();
             if job["step"].as_str() == Some(prev_step.as_str()) {
@@ -135,6 +162,10 @@ impl Runtime for Platform {
         ))
     }
     fn secret(&self, name: &str) -> Result<Option<String>, String> {
+        let fresh = REQ_SECRETS.with(|s| s.borrow_mut().insert(name.into()));
+        if fresh {
+            charge_backend()?;
+        }
         match name {
             "cdn_key" => Ok(Some("fixture-cdn-key".into())),
             "front_key" => Ok(Some("fixture-front-key".into())),
@@ -165,10 +196,15 @@ impl Runtime for Platform {
         Some("1".into())
     }
     fn admin_get(&self, key: &str) -> Result<Option<Record>, String> {
+        if let Some(cached) = self.adapter.cached_get(key) {
+            return Ok(cached);
+        }
+        charge_backend()?;
         self.adapter.get(key)
     }
     fn admin_get_fresh(&self, key: &str, _: &str) -> Result<Option<Record>, String> {
-        self.adapter.get(key)
+        charge_backend()?;
+        self.adapter.confirm(key)
     }
     fn admin_cas(
         &self,
@@ -176,16 +212,34 @@ impl Runtime for Platform {
         generation: Option<&str>,
         value: &Value,
     ) -> Result<bool, String> {
+        self.adapter.cache_invalidate(key);
+        charge_backend()?;
         self.adapter.cas(key, generation, value)
     }
     fn admin_api(&self, request: ApiRequest<'_>) -> Result<admin::ApiResponse, String> {
+        charge_backend()?;
+        if self.refuse_scorer_teardown.load(Ordering::SeqCst)
+            && request.path.starts_with("/service/fixtureScorer")
+            && (request.method == "DELETE" || request.path.ends_with("/deactivate"))
+        {
+            return Ok(admin::ApiResponse {
+                status: 409,
+                body: json!({"msg": "scorer service retained"}),
+                retry_after: None,
+            });
+        }
         self.adapter.api(request).map(Into::into)
     }
     fn admin_api_raw(&self, request: ApiRawRequest<'_>) -> Result<admin::ApiResponse, String> {
+        charge_backend()?;
         self.adapter.api_raw(request).map(Into::into)
     }
     fn admin_fos(&self, request: FosRequest<'_>) -> Result<FosResponse, String> {
+        charge_backend()?;
         self.adapter.fos(request)
+    }
+    fn admin_remaining_calls(&self) -> u32 {
+        REQ_CALLS.with(|c| 32u32.saturating_sub(c.get()))
     }
     fn scorer_package(&self) -> Option<Vec<u8>> {
         Some(b"fixture-session-scorer-wasm-tar-gz".to_vec())
@@ -242,9 +296,32 @@ fn scoring_enable_isolates_secrets_and_completes_control_plane_ops() {
     assert_eq!(status["supported"], true);
     let sc = &status["scoring"];
     let scorer_sid = sc["scoring_service_id"].as_str().unwrap();
+    let scorer_domain = sc["scoring_domain"].as_str().unwrap();
     let keys_store_id = sc["scoring_keys_store_id"].as_str().unwrap();
     let cfg_store_id = sc["scoring_config_store_id"].as_str().unwrap();
     let matrix_store_id = sc["scoring_matrix_store_id"].as_str().unwrap();
+
+    // BUG-CLOUD-DR-17: fresh enable must populate both domain and placeholder_origin backend + 3 resource links.
+    let scorer_domains = p.adapter.resources(scorer_sid, "domain");
+    assert_eq!(
+        scorer_domains.len(),
+        1,
+        "scorer domains: {scorer_domains:?}"
+    );
+    assert_eq!(scorer_domains[0]["name"], scorer_domain);
+    let scorer_backends = p.adapter.resources(scorer_sid, "backend");
+    assert_eq!(
+        scorer_backends.len(),
+        1,
+        "scorer backends must include placeholder_origin: {scorer_backends:?}"
+    );
+    assert_eq!(scorer_backends[0]["name"], "placeholder_origin");
+    let scorer_links = p.adapter.resources(scorer_sid, "resource");
+    assert_eq!(
+        scorer_links.len(),
+        3,
+        "scorer resource links: {scorer_links:?}"
+    );
 
     // Verify secret isolation: svc:<sid> and job:<id> must not contain token, request_secret, or aes_key_hex.
     let svc_raw = p
@@ -1047,4 +1124,316 @@ fn scoring_retrain_and_restore_validate_matrix_versions_and_protect_index_json()
             .any(|p| p.ends_with("/matrices/index.json") || p.contains("..")),
         "MAX_MATRIX_HISTORY eviction must never delete index.json or traversal paths: {new_deletes:?}"
     );
+}
+
+#[test]
+fn bug_cloud_dr_17_stale_kv_locked_reuse_post_activate_retry_and_failed_job_supersede() {
+    // 1. Cross-POP stale svc:fixtureService KV cache on Tick 0 (scorer_service) AND on scorer_stores:
+    // must complete with 0 HTTP 503s, domains == 1, backends == 1 ("placeholder_origin"), and _job_checkpoint.
+    let p = Platform::new();
+    p.provision_logging_service();
+    let pre_enable_svc = p.adapter.record_snapshot("svc:fixtureService");
+    let en = p.ok(
+        "POST",
+        "/api/services/fixtureService/scoring/enable",
+        json!({}),
+    );
+    let mut job = en["job"].clone();
+    let job_id = job["id"].as_str().unwrap().to_owned();
+    // Simulate cross-POP stale KV read on Tick 0 (scorer_service):
+    p.adapter.cache_stale("svc:fixtureService", pre_enable_svc);
+
+    let mut saw_scorer_stores_stale = false;
+    let mut prev_svc = p.adapter.record_snapshot("svc:fixtureService");
+    for _ in 0..80 {
+        if job["status"] == "complete" || job["status"] == "failed" {
+            break;
+        }
+        if let Some(at) = job["retry_at"].as_u64() {
+            p.clock.fetch_max(at, Ordering::SeqCst);
+        }
+        if job["step"] == "scorer_stores" && !saw_scorer_stores_stale {
+            saw_scorer_stores_stale = true;
+            p.adapter
+                .cache_stale("svc:fixtureService", prev_svc.clone());
+        }
+        prev_svc = p.adapter.record_snapshot("svc:fixtureService");
+        let (st, res) = p.call("POST", &format!("/api/admin/jobs/{job_id}/step"), json!({}));
+        assert_eq!(st, 200, "scoring_enable step must not hit 503: {res}");
+        job = res["job"].clone();
+    }
+    assert!(saw_scorer_stores_stale, "must have exercised scorer_stores");
+    assert_eq!(
+        job["status"], "complete",
+        "stale-KV scoring_enable failed: {job}"
+    );
+    let svc_after = p.adapter.record_snapshot("svc:fixtureService").unwrap();
+    assert_eq!(svc_after.value["_job_checkpoint"]["job_id"], job_id);
+    let scorer_sid = svc_after.value["scoring"]["scoring_service_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(p.adapter.resources(&scorer_sid, "domain").len(), 1);
+    let backends = p.adapter.resources(&scorer_sid, "backend");
+    assert_eq!(backends.len(), 1);
+    assert_eq!(backends[0]["name"], "placeholder_origin");
+    assert_eq!(p.adapter.resources(&scorer_sid, "resource").len(), 3);
+
+    // 2. Bulk MAX_MATRIX_HISTORY (65 seeded entries -> 16 evictions) stays within 24-call Context budget:
+    let ak_ref = svc_after.value["fos_access_key_ref"].as_str().unwrap();
+    let sk_ref = svc_after.value["fos_secret_key_ref"].as_str().unwrap();
+    let ak = p.adapter.secret(ak_ref).unwrap().unwrap();
+    let sk_env: Value = serde_json::from_str(&p.adapter.secret(sk_ref).unwrap().unwrap()).unwrap();
+    let sk = sk_env["secret_key"].as_str().unwrap().to_owned();
+    let bulk_versions: Vec<Value> = (1..=65)
+        .map(|n| json!({"version": format!("2027-02-01-bulk-{n:03}"), "vocab_size": 2}))
+        .collect();
+    assert_eq!(
+        p.adapter
+            .fos(FosRequest {
+                method: "PUT",
+                region: "us-east-1",
+                bucket: "fos-fixture-logs",
+                key: "processed/scoring/matrices/index.json",
+                query: "",
+                access_key: &ak,
+                secret_key: &sk,
+                body: serde_json::to_vec(&json!({"versions": bulk_versions})).unwrap(),
+                timeout: std::time::Duration::from_secs(5),
+                response_limit: 65_536,
+                content_md5: None,
+            })
+            .unwrap()
+            .status,
+        200
+    );
+    let bulk_retrain = p.ok(
+        "POST",
+        "/api/services/fixtureService/scoring/retrain",
+        json!({
+            "matrix": {
+                "version": "2027-02-01-v66",
+                "vocab_size": 2,
+                "session_count": 3,
+                "transition_count": 4,
+                "counts": {"/": {"/checkout": 4}},
+                "row_totals": {"/": 4}
+            }
+        }),
+    );
+    assert_eq!(bulk_retrain["ok"], true);
+    let capped_versions = p.ok(
+        "GET",
+        "/api/services/fixtureService/scoring/matrix/versions",
+        json!({}),
+    );
+    assert_eq!(capped_versions["versions"].as_array().unwrap().len(), 50);
+
+    // 3. Disable scoring while DELETE /service/{scorer_sid} returns 409 (preserving active/locked v1 scorer service),
+    // then re-enable scoring: must reuse locked-v1 scorer service cleanly without scorer_resource_link_failed,
+    // and link all 3 resources onto cloned v2!
+    p.refuse_scorer_teardown.store(true, Ordering::SeqCst);
+    let dis = p.ok(
+        "POST",
+        "/api/services/fixtureService/scoring/disable",
+        json!({}),
+    );
+    let dis_done = p.run_job(dis["job"].clone());
+    p.refuse_scorer_teardown.store(false, Ordering::SeqCst);
+    assert_eq!(dis_done["status"], "complete", "{dis_done}");
+    assert!(
+        p.adapter.has_service(&scorer_sid),
+        "scorer service must still exist with locked v1"
+    );
+    // Remove stores so reuse must create new stores and link all 3 onto cloned v2!
+    let prev_keys = svc_after.value["scoring"]["scoring_keys_store_id"]
+        .as_str()
+        .unwrap();
+    let prev_cfg = svc_after.value["scoring"]["scoring_config_store_id"]
+        .as_str()
+        .unwrap();
+    let prev_mat = svc_after.value["scoring"]["scoring_matrix_store_id"]
+        .as_str()
+        .unwrap();
+    assert!(p
+        .adapter
+        .config_store_value(prev_keys, "current_key_hex")
+        .is_none());
+    assert!(p
+        .adapter
+        .config_store_value(prev_cfg, "debug_logging_enabled")
+        .is_none());
+    assert!(p.adapter.kv_store_value(prev_mat, "matrix").is_none());
+
+    let re_en = p.ok(
+        "POST",
+        "/api/services/fixtureService/scoring/enable",
+        json!({}),
+    );
+    let re_done = p.run_job(re_en["job"].clone());
+    assert_eq!(
+        re_done["status"], "complete",
+        "reusing locked-v1 scorer service must succeed: {re_done}"
+    );
+    let re_status = p.ok(
+        "GET",
+        "/api/services/fixtureService/scoring/status",
+        json!({}),
+    );
+    assert_eq!(re_status["scoring"]["scoring_service_id"], scorer_sid);
+    let v2_links = p.adapter.resources(&scorer_sid, "resource");
+    let link_names: BTreeSet<&str> = v2_links.iter().filter_map(|r| r["name"].as_str()).collect();
+    assert_eq!(
+        link_names,
+        BTreeSet::from(["scoring_keys", "scoring_config", "scoring_matrix"]),
+        "cloned scorer version must link all 3 stores: {v2_links:?}"
+    );
+
+    // 4. Post-activate transient FOS failure on scorer_deploy + manual retry:
+    // must NOT leak extra cloned versions or wedge with service_changed_rerun!
+    let p2 = Platform::new();
+    p2.provision_logging_service();
+    let en2 = p2.ok(
+        "POST",
+        "/api/services/fixtureService/scoring/enable",
+        json!({}),
+    );
+    let mut job2 = en2["job"].clone();
+    let job2_id = job2["id"].as_str().unwrap().to_owned();
+    let mut injected_fos_fail = false;
+    for _ in 0..80 {
+        if job2["status"] == "complete" || job2["status"] == "failed" {
+            break;
+        }
+        if let Some(at) = job2["retry_at"].as_u64() {
+            p2.clock.fetch_max(at, Ordering::SeqCst);
+        }
+        if job2["step"] == "scorer_deploy" && !injected_fos_fail {
+            // Inject transient FOS failure on matrix_latest.json (runs only after activate)
+            p2.adapter.fail_next(
+                "GET",
+                "/fos-fixture-logs/processed/scoring/matrix_latest.json",
+                false,
+            );
+            injected_fos_fail = true;
+        }
+        let (st, res) = p2.call(
+            "POST",
+            &format!("/api/admin/jobs/{job2_id}/step"),
+            json!({}),
+        );
+        assert_eq!(st, 200, "step returned {st}: {res}");
+        job2 = res["job"].clone();
+    }
+    assert_eq!(job2["status"], "failed");
+    assert_eq!(job2["error"], "object_storage_transport_failed");
+    let scorer2_sid = p2
+        .adapter
+        .record_snapshot("svc:fixtureService")
+        .unwrap()
+        .value["scoring"]["scoring_service_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // Retry failed job2 and drive to completion:
+    p2.clock.fetch_add(65, Ordering::SeqCst);
+    let retried = p2.ok(
+        "POST",
+        &format!("/api/admin/jobs/{job2_id}/retry"),
+        json!({}),
+    )["job"]
+        .clone();
+    let retried_done = p2.run_job(retried);
+    assert_eq!(
+        retried_done["status"], "complete",
+        "post-activate retry must complete without service_changed_rerun: {retried_done}"
+    );
+    let (_, vers_val) = p2
+        .adapter
+        .api(ApiRequest {
+            method: "GET",
+            path: &format!("/service/{scorer2_sid}/version"),
+            query: "",
+            token: "fixture-token",
+            body: None,
+            timeout: std::time::Duration::from_secs(5),
+        })
+        .unwrap();
+    assert_eq!(
+        vers_val.as_array().unwrap().len(),
+        1,
+        "post-activate FOS retry must not leak extra cloned scorer versions: {vers_val}"
+    );
+
+    // 5. Mid-job GCE takeover right before scorer_deploy (even on locked-v1 reuse) still fails closed with
+    // managed_resources_not_owned, AND failed scoring jobs can be superseded by PATCH / reconcile / enable!
+    p2.refuse_scorer_teardown.store(true, Ordering::SeqCst);
+    let dis2 = p2.ok(
+        "POST",
+        "/api/services/fixtureService/scoring/disable",
+        json!({}),
+    );
+    let dis2_done = p2.run_job(dis2["job"].clone());
+    p2.refuse_scorer_teardown.store(false, Ordering::SeqCst);
+    assert_eq!(dis2_done["status"], "complete");
+
+    let en3 = p2.ok(
+        "POST",
+        "/api/services/fixtureService/scoring/enable",
+        json!({}),
+    );
+    let mut job3 = en3["job"].clone();
+    let job3_id = job3["id"].as_str().unwrap().to_owned();
+    let mut injected_takeover = false;
+    for _ in 0..80 {
+        if job3["status"] == "complete" || job3["status"] == "failed" {
+            break;
+        }
+        if job3["step"] == "scorer_deploy" && !injected_takeover {
+            p2.adapter.seed_resource(
+                "fixtureService",
+                "logging/fos",
+                json!({
+                    "name": "Fastly Object Storage Logs",
+                    "bucket_name": "fos-gce-logs",
+                    "region": "us-east-1",
+                    "path": "raw/"
+                }),
+            );
+            injected_takeover = true;
+        }
+        let (st, res) = p2.call(
+            "POST",
+            &format!("/api/admin/jobs/{job3_id}/step"),
+            json!({}),
+        );
+        assert_eq!(st, 200);
+        job3 = res["job"].clone();
+    }
+    assert_eq!(job3["status"], "failed");
+    assert_eq!(job3["error"], "managed_resources_not_owned");
+
+    // Clean up foreign endpoint and verify failed scoring_enable does NOT permanently brick PATCH / enable:
+    p2.adapter.remove_resource(
+        "fixtureService",
+        "logging/fos",
+        "Fastly Object Storage Logs",
+    );
+    let cur_svc = p2.ok("GET", "/api/admin/services/fixtureService", json!({}));
+    let patched = p2.ok(
+        "PATCH",
+        "/api/admin/services/fixtureService",
+        json!({
+            "generation": cur_svc["generation"],
+            "sample_rate": 50
+        }),
+    );
+    assert_eq!(patched["service"]["sample_rate"], 50);
+    let en4 = p2.ok(
+        "POST",
+        "/api/services/fixtureService/scoring/enable",
+        json!({}),
+    );
+    assert_eq!(p2.run_job(en4["job"].clone())["status"], "complete");
 }

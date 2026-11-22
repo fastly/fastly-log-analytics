@@ -440,6 +440,30 @@ describe("queryRollup", () => {
       });
       expect(replay).not.toBeNull();
       expect(rangeReads + wholeFetches).toBeGreaterThan(0);
+
+      // Auditor Challenge 1: un-signaled queryRollup must ALSO abort and evict decoded solely via clearRollupQueryCache():
+      clearFn?.();
+      rangeReads = 0;
+      wholeFetches = 0;
+      derivedWrites = 0;
+      pauseFirstDerivedRead = true;
+      const pausedUnsignaled = new Promise<void>((r) => {
+        notifyDerivedPaused = r;
+      });
+      const unsignaledPending = queryRollup(trackedSource, {
+        fromMs: T0,
+        toMs: T0 + 2 * HOUR,
+        spec,
+      }).then(
+        () => "RESOLVED",
+        () => "REJECTED",
+      );
+      await pausedUnsignaled;
+      clearFn?.();
+      releaseDerivedRead?.();
+      expect(await unsignaledPending).toBe("REJECTED");
+      expect(rangeReads).toBe(0);
+      expect(derivedWrites).toBe(0);
     } finally {
       summaryProjectionLimits.wholeBelowBytes = prevLimit;
     }

@@ -283,10 +283,35 @@ export async function decodeSecuritySummary(
 }
 
 const DECODED_LIMIT = 64;
+let securityRollupEpoch = 0;
+const activeSecurityRollupControllers = new Set<AbortController>();
 const decoded = new Map<string, Promise<SecuritySummary | null>>();
 
+function securityRollupAbortError(): DOMException {
+  return new DOMException("The operation was aborted.", "AbortError");
+}
+
+export function clearSecurityRollupCache(): void {
+  securityRollupEpoch += 1;
+  for (const controller of activeSecurityRollupControllers) {
+    controller.abort(securityRollupAbortError());
+  }
+  activeSecurityRollupControllers.clear();
+  decoded.clear();
+}
+
 /** `file` decoded for `spec`, or whole when null. */
-function decodeCached(source: Source, file: ManifestFile, spec: SummarySpec | null): Promise<SecuritySummary | null> {
+function decodeCached(
+  source: Source,
+  file: ManifestFile,
+  spec: SummarySpec | null,
+  signal: AbortSignal,
+  callEpoch: number,
+): Promise<SecuritySummary | null> {
+  signal.throwIfAborted();
+  if (callEpoch !== securityRollupEpoch) {
+    return Promise.reject(securityRollupAbortError());
+  }
   const key = `${source.cacheScope ?? "default"}|${file.key}|${spec?.id ?? "whole"}`;
   const hit = decoded.get(key);
   if (hit) {
@@ -294,12 +319,32 @@ function decodeCached(source: Source, file: ManifestFile, spec: SummarySpec | nu
     decoded.set(key, hit);
     return hit;
   }
-  const pending = spec
-    ? readSummaryProjection(source, file, spec).then(({ parts }) => decodeSecuritySummary(parts, spec))
-    : source.fetchFile(file.key).then(({ bytes }) => decodeSecuritySummary(bytes));
-  pending.catch(() => decoded.delete(key));
-  decoded.set(key, pending);
-  while (decoded.size > DECODED_LIMIT) decoded.delete(decoded.keys().next().value!);
+  const pending = (
+    spec
+      ? readSummaryProjection(source, file, spec, signal).then(({ parts }) => {
+          signal.throwIfAborted();
+          if (callEpoch !== securityRollupEpoch) throw securityRollupAbortError();
+          return decodeSecuritySummary(parts, spec);
+        })
+      : source.fetchFile(file.key, signal).then(({ bytes }) => {
+          signal.throwIfAborted();
+          if (callEpoch !== securityRollupEpoch) throw securityRollupAbortError();
+          return decodeSecuritySummary(bytes);
+        })
+  ).then((summary) => {
+    if (callEpoch !== securityRollupEpoch || signal.aborted) {
+      if (decoded.get(key) === pending) decoded.delete(key);
+      throw signal.reason ?? securityRollupAbortError();
+    }
+    return summary;
+  });
+  pending.catch(() => {
+    if (decoded.get(key) === pending) decoded.delete(key);
+  });
+  if (callEpoch === securityRollupEpoch && !signal.aborted) {
+    decoded.set(key, pending);
+    while (decoded.size > DECODED_LIMIT) decoded.delete(decoded.keys().next().value!);
+  }
   return pending;
 }
 
@@ -321,24 +366,44 @@ export async function querySecurityRollup(
   range: { fromMs: number; toMs: number; hourly: boolean; signal?: AbortSignal; spec?: SummarySpec | null },
 ): Promise<SecurityRollup | null> {
   const { fromMs, toMs, hourly, signal, spec = securitySummarySpec(SECURITY_ROLLUP_SECTIONS) } = range;
-  const from = new Date(fromMs).toISOString();
-  const to = new Date(toMs).toISOString();
-  const [raw, summaries] = await Promise.all([
-    fetchManifest(source.fetchJson, from, to, signal),
-    fetchManifest(source.fetchJson, from, to, signal, undefined, "summary"),
-  ]);
-  if (!raw.complete || !summaries.complete) return null;
-  const usable = hourly ? summaries.files.filter((file) => !isDayBundle(file.key)) : summaries.files;
-  const plan = planRollup(raw.files, usable, fromMs, toMs);
-  if (!plan) return null;
-  const parts = await Promise.all(plan.files.map((use) => decodeCached(source, use.file, spec)));
   signal?.throwIfAborted();
-  if (parts.some((part) => part === null)) return null;
-  return {
-    files: plan.files.map((use, i) => ({ key: use.file.key, summary: parts[i]! })),
-    dataFromMs: plan.dataFromMs,
-    dataThroughMs: plan.dataThroughMs,
-  };
+  const callEpoch = securityRollupEpoch;
+  const controller = new AbortController();
+  const onCallerAbort = () =>
+    controller.abort(signal?.reason ?? securityRollupAbortError());
+  if (signal) {
+    signal.addEventListener("abort", onCallerAbort, { once: true });
+  }
+  activeSecurityRollupControllers.add(controller);
+  try {
+    const from = new Date(fromMs).toISOString();
+    const to = new Date(toMs).toISOString();
+    const [raw, summaries] = await Promise.all([
+      fetchManifest(source.fetchJson, from, to, controller.signal),
+      fetchManifest(source.fetchJson, from, to, controller.signal, undefined, "summary"),
+    ]);
+    controller.signal.throwIfAborted();
+    if (callEpoch !== securityRollupEpoch) throw securityRollupAbortError();
+    if (!raw.complete || !summaries.complete) return null;
+    const usable = hourly ? summaries.files.filter((file) => !isDayBundle(file.key)) : summaries.files;
+    const plan = planRollup(raw.files, usable, fromMs, toMs);
+    if (!plan) return null;
+    const parts = await Promise.all(
+      plan.files.map((use) => decodeCached(source, use.file, spec, controller.signal, callEpoch)),
+    );
+    signal?.throwIfAborted();
+    controller.signal.throwIfAborted();
+    if (callEpoch !== securityRollupEpoch) throw securityRollupAbortError();
+    if (parts.some((part) => part === null)) return null;
+    return {
+      files: plan.files.map((use, i) => ({ key: use.file.key, summary: parts[i]! })),
+      dataFromMs: plan.dataFromMs,
+      dataThroughMs: plan.dataThroughMs,
+    };
+  } finally {
+    signal?.removeEventListener("abort", onCallerAbort);
+    activeSecurityRollupControllers.delete(controller);
+  }
 }
 
 const byCountThenValue = ([a, x]: [string, number], [b, y]: [string, number]) =>

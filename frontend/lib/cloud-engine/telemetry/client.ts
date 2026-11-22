@@ -3,6 +3,7 @@ import { BaseWorkerRpcClient } from "../worker-rpc";
 import { beginCloudLoading } from "../loading-progress";
 import { createSharedRequests } from "../shared-request";
 import type { RunProgress } from "../dashboard/engine";
+import { dashboardCacheIdentity } from "../dashboard/sources";
 import {
   readLogs as readLogsInline,
   type LogResult,
@@ -11,12 +12,18 @@ import {
   type OpsKind,
   type ReadLogsOptions,
 } from "./engine";
-import { activeOpsUser, browserOpsSource } from "./sources";
+import {
+  activeOpsUser,
+  browserOpsSource,
+  currentVolatileOpsScope,
+  type OpsIdentity,
+} from "./sources";
 
 type WorkerRequest = {
   id: number;
   options: Omit<ReadLogsOptions, "signal" | "onProgress">;
   pageLoadId: string | null;
+  identity: OpsIdentity;
 };
 
 type WorkerMessage =
@@ -53,17 +60,20 @@ class OpsWorkerClient extends BaseWorkerRpcClient<
     }
   };
 
-  async run(options: ReadLogsOptions): Promise<LogResult> {
+  async run(options: ReadLogsOptions, identity: OpsIdentity): Promise<LogResult> {
     const loading = beginCloudLoading("listing");
     let success = false;
     try {
-      const result = await this.runWithProgress({
-        ...options,
-        onProgress: (progress) => {
-          loading.update({ stage: "files", progress });
-          options.onProgress?.(progress);
+      const result = await this.runWithProgress(
+        {
+          ...options,
+          onProgress: (progress) => {
+            loading.update({ stage: "files", progress });
+            options.onProgress?.(progress);
+          },
         },
-      });
+        identity,
+      );
       success = true;
       return result;
     } finally {
@@ -71,7 +81,10 @@ class OpsWorkerClient extends BaseWorkerRpcClient<
     }
   }
 
-  private runWithProgress(options: ReadLogsOptions): Promise<LogResult> {
+  private runWithProgress(
+    options: ReadLogsOptions,
+    identity: OpsIdentity,
+  ): Promise<LogResult> {
     if (options.signal?.aborted) {
       return Promise.reject(new DOMException("Aborted", "AbortError"));
     }
@@ -80,7 +93,8 @@ class OpsWorkerClient extends BaseWorkerRpcClient<
       return readLogsInline(
         browserOpsSource(
           typeof window !== "undefined" ? window.location.origin : "",
-          getPageLoadId,
+          identity,
+          { getPageLoadId: () => getPageLoadId() ?? "" },
         ),
         options,
       );
@@ -99,6 +113,7 @@ class OpsWorkerClient extends BaseWorkerRpcClient<
         id,
         options: serializable,
         pageLoadId: getPageLoadId(),
+        identity,
       };
       worker.postMessage(req);
     });
@@ -108,6 +123,11 @@ class OpsWorkerClient extends BaseWorkerRpcClient<
 let rpcClient: OpsWorkerClient | null = null;
 const getClient = () => (rpcClient ??= new OpsWorkerClient());
 
+export function resetOpsLogsClient(): void {
+  rpcClient?.terminate();
+  rpcClient = null;
+}
+
 const sharedReads = createSharedRequests<LogsResult, RunProgress>();
 
 // Several panels often ask for the same kind and range at once; they share one
@@ -116,19 +136,31 @@ function sharedRead(
   { kind, from, to, signal, onProgress }: ReadLogsOptions,
   scope: { user?: string; role?: string } = {},
 ): Promise<LogsResult> {
+  const identity: OpsIdentity = {
+    user:
+      (scope.user && scope.user.trim().length > 0 ? scope.user : null) ??
+      activeOpsUser() ??
+      dashboardCacheIdentity() ??
+      currentVolatileOpsScope(),
+    role: scope.role && scope.role.trim().length > 0 ? scope.role : "admin",
+  };
   const key = JSON.stringify([
     kind,
     from,
     to,
-    scope.user ?? null,
-    scope.role ?? null,
+    identity.user,
+    identity.role,
     activeOpsUser(),
+    dashboardCacheIdentity(),
     getPageLoadId(),
   ]);
   return sharedReads(
     key,
     (shared, notify) =>
-      getClient().run({ kind, from, to, signal: shared, onProgress: notify }),
+      getClient().run(
+        { kind, from, to, signal: shared, onProgress: notify },
+        identity,
+      ),
     { signal, onProgress },
   );
 }

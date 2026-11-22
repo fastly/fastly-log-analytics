@@ -1467,7 +1467,7 @@ export function browserSource(
         end,
       ]);
       const existing = inFlightRanges.get(rangeKey);
-      if (existing) {
+      if (existing && !existing.controller.signal.aborted) {
         const bytes = await waitSharedRange(existing, signal);
         return bytes.slice(0);
       }

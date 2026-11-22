@@ -1,18 +1,20 @@
 import { createWorkerRpcHost } from "../worker-rpc";
 import { readLogs, type ReadLogsOptions } from "./engine";
-import { browserOpsSource } from "./sources";
+import { browserOpsSource, type OpsIdentity } from "./sources";
 
 type JobMessage = {
   id: number;
   type?: string;
   options: Omit<ReadLogsOptions, "signal" | "onProgress">;
   pageLoadId?: string | null;
+  identity?: OpsIdentity;
 };
 
 self.onmessage = createWorkerRpcHost<JobMessage>(async (msg, ctx) => {
   const source = browserOpsSource(
     self.location.origin,
-    () => msg.pageLoadId ?? null,
+    msg.identity,
+    { getPageLoadId: () => msg.pageLoadId ?? "" },
   );
   const result = await readLogs(source, {
     ...msg.options,

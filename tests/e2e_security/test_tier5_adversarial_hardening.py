@@ -261,6 +261,7 @@ struct ProbeRt {
     rng: AtomicU64,
     rich_fos: std::cell::Cell<bool>,
     mtimes: std::cell::RefCell<BTreeMap<String, String>>,
+    budget: std::cell::Cell<Option<u32>>,
 }
 
 impl ProbeRt {
@@ -296,7 +297,23 @@ impl ProbeRt {
             rng: AtomicU64::new(1),
             rich_fos: std::cell::Cell::new(false),
             mtimes: std::cell::RefCell::new(BTreeMap::new()),
+            budget: std::cell::Cell::new(None),
         }
+    }
+    fn spend_budget(&self) -> Result<(), String> {
+        if let Some(used) = self.budget.get() {
+            if used >= 32 {
+                return Err("backend_budget_exhausted".into());
+            }
+            self.budget.set(Some(used + 1));
+        }
+        Ok(())
+    }
+    fn call_budgeted(&self, method: &str, path: &str, body: Value) -> (u16, Value) {
+        self.budget.set(Some(0));
+        let res = self.call(method, path, body);
+        self.budget.set(None);
+        res
     }
     fn call(&self, method: &str, path: &str, body: Value) -> (u16, Value) {
         let resp = admin::handle(
@@ -335,13 +352,42 @@ impl Runtime for ProbeRt {
     fn versions(&self) -> Result<Value, String> { Ok(json!({})) }
     fn compute_service_id(&self) -> Option<String> { Some("fixtureApp".into()) }
     fn compute_service_version(&self) -> Option<String> { Some("1".into()) }
-    fn admin_get(&self, key: &str) -> Result<Option<Record>, String> { self.admin.get(key) }
+    fn admin_get(&self, key: &str) -> Result<Option<Record>, String> {
+        if self.budget.get().is_some() {
+            if let Some(cached) = self.admin.cached_get(key) {
+                return Ok(cached);
+            }
+        }
+        self.spend_budget()?;
+        self.admin.get(key)
+    }
+    fn admin_get_fresh(&self, key: &str, _: &str) -> Result<Option<Record>, String> {
+        self.spend_budget()?;
+        self.admin.confirm(key)
+    }
     fn admin_cas(&self, key: &str, generation: Option<&str>, value: &Value) -> Result<bool, String> {
+        if self.budget.get().is_some() {
+            self.admin.cache_invalidate(key);
+        }
+        self.spend_budget()?;
         self.admin.cas(key, generation, value)
     }
-    fn admin_api(&self, req: ApiRequest<'_>) -> Result<ApiResponse, String> { self.admin.api(req).map(Into::into) }
-    fn admin_api_raw(&self, req: ApiRawRequest<'_>) -> Result<ApiResponse, String> { self.admin.api_raw(req).map(Into::into) }
+    fn admin_api(&self, req: ApiRequest<'_>) -> Result<ApiResponse, String> {
+        self.spend_budget()?;
+        self.admin.api(req).map(Into::into)
+    }
+    fn admin_api_raw(&self, req: ApiRawRequest<'_>) -> Result<ApiResponse, String> {
+        self.spend_budget()?;
+        self.admin.api_raw(req).map(Into::into)
+    }
+    fn admin_remaining_calls(&self) -> u32 {
+        match self.budget.get() {
+            Some(used) => 32u32.saturating_sub(used),
+            None => 32,
+        }
+    }
     fn admin_fos(&self, req: FosRequest<'_>) -> Result<FosResponse, String> {
+        self.spend_budget()?;
         if self.rich_fos.get() && req.method == "GET" && req.key.is_empty() && req.query.contains("list-type=2") {
             let objects = self.admin.bucket_objects(req.bucket);
             let mut prefix = String::new();
@@ -1468,6 +1514,68 @@ fn main() {
         dr16_results.push(json!({"status": st16, "source": b16["source"], "capture": cap16}));
     }
 
+    // Iteration-20 WS1 (BUG-CLOUD-DR-17): 32-call budgeted scoring_enable (0 HTTP 503s), _job_checkpoint atomicity,
+    // single domain/placeholder_origin/3 store links, and failed scoring_enable supersede by PATCH & retry.
+    let rt_dr17 = ProbeRt::new();
+    let (_, prov17) = rt_dr17.call("POST", "/api/admin/provision/execute", json!({
+        "token": "fixture-token",
+        "service_id": "fixtureService",
+        "fos_bucket": "fos-fixture-logs",
+        "fos_region": "us-east-1",
+        "log_fields": {"groups": ["A", "C"], "custom_fields": [], "field_overrides": {}, "field_limits": {}}
+    }));
+    let mut jb_prov17 = prov17["job"].clone();
+    for _ in 0..40 {
+        if jb_prov17["status"] == "complete" || jb_prov17["status"] == "failed" {
+            break;
+        }
+        if let Some(at) = jb_prov17["retry_at"].as_u64() {
+            rt_dr17.now_s.fetch_max(at, Ordering::SeqCst);
+        }
+        let (_, sb) = rt_dr17.call("POST", &format!("/api/admin/jobs/{}/step", jb_prov17["id"].as_str().unwrap()), json!({}));
+        jb_prov17 = sb["job"].clone();
+    }
+    assert_eq!(jb_prov17["status"], "complete", "{jb_prov17}");
+    let (_, sc17_fail_start) = rt_dr17.call_budgeted("POST", "/api/services/fixtureService/scoring/enable", json!({}));
+    let fail_job_id = sc17_fail_start["job"]["id"].as_str().unwrap().to_owned();
+    let fail_job_rec = rt_dr17.admin.get(&format!("job:{fail_job_id}")).unwrap().unwrap();
+    let mut poisoned_job = fail_job_rec.value.clone();
+    poisoned_job["status"] = json!("failed");
+    poisoned_job["error"] = json!("fastly_api_failed");
+    rt_dr17.admin.cas(&format!("job:{fail_job_id}"), Some(&fail_job_rec.generation), &poisoned_job).unwrap();
+    let gen17_patch = rt_dr17.admin.get("svc:fixtureService").unwrap().unwrap().generation;
+    let (dr17_patch_after_fail_st, _) = rt_dr17.call("PATCH", "/api/admin/services/fixtureService", json!({
+        "generation": gen17_patch,
+        "log_period": 120
+    }));
+    let (dr17_en_start_st, sc17_en_start) = rt_dr17.call_budgeted("POST", "/api/services/fixtureService/scoring/enable", json!({}));
+    let mut jb_sc17 = sc17_en_start["job"].clone();
+    let mut dr17_step_503s = 0usize;
+    let mut dr17_saw_checkpoint = false;
+    for _ in 0..40 {
+        if jb_sc17["status"] == "complete" || jb_sc17["status"] == "failed" {
+            break;
+        }
+        if let Some(at) = jb_sc17["retry_at"].as_u64() {
+            rt_dr17.now_s.fetch_max(at, Ordering::SeqCst);
+        }
+        let (st_step, sb) = rt_dr17.call_budgeted("POST", &format!("/api/admin/jobs/{}/step", jb_sc17["id"].as_str().unwrap()), json!({}));
+        if st_step == 503 {
+            dr17_step_503s += 1;
+            break;
+        }
+        if rt_dr17.admin.get("svc:fixtureService").unwrap().unwrap().value.get("_job_checkpoint").is_some() {
+            dr17_saw_checkpoint = true;
+        }
+        jb_sc17 = sb["job"].clone();
+    }
+    let dr17_sc_status = jb_sc17["status"].as_str().unwrap_or("").to_owned();
+    let svc17_after = rt_dr17.admin.get("svc:fixtureService").unwrap().unwrap().value;
+    let sc17_sid = svc17_after["scoring"]["scoring_service_id"].as_str().unwrap_or("").to_owned();
+    let dr17_domains = rt_dr17.admin.resources(&sc17_sid, "domain").len();
+    let dr17_backends = rt_dr17.admin.resources(&sc17_sid, "backend").len();
+    let dr17_links = rt_dr17.admin.resources(&sc17_sid, "resource").len();
+
     println!("{}", json!({
         "st_trav": st_trav,
         "st_own_svc": st_own_svc,
@@ -1518,6 +1626,14 @@ fn main() {
         "dr15_statuses": dr15_statuses,
         "dr15_gce_matrix_intact": dr15_gce_matrix_intact,
         "dr16_results": dr16_results,
+        "dr17_patch_after_fail_st": dr17_patch_after_fail_st,
+        "dr17_en_start_st": dr17_en_start_st,
+        "dr17_step_503s": dr17_step_503s,
+        "dr17_saw_checkpoint": dr17_saw_checkpoint,
+        "dr17_sc_status": dr17_sc_status,
+        "dr17_domains": dr17_domains,
+        "dr17_backends": dr17_backends,
+        "dr17_links": dr17_links,
     }));
 }
 """,
@@ -1590,6 +1706,14 @@ fn main() {
         {"status": 200, "source": "catalog_scan", "capture": "attached"},
         {"status": 200, "source": "catalog_scan", "capture": "attached"},
     ]
+    assert dr14["dr17_patch_after_fail_st"] == 200
+    assert dr14["dr17_en_start_st"] == 200
+    assert dr14["dr17_step_503s"] == 0
+    assert dr14["dr17_saw_checkpoint"] is True
+    assert dr14["dr17_sc_status"] == "complete"
+    assert dr14["dr17_domains"] == 1
+    assert dr14["dr17_backends"] == 1
+    assert dr14["dr17_links"] == 3
 
 
 def test_t5_c04_c12_cloud_disabled_rum_faro_cdn_shield_reconcile_cookie_and_fos_guards(
@@ -5406,7 +5530,8 @@ console.log('NODE_PROXY_AND_CSV_PARITY_OK');
     )
     assert node_probe.returncode == 0 and "NODE_PROXY_AND_CSV_PARITY_OK" in node_probe.stdout, node_probe.stderr
 
-    # Iteration-17..19 WS2 behavioral check: run Vitest on logout DuckDB reset + multi-step caller resumption + identity-switch + manifest/telemetry drain
+    # Iteration-17..20 WS2 behavioral check: run Vitest on logout DuckDB reset + multi-step caller resumption + identity-switch + manifest/telemetry/metadata/stats/ops/security-rollup drain
+    cloud_vitest_env = {**os.environ, "STATIC_EXPORT": "1", "NEXT_PUBLIC_DEPLOYMENT_MODE": "cloud"}
     vitest_logout_probe = subprocess.run(
         [
             "npx",
@@ -5417,8 +5542,30 @@ console.log('NODE_PROXY_AND_CSV_PARITY_OK');
             "lib/cloud-engine/dashboard/rollup-query.test.ts",
             "lib/cloud-engine/dashboard/filtered-cache.test.ts",
             "lib/cloud-engine/dashboard/manifest-store.test.ts",
+            "lib/cloud-engine/value-stats.test.ts",
+            "lib/cloud-engine/security-rollup.test.ts",
+            "lib/cloud-engine/telemetry/client.test.ts",
+            "lib/cloud-engine/adapter.test.ts",
             "-t",
-            "wipes range-loader singleton|aborts in-flight|blocks post-logout OPFS persistFile|blocks multi-step runDashboard|aborts in-flight queryRollup|suppresses pending write|skips CacheStorage and error telemetry",
+            "wipes range-loader singleton|aborts in-flight|blocks post-logout OPFS persistFile|blocks multi-step runDashboard|aborts in-flight queryRollup|suppresses pending write|skips CacheStorage and error telemetry|isolates cached service stats|clears decoded SecuritySummary|fences in-flight ops CacheStorage|aborts multi-step handleCloudAnalyticalRequest",
+        ],
+        cwd=str(REPO_ROOT / "frontend"),
+        env=cloud_vitest_env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+        check=False,
+    )
+    assert vitest_logout_probe.returncode == 0, f"{vitest_logout_probe.stdout}\n{vitest_logout_probe.stderr}"
+    vitest_hook_logout_probe = subprocess.run(
+        [
+            "npx",
+            "vitest",
+            "run",
+            "--no-cache",
+            "__tests__/hooks/useBootstrap.test.ts",
+            "-t",
+            "wipes Cloud dashboard and ops caches",
         ],
         cwd=str(REPO_ROOT / "frontend"),
         capture_output=True,
@@ -5426,4 +5573,6 @@ console.log('NODE_PROXY_AND_CSV_PARITY_OK');
         timeout=60,
         check=False,
     )
-    assert vitest_logout_probe.returncode == 0, f"{vitest_logout_probe.stdout}\n{vitest_logout_probe.stderr}"
+    assert vitest_hook_logout_probe.returncode == 0, (
+        f"{vitest_hook_logout_probe.stdout}\n{vitest_hook_logout_probe.stderr}"
+    )

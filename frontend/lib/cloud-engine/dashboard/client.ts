@@ -4,9 +4,13 @@ import { BaseWorkerRpcClient } from "../worker-rpc";
 import { beginCloudLoading } from "../loading-progress";
 import { resetCloudMetadataCache } from "../metadata-cache";
 import { resetRangeLoaderCache } from "../range-loader";
+import { clearSecurityRollupCache } from "../security-rollup";
 import { clearCloudSessionReferences } from "../session-reference";
+import { resetOpsLogsClient } from "../telemetry/client";
+import { clearOpsCaches } from "../telemetry/sources";
 import { resetUsageSettingsCache } from "../usage/summary";
 import { resetComputeBillingCache } from "../usage/computeUsage";
+import { clearServiceStatsCache } from "../value-stats";
 import { getDuckDBEngine } from "./duckdb";
 import {
   clearDashboardMemo,
@@ -420,17 +424,24 @@ export function notifyDashboardCatalogChange(): void {
 export async function clearDashboardData(): Promise<void> {
   rpcClient?.terminate();
   rpcClient = null;
+  resetOpsLogsClient();
   inlineSource = null;
   clearDashboardMemo();
   clearManifestCache();
   clearRollupQueryCache();
+  clearSecurityRollupCache();
   resetRangeLoaderCache();
   clearCloudSessionReferences();
   resetCloudMetadataCache();
   resetUsageSettingsCache();
   resetComputeBillingCache();
+  clearServiceStatsCache();
   updateDashboardCacheIdentity(null);
-  await Promise.all([getDuckDBEngine().reset(), clearRequestLogCaches()]);
+  await Promise.all([
+    getDuckDBEngine().reset(),
+    clearRequestLogCaches(),
+    clearOpsCaches(),
+  ]);
 }
 
 export async function setDashboardCacheIdentity(
@@ -441,17 +452,24 @@ export async function setDashboardCacheIdentity(
   if (previous === normalized) return;
   rpcClient?.terminate();
   rpcClient = null;
+  resetOpsLogsClient();
   inlineSource = null;
   clearDashboardMemo();
   clearManifestCache();
   clearRollupQueryCache();
+  clearSecurityRollupCache();
   resetRangeLoaderCache();
   clearCloudSessionReferences();
   resetCloudMetadataCache();
   resetUsageSettingsCache();
   resetComputeBillingCache();
+  clearServiceStatsCache();
   updateDashboardCacheIdentity(normalized);
-  await Promise.all([getDuckDBEngine().reset(), clearRequestLogCaches()]);
+  await Promise.all([
+    getDuckDBEngine().reset(),
+    clearRequestLogCaches(),
+    clearOpsCaches(),
+  ]);
 }
 
 export function runDashboard(options: EngineOptions): Promise<DashboardResult> {

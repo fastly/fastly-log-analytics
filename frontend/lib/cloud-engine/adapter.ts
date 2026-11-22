@@ -15,6 +15,7 @@ import { classifyUserAgentCounts } from "./bots/classify";
 import { cmcdScanColumns, handleCmcdRequest, type CmcdQueryParams } from "./cmcd";
 import { cmcdRollupEligible } from "./cmcd-rollup";
 import type { MinuteBucket } from "./dashboard/engine";
+import { currentStoreMetaEpoch } from "./dashboard/file-store";
 import { dashboardCacheIdentity, parseVcpuMsHeader } from "./dashboard/sources";
 import { customCards, type CardField, type CustomField } from "./dashboard/summaries";
 import {
@@ -406,18 +407,38 @@ async function processNativeCloudBootstrap(response: Response): Promise<Response
   return response;
 }
 
-async function loadCloudCatalog(request: Request) {
+function isAdapterAbortError(error: unknown): boolean {
+  return (error instanceof DOMException && error.name === "AbortError") ||
+    (error instanceof Error && error.name === "AbortError");
+}
+
+function assertAdapterEpoch(request: Request, entryMetaEpoch: number): void {
+  request.signal.throwIfAborted();
+  if (entryMetaEpoch !== currentStoreMetaEpoch()) {
+    throw new DOMException("The operation was aborted.", "AbortError");
+  }
+}
+
+async function loadCloudCatalog(
+  request: Request,
+  entryMetaEpoch: number = currentStoreMetaEpoch(),
+) {
+  assertAdapterEpoch(request, entryMetaEpoch);
   const response = await fetchCloudMetadata("/api/log-fields/catalog", request.signal);
+  assertAdapterEpoch(request, entryMetaEpoch);
   if (!response.ok) return response;
   const catalog = await response.json() as components["schemas"]["LogFieldsCatalogResponse"];
+  assertAdapterEpoch(request, entryMetaEpoch);
   const serviceId = new URL(request.url).searchParams.get("service_id") ??
     request.headers.get("x-service-id");
   if (!serviceId) return cloudLogFieldsCatalog(catalog);
   const services = await fetchCloudMetadata("/api/services", request.signal);
+  assertAdapterEpoch(request, entryMetaEpoch);
   if (!services.ok) return services;
   const payload = await services.json() as {
     services?: Array<{ service_id: string; log_fields?: { custom_fields?: Array<Record<string, unknown>> } }>;
   };
+  assertAdapterEpoch(request, entryMetaEpoch);
   const service = payload.services?.find((item) => item.service_id === serviceId);
   if (!service) return jsonResponse({ detail: { error: "service_not_found" } }, request, undefined, 404);
   return cloudLogFieldsCatalog(catalog, service.log_fields);
@@ -465,17 +486,27 @@ const INSIGHT_BASELINE_LADDER_HOURS = [720, 168, 24, 1];
  * baseline one step at a time; the envelope's `baseline_hours` reports what
  * was applied. Speculative prefetches keep failing fast within their own budget.
  */
-async function prepareInsightsScan(request: Request): Promise<Request> {
-  if (request.method !== "POST" || new URL(request.url).pathname !== "/api/insights") return prepareCloudScan(request);
-  const baseline = await cloudInsightsBaseline(request);
-  if (baseline) return prepareCloudScan(request, baseline);
-  if (request.headers.get("x-flp-cloud-prefetch") === "1") return prepareCloudScan(request);
+async function prepareInsightsScan(
+  request: Request,
+  entryMetaEpoch: number = currentStoreMetaEpoch(),
+): Promise<Request> {
+  assertAdapterEpoch(request, entryMetaEpoch);
+  if (request.method !== "POST" || new URL(request.url).pathname !== "/api/insights") {
+    return prepareCloudScan(request, undefined, entryMetaEpoch);
+  }
+  const baseline = await cloudInsightsBaseline(request, entryMetaEpoch);
+  assertAdapterEpoch(request, entryMetaEpoch);
+  if (baseline) return prepareCloudScan(request, baseline, entryMetaEpoch);
+  if (request.headers.get("x-flp-cloud-prefetch") === "1") {
+    return prepareCloudScan(request, undefined, entryMetaEpoch);
+  }
   let current = request;
   for (;;) {
     try {
-      return await prepareCloudScan(current);
+      return await prepareCloudScan(current, undefined, entryMetaEpoch);
     } catch (error) {
       if (!(error instanceof CloudBudgetError)) throw error;
+      assertAdapterEpoch(current, entryMetaEpoch);
       const body = await current.clone().json() as Record<string, unknown>;
       const shorter = INSIGHT_BASELINE_LADDER_HOURS.find((hours) => hours < Number(body.baseline_hours ?? 168));
       if (shorter === undefined) throw error;
@@ -504,14 +535,23 @@ function rollupAnswer(path: string, params: Record<string, unknown>, serviceId: 
  * loads DuckDB. Null (or a summary failure) leaves the read to the raw scan. A
  * partial answer has only its missing parts read raw, over the summaries' range.
  */
-async function cloudNetworkRollup(request: Request, path: string, origin?: CloudQueryContext): Promise<Response | null> {
+async function cloudNetworkRollup(
+  request: Request,
+  path: string,
+  origin: CloudQueryContext | undefined,
+  entryMetaEpoch: number,
+): Promise<Response | null> {
+  assertAdapterEpoch(request, entryMetaEpoch);
   const params = await readRequestParams(request) as NetworkQueryParams & Record<string, unknown>;
+  assertAdapterEpoch(request, entryMetaEpoch);
   if (!networkRollupEligible(path, params)) return null;
   let end = String(params.end_time ?? params.end ?? "");
   if (!end) {
     const response = await withLoading("range", () => fetchCloudMetadata("/api/log-extents", request.signal));
+    assertAdapterEpoch(request, entryMetaEpoch);
     if (!response.ok) return null;
     end = (await response.json() as { latest_log_at?: string | null }).latest_log_at ?? new Date().toISOString();
+    assertAdapterEpoch(request, entryMetaEpoch);
   }
   const { start } = queryRange({ ...params, end }, 24);
   const rawServiceId = params.service_id ?? request.headers.get("x-service-id");
@@ -521,8 +561,11 @@ async function cloudNetworkRollup(request: Request, path: string, origin?: Cloud
     answer = await rollupAnswer(path, {
       ...params, start_time: start, end_time: end, ...serviceId ? { service_id: serviceId } : {},
     }, serviceId, request.signal);
+    assertAdapterEpoch(request, entryMetaEpoch);
   } catch (error) {
-    if (request.signal.aborted) throw error;
+    if (request.signal.aborted || entryMetaEpoch !== currentStoreMetaEpoch() || isAdapterAbortError(error)) {
+      throw error;
+    }
     console.warn("flp: /network summaries failed; reading raw Parquet", error);
     return null;
   }
@@ -530,7 +573,8 @@ async function cloudNetworkRollup(request: Request, path: string, origin?: Cloud
   const residual = await handleCloudRequest(new Request(request.url, {
     method: "POST", headers: request.headers, signal: request.signal,
     body: JSON.stringify({ ...params, ...answer.residual, network_residual: true }),
-  }), origin);
+  }), origin, entryMetaEpoch);
+  assertAdapterEpoch(request, entryMetaEpoch);
   if (!residual?.ok) return residual;
   return jsonResponse(mergeNetworkPartial(answer, await residual.json()), request);
 }
@@ -561,17 +605,26 @@ const SECTION_ROLLUPS: Record<string, SectionRollup> = {
  * range and service, with null (or a summary failure) leaving the read to the
  * raw scan.
  */
-async function cloudSectionRollup(request: Request, path: string, route: SectionRollup): Promise<Response | null> {
+async function cloudSectionRollup(
+  request: Request,
+  path: string,
+  route: SectionRollup,
+  entryMetaEpoch: number,
+): Promise<Response | null> {
+  assertAdapterEpoch(request, entryMetaEpoch);
   const url = new URL(request.url);
   const params = await readRequestParams(request);
+  assertAdapterEpoch(request, entryMetaEpoch);
   const body = request.method === "POST" ? params : {};
   if (route.label === "/security") params.mask_ips = securityMaskIps(request, url, body);
   if (!route.eligible(path, params)) return null;
   let end = String(params.end_time ?? params.end ?? "");
   if (!end) {
     const response = await withLoading("range", () => fetchCloudMetadata("/api/log-extents", request.signal));
+    assertAdapterEpoch(request, entryMetaEpoch);
     if (!response.ok) return null;
     end = (await response.json() as { latest_log_at?: string | null }).latest_log_at ?? new Date().toISOString();
+    assertAdapterEpoch(request, entryMetaEpoch);
   }
   const { start } = queryRange({ ...params, end }, 24);
   const rawServiceId = params.service_id ?? request.headers.get("x-service-id");
@@ -581,9 +634,15 @@ async function cloudSectionRollup(request: Request, path: string, route: Section
     const answer = await rollupAnswer(path, {
       ...params, start_time: start, end_time: end, ...serviceId ? { service_id: serviceId } : {},
     }, serviceId, request.signal);
-    return answer ? jsonResponse(finish ? await finish(answer) : answer, request) : null;
+    assertAdapterEpoch(request, entryMetaEpoch);
+    if (!answer) return null;
+    const decorated = finish ? await finish(answer) : answer;
+    assertAdapterEpoch(request, entryMetaEpoch);
+    return jsonResponse(decorated, request);
   } catch (error) {
-    if (request.signal.aborted) throw error;
+    if (request.signal.aborted || entryMetaEpoch !== currentStoreMetaEpoch() || isAdapterAbortError(error)) {
+      throw error;
+    }
     console.warn(`flp: ${route.label} summaries failed; reading raw Parquet`, error);
     return null;
   }
@@ -633,8 +692,13 @@ function networkBudgetError(error: CloudBudgetError, scans: readonly string[] | 
  * v3 summaries for both window and baseline, deferring only IP detectors to
  * the raw follow-up. Null (or a summary failure) falls back to the raw path.
  */
-async function cloudInsightsRollup(request: Request): Promise<Response | null> {
+async function cloudInsightsRollup(
+  request: Request,
+  entryMetaEpoch: number,
+): Promise<Response | null> {
+  assertAdapterEpoch(request, entryMetaEpoch);
   const body = await request.clone().json() as Record<string, unknown>;
+  assertAdapterEpoch(request, entryMetaEpoch);
   if (Array.isArray(body.detectors)) return null;
   const filters = filtersPayloadToPredicates(body.filters as Parameters<typeof filtersPayloadToPredicates>[0], undefined);
   if (filters.length) return null;
@@ -642,12 +706,19 @@ async function cloudInsightsRollup(request: Request): Promise<Response | null> {
   let earliestLogAt: string | null = null;
   const extentsRes = await withLoading("range", () =>
     fetchCloudMetadata("/api/log-extents", request.signal),
-  ).catch(() => null);
+  ).catch((error: unknown) => {
+    if (request.signal.aborted || entryMetaEpoch !== currentStoreMetaEpoch() || isAdapterAbortError(error)) {
+      throw error;
+    }
+    return null;
+  });
+  assertAdapterEpoch(request, entryMetaEpoch);
   if (extentsRes?.ok) {
     const extents = (await extentsRes.json().catch(() => null)) as {
       earliest_log_at?: string | null;
       latest_log_at?: string | null;
     } | null;
+    assertAdapterEpoch(request, entryMetaEpoch);
     earliestLogAt = extents?.earliest_log_at ?? null;
     if (!end) end = extents?.latest_log_at ?? new Date().toISOString();
   } else if (!end) {
@@ -666,9 +737,12 @@ async function cloudInsightsRollup(request: Request): Promise<Response | null> {
       ...(serviceId ? { service_id: serviceId } : {}),
       mask_ips: maskIps,
     }, serviceId, request.signal);
+    assertAdapterEpoch(request, entryMetaEpoch);
     return answer ? jsonResponse(answer, request) : null;
   } catch (error) {
-    if (request.signal.aborted) throw error;
+    if (request.signal.aborted || entryMetaEpoch !== currentStoreMetaEpoch() || isAdapterAbortError(error)) {
+      throw error;
+    }
     console.warn("flp: /insights summaries failed; reading raw Parquet", error);
     return null;
   }
@@ -679,8 +753,13 @@ async function cloudInsightsRollup(request: Request): Promise<Response | null> {
  * scan would use, so only the window needs raw Parquet. Null (or a summary
  * failure) leaves the baseline to the raw scan.
  */
-async function cloudInsightsBaseline(request: Request): Promise<RollupResult | null> {
+async function cloudInsightsBaseline(
+  request: Request,
+  entryMetaEpoch: number,
+): Promise<RollupResult | null> {
+  assertAdapterEpoch(request, entryMetaEpoch);
   const body = await request.clone().json() as Record<string, unknown>;
+  assertAdapterEpoch(request, entryMetaEpoch);
   // A detector-restricted request is the raw follow-up for detectors the summaries can't answer.
   if (Array.isArray(body.detectors)) return null;
   const filters = filtersPayloadToPredicates(body.filters as Parameters<typeof filtersPayloadToPredicates>[0], undefined);
@@ -688,39 +767,51 @@ async function cloudInsightsBaseline(request: Request): Promise<RollupResult | n
   let end = String(body.end_time ?? body.end ?? body.clamp_end ?? "");
   if (!end) {
     const response = await withLoading("range", () => fetchCloudMetadata("/api/log-extents", request.signal));
+    assertAdapterEpoch(request, entryMetaEpoch);
     if (!response.ok) return null;
     end = (await response.json() as { latest_log_at?: string | null }).latest_log_at ?? new Date().toISOString();
+    assertAdapterEpoch(request, entryMetaEpoch);
   }
   const rawServiceId = body.service_id ?? request.headers.get("x-service-id");
   const serviceId = rawServiceId ? decodeURIComponent(String(rawServiceId)) : undefined;
   try {
-    return await rollupAnswer("/api/insights", { ...body, clamp_end: end }, serviceId,
+    const baseline = await rollupAnswer("/api/insights", { ...body, clamp_end: end }, serviceId,
       request.signal) as RollupResult | null;
+    assertAdapterEpoch(request, entryMetaEpoch);
+    return baseline;
   } catch (error) {
-    if (request.signal.aborted) throw error;
+    if (request.signal.aborted || entryMetaEpoch !== currentStoreMetaEpoch() || isAdapterAbortError(error)) {
+      throw error;
+    }
     console.warn("flp: /insights baseline summaries failed; reading raw Parquet", error);
     return null;
   }
 }
 
-async function prepareCloudScan(request: Request, insightBaseline?: RollupResult): Promise<Request> {
+async function prepareCloudScan(
+  request: Request,
+  insightBaseline?: RollupResult,
+  entryMetaEpoch: number = currentStoreMetaEpoch(),
+): Promise<Request> {
+  assertAdapterEpoch(request, entryMetaEpoch);
   const engine = getDuckDBEngine();
   const generation = await engine.beginRequest();
   generation.assertCurrent();
-  request.signal.throwIfAborted();
+  assertAdapterEpoch(request, entryMetaEpoch);
   const url = new URL(request.url);
   const params = await readRequestParams(request);
   generation.assertCurrent();
-  request.signal.throwIfAborted();
+  assertAdapterEpoch(request, entryMetaEpoch);
   const token = typeof params.session_token === "string" ? openSessionToken(params.session_token) : null;
   let end = String(params.end_time ?? params.end ?? params.clamp_end ?? token?.e ?? "");
   if (!end) {
     const response = await withLoading("range", () =>
       fetchCloudMetadata("/api/log-extents", request.signal));
+    assertAdapterEpoch(request, entryMetaEpoch);
     if (!response.ok) throw new Error(`Cloud range discovery failed (${response.status})`);
     const extents = await response.json() as { latest_log_at?: string | null };
     generation.assertCurrent();
-    request.signal.throwIfAborted();
+    assertAdapterEpoch(request, entryMetaEpoch);
     end = extents.latest_log_at ?? new Date().toISOString();
   }
   const scoring = /\/scoring\//.test(url.pathname);
@@ -744,9 +835,9 @@ async function prepareCloudScan(request: Request, insightBaseline?: RollupResult
   if (!rum && serviceId) {
     const catalogUrl = new URL("/api/log-fields/catalog", request.url);
     catalogUrl.searchParams.set("service_id", decodeURIComponent(String(serviceId)));
-    const catalog = await loadCloudCatalog(new Request(catalogUrl, request));
+    const catalog = await loadCloudCatalog(new Request(catalogUrl, request), entryMetaEpoch);
     generation.assertCurrent();
-    request.signal.throwIfAborted();
+    assertAdapterEpoch(request, entryMetaEpoch);
     if (catalog instanceof Response) throw new Error(`Cloud field discovery failed (${catalog.status})`);
     customFields = (catalog.fields ?? []).filter((field) => field.is_custom).map((field) => ({
       id: field.id,
@@ -781,24 +872,30 @@ async function prepareCloudScan(request: Request, insightBaseline?: RollupResult
     signal: request.signal,
   }) : null;
   generation.assertCurrent();
-  request.signal.throwIfAborted();
+  assertAdapterEpoch(request, entryMetaEpoch);
   // Newest-first windows end at the range end: 1h, then 4x wider until the whole range.
   const queryWindow = (step: number): string | null => {
     const from = Math.floor((Date.parse(end) - QUERY_FIRST_WINDOW_MS * 4 ** step) / 1000) * 1000;
     return from > Date.parse(scanStart) ? new Date(from).toISOString() : null;
   };
-  const loadQuery = (from: string) => ensureCloudRange(from, scanEnd, request.signal, rum ? ["rum"] : ["request"], {
-    serviceId: serviceId ? decodeURIComponent(String(serviceId)) : undefined, customFields,
-    ...queryPlan?.columns && !rum ? { projection: { columns: queryPlan.columns } } : {},
-  }).catch((error: unknown) => {
-    throw error instanceof CloudBudgetError ? queryBudgetError(error, rum ? null : queryPlan?.columns ?? null) : error;
-  });
-  const firstQueryWindow = queryPlan?.newestFirst ? queryWindow(0) : null;
-  const loadSessions = (fromMs: number, toMs: number, columns: readonly string[] | null) => ensureCloudRange(
-    new Date(fromMs).toISOString(), new Date(toMs).toISOString(), request.signal, ["request"], {
+  const loadQuery = async (from: string) => {
+    assertAdapterEpoch(request, entryMetaEpoch);
+    return ensureCloudRange(from, scanEnd, request.signal, rum ? ["rum"] : ["request"], {
       serviceId: serviceId ? decodeURIComponent(String(serviceId)) : undefined, customFields,
-      ...columns ? { projection: { columns: [...columns] } } : {},
+      ...queryPlan?.columns && !rum ? { projection: { columns: queryPlan.columns } } : {},
+    }).catch((error: unknown) => {
+      throw error instanceof CloudBudgetError ? queryBudgetError(error, rum ? null : queryPlan?.columns ?? null) : error;
     });
+  };
+  const firstQueryWindow = queryPlan?.newestFirst ? queryWindow(0) : null;
+  const loadSessions = async (fromMs: number, toMs: number, columns: readonly string[] | null) => {
+    assertAdapterEpoch(request, entryMetaEpoch);
+    return ensureCloudRange(
+      new Date(fromMs).toISOString(), new Date(toMs).toISOString(), request.signal, ["request"], {
+        serviceId: serviceId ? decodeURIComponent(String(serviceId)) : undefined, customFields,
+        ...columns ? { projection: { columns: [...columns] } } : {},
+      });
+  };
   const sessionsFrom = url.pathname === "/api/sessions"
     ? sessionsLoadFrom(params, Date.parse(scanStart), Date.parse(end)) : Date.parse(scanStart);
   const read = queryPlan ? await loadQuery(firstQueryWindow ?? scanStart) : await ensureCloudRange(
@@ -820,7 +917,7 @@ async function prepareCloudScan(request: Request, insightBaseline?: RollupResult
   });
   try {
     generation.assertCurrent();
-    request.signal.throwIfAborted();
+    assertAdapterEpoch(request, entryMetaEpoch);
     if (request.method === "POST") {
       const prepared = bindCloudReadContext(new Request(request, { body: JSON.stringify({ ...params,
         start_time: params.start_time ?? start, end_time: params.end_time ?? end,
@@ -861,10 +958,11 @@ async function prepareCloudScan(request: Request, insightBaseline?: RollupResult
 export async function handleCloudAnalyticalRequest(
   request: Request,
 ): Promise<Response | null> {
+  const entryMetaEpoch = currentStoreMetaEpoch();
   const url = new URL(request.url);
   const serviceId = url.searchParams.get("service_id") ?? request.headers.get("x-service-id");
   const origin = captureCloudQueryContext();
-  const handle = () => handleCloudRequest(request, origin).catch((error: unknown) => {
+  const handle = () => handleCloudRequest(request, origin, entryMetaEpoch).catch((error: unknown) => {
     if (!(error instanceof CloudBudgetError)) throw error;
     return Response.json({ detail: error.message }, { status: 413 });
   });
@@ -876,6 +974,7 @@ export async function handleCloudAnalyticalRequest(
 async function handleCloudRequest(
   request: Request,
   origin?: CloudQueryContext,
+  entryMetaEpoch: number = currentStoreMetaEpoch(),
 ): Promise<Response | null> {
   const url = new URL(request.url);
   const path = url.pathname;
@@ -886,7 +985,7 @@ async function handleCloudRequest(
     resetCloudMetadataCache();
     resetUsageSettingsCache();
   }
-  const response = await handleCloudRequestInner(request, origin);
+  const response = await handleCloudRequestInner(request, origin, entryMetaEpoch);
   const isEventStream =
     response?.headers.get("content-type")?.includes("text/event-stream") === true;
   if (configMutation && response?.ok && !isEventStream) {
@@ -911,6 +1010,7 @@ function isCloudConfigMutation(method: string, path: string): boolean {
 async function handleCloudRequestInner(
   request: Request,
   origin?: CloudQueryContext,
+  entryMetaEpoch: number = currentStoreMetaEpoch(),
 ): Promise<Response | null> {
   const url = new URL(request.url);
   const path = url.pathname;
@@ -979,7 +1079,8 @@ async function handleCloudRequestInner(
     return null;
   }
   if (request.method === "GET" && ["/api/log-fields/catalog", "/api/schema"].includes(path)) {
-    const catalog = await withLoading("listing", () => loadCloudCatalog(request));
+    const catalog = await withLoading("listing", () => loadCloudCatalog(request, entryMetaEpoch));
+    assertAdapterEpoch(request, entryMetaEpoch);
     if (catalog instanceof Response) return catalog;
     return jsonResponse(path === "/api/schema" ? cloudSchema(catalog) : catalog, request);
   }
@@ -988,6 +1089,7 @@ async function handleCloudRequestInner(
   if (stage && isNativeCloudRoute(request.method, path)) {
     if (path === "/api/bootstrap") {
       return withLoading(stage, async () => {
+        request.signal.throwIfAborted();
         const response = await fetch(`${url.pathname}${url.search}`, {
           headers: request.headers,
           credentials: "include",
@@ -1004,7 +1106,12 @@ async function handleCloudRequestInner(
     // The server answers extents for its one active service, so the page's
     // own read can share the lookup its scans make.
     if (path === "/api/log-extents" && !url.search) {
-      return withLoading(stage, () => fetchCloudMetadata(path, request.signal));
+      return withLoading(stage, async () => {
+        assertAdapterEpoch(request, entryMetaEpoch);
+        const res = await fetchCloudMetadata(path, request.signal);
+        assertAdapterEpoch(request, entryMetaEpoch);
+        return res;
+      });
     }
     return withLoading(stage, () => fetch(request));
   }
@@ -1015,26 +1122,29 @@ async function handleCloudRequestInner(
   }
 
   const work = async () => {
+    assertAdapterEpoch(request, entryMetaEpoch);
     let localScan = isLocalScan(path, request.method);
     if (request.method === "POST" && DASHBOARD_PATH.test(path)) {
       const body = await request.clone().json() as {
         chart_metric?: string; metric?: string; chart_interval?: string; interval?: string;
       };
+      assertAdapterEpoch(request, entryMetaEpoch);
       const chartInterval = body.chart_interval ?? body.interval;
       localScan ||= RAW_CHART_METRICS.has(body.chart_metric ?? body.metric ?? "requests") ||
         chartInterval === "1 second" || chartInterval === "1s";
     }
     if (localScan && /^\/api\/network(?:-health|-quality|\/pop-health|\/bundle)$/.test(path)) {
-      const answer = await cloudNetworkRollup(request, path, origin);
+      const answer = await cloudNetworkRollup(request, path, origin, entryMetaEpoch);
       if (answer) return answer;
     }
     const sectionRollup = localScan ? SECTION_ROLLUPS[path] : undefined;
     if (sectionRollup) {
-      const answer = await cloudSectionRollup(request, path, sectionRollup);
+      const answer = await cloudSectionRollup(request, path, sectionRollup, entryMetaEpoch);
       if (answer) return answer;
     }
     if (localScan && path === "/api/sessions/detail") {
       const params = await readRequestParams(request);
+      assertAdapterEpoch(request, entryMetaEpoch);
       if (typeof params.session_token === "string" && params.session_token.length > 0 && !openSessionToken(params.session_token)) {
         return jsonResponse(
           { detail: { error: "invalid_session_token", message: "Invalid or malformed session token." } },
@@ -1045,7 +1155,7 @@ async function handleCloudRequestInner(
       }
     }
     if (localScan && path === "/api/insights" && request.method === "POST") {
-      const answer = await cloudInsightsRollup(request);
+      const answer = await cloudInsightsRollup(request, entryMetaEpoch);
       if (answer) return answer;
     }
     if (localScan) {
@@ -1058,13 +1168,14 @@ async function handleCloudRequestInner(
       let read: DuckDBReadContext | undefined;
       try {
         await previous;
-        request.signal.throwIfAborted();
-        const prepared = await prepareInsightsScan(request);
+        assertAdapterEpoch(request, entryMetaEpoch);
+        const prepared = await prepareInsightsScan(request, entryMetaEpoch);
+        assertAdapterEpoch(request, entryMetaEpoch);
         read = cloudReadContext(prepared);
         const response = /\/scoring\//.test(path)
           ? await cloudScoringRead(prepared) : await dispatchCloudRequest(prepared, origin, cloudReadContext(prepared));
         cloudReadContext(prepared).assertCurrent();
-        prepared.signal.throwIfAborted();
+        assertAdapterEpoch(prepared, entryMetaEpoch);
         success = Boolean(response?.ok);
         return response ?? unsupportedCloudEndpoint(request);
       } finally {
@@ -1073,7 +1184,9 @@ async function handleCloudRequestInner(
         release();
       }
     }
+    assertAdapterEpoch(request, entryMetaEpoch);
     const response = await dispatchCloudRequest(request, origin);
+    assertAdapterEpoch(request, entryMetaEpoch);
     if (response) return response;
     return !path.startsWith("/api/") || isNativeCloudRoute(request.method, path)
       ? null : unsupportedCloudEndpoint(request);

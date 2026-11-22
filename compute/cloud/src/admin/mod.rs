@@ -1109,7 +1109,7 @@ fn new_job(
         scorer_ownership_verified: false,
     })
 }
-// A failed reconcile is superseded by the next one: it can fail for good (service_changed_rerun),
+// A failed reconcile or scoring job is superseded by the next mutation/job: it can fail for good,
 // and keeping it pending would wedge the service. Failed provision/teardown jobs still block.
 fn reject_blocking_job(
     context: &Context<'_, impl Runtime>,
@@ -1117,7 +1117,11 @@ fn reject_blocking_job(
 ) -> Result<(), Error> {
     if let Some(id) = &service.pending_job_id {
         let (_, job) = load_job(context, id)?;
-        let superseded = job.status == "failed" && job.kind == "reconcile";
+        let superseded = job.status == "failed"
+            && matches!(
+                job.kind.as_str(),
+                "reconcile" | "scoring_enable" | "scoring_disable" | "scoring_teardown"
+            );
         if job.status != "complete" && !superseded {
             return Err(Error::new(409, "job_in_progress"));
         }
@@ -1625,9 +1629,9 @@ fn step(context: &Context<'_, impl Runtime>, id: &str, retry: bool) -> Result<Va
         } else {
             job.status = "failed".into();
             job.error = Some(failure.code.into());
-            if job.kind == "scoring_enable" {
+            if job.kind == "scoring_enable" && context.remaining_calls() >= 6 {
                 if let Ok((svc_rec, mut svc)) = load_service(context, &job.service_id) {
-                    scoring::rollback_failed_enable(context, &mut svc, &svc_rec, &job.actor);
+                    scoring::rollback_failed_enable(context, &mut svc, &svc_rec, &mut job);
                 }
             }
         }

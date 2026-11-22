@@ -1688,4 +1688,169 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     );
     expect(await loggedOutRes!.json()).toMatchObject({ source: "unavailable" });
   });
+
+  it("aborts multi-step handleCloudAnalyticalRequest across fetchCloudMetadata and analyticalQueue on clearDashboardData while allowing /api/bootstrap identity updates", async () => {
+    const { clearDashboardData, setDashboardCacheIdentity } = await import("./dashboard/client");
+    const { getDuckDBEngine } = await import("./dashboard/duckdb");
+
+    const cacheBuckets = new Map<string, Map<string, Response>>();
+    vi.stubGlobal("caches", {
+      async open(name: string) {
+        let b = cacheBuckets.get(name);
+        if (!b) {
+          b = new Map();
+          cacheBuckets.set(name, b);
+        }
+        return {
+          async match(k: RequestInfo | URL) { return b!.get(String(k))?.clone(); },
+          async put(k: RequestInfo | URL, v: Response) { b!.set(String(k), v.clone()); },
+          async delete(k: RequestInfo | URL) { return b!.delete(String(k)); },
+          async keys() { return [...b!.keys()].map((u) => new Request(u)); },
+        };
+      },
+      async keys() { return [...cacheBuckets.keys()]; },
+      async delete(name: string) { return cacheBuckets.delete(name); },
+    });
+
+    // 1. /api/bootstrap intentionally calls setDashboardCacheIdentity and MUST still return 200 OK:
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json({
+          runtime_mode: "cloud",
+          user: { id: "alice", role: "admin" },
+          services: [{ service_id: "svc-alice" }],
+          active_service_id: "svc-alice",
+          active_log_field_ids: [],
+          log_fields_catalog: { fields: [] },
+          views: [],
+          build_sha: "baef6e7bb",
+          ngwaf_configured: false,
+          fastly_bots_available: false,
+          settings: { needs_login: false },
+          debug_state: {},
+        }),
+      ),
+    );
+    const bootRes = await handleCloudAnalyticalRequest(new Request("http://localhost/api/bootstrap"));
+    expect(bootRes?.status).toBe(200);
+
+    // 2. N3a: Request paused inside fetchCloudMetadata('/api/log-extents') across clearDashboardData()
+    // (with caller request.signal still un-aborted!) must abort fetchRetrying and reject without post-logout fetches:
+    let resolveExtents!: (res: Response) => void;
+    let notifyExtentsStarted!: () => void;
+    let extentsSignal: AbortSignal | undefined;
+    let postLogoutFilesFetched = 0;
+    const extentsStarted = new Promise<void>((r) => { notifyExtentsStarted = r; });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url.includes("/api/log-extents")) {
+          extentsSignal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+          notifyExtentsStarted();
+          return new Promise<Response>((resolve) => {
+            resolveExtents = resolve;
+          });
+        }
+        if (url.includes("/api/files")) {
+          postLogoutFilesFetched += 1;
+          return Promise.resolve(Response.json({ files: [], complete: true, next_cursor: null }));
+        }
+        return Promise.resolve(Response.json({ fields: [] }));
+      }),
+    );
+
+    const n3aPending = handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/network/bundle?service_id=svc-alice"),
+    ).then(() => "RESOLVED", () => "REJECTED");
+
+    await extentsStarted;
+    await clearDashboardData();
+    expect(extentsSignal?.aborted).toBe(true);
+    resolveExtents(Response.json({ earliest_log_at: "2026-11-10T00:00:00Z", latest_log_at: "2026-11-10T01:00:00Z" }));
+    expect(await n3aPending).toBe("REJECTED");
+    expect(postLogoutFilesFetched).toBe(0);
+    expect([...cacheBuckets.keys()]).toEqual([]);
+
+    // 3. N3b: Scan #2 queued behind Scan #1 in analyticalQueue (`await previous`) across clearDashboardData()
+    // must reject immediately upon waking from `await previous` without invoking prepareInsightsScan / ensureCloudRange!
+    await setDashboardCacheIdentity("alice:admin");
+    let notifyScan1InRange!: () => void;
+    let releaseScan1Range!: () => void;
+    let ensureRangeCalls = 0;
+    const scan1InRange = new Promise<void>((r) => { notifyScan1InRange = r; });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url.includes("/api/log-fields/catalog")) {
+          return Promise.resolve(Response.json({ fields: [] }));
+        }
+        if (url.includes("/api/services")) {
+          return Promise.resolve(Response.json({ services: [{ service_id: "svc-alice" }] }));
+        }
+        return Promise.resolve(new Response("not found", { status: 404 }));
+      }),
+    );
+
+    vi.mocked(ensureCloudRange).mockImplementation(async () => {
+      ensureRangeCalls += 1;
+      if (ensureRangeCalls === 1) {
+        notifyScan1InRange();
+        await new Promise<void>((resolve) => {
+          releaseScan1Range = resolve;
+        });
+      }
+      return {
+        assertCurrent: () => {},
+        release: vi.fn(),
+        getPresentColumns: () => new Set(["timestamp", "ip", "cookie_session", "url"]),
+        getCustomColumnTypes: () => new Map(),
+        executeSql: async () => [{ ip: "203.0.113.88", cookie_session: "ALICE_QUEUED_COOKIE_888", url: "/secret" }],
+      } as unknown as DuckDBReadContext;
+    });
+
+    const scan1 = handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/query", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          sql: "SELECT url FROM logs LIMIT 5",
+          start_time: "2026-11-10T00:00:00Z",
+          end_time: "2026-11-10T01:00:00Z",
+          service_id: "svc-alice",
+        }),
+      }),
+    ).then(() => "RESOLVED", () => "REJECTED");
+
+    await scan1InRange;
+
+    // Enqueue Scan #2 in analyticalQueue (`await previous`) BEFORE clearDashboardData()!
+    const scan2 = handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/query", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          sql: "SELECT ip, cookie_session, url FROM logs LIMIT 5",
+          start_time: "2026-11-10T00:00:00Z",
+          end_time: "2026-11-10T01:00:00Z",
+          service_id: "svc-alice",
+        }),
+      }),
+    ).then(() => "RESOLVED", () => "REJECTED");
+
+    await new Promise((r) => setTimeout(r, 10));
+    await clearDashboardData();
+    releaseScan1Range?.();
+
+    expect(await scan1).toBe("REJECTED");
+    expect(await scan2).toBe("REJECTED");
+    expect(ensureRangeCalls).toBe(1);
+    expect([...cacheBuckets.keys()]).toEqual([]);
+    const rowsAfter = await getDuckDBEngine().readContext().executeSql("SELECT count(*) AS cnt FROM requests");
+    expect(rowsAfter).toEqual([{ cnt: 0 }]);
+  });
 });

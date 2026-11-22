@@ -1,4 +1,5 @@
 import { answerFromRollup } from "../rollup-answer";
+import { clearSecurityRollupCache } from "../security-rollup";
 import { createWorkerRpcHost } from "../worker-rpc";
 import { getDuckDBEngine } from "./duckdb";
 import {
@@ -163,6 +164,7 @@ self.onmessage = createWorkerRpcHost<WorkerRequest>(async (msg, ctx) => {
     clearDashboardMemo();
     clearManifestCache();
     clearRollupQueryCache();
+    clearSecurityRollupCache();
     sharedSource?.clearMemoryCache?.();
     rollupBase?.clearMemoryCache?.();
     await getDuckDBEngine().reset();
@@ -173,6 +175,7 @@ self.onmessage = createWorkerRpcHost<WorkerRequest>(async (msg, ctx) => {
     clearDashboardMemo();
     clearManifestCache();
     clearRollupQueryCache();
+    clearSecurityRollupCache();
     sharedSource?.clearMemoryCache?.();
     rollupBase?.clearMemoryCache?.();
     return;

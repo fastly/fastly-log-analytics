@@ -2410,4 +2410,86 @@ describe('runEventStream, useEventStream, useServiceStream & useAdminEventStream
       expect(cronApply).not.toHaveBeenCalled()
     })
   })
+
+  describe('useAnalystLogout', () => {
+    it('wipes Cloud dashboard and ops caches both immediately AND after /api/auth/logout settles', async () => {
+      const { useAnalystLogout } = await import('@/hooks/useAnalystAndServiceHooks')
+      const clientMod = await import('@/lib/cloud-engine/dashboard/client')
+      const opsMod = await import('@/lib/cloud-engine/telemetry/sources')
+
+      const events: string[] = []
+      let releaseServerLogout!: () => void
+      const serverLogoutStarted = new Promise<void>((resolve) => {
+        vi.mocked(globalThis.fetch).mockImplementation(async (input, init) => {
+          const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+          expect(url).toBe('/api/auth/logout')
+          expect(init?.method).toBe('POST')
+          events.push('logout:request')
+          resolve()
+          await new Promise<void>((r) => {
+            releaseServerLogout = r
+          })
+          events.push('logout:response')
+          return Response.json({ ok: true })
+        })
+      })
+
+      const clearDashSpy = vi.spyOn(clientMod, 'clearDashboardData').mockImplementation(async () => {
+        events.push('clearDashboardData')
+      })
+      const clearOpsSpy = vi.spyOn(opsMod, 'clearOpsCaches').mockImplementation(async () => {
+        events.push('clearOpsCaches')
+      })
+      const origLocation = window.location
+      Object.defineProperty(window, 'location', {
+        configurable: true,
+        value: { ...origLocation, assign: vi.fn() },
+      })
+
+      setCloudModeRuntime(true)
+      try {
+        const { result } = renderHook(() => useAnalystLogout())
+        let logoutDone = false
+        let logoutPromise!: Promise<void>
+        act(() => {
+          logoutPromise = result.current.logout().then(() => {
+            logoutDone = true
+          })
+        })
+
+        await Promise.race([
+          serverLogoutStarted,
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('Expected /api/auth/logout to start')), 1000),
+          ),
+        ])
+        await new Promise((r) => setTimeout(r, 15))
+        // Immediate wipe ran while server logout is still in flight:
+        expect(clearDashSpy).toHaveBeenCalledTimes(1)
+        expect(clearOpsSpy).toHaveBeenCalledTimes(1)
+        expect(logoutDone).toBe(false)
+
+        releaseServerLogout()
+        await act(async () => {
+          await logoutPromise
+        })
+
+        // Post-logout final wipe MUST run AFTER server session revocation settles!
+        expect(clearDashSpy).toHaveBeenCalledTimes(2)
+        expect(clearOpsSpy).toHaveBeenCalledTimes(2)
+        const respIdx = events.indexOf('logout:response')
+        expect(respIdx).toBeGreaterThanOrEqual(0)
+        expect(events.lastIndexOf('clearDashboardData')).toBeGreaterThan(respIdx)
+        expect(events.lastIndexOf('clearOpsCaches')).toBeGreaterThan(respIdx)
+      } finally {
+        setCloudModeRuntime(false)
+        clearDashSpy.mockRestore()
+        clearOpsSpy.mockRestore()
+        Object.defineProperty(window, 'location', {
+          configurable: true,
+          value: origLocation,
+        })
+      }
+    })
+  })
 })
