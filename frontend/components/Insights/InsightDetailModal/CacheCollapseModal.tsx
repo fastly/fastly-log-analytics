@@ -11,7 +11,7 @@ import {
   ShieldAlert,
 } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
-import type { ColumnDef } from '@tanstack/react-table'
+import type { ColumnDef } from '@/lib/table'
 import { TimeSeriesChart } from '@/components/AnalyticsCard'
 import { DataTableReadonly } from '@/components/DataTable'
 import { client, extractApiError, unwrapClient } from '@/lib/api'

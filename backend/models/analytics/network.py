@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_serializer
+from pydantic import BaseModel, ConfigDict, Field, model_serializer
 
 from backend.models.analytics._common import (
     ShieldingRow,
@@ -186,6 +186,7 @@ class TransportProtocolShare(BaseModel):
 
 
 class TransportMetrics(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
     section_timings: list[SectionTimingEntry] | None = Field(
         default=None, serialization_alias="_section_timings", exclude_if=lambda value: value is None
     )
@@ -202,6 +203,8 @@ class TransportMetrics(BaseModel):
     total_requests: int = 0
     protocol_distribution: list[TransportProtocolShare] = []
     missing_fields: list[str] = []
+    approx: bool = Field(default=False, alias="_approx")
+    approx_note: str | None = Field(default=None, alias="_approx_note", exclude_if=lambda value: value is None)
 
 
 NetworkSectionName = Literal[

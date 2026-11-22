@@ -4,7 +4,6 @@ import React, { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   HardDrive,
-  Archive,
   RefreshCw,
   Download,
   Bot,
@@ -27,9 +26,13 @@ import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { DataTableReadonly, ColumnVisibilityDropdown } from '@/components/DataTable'
 import { Input } from '@/components/ui/input'
-import type { ColumnDef } from '@tanstack/react-table'
+import type { ColumnDef } from '@/lib/table'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import type { components } from '@/types/api.generated'
+import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
+import { clearManifestCache } from '@/lib/cloud-engine/dashboard/manifest'
+import { clearDashboardBrowserCaches, getStoreStats } from '@/lib/cloud-engine/dashboard/sources'
+import { clearOpsCaches } from '@/lib/cloud-engine/telemetry/sources'
 import type { CronRun } from './useLogsPageState'
 
 type CronRunsResponse = components['schemas']['CronRunsResponse']
@@ -51,7 +54,7 @@ const SCHEMA_COLUMNS: ColumnDef<SchemaColumn>[] = [
   },
   {
     id: 'type',
-    header: 'DuckDB Type',
+    header: IS_CLOUD_MODE ? 'Parquet / Arrow Type' : 'ClickHouse Type',
     accessorFn: (c) => c.type,
     size: 160,
     cell: ({ row }) => <span className="font-mono text-xs text-muted-foreground">{row.original.type}</span>,
@@ -108,13 +111,37 @@ export function SchemaTab({
   schemaData: components['schemas']['SchemaResponse'] | undefined
   isLoadingSchema: boolean
 }) {
+  const [clearingCache, setClearingCache] = useState(false)
+  const handleClearBrowserCache = async () => {
+    setClearingCache(true)
+    try {
+      clearManifestCache()
+      await Promise.allSettled([clearDashboardBrowserCaches(), clearOpsCaches(), getStoreStats()])
+      showToast('Browser Parquet & operational caches cleared', 'success')
+    } finally {
+      setClearingCache(false)
+    }
+  }
   return (
     <>
       <div className="p-4 border-b flex justify-between items-center">
         <div>
-          <h3 className="text-sm font-medium">DuckDB Table Schema & Statistics</h3>
+          <h3 className="text-sm font-medium">
+            {IS_CLOUD_MODE ? 'Parquet Schema & Statistics' : 'ClickHouse Table Schema & Statistics'}
+          </h3>
           <p className="text-xs text-muted-foreground mt-1">Based on a fast statistical sample of your logs.</p>
         </div>
+        {IS_CLOUD_MODE && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => { void handleClearBrowserCache() }}
+            disabled={clearingCache}
+            data-testid="clear-browser-cache-btn"
+          >
+            Clear Browser Cache
+          </Button>
+        )}
       </div>
       <DataTableReadonly
         columns={SCHEMA_COLUMNS}
@@ -122,7 +149,7 @@ export function SchemaTab({
         isLoading={isLoadingSchema}
         hideToolbar
         showPagination={false}
-        tableCaption="DuckDB Table Schema and Statistics"
+        tableCaption="ClickHouse Table Schema and Statistics"
       />
     </>
   )
@@ -138,27 +165,29 @@ export function IngestionTab({
   isLoadingIngested: boolean
 }) {
   return (
-    <DataTableReadonly
-      columns={ingestedColumns}
-      data={ingestedFiles?.files || []}
-      isLoading={isLoadingIngested}
-      searchKey="file_name"
-      initialSorting={[{ id: 'ingested_at', desc: true }]}
-      renderToolbar={(table) => (
-        <div className="p-4 border-b flex flex-wrap items-center justify-between gap-4">
-          <h3 className="text-sm font-medium">Log Ingestion History</h3>
-          <div className="flex items-center gap-2 ml-auto">
-            <Input
-              placeholder="Filter by filename..."
-              className="max-w-sm h-8"
-              value={(table.getColumn('file_name')?.getFilterValue() as string) ?? ''}
-              onChange={(event) => table.getColumn('file_name')?.setFilterValue(event.target.value)}
-            />
-            <ColumnVisibilityDropdown table={table} compact />
+    <div data-testid="ingested-files">
+      <DataTableReadonly
+        columns={ingestedColumns}
+        data={ingestedFiles?.files || []}
+        isLoading={isLoadingIngested}
+        searchKey="file_name"
+        initialSorting={[{ id: 'ingested_at', desc: true }]}
+        renderToolbar={(table) => (
+          <div className="p-4 border-b flex flex-wrap items-center justify-between gap-4">
+            <h3 className="text-sm font-medium">Log Ingestion History</h3>
+            <div className="flex items-center gap-2 ml-auto">
+              <Input
+                placeholder="Filter by filename..."
+                className="max-w-sm h-8"
+                value={(table.getColumn('file_name')?.getFilterValue() as string) ?? ''}
+                onChange={(event) => table.getColumn('file_name')?.setFilterValue(event.target.value)}
+              />
+              <ColumnVisibilityDropdown table={table} compact />
+            </div>
           </div>
-        </div>
-      )}
-    />
+        )}
+      />
+    </div>
   )
 }
 
@@ -193,7 +222,7 @@ export function QuickActionsBar({
 }) {
   const queryClient = useQueryClient()
   const triggerCronAction = async (
-    endpoint: '/api/admin/ingest-logs' | '/api/admin/commit-storage',
+    endpoint: '/api/admin/ingest-logs',
     title: string,
     description: string,
   ) => {
@@ -239,20 +268,6 @@ export function QuickActionsBar({
         title="Open the range-picker to backfill a specific historical window (e.g., to close an Ingest Gap)"
       >
         <Download className="h-3 w-3 mr-1.5" /> Backfill Logs
-      </Button>
-      <Button
-        size="sm"
-        variant="outline"
-        className="h-8 text-xs bg-background"
-        onClick={() =>
-          triggerCronAction(
-            '/api/admin/commit-storage',
-            'Committing Buffer',
-            'Committing the local Parquet buffer to DuckLake and pushing it to cloud storage...',
-          )
-        }
-      >
-        <Archive className="h-3 w-3 mr-1.5" /> Commit Buffer
       </Button>
       <Button
         size="sm"
@@ -351,6 +366,7 @@ function Node({ node, prefix, level, type, forceExpand }: TreeProps & { node: Tr
                 variant="ghost"
                 size="icon"
                 aria-label="Download folder as ZIP"
+                hidden={IS_CLOUD_MODE}
                 title="Download folder as ZIP"
                 className="h-6 w-6 text-muted-foreground transition-opacity"
                 onClick={(e) => {
@@ -432,7 +448,7 @@ function Node({ node, prefix, level, type, forceExpand }: TreeProps & { node: Tr
               <Cloud className="w-3 h-3 mr-1" /> Cloud
             </Badge>
           )}
-          {node.key && (
+          {node.key && (!IS_CLOUD_MODE || type === 'storage') && (
             <Button
               variant="ghost"
               size="icon"
@@ -441,7 +457,9 @@ function Node({ node, prefix, level, type, forceExpand }: TreeProps & { node: Tr
               className="h-6 w-6 text-muted-foreground transition-opacity"
               onClick={(e) => {
                 e.stopPropagation()
-                window.open(`/api/download?service=${activeServiceId}&key=${encodeURIComponent(node.key as string)}`, '_blank')
+                window.open(IS_CLOUD_MODE
+                  ? `/api/file?service_id=${encodeURIComponent(activeServiceId ?? '')}&key=${encodeURIComponent(node.key as string)}`
+                  : `/api/download?service=${activeServiceId}&key=${encodeURIComponent(node.key as string)}`, '_blank')
               }}
             >
               <Download className="h-3.5 w-3.5" />
@@ -550,7 +568,7 @@ export function FileBrowser({ type }: { type: 'storage' | 'raw' }) {
     <div className="flex flex-col font-sans h-full relative">
       <div className="flex items-center justify-between px-4 py-2 border-b bg-muted/5 sticky top-0 z-10 backdrop-blur-sm">
         <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest">
-          {type === 'storage' ? 'DuckLake Data' : 'Raw Archives'}
+          {type === 'storage' ? 'Archive Parquet' : 'Raw Archives'}
         </span>
         <div className="flex items-center gap-2">
           <Button

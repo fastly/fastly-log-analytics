@@ -38,10 +38,10 @@ BACKEND_PORT_EXPLICIT=false; [ -n "${BACKEND_PORT:-}" ] && BACKEND_PORT_EXPLICIT
 FRONTEND_PORT=${FRONTEND_PORT:-3000}
 BACKEND_PORT=${BACKEND_PORT:-8000}
 LOCAL_REFRESH_MAX_AGE_HOURS=${LOCAL_REFRESH_MAX_AGE_HOURS:-24}
-: "${DUCKLAKE_PG_PASSWORD:=fla_local_dev}"
-: "${METADATA_DSN:=postgresql://fla:${DUCKLAKE_PG_PASSWORD}@127.0.0.1:5432/ducklake}"
-: "${DUCKLAKE_CATALOG:=postgresql://fla:${DUCKLAKE_PG_PASSWORD}@127.0.0.1:5432/ducklake}"
-export DUCKLAKE_PG_PASSWORD METADATA_DSN DUCKLAKE_CATALOG
+: "${POSTGRES_PASSWORD:=fla_local_dev}"
+: "${METADATA_DSN:=postgresql://fla:${POSTGRES_PASSWORD}@127.0.0.1:5432/fla}"
+: "${CLICKHOUSE_URL:=http://127.0.0.1:8123}"
+export POSTGRES_PASSWORD METADATA_DSN CLICKHOUSE_URL
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -137,13 +137,12 @@ if [ "$DEV_MODE" = true ]; then
     fi
     # Local dev runs against the same FOS bucket as prod — any
     # background ingestion would race the prod cron and double-write
-    # rows into the shared DuckLake snapshot. The kill switch in
+    # rows into the shared ClickHouse analytical store. The kill switch in
     # backend/cron/scheduler/runner.py reads this env var and refuses to
     # register OR execute any scheduled cron job (including the
     # ingest-class jobs that gap_heal / manual /admin/ingest-logs
-    # would otherwise trigger). HTTP API calls remain functional
-    # so /api/admin/rebuild-local-view (metadata refresh from cloud)
-    # still works. Override with FLA_DEV_NO_CRONS=0 if you need to
+    # would otherwise trigger). HTTP API calls remain functional.
+    # Override with FLA_DEV_NO_CRONS=0 if you need to
     # exercise the cron path locally (rare).
     : "${FLA_DEV_NO_CRONS:=1}"
     export FLA_DEV_NO_CRONS
@@ -162,13 +161,11 @@ if [ "$DEV_MODE" = true ] && [ "$NO_RELOAD" = false ]; then
     # In dev mode with reload, we explicitly exclude large directories to
     # prevent the watcher from hanging or causing reload loops.
     uv run uvicorn backend.main:app --host 127.0.0.1 --port $BACKEND_PORT --reload \
-        --reload-exclude "cache" \
         --reload-exclude "data" \
         --reload-exclude "frontend" \
         --reload-exclude "node_modules" \
         --reload-exclude ".venv" \
         --reload-exclude ".git" \
-        --reload-exclude "*.duckdb*" \
         --reload-exclude "*.db-wal" \
         --reload-exclude "*.db-shm" \
         --reload-exclude "*.sqlite*" \

@@ -22,7 +22,7 @@ mod scorer;
 
 use fastly::{ConfigStore, Error, Request, Response};
 use std::collections::hash_map::RandomState;
-use std::hash::{BuildHasher, Hash, Hasher};
+use std::hash::BuildHasher;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
@@ -186,7 +186,10 @@ fn score_request(req: &Request) -> Response {
             // Misconfigured dictionary is operationally critical but should
             // fail open in the request path. Emit a diagnostic header so the
             // outage is visible in VCL logs.
-            dbg_log(&format!("[ERROR] Failed to load keys from ConfigStore: {:?}", e));
+            dbg_log(&format!(
+                "[ERROR] Failed to load keys from ConfigStore: {:?}",
+                e
+            ));
             // EC-05: bump the keys fail-open counter AND flush metrics BEFORE the
             // early return — otherwise this path skips maybe_emit_metrics() at the
             // bottom, leaving key-load outages out of the in-process `metrics:`
@@ -295,7 +298,11 @@ fn score_request(req: &Request) -> Response {
     // Behaviour is unchanged: with prev_route None, L2 has no transition to
     // score regardless of whether the matrix is loaded.
     let needs_matrix = prev_route.is_some();
-    let matrix = if needs_matrix { matrix::load_matrix() } else { None };
+    let matrix = if needs_matrix {
+        matrix::load_matrix()
+    } else {
+        None
+    };
     if needs_matrix && matrix.is_none() {
         // We needed the matrix but it's unlinked/empty/unparseable. L2
         // self-disables; bump the counter so the periodic metrics line
@@ -588,14 +595,7 @@ fn load_request_secret(dict: &ConfigStore) -> Option<String> {
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff: u8 = 0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
+    compute_common::crypto::constant_time_eq(a, b)
 }
 
 fn load_keys(keys: Option<&ConfigStore>) -> Result<(Vec<u8>, Option<Vec<u8>>), Error> {
@@ -625,16 +625,7 @@ fn hex_decode(s: &str) -> Result<Vec<u8>, Error> {
 /// doesn't handle quoted values or escapes (we only consume cookies we
 /// ourselves emitted, so the value space is base64url alphabet only).
 fn extract_cookie_value<'a>(cookie_header: &'a str, name: &str) -> Option<&'a str> {
-    for part in cookie_header.split(';') {
-        let trimmed = part.trim();
-        if let Some(eq_idx) = trimmed.find('=') {
-            let (k, v) = trimmed.split_at(eq_idx);
-            if k == name {
-                return Some(&v[1..]);
-            }
-        }
-    }
-    None
+    compute_common::http::extract_cookie_value(cookie_header, name)
 }
 
 /// Returns true when this sealed cookie value looks like a SUSTAINED replay:
@@ -652,9 +643,9 @@ fn extract_cookie_value<'a>(cookie_header: &'a str, name: &str) -> Option<&'a st
 /// it can only MISS a replay, never manufacture a false positive).
 fn is_sustained_replay(cookie_value: &str, now_secs: u32) -> bool {
     static REPLAY_HASHER: OnceLock<RandomState> = OnceLock::new();
-    let mut hasher = REPLAY_HASHER.get_or_init(RandomState::new).build_hasher();
-    cookie_value.hash(&mut hasher);
-    let h = hasher.finish();
+    let h = REPLAY_HASHER
+        .get_or_init(RandomState::new)
+        .hash_one(cookie_value);
     let h = if h == 0 { 1 } else { h }; // 0 marks an empty slot
     let start = (h as usize) & (REPLAY_CACHE_SIZE - 1);
     for probe in 0..REPLAY_PROBES {
@@ -676,17 +667,8 @@ fn is_sustained_replay(cookie_value: &str, now_secs: u32) -> bool {
 }
 
 fn random_nonce() -> [u8; cookie::NONCE_BYTES] {
-    // CSPRNG from the WASI runtime. AES-GCM nonce REUSE is catastrophic
-    // for confidentiality (an attacker who sees two ciphertexts under
-    // the same key+nonce recovers the plaintext XOR and can forge),
-    // so if getrandom fails we PANIC rather than fall back to a weak
-    // source. On wasm32-wasip1 (Fastly Compute) this branch is
-    // unreachable in practice — random_get is a host function backed
-    // by Fastly's runtime entropy and has never been observed to fail.
-    let mut buf = [0u8; cookie::NONCE_BYTES];
-    getrandom::getrandom(&mut buf)
-        .expect("WASI getrandom must not fail — AES-GCM nonce reuse is catastrophic");
-    buf
+    compute_common::runtime::random_bytes()
+        .expect("WASI getrandom must not fail — AES-GCM nonce reuse is catastrophic")
 }
 
 /// Apply the just-computed score back into a new SessionState for the
@@ -726,11 +708,7 @@ fn session_expired(s: &cookie::SessionState, now_secs: u32) -> bool {
     idle > SESSION_IDLE_EXPIRE_S || age > SESSION_HARD_CAP_S
 }
 
-fn fresh_session_state(
-    score: u8,
-    prev_route_path: String,
-    now_secs: u32,
-) -> cookie::SessionState {
+fn fresh_session_state(score: u8, prev_route_path: String, now_secs: u32) -> cookie::SessionState {
     cookie::SessionState {
         v: cookie::SCHEMA_VERSION,
         sid: new_random_sid(),
@@ -787,14 +765,8 @@ fn update_state(
 }
 
 fn new_random_sid() -> [u8; cookie::SID_BYTES] {
-    // Same CSPRNG-or-panic policy as random_nonce: a collision in sids
-    // doesn't break confidentiality but it does collapse distinct
-    // sessions into the same row in the labels table. Better to abort
-    // the request and fail-open than to return a deterministic sid.
-    let mut buf = [0u8; cookie::SID_BYTES];
-    getrandom::getrandom(&mut buf)
-        .expect("WASI getrandom must not fail when generating session sid");
-    buf
+    compute_common::runtime::random_bytes()
+        .expect("WASI getrandom must not fail when generating session sid")
 }
 
 #[cfg(test)]

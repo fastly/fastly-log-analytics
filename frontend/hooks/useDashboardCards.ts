@@ -15,6 +15,8 @@ import { adminJsonResult, client, unwrapClient, queryKeys } from "@/lib/api";
 import { INTERVAL_SECONDS, INTERVALS, historyHoursFromExtents, pickInsightsDefault, quantizeAnchor, resolveRangeWire, _resetUrlHydrationFlag, hydrateFilterStoreFromUrl, rangeLabelToHours, type ChartInterval, type RangeWire, type RangeWireArgs } from "@/lib/utils";
 import { useFilterStore } from '@/stores/filterStore'
 import type { Simplify, WithRequired, components } from '@/types/api'
+import { measureCloudQuery } from '@/lib/cloud-engine/readiness'
+import { analyticsReportQueryKey } from '@/lib/report-query-key'
 
 export { useDebounce, useFilterPayload, useDebouncedFilterPayload }
 export * from './useDashboardCardDefinitions'
@@ -153,16 +155,25 @@ export function keepPreviousWithinService(currentKey: QueryKey, serviceIdIndex =
 export function useServiceQuery<T>(
   queryKey: unknown[],
   queryFn: (context: QueryFunctionContext) => Promise<T>,
-  options?: Omit<UseQueryOptions<T, Error, T, readonly unknown[]>, 'queryKey' | 'queryFn' | 'placeholderData'>
+  options?: Omit<UseQueryOptions<T, Error, T, readonly unknown[]>, 'queryKey' | 'queryFn' | 'placeholderData'>,
+  serviceIdIndex = 2,
 ) {
   const isReady = useIsDataReady()
-  return useQuery<T, Error, T>({
+  const query = useQuery<T, Error, T>({
     ...options,
     queryKey,
     queryFn,
     enabled: isReady && (options?.enabled ?? true),
-    placeholderData: keepPreviousWithinService(queryKey),
+    placeholderData: keepPreviousWithinService(queryKey, serviceIdIndex),
   })
+  const waitingForDataReady =
+    !isReady &&
+    (options?.enabled === undefined || options.enabled === true) &&
+    query.isPending &&
+    query.data === undefined &&
+    !query.isError
+
+  return waitingForDataReady ? { ...query, isLoading: true } : query
 }
 
 type RumStatusWire = WithRequired<components['schemas']['RumStatusResponse'], 'enabled'>
@@ -182,11 +193,12 @@ export function useRumStatus(
 ) {
   return useQuery<RumStatus | null>({
     queryKey: queryKeys.rumStatus(serviceId),
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       if (!serviceId) return null
       const res = await adminJsonResult<'/api/services/{service_id}/rum/status', RumStatusWire>(
         '/api/services/{service_id}/rum/status',
         `/api/services/${serviceId}/rum/status`,
+        { signal },
       )
       if (res.status === 403) return { enabled: false, unauthorized: true }
       return res.ok ? res.data : null
@@ -228,18 +240,24 @@ export function useAnalyticsReportQuery<TData>({
   queryOptions,
 }: AnalyticsReportQueryArgs<TData>) {
   const { rangeKey, rangeBody, rangeToken } = resolveRangeWire(range)
-  const queryKey: unknown[] = [
-    ...namespace,
+  const queryKey = analyticsReportQueryKey({
+    namespace,
     serviceId,
-    rangeKey,
-    range.anchor,
+    rangeToken: rangeKey,
+    anchor: range.anchor,
     filterPayload,
-    ...(keyParts ?? []),
-  ]
+    keyParts,
+  })
   return useServiceQuery<TData>(
     queryKey,
-    ({ signal }) => queryFn({ rangeBody, rangeToken, signal }),
+    ({ signal }) => measureCloudQuery(
+      namespace.join('.'),
+      () => queryFn({ rangeBody, rangeToken, signal }),
+      { range: rangeToken, filters: filterPayload, start: range.startTime, end: range.endTime },
+      serviceId,
+    ),
     queryOptions,
+    namespace.length,
   )
 }
 
@@ -345,8 +363,8 @@ export function useInsightsDefaults(
 ): InsightsDefaults {
   const { data } = useQuery({
     queryKey: queryKeys.logExtents(activeServiceId),
-    queryFn: async () => {
-      return await unwrapClient(client.GET('/api/log-extents'))
+    queryFn: async ({ signal }) => {
+      return await unwrapClient(client.GET('/api/log-extents', { signal }))
     },
     enabled: !!activeServiceId,
     staleTime: 60_000,

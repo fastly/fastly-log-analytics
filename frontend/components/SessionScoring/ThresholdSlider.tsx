@@ -14,7 +14,7 @@ import { client, unwrapClient } from '@/lib/api'
 import { formatCount, formatPercent } from '@/lib/utils'
 import type { Expect, Simplify, WireParity, WithRequired, WithRequiredNullable, components } from '@/types/api'
 import { ThresholdSliderHelp } from './help-content'
-import { scoringConfigCompositeKey, useScoringQuery } from './ScoringAdminPanels'
+import { scoringConfigCompositeKey, useScoringQuery, useScoringStatus } from './ScoringAdminPanels'
 
 type StatusCodeMeta = components['schemas']['ScoringEnforceStatusCodeState']
 type CommittedThreshold = components['schemas']['ScoringThresholdState']
@@ -391,8 +391,7 @@ export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderP
   })
   const isAlreadyCommitted = committed?.threshold === thresholdRaw
 
-  const cachedStatus = queryClient.getQueryData<{ enabled?: boolean }>(['scoring-status', serviceId])
-  const scoringExplicitlyDisabled = cachedStatus?.enabled === false
+  const { data: scoringStatus } = useScoringStatus(serviceId)
 
   const { data: enforce } = useScoringQuery(
     ['scoring-enforce-threshold', serviceId],
@@ -400,7 +399,7 @@ export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderP
       client.GET('/api/services/{service_id}/scoring/enforce-threshold', {
         params: { path: { service_id: serviceId } },
       }),
-    { staleTime: 30_000, enabled: !scoringExplicitlyDisabled },
+    { staleTime: 30_000, enabled: scoringStatus?.enabled === true },
   )
 
   const enforceMutation = useMutation({
@@ -496,6 +495,10 @@ export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderP
             <Skeleton className="h-20 w-full" />
             <Skeleton className="h-20 w-full" />
           </div>
+        ) : !data.flagged || !data.passed ? (
+          <p className="text-xs text-muted-foreground py-3">
+            Threshold preview unavailable until scored sessions are recorded.
+          </p>
         ) : (
           <>
             <ThresholdMatrix flagged={data.flagged} passed={data.passed} />

@@ -1,11 +1,12 @@
 'use client'
 
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { BookOpen, Radio } from 'lucide-react'
+import { CardErrorState } from '@/components/AnalyticsCard'
 import { DashboardSkeleton, ReportLayout } from '@/components/ReportLayout'
 import { Button } from '@/components/ui/button'
-import { useIsAnalyst } from '@/hooks/useBootstrap'
+import { useIsAnalyst, useMounted } from '@/hooks/useBootstrap'
 import { useRumStatus } from '@/hooks/useDashboardCards'
 import { useAnalyticsReportQuery, useReportRangeAnchor } from '@/hooks/useReportPageState'
 import { useTimezone } from '@/hooks/useSSE'
@@ -74,6 +75,17 @@ export {
   type RumLiveEvent,
 }
 
+// Columns the RUM analytics API accepts (backend/high_scale/rum.py _FILTER_COLUMNS). The shared
+// FilterBar carries request-log fields such as status across pages; both backends answer 400 for
+// those on RUM, so they are dropped here instead of failing the whole report.
+const RUM_FILTER_COLUMNS = new Set(['browser', 'os', 'device', 'country', 'pathname', 'city', 'region', 'pop', 'tls'])
+
+export function rumSupportedFilters(filterPayload: FiltersPayload): FiltersPayload {
+  return Object.fromEntries(
+    Object.entries(filterPayload ?? {}).filter(([key]) => RUM_FILTER_COLUMNS.has(key.replace(/_\d+$/, ''))),
+  )
+}
+
 export interface RumClientProps extends Pick<RangeWireArgs, 'relativeRange' | 'isAutoRange' | 'anchor'> {
   serviceId: string | null
   startTime: string | null
@@ -85,20 +97,25 @@ export function RumClient({
   serviceId,
   startTime,
   endTime,
-  filterPayload,
+  filterPayload: rawFilterPayload,
   relativeRange,
   isAutoRange,
   anchor,
 }: RumClientProps) {
   const timezone = useTimezone()
+  const filterPayload = useMemo(() => rumSupportedFilters(rawFilterPayload), [rawFilterPayload])
   const { data: status, isLoading: isStatusLoading } = useRumStatus(serviceId)
+  // Zustand serves its initial (default 24h) range while hydrating, so fetching before mount runs the
+  // heavy RUM queries for a window the URL-selected range immediately replaces (Trap #46).
+  const mounted = useMounted()
+  const queriesEnabled = mounted && !!serviceId && status?.enabled !== false
 
-  const { data: analytics, isLoading } = useAnalyticsReportQuery<RumAnalytics | null>({
+  const { data: analytics, isLoading, isError, refetch } = useAnalyticsReportQuery<RumAnalytics | null>({
     namespace: ['rum-analytics'],
     serviceId,
     filterPayload,
     range: { relativeRange, isAutoRange, startTime, endTime, anchor },
-    queryFn: async ({ rangeBody }) => {
+    queryFn: async ({ rangeBody, signal }) => {
       if (!serviceId) return null
       const params = new URLSearchParams()
       for (const [k, v] of Object.entries(rangeBody)) if (v) params.append(k, v)
@@ -107,16 +124,17 @@ export function RumClient({
       const res = await adminJsonResult<'/api/services/{service_id}/rum/analytics', RumAnalytics>(
         '/api/services/{service_id}/rum/analytics',
         `/api/services/${serviceId}/rum/analytics${qs ? `?${qs}` : ''}`,
+        { signal },
       )
       if (!res.ok) throw new Error(res.errorText || `RUM analytics failed (HTTP ${res.status})`)
       return recordOrNull(res.data)
     },
-    queryOptions: { enabled: !!serviceId && status?.enabled !== false, refetchInterval: false },
+    queryOptions: { enabled: queriesEnabled, refetchInterval: false },
   })
 
-  const { data: liveEvents, isLoading: isLiveEventsLoading } = useQuery({
+  const { data: liveEvents, isLoading: isLiveEventsLoading, isError: isLiveEventsError, refetch: refetchLiveEvents } = useQuery({
     queryKey: ['rum-live-events', serviceId, startTime, endTime, filterPayload],
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       if (!serviceId) return []
       const params = new URLSearchParams()
       if (startTime) params.append('start_time', startTime)
@@ -126,16 +144,24 @@ export function RumClient({
       const res = await adminJsonResult<'/api/services/{service_id}/rum/live-events', RumLiveEvent[]>(
         '/api/services/{service_id}/rum/live-events',
         qs ? `/api/services/${serviceId}/rum/live-events?${qs}` : `/api/services/${serviceId}/rum/live-events`,
+        { signal },
       )
       if (!res.ok) throw new Error(res.errorText || `RUM live events failed (HTTP ${res.status})`)
       return arrayOrEmpty(res.data)
     },
-    enabled: !!serviceId && status?.enabled !== false,
+    enabled: queriesEnabled,
     refetchInterval: false,
   })
 
   if (isStatusLoading) return <DashboardSkeleton />
   if (!status?.enabled) return <RumStatusPanel />
+  if (isError) return (
+    <CardErrorState
+      title="RUM analytics unavailable"
+      message="Could not load analytics for this time window."
+      onRetry={() => void refetch()}
+    />
+  )
   if (isLoading || !analytics) return <DashboardSkeleton />
 
   if (analytics.no_data) {
@@ -167,11 +193,15 @@ export function RumClient({
         timezone={timezone}
       />
 
-      <RumLiveActivitySection
+      {isLiveEventsError ? <CardErrorState
+        title="Live activity unavailable"
+        message="Could not load RUM live events for this time window."
+        onRetry={() => void refetchLiveEvents()}
+      /> : <RumLiveActivitySection
         liveEvents={liveEvents}
         isLiveEventsLoading={isLiveEventsLoading}
         timezone={timezone}
-      />
+      />}
     </div>
   )
 }

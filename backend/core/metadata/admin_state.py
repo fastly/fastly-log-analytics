@@ -9,6 +9,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
+from fastapi import HTTPException
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, TypeAdapter
 
 from backend.core.metadata.pg_pool import get_con, get_con_readonly
@@ -18,13 +19,13 @@ logger = logging.getLogger(__name__)
 
 
 def _get_fos_client(source: dict[str, Any] | None = None) -> Any:
-    from backend.core.duckdb import _get_fos_client as _impl
+    from backend.core.fos_client import _get_fos_client as _impl
 
     return _impl(source or {})
 
 
 def get_source_for_service(service_id: str | None = None) -> dict[str, Any] | None:
-    from backend.core.duckdb import get_source_for_service as _impl
+    from backend.core.fos_client import get_source_for_service as _impl
 
     return _impl(service_id or "")
 
@@ -234,7 +235,7 @@ def asn_ints_for_search(service_id: str, name_ilike: str) -> list[int]:
     """Return ASN integers whose cached name matches the given LIKE pattern.
 
     Used by the dashboard ASN search to pre-fetch matching ASNs and inline them
-    into a DuckDB IN clause (avoids cross-engine JOINs).
+    into a ClickHouse IN clause (avoids cross-engine JOINs).
     """
     with contextlib.closing(get_con_readonly(service_id)) as con:
         rows = con.execute(
@@ -260,6 +261,12 @@ def list_views(service_id: str) -> list[dict]:
 def save_view(service_id: str, view) -> dict:
     con = get_con(service_id)
     view_id = view.id or str(uuid.uuid4())
+    existing = con.execute("SELECT service_id FROM views WHERE id = ?", (view_id,)).fetchone()
+    if existing is not None and str(existing["service_id"]) != str(service_id):
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "conflict", "message": "Saved view ID belongs to another service."},
+        )
     con.execute(
         "INSERT OR REPLACE INTO views (id, service_id, name, filters_json, time_range_type, start_time, end_time, page) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",

@@ -13,8 +13,11 @@ import { PlotlyChart } from '@/components/PlotlyChart'
 import { ColumnVisibilityDropdown, DataTable } from '@/components/DataTable'
 import { ReportLayout } from '@/components/ReportLayout'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
-import { CHART_COLORS } from '@/lib/utils'
-import type { FiltersPayload, PlotlyTrace } from '@/types/api'
+import { approxMark, boundMark, readRollupMeta, RollupDataThroughSlot } from '@/components/network/rollupLabels'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
+import { hasFilterValues, PERFORMANCE_ROLLUP_SECTIONS } from '@/lib/cloud-engine/rollup-sections'
+import { CHART_COLORS, type RangeWire } from '@/lib/utils'
+import type { components, FiltersPayload, PlotlyTrace } from '@/types/api'
 import {
   ASN_COLUMN_IDS,
   asnColumns,
@@ -36,6 +39,8 @@ export {
   CacheTtlHelp,
   OriginVsEdgeHelp,
 } from './PerformanceHelp'
+
+type PerformanceSection = NonNullable<components['schemas']['PerformanceRequest']['sections']>[number]
 
 interface PerformanceBodyProps {
   activeServiceId: string | null
@@ -71,28 +76,45 @@ function PerformanceBody({
   onAsnVisChange,
 }: PerformanceBodyProps) {
   const [sortBy] = useQueryState('sort_by', parseAsStringLiteral(PERF_SORT_BY).withDefault('p99'))
+  // Cloud answers every section from summaries only when unfiltered, so then the raw read never runs.
+  const rollupFirst = isCloudMode() && !hasFilterValues(filterPayload)
+  const range = { relativeRange, isAutoRange, startTime, endTime, anchor }
+  const postPerformance = (sections: PerformanceSection[] | undefined, rangeBody: RangeWire['rangeBody'], signal: AbortSignal | undefined) =>
+    unwrapClient(
+      client.POST('/api/performance/aggregates', {
+        signal,
+        body: {
+          filters: filterPayload,
+          sort_by: sortBy,
+          sections,
+          ...rangeBody,
+        },
+      }),
+    )
+
   const performanceQuery = useAnalyticsReportQuery({
     namespace: ['performance', 'aggregates'],
     serviceId: activeServiceId,
     filterPayload,
-    range: { relativeRange, isAutoRange, startTime, endTime, anchor },
+    range,
     keyParts: [sortBy],
-    queryFn: async ({ rangeBody, signal }) =>
-      unwrapClient(
-        client.POST('/api/performance/aggregates', {
-          signal,
-          body: {
-            filters: filterPayload,
-            sort_by: sortBy,
-            sections: undefined,
-            ...rangeBody,
-          },
-        }),
-      ),
+    queryOptions: { enabled: !rollupFirst },
+    queryFn: ({ rangeBody, signal }) => postPerformance(undefined, rangeBody, signal),
   })
 
-  const coreData = performanceQuery.data
-  const distData = performanceQuery.data
+  const rollupQuery = useAnalyticsReportQuery({
+    namespace: ['performance', 'aggregates', 'rollup'],
+    serviceId: activeServiceId,
+    filterPayload,
+    range,
+    keyParts: [sortBy],
+    queryOptions: { enabled: rollupFirst },
+    queryFn: ({ rangeBody, signal }) => postPerformance([...PERFORMANCE_ROLLUP_SECTIONS], rangeBody, signal),
+  })
+
+  const distQuery = rollupFirst ? rollupQuery : performanceQuery
+  const distData = distQuery.data
+  const rollup = rollupFirst ? readRollupMeta(distData) : undefined
 
   const ttlDist = distData?.ttl_dist
   const ttlDistData = React.useMemo((): PlotlyTrace[] => {
@@ -107,7 +129,7 @@ function PerformanceBody({
     ]
   }, [ttlDist])
 
-  const scatterRows = coreData?.scatter
+  const scatterRows = distData?.scatter
   const scatterData = React.useMemo((): PlotlyTrace[] => {
     if (!scatterRows?.length) return []
     const isHit = (c: string | null | undefined) => c?.startsWith('HIT') === true
@@ -133,7 +155,7 @@ function PerformanceBody({
     ]
   }, [scatterRows])
 
-  const avg = coreData?.waterfall?.avg
+  const avg = distData?.waterfall?.avg
   const waterfallData = React.useMemo((): PlotlyTrace[] => {
     if (!avg) return []
     return [
@@ -146,15 +168,16 @@ function PerformanceBody({
 
   return (
     <>
+      <RollupDataThroughSlot reserve={rollupFirst} meta={rollup} className="mb-4" />
       <div className="mb-6">
         <AnalyticsCard
           title="End-to-End Latency Waterfall (Average)"
           icon={<Network className="h-4 w-4" />}
-          isLoading={performanceQuery.isLoading}
-          isFetching={performanceQuery.isFetching}
+          isLoading={distQuery.isLoading}
+          isFetching={distQuery.isFetching}
           loadingMessage="Calculating latency percentiles..."
-          error={performanceQuery.error as AnalyticsCardError | null}
-          isEmpty={!coreData?.waterfall?.avg}
+          error={distQuery.error as AnalyticsCardError | null}
+          isEmpty={!avg}
           className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
           contentClassName="p-2"
           helpContent={
@@ -175,13 +198,15 @@ function PerformanceBody({
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
         <AnalyticsCard
-          title="Slowest URLs"
+          title={boundMark(rollup, 'top_urls.requests') ? 'Slowest URLs (≥ counts)' : 'Slowest URLs'}
           icon={<Server className="h-4 w-4" />}
           headerAction={
             <div className="flex items-center gap-2">
-              {coreData?._approx === true && (
+              {distData?._approx === true && (
                 <span
-                  title="Latency percentiles on this window are request-weighted averages of per-hour percentiles (sub-second accuracy on most services). Request counts are exact."
+                  title={rollup
+                    ? 'Latency percentiles and the ranking by them are estimated from summary histograms (≈); averages are exact. Request counts are exact unless marked ≥: summaries keep only their busiest values.'
+                    : 'Latency percentiles on this window are request-weighted averages of per-hour percentiles (sub-second accuracy on most services). Request counts are exact.'}
                   className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-muted text-muted-foreground text-[10px] font-bold uppercase tracking-wider cursor-help"
                 >
                   <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground/60" />
@@ -195,18 +220,18 @@ function PerformanceBody({
               />
             </div>
           }
-          isLoading={performanceQuery.isLoading}
-          isFetching={performanceQuery.isFetching}
+          isLoading={distQuery.isLoading}
+          isFetching={distQuery.isFetching}
           loadingMessage="Profiling endpoint latency..."
-          error={performanceQuery.error as AnalyticsCardError | null}
-          isEmpty={(coreData?.top_urls?.length ?? 0) === 0}
+          error={distQuery.error as AnalyticsCardError | null}
+          isEmpty={(distData?.top_urls?.length ?? 0) === 0}
           className="min-h-[560px] [contain-intrinsic-size:560px] [content-visibility:auto]"
           contentClassName="p-0"
           helpContent={<SlowestUrlsHelp />}
         >
           <DataTable
             columns={urlColumns}
-            data={coreData?.top_urls || []}
+            data={distData?.top_urls || []}
             hideToolbar
             columnVisibility={urlVisibility}
             onColumnVisibilityChange={setUrlVisibility}
@@ -214,7 +239,7 @@ function PerformanceBody({
         </AnalyticsCard>
 
         <AnalyticsCard
-          title="Slowest Networks"
+          title={boundMark(rollup, 'top_asns.requests') ? 'Slowest Networks (≥ counts)' : 'Slowest Networks'}
           icon={<Shield className="h-4 w-4" />}
           headerAction={
             <div className="flex items-center gap-2">
@@ -225,18 +250,18 @@ function PerformanceBody({
               />
             </div>
           }
-          isLoading={performanceQuery.isLoading}
-          isFetching={performanceQuery.isFetching}
+          isLoading={distQuery.isLoading}
+          isFetching={distQuery.isFetching}
           loadingMessage="Profiling network latency..."
-          error={performanceQuery.error as AnalyticsCardError | null}
-          isEmpty={(coreData?.top_asns?.length ?? 0) === 0}
+          error={distQuery.error as AnalyticsCardError | null}
+          isEmpty={(distData?.top_asns?.length ?? 0) === 0}
           className="min-h-[560px] [contain-intrinsic-size:560px] [content-visibility:auto]"
           contentClassName="p-0"
           helpContent={<SlowestNetworksHelp />}
         >
           <DataTable
             columns={asnColumns}
-            data={coreData?.top_asns || []}
+            data={distData?.top_asns || []}
             hideToolbar
             columnVisibility={asnVisibility}
             onColumnVisibilityChange={setAsnVisibility}
@@ -246,12 +271,12 @@ function PerformanceBody({
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <AnalyticsCard
-          title="Cache TTL Distribution"
+          title={boundMark(rollup, 'ttl_dist') ? 'Cache TTL Distribution (≥ counts)' : 'Cache TTL Distribution'}
           icon={<Clock className="h-4 w-4" />}
-          isLoading={performanceQuery.isLoading}
-          isFetching={performanceQuery.isFetching}
+          isLoading={distQuery.isLoading}
+          isFetching={distQuery.isFetching}
           loadingMessage="Profiling cache TTL distribution..."
-          error={performanceQuery.error as AnalyticsCardError | null}
+          error={distQuery.error as AnalyticsCardError | null}
           isEmpty={(distData?.ttl_dist?.length ?? 0) === 0}
           className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
           contentClassName="p-2"
@@ -261,13 +286,13 @@ function PerformanceBody({
         </AnalyticsCard>
 
         <AnalyticsCard
-          title="Origin vs Edge Processing (ms)"
+          title={approxMark(rollup, 'scatter') ? 'Origin vs Edge Processing (ms, ≈ sample)' : 'Origin vs Edge Processing (ms)'}
           icon={<Zap className="h-4 w-4" />}
-          isLoading={performanceQuery.isLoading}
-          isFetching={performanceQuery.isFetching}
+          isLoading={distQuery.isLoading}
+          isFetching={distQuery.isFetching}
           loadingMessage="Profiling origin vs edge latency..."
-          error={performanceQuery.error as AnalyticsCardError | null}
-          isEmpty={(coreData?.scatter?.length ?? 0) === 0}
+          error={distQuery.error as AnalyticsCardError | null}
+          isEmpty={(scatterRows?.length ?? 0) === 0}
           className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
           contentClassName="p-2"
           helpContent={<OriginVsEdgeHelp />}

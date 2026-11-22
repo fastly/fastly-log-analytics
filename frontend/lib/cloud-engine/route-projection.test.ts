@@ -1,0 +1,432 @@
+// @vitest-environment node
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { ALL_TABLE_FIELDS, createNodeBackend, FIELD_DUCKDB_TYPES, type DuckDBReadContext } from "./dashboard/duckdb";
+import { assetsScanColumns, handleAssetsRequest } from "./assets";
+import { handleOriginRequest, originScanColumns } from "./origin";
+import { handlePerformanceRequest, performanceScanColumns } from "./performance";
+import { handleValueRequest, valueScanColumns } from "./value";
+import { handleSessionsList, sessionsScanColumns } from "./sessions";
+import { handleSecurityRequest, securityScanColumns, threatIntelScanColumns } from "./security";
+import { cmcdScanColumns, handleCmcdRequest } from "./cmcd";
+import { handleNetworkRequest, NETWORK_SCAN_COLUMNS, networkScanColumns, type NetworkQueryParams } from "./network";
+import { queryCloudScoring, scoringScanColumns } from "./scoring-reads";
+import { bindCloudReadContext } from "./range-loader";
+import { SCORING_OPTIONAL_COLUMNS } from "./sessions";
+
+type Backend = Awaited<ReturnType<typeof createNodeBackend>>;
+type Variant = { name: string; columns: string[] | null; run: (read: DuckDBReadContext) => Promise<unknown> };
+
+const START_MS = 1_700_000_000_000;
+const ROWS = 240;
+const RANGE = { start_time: new Date(START_MS).toISOString(), end_time: new Date(START_MS + ROWS * 60_000).toISOString() };
+const cycle = (values: readonly (string | number | null)[]) =>
+  `(${JSON.stringify(values).replaceAll('"', "'").replaceAll("null", "NULL")})[1 + i % ${values.length}]`;
+// Varied values in every view column, so a scan that read one the projection drops would differ or fail.
+const DATA: Record<string, string> = {
+  cache: cycle(["HIT", "MISS", "PASS", "HIT-CLUSTER", "MISS"]),
+  cache_status: cycle([null, "", "hit", null]),
+  status: cycle([200, 304, 404, 503, 200]),
+  ost: cycle([200, 500, null, 404, 503, 200]),
+  oip: "'10.0.0.' || (i % 5)::VARCHAR",
+  url: "'/assets/' || (i % 6)::VARCHAR || CASE WHEN i % 2 = 0 THEN '.js' ELSE '.png' END",
+  path: cycle([null, "/p.css", "/p.woff2"]),
+  content_type: cycle(["image/png", "text/css", "application/javascript", "text/html", "image/jpeg", null]),
+  resp_header_content_type: cycle([null, "image/gif", "application/json"]),
+  content_encoding: cycle([null, "gzip", "", "br"]),
+  resp_header_content_encoding: cycle(["identity", null, "zstd"]),
+  proto: cycle(["HTTP/2", "HTTP/1.1", "HTTP/3", null]),
+  protocol: cycle([null, null, "h3"]),
+  pop: cycle(["IAD", "LHR", "SJC", "FRA"]),
+  server_region: cycle(["US-East", "EU-West", null]),
+  host: cycle(["a.example", "b.example"]),
+  edge: "i % 5 <> 0",
+  rid: "'r' || i::VARCHAR",
+  prid: "CASE WHEN i % 5 = 0 THEN 'r' || (i - 1)::VARCHAR END",
+  service_id: cycle(["svc", null, "other"]),
+  waf_action: cycle(["block", "log", "allow", null]),
+  ngwaf_decision: cycle([null, "BLOCKED", "PASS"]),
+  waf_sig: cycle(["SQLI,XSS", null, "CMDEXE", "VERIFIED-BOT.Googlebot"]),
+  _bot_name: cycle([null, "Googlebot", ""]),
+  ngwaf_bot_name: cycle(["", "Bingbot", null]),
+  bot_category: cycle([null, null, "crawler"]),
+  io_output_format: cycle(["webp", null, "avif", ""]),
+  ofmt: cycle([null, "jpeg", null]),
+  io_input_format: cycle(["jpeg", "", null]),
+  ifmt: cycle([null, "png"]),
+  tls_version: cycle([null, "TLSv1.3", ""]),
+  tls: cycle(["TLSv1.2", null]),
+  asset_type: cycle([null, "", "Font", null, null]),
+  ua: cycle([
+    "Mozilla/5.0 (compatible; Googlebot/2.1)", "ua-2", "curl/8.4.0", "Mozilla/5.0 Chrome/120",
+    "Mozilla/5.0 (compatible; ChatGPT-User/1.0)", null, "CCBot/2.0",
+  ]),
+  referer: cycle([null, "https://www.google.com/search", "-", "https://example.org/x", ""]),
+};
+
+// Scoring fields the table schema leaves optional; the Cloud view lists them once a file carries them.
+const OPTIONAL_FIELDS = Object.keys(SCORING_OPTIONAL_COLUMNS).filter((column) => !(column in FIELD_DUCKDB_TYPES));
+const FIELDS = [...ALL_TABLE_FIELDS, ...OPTIONAL_FIELDS];
+
+function columnValue(column: string): string {
+  const type = FIELD_DUCKDB_TYPES[column] ?? SCORING_OPTIONAL_COLUMNS[column];
+  const custom = DATA[column];
+  if (custom) return `${custom}::${type}`;
+  if (type === "VARCHAR") return `CASE WHEN i % 11 = 3 THEN NULL ELSE '${column}-' || (i % 7)::VARCHAR END`;
+  if (type === "BOOLEAN") return `CASE WHEN i % 13 = 5 THEN NULL ELSE (i + ${column.length}) % 3 = 0 END`;
+  if (type === "DOUBLE") return `CASE WHEN i % 17 = 2 THEN NULL ELSE ((i * ${column.length + 7}) % 997)::DOUBLE * 37.5 + 0.25 END`;
+  return `CASE WHEN i % 19 = 4 THEN NULL ELSE ((i * ${column.length + 11}) % 1009) * 1103 + 600 END`;
+}
+
+describe("Cloud route column projections", () => {
+  let backend: Backend;
+  const sqls: string[] = [];
+  const read = {
+    assertCurrent: () => undefined,
+    async executeSql(sql: string) {
+      sqls.push(sql);
+      // Like the Cloud view, the schema always lists every column, projected or not.
+      const statement = /^\s*DESCRIBE\b/i.test(sql) ? "DESCRIBE source" : sql;
+      const result = await backend.query(statement) as unknown as { toArray(): Record<string, unknown>[] };
+      return result.toArray().map((row) => Object.fromEntries(Object.entries({ ...row })
+        .map(([key, value]) => [key, typeof value === "bigint" ? Number(value) : value])));
+    },
+    getPresentColumns: async () => new Set(FIELDS),
+    getCustomColumnTypes: () => new Map(),
+  } as unknown as DuckDBReadContext;
+  // `nullFill` lists every column, unprojected ones as NULL, as the Cloud view over a projected file does.
+  const view = (columns: readonly string[], nullFill = false) =>
+    backend.query(`CREATE OR REPLACE VIEW requests AS SELECT ${(nullFill ? all : columns).map((c) => columns.includes(c)
+      ? `"${c}"` : `NULL::${{ ts_ms: "BIGINT", timestamp: "TIMESTAMPTZ" }[c] ?? FIELD_DUCKDB_TYPES[c] ?? SCORING_OPTIONAL_COLUMNS[c]} AS "${c}"`).join(", ")} FROM source`);
+  const all = ["ts_ms", "timestamp", ...FIELDS];
+
+  beforeAll(async () => {
+    backend = await createNodeBackend();
+    await backend.query(`CREATE TABLE source AS SELECT ${START_MS}::BIGINT + i * 60000 AS ts_ms,
+      epoch_ms(${START_MS}::BIGINT + i * 60000)::TIMESTAMPTZ AS "timestamp",
+      ${FIELDS.map((column) => `${columnValue(column)} AS "${column}"`).join(", ")}
+      FROM range(${ROWS}) rows(i)`);
+    await view(all);
+  });
+  afterAll(async () => { await backend?.dispose(); });
+
+  // Each variant's own projection gives the full-table result; every projected column is read by some variant.
+  // `nullFill` checks only that each projection answers like the full table; its NULLs can't show a column unread.
+  async function guard(variants: Variant[], nullFill = false) {
+    for (const variant of variants) {
+      expect(variant.columns, variant.name).not.toBeNull();
+      expect(variant.columns!.filter((column) => !all.includes(column)), variant.name).toEqual([]);
+      await view(all);
+      const expected = await variant.run(read);
+      await view(variant.columns!, nullFill);
+      expect(await variant.run(read), variant.name).toEqual(expected);
+    }
+    if (nullFill) {
+      await view(all);
+      return;
+    }
+    // The loader derives ts_ms from the physical timestamp, which no scan names.
+    const used = new Set(variants.flatMap((variant) => variant.columns!).filter((column) => column !== "timestamp"));
+    for (const column of used) {
+      let failed = false;
+      for (const variant of variants.filter((item) => item.columns!.includes(column))) {
+        await view(variant.columns!.filter((item) => item !== column));
+        if (await variant.run(read).then(() => false, () => true)) { failed = true; break; }
+      }
+      expect(failed, `no scan read ${column}`).toBe(true);
+    }
+    await view(all);
+  }
+
+  const origin = (path: string, body: Record<string, unknown>): Variant => ({
+    name: `${path} ${JSON.stringify(body)}`,
+    columns: originScanColumns(path, body),
+    run: async (context) => {
+      const response = await handleOriginRequest(new Request(`http://localhost${path}`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...RANGE, ...body }),
+      }), path, undefined, context);
+      return response!.json();
+    },
+  });
+
+  it("loads /api/origin scans as exact projections", async () => {
+    const page = {
+      filters: {}, bucket_minutes: 60, split_by_leg: false, timeseries_metric: "ttfb", timeseries_percentile: "p95",
+      slow_urls_limit: 20, slow_urls_min_requests: 50, pop_latency_limit: 30, ip_health_limit: 30,
+      sections: ["summary", "timeseries", "slow_urls", "status_codes", "path_breakdown", "pop_latency", "ip_health"],
+    };
+    const result = await origin("/api/origin/aggregates", page).run(read);
+    expect(result).toMatchObject({ has_data: true, summary: { has_data: true }, ip_health: { has_data: true } });
+    await guard([
+      origin("/api/origin/aggregates", page),
+      origin("/api/origin/aggregates", { split_by_leg: true, timeseries_metric: "ttlb" }),
+      origin("/api/origin/aggregates", { ...page, filters: { country_1: { mode: "include", values: ["country-1"] } } }),
+      origin("/api/origin/timeseries", { metric: "ttlb", split_by_leg: true }),
+      origin("/api/origin/shielding-analysis", {}),
+      ...["host", "pop", "datacenter", "protocol", "oip"].map((dimension) =>
+        origin("/api/origin/drilldown", { dimension })),
+    ]);
+    expect(originScanColumns("/api/origin/aggregates", {
+      filters: { host_2: { mode: "include", values: ["a"] } }, custom_filters: { team: { mode: "exclude", values: ["x"] } },
+    })).toEqual(expect.arrayContaining(["host", "team"]));
+    expect(originScanColumns("/api/origin/aggregates", { filters: [{ field: "host" }] })).toBeNull();
+    expect(originScanColumns("/api/origin/aggregates", { custom_filters: "host" })).toBeNull();
+    expect(originScanColumns("/api/origin/unknown", {})).toBeNull();
+  });
+
+  const value = (body: Record<string, unknown>): Variant => ({
+    name: `/api/value/summary ${JSON.stringify(body)}`,
+    columns: valueScanColumns(body),
+    run: (context) => handleValueRequest("/api/value/summary", { ...RANGE, ...body, engine: context }),
+  });
+
+  it("loads /api/value/summary scans as exact projections", async () => {
+    const page = { filters: {}, chart_interval: "1 day", sections: ["overview", "caching", "network"], service_id: "svc" };
+    expect(await value(page).run(read)).toMatchObject({ overview: { total_requests: expect.any(Number) } });
+    await guard([
+      value({ service_id: "svc", chart_interval: "1 hour" }),
+      value({ filters: { ua_1: { mode: "exclude", values: ["ua-2"] } }, custom_filters: { method: { mode: "include", values: ["method-1"] } } }),
+    ]);
+    // A sectioned scan reads only its sections' columns; the Cloud view lists the rest as NULL.
+    await guard([
+      value(page),
+      ...["overview", "caching", "performance", "network", "security", "bots", "io"].map((section) =>
+        value({ ...page, sections: [section] })),
+      value({ ...page, sections: ["caching"], filters: { host: { mode: "include", values: ["a.example"] } } }),
+    ], true);
+    expect(valueScanColumns({ sections: ["network"] })).toEqual(expect.not.arrayContaining(["url", "cache"]));
+    expect(valueScanColumns({ sections: ["nope"] })).toEqual(valueScanColumns({}));
+    expect(valueScanColumns({ filters: "host" })).toBeNull();
+    expect(valueScanColumns({ custom_filters: [] })).toBeNull();
+  });
+
+  const assets = (body: Record<string, unknown>): Variant => ({
+    name: `/api/assets/aggregates ${JSON.stringify(body)}`,
+    columns: assetsScanColumns(body.filters, body.sections),
+    run: (context) => handleAssetsRequest("/api/assets/aggregates", { ...RANGE, ...body, engine: context }),
+  });
+
+  it("loads /api/assets/aggregates scans as exact projections", async () => {
+    expect(await assets({ filters: {}, service_id: "svc" }).run(read))
+      .toMatchObject({ summary: { total_requests: expect.any(Number) }, low_ttl_assets: expect.any(Array) });
+    await guard([
+      assets({ filters: {}, service_id: "svc" }),
+      assets({ filters: { method: { mode: "include", values: ["method-1"] } } }),
+      assets({ filters: [{ column: "geo_country", operator: "!=", value: "x" }, { column: "asset_type", operator: "=", value: "Image" }] }),
+    ]);
+    // The raw URL tables read only their columns; the Cloud view lists the rest as NULL.
+    const tables = ["large_uncompressed_assets", "low_ttl_assets"];
+    await guard([
+      assets({ filters: {}, service_id: "svc", sections: tables }),
+      ...tables.map((section) => assets({ filters: {}, sections: [section] })),
+      assets({ filters: { cache: { mode: "exclude", values: ["PASS"] } }, sections: tables }),
+      assets({ filters: [{ column: "cache_status", operator: "=", value: "MISS" }], sections: ["large_uncompressed_assets"] }),
+      assets({ filters: {}, sections: ["summary"] }),
+    ], true);
+    const raw = assetsScanColumns({}, tables)!;
+    expect(raw).toEqual(expect.not.arrayContaining(["ttfb", "elapsed", "ttfb_ms", "origin_Whole_ms", "origin_time_ms"]));
+    expect(assetsScanColumns({}, ["low_ttl_assets"])).toEqual(expect.not.arrayContaining(["resp_bytes", "status"]));
+    expect(assetsScanColumns({}, ["large_uncompressed_assets"])).not.toContain("ttl");
+    expect(assetsScanColumns({}, ["nope"])).toEqual(assetsScanColumns({}));
+    expect(assetsScanColumns({}, [])).toEqual(assetsScanColumns({}));
+    expect(assetsScanColumns([{ column: "ua", operator: "=", value: "x" }])).not.toContain("ua");
+    expect(assetsScanColumns("host")).toBeNull();
+    expect(assetsScanColumns([null])).toBeNull();
+  });
+
+  const performance = (body: Record<string, unknown>): Variant => ({
+    name: `/api/performance/aggregates ${JSON.stringify(body)}`,
+    columns: performanceScanColumns(body.filters),
+    run: async (context) => (await handlePerformanceRequest(new Request("http://localhost/api/performance/aggregates", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...RANGE, ...body }),
+    // The Cloud read context's querySql describes the view, so the scan filters on ts_ms.
+    }), undefined, undefined, { ...context, querySql: context.executeSql } as DuckDBReadContext))!.json(),
+  });
+
+  it("loads /api/performance/aggregates scans as exact projections", async () => {
+    expect(await performance({ filters: {}, sort_by: "p99" }).run(read)).toMatchObject({
+      top_urls: expect.arrayContaining([expect.objectContaining({ requests: expect.any(Number) })]),
+      waterfall: { avg: expect.any(Object) }, scatter: expect.any(Array),
+    });
+    await guard([
+      performance({ filters: {}, sort_by: "p99" }),
+      performance({ filters: { status_1: { mode: "include", values: ["200"] } }, sort_by: "avg" }),
+      performance({ filters: { host: ["a.example"], pop: { mode: "exclude", values: ["IAD"] } } }),
+    ]);
+    expect(performanceScanColumns({ status_1: { mode: "include", values: ["200"] } })).toContain("status");
+    expect(performanceScanColumns("status")).toBeNull();
+    expect(performanceScanColumns([{ field: "status" }])).toBeNull();
+  });
+
+  const sessions = (body: Record<string, unknown>): Variant => ({
+    name: `/api/sessions ${JSON.stringify(body)}`,
+    columns: sessionsScanColumns(body.filters),
+    run: async (context) => {
+      const response = await handleSessionsList({ ...RANGE, ...body }, {
+        // The Cloud view's present columns include the loader-derived ts_ms.
+        availableColumns: new Set(["ts_ms", ...await context.getPresentColumns()]),
+        runSql: (sql) => context.executeSql(sql),
+      });
+      if (!("sessions" in response.body)) throw new Error("Session scan failed");
+      return response.body.sessions;
+    },
+  });
+
+  it("loads /api/sessions scans as exact projections", async () => {
+    expect(await sessions({}).run(read)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ req_count: expect.any(Number), unique_urls: expect.any(Number) }),
+    ]));
+    await guard([
+      sessions({}),
+      sessions({ sort_by: "median_rtt_ms", flagged_only: true, min_reqs_flag: 2 }),
+      sessions({ filters: { host: { mode: "include", values: ["a.example"] } }, sort_by: "unique_urls" }),
+    ]);
+    expect(sessionsScanColumns({ host: ["a.example"] })).toContain("host");
+    expect(sessionsScanColumns("host")).toBeNull();
+    expect(sessionsScanColumns([{ field: "host" }])).toBeNull();
+  });
+
+  const security = (body: Record<string, unknown>): Variant => ({
+    name: `/api/security/aggregates ${JSON.stringify(body)}`,
+    columns: securityScanColumns(body.filters),
+    run: async (context) => (await handleSecurityRequest(new Request("http://localhost/api/security/aggregates", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...RANGE, ...body }),
+    }), undefined, undefined, context))!.json(),
+  });
+
+  it("loads /api/security/aggregates scans as exact projections", async () => {
+    expect(await security({ filters: {} }).run(read)).toMatchObject({
+      tls_fingerprints: expect.arrayContaining([expect.objectContaining({ request_count: expect.any(Number) })]),
+      verified_bots_ts: expect.arrayContaining([expect.objectContaining({ bot_type: "Googlebot" })]),
+      traffic_quality: expect.any(Array), proxy_dist: expect.any(Array),
+      wellknown_bots: expect.arrayContaining([expect.objectContaining({ id: "curl" })]),
+      bot_efficiency: expect.arrayContaining([expect.objectContaining({ bot_name: "Curl", referrals: 0 })]),
+    });
+    await guard([
+      security({ filters: {} }),
+      security({ filters: { status_1: { mode: "include", values: ["200"] } }, sections: ["proxies", "ipv6_adoption"] }),
+      security({ filters: { host: ["a.example"] }, sections: ["tls_fingerprints", "top_ips_header", "wellknown_bots"], bucket_seconds: 60 }),
+      security({ filters: {}, sections: ["wellknown_bots"] }),
+      security({ filters: { status_1: { mode: "include", values: ["200"] } }, sections: ["bot_efficiency"] }),
+    ]);
+    expect(securityScanColumns({ status_1: { mode: "include", values: ["200"] }, filter_mode: "all" })).toContain("status");
+    expect(securityScanColumns({ filter_mode: "all" })).not.toContain("filter_mode");
+    expect(securityScanColumns("status")).toBeNull();
+    expect(securityScanColumns([{ field: "status" }])).toBeNull();
+  });
+
+  const threatIntel = (body: Record<string, unknown>): Variant => ({
+    name: `/api/security/threat-intel ${JSON.stringify(body)}`,
+    columns: threatIntelScanColumns(body.filters),
+    run: async (context) => (await handleSecurityRequest(new Request("http://localhost/api/security/threat-intel", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...RANGE, ...body }),
+    }), undefined, undefined, context))!.json(),
+  });
+
+  it("loads /api/security/threat-intel scans as exact projections", async () => {
+    expect(await threatIntel({ filters: {} }).run(read)).toMatchObject({
+      data: expect.arrayContaining([expect.objectContaining({ requests: expect.any(Number) })]),
+    });
+    await guard([
+      threatIntel({ filters: {} }),
+      threatIntel({ filters: { status_1: { mode: "include", values: ["200"] } } }),
+    ]);
+    expect(threatIntelScanColumns({ host_2: { mode: "exclude", values: ["x"] } })).toContain("host");
+    expect(threatIntelScanColumns("host")).toBeNull();
+  });
+
+  const cmcd = (body: Record<string, unknown>): Variant => ({
+    name: `/api/cmcd/aggregates ${JSON.stringify(body)}`,
+    columns: cmcdScanColumns(body.filters),
+    run: (context) => handleCmcdRequest("/api/cmcd/aggregates", { ...RANGE, ...body, engine: context }),
+  });
+
+  it("loads /api/cmcd/aggregates scans as exact projections", async () => {
+    expect(await cmcd({ service_id: "svc" }).run(read)).toMatchObject({
+      has_data: true, summary: { total_requests: expect.any(Number) }, rebuffer_by_asn: expect.any(Array),
+    });
+    await guard([
+      cmcd({ service_id: "svc" }),
+      cmcd({ service_id: "svc", filters: { host: { mode: "include", values: ["a.example"] } }, bucket_seconds: 600, top_n: 3 }),
+      cmcd({ service_id: "svc", filter_sf: "cmcd_sf-1", filter_ot: "cmcd_ot-2", filter_st: "cmcd_st-3", filter_cid: "cmcd_cid-4" }),
+    ]);
+    expect(cmcdScanColumns({ host: { mode: "include", values: ["a.example"] } })).toContain("host");
+    expect(cmcdScanColumns("host")).toBeNull();
+    expect(cmcdScanColumns([{ field: "host" }])).toBeNull();
+  });
+
+  const scoring = (route: string, query = ""): Variant => ({
+    name: `/api/services/svc/scoring/${route}${query}`,
+    columns: scoringScanColumns(),
+    run: (context) => queryCloudScoring(bindCloudReadContext(new Request(
+      `http://localhost/api/services/svc/scoring/${route}?start_time=${RANGE.start_time}&end_time=${RANGE.end_time}${query}`,
+    ), context), route),
+  });
+
+  const network = (path: string, body: Record<string, unknown>): Variant => ({
+    name: `${path} ${JSON.stringify(body)}`,
+    columns: networkScanColumns(path, body),
+    run: (context) => handleNetworkRequest(path, { ...RANGE, ...body, engine: context } as NetworkQueryParams),
+  });
+
+  it("loads each /network scan as its sections' exact projection", async () => {
+    const page = { bucket_seconds: 3600, top_n: 30, map_asn: "all", service_id: "svc" };
+    const transport = { ...page, sections: ["transport"], region_country: "US" };
+    expect(await network("/api/network/bundle", transport).run(read)).toMatchObject({
+      transport: { has_transport_data: true, tcp_rtt_p50_ms: expect.any(Number), delivery_rate_mbps: expect.any(Number) },
+    });
+    await guard([
+      network("/api/network-health", { ...page, sections: ["summary", "leaderboard", "metro_leaderboard", "heatmap", "buckets"] }),
+      network("/api/network-health", { ...page, sections: ["buckets", "cities", "map_buckets"], map_asn: "600" }),
+      network("/api/network-health", { ...page, sections: ["buckets", "cities", "map_buckets"] }),
+      network("/api/network-quality", { region_country: "US", quality_parts: ["throughput"] }),
+      network("/api/network-quality", { region_country: "US", quality_parts: ["region"] }),
+      network("/api/network-quality", { quality_parts: ["asn_client", "throughput"], quality_asns: [600, 601] }),
+      network("/api/network-health", { ...page, sections: ["shielding_analysis"] }),
+      network("/api/network-health", { filter_country: "geo_country-1", filter_asn: 600, filter_pop: "IAD" }),
+      network("/api/network-quality", { region_country: "US", filters: { host: { mode: "include", values: ["a.example"] } } }),
+      network("/api/network/pop-health", {}),
+      network("/api/network/bundle", transport),
+      network("/api/network/bundle", { sections: ["quality", "pop_health", "transport"] }),
+      network("/api/network/bundle", {}),
+    ]);
+    // The page's transport card reads none of the heavy row-level or geo columns.
+    for (const heavy of ["rid", "prid", "city", "as_name", "lat", "region", "cache", "ttfb"]) {
+      expect(networkScanColumns("/api/network/bundle", transport), heavy).not.toContain(heavy);
+    }
+    // The map alone groups no ASN, metro or name; summaries that lack its rows fall back to just these.
+    const map = networkScanColumns("/api/network-health", { ...page, sections: ["buckets", "cities", "map_buckets"] })!;
+    for (const heavy of ["asn", "client_asn", "as_name", "rid", "region", "proto", "pop"]) expect(map, heavy).not.toContain(heavy);
+    expect(networkScanColumns("/api/network-health", { ...page, sections: ["buckets", "cities", "map_buckets"], map_asn: "600" }))
+      .toEqual(expect.arrayContaining(["asn", "client_asn"]));
+    // A quality read of only the parts summaries lacked loads only those parts' columns.
+    const full = networkScanColumns("/api/network-quality", {})!;
+    const throughput = networkScanColumns("/api/network-quality", { quality_parts: ["throughput"] })!;
+    expect(throughput.toSorted()).toEqual(
+      ["timestamp", "ts_ms", "service_id", "elapsed", "time_elapsed_usec", "resp_bytes", "resp_body_size"].toSorted());
+    const allParts = networkScanColumns("/api/network-quality", { quality_parts: ["throughput", "region", "asn_client"] })!;
+    for (const heavy of ["as_name", "proto", "pop", "cache", "ttfb", "client_cwnd", "rtt_var"]) {
+      expect(full, heavy).toContain(heavy);
+      expect(allParts, heavy).not.toContain(heavy);
+    }
+    expect(networkScanColumns("/api/network-quality", { quality_parts: ["bogus"] })).toEqual(full);
+    expect(networkScanColumns("/api/network/bundle", { sections: ["transport"], filters: { host: ["a.example"] } }))
+      .toContain("host");
+    expect(networkScanColumns("/api/network/bundle", { filters: "host" })).toBeNull();
+    // An unparsed section list reads every /network column rather than guessing.
+    expect(networkScanColumns("/api/network/bundle", { sections: "transport" })?.toSorted())
+      .toEqual([...NETWORK_SCAN_COLUMNS].toSorted());
+  });
+
+  it("loads /api/services/{id}/scoring scans as exact projections", async () => {
+    expect(await scoring("analytics").run(read)).toMatchObject({
+      available: true, top_flagged: { rows: expect.arrayContaining([expect.objectContaining({ edge_score: expect.any(Number) })]) },
+      health: { scored_rows: expect.any(Number) },
+    });
+    await guard([
+      scoring("analytics"),
+      scoring("analytics", "&mask_ips=1"),
+      scoring("health"),
+      scoring("sessions/edge_sid-1/events"),
+    ]);
+  });
+});

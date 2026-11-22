@@ -107,31 +107,13 @@ _SCHEMA = [
     # read after upgrade; transactional delta updates after that.
     """CREATE TABLE IF NOT EXISTS ingested_files_summary (
         source_name TEXT PRIMARY KEY,
-        file_count INTEGER NOT NULL DEFAULT 0,
-        total_rows INTEGER NOT NULL DEFAULT 0,
-        total_bytes INTEGER NOT NULL DEFAULT 0,
-        count_with_bytes INTEGER NOT NULL DEFAULT 0,
+        file_count BIGINT NOT NULL DEFAULT 0,
+        total_rows BIGINT NOT NULL DEFAULT 0,
+        total_bytes BIGINT NOT NULL DEFAULT 0,
+        count_with_bytes BIGINT NOT NULL DEFAULT 0,
         latest_file_name TEXT,
         last_ingested TEXT
     )""",
-    # Atomic ingest manifest. A row is written BEFORE the buffer Parquet
-    # appears on disk and deleted AFTER ingested_files is updated. On startup
-    # the ingest loop sweeps this table: if the buffer file exists the row is
-    # promoted (commit ingested_files, drop the in_flight row); if it is
-    # missing the row is dropped without touching ingested_files (the buffer
-    # write itself crashed — files will re-LIST on the next tick). Combined
-    # with deterministic buffer filenames (sha256 of sorted source filenames)
-    # this makes the ingest → buffer → metadata commit sequence crash-safe
-    # without ever double-committing a row to DuckLake.
-    """CREATE TABLE IF NOT EXISTS ingest_in_flight (
-        buffer_filename TEXT NOT NULL,
-        source_name TEXT NOT NULL,
-        files_json TEXT NOT NULL,
-        started_at TEXT DEFAULT (datetime('now')),
-        table_name TEXT NOT NULL DEFAULT 'logs',
-        PRIMARY KEY (buffer_filename, table_name)
-    )""",
-    "CREATE INDEX IF NOT EXISTS idx_in_flight_source ON ingest_in_flight(source_name)",
     """CREATE TABLE IF NOT EXISTS cron_runs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         service_id TEXT,
@@ -145,7 +127,6 @@ _SCHEMA = [
         rows_ingested INTEGER DEFAULT 0,
         corrupt_rows INTEGER DEFAULT 0,
         parquet_files_created INTEGER DEFAULT 0,
-        parquet_files_optimized INTEGER DEFAULT 0,
         parquet_keys TEXT DEFAULT '[]',
         outcome_counters TEXT NOT NULL DEFAULT '{}',
         summary TEXT,
@@ -295,7 +276,7 @@ _SCHEMA = [
 # No ``_init_schema`` here anymore: nothing calls ``get_con`` against a raw
 # SQLite connection needing bootstrap, so the old SQLite-pool ``schema_fn``
 # has no caller left. Postgres schema bootstrap goes through
-# ``backend.core.metadata.pg_schema.ensure_pg_schema()`` (wired at API/Celery
+# ``backend.core.metadata.pg_schema.ensure_pg_schema()`` (wired at API
 # startup — see that module's docstring), which imports ``_SCHEMA`` above and
 # runs it through ``pg_schema._to_postgres()``. ``_SCHEMA`` itself MUST stay
 # SQLite-flavored and MUST NOT be deleted — it is the schema-of-record for
@@ -488,6 +469,26 @@ _RDNS_INDEX_DDL = """
 CREATE INDEX IF NOT EXISTS idx_rdns_status_looked_up_at ON rdns (status, looked_up_at)
 """
 
+# ``ingested_files_summary`` accumulates compressed bytes over the whole retention window. As INTEGER it overflowed
+# at 2 GiB (about 190 logged RPS at the default one-day retention) and every ingest tick then failed. CREATE TABLE
+# IF NOT EXISTS cannot widen an existing column, so deployments created before the BIGINT change are widened here.
+# The guard keeps repeat boots from rewriting the table or taking its lock.
+_WIDEN_INGESTED_FILES_SUMMARY_DDL = """
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'ingested_files_summary' AND data_type = 'integer'
+    ) THEN
+        ALTER TABLE ingested_files_summary
+            ALTER COLUMN file_count TYPE BIGINT,
+            ALTER COLUMN total_rows TYPE BIGINT,
+            ALTER COLUMN total_bytes TYPE BIGINT,
+            ALTER COLUMN count_with_bytes TYPE BIGINT;
+    END IF;
+END $$
+"""
+
 _INGEST_LEDGER_INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_ingest_ledger_claimed_scan ON ingest_ledger(service_id, status, claimed_at)",
     "CREATE INDEX IF NOT EXISTS idx_ingest_ledger_commit_scan "
@@ -544,6 +545,7 @@ def pg_schema_statements() -> list[str]:
     statements.extend(_SLOW_QUERIES_INDEX_DDL)
     statements.append(_METRIC_SNAPSHOTS_DDL)
     statements.extend(_METRIC_SNAPSHOTS_INDEX_DDL)
+    statements.append(_WIDEN_INGESTED_FILES_SUMMARY_DDL)
     statements.extend(_INGEST_LEDGER_INDEXES)
     statements.extend(CLICKHOUSE_CONTROL_DDL)
     statements.append(HIGH_SCALE_CONTROL_DDL)
@@ -639,13 +641,6 @@ class _UsageLogDbProxy:
 
 _usage_log_db: Any = _UsageLogDbProxy()
 
-
-def recompute_ingested_files_summary(con: Any, service_id: str) -> None:
-    from backend.core.metadata import ingest_log as _il
-
-    _il.recompute_ingested_files_summary(con, service_id)
-
-
 _STATS_TABLES = (
     ("usage_log", "usage_log"),
     ("ingested_files", "ingested_files"),
@@ -653,7 +648,6 @@ _STATS_TABLES = (
     ("alerts", "alerts"),
     ("views", "saved_views"),
     ("audit_logs", "audit_log"),
-    ("ingest_in_flight", "in_flight_buffers"),
     ("slow_queries", "slow_queries"),
     ("quarantined_files", "quarantined_files"),
 )
@@ -674,7 +668,7 @@ def _retention_timestamp_expr(ts_col: str) -> str:
     return f"CAST({ts_col} AS TIMESTAMPTZ)"
 
 
-_STATS_SOURCE_NAME_TABLES = frozenset({"ingested_files", "audit_logs", "ingest_in_flight"})
+_STATS_SOURCE_NAME_TABLES = frozenset({"ingested_files", "audit_logs"})
 _STATS_SERVICE_ID_TABLES = frozenset({"cron_runs", "alerts", "views", "slow_queries", "quarantined_files"})
 
 
@@ -797,14 +791,6 @@ def get_metadata_storage_stats(service_id: str, *, force: bool = False) -> dict:
     return result
 
 
-def is_ingested_files_dedup_active(service_id: str) -> bool:
-    """Return True when the ``ingested_files`` table is the active dedup gate."""
-    from backend import config as svcconfig
-
-    cfg = svcconfig.load_config(service_id) or {}
-    return svcconfig.resolve_raw_delete_after(cfg)
-
-
 def cleanup_metadata(
     service_id: str,
     retention: dict | None = None,
@@ -821,21 +807,6 @@ def cleanup_metadata(
             logger.debug("_emit: on_event failed (ignored)", exc_info=True)
 
     cfg = {**DEFAULT_METADATA_RETENTION, **(retention or {})}
-
-    if not is_ingested_files_dedup_active(service_id):
-        configured = int(cfg.get("ingested_files_days") or 0)
-        if configured > 0:
-            _emit(
-                {
-                    "type": "status",
-                    "message": (
-                        f"ingested_files retention ({configured}d) ignored — "
-                        "cron_sync.delete_after=false makes this table the dedup gate. "
-                        "Trimming would cause full_sync to re-ingest aged-out files."
-                    ),
-                }
-            )
-        cfg["ingested_files_days"] = 0
 
     con = get_con(service_id)
     t0 = _t.time()
@@ -937,16 +908,6 @@ def cleanup_metadata(
                 }
             )
 
-    if deleted.get("ingested_files", 0) > 0:
-        try:
-            recompute_ingested_files_summary(con, service_id)
-        except Exception as e:
-            logger.warning(
-                "[metadata_cleanup] %s: ingested_files_summary recompute failed — %s",
-                service_id,
-                e,
-            )
-
     vacuumed = False
     _emit(
         {
@@ -968,27 +929,6 @@ def cleanup_metadata(
     )
 
     rollups_deleted = 0
-    try:
-        rollups_days = int(cfg.get("rollups_days") or 0)
-    except (TypeError, ValueError):
-        rollups_days = 0
-    if rollups_days > 0:
-        try:
-            from backend.core import rollups as _rollups
-            from backend.core.duckdb import get_source_for_service
-
-            src = get_source_for_service(service_id)
-            if src is not None:
-                rollups_deleted = _rollups.cleanup_old_rollups(service_id, src, rollups_days)
-                if rollups_deleted:
-                    _emit(
-                        {
-                            "type": "status",
-                            "message": f"Rollups: dropped {rollups_deleted} hour-dir(s) older than {rollups_days}d",
-                        }
-                    )
-        except Exception as e:
-            logger.warning("[metadata_cleanup] %s: rollups cleanup skipped — %s", service_id, e)
 
     invalidate_storage_stats_cache(service_id)
     return {

@@ -2,7 +2,7 @@
 
 import React from 'react'
 import dynamic from 'next/dynamic'
-import type { ColumnDef } from '@tanstack/react-table'
+import type { ColumnDef } from '@/lib/table'
 import {
   DataTableReadonly,
   FilterValueCell,
@@ -30,6 +30,7 @@ import {
   WorstAsnHelp,
   WorstRegionHelp,
 } from './NetworkHelp'
+import { approxMark, boundMark, readRollupMeta, type NetworkRollupMeta } from '@/components/network/rollupLabels'
 
 const PlotlyChart = dynamic(() => import('@/components/PlotlyChart').then((mod) => mod.PlotlyChart), {
   ssr: false, loading: () => <Skeleton className="w-full h-[300px]" />,
@@ -45,7 +46,11 @@ export type MetroRow = components['schemas']['NetworkMetroRow']
 const rttMs = (us: number | null | undefined) => (us != null ? `${(us / 1000).toFixed(1)}ms` : '—')
 const healthDelta = (a: AsnRow) => (a.health_score_now ?? 0) - (a.health_score_1h_ago ?? 0)
 
-export const ASN_COLUMNS: ColumnDef<AsnRow>[] = [
+const ApproxHealth = ({ mark, score }: { mark: string; score: number | null }) => (
+  <span className="block text-right">{mark && <span className="mr-1 text-xs text-muted-foreground">{mark}</span>}<HealthBadge score={score} /></span>
+)
+
+export const asnColumns = (meta?: NetworkRollupMeta): ColumnDef<AsnRow>[] => [
   {
     id: 'asn', header: 'ASN', accessorFn: (a) => a.label, size: 240,
     cell: ({ row }) => (
@@ -56,11 +61,11 @@ export const ASN_COLUMNS: ColumnDef<AsnRow>[] = [
   },
   {
     id: 'requests', header: 'Requests', accessorFn: (a) => a.total_reqs ?? 0, size: 110,
-    cell: ({ row }) => <span className="block text-right font-mono text-xs">{formatCount(row.original.total_reqs ?? 0)}</span>,
+    cell: ({ row }) => <span className="block text-right font-mono text-xs">{boundMark(meta, 'leaderboard')}{formatCount(row.original.total_reqs ?? 0)}</span>,
   },
   {
     id: 'health', header: 'Health Score', accessorFn: (a) => a.health_score_now ?? -1, size: 120,
-    cell: ({ row }) => <span className="block text-right"><HealthBadge score={row.original.health_score_now ?? null} /></span>,
+    cell: ({ row }) => <ApproxHealth mark={approxMark(meta, 'health_score_now')} score={row.original.health_score_now ?? null} />,
   },
   {
     id: 'p95', header: 'P95 RTT', accessorFn: (a) => a.p95_rtt_us ?? -1, size: 100,
@@ -98,7 +103,7 @@ export const ASN_COLUMNS: ColumnDef<AsnRow>[] = [
   },
 ]
 
-export const METRO_COLUMNS: ColumnDef<MetroRow>[] = [
+export const metroColumns = (meta?: NetworkRollupMeta): ColumnDef<MetroRow>[] => [
   {
     id: 'city', header: 'Metro / City', accessorFn: (m) => m.city, size: 260,
     cell: ({ row }) => {
@@ -121,11 +126,11 @@ export const METRO_COLUMNS: ColumnDef<MetroRow>[] = [
   },
   {
     id: 'requests', header: 'Requests', accessorFn: (m) => m.total_reqs ?? 0, size: 110,
-    cell: ({ row }) => <span className="block text-right font-mono text-xs">{formatCount(row.original.total_reqs ?? 0)}</span>,
+    cell: ({ row }) => <span className="block text-right font-mono text-xs">{boundMark(meta, 'metro_leaderboard')}{formatCount(row.original.total_reqs ?? 0)}</span>,
   },
   {
     id: 'health', header: 'Health Score', accessorFn: (m) => m.health_score ?? -1, size: 120,
-    cell: ({ row }) => <span className="block text-right"><HealthBadge score={row.original.health_score ?? null} /></span>,
+    cell: ({ row }) => <ApproxHealth mark={approxMark(meta, 'health_score')} score={row.original.health_score ?? null} />,
   },
 ]
 
@@ -175,16 +180,18 @@ export function LeaderboardStatusBody<T>({
 export function NetworkKpiGrid({
   summary,
   isCoreLoadingInitial,
+  rollup,
 }: {
   summary: components['schemas']['NetworkHealthResponse']['summary'] | undefined
   isCoreLoadingInitial: boolean
+  rollup?: NetworkRollupMeta
 }) {
   return (
     <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 [contain-intrinsic-size:120px] [content-visibility:auto]">
       {[
         {
           title: 'Global Health', icon: Activity, loadingMessage: 'Compiling ASN health matrix...',
-          value: <>{summary?.global_health_score ?? '--'}/100</>, sub: 'Average across top ASNs',
+          value: <>{summary?.global_health_score != null && approxMark(rollup, 'global_health_score')}{summary?.global_health_score ?? '--'}/100</>, sub: 'Average across top ASNs',
           helpTitle: 'Global Health Score', helpContent: <GlobalHealthHelp />,
         },
         {
@@ -195,13 +202,13 @@ export function NetworkKpiGrid({
         {
           title: 'Worst ASN', icon: AlertCircle, iconClassName: 'text-red-500', loadingMessage: 'Scanning ASN degradation...',
           value: <span className="text-sm truncate block">{summary?.worst_asn?.label ?? '--'}</span>,
-          sub: <span className="text-red-500 font-medium">Score: {summary?.worst_asn?.score ?? '--'}</span>,
+          sub: <span className="text-red-500 font-medium">Score: {summary?.worst_asn?.score != null && approxMark(rollup, 'worst_asn')}{summary?.worst_asn?.score ?? '--'}</span>,
           helpTitle: 'Worst-Performing ASN', helpContent: <WorstAsnHelp />,
         },
         {
           title: 'Worst Region', icon: Globe, loadingMessage: 'Evaluating regional latency...',
           value: <span className="text-sm truncate block">{summary?.worst_country?.label ?? '--'}</span>,
-          sub: <span className="text-red-500 font-medium">Score: {summary?.worst_country?.score ?? '--'}</span>,
+          sub: <span className="text-red-500 font-medium">Score: {summary?.worst_country?.score != null && approxMark(rollup, 'worst_country')}{summary?.worst_country?.score ?? '--'}</span>,
           helpTitle: 'Worst-Performing Region', helpContent: <WorstRegionHelp />,
         },
       ].map((card) => (
@@ -224,6 +231,9 @@ export function NetworkLeaderboardsSection({
   error: unknown
   isFieldActive: (field: string) => boolean
 }) {
+  const rollup = readRollupMeta(data)
+  const asnCols = React.useMemo(() => asnColumns(rollup), [rollup])
+  const metroCols = React.useMemo(() => metroColumns(rollup), [rollup])
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 [contain-intrinsic-size:420px] [content-visibility:auto]">
       <AnalyticsCard
@@ -236,7 +246,7 @@ export function NetworkLeaderboardsSection({
           emptyActiveMsg="No ASN data in this time range."
           emptyInactiveMsg="Requires Network Quality (Group F) fields to be enabled in Fastly logging."
         >
-          {(rows) => <DataTableReadonly columns={ASN_COLUMNS} data={[...rows]} hideToolbar showPagination={false} tableCaption="ASN performance leaderboard" />}
+          {(rows) => <DataTableReadonly columns={asnCols} data={[...rows]} hideToolbar showPagination={false} tableCaption="ASN performance leaderboard" />}
         </LeaderboardStatusBody>
       </AnalyticsCard>
 
@@ -251,7 +261,7 @@ export function NetworkLeaderboardsSection({
             emptyActiveMsg="No metro data in this time range."
             emptyInactiveMsg="Requires Geolocation (Group D/E) fields to be enabled in Fastly logging."
           >
-            {(rows) => <DataTableReadonly columns={METRO_COLUMNS} data={[...rows]} hideToolbar showPagination={false} tableCaption="Metro and region leaderboard" />}
+            {(rows) => <DataTableReadonly columns={metroCols} data={[...rows]} hideToolbar showPagination={false} tableCaption="Metro and region leaderboard" />}
           </LeaderboardStatusBody>
         </AnalyticsCard>
       )}

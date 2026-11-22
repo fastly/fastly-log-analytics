@@ -73,18 +73,18 @@ run "cdn_proxy_has_required_cdn_snippets" {
   }
 }
 
-run "logging_service_has_logging_s3_endpoint" {
+run "logging_service_has_logging_fos_endpoint" {
   command = plan
 
   # The whole pipeline starts here — fastly writes log batches to FOS via
-  # this endpoint. Assert the bucket name plumbs through correctly.
+  # this native endpoint. Assert the bucket and region plumb through.
   assert {
     condition = length([
-      for ep in fastly_service_vcl.logging_service.logging_s3 :
+      for ep in fastly_service_vcl.logging_service.logging_fos :
       ep
-      if ep.bucket_name == "my-test-bucket"
+      if ep.bucket_name == "my-test-bucket" && ep.region == "us-east-1"
     ]) == 1
-    error_message = "logging_service must declare a logging_s3 endpoint pointing at my-test-bucket"
+    error_message = "logging_service must declare a logging_fos endpoint pointing at my-test-bucket in us-east-1"
   }
 }
 
@@ -93,7 +93,7 @@ run "logging_service_has_capture_recv_snippet" {
 
   # The recv-stage snippet ("Fastly Log Analysis Capture") is what
   # actually instructs Fastly to write to the endpoint. Without it,
-  # logging_s3 declared above is dead config.
+  # logging_fos declared above is dead config.
   assert {
     condition = length([
       for s in fastly_service_vcl.logging_service.snippet :

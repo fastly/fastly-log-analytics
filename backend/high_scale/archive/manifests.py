@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import uuid
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
@@ -13,6 +12,7 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
+import orjson
 import pyarrow as pa
 import pyarrow.parquet as pq
 import structlog
@@ -201,6 +201,7 @@ class ObjectStore(Protocol):
     def get(self, key: str) -> bytes: ...
     def exists(self, key: str) -> bool: ...
     def delete(self, key: str) -> None: ...
+    def list_keys(self, prefix: str = "") -> list[str]: ...
 
 
 class PublicationState(StrEnum):
@@ -249,6 +250,10 @@ class InMemoryObjectStore:
     def delete(self, key: str) -> None:
         self._objects.pop(key, None)
 
+    def list_keys(self, prefix: str = "") -> list[str]:
+        norm = prefix.lstrip("/")
+        return sorted(k for k in self._objects if k.startswith(norm))
+
 
 class S3ObjectStore:
     """S3-compatible object store adapter for FOS and local S3 emulators."""
@@ -275,6 +280,60 @@ class S3ObjectStore:
 
     def delete(self, key: str) -> None:
         self._client.delete_object(Bucket=self._bucket, Key=self._key(key))
+
+    def list_keys(self, prefix: str = "") -> list[str]:
+        sub = prefix.lstrip("/")
+        if self._prefix and sub:
+            s3_prefix = f"{self._prefix}/{sub}"
+        elif self._prefix:
+            s3_prefix = f"{self._prefix}/"
+        else:
+            s3_prefix = sub
+
+        strip_prefix = f"{self._prefix}/" if self._prefix else ""
+        keys: list[str] = []
+
+        get_paginator = getattr(self._client, "get_paginator", None)
+        if callable(get_paginator):
+            paginator = get_paginator("list_objects_v2")
+            pages = paginator.paginate(Bucket=self._bucket, Prefix=s3_prefix)
+            for page in pages:
+                for item in page.get("Contents") or ():
+                    raw_key = item.get("Key", "")
+                    if not raw_key:
+                        continue
+                    if strip_prefix:
+                        if not raw_key.startswith(strip_prefix):
+                            continue
+                        raw_key = raw_key[len(strip_prefix) :]
+                    if not raw_key:
+                        continue
+                    keys.append(raw_key)
+        else:
+            token: str | None = None
+            while True:
+                kwargs: dict[str, Any] = {"Bucket": self._bucket, "Prefix": s3_prefix}
+                if token:
+                    kwargs["ContinuationToken"] = token
+                page = self._client.list_objects_v2(**kwargs)
+                for item in page.get("Contents") or ():
+                    raw_key = item.get("Key", "")
+                    if not raw_key:
+                        continue
+                    if strip_prefix:
+                        if not raw_key.startswith(strip_prefix):
+                            continue
+                        raw_key = raw_key[len(strip_prefix) :]
+                    if not raw_key:
+                        continue
+                    keys.append(raw_key)
+                if not page.get("IsTruncated"):
+                    break
+                token = page.get("NextContinuationToken")
+                if not token:
+                    break
+
+        return sorted(keys)
 
     def _key(self, key: str) -> str:
         normalized = key.strip("/")
@@ -348,10 +407,13 @@ class ArchivePublication:
         try:
             manifest_payload = self._store.get(manifest_key)
             commit = json.loads(self._store.get(commit_key))
+            if not isinstance(commit, dict):
+                return None
             manifest = _manifest_from_json(manifest_payload)
             manifest.validate()
             if (
-                commit.get("manifest_id") != manifest_id
+                manifest.manifest_id != manifest_id
+                or commit.get("manifest_id") != manifest_id
                 or commit.get("manifest_checksum") != _checksum(manifest_payload)
                 or commit.get("artifact_checksum") != manifest.artifact.checksum
             ):
@@ -362,6 +424,51 @@ class ArchivePublication:
             return None
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             return None
+
+    def read_committed_manifest(self, manifest_id: str) -> ArchiveManifest | None:
+        manifest_key = f"archive/manifests/{manifest_id}.json"
+        commit_key = f"archive/manifests/{manifest_id}.commit"
+        if not self._store.exists(manifest_key) or not self._store.exists(commit_key):
+            return None
+        try:
+            manifest_payload = self._store.get(manifest_key)
+            commit = json.loads(self._store.get(commit_key))
+            if not isinstance(commit, dict):
+                logger.warning("archive_manifest_commit_not_dict", manifest_id=manifest_id)
+                return None
+            manifest = _manifest_from_json(manifest_payload)
+            manifest.validate()
+            if (
+                manifest.manifest_id != manifest_id
+                or commit.get("manifest_id") != manifest_id
+                or commit.get("manifest_checksum") != _checksum(manifest_payload)
+                or commit.get("artifact_checksum") != manifest.artifact.checksum
+            ):
+                logger.warning("archive_manifest_commit_checksum_mismatch", manifest_id=manifest_id)
+                return None
+            return manifest
+        except (KeyError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            logger.warning("archive_manifest_commit_invalid", manifest_id=manifest_id, error=str(exc))
+            return None
+
+    def list_committed_manifests(self, *, service_id: str | None = None) -> list[ArchiveManifest]:
+        prefix = "archive/manifests/"
+        manifests: list[ArchiveManifest] = []
+        for key in self._store.list_keys(prefix):
+            if not key.endswith(".commit"):
+                continue
+            rel = key[len(prefix) :] if key.startswith(prefix) else key
+            manifest_id = rel[: -len(".commit")]
+            if not manifest_id:
+                continue
+            manifest = self.read_committed_manifest(manifest_id)
+            if manifest is None:
+                continue
+            if service_id is not None and manifest.service_id != service_id:
+                continue
+            manifests.append(manifest)
+        manifests.sort(key=lambda m: (m.coverage_start, m.manifest_id))
+        return manifests
 
     def is_replayable(self, manifest_id: str) -> bool:
         return self._read_verified_artifact(manifest_id) is not None
@@ -383,6 +490,8 @@ def _artifact_key(uri: str) -> str:
 
 def _manifest_from_json(payload: bytes) -> ArchiveManifest:
     raw = json.loads(payload)
+    if not isinstance(raw, dict):
+        raise ValueError("manifest payload must be a JSON object")
     raw_sources = raw.get("sources")
     sources = (
         [
@@ -446,14 +555,50 @@ def _sha256(path: Path) -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
+_PRIMITIVE_PARQUET_TYPES = (str, int, float, bool, type(None))
+
+
+def _canonical_json_bytes(event: Mapping[str, Any]) -> bytes:
+    try:
+        return orjson.dumps(event, option=orjson.OPT_SORT_KEYS)
+    except (TypeError, ValueError):
+        return json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def _sorted_canonical_events(
+    events: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+) -> list[dict[str, Any]]:
+    if not events:
+        return []
+    keys: set[str] = set(events[0].keys())
+    for event in events[1:]:
+        ek = event.keys()
+        if len(ek) != len(keys) or ek != keys:
+            keys.update(ek)
+    sorted_keys = tuple(sorted(keys))
+    prim_types = _PRIMITIVE_PARQUET_TYPES
+    safe_val = _parquet_safe_value
+    return [
+        {
+            key: (
+                v if type(v := event.get(key)) in prim_types else (None if type(v) is dict and not v else safe_val(v))
+            )
+            for key in sorted_keys
+        }
+        for event in events
+    ]
+
+
 def event_digest(events: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> str:
-    keys = set().union(*(event.keys() for event in events))
     digest = hashlib.sha256()
-    for event in events:
-        canonical = {key: _parquet_safe_value(event.get(key)) for key in keys}
-        digest.update(
-            (json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
-        )
+    dumps = orjson.dumps
+    for canonical in _sorted_canonical_events(events):
+        try:
+            encoded = dumps(canonical)
+        except (TypeError, ValueError):
+            encoded = _canonical_json_bytes(canonical)
+        digest.update(encoded)
+        digest.update(b"\n")
     return f"sha256:{digest.hexdigest()}"
 
 
@@ -507,9 +652,19 @@ def write_batch_archive_checkpoint(
         current_offset += row_count
         all_events.extend(events)
 
-    keys = set().union(*(event.keys() for event in all_events))
-    canonical_events = [{key: _parquet_safe_value(event.get(key)) for key in keys} for event in all_events]
-    artifact_digest = event_digest(canonical_events)
+    canonical_events = _sorted_canonical_events(all_events)
+    digest_hasher = hashlib.sha256()
+    byte_count = 0
+    dumps = orjson.dumps
+    for event in canonical_events:
+        try:
+            encoded = dumps(event)
+        except (TypeError, ValueError):
+            encoded = _canonical_json_bytes(event)
+        byte_count += len(encoded)
+        digest_hasher.update(encoded)
+        digest_hasher.update(b"\n")
+    artifact_digest = f"sha256:{digest_hasher.hexdigest()}"
     source_token = hashlib.sha256(
         ":".join(f"{s.object_key}:{s.checksum}" for s, _ in source_batches).encode()
     ).hexdigest()[:16]
@@ -519,9 +674,6 @@ def write_batch_archive_checkpoint(
         pq.write_table(pa.Table.from_pylist(canonical_events), temp_path)
 
     artifact_checksum = _sha256(artifact_path)
-    byte_count = sum(
-        len(json.dumps(event, separators=(",", ":"), ensure_ascii=False).encode()) for event in canonical_events
-    )
     artifact = ArchiveArtifact(
         artifact_path.as_uri(),
         artifact_checksum,
@@ -566,12 +718,18 @@ def write_batch_archive_checkpoint(
 
 
 def _parquet_safe_value(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return {key: _parquet_safe_value(item) for key, item in value.items()} if value else None
+    if type(value) in _PRIMITIVE_PARQUET_TYPES:
+        return value
+    if isinstance(value, dict):
+        if not value:
+            return None
+        return {key: _parquet_safe_value(value[key]) for key in sorted(value)}
     if isinstance(value, list):
         return [_parquet_safe_value(item) for item in value]
     if isinstance(value, tuple):
         return tuple(_parquet_safe_value(item) for item in value)
+    if isinstance(value, Mapping):
+        return {key: _parquet_safe_value(value[key]) for key in sorted(value)} if value else None
     return value
 
 
@@ -588,21 +746,29 @@ IDENTITY_FIELDS = (
 
 
 def _sha256_uuid(payload: str) -> str:
-    return str(uuid.UUID(bytes=hashlib.sha256(payload.encode("utf-8")).digest()[:16]))
+    h = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:32]}"
 
 
 def build_event_id(row: Mapping[str, Any], *, domain: str | None = None) -> str:
-    values = dict(row)
-    if domain is not None:
-        values["domain"] = domain
-    missing = [fld for fld in IDENTITY_FIELDS if fld not in values]
+    effective_domain = domain if domain is not None else row.get("domain")
+    missing = [fld for fld in IDENTITY_FIELDS if (effective_domain is None if fld == "domain" else fld not in row)]
     if missing:
         raise ValueError(f"event identity missing fields: {', '.join(missing)}")
-    if not isinstance(values["line_ordinal"], int) or values["line_ordinal"] < 0:
+    line_ordinal = row["line_ordinal"]
+    if not isinstance(line_ordinal, int) or line_ordinal < 0:
         raise ValueError("line_ordinal must be a non-negative integer")
-    if not all(isinstance(values[fld], str) and values[fld] for fld in IDENTITY_FIELDS if fld != "line_ordinal"):
-        raise ValueError("event identity string fields must be non-empty strings")
-    return _sha256_uuid("|".join(f"{len(str(values[fld]))}:{values[fld]}" for fld in IDENTITY_FIELDS))
+    parts: list[str] = []
+    for fld in IDENTITY_FIELDS:
+        if fld == "line_ordinal":
+            s_val = str(line_ordinal)
+            parts.append(f"{len(s_val)}:{s_val}")
+        else:
+            val = effective_domain if fld == "domain" else row[fld]
+            if not isinstance(val, str) or not val:
+                raise ValueError("event identity string fields must be non-empty strings")
+            parts.append(f"{len(val)}:{val}")
+    return _sha256_uuid("|".join(parts))
 
 
 def build_request_event_id(row: Mapping[str, Any]) -> str:

@@ -45,27 +45,16 @@ from env vars or config, never hard-coded infra.
 | `dev/audit_environments.py` | Read-only environment parity and configuration audit. |
 | `dev/measure_e2e_freshness.py` | End-to-end ingestion freshness probe across environments. |
 | `dev/verify_observability.py` | Diagnostic CLI verifying OTel traces, Prometheus metrics, and structured log delivery. |
-| `dev/scale_harness.py` | Bounded staged edge-load runner with FOS freshness, cron, pool, OTel, and analytics checkpoints. |
-| `load_test/generate_synthetic_traffic.py` | Unified multi-tier synthetic traffic and log generator for DuckLake, FOS, and ClickHouse. |
+| `load_test/generate_synthetic_traffic.py` | Unified multi-tier synthetic traffic and log generator for FOS and ClickHouse. |
 
-The scale harness defaults to `100:10,500:10,1000:10` stages. It measures
-achieved RPS separately from the requested target and writes JSON plus
-Markdown output. Stages above 1,000 RPS require `--allow-high-rate`; use
-`--max-in-flight` to keep client pressure bounded:
+### Live deploy and load tests
 
-```bash
-uv run python scripts/dev/scale_harness.py run \
-  --url "$LOADTEST_URL" \
-  --service-id "$FASTLY_SERVICE_ID" \
-  --stages 100:30,500:30,1000:30 \
-  --start-time "$START_UTC" --end-time "$END_UTC" \
-  --output performance-report/scale-harness.json
-```
-
-The harness waits 60 seconds after the last stage by default before taking a
-final checkpoint, allowing delayed FOS delivery to be distinguished from
-conversion/commit latency. Override with `--settle-seconds 0` only when a
-post-run freshness checkpoint is not needed.
+`~/Projects/fastly-log-analytics-deploy-testing` owns the combined `fdt`
+workflow (see that repo's `AGENTS.md` for private environment names). Run it
+there with `uv run fdt run <envs...>`; the command is read-only unless the
+explicit `--approve` flag is added. Billed load campaigns also require explicit
+approval. FLA keeps only the hooks fdt reads: `X-FLA-Harness`, the SSR
+forwarding header, and the page-sweep `DEBUG_RESPONSES` envelope.
 
 > Local-only artifacts (e.g. a deployed-`restart.sh` snapshot) are gitignored and
 > not listed here.

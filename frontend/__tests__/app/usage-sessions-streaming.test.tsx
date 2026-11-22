@@ -1,5 +1,5 @@
 import { fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react'
-import { http, HttpResponse } from 'msw'
+import { http, HttpResponse } from 'msw/http'
 import { describe, expect, it, test, vi, beforeAll, beforeEach, afterEach } from 'vitest'
 import { UsageLogClient } from '@/app/admin/usage-log/page'
 import Loading from '@/app/admin/usage-log/loading'
@@ -21,6 +21,9 @@ import {
 } from '../helpers/page-smoke'
 import type { PlotlyChart } from '@/components/PlotlyChart'
 import React, { type ComponentProps } from 'react'
+import { setCloudModeRuntime } from '@/lib/cloud-engine/mode'
+import { DEFAULT_INPUTS, DEFAULT_UNITS, LIST_PRICE_RATES } from '@/lib/cloud-engine/usage/estimate'
+import { useServiceQuery } from '@/hooks/useDashboardCards'
 
 beforeAll(() => {
   stubResizeObserver()
@@ -145,7 +148,7 @@ vi.mock('@/hooks/useDashboardCards', async (importOriginal) => {
 
 vi.mock('@/components/CostCalculator/CostCalculator', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/components/CostCalculator/CostCalculator')>()),
-  CostCalculator: () => <div data-testid="cost-calculator" />,
+  CostCalculator: ({ prefillNote }: { prefillNote?: string }) => <div data-testid="cost-calculator">{prefillNote}</div>,
 }))
 
 function resetDefaultStores() {
@@ -246,8 +249,8 @@ let errorSpy: ReturnType<typeof spyOnConsoleError>
 
 function makePrefill(overrides: Partial<PrefillResponse>): PrefillResponse {
   return {
-    _is_cached: false, data_days: 7, commit_interval_mins: 5, sample_rate: 100, edge_only: false,
-    compaction_enabled: true, delete_after: false, log_retention_days: 90, rum_retention_days: 90, deployment_mode: 'standard', billing_zone: null, ...overrides,
+    _is_cached: false, data_days: 7, sample_rate: 100, edge_only: false,
+    delete_after: false, snapshot_interval_minutes: 5, log_retention_days: 90, rum_retention_days: 90, billing_zone: null, ...overrides,
   }
 }
 
@@ -299,16 +302,159 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
   })
 
   afterEach(() => {
+    setCloudModeRuntime(false)
     reportLayoutChildArgs = null
     useMockDataTable = false
     mockIsDataReady = null
     errorSpy.mockRestore()
   })
 
+  test('treats a service query waiting for app data as initially loading', () => {
+    mockIsDataReady = false
+    const queryFn = vi.fn(async () => ({ rows: [] }))
+
+    const { result } = renderHook(
+      () => useServiceQuery(['loading-contract', 'test-svc'], queryFn),
+      { wrapper: makeQueryWrapper(queryClient) },
+    )
+
+    expect(result.current.isLoading).toBe(true)
+    expect(queryFn).not.toHaveBeenCalled()
+  })
+
+  test('does not mark an explicitly disabled service query as loading', () => {
+    mockIsDataReady = false
+    const queryFn = vi.fn(async () => ({ rows: [] }))
+
+    const { result } = renderHook(
+      () => useServiceQuery(['loading-contract-disabled', 'test-svc'], queryFn, { enabled: false }),
+      { wrapper: makeQueryWrapper(queryClient) },
+    )
+
+    expect(result.current.isLoading).toBe(false)
+    expect(queryFn).not.toHaveBeenCalled()
+  })
+
+  test('does not mark a callback-disabled service query as loading', () => {
+    mockIsDataReady = false
+    const queryFn = vi.fn(async () => ({ rows: [] }))
+
+    const { result } = renderHook(
+      () => useServiceQuery(['loading-contract-disabled-callback', 'test-svc'], queryFn, { enabled: () => false }),
+      { wrapper: makeQueryWrapper(queryClient) },
+    )
+
+    expect(result.current.isLoading).toBe(false)
+    expect(queryFn).not.toHaveBeenCalled()
+  })
+
   test('usage page mounts and renders title', () => {
     renderWithQuery(<UsagePage />, { queryClient })
     expect(screen.getByText('System Usage')).toBeInTheDocument()
     expect(errorSpy).not.toHaveBeenCalled()
+  })
+
+  test('Cloud usage renders Compute, KV, secrets and CDN requests from measured prefill', async () => {
+    setCloudModeRuntime(true)
+    mockGet.mockImplementation(async (path: string) => {
+      if (path === '/api/usage/prefill/rates') return { data: LIST_PRICE_RATES }
+      if (path === '/api/usage/prefill') return {
+        data: {
+          inputs: { ...DEFAULT_INPUTS, requestsPerDay: 12345, edgeRequestsPerDay: 10000 },
+          units: { ...DEFAULT_UNITS, secrets: 3 },
+          measuredInputs: { requestsPerDay: true, edgeRequestsPerDay: true },
+          measuredUnits: { secrets: true },
+          rates: { ...LIST_PRICE_RATES, secret_rate_per_month: 7 },
+          window: { days: 7, files: 10, lines: 100 },
+        },
+      }
+      return undefined
+    })
+
+    renderWithQuery(<UsagePage />, { queryClient })
+    expect(await screen.findByText('Compute (app + worker)')).toBeInTheDocument()
+    expect(screen.getByText('KV Store operations')).toBeInTheDocument()
+    expect(screen.getByText('3 secrets')).toBeInTheDocument()
+    expect(screen.getByText('$21.00')).toBeInTheDocument()
+    expect(screen.getByText(/front reqs/)).toBeInTheDocument()
+    expect(screen.getByRole('spinbutton', { name: 'Total requests per day' })).toHaveValue(12345)
+    expect(screen.queryByTestId('cost-calculator')).not.toBeInTheDocument()
+  })
+
+  test('Cloud cost card and Compute charts use one Platform Metrics read for the range', async () => {
+    setCloudModeRuntime(true)
+    useMockAdminFetch = true
+    mockGet.mockImplementation(async (path: string) => {
+      if (path === '/api/usage/current-storage') return { data: { compute_requests: 7, compute_vcpu_ms: 3, kv_ops: 2 } as never }
+      return undefined
+    })
+    mockAdminFetch.mockImplementation(async () => Response.json({
+      source: 'fastly', requests: 1_500, vcpu_ms: 2_500, billed_ms: 60_000,
+      app_requests: 1_000, worker_requests: 500, app_vcpu_ms: 2_000, worker_vcpu_ms: 500,
+      covered_from: '2026-01-01T00:00:00.000Z', covered_to: '2026-01-01T01:00:00.000Z',
+      data: [{ time: '2026-01-01T00:00:00.000Z', app_requests: 1_000, worker_requests: 500, app_vcpu_ms: 2_000, worker_vcpu_ms: 500, billed_ms: 60_000 }],
+    }))
+
+    renderWithQuery(<UsagePage />, { queryClient })
+
+    expect(await screen.findByText('Fastly stats · KV logged')).toBeInTheDocument()
+    expect(screen.getByText('1.5K reqs')).toBeInTheDocument()
+    expect(screen.queryByText('7 reqs')).not.toBeInTheDocument()
+    expect(screen.getByText('Compute Requests')).toBeInTheDocument()
+    expect(screen.getByText('Compute vCPU')).toBeInTheDocument()
+    expect(mockAdminFetch).toHaveBeenCalledTimes(1)
+    expect(mockAdminFetch.mock.calls[0][0]).toBe(
+      '/api/usage/compute?start_time=2026-01-01T00%3A00%3A00Z&end_time=2026-01-01T01%3A00%3A00Z',
+    )
+    const vcpuTraces = plotlyMock.mock.calls.map(([props]) => props.data as Array<{ name?: string; y?: number[]; hovertemplate?: string }>)
+      .findLast((traces) => traces.some((t) => t.hovertemplate?.includes(' s<extra>')))
+    expect(vcpuTraces?.map((t) => [t.name, t.y])).toEqual([['App service', [2]], ['Worker service', [0.5]]])
+  })
+
+  test('Cloud cost card falls back to logged Compute figures when Platform Metrics is unavailable', async () => {
+    setCloudModeRuntime(true)
+    useMockAdminFetch = true
+    mockGet.mockImplementation(async (path: string) => {
+      if (path === '/api/usage/current-storage') return { data: { compute_requests: 7, compute_vcpu_ms: 3, kv_ops: 2 } as never }
+      return undefined
+    })
+    mockAdminFetch.mockImplementation(async () => Response.json({ source: 'unavailable', reason: 'stats_unavailable' }))
+
+    renderWithQuery(<UsagePage />, { queryClient })
+
+    expect(await screen.findByText('logged')).toBeInTheDocument()
+    expect(screen.getByText('7 reqs')).toBeInTheDocument()
+  })
+
+  test('High-Scale missing traffic is labelled reference rather than measured service traffic', async () => {
+    mockGet.mockImplementation(async (path: string) => {
+      if (path === '/api/usage/prefill/rates' || path === '/api/usage/prefill')
+        return { data: makePrefill({ requests_per_day: null, edge_requests_per_day: null, edge_only: true }) }
+      return undefined
+    })
+    renderWithQuery(<UsagePage />, { queryClient })
+    expect(await screen.findByText(/Traffic measurements are unavailable/)).toBeInTheDocument()
+    expect(screen.queryByText('Compute (app + worker)')).not.toBeInTheDocument()
+    expect(screen.queryByText('Compute Requests')).not.toBeInTheDocument()
+  })
+
+  test('High-Scale does not call traffic unavailable before the below-the-fold estimator loads its measurements', async () => {
+    vi.stubGlobal('IntersectionObserver', class {
+      observe() {}
+      disconnect() {}
+    })
+    try {
+      mockGet.mockImplementation(async (path: string) => {
+        if (path === '/api/usage/prefill/rates') return { data: makePrefill({ requests_per_day: null }) }
+        return undefined
+      })
+      renderWithQuery(<UsagePage />, { queryClient })
+      await screen.findByTestId('cost-calculator')
+      expect(mockGet).not.toHaveBeenCalledWith('/api/usage/prefill', expect.anything())
+      expect(screen.queryByText(/Traffic measurements are unavailable/)).not.toBeInTheDocument()
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   test('UX-6: storage card shows an error (not "0.00 GB-hrs") and the cost is flagged partial on a storage 5xx', async () => {
@@ -345,6 +491,16 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     renderWithQuery(<SessionsPage />, { queryClient })
     expect(screen.getByText('User Sessions')).toBeInTheDocument()
     expect(errorSpy).not.toHaveBeenCalled()
+  })
+
+  test('shows a contextual loading state while Streaming prerequisites are pending', () => {
+    mockIsDataReady = false
+
+    renderWithQuery(<StreamingClient />, { queryClient })
+
+    expect(screen.getByText('Loading Active Viewers...')).toBeInTheDocument()
+    expect(screen.getByText('Loading Buffer Health...')).toBeInTheDocument()
+    expect(mockPost).not.toHaveBeenCalled()
   })
 
   test('requests /api/cmcd/aggregates with the page window and renders the headline cards', async () => {
@@ -388,20 +544,22 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     })
 
     test('correctly calculates RUM beacon costs and storage when rumBeaconsDay is set', () => {
-      const results = calculate({ ...DEFAULTS, rumBeaconsDay: 10000 })
+      const results = calculate({ ...DEFAULTS, rumBeaconsDay: 10000, rumRetentionDays: 90 })
       expect(results.rumBeaconsMonth).toBe(300000)
       const expected30dRumGbMonths = (10000 * 30 * RUM_COMPRESSED_BYTES_PER_BEACON) / (1024 * 1024 * 1024)
       // RUM storage follows the RUM retention: 90 days is three times the 30-day monthly volume.
       expect(results.rumParquetGBMonths).toBeCloseTo(expected30dRumGbMonths * 3, 5)
-      expect(results.costRum).toBeCloseTo(1.5 + expected30dRumGbMonths * 3 * 0.02, 5)
       const rumTier = results.storageTiers.find(t => t.label === 'RUM data')
+      const rumArchiveTier = results.storageTiers.find(t => t.label === 'RUM archive')
       expect(rumTier).toBeDefined()
+      expect(rumArchiveTier).toBeDefined()
       expect(rumTier?.gbMonths).toBeCloseTo(expected30dRumGbMonths * 3, 5)
-      // A shorter RUM retention shrinks RUM storage but not the request data.
+      expect(results.costRum).toBeCloseTo(1.5 + (expected30dRumGbMonths * 3 + (rumArchiveTier?.gbMonths ?? 0)) * 0.02, 5)
+      // A shorter RUM retention shrinks RUM storage but not the request archive.
       const short = calculate({ ...DEFAULTS, rumBeaconsDay: 10000, rumRetentionDays: 30 })
       expect(short.rumParquetGBMonths).toBeCloseTo(expected30dRumGbMonths, 5)
-      expect(short.storageTiers.find(t => t.label === 'DuckLake data')?.gbMonths)
-        .toBeCloseTo(results.storageTiers.find(t => t.label === 'DuckLake data')?.gbMonths ?? 0, 6)
+      expect(short.storageTiers.find(t => t.label === 'Archive Parquet')?.gbMonths)
+        .toBeCloseTo(results.storageTiers.find(t => t.label === 'Archive Parquet')?.gbMonths ?? 0, 6)
     })
 
     test('models ZSTD raw log compression (15x) for smaller compressed volume, raw storage, and CDN egress', () => {
@@ -419,65 +577,90 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
       expect(prefilled.bytesPerLine).toBe(expectedBpl)
     })
 
-    test('High-Scale adds the archive Parquet tier sized from the measured per-artifact and per-row bytes', () => {
-      const standard = calculate(DEFAULTS)
-      const highScale = calculate({ ...DEFAULTS, deploymentMode: 'high_scale' })
-      expect(standard.storageTiers.find(t => t.label === 'High-Scale archive')).toBeUndefined()
-      const archive = highScale.storageTiers.find(t => t.label === 'High-Scale archive')
+    test('sizes the Archive Parquet tier from snapshot_interval_minutes and batches busy services', () => {
+      const defaults = calculate(DEFAULTS)
+      const archive = defaults.storageTiers.find(t => t.label === 'Archive Parquet')
       expect(archive?.gbMonths).toBeGreaterThan(0)
-      expect(highScale.totalGBStored).toBeCloseTo(standard.totalGBStored + (archive?.gbMonths ?? 0), 6)
-      // Defaults: 1440 log files/day at ~0.33 objects per tick means one object per page, so 3 writes and 3 reads per file.
-      const filesPerMonth = (86400 / DEFAULTS.logPeriod) * DEFAULTS.logNodes * 30
-      expect(highScale.classAPerMonth - standard.classAPerMonth).toBeCloseTo(filesPerMonth * 3, 6)
-      expect(highScale.classBPerMonth - standard.classBPerMonth).toBeCloseTo(filesPerMonth * 3, 6)
-      const busy = calculate({ ...DEFAULTS, deploymentMode: 'high_scale', logNodes: 60 })
+      // Defaults: a 10 s period gives 8640 log files/day; 5m (300 s) snapshot window batches 30 objects/page
+      // (288 pages/day), each costing 3 reads on top of one read per raw file.
+      const snapshotSeconds = DEFAULTS.snapshotIntervalMinutes * 60
+      const filesPerDay = (86400 / DEFAULTS.logPeriod) * DEFAULTS.logNodes
+      const pagesPerDay = Math.ceil(filesPerDay / Math.min(DEFAULTS.archiveBatchObjects, (filesPerDay * snapshotSeconds) / 86400))
+      expect(pagesPerDay).toBe(288)
+      expect(defaults.classBPerMonth).toBeCloseTo((filesPerDay + pagesPerDay * 3) * 30, 6)
+      const busy = calculate({ ...DEFAULTS, logNodes: 60 })
       const busyFiles = (86400 / DEFAULTS.logPeriod) * 60
-      const busyPages = Math.ceil(busyFiles / Math.min(DEFAULTS.archiveBatchObjects, (busyFiles * 20) / 86400))
-      expect(busy.classAPerMonth - calculate({ ...DEFAULTS, logNodes: 60 }).classAPerMonth).toBeCloseTo(busyPages * 30 * 3, 6)
+      const busyPages = Math.ceil(busyFiles / Math.min(DEFAULTS.archiveBatchObjects, (busyFiles * snapshotSeconds) / 86400))
+      expect(busy.parquetFilesPerMonth).toBeCloseTo(busyPages * 30, 6)
       expect(busyPages).toBeLessThan(busyFiles)
     })
 
-    test('PREFILL takes the service retention settings and deployment mode; 0 means keep forever', () => {
+    test('PREFILL applies snapshot_interval_minutes and longer intervals reduce archive/DR ops while lengthening raw-log steady-state window', () => {
       const prefilled = reducer(DEFAULTS, {
         type: 'PREFILL',
-        prefill: makePrefill({ log_retention_days: 14, rum_retention_days: 7, deployment_mode: 'high_scale' }),
+        prefill: makePrefill({ snapshot_interval_minutes: 60 }),
       })
-      expect([prefilled.retentionDays, prefilled.rumRetentionDays, prefilled.deploymentMode]).toEqual([14, 7, 'high_scale'])
-      const forever = reducer(DEFAULTS, {
-        type: 'PREFILL',
-        prefill: makePrefill({ log_retention_days: 0, rum_retention_days: 0, deployment_mode: 'standard' }),
-      })
-      expect([forever.retentionDays, forever.rumRetentionDays, forever.deploymentMode]).toEqual([365, 365, 'standard'])
+      expect(prefilled.snapshotIntervalMinutes).toBe(60)
+
+      const at5m = calculate({ ...DEFAULTS, snapshotIntervalMinutes: 5, deleteLogs: true })
+      const at60m = calculate({ ...DEFAULTS, snapshotIntervalMinutes: 60, deleteLogs: true })
+      const at24h = calculate({ ...DEFAULTS, snapshotIntervalMinutes: 1440, deleteLogs: true })
+
+      expect(at5m.drStateSnapshotsPerMonth).toBe(8640)
+      expect(at60m.drStateSnapshotsPerMonth).toBe(720)
+      expect(at24h.drStateSnapshotsPerMonth).toBe(30)
+
+      expect(at60m.parquetFilesPerMonth).toBeLessThan(at5m.parquetFilesPerMonth)
+      expect(at60m.classAPerMonth).toBeLessThan(at5m.classAPerMonth)
+      expect(at60m.classBPerMonth).toBeLessThan(at5m.classBPerMonth)
+
+      // Raw logs stay in FOS for snapshotIntervalMinutes + 15m grace when deleteLogs is true
+      // At 24h (1440m + 15m = 24.25h) with minDays=0, raw-log steady-state GB-months is > at 5m (20m = 1/3h)
+      const noMin5m = calculate({ ...DEFAULTS, snapshotIntervalMinutes: 5, deleteLogs: true, minDays: 0 })
+      const noMin24h = calculate({ ...DEFAULTS, snapshotIntervalMinutes: 1440, deleteLogs: true, minDays: 0 })
+      const raw5m = noMin5m.storageTiers.find((t) => t.label === 'Raw logs')!.gbMonths
+      const raw24h = noMin24h.storageTiers.find((t) => t.label === 'Raw logs')!.gbMonths
+      expect(raw24h / raw5m).toBeCloseTo((1440 + 15) / (5 + 15), 5)
     })
 
-    test('the High-Scale archive is billed for the retention window plus the one-day margin, per domain', () => {
-      const base = { ...DEFAULTS, deploymentMode: 'high_scale' as const, rumBeaconsDay: 10000, minDays: 1 }
+    test('PREFILL takes the service retention settings; 0 means keep forever', () => {
+      const prefilled = reducer(DEFAULTS, {
+        type: 'PREFILL',
+        prefill: makePrefill({ log_retention_days: 14, rum_retention_days: 7 }),
+      })
+      expect([prefilled.retentionDays, prefilled.rumRetentionDays]).toEqual([14, 7])
+      const forever = reducer(DEFAULTS, {
+        type: 'PREFILL',
+        prefill: makePrefill({ log_retention_days: 0, rum_retention_days: 0 }),
+      })
+      expect([forever.retentionDays, forever.rumRetentionDays]).toEqual([365, 365])
+    })
+
+    test('the FOS archive is billed for the retention window plus the one-day margin, per domain', () => {
+      const base = { ...DEFAULTS, rumBeaconsDay: 10000, minDays: 1 }
       const archiveGB = (state: typeof base, label: string) =>
         calculate(state).storageTiers.find(t => t.label === label)?.gbMonths ?? 0
       // Request archive scales with the request retention (+1 day) and ignores RUM retention.
-      const req30 = archiveGB({ ...base, retentionDays: 30 }, 'High-Scale archive')
-      const req7 = archiveGB({ ...base, retentionDays: 7 }, 'High-Scale archive')
+      const req30 = archiveGB({ ...base, retentionDays: 30 }, 'Archive Parquet')
+      const req7 = archiveGB({ ...base, retentionDays: 7 }, 'Archive Parquet')
       expect(req30 / req7).toBeCloseTo(31 / 8, 6)
-      expect(archiveGB({ ...base, retentionDays: 30, rumRetentionDays: 3 }, 'High-Scale archive')).toBeCloseTo(req30, 9)
+      expect(archiveGB({ ...base, retentionDays: 30, rumRetentionDays: 3 }, 'Archive Parquet')).toBeCloseTo(req30, 9)
       // RUM archive scales with the RUM retention (+1 day) and ignores the request retention.
-      const rum30 = archiveGB({ ...base, rumRetentionDays: 30 }, 'High-Scale RUM archive')
-      const rum7 = archiveGB({ ...base, rumRetentionDays: 7 }, 'High-Scale RUM archive')
+      const rum30 = archiveGB({ ...base, rumRetentionDays: 30 }, 'RUM archive')
+      const rum7 = archiveGB({ ...base, rumRetentionDays: 7 }, 'RUM archive')
       expect(rum30).toBeGreaterThan(0)
       expect(rum30 / rum7).toBeCloseTo(31 / 8, 6)
-      expect(archiveGB({ ...base, retentionDays: 5, rumRetentionDays: 30 }, 'High-Scale RUM archive')).toBeCloseTo(rum30, 9)
+      expect(archiveGB({ ...base, retentionDays: 5, rumRetentionDays: 30 }, 'RUM archive')).toBeCloseTo(rum30, 9)
       // The FOS 30-day minimum floors a short window.
       const floored = calculate({ ...base, minDays: 30, retentionDays: 3 })
-      expect(floored.storageTiers.find(t => t.label === 'High-Scale archive')?.flagged).toBe(true)
-      // Standard keeps no archive and no RUM archive.
-      const standard = calculate({ ...DEFAULTS, rumBeaconsDay: 10000 })
-      expect(standard.storageTiers.some(t => t.label.includes('archive'))).toBe(false)
+      expect(floored.storageTiers.find(t => t.label === 'Archive Parquet')?.flagged).toBe(true)
     })
 
     test('reducer PREFILL handles rum_beacons_per_day correctly', () => {
       const prefill = makePrefill({
         rum_beacons_per_day: 5000, requests_per_day: 1000000, edge_requests_per_day: 800000,
-        log_period_seconds: 60, commit_interval_mins: 5, sample_rate: 100, edge_only: true,
-        compaction_enabled: true, delete_after: true, log_retention_days: 90,
+        log_period_seconds: 60, sample_rate: 100, edge_only: true,
+        delete_after: true, log_retention_days: 90,
         class_a_rate_per_1k: 0.005, class_b_rate_per_10k: 0.01, cdn_egress_rate_per_gb: 0.12,
         storage_rate_per_gb_month: 0.02, min_billed_days: 30, avg_nodes_per_flush: 1,
       })
@@ -558,6 +741,38 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
       expect(screen.getByText('s3://fos-bucket/lake/part-001.parquet')).toBeInTheDocument()
       expect(screen.getByText('cron:commit:svc-alpha')).toBeInTheDocument()
       expect(screen.getByText('Caught up')).toBeInTheDocument()
+    })
+
+    it('issues one usage-log read in Cloud mode so readiness never sees a dependent follow-up query', async () => {
+      setCloudModeRuntime(true)
+      try {
+        mockGet.mockImplementation((url: string) =>
+          Promise.resolve({
+            data: url === '/api/admin/usage-log' ? SAMPLE_USAGE_LOG : SAMPLE_ACCOUNTING,
+            response: new Response(null, { status: 200 }),
+          }),
+        )
+        renderWithQuery(<UsageLogClient initialServiceId="svc-alpha" initialNowMs={1780315200000} />)
+        await waitFor(() => expect(screen.getByText('s3://fos-bucket/lake/part-001.parquet')).toBeInTheDocument())
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        const usageCalls = mockGet.mock.calls.filter(([url]) => url === '/api/admin/usage-log')
+        expect(usageCalls).toHaveLength(1)
+        expect(usageCalls[0][1]).toEqual(expect.objectContaining({ params: { query: expect.objectContaining({ page_size: 500 }) } }))
+      } finally {
+        setCloudModeRuntime(false)
+      }
+    })
+
+    it('shows a failed usage-log read as an error instead of an empty ledger', async () => {
+      mockGet.mockImplementation((url: string) =>
+        url === '/api/admin/usage-log'
+          ? Promise.reject(new Error('Cloud usage history is incomplete'))
+          : Promise.resolve({ data: SAMPLE_ACCOUNTING, response: new Response(null, { status: 200 }) }),
+      )
+      renderWithQuery(<UsageLogClient initialServiceId="svc-alpha" initialNowMs={1780315200000} />)
+      const alert = await screen.findByTestId('admin-usage-log-error')
+      expect(alert).toHaveAttribute('role', 'alert')
+      expect(alert).toHaveTextContent('Cloud usage history is incomplete')
     })
 
     it('switches time-window presets, filters by process/operation, refreshes, and purges logs', async () => {
@@ -657,7 +872,7 @@ describe('HighScaleRequestFactsPage (/high-scale/request-facts)', () => {
     expect(screen.getByTestId('high-scale-loading-card').className).toContain('contain-intrinsic-size')
   })
 
-  it('renders DuckDB Standard Mode Emulation badge and supports filter controls', () => {
+  it('renders ClickHouse Distributed Cluster badge and supports filter controls', () => {
     useFactsMock.mockReturnValue(
       mockFactsState({
         data: {
@@ -665,13 +880,13 @@ describe('HighScaleRequestFactsPage (/high-scale/request-facts)', () => {
             event_id: 'event-emul-1', timestamp: '2026-09-11T00:00:01Z', service_id: 'service-1',
             status: 200, host: 'www.example.com', pop: 'IAD', country: 'US', client_ip: '203.0.113.xxx', url: '/healthz',
           }],
-          metadata: { ...baseMetadata, mode: 'duckdb_emulation' },
+          metadata: baseMetadata,
           next_cursor: null, _is_cached: false,
         },
       }),
     )
     render(<HighScaleRequestFactsPage />)
-    expect(screen.getByTestId('high-scale-mode-badge')).toHaveTextContent('DuckDB Standard Mode Emulation')
+    expect(screen.getByTestId('high-scale-mode-badge')).toHaveTextContent('ClickHouse Distributed Cluster')
     expect(screen.getByText('/healthz')).toBeInTheDocument()
     expect(screen.getByText('IAD')).toBeInTheDocument()
     expect(screen.getByText('203.0.113.xxx')).toBeInTheDocument()
@@ -685,7 +900,7 @@ describe('HighScaleRequestFactsPage (/high-scale/request-facts)', () => {
     expect(useFactsMock).toHaveBeenLastCalledWith(
       expect.objectContaining({
         serviceId: 'service-1', status: 503, domain: 'api.example.com',
-        pop: 'LHR', country: 'GB', batchId: 'batch-9', emulateStandard: true,
+        pop: 'LHR', country: 'GB', batchId: 'batch-9',
       }),
     )
 

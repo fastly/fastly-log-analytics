@@ -15,6 +15,7 @@ import { useServiceStore } from '@/stores/filterStore'
 import { useTimezoneStore } from '@/stores/filterStore'
 import { useDebugStore } from '@/stores/filterStore'
 import { setActiveServiceCookie } from '@/lib/utils'
+import { publishCloudService } from '@/lib/cloud-engine/readiness'
 
 // Reload-loop breaker (defense-in-depth).
 //
@@ -195,6 +196,11 @@ export function StoreHydrator() {
       }
     }
 
+    publishCloudService(useServiceStore.getState().activeServiceId)
+    const unsubscribeService = useServiceStore.subscribe((state, previous) => {
+      if (state.activeServiceId !== previous.activeServiceId) publishCloudService(state.activeServiceId)
+    })
+
     // Timezone: rehydrate the persisted mode/zone, then re-resolve the
     // live system zone on every mount while mode is 'system'. Doing this
     // post-mount means it never contradicts the server's deterministic
@@ -210,6 +216,7 @@ export function StoreHydrator() {
         /* keep whatever's already in state */
       }
     }
+    return unsubscribeService
   }, [])
 
   return null
@@ -356,7 +363,7 @@ export default function QueryProvider({ children, dehydratedState }: QueryProvid
         // CORS preflight failure used to fan one user click into 4
         // identical /api/sessions POSTs visible in HAR.
         //
-        // E-5 (audit): 503 with err.busy = true (DuckDB pool saturation)
+        // E-5 (audit): 503 with err.busy = true (query pool saturation)
         // gets one extra retry (3 total) because the failure mode is
         // explicitly transient — the backend is telling us "try again
         // shortly" rather than "this is broken". Exponential backoff

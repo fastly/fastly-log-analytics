@@ -5,10 +5,13 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import logging
+import re
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
+from datetime import date, datetime
 from typing import Any
 
 from backend import config as svcconfig
@@ -160,7 +163,7 @@ def publish_matrix_to_fos(service_id: str, matrix: dict) -> None:
 
 def _cdn_get(source: dict, key: str) -> bytes:
     """Fetch *key* via CDN, recording telemetry. Raises on any HTTP error."""
-    from backend.core.storage._core import _safe_cdn_url
+    from backend.core.fos_client import _safe_cdn_url
     from backend.utils.telemetry import record_cdn_call
 
     cdn_url = _safe_cdn_url((source.get("cdn_url") or "").rstrip("/"))
@@ -168,16 +171,23 @@ def _cdn_get(source: dict, key: str) -> bytes:
         raise urllib.error.URLError("cdn_url missing or not on the Fastly allowlist")
     cdn_secret = source.get("cdn_secret") or ""
     url = f"{cdn_url}/{urllib.parse.quote(key, safe='/')}"
+    req_headers: dict[str, str] = {}
     if cdn_secret:
-        url += f"?key={urllib.parse.quote(cdn_secret)}"
+        req_headers["x-fastly-key"] = cdn_secret
 
     class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, req, fp, code, msg, headers, newurl):
-            if not _safe_cdn_url(newurl):
+            orig_url = req.full_url if isinstance(getattr(req, "full_url", None), str) else ""
+            resolved_url = urllib.parse.urljoin(orig_url, newurl)
+            if not _safe_cdn_url(resolved_url):
                 raise urllib.error.URLError("Redirected to an invalid URL")
-            return super().redirect_request(req, fp, code, msg, headers, newurl)
+            orig_parts = urllib.parse.urlsplit(orig_url)
+            new_parts = urllib.parse.urlsplit(resolved_url)
+            if new_parts.scheme.lower() != "https" or new_parts.netloc.lower() != orig_parts.netloc.lower():
+                raise urllib.error.URLError("Cross-host or non-HTTPS CDN redirect blocked")
+            return super().redirect_request(req, fp, code, msg, headers, resolved_url)
 
-    req = urllib.request.Request(url)
+    req = urllib.request.Request(url, headers=req_headers)
     t0 = time.time()
     if hasattr(urllib.request.urlopen, "assert_called"):
         with urllib.request.urlopen(req, timeout=15) as resp:
@@ -259,3 +269,164 @@ def export_admin_state(service_id: str):
         logger.debug(f"[state_sync] Exported admin state to {key}")
     except Exception as e:
         logger.warning(f"[state_sync] Failed to export admin state: {e}")
+
+
+# ── Postgres DR State Snapshot (meta/dr_state.json) ──────────────────────────
+
+DR_STATE_SCHEMA_VERSION = 1
+
+_SECRET_EXACT_KEYS: frozenset[str] = frozenset(
+    {
+        "fos_access_key",
+        "fos_access_key_id",
+        "fos_secret_access_key",
+        "fos_secret_key",
+        "fastly_api_key",
+        "cdn_secret",
+        "admin_token",
+        "request_secret",
+        "scoring_request_secret",
+        "aes_key_hex",
+        "temp_admin_access_key",
+        "temp_admin_secret_key",
+        "access_key",
+        "secret_key",
+        "access_key_id",
+        "secret_access_key",
+        "hmac_key",
+        "signing_key",
+        "authorization",
+        "cookie",
+        "bearer",
+    }
+)
+
+_CAMEL_ACRONYM_RE = re.compile(r"([A-Z]+)([A-Z][a-z])")
+_CAMEL_BOUNDARY_RE = re.compile(r"([a-z0-9])([A-Z])")
+_KEY_SEP_RE = re.compile(r"[-\s]+")
+
+_SECRET_KEY_RE = re.compile(
+    r"(secret|token|password|passwd|passcode|api[_-]?key|access[_-]?key|private[_-]?key|"
+    r"fastly[_-]?key|hmac[_-]?key|signing[_-]?key|credential|authorization|cookie|bearer)",
+    re.IGNORECASE,
+)
+
+
+def _normalize_secret_key(key: str) -> str:
+    s = _CAMEL_ACRONYM_RE.sub(r"\1_\2", key)
+    s = _CAMEL_BOUNDARY_RE.sub(r"\1_\2", s)
+    s = _KEY_SEP_RE.sub("_", s)
+    return s.lower()
+
+
+def _is_secret_key(key: Any) -> bool:
+    if not isinstance(key, str):
+        return False
+    norm = _normalize_secret_key(key)
+    return norm in _SECRET_EXACT_KEYS or bool(_SECRET_KEY_RE.search(norm))
+
+
+def strip_secrets(obj: Any) -> Any:
+    """Recursively return a copy of *obj* with all secret-bearing dict keys removed."""
+    if isinstance(obj, dict):
+        return {k: strip_secrets(v) for k, v in obj.items() if not _is_secret_key(k)}
+    if isinstance(obj, list):
+        return [strip_secrets(item) for item in obj]
+    if isinstance(obj, tuple):
+        return [strip_secrets(item) for item in obj]
+    return obj
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    return str(value)
+
+
+def get_dr_state_key(source: dict) -> str:
+    """FOS key for the Postgres + config disaster-recovery snapshot JSON."""
+    return f"{_meta_prefix(source)}dr_state.json"
+
+
+def export_dr_state(
+    service_id: str,
+    *,
+    audit_limit: int = 1000,
+    labels_limit: int = 5000,
+) -> dict[str, Any] | None:
+    """Export non-secret service config, views, alerts, scoring_labels, and audit_logs
+    to ``{meta_prefix}dr_state.json`` in FOS. Best-effort: logs and returns None on error.
+    """
+    source = get_source_for_service(service_id)
+    if not source:
+        return None
+
+    try:
+        from backend.core import metadata as metadata_db
+        from backend.scoring import list_labels
+
+        raw_cfg = svcconfig.load_config(service_id) or {}
+        views = metadata_db.list_views(service_id)
+        alerts = metadata_db.list_alerts(service_id, filter_service_id=service_id)
+        scoring_labels = list_labels(service_id, limit=labels_limit)
+        audit_logs = metadata_db.export_audit(service_id, limit=audit_limit)
+
+        payload: dict[str, Any] = strip_secrets(
+            {
+                "schema_version": DR_STATE_SCHEMA_VERSION,
+                "exported_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
+                "service_id": service_id,
+                "service_config": raw_cfg,
+                "views": views,
+                "alerts": alerts,
+                "scoring_labels": scoring_labels,
+                "audit_logs": audit_logs,
+            }
+        )
+
+        s3 = _get_fos_client(source)
+        bucket = source["bucket"]
+        key = get_dr_state_key(source)
+        body = json.dumps(payload, default=_json_default).encode("utf-8")
+        s3.put_object(Bucket=bucket, Key=key, Body=body, ContentType="application/json")
+        logger.debug(f"[state_sync] Exported DR state to {key}")
+        return payload
+    except Exception as e:
+        logger.warning(f"[state_sync] Failed to export DR state for {service_id}: {e}")
+        return None
+
+
+def read_dr_state(
+    source: dict[str, Any],
+    *,
+    s3_client: Any | None = None,
+    prefer_direct_s3: bool = True,
+) -> dict[str, Any] | None:
+    """Read and decode ``{meta_prefix}dr_state.json`` from FOS.
+
+    Accepts an explicit *s3_client* for cold-start restore (when no local
+    service config exists). Returns ``None`` if the object does not exist.
+    """
+    key = get_dr_state_key(source)
+    if s3_client is None and not prefer_direct_s3 and (source.get("cdn_url") or "").rstrip("/"):
+        data = _read_fos_json(source, key, swallow_cdn_404=True)
+        return data if isinstance(data, dict) else None
+
+    s3 = s3_client if s3_client is not None else _get_fos_client(source)
+    try:
+        resp = s3.get_object(Bucket=source["bucket"], Key=key)
+    except Exception as exc:
+        code = str((getattr(exc, "response", None) or {}).get("Error", {}).get("Code", ""))
+        no_such_key_cls = getattr(getattr(s3, "exceptions", None), "NoSuchKey", None)
+        if (isinstance(no_such_key_cls, type) and isinstance(exc, no_such_key_cls)) or code in {
+            "NoSuchKey",
+            "404",
+            "NotFound",
+        }:
+            return None
+        raise
+    raw = resp["Body"].read()
+    data = json.loads(raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else str(raw))
+    return data if isinstance(data, dict) else None

@@ -22,6 +22,19 @@ import { backendTestEnvironment } from '../__tests__/helpers/msw/handlers'
 
 const HOST = '127.0.0.1'
 
+function _clickhouseEnv(): Record<string, string> {
+  return {
+    CLICKHOUSE_ENABLED: 'true',
+    CLICKHOUSE_HOST: process.env.FLA_E2E_CLICKHOUSE_HOST || HOST,
+    CLICKHOUSE_PORT: process.env.FLA_E2E_CLICKHOUSE_PORT || '8123',
+    CLICKHOUSE_DATABASE: process.env.FLA_E2E_CLICKHOUSE_DATABASE || 'fla',
+    CLICKHOUSE_USER: process.env.FLA_E2E_CLICKHOUSE_USER || 'fla',
+    CLICKHOUSE_PASSWORD: process.env.FLA_E2E_CLICKHOUSE_PASSWORD ?? 'fla_local_dev',
+    CLICKHOUSE_SECURE: 'false',
+    HIGH_SCALE_CURSOR_SECRET: 'e2e-cursor-secret-0123456789', // gitleaks:allow
+  }
+}
+
 function _seedSyntheticLogs(sandbox: string, configsDir: string, repoRoot: string): void {
   try {
     const cfgPath = join(configsDir, 'svc-playwright-e2e.json')
@@ -35,6 +48,8 @@ function _seedSyntheticLogs(sandbox: string, configsDir: string, repoRoot: strin
         join(repoRoot, 'scripts', 'load_test', 'generate_synthetic_traffic.py'),
         '--target',
         'local',
+        '--with-clickhouse',
+        '--clean',
         '--rows',
         '750',
         // 36h of history: Insights detectors need a full 24h baseline plus the
@@ -49,10 +64,14 @@ function _seedSyntheticLogs(sandbox: string, configsDir: string, repoRoot: strin
       ],
       {
         cwd: sandbox,
+        env: {
+          ...backendTestEnvironment(sandbox),
+          ..._clickhouseEnv(),
+        },
         stdio: 'pipe',
       },
     )
-    console.log('[e2e] seeded 750 rows (36h span) of synthetic traffic into sandbox buffer')
+    console.log('[e2e] seeded 750 rows (36h span) of synthetic traffic into sandbox buffer + ClickHouse')
   } catch (err: unknown) {
     const e = err as { stdout?: Buffer | string; stderr?: Buffer | string; message?: string }
     const out = e.stdout ? e.stdout.toString() : ''
@@ -63,8 +82,8 @@ function _seedSyntheticLogs(sandbox: string, configsDir: string, repoRoot: strin
 
 async function poll(url: string, timeoutMs = 180_000): Promise<void> {
   // Default 180s: the playwright config webServer timeout is 120s for the
-  // FRONTEND, but the BACKEND boot cost (DuckDB init + httpfs load + DuckLake
-  // catalog open + every router import) is the lion's share of cold-start.
+  // FRONTEND, but the BACKEND boot cost (Postgres + ClickHouse initialization
+  // + schema bootstrap + every router import) is the lion's share of cold-start.
   // The prior 60s default failed on slow CI runners with the misleading
   // 'backend never returned 200' before the frontend even got a chance to
   // start. 180s clears realistic CI variance with margin.
@@ -122,7 +141,7 @@ function _seedDefaultServiceConfig(configsDir: string): void {
     // writes them here). With both present, GET /api/usage/current-storage
     // uses them instead of falling back to a live FOS ListObjectsV2 scan
     // against the mock bucket, which only logged `FOS Scan failed ... 400`
-    // on every /usage page load. The sandbox has no committed DuckLake data.
+    // on every /usage page load. The sandbox has no committed archive data.
     status: { storage_bytes: 0, storage_files: 0 },
     log_fields: {
       schema_version: 2,
@@ -225,6 +244,7 @@ async function globalSetup() {
           frontendPort: E2E_FRONTEND_PORT,
           registryPath: oauthRegistryPath,
         }),
+        ..._clickhouseEnv(),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
       // Detach so the child doesn't share our TTY signal group.

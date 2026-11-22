@@ -1,8 +1,11 @@
 import type React from 'react'
+import { SERVICE_DEFAULTS, type SnapshotIntervalMinutes } from '@/lib/serviceDefaults'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 import type { useMutation, useQueryClient } from '@tanstack/react-query'
 import type { Service } from '@/stores/filterStore'
 import type { SSELine, SSEStatus } from '@/hooks/useSSE'
 import type { Schema } from '@/types/api'
+import type { AttachOffer } from './attach'
 
 export type ProvisionService = Schema<"ProvisionService">
 export type LogFieldsCatalog = Schema<"LogFieldsCatalogResponse">
@@ -35,6 +38,7 @@ export interface TokenInfo {
 }
 
 export interface ProvisionConfig {
+  capture: "managed" | "attached"
   endpoint_name: string
   fos_region: string
   fos_endpoint: string
@@ -53,8 +57,7 @@ export interface ProvisionConfig {
   cdn_secret: string
   enable_cron_sync: boolean
   delete_after: boolean
-  commit_interval_mins: number
-  enable_cron_compact: boolean
+  snapshot_interval_minutes: SnapshotIntervalMinutes
   log_fields: LogFieldsConfig
   ngwaf_workspace_id: string
   cmcd_enabled: boolean
@@ -65,13 +68,12 @@ export interface ProvisionConfig {
   rum_log_period: number
   log_retention_days: number
   rum_retention_days: number
-  cache_retention_days: number
-  rollup_retention_months: number
   rum_custom_condition: string
   faro_version: string | null
 }
 
 export const INITIAL_CONFIG: ProvisionConfig = {
+  capture: "managed",
   endpoint_name: "",
   fos_region: "us-east-1",
   fos_endpoint: "",
@@ -82,8 +84,8 @@ export const INITIAL_CONFIG: ProvisionConfig = {
   sample_rate: 100,
   edge_only: true,
   custom_condition: "",
-  log_period: 60,
-  rum_log_period: 300,
+  log_period: SERVICE_DEFAULTS.logPeriodSeconds,
+  rum_log_period: SERVICE_DEFAULTS.rumLogPeriodSeconds,
   cdn_service_name: "",
   cdn_prefix: "",
   cdn_shield: "iad-va-us",
@@ -91,19 +93,16 @@ export const INITIAL_CONFIG: ProvisionConfig = {
   cdn_secret: "",
   enable_cron_sync: true,
   delete_after: true,
-  commit_interval_mins: 5,
-  enable_cron_compact: true,
-  log_fields: { groups: [], field_overrides: {} },
+  snapshot_interval_minutes: SERVICE_DEFAULTS.snapshotIntervalMinutes,
+  log_fields: { groups: [], custom_fields: [], field_overrides: {} },
   ngwaf_workspace_id: "",
   cmcd_enabled: false,
   cmcd_mode: "query_string",
   cmcd_version: 1,
   logging_enabled: true,
   rum_enabled: false,
-  log_retention_days: 30,
-  rum_retention_days: 30,
-  cache_retention_days: 14,
-  rollup_retention_months: 12,
+  log_retention_days: SERVICE_DEFAULTS.logRetentionDays,
+  rum_retention_days: SERVICE_DEFAULTS.rumRetentionDays,
   rum_custom_condition: "",
   faro_version: null,
 }
@@ -128,17 +127,21 @@ export interface WizardDraft {
 
 export function getStepsForMode(
   mode: WizardMode,
-  config?: { logging_enabled?: boolean },
+  config?: { logging_enabled?: boolean; capture?: "managed" | "attached" },
 ): { id: Step; label: string }[] {
+  const attached = config?.capture === "attached"
   const steps: { id: Step; label: string }[] = [
-    { id: "mode", label: "Role" },
+    ...(isCloudMode() ? [] : [{ id: "mode" as const, label: "Role" }]),
     { id: "token", label: "Auth" },
     { id: "service", label: "Service" },
   ]
   if (mode === "ingest") steps.push({ id: "connect", label: "Connect" })
-  steps.push({ id: "features", label: "Features" }, { id: "storage", label: "Storage" })
-  if (!config || config.logging_enabled !== false) {
-    steps.push({ id: "ngwaf", label: "NGWAF" }, { id: "fields", label: "Log Fields" })
+  if (!attached) steps.push({ id: "features", label: "Features" })
+  steps.push({ id: "storage", label: "Storage" })
+  if (!attached && (!config || config.logging_enabled !== false)) {
+    // Cloud has no NGWAF workspace lookup; its server ignores ngwaf_workspace_id.
+    if (!isCloudMode()) steps.push({ id: "ngwaf", label: "NGWAF" })
+    steps.push({ id: "fields", label: "Log Fields" })
   }
   steps.push({ id: "execute", label: "Review" })
   return steps
@@ -206,6 +209,9 @@ export interface WizardState {
   handleTokenSubmit: () => Promise<void>
   validateMutation: ReturnType<typeof useMutation<ValidateResponse | undefined, Error, string>>
   handleServiceSelect: (service: ProvisionService) => void
+  attachOffer: AttachOffer | null
+  isCheckingAttach: boolean
+  acceptAttach: () => void
   handleCheckFos: (vals?: { bucket?: string; region?: string; access_key?: string; secret_key?: string }) => Promise<void>
   checkDomain: (prefix: string) => Promise<void>
   domainStatus: DomainStatus

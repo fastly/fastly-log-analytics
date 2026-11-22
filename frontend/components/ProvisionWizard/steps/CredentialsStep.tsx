@@ -2,6 +2,7 @@
 
 import React from 'react'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import {
@@ -15,6 +16,8 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { WizardState } from '../types'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
+import { ATTACH_ENDPOINT_NAME, attachUnavailableMessage } from '../attach'
 
 function errorCode(e: unknown): string | undefined {
   return e && typeof e === "object" && "code" in e
@@ -23,6 +26,7 @@ function errorCode(e: unknown): string | undefined {
 }
 
 export function ModeStep({ s }: { s: WizardState }) {
+  const cloud = isCloudMode()
   const modeCards = [
     {
       mode: "provision" as const,
@@ -32,10 +36,11 @@ export function ModeStep({ s }: { s: WizardState }) {
       iconColor: "text-primary",
       hoverBorder: "hover:border-primary",
       title: "Admin: Provision",
-      description:
-        "Deploy new Fastly Object Storage resources, logging endpoints, and a CDN proxy. Best for new projects.",
+      description: cloud
+        ? "Deploy new Fastly Object Storage resources and logging endpoints. Best for new projects."
+        : "Deploy new Fastly Object Storage resources, logging endpoints, and a CDN proxy. Best for new projects.",
     },
-    {
+    ...(cloud ? [] : [{
       mode: "ingest" as const,
       nextStep: "token" as const,
       icon: Settings,
@@ -45,7 +50,7 @@ export function ModeStep({ s }: { s: WizardState }) {
       title: "Admin: Connect Terraform",
       description:
         "Set up ingestion for a service that is already managed via Terraform. We'll skip creating Fastly resources but set up data sync.",
-    },
+    }]),
   ]
 
   return (
@@ -91,14 +96,22 @@ export function ModeStep({ s }: { s: WizardState }) {
 }
 
 export function TokenStep({ s }: { s: WizardState }) {
+  const cloud = isCloudMode()
   return (
     <div className="flex-1 flex flex-col items-center justify-center p-8 space-y-6 text-center">
       <div className="space-y-2 max-w-md">
         <h3 className="text-xl font-semibold tracking-tight">Enter Fastly API Token</h3>
-        <p className="text-sm text-muted-foreground leading-relaxed">
-          We need a token with <code>superuser</code> permissions to create and configure your services. An{" "}
-          <code>engineer</code> token cannot create new services.
-        </p>
+        {cloud ? (
+          <p className="text-sm text-muted-foreground leading-relaxed">
+            We need an <code>engineer</code> token with access to all services, or a <code>superuser</code> token,
+            to configure logging on your service and set up Fastly Object Storage.
+          </p>
+        ) : (
+          <p className="text-sm text-muted-foreground leading-relaxed">
+            We need an <code>engineer</code> token with access to all services, or a <code>superuser</code> token,
+            to create and configure your services.
+          </p>
+        )}
         <div className="pt-2">
           <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-500 border border-amber-500/20 text-[10px] font-bold uppercase tracking-wider">
             <AlertCircle className="h-3 w-3 shrink-0" />
@@ -121,6 +134,7 @@ export function TokenStep({ s }: { s: WizardState }) {
           <Input
             id="token"
             type="password"
+            autoFocus
             value={s.token}
             onChange={(e) => s.setToken(e.target.value.trim())}
             placeholder=""
@@ -243,6 +257,46 @@ export function ServiceStep({ s }: { s: WizardState }) {
           )}
         </div>
       </div>
+      <AttachPanel s={s} />
+    </div>
+  )
+}
+
+function AttachPanel({ s }: { s: WizardState }) {
+  const offer = s.attachOffer
+  if (s.isCheckingAttach) {
+    return (
+      <div className="shrink-0 flex items-center gap-2 text-sm text-muted-foreground" role="status">
+        <Loader2 className="h-4 w-4 animate-spin" /> Another install manages this service. Checking whether Cloud can attach…
+      </div>
+    )
+  }
+  if (!offer || offer.serviceId !== s.selectedService?.id) return null
+  if (!offer.available) {
+    return (
+      <div className="shrink-0 flex items-start gap-2 p-3 border border-destructive/30 rounded-lg text-sm text-destructive" role="alert">
+        <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" /> {attachUnavailableMessage(offer.reason)}
+      </div>
+    )
+  }
+  return (
+    <div className="shrink-0 p-4 border rounded-lg bg-muted/10 space-y-3 text-sm" role="region" aria-label="Attach alongside the existing install">
+      <p className="font-semibold">Another install already manages this service&apos;s logging VCL.</p>
+      <p className="text-muted-foreground leading-relaxed">
+        Cloud can attach alongside it and reuse its capture VCL. Cloud adds only its own owner marker,
+        its logging endpoints (starting with &quot;{ATTACH_ENDPOINT_NAME}&quot;), and their response
+        conditions, attaching request logs (including CMCD if captured) and RUM without modifying the
+        existing capture VCL.
+      </p>
+      {offer.missingFields.length > 0 && (
+        <p className="text-muted-foreground">
+          The existing capture VCL does not set these fields, so they will be blank:{" "}
+          <span className="font-mono">{offer.missingFields.join(", ")}</span>
+        </p>
+      )}
+      <Button className="h-9 text-xs" onClick={s.acceptAttach}>
+        Attach alongside the existing install
+      </Button>
     </div>
   )
 }

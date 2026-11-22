@@ -1,6 +1,6 @@
 import { act, render, renderHook, screen, waitFor, fireEvent } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { http, HttpResponse } from 'msw'
+import { http, HttpResponse } from 'msw/http'
 import { withNuqsTestingAdapter, type OnUrlUpdateFunction } from 'nuqs/adapters/testing'
 import {
   createTestQueryClient, renderWithQuery, renderWithQueryClient,
@@ -9,8 +9,12 @@ import {
 } from '../helpers/page-smoke'
 import { describe, expect, it, test, vi, beforeAll, beforeEach, afterEach } from 'vitest'
 import React from 'react'
+import { renderToString } from 'react-dom/server'
+import { hydrateRoot } from 'react-dom/client'
+import { QueryClientProvider } from '@tanstack/react-query'
 import type { PlotlyLayout, PlotlyTrace } from '@/types/api'
 import { useServiceStore } from '@/stores/filterStore'
+import { setCloudModeRuntime } from '@/lib/cloud-engine/mode'
 
 let mockSearchParamsString = 'service=svc-test'
 let mockScoringSubcomponents = false
@@ -201,13 +205,14 @@ import { ClickHouseAdminClient, ClickHouseStatusNotice } from '@/app/admin/click
 import { OperationsOverview, AdminTrendsClient, ServicesTable } from '@/app/admin/_sections/OperationsOverview'
 import { QuarantineSection } from '@/app/control-room/_sections/ControlRoomClient'
 import TrendsLoading from '@/app/admin/trends/loading'
-import { getApiBase } from '@/lib/api'
+import { getApiBase, queryKeys } from '@/lib/api'
 import { server } from '@/__tests__/helpers/msw/handlers'
 import { InvitationsPanel } from '@/components/share-dashboard/InvitationsPanel'
 import { CreateInviteDialog } from '@/components/share-dashboard/CreateInviteDialog'
-import { useTableSort, type ShareStatus, type SortAccessors } from '@/components/share-dashboard/SharingControlPanel'
+import { AuditLogPanel, useTableSort, type ShareStatus, type SortAccessors } from '@/components/share-dashboard/SharingControlPanel'
 import { StatusPanel, L2EnforcementCard } from '@/components/SessionScoring/StatusPanel'
-import { LabelsTab, AuditLogTab, MatrixVersionsCard, useScorerTimeseries } from '@/components/SessionScoring/ScoringAdminPanels'
+import { LabelsTab, AuditLogTab, MatrixVersionsCard, ThresholdSlider, useScorerTimeseries } from '@/components/SessionScoring/ScoringAdminPanels'
+import { PricingSettings } from '@/app/admin/_sections/AdminGlobalSettings'
 
 stubMatchMedia()
 window.HTMLElement.prototype.scrollIntoView = vi.fn()
@@ -265,23 +270,24 @@ test('Loading skeleton and AdminPage render zero-CLS contain-intrinsic-size rese
   expect(container.querySelectorAll('[class*="contain-intrinsic-size"]').length).toBeGreaterThanOrEqual(6)
 })
 
-test('OperationsOverview renders live query, ingest gap, slow query, and worker status cards', async () => {
+test('OperationsOverview renders live query, ingest gap, slow query, and ingest ledger cards', async () => {
   server.use(
-    http.get('/api/admin/queries/summary', () => HttpResponse.json({ active_total: 2, by_db_type: { duckdb: 2 }, recent_count: 15 })),
+    http.get('/api/admin/queries/summary', () => HttpResponse.json({ active_total: 2, by_db_type: { clickhouse: 2 }, recent_count: 15 })),
     http.get('/api/admin/log-accounting', () => HttpResponse.json({
       configured: true, service_id: 'test-svc', hours: 24, buckets: [],
       totals: { requests: 1000, log_lines: 1000, log_bytes: 50000, ingested_rows: 1000, gap: 0, gap_pct: 0 }, sustained_loss: null,
     })),
     http.get('/api/admin/slow-queries/count', () => HttpResponse.json({ count: 0, since_hours: 24, threshold_ms: 1000 })),
     http.get('/api/admin/celery/status', () => HttpResponse.json({
-      workers: { count: 4 }, queues: { 'q.ingest': 0, 'q.control': 0 }, ledger: { dead_letter: 0, quarantined: 0 },
+      ledger: { discovered: 7, claimed: 2, committed: 140, dead_letter: 0, quarantined: 0 }, inprocess_schedules: [], inprocess_active_runs: [],
     })),
   )
   renderWithQuery(<OperationsOverview />, { queryClient: createTestQueryClient({ queries: { staleTime: 0 } }) })
-  for (const label of ['Live Queries', 'Ingest Gap', 'Notable Slow Queries', 'Workers & Queues']) expect(screen.getByText(label)).toBeInTheDocument()
+  for (const label of ['Live Queries', 'Ingest Gap', 'Notable Slow Queries', 'Ingest Ledger']) expect(screen.getByText(label)).toBeInTheDocument()
   await waitFor(() => {
-    for (const txt of ['0%', 'healthy · 24h', '4 workers']) expect(screen.getByText(txt)).toBeInTheDocument()
+    for (const txt of ['0%', 'healthy · 24h', '7 discovered', '2 claimed · 140 committed']) expect(screen.getByText(txt)).toBeInTheDocument()
   })
+  expect(screen.queryByText(/workers/i)).not.toBeInTheDocument()
 })
 
 test('ServicesTable renders services, manual Refresh Status trigger, and Delete Data / Teardown menu order', async () => {
@@ -305,6 +311,34 @@ test('ServicesTable renders services, manual Refresh Status trigger, and Delete 
   expect(deleteDataItem.compareDocumentPosition(screen.getByText('Teardown Service')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   await user.click(deleteDataItem)
   expect(await screen.findByText('Delete Data: Production Edge CDN')).toBeInTheDocument()
+})
+
+test('ServicesTable shows Restore/Recover from FOS when 0 services exist in High-Scale and Cloud modes, and hides in Cloud when a service exists', async () => {
+  try {
+    setCloudModeRuntime(false)
+    server.use(http.get(`${API_BASE}/api/services`, () => HttpResponse.json({ services: [] })))
+    const { unmount } = renderWithQuery(<ServicesTable />, { queryClient: createTestQueryClient({ queries: { staleTime: 0 } }) })
+    await waitFor(() => expect(screen.getByTestId('restore-from-fos-btn')).toBeInTheDocument())
+    expect(screen.getByTestId('restore-from-fos-btn')).toHaveTextContent('Restore from FOS')
+    unmount()
+
+    setCloudModeRuntime(true)
+    const { unmount: unmountCloudEmpty } = renderWithQuery(<ServicesTable />, { queryClient: createTestQueryClient({ queries: { staleTime: 0 } }) })
+    await waitFor(() => expect(screen.getByTestId('restore-from-fos-btn')).toBeInTheDocument())
+    expect(screen.getByTestId('restore-from-fos-btn')).toHaveTextContent('Recover from FOS')
+    unmountCloudEmpty()
+
+    server.use(
+      http.get(`${API_BASE}/api/services`, () =>
+        HttpResponse.json({ services: [{ service_id: 'cloud-1', name: 'Cloud Site', fos_bucket: 'cloud-bkt' }] }),
+      ),
+    )
+    renderWithQuery(<ServicesTable />, { queryClient: createTestQueryClient({ queries: { staleTime: 0 } }) })
+    await waitFor(() => expect(screen.getByText('Cloud Site')).toBeInTheDocument())
+    expect(screen.queryByTestId('restore-from-fos-btn')).not.toBeInTheDocument()
+  } finally {
+    setCloudModeRuntime(false)
+  }
 })
 
 const evidence = {
@@ -359,8 +393,6 @@ const SAMPLE_SERIES = {
   disk_used_pct: [{ ts: '2026-04-19T12:01:00Z', value: 31.2 }],
   disk_used_pct_root: [{ ts: '2026-04-19T12:01:00Z', value: 44.8 }],
   active_query_count: [{ ts: '2026-04-19T12:01:00Z', value: 2.0 }],
-  'pool_wait_p95_ms|svc-a': [{ ts: '2026-04-19T12:01:00Z', value: 4.2 }],
-  'pool_wait_p95_ms|svc-b': [{ ts: '2026-04-19T12:01:00Z', value: 11.5 }],
   'ingest_lag_s|svc-a': [{ ts: '2026-04-19T12:01:00Z', value: 18.0 }],
   'ingest_lag_s|svc-b': [{ ts: '2026-04-19T12:01:00Z', value: 7.0 }],
 }
@@ -382,11 +414,11 @@ describe('/admin/trends Page & Client', () => {
     expect(screen.getByTestId('admin-trends-grid-reservation').className).toContain('[contain-intrinsic-size:auto_680px]')
   })
 
-  it('renders all 7 vital series cards, switches lookback windows, and triggers manual Refresh', async () => {
+  it('renders all 6 vital series cards, switches lookback windows, and triggers manual Refresh', async () => {
     clientGetSpy.mockResolvedValue({ data: { series: SAMPLE_SERIES }, response: new Response(null, { status: 200 }) })
     renderWithQuery(<AdminTrendsClient />)
     await waitFor(() => expect(screen.getByTestId('admin-trends-latest-cpu_load_1m')).toHaveTextContent('0.82'))
-    for (const [k, v] of [['mem_used_pct', '54.3%'], ['disk_used_pct', '31.2%'], ['disk_used_pct_root', '44.8%'], ['active_query_count', '2.00'], ['pool_wait_p95_ms', '11.5ms'], ['ingest_lag_s', '18s']] as const) {
+    for (const [k, v] of [['mem_used_pct', '54.3%'], ['disk_used_pct', '31.2%'], ['disk_used_pct_root', '44.8%'], ['active_query_count', '2.00'], ['ingest_lag_s', '18s']] as const) {
       expect(screen.getByTestId(`admin-trends-latest-${k}`)).toHaveTextContent(v)
     }
 
@@ -502,7 +534,7 @@ describe('Admin Live Query Monitor (/admin/queries)', () => {
         return {
           last_seq: 12,
           active: [{
-            query_id: 11, db_type: 'DuckDB', sql_preview: 'SELECT count(*) FROM logs WHERE status >= 500',
+            query_id: 11, db_type: 'ClickHouse', sql_preview: 'SELECT count(*) FROM logs WHERE status >= 500',
             sql: 'SELECT count(*) FROM logs WHERE status >= 500', sql_len: 46, service_id: 'svc_alpha',
             started_at_utc: nowSec - 2, duration_ms: 1450.0, cancellable: true, cancelled_at: null,
             attribution: {
@@ -542,7 +574,7 @@ describe('Admin Live Query Monitor (/admin/queries)', () => {
       route === '/api/admin/app-config/query-monitor' ? { enabled: true } : new Promise(() => {}),
     )
     renderWithQuery(<QueryMonitorPage />, {
-      wrapper: withNuqsTestingAdapter({ searchParams: '?q=COMPACT&kind=cron&view=live&slow=250&db=DuckDB&nogroup=1' }),
+      wrapper: withNuqsTestingAdapter({ searchParams: '?q=COMPACT&kind=cron&view=live&slow=250&db=ClickHouse&nogroup=1' }),
     })
     expect(await screen.findByDisplayValue('COMPACT')).toBeDefined()
     expect(screen.getByRole('tab', { name: /live only/i }).getAttribute('aria-selected')).toBe('true')
@@ -550,6 +582,39 @@ describe('Admin Live Query Monitor (/admin/queries)', () => {
 })
 
 describe('/admin/clickhouse page & ClickHouseAdminClient', () => {
+  it('hydrates before the service store and status cache are safe to consume', async () => {
+    mockSearchParamsString = ''
+    useServiceStore.setState({ activeServiceId: null, services: [] })
+    const queryClient = createTestQueryClient()
+    const tree = (
+      <QueryClientProvider client={queryClient}>
+        <ClickHouseAdminClient initialServiceId="svc-test" />
+      </QueryClientProvider>
+    )
+    const container = document.createElement('div')
+    container.innerHTML = renderToString(tree)
+    document.body.appendChild(container)
+    useServiceStore.setState({ activeServiceId: 'svc-test', services: [{ id: 'svc-test', name: 'Test' }] })
+    queryClient.setQueryData(queryKeys.admin.clickhouseStatus('svc-test'), {
+      service_id: 'svc-test', enabled: false, health: 'disabled',
+    })
+    const onRecoverableError = vi.fn()
+    let root: ReturnType<typeof hydrateRoot> | undefined
+    try {
+      await act(async () => {
+        root = hydrateRoot(container, tree, { onRecoverableError })
+      })
+      expect(onRecoverableError).not.toHaveBeenCalled()
+      expect(container.querySelector('[data-testid="admin-clickhouse-service-badge"]')).toHaveTextContent('svc-test')
+      expect(container.querySelector('[data-testid="admin-clickhouse-health-badge"]')).toHaveTextContent('disabled')
+    } finally {
+      act(() => root?.unmount())
+      container.remove()
+      queryClient.clear()
+      mockSearchParamsString = 'service=svc-test'
+    }
+  })
+
   beforeEach(() => {
     notFoundMock.mockClear()
     vi.unstubAllEnvs()
@@ -562,12 +627,7 @@ describe('/admin/clickhouse page & ClickHouseAdminClient', () => {
     vi.restoreAllMocks()
   })
 
-  it('enforces Standard vs High-Scale deployment mode on loading shell, page, and status notices', async () => {
-    vi.stubEnv('DEPLOYMENT_MODE', 'standard')
-    expect(() => render(<ClickHouseLoading />)).toThrow('NEXT_HTTP_ERROR_FALLBACK;404')
-    expect(() => renderWithQueryClient(<ClickHouseAdminPage />)).toThrow('NEXT_HTTP_ERROR_FALLBACK;404')
-
-    vi.stubEnv('DEPLOYMENT_MODE', 'high_scale')
+  it('renders loading shell, page, and status notices unconditionally', async () => {
     const { unmount: uLoad } = render(<ClickHouseLoading />)
     for (const id of [
       'admin-clickhouse-loading', 'admin-clickhouse-toolbar', 'admin-clickhouse-vitals-reservation',
@@ -741,6 +801,35 @@ describe('InvitationsPanel, CreateInviteDialog & useTableSort', () => {
     expect(screen.getByRole('button', { name: /create invite/i })).toBeDisabled()
   })
 
+  test('CreateInviteDialog rejects invalid invite details, preserves zero duration, and surfaces API errors', async () => {
+    const user = userEvent.setup()
+    const services: ShareStatus['services'] = [{ service_id: 'svcA', name: 'Service A' }]
+    let posted: Record<string, unknown> | undefined
+    server.use(
+      http.get('*/api/admin/share/oauth-providers', () => HttpResponse.json({ providers: [] })),
+      http.post('*/api/admin/share/invites', async ({ request }) => {
+        posted = await request.json() as Record<string, unknown>
+        return HttpResponse.json({ detail: 'Invite storage unavailable' }, { status: 503 })
+      }),
+    )
+    render(<CreateInviteDialog open onOpenChange={vi.fn()} services={services} onCreated={vi.fn()} />)
+
+    await user.type(screen.getByLabelText('Name'), 'Jane')
+    await user.type(screen.getByLabelText('Email'), 'not-an-email')
+    await user.type(screen.getByLabelText('Passcode'), 'ocean-breeze-cabin-42')
+    await user.click(screen.getByRole('checkbox', { name: /Service A/i }))
+    expect(screen.getByRole('button', { name: /create invite/i })).toBeDisabled()
+
+    await user.clear(screen.getByLabelText('Email'))
+    await user.type(screen.getByLabelText('Email'), 'jane@example.com')
+    await user.click(screen.getByLabelText('Expiration'))
+    await user.click(await screen.findByRole('option', { name: 'Unlimited' }))
+    await user.click(screen.getByRole('button', { name: /create invite/i }))
+
+    await waitFor(() => expect(posted?.duration_hours).toBeNull())
+    expect(await screen.findByText(/Invite storage unavailable/i)).toBeInTheDocument()
+  })
+
   test('useTableSort sorts ascending/descending, keeps nulls last, and resets direction on key change', () => {
     type SortRow = { name: string; n: number | null }
     const sortRows: SortRow[] = [{ name: 'bravo', n: 2 }, { name: 'alpha', n: null }, { name: 'charlie', n: 1 }]
@@ -759,11 +848,109 @@ describe('InvitationsPanel, CreateInviteDialog & useTableSort', () => {
   })
 })
 
+describe('PricingSettings', () => {
+  const settings = {
+    enabled: true,
+    retention_days: 30,
+    class_a_rate_per_1k: 0.005,
+    class_b_rate_per_10k: 0.01,
+    cdn_egress_rate_per_gb: 0.12,
+    storage_rate_per_gb_month: 0.02,
+    min_billed_days: 30,
+  }
+
+  test('rejects invalid values, permits zero rates, and preserves the numeric payload', async () => {
+    const user = userEvent.setup()
+    let body: Record<string, unknown> | undefined
+    server.use(
+      http.get('*/api/admin/usage-logging', () => HttpResponse.json(settings)),
+      http.patch('*/api/admin/usage-logging', async ({ request }) => {
+        body = await request.json() as Record<string, unknown>
+        return HttpResponse.json(settings)
+      }),
+    )
+    renderWithQuery(<PricingSettings />)
+    await screen.findByLabelText('Class A Ops ($/1k)')
+    await user.click(screen.getByRole('button', { name: /edit/i }))
+
+    const rateA = screen.getByLabelText('Class A Ops ($/1k)')
+    const minDays = screen.getByLabelText('Min. Days Billed/Object')
+    await user.clear(rateA)
+    await user.type(rateA, 'invalid')
+    expect(screen.getByRole('button', { name: /save changes/i })).toBeDisabled()
+
+    await user.clear(rateA)
+    await user.type(rateA, '0')
+    await user.clear(minDays)
+    await user.type(minDays, '0')
+    expect(screen.getByRole('button', { name: /save changes/i })).toBeDisabled()
+
+    await user.clear(minDays)
+    await user.type(minDays, '1')
+    await user.click(screen.getByRole('button', { name: /save changes/i }))
+    await waitFor(() => expect(body).toMatchObject({
+      class_a_rate_per_1k: 0,
+      min_billed_days: 1,
+    }))
+  })
+
+  test('shows a failed pricing save without leaving edit mode', async () => {
+    const user = userEvent.setup()
+    server.use(
+      http.get('*/api/admin/usage-logging', () => HttpResponse.json(settings)),
+      http.patch('*/api/admin/usage-logging', () =>
+        HttpResponse.json({ detail: 'Pricing update rejected' }, { status: 400 })),
+    )
+    renderWithQuery(<PricingSettings />)
+    await screen.findByLabelText('Class A Ops ($/1k)')
+    await user.click(screen.getByRole('button', { name: /edit/i }))
+    await user.click(screen.getByRole('button', { name: /save changes/i }))
+
+    expect(await screen.findByText(/Pricing update rejected/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /cancel/i })).toBeInTheDocument()
+  })
+})
+
 describe('SessionScoring Admin Panels: StatusPanel, AuditLogTab, MatrixVersionsCard, LabelsTab, L2EnforcementCard', () => {
   const SVC = 'svc-scoring-test'
 
   beforeEach(() => {
     useServiceStore.setState({ activeServiceId: SVC, isInitialized: true })
+  })
+
+  it('waits for scoring configuration before requesting enforcement and reacts to configuration changes', async () => {
+    const hits: string[] = []
+    let releaseStatus!: (value: { enabled: boolean }) => void
+    const status = new Promise<{ enabled: boolean }>((resolve) => { releaseStatus = resolve })
+    server.use(
+      http.get(`${API_BASE}/api/services/:service_id/scoring/status`, async () => HttpResponse.json(await status)),
+      http.get(`${API_BASE}/api/services/:service_id/scoring/threshold-preview`, () => HttpResponse.json({
+        flagged: { total: 0, good: 0, bad: 0, unlabeled: 0 },
+        passed: { good: 0, bad: 0, unlabeled: 0 }, total_scored_sessions: 0,
+      })),
+      http.get(`${API_BASE}/api/services/:service_id/scoring/threshold`, () => HttpResponse.json({ threshold: null })),
+      http.get(`${API_BASE}/api/services/:service_id/scoring/enforce-status-code`, () => HttpResponse.json({ effective: 429 })),
+      http.get(`${API_BASE}/api/services/:service_id/scoring/health`, () => HttpResponse.json({})),
+      http.get(`${API_BASE}/api/services/:service_id/scoring/enforce-threshold`, () => {
+        hits.push('threshold')
+        return HttpResponse.json({ threshold: null })
+      }),
+      http.get(`${API_BASE}/api/services/:service_id/scoring/l2-enforce`, () => {
+        hits.push('l2')
+        return HttpResponse.json({ detail: { error: 'enforcement read failed' } }, { status: 500 })
+      }),
+    )
+    const { queryClient } = renderWithQuery(
+      <><ThresholdSlider serviceId={SVC} /><L2EnforcementCard serviceId={SVC} /></>,
+    )
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 30)) })
+    expect(hits).toEqual([])
+    await act(async () => { releaseStatus({ enabled: false }) })
+    expect(await screen.findByText(/Enable session scoring for this service to manage L2 enforcement/)).toBeInTheDocument()
+    expect(hits).toEqual([])
+    act(() => { queryClient.setQueryData(['scoring-status', SVC], { enabled: true }) })
+    await waitFor(() => expect(hits).toEqual(expect.arrayContaining(['threshold', 'l2'])))
+    expect(await screen.findByText(/enforcement read failed/)).toBeInTheDocument()
   })
 
   it('StatusPanel gates on preflight_pragmas_ready without leaking internal pragma names, then opens SSEModal when ready', async () => {
@@ -887,6 +1074,7 @@ describe('SessionScoring Admin Panels: StatusPanel, AuditLogTab, MatrixVersionsC
     })
 
     server.use(
+      http.get(`${API_BASE}/api/services/:service_id/scoring/status`, () => HttpResponse.json({ enabled: true })),
       http.get(`${API_BASE}/api/services/:service_id/scoring/health`, () =>
         HttpResponse.json({ matrix_staleness: { l2_high_pct: 8.5, l2_evaluated: 1000 } }),
       ),
@@ -944,50 +1132,32 @@ describe('AdminQueuePage (/admin/queue)', () => {
     const { unmount } = render(<QueueLoading />)
     expect(screen.getByTestId('admin-queue-loading')).toBeInTheDocument()
     expect(screen.getByTestId('admin-queue-toolbar-skeleton')).toBeInTheDocument()
-    expect(screen.getAllByText(/Inspecting Celery task broker/i).length).toBeGreaterThan(0)
+    expect(screen.queryByText(/Celery|broker/i)).not.toBeInTheDocument()
     expect(screen.getAllByText(/Loading queue telemetry/i).length).toBeGreaterThan(0)
     unmount()
 
     clientGetSpy.mockImplementation(() => new Promise(() => {}))
     renderWithQuery(<AdminQueuePage />)
-    for (const id of [
-      'admin-queue-root', 'admin-queue-trends-reservation', 'admin-queue-depths-reservation',
-      'admin-queue-workers-reservation', 'admin-queue-ledger-reservation', 'admin-queue-schedules-reservation',
-    ]) {
+    for (const id of ['admin-queue-root', 'admin-queue-ledger-reservation', 'admin-queue-schedules-reservation']) {
       expect(screen.getByTestId(id)).toBeInTheDocument()
+    }
+    for (const id of ['admin-queue-trends-reservation', 'admin-queue-depths-reservation', 'admin-queue-workers-reservation']) {
+      expect(screen.queryByTestId(id)).not.toBeInTheDocument()
     }
     expect(screen.getByTestId('admin-queue-refresh-btn')).toBeDisabled()
   })
 
-  it('renders High-Scale queue depths, active workers, ingest ledger cards, in-process schedules, and supports manual Refresh', async () => {
+  it('renders ingest ledger cards and in-process schedules without Celery worker or queue panels, and supports manual Refresh', async () => {
     let statusCalls = 0
-    let batchCalls = 0
     const okRes = (data: unknown) => ({ data, response: { ok: true, status: 200 } })
 
     clientGetSpy.mockImplementation(async (path: string) => {
       if (path === '/api/admin/celery/status') {
         statusCalls += 1
         return okRes({
-          broker_reachable: true,
-          workers: {
-            count: 1,
-            active_tasks: { 'celery@worker-1': [{ id: 'task-uuid-101', name: 'backend.tasks.ingest.ingest_batch', args: ['svc-alpha', 25], time_start: 1700000000 }] },
-            stats: { 'celery@worker-1': {} },
-            registered: { 'celery@worker-1': ['backend.tasks.ingest.ingest_batch'] },
-            scheduled: { 'celery@worker-1': [] },
-          },
-          queues: { celery: 0, 'q.control': 2, 'q.ingest': 9 },
           inprocess_schedules: [{ name: 'log_discovery_svc-alpha', trigger: 'interval[0:00:10]', next_run_at: 1700000010 }],
+          inprocess_active_runs: [],
           ledger: { discovered: 5, claimed: 2, committed: 140, quarantined: 1, dead_letter: 0 },
-        })
-      }
-      if (path === '/api/admin/metric-history/batch') {
-        batchCalls += 1
-        return okRes({
-          series: {
-            celery_queue_depth: [{ ts: 1700000000, value: 4 }, { ts: 1700000060, value: 11 }],
-            celery_active_tasks: [{ ts: 1700000000, value: 1 }, { ts: 1700000060, value: 1 }],
-          },
         })
       }
       if (path === '/api/admin/celery/ledger') {
@@ -1004,82 +1174,31 @@ describe('AdminQueuePage (/admin/queue)', () => {
     })
 
     renderWithQuery(<AdminQueuePage />)
-    await waitFor(() => expect(screen.getByTestId('admin-queue-broker-badge')).toHaveTextContent('Broker Reachable'))
-
-    expect(screen.getByTestId('admin-queue-depths-table')).toBeInTheDocument()
-    expect(screen.getByText('q.ingest')).toBeInTheDocument()
-    expect(screen.getByText('q.control')).toBeInTheDocument()
-    expect(screen.getByTestId('admin-queue-workers-list')).toBeInTheDocument()
-    expect(screen.getByText('celery@worker-1')).toBeInTheDocument()
-    expect(screen.getByText('task-uuid-101')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByTestId('admin-queue-ledger-discovered')).toHaveTextContent('5'))
     expect(screen.getByTestId('admin-queue-ledger-cards')).toBeInTheDocument()
-    expect(screen.getByTestId('admin-queue-ledger-discovered')).toHaveTextContent('5')
     expect(screen.getByTestId('admin-queue-ledger-committed')).toHaveTextContent('140')
     expect(screen.getByTestId('admin-queue-inprocess-schedules-table')).toBeInTheDocument()
     expect(screen.getByText('log_discovery_svc-alpha')).toBeInTheDocument()
+    expect(screen.queryByTestId('admin-queue-broker-badge')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Celery|Active Workers|Queue Depth/i)).not.toBeInTheDocument()
+    expect(clientGetSpy).not.toHaveBeenCalledWith('/api/admin/metric-history/batch', expect.anything())
 
     const refreshBtn = screen.getByTestId('admin-queue-refresh-btn')
     expect(refreshBtn).not.toBeDisabled()
     fireEvent.click(refreshBtn)
-    await waitFor(() => {
-      expect(statusCalls).toBeGreaterThanOrEqual(2)
-      expect(batchCalls).toBeGreaterThanOrEqual(2)
-    })
+    await waitFor(() => expect(statusCalls).toBeGreaterThanOrEqual(2))
   })
 
-  it('renders Standard mode fallback and Standard Mode in-process scheduler telemetry', async () => {
+  it('renders empty ledger and empty in-process schedule states', async () => {
     const okRes = (data: unknown) => ({ data, response: { ok: true, status: 200 } })
-    const emptyWorkers = { count: 0, active_tasks: {}, stats: {}, registered: {}, scheduled: {}, error: 'Valkey unreachable' }
-
     clientGetSpy.mockImplementation(async (path: string) => {
-      if (path === '/api/admin/celery/status') {
-        return okRes({ broker_reachable: false, workers: emptyWorkers, queues: {}, inprocess_schedules: [], ledger: {} })
-      }
-      if (path === '/api/admin/metric-history/batch') return okRes({ series: {} })
-      return okRes({})
-    })
-
-    const { unmount } = renderWithQuery(<AdminQueuePage />)
-    await waitFor(() => expect(screen.getByTestId('admin-queue-broker-badge')).toHaveTextContent('Broker Unreachable / Standard Mode'))
-    expect(screen.getByText(/No queues found or Celery mode is inactive/i)).toBeInTheDocument()
-    expect(screen.getByText(/No active workers found/i)).toBeInTheDocument()
-    expect(screen.getByText(/Ledger is empty/i)).toBeInTheDocument()
-    expect(screen.getByText(/No in-process schedules registered/i)).toBeInTheDocument()
-    unmount()
-
-    clientGetSpy.mockImplementation(async (path: string) => {
-      if (path === '/api/admin/celery/status') {
-        return okRes({
-          broker_reachable: false, deployment_mode: 'standard',
-          workers: { ...emptyWorkers, error: 'Celery broker not configured in standard mode' },
-          queues: {},
-          inprocess_schedules: [
-            { name: 'log_discovery_svc-alpha', trigger: 'interval[0:00:10]', next_run_at: 1700000010 },
-            { name: 'commit_svc-alpha', trigger: 'interval[0:05:00]', next_run_at: 1700000300 },
-          ],
-          inprocess_active_runs: [{ run_id: 101, service_id: 'svc-alpha', task: 'sync', started_at: 1700000000 }],
-          standard_ingest: { ingested_files: 1250, quarantined_items: 2 },
-          ledger: { committed: 1250, quarantined: 2, dead_letter: 0 },
-        })
-      }
-      if (path === '/api/admin/metric-history/batch') return okRes({ series: {} })
+      if (path === '/api/admin/celery/status') return okRes({ inprocess_schedules: [], inprocess_active_runs: [], ledger: {} })
       return okRes({})
     })
 
     renderWithQuery(<AdminQueuePage />)
-    await waitFor(() => expect(screen.getByTestId('admin-queue-broker-badge')).toHaveTextContent('Standard Mode · In-Process Scheduler'))
-    expect(screen.queryByText(/^Queue Depths$/i)).not.toBeInTheDocument()
-    expect(screen.queryByText(/Total Queue Depth \(1h\)/i)).not.toBeInTheDocument()
-    expect(screen.queryByText(/Inspect warning:/i)).not.toBeInTheDocument()
-    expect(screen.getByTestId('admin-queue-depths-reservation')).toBeInTheDocument()
-    expect(screen.getByText(/Quarantined Files & Corrupt Lines \(2\)/i)).toBeInTheDocument()
-    expect(screen.getByTestId('admin-queue-standard-ingest-summary')).toBeInTheDocument()
-    expect(screen.getByText('1,250')).toBeInTheDocument()
-    expect(screen.getByTestId('admin-queue-standard-scheduler-summary')).toBeInTheDocument()
-    expect(screen.getByTestId('admin-queue-inprocess-active-table')).toBeInTheDocument()
-    expect(screen.getByTestId('admin-queue-inprocess-schedules-table')).toBeInTheDocument()
-    expect(screen.getByText('log_discovery_svc-alpha')).toBeInTheDocument()
-    expect(screen.getByText('commit_svc-alpha')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByText(/Ledger is empty/i)).toBeInTheDocument())
+    expect(screen.getByText(/No in-process schedules registered/i)).toBeInTheDocument()
   })
 
   it('displays dead-letter entries in the ledger inspector and handles Retry and Dismiss actions', async () => {
@@ -1088,10 +1207,8 @@ describe('AdminQueuePage (/admin/queue)', () => {
     clientGetSpy.mockImplementation(async (path: string) => {
       if (path === '/api/admin/celery/status') {
         return okRes({
-          broker_reachable: true,
-          workers: { count: 1, active_tasks: {}, stats: {}, registered: {}, scheduled: {} },
-          queues: { celery: 0, 'q.ingest': 0, 'q.control': 0 },
           inprocess_schedules: [],
+          inprocess_active_runs: [],
           ledger: { discovered: 0, claimed: 0, committed: 120, quarantined: 0, dead_letter: 3 },
         })
       }
@@ -1105,10 +1222,9 @@ describe('AdminQueuePage (/admin/queue)', () => {
           total: 1,
         })
       }
-      if (path === '/api/admin/metric-history/batch') return okRes({ series: {} })
       return okRes({})
     })
-    clientPostSpy.mockImplementation(async () => okRes({ ok: true, affected: 1, dispatched: 1 }))
+    clientPostSpy.mockImplementation(async () => okRes({ ok: true, affected: 1 }))
 
     renderWithQuery(<AdminQueuePage />)
     await waitFor(() => expect(screen.getByTestId('admin-queue-ledger-entries')).toBeInTheDocument())
@@ -1121,6 +1237,7 @@ describe('AdminQueuePage (/admin/queue)', () => {
       '/api/admin/celery/ledger/retry',
       expect.objectContaining({ body: { items: [{ service_id: 'svc-alpha', object_key: deadKey }] } }),
     ))
+    await waitFor(() => expect(screen.getByText('Requeued 1 file for ingest retry.')).toBeInTheDocument())
 
     fireEvent.click(screen.getByTestId('admin-queue-ledger-purge-all'))
     await waitFor(() => expect(clientPostSpy).toHaveBeenCalledWith(
@@ -1149,6 +1266,89 @@ function buildMockShareStatus(overrides: Record<string, unknown> = {}) {
 
 describe('admin/share page', () => {
   beforeEach(() => { mockSearchParamsString = '' })
+
+  test('filters by native audit actions and retains the selection when no events match', async () => {
+    const requestedEvents: Array<string | null> = []
+    server.use(http.get(`${API_BASE}/api/admin/share/audit-logs`, ({ request }) => {
+      const event = new URL(request.url).searchParams.get('event_type')
+      requestedEvents.push(event)
+      return HttpResponse.json({ audit_logs: event ? [] : ['login', 'logout', 'login'].map((event_type, id) => ({
+        id, timestamp: '2026-06-01T10:00:00Z', event_type,
+        email: `fixture-user-${id}@example.test`, ip_address: '127.0.0.1', details: '',
+      })) })
+    }))
+    const status = buildMockShareStatus({ audit_logs: undefined }) as unknown as ShareStatus
+    const user = userEvent.setup()
+    renderWithQuery(<AuditLogPanel status={status} onError={vi.fn()} />)
+    await screen.findByText('fixture-user-0@example.test')
+    const eventSelect = screen.getByRole('combobox')
+    eventSelect.focus()
+    await user.keyboard('{ArrowDown}')
+    expect(await screen.findByRole('option', { name: 'LOGIN_SUCCESS' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'logout' })).toBeInTheDocument()
+    expect(screen.getAllByRole('option', { name: 'login' })).toHaveLength(1)
+    await user.click(screen.getByRole('option', { name: 'login' }))
+    await user.click(screen.getByTestId('admin-share-audit-apply-btn'))
+    await screen.findByText('No audit events yet.')
+    expect(requestedEvents).toEqual([null, 'login'])
+    expect(eventSelect).toHaveTextContent('login')
+    eventSelect.focus()
+    await user.keyboard('{ArrowDown}')
+    expect(await screen.findByRole('option', { name: 'login' })).toHaveAttribute('aria-selected', 'true')
+  })
+
+  test('loads recent audit events when Cloud status does not embed them', async () => {
+    let calls = 0
+    server.use(http.get(`${API_BASE}/api/admin/share/audit-logs`, () => {
+      calls += 1
+      return HttpResponse.json({ audit_logs: [{
+        id: 1, timestamp: '2026-06-01T10:00:00Z', event_type: 'login',
+        email: 'admin@example.com', ip_address: '127.0.0.1', details: 'fixture-target',
+      }] })
+    }))
+    const status = buildMockShareStatus({ audit_logs: undefined }) as unknown as ShareStatus
+    const onError = vi.fn()
+    renderWithQuery(<AuditLogPanel status={status} onError={onError} />)
+    expect(await screen.findByText('admin@example.com')).toBeInTheDocument()
+    expect(screen.getByText('fixture-target')).toBeInTheDocument()
+    expect(calls).toBe(1)
+    expect(onError).not.toHaveBeenCalledWith(expect.stringMatching(/error|failed/i))
+  })
+
+  test.each(['omitted', 'populated'])('audit table remains stable with %s recent audit rows', async (mode) => {
+    server.use(http.get(`${API_BASE}/api/admin/share/audit-logs`, () => HttpResponse.json({ audit_logs: [] })))
+    let commits = 0
+    const onRender = () => {
+      commits += 1
+      if (commits > 12) throw new Error('Audit render loop exceeded the test safety bound')
+    }
+    const auditLogs = mode === 'omitted' ? undefined : Array.from({ length: 250 }, (_, index) => ({
+      id: index,
+      timestamp: '2026-06-01T10:00:00Z',
+      event_type: 'login_success',
+      email: `admin-${index}@example.com`,
+      ip_address: '127.0.0.1',
+      details: '',
+    }))
+    const status = buildMockShareStatus({ audit_logs: auditLogs }) as unknown as ShareStatus
+    const tree = () => (
+      <React.Profiler id="share-audit" onRender={onRender}>
+        <AuditLogPanel status={{ ...status }} onError={vi.fn()} />
+      </React.Profiler>
+    )
+    const { rerender } = renderWithQuery(tree())
+    await act(async () => {})
+    rerender(tree())
+    fireEvent.change(screen.getByLabelText('Email contains'), { target: { value: 'admin' } })
+    await act(async () => {})
+    if (mode === 'omitted') {
+      expect(screen.getByText('No audit events yet.')).toBeInTheDocument()
+    } else {
+      expect(screen.getAllByText('login_success')).toHaveLength(250)
+      expect(screen.getByText('admin-249@example.com')).toBeInTheDocument()
+    }
+    expect(commits).toBeLessThan(12)
+  })
 
   test('renders zero-CLS reservations, SharingControlPanel, InvitationsPanel, and manual Refresh', async () => {
     let statusCalls = 0
@@ -1277,6 +1477,38 @@ describe('admin/session-scoring page', () => {
       expect(configHits.length).toBe(2)
       expect(analyticsHits.length).toBe(2)
     })
+  })
+
+  test('overview cards wait for the config composite instead of fetching its pieces themselves', async () => {
+    mockScoringSubcomponents = false
+    const paths: string[] = []
+    const onRequest = ({ request }: { request: Request }) => paths.push(new URL(request.url).pathname)
+    server.events.on('request:start', onRequest)
+    let releaseConfig!: () => void
+    const configGate = new Promise<void>((resolve) => { releaseConfig = resolve })
+    server.use(
+      http.get(`${API_BASE}/api/services/:service_id/scoring/analytics`, () => HttpResponse.json(analyticsStub)),
+      http.get(`${API_BASE}/api/services/:service_id/scoring/config`, async () => {
+        await configGate
+        return HttpResponse.json({
+          status: { enabled: false }, threshold: { threshold: 75 }, exclude_regex: { current: '', is_default: true, default: '', effective: '' },
+          enforce_status_code: { current: 429, effective: 429, is_default: true, default: 429 },
+        })
+      }),
+    )
+    try {
+      // Production gcTime: seeded keys must survive until the cards mount.
+      renderWithQuery(<SessionScoringPage />, { queryOptions: { queries: { gcTime: 5 * 60_000 } } })
+      await waitFor(() => expect(paths).toContain('/api/services/svc-default/scoring/analytics'))
+      await new Promise((r) => setTimeout(r, 50))
+      releaseConfig()
+      await screen.findByTestId('admin-session-scoring-status-card')
+      await new Promise((r) => setTimeout(r, 50))
+      const pieces = ['status', 'threshold', 'exclude-regex', 'enforce-status-code'].map((p) => `/api/services/svc-default/scoring/${p}`)
+      expect(paths.filter((p) => pieces.includes(p))).toEqual([])
+    } finally {
+      server.events.removeListener('request:start', onRequest)
+    }
   })
 
   test('falls back to /api/services when activeServiceId is initially empty or "all"', async () => {

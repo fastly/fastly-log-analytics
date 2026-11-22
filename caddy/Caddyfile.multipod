@@ -6,6 +6,7 @@
 			wrap json
 			fields {
 				request>headers>X-Admin-Gateway-Token delete
+				request>headers>X-FLA-Admin-Gateway delete
 				request>headers>X-Admin-Token delete
 			}
 		}
@@ -19,6 +20,7 @@
 			wrap json
 			fields {
 				request>headers>X-Admin-Gateway-Token delete
+				request>headers>X-FLA-Admin-Gateway delete
 				request>headers>X-Admin-Token delete
 			}
 		}
@@ -27,8 +29,28 @@
 }
 
 :80 {
-    request_header -X-Admin-Gateway-Token
-    request_header -X-Admin-Token
+    request_body {
+        max_size 25MB
+    }
+    header {
+        -Server
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Frame-Options "DENY"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+        Cross-Origin-Opener-Policy "same-origin"
+        ?Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' blob:; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+    }
+    route {
+        request_header -X-Admin-Gateway-Token
+        request_header -X-FLA-Admin-Gateway
+        request_header -X-FLA-Frontend-Proxy
+        request_header -X-Admin-Token
+        request_header X-FLA-Public-Gateway "1"
+        request_header X-Proxied-By-Caddy "true"
+        request_header X-Forwarded-For {http.request.remote.host}
+    }
     @api path /api/* /js/* /rum-beacon
     # Caddy forwards the REAL client IP (it appends the peer address to
     # X-Forwarded-For by default). Never stamp a synthetic XFF here: a
@@ -40,20 +62,25 @@
     # docker-compose.multipod.yml), so this proxy is the only party that can
     # assert a client IP.
     reverse_proxy @api backend:8000 {
+        header_up X-Forwarded-For {http.request.header.X-Forwarded-For}
         flush_interval -1
         transport http {
-            # 120s -> 180s 2026-10-01: /api/network-health's rollup-ineligible
-            # raw-scan fallback (any freshly-provisioned/low-history service)
-            # took ~117.5s under concurrent synthetic load, right at the old
-            # ceiling. See root Caddyfile's admin-tunnel block for the same
-            # pattern on dashboard-30d.
+            # Generous 180s upstream timeouts for long-window (30d) ClickHouse
+            # analytical queries under concurrent synthetic load.
+            # Below the app's 5 s keep-alive, so Caddy never reuses a socket it closed.
+            keepalive 4s
             response_header_timeout 180s
             read_timeout 180s
         }
     }
 
     # Everything else → Next.js frontend.
-    reverse_proxy frontend:3000
+    reverse_proxy frontend:3000 {
+        header_up X-Forwarded-For {http.request.header.X-Forwarded-For}
+        transport http {
+            keepalive 4s
+        }
+    }
 
     import redacted_log
 }

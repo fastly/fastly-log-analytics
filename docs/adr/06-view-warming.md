@@ -1,13 +1,11 @@
 # ADR-06 — Writer-Driven View Warming
 
-**Status:** Scoped to Standard Mode (Amended by [ADR-14](14-ducklake-replacement.md) & [ADR-21](21-high-scale-serving-architecture.md))
+**Status:** Superseded by [ADR-21](21-high-scale-serving-architecture.md) (historical)
 **Decided by:** Engineering retrospective
 
 > [!NOTE]
-> **Architectural Amendments (v3.0):**
-> - **Scope Restricted to Standard Mode:** Writer-driven view warming and connection pool fingerprint tracking apply specifically to `DEPLOYMENT_MODE=standard` (where DuckDB queries local buffer Parquet and DuckLake via persistent DuckDB instances).
-> - **High-Scale Serving ([ADR-21](21-high-scale-serving-architecture.md)):** Serving connections query ClickHouse or use independent ephemeral in-memory DuckDB instances reading durable DuckLake state; pod-local DuckDB views and local buffer Parquet are not queried on the serving path.
-> - **DuckLake Terminology ([ADR-14](14-ducklake-replacement.md)):** All references to the historical Iceberg view (`update_iceberg_view`, `_view_cache`) operate on DuckLake catalog tables and the unified `logs` view.
+> **Superseded in v3.0.0-rc3 ([ADR-21](21-high-scale-serving-architecture.md)):**
+> DuckDB connection pooling (`duckdb_pool.py`), local Parquet buffers, and DuckLake view warming have been retired. All analytics queries now execute directly against ClickHouse. This ADR is retained as historical record only.
 
 ## 1. Context & Motivation
 

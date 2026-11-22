@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from backend.high_scale._common import visible_fact_clauses
 from backend.repositories.insights.shaping import fingerprint_column as _fingerprint_column
 
-# DuckDB column name -> ClickHouse expression over request_facts.
+# Logical column name -> ClickHouse expression over request_facts.
 COLUMNS: dict[str, str] = {
     "timestamp": "event_timestamp",
     "url": "url",
@@ -77,6 +77,9 @@ class Detection:
     sql: str
     row_filter: str = ""
     window_only: bool = False
+    # Must name only real request_facts columns and never the moving time bounds: ClickHouse's
+    # query condition cache keys on this exact text, so later evaluations skip non-matching granules.
+    prewhere: str = ""
     needs_baseline: bool = True
 
 
@@ -130,13 +133,14 @@ def _share_spike(
 ) -> str:
     """Window traffic share of one value that spiked versus its baseline share."""
     sel_cols = ", ".join(f"g.{c.strip()}" for c in column.split(","))
-    totals_cols = "t.w_total, t.b_total" if w_first else "t.b_total, t.w_total"
+    totals_cols = "g.w_total, g.b_total" if w_first else "g.b_total, g.w_total"
     cnt_clause = f" AND g.w_cnt >= {min_w_cnt}" if min_w_cnt else ""
-    return f""" , totals AS (SELECT countIf(is_w) AS w_total, countIf(is_b) AS b_total FROM base),
-    grp AS (SELECT {column}, countIf(is_w) AS w_cnt, countIf(is_b) AS b_cnt FROM base {extra_row} GROUP BY {column})
-    SELECT {sel_cols}, g.w_cnt, g.b_cnt, {totals_cols} FROM grp g CROSS JOIN totals t
-    WHERE t.w_total > 0{cnt_clause} AND g.w_cnt * 1.0 / t.w_total >= {share_floor}
-      AND (t.b_total = 0 OR g.w_cnt * 1.0 / t.w_total >= g.b_cnt * 1.0 / nullIf(t.b_total, 0) * {multiplier} + {delta})
+    extra_pred = f" AND ({extra_row.removeprefix('WHERE ').strip()})" if extra_row.strip() else ""
+    return f""" , grp AS (SELECT {column}, countIf(is_w) AS w_cnt, countIf(is_b) AS b_cnt,
+        sum(countIf(is_w)) OVER () AS w_total, sum(countIf(is_b)) OVER () AS b_total FROM base GROUP BY {column})
+    SELECT {sel_cols}, g.w_cnt, g.b_cnt, {totals_cols} FROM grp g
+    WHERE g.w_total > 0{extra_pred}{cnt_clause} AND g.w_cnt * 1.0 / g.w_total >= {share_floor}
+      AND (g.b_total = 0 OR g.w_cnt * 1.0 / g.w_total >= g.b_cnt * 1.0 / nullIf(g.b_total, 0) * {multiplier} + {delta})
     ORDER BY g.w_cnt DESC LIMIT {limit} """
 
 
@@ -150,10 +154,13 @@ def _p95_regression(
     min_delta_ms: int = 100,
     extra_select: str = "",
 ) -> str:
+    grp = group_by or select_col
+    key_expr = f"({grp})" if "," in grp else grp
     return _base_group_sql(
         f"{select_col}, {_P95}(elapsed, is_w) / 1000.0 AS w_p95, {_P95}(elapsed, is_b) / 1000.0 AS b_p95, "
         f"countIf(is_w) AS w_total, countIf(is_b) AS b_total{extra_select}",
-        group_by or select_col,
+        grp,
+        where=f"{key_expr} IN (SELECT {grp} FROM base WHERE is_w GROUP BY {grp} HAVING count() >= {min_w})",
         having=f"w_total >= {min_w} AND b_total >= {min_b} AND w_p95 >= b_p95 * {ratio} AND w_p95 - b_p95 >= {min_delta_ms}",
         order_by="(w_p95 / nullIf(b_p95, 0)) DESC",
         limit=15,
@@ -181,11 +188,17 @@ def _error_spike(
     min_b: int = 10,
     multiplier: int = 2,
 ) -> str:
+    grp = group_by or select_col
+    key_expr = f"({grp})" if "," in grp else grp
     return _base_group_sql(
         f"{select_col}, countIf(is_w AND status >= {status_min}) * 1.0 / nullIf(countIf(is_w), 0) AS w_rate, "
         f"countIf(is_b AND status >= {status_min}) * 1.0 / nullIf(countIf(is_b), 0) AS b_rate, "
         f"countIf(is_w AND status >= {status_min}) AS w_errors, countIf(is_w) AS w_total, countIf(is_b) AS b_total",
-        group_by or select_col,
+        grp,
+        where=(
+            f"{key_expr} IN (SELECT {grp} FROM base WHERE is_w "
+            f"GROUP BY {grp} HAVING count() >= {min_w} AND countIf(status >= {status_min}) >= 1)"
+        ),
         having=f"w_total >= {min_w} AND w_rate >= {min_rate} AND (b_total < {min_b} OR w_rate >= b_rate * {multiplier} + 0.05)",
         order_by="(w_rate - coalesce(b_rate, 0)) DESC",
         limit=15,
@@ -207,6 +220,9 @@ def _rate_regression(
         f"countIf(is_b AND {cond}) * 1.0 / nullIf(countIf({b_denom}), 0) AS b_rate, "
         f"countIf({w_denom}) AS w_total, countIf({b_denom}) AS b_total",
         "url",
+        where="url IN (SELECT url FROM base WHERE is_w GROUP BY url HAVING count() >= 5)"
+        if from_table == "base"
+        else "",
         having=having,
         order_by=order_by,
         limit=15,
@@ -222,7 +238,8 @@ def _fingerprint_spread(column: str, *, with_ratio: bool) -> str:
         else ""
     )
     return f""" , win AS (SELECT {column}, uniqExactIf(ip, is_w) AS w_ips, countIf(is_w) AS w_reqs, uniqExactIf(ip, is_b) AS b_ips
-        FROM base WHERE {column} != '' GROUP BY {column} HAVING w_ips >= 5)
+        FROM base WHERE {column} != '' AND {column} IN (SELECT {column} FROM base WHERE is_w AND {column} != '' GROUP BY {column} HAVING uniqExact(ip) >= 5)
+        GROUP BY {column} HAVING w_ips >= 5)
     SELECT {column}, w_ips, w_reqs, b_ips{ratio} FROM win
     WHERE w_ips > b_ips / greatest({{baseline_hours:Float64}}, 1.0) * {{window_hours:Float64}} * 3
     ORDER BY w_ips * 1.0 / greatest(b_ips / greatest({{baseline_hours:Float64}}, 1.0) * {{window_hours:Float64}}, 1) DESC LIMIT 10 """
@@ -231,11 +248,12 @@ def _fingerprint_spread(column: str, *, with_ratio: bool) -> str:
 def _per_ip_outlier(column: str, window_floor: int, extra_having: str, order: str, aliases: tuple[str, str]) -> str:
     """Per-IP window maximum against that IP's own baseline p95 (request size, connection reuse)."""
     peak, mean = aliases
-    return f""" , win AS (SELECT ip, max({column}) AS {peak}, avg({column}) AS {mean}, count() AS w_total
-        FROM base WHERE is_w GROUP BY ip HAVING w_total >= {window_floor}{extra_having}),
-    base_b AS (SELECT ip, quantileExactInclusive(0.95)({column}) AS b_p95 FROM base WHERE is_b AND ip IN (SELECT ip FROM win) GROUP BY ip)
-    SELECT w.ip, w.{peak}, w.{mean}, w.w_total, b.b_p95 FROM win w INNER JOIN base_b b ON w.ip = b.ip
-    WHERE w.w_total >= {window_floor} AND w.{peak} > b.b_p95 * 3{order} """
+    return f""" , agg AS (SELECT ip, maxIf({column}, is_w) AS {peak}, avgIf({column}, is_w) AS {mean}, countIf(is_w) AS w_total,
+            quantileExactInclusiveIf(0.95)({column}, is_b) AS b_p95, countIf(is_b) AS b_total
+        FROM base WHERE ip IN (SELECT ip FROM base WHERE is_w GROUP BY ip HAVING count() >= {window_floor})
+        GROUP BY ip HAVING w_total >= {window_floor} AND b_total > 0{extra_having})
+    SELECT w.ip, w.{peak}, w.{mean}, w.w_total, w.b_p95 FROM agg w
+    WHERE w.w_total >= {window_floor} AND w.{peak} > w.b_p95 * 3{order} """
 
 
 _CITY_LABEL = "concat(city, ', ', region, ', ', country) AS label, city, region, country"
@@ -243,22 +261,21 @@ _CITY_LABEL = "concat(city, ', ', region, ', ', country) AS label, city, region,
 
 def _beaconing(entity: str, diversity: str) -> str:
     """Regular-cadence (beaconing) detection per ``entity``: gap statistics over distinct active seconds."""
-    return f""" , meta AS (SELECT {entity}, {diversity} AS diversity, count() AS n_events, (max(sec) - min(sec)) AS span_s
-        FROM base GROUP BY {entity} HAVING n_events >= 13 AND (n_events * 1.0 / nullIf(span_s, 0)) < 2.0),
-    secs AS (SELECT {entity}, sec FROM base WHERE {entity} IN (SELECT {entity} FROM meta) GROUP BY {entity}, sec),
-    gaps AS (SELECT {entity}, sec - lagInFrame(sec) OVER (PARTITION BY {entity} ORDER BY sec ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS gap,
-               row_number() OVER (PARTITION BY {entity} ORDER BY sec) AS position FROM secs),
-    g AS (SELECT {entity}, gap FROM gaps WHERE position > 1),
-    gap_counts AS (SELECT {entity}, gap, count() AS occurrences FROM g GROUP BY {entity}, gap),
-    modes AS (SELECT {entity}, argMax(gap, tuple(occurrences, -gap)) AS mode_gap FROM gap_counts GROUP BY {entity}),
-    agg AS (SELECT g.{entity} AS {entity}, count() AS n_gaps, avg(g.gap) AS mean_gap, varSamp(g.gap) AS var_gap,
-               stddevSamp(g.gap) AS sd_gap, any(m.mode_gap) AS mode_gap, avg(if(abs(g.gap - m.mode_gap) <= 1, 1.0, 0.0)) AS modal_frac
-        FROM g INNER JOIN modes m ON g.{entity} = m.{entity} GROUP BY g.{entity} HAVING n_gaps >= 12)
-    SELECT a.{entity}, a.n_gaps, d.n_events, round(a.mean_gap, 2) AS avg_interval, round(a.sd_gap, 2) AS stddev_interval,
+    return f""" , meta AS (SELECT {entity}, {diversity} AS diversity, count() AS n_events, (max(sec) - min(sec)) AS span_s,
+            arraySlice(arrayDifference(arraySort(groupUniqArray(sec))), 2) AS gaps_arr
+        FROM base GROUP BY {entity} HAVING n_events >= 13 AND length(gaps_arr) >= 12 AND (n_events * 1.0 / nullIf(span_s, 0)) < 2.0),
+    agg AS (SELECT {entity}, diversity, n_events, span_s,
+            length(gaps_arr) AS n_gaps, arrayAvg(gaps_arr) AS mean_gap,
+            arrayReduce('varSamp', gaps_arr) AS var_gap, arrayReduce('stddevSamp', gaps_arr) AS sd_gap,
+            arrayDistinct(gaps_arr) AS u_gaps,
+            arrayReduce('argMax', u_gaps, arrayMap(x -> tuple(countEqual(gaps_arr, x), -x), u_gaps)) AS mode_gap,
+            arrayAvg(x -> if(abs(x - mode_gap) <= 1, 1.0, 0.0), gaps_arr) AS modal_frac
+        FROM meta)
+    SELECT a.{entity}, a.n_gaps, a.n_events, round(a.mean_gap, 2) AS avg_interval, round(a.sd_gap, 2) AS stddev_interval,
            round(sqrt(greatest(a.var_gap - 1.0 / 12.0, 0)) / nullIf(a.mean_gap, 0), 3) AS cv_corr,
-           round(a.modal_frac, 3) AS modal_frac, d.diversity, d.span_s, a.mode_gap
-    FROM agg a INNER JOIN meta d ON a.{entity} = d.{entity}
-    WHERE a.n_gaps >= 12 AND (d.n_events * 1.0 / nullIf(d.span_s, 0)) < 2.0
+           round(a.modal_frac, 3) AS modal_frac, a.diversity, a.span_s, a.mode_gap
+    FROM agg a
+    WHERE a.n_gaps >= 12 AND (a.n_events * 1.0 / nullIf(a.span_s, 0)) < 2.0
       AND ((a.mean_gap >= 5 AND sqrt(greatest(a.var_gap - 1.0 / 12.0, 0)) / nullIf(a.mean_gap, 0) < 0.3 AND a.modal_frac >= 0.6)
         OR (a.mean_gap >= 1 AND a.mean_gap < 5 AND a.modal_frac >= 0.85))
     ORDER BY a.modal_frac DESC, a.n_gaps DESC LIMIT 15 """
@@ -314,6 +331,17 @@ def impossible_distance(
     )
 
 
+_CRAWLER_TOKEN = "'([a-z0-9_.-]*(?:bot|crawler|spider|slurp|archiver|scraper|externalagent|extended|other|preview)[a-z0-9_.-]*|headless[a-z0-9_.-]*|python-[a-z0-9_.-]+|go-http-client|curl|wget|scrapy|aiohttp|httpx|okhttp|axios)'"
+_BOT_STEM_SUFFIX = "'(-searchbot|-assistbot|-externalagent|-extended|-user|searchbot|assistbot|externalagent|extended|crawler|spider|slurp|archiver|scraper|preview|other|bot).*$'"
+_BOT_STEM = f"if(replaceRegexpOne(raw_tok, {_BOT_STEM_SUFFIX}, '') != '', replaceRegexpOne(raw_tok, {_BOT_STEM_SUFFIX}, ''), raw_tok)"
+# crawler_traffic is non-empty exactly when a bot stem has 50+ window requests; deciding that
+# from window rows alone avoids re-running crawler_traffic's full-range scan for the guard.
+_CRAWLER_IN_WINDOW = (
+    f"(SELECT count() FROM (SELECT {_BOT_STEM} AS bot_stem FROM (SELECT extract(lower(ua), {_CRAWLER_TOKEN}) AS raw_tok "
+    "FROM base WHERE is_w) WHERE raw_tok != '' AND bot_stem != '' GROUP BY bot_stem HAVING count() >= 50)) > 0"
+)
+
+
 DETECTIONS: dict[str, Detection] = {
     "error_spikes": Detection(("url", "status"), _error_spike("url")),
     "new_country_traffic": Detection(("country",), _new_traffic("country", 3, where="country != ''")),
@@ -323,20 +351,23 @@ DETECTIONS: dict[str, Detection] = {
         _base_group_sql(
             "url, countIf(is_w) AS w_cnt, countIf(is_b) AS b_cnt, avgIf(if(status >= 400, 1.0, 0.0), is_w) * 100 AS w_error_pct",
             "url",
-            where="url != '' AND match(url, {probe_regex:String})",
+            where="url != ''",
             having="w_cnt > 0 AND b_cnt = 0",
             order_by="w_cnt DESC",
             limit=25,
         ),
+        prewhere="match(url, {probe_regex:String})",
     ),
     "proxy_surge": Detection(
         ("p_type",),
-        """ , agg AS (SELECT p_type, countIf(is_w) AS w_cnt, countIf(is_b) AS b_cnt FROM base WHERE p_type != '' GROUP BY p_type),
-    totals AS (SELECT sum(w_cnt) AS w_proxy_total, sum(b_cnt) AS b_proxy_total FROM agg),
-    all_rows AS (SELECT countIf(is_w) AS w_total_all, countIf(is_b) AS b_total_all FROM base)
-    SELECT a.p_type, a.w_cnt, a.b_cnt, r.w_total_all, r.b_total_all FROM agg a CROSS JOIN totals t CROSS JOIN all_rows r
-    WHERE (t.w_proxy_total * 100.0 / nullIf(r.w_total_all, 0)) >= 5
-      AND (t.w_proxy_total * 100.0 / nullIf(r.w_total_all, 0)) >= (t.b_proxy_total * 100.0 / nullIf(r.b_total_all, 0)) * 2 + 5 """,
+        """ , agg AS (SELECT p_type, countIf(is_w) AS w_cnt, countIf(is_b) AS b_cnt,
+            sumIf(countIf(is_w), p_type != '') OVER () AS w_proxy_total,
+            sumIf(countIf(is_b), p_type != '') OVER () AS b_proxy_total,
+            sum(countIf(is_w)) OVER () AS w_total_all,
+            sum(countIf(is_b)) OVER () AS b_total_all FROM base GROUP BY p_type)
+    SELECT a.p_type, a.w_cnt, a.b_cnt, a.w_total_all, a.b_total_all FROM agg a
+    WHERE a.p_type != '' AND (a.w_proxy_total * 100.0 / nullIf(a.w_total_all, 0)) >= 5
+      AND (a.w_proxy_total * 100.0 / nullIf(a.w_total_all, 0)) >= (a.b_proxy_total * 100.0 / nullIf(a.b_total_all, 0)) * 2 + 5 """,
     ),
     "asn_concentration": Detection(("asn",), _share_spike("asn", "0.20", extra_row="WHERE asn IS NOT NULL")),
     "cache_collapse": Detection(
@@ -401,10 +432,13 @@ DETECTIONS: dict[str, Detection] = {
     ),
     "origin_error_rate": Detection(
         ("ost",),
-        """ , totals AS (SELECT countIf(is_w) AS w_total, countIf(is_b) AS b_total, countIf(is_w AND ost >= 500) AS w_5xx, countIf(is_b AND ost >= 500) AS b_5xx FROM base),
-    by_status AS (SELECT ost AS status, count() AS w_cnt FROM base WHERE is_w AND ost >= 500 GROUP BY ost)
-    SELECT s.status, s.w_cnt, t.w_total, t.b_total, t.w_5xx, t.b_5xx FROM by_status s CROSS JOIN totals t
-    WHERE (t.w_5xx * 100.0 / nullIf(t.w_total, 0)) >= 1.0 AND (t.w_5xx * 100.0 / nullIf(t.w_total, 0)) > (t.b_5xx * 100.0 / nullIf(t.b_total, 0)) * 2 """,
+        """ , by_status AS (SELECT ost AS status, countIf(is_w) AS w_cnt, countIf(is_b) AS b_cnt,
+            sum(countIf(is_w)) OVER () AS w_total, sum(countIf(is_b)) OVER () AS b_total,
+            sumIf(countIf(is_w), ost >= 500) OVER () AS w_5xx, sumIf(countIf(is_b), ost >= 500) OVER () AS b_5xx
+            FROM base GROUP BY ost)
+    SELECT s.status, s.w_cnt, s.w_total, s.b_total, s.w_5xx, s.b_5xx FROM by_status s
+    WHERE s.status >= 500 AND s.w_cnt > 0
+      AND (s.w_5xx * 100.0 / nullIf(s.w_total, 0)) >= 1.0 AND (s.w_5xx * 100.0 / nullIf(s.w_total, 0)) > (s.b_5xx * 100.0 / nullIf(s.b_total, 0)) * 2 """,
         row_filter="ost IS NOT NULL",
     ),
     "origin_retries": Detection(
@@ -421,9 +455,10 @@ DETECTIONS: dict[str, Detection] = {
     ),
     "origin_ip_failure": Detection(
         ("oip", "ost"),
-        """ , stats AS (SELECT oip, count() AS requests, round(countIf(ost >= 500) * 100.0 / nullIf(count(), 0), 1) AS error_pct FROM base GROUP BY oip HAVING requests >= 10),
-    med AS (SELECT quantileExactInclusive(0.5)(error_pct) AS median_rate FROM stats)
-    SELECT s.oip, s.requests, s.error_pct, m.median_rate FROM stats s CROSS JOIN med m WHERE s.error_pct > m.median_rate * 3 AND s.error_pct > 5 ORDER BY s.error_pct DESC """,
+        """ , stats AS (SELECT oip, count() AS requests, round(countIf(ost >= 500) * 100.0 / nullIf(count(), 0), 1) AS error_pct,
+            quantileExactInclusive(0.5)(round(countIf(ost >= 500) * 100.0 / nullIf(count(), 0), 1)) OVER () AS median_rate
+            FROM base GROUP BY oip HAVING requests >= 10)
+    SELECT s.oip, s.requests, s.error_pct, s.median_rate FROM stats s WHERE s.error_pct > s.median_rate * 3 AND s.error_pct > 5 ORDER BY s.error_pct DESC """,
         row_filter="oip != '' AND ost IS NOT NULL",
         window_only=True,
     ),
@@ -432,6 +467,7 @@ DETECTIONS: dict[str, Detection] = {
         _base_group_sql(
             "ip, countIf(is_w AND status = 404) AS w_404, countIf(is_w) AS w_total, uniqExactIf(url, is_w AND status = 404) AS w_distinct_404, countIf(is_b AND status = 404) AS b_404",
             "ip",
+            where="ip IN (SELECT ip FROM base WHERE is_w AND status = 404 GROUP BY ip HAVING count() >= 20)",
             having="w_404 >= 20 AND w_404 * 1.0 / nullIf(w_total, 0) >= 0.7 AND w_distinct_404 >= 15",
             order_by="w_404 DESC",
             limit=15,
@@ -457,6 +493,7 @@ DETECTIONS: dict[str, Detection] = {
         _base_group_sql(
             "asn, countIf(is_w AND p_type = 'hosting') AS w_hosting, countIf(is_w) AS w_total, countIf(is_b AND p_type = 'hosting') AS b_hosting, countIf(is_b) AS b_total",
             "asn",
+            where="asn IN (SELECT asn FROM base WHERE is_w GROUP BY asn HAVING count() >= 50)",
             having="w_total >= 50 AND (w_hosting * 1.0 / w_total) >= 0.3 AND (b_total = 0 OR (w_hosting * 1.0 / w_total) >= (b_hosting * 1.0 / nullIf(b_total, 0)) * 3 + 0.10)",
             order_by="w_hosting DESC",
             limit=15,
@@ -468,6 +505,7 @@ DETECTIONS: dict[str, Detection] = {
         _base_group_sql(
             "metro, quantileTDigestIf(0.5)(delivery_rate, is_w) AS w_med, quantileTDigestIf(0.5)(delivery_rate, is_b) AS b_med, countIf(is_w) AS w_total, countIf(is_b) AS b_total",
             "metro",
+            where="metro IN (SELECT metro FROM base WHERE is_w GROUP BY metro HAVING count() >= 20)",
             having="w_total >= 20 AND b_total >= 50 AND w_med > 0 AND b_med > 0 AND w_med <= b_med * 0.5",
             order_by="(b_med - w_med) DESC",
             limit=15,
@@ -502,14 +540,13 @@ DETECTIONS: dict[str, Detection] = {
     "payload_compression_regression": Detection(
         ("url", "status", "resp_bytes", "resp_header_content_encoding"),
         _rate_regression(
-            "uncompressed",
-            from_table="(SELECT url, is_w, is_b, NOT match(lower(resp_header_content_encoding), 'gzip|br|zstd|deflate') AS uncompressed FROM base)",
+            "NOT match(lower(resp_header_content_encoding), 'gzip|br|zstd|deflate')",
         ),
         row_filter="status = 200 AND resp_bytes >= 1024 AND url != '' AND match(url, {compress_regex:String})",
     ),
     "session_harvesting": Detection(
         ("ip", "cookie_session"),
-        """ , win AS (SELECT ip, uniqExactIf(cookie_session, is_w) AS w_sessions, countIf(is_w) AS w_reqs, uniqExactIf(cookie_session, is_b) AS b_sessions FROM base GROUP BY ip HAVING w_sessions >= 20)
+        """ , win AS (SELECT ip, uniqExactIf(cookie_session, is_w) AS w_sessions, countIf(is_w) AS w_reqs, uniqExactIf(cookie_session, is_b) AS b_sessions FROM base WHERE ip IN (SELECT ip FROM base WHERE is_w GROUP BY ip HAVING uniqExact(cookie_session) >= 20) GROUP BY ip HAVING w_sessions >= 20)
     SELECT ip, w_sessions, w_reqs, b_sessions FROM win WHERE w_sessions > b_sessions * 2 + 10 ORDER BY w_sessions DESC LIMIT 15 """,
         row_filter="ip != '' AND cookie_session != ''",
     ),
@@ -542,13 +579,15 @@ DETECTIONS: dict[str, Detection] = {
             order_by="distinct_paths DESC, span_s DESC",
             limit=15,
         ),
-        row_filter="ip != '' AND url != '' AND match(url, {probe_regex:String})",
+        row_filter="ip != '' AND url != ''",
+        prewhere="match(url, {probe_regex:String})",
     ),
     "credential_enumeration": Detection(
         ("ip", "url", "status"),
         _base_group_sql(
             "ip, countIf(is_w AND status IN (401, 403)) AS w_denied, countIf(is_w) AS w_attempts, uniqExactIf(url, is_w) AS w_paths, countIf(is_b AND status IN (401, 403)) AS b_denied",
             "ip",
+            where="ip IN (SELECT ip FROM base WHERE is_w AND status IN (401, 403) GROUP BY ip HAVING count() >= 20)",
             having="w_denied >= 20 AND w_denied * 1.0 / nullIf(w_attempts, 0) >= 0.5 AND w_denied > b_denied / greatest({baseline_hours:Float64}, 1.0) * {window_hours:Float64} * 3 + 5",
             order_by="w_denied DESC",
             limit=15,
@@ -559,7 +598,7 @@ DETECTIONS: dict[str, Detection] = {
         ("asn", "ploss", "rtt_var", "retrans"),
         f""" , health AS (SELECT asn, avgIf(ploss, is_w) AS w_ploss, avgIf(ploss, is_b) AS b_ploss, {_P95}(rtt_var, is_w) AS w_jitter, {_P95}(rtt_var, is_b) AS b_jitter,
             avgIf(retrans, is_w) AS w_retrans, avgIf(retrans, is_b) AS b_retrans, countIf(is_w) AS w_total, countIf(is_b) AS b_total
-        FROM base GROUP BY asn HAVING w_total >= 50 AND b_total >= 100)
+        FROM base WHERE asn IN (SELECT asn FROM base WHERE is_w GROUP BY asn HAVING count() >= 50) GROUP BY asn HAVING w_total >= 50 AND b_total >= 100)
     SELECT asn, w_ploss, b_ploss, w_jitter, b_jitter, w_retrans, b_retrans, w_total, b_total FROM health
     WHERE ((coalesce(w_ploss, 0) >= 0.02 AND coalesce(w_ploss, 0) >= coalesce(b_ploss, 0) * 2 + 0.005)
         OR (w_jitter >= b_jitter * 2 AND w_jitter - b_jitter >= 20000) OR (coalesce(w_retrans, 0) >= coalesce(b_retrans, 0) * 2 + 0.5))
@@ -571,6 +610,7 @@ DETECTIONS: dict[str, Detection] = {
         _base_group_sql(
             f"{_CITY_LABEL}, countIf(is_w) AS w_cnt, countIf(is_b) AS b_cnt, w_cnt * 1.0 / greatest(b_cnt * 1.0 / greatest({{baseline_hours:Float64}}, 1.0) * {{window_hours:Float64}}, 1.0) AS spike_ratio",
             "city, region, country",
+            where="(city, region, country) IN (SELECT city, region, country FROM base WHERE is_w GROUP BY city, region, country HAVING count() >= 20)",
             having="w_cnt >= 20 AND w_cnt > b_cnt / greatest({baseline_hours:Float64}, 1.0) * {window_hours:Float64} * 3",
             order_by="spike_ratio DESC",
             limit=15,
@@ -605,6 +645,7 @@ DETECTIONS: dict[str, Detection] = {
         _base_group_sql(
             "asn, metro, quantileTDigestIf(0.50)(tcp_rtt, is_w) / 1000.0 AS w_med, quantileTDigestIf(0.50)(tcp_rtt, is_b) / 1000.0 AS b_med, countIf(is_w) AS w_total, countIf(is_b) AS b_total",
             "asn, metro",
+            where="(asn, metro) IN (SELECT asn, metro FROM base WHERE is_w GROUP BY asn, metro HAVING count() >= 20)",
             having="w_total >= 20 AND b_total >= 50 AND w_med >= b_med * 1.5 AND w_med - b_med >= 20",
             order_by="(w_med - b_med) DESC",
             limit=15,
@@ -640,7 +681,7 @@ DETECTIONS: dict[str, Detection] = {
     ),
     "shield_path_degradation": Detection(
         ("rid", "prid", "pop", "ottfb", "edge"),
-        """ , edge_logs AS (SELECT rid, pop, ottfb, is_w, is_b FROM base WHERE lower(edge) IN ('1', 'true')),
+        """ , edge_logs AS (SELECT rid, pop, ottfb, is_w, is_b FROM base WHERE lower(edge) IN ('1', 'true') AND rid != ''),
     shield_logs AS (SELECT prid, pop, ottfb FROM base WHERE lower(edge) IN ('0', 'false') AND prid != ''),
     joined AS (SELECT e.pop AS edge_pop, if(ifNull(s.prid, '') = '', 'Direct to Origin', s.pop) AS shield_pop,
                (e.ottfb - ifNull(s.ottfb, 0)) / 1000.0 AS transit_ms, e.is_w AS is_w, e.is_b AS is_b
@@ -657,7 +698,7 @@ DETECTIONS: dict[str, Detection] = {
     ),
     "stale_browser_version": Detection(
         ("ip", "ua", "chrome_version"),
-        """ , win AS (SELECT chrome_version, countIf(is_w) AS w_reqs, uniqExactIf(ip, is_w) AS w_ips, countIf(is_b) AS b_reqs FROM base GROUP BY chrome_version HAVING w_reqs >= 500)
+        """ , win AS (SELECT chrome_version, countIf(is_w) AS w_reqs, uniqExactIf(ip, is_w) AS w_ips, countIf(is_b) AS b_reqs FROM base WHERE chrome_version IN (SELECT chrome_version FROM base WHERE is_w GROUP BY chrome_version HAVING count() >= 500) GROUP BY chrome_version HAVING w_reqs >= 500)
     SELECT concat('Chrome ', chrome_version) AS label, w_reqs, w_ips,
         w_reqs * 1.0 / greatest(b_reqs / greatest({baseline_hours:Float64}, 1.0) * {window_hours:Float64}, 1.0) AS surge_ratio
     FROM win WHERE w_reqs > b_reqs / greatest({baseline_hours:Float64}, 1.0) * {window_hours:Float64} * 2.5 ORDER BY surge_ratio DESC LIMIT 10 """,
@@ -668,7 +709,7 @@ DETECTIONS: dict[str, Detection] = {
     ),
     "orphaned_deep_crawl": Detection(
         ("ip", "url", "referer"),
-        """ , win AS (SELECT ip, countIf(is_w) AS w_reqs, uniqExactIf(url, is_w) AS w_distinct_urls, countIf(is_b) AS b_reqs FROM base GROUP BY ip HAVING w_reqs >= 50 AND w_distinct_urls >= 10)
+        """ , win AS (SELECT ip, countIf(is_w) AS w_reqs, uniqExactIf(url, is_w) AS w_distinct_urls, countIf(is_b) AS b_reqs FROM base WHERE ip IN (SELECT ip FROM base WHERE is_w GROUP BY ip HAVING count() >= 50) GROUP BY ip HAVING w_reqs >= 50 AND w_distinct_urls >= 10)
     SELECT ip AS label, w_reqs, w_distinct_urls, b_reqs, w_reqs * 1.0 / greatest(toFloat64(w_distinct_urls), 1.0) AS requests_per_url,
         w_reqs * 1.0 / greatest(b_reqs / greatest({baseline_hours:Float64}, 1.0) * {window_hours:Float64}, 1.0) AS surge_ratio
     FROM win ORDER BY w_reqs DESC LIMIT 15 """,
@@ -679,6 +720,7 @@ DETECTIONS: dict[str, Detection] = {
         _base_group_sql(
             "ja4 AS label, uniqExactIf(ip, is_w) AS w_ips, uniqExactIf(asn, is_w) AS w_asns, countIf(is_w) AS w_requests, uniqExactIf(ip, is_b) AS b_ips, w_asns * 1.0 / greatest(toFloat64(uniqExactIf(asn, is_b)), 1.0) AS asn_expansion_ratio",
             "ja4",
+            where="ja4 IN (SELECT ja4 FROM base WHERE is_w GROUP BY ja4 HAVING uniqExact(ip) >= 30 AND uniqExact(asn) >= 5)",
             having="w_ips >= 30 AND w_asns >= 5",
             order_by="asn_expansion_ratio DESC",
             limit=10,
@@ -687,32 +729,39 @@ DETECTIONS: dict[str, Detection] = {
     ),
     "crawler_disparity": Detection(
         ("ua", "referer", "ip", "resp_bytes"),
-        """ , tagged AS (SELECT ip, is_w, is_b, coalesce(resp_bytes, 0) AS r_bytes,
-            extract(lower(ua), '([a-z0-9_.-]*(?:bot|crawler|spider|slurp|archiver|scraper|externalagent|extended|other|preview)[a-z0-9_.-]*|headless[a-z0-9_.-]*|python-[a-z0-9_.-]+|go-http-client|curl|wget|scrapy|aiohttp|httpx|okhttp|axios)') AS raw_tok,
-            extract(lower(ua), 'https?://(?:www\\.)?([^/.:;\\s)]+)') AS ua_dom,
-            extract(lower(ua), '([a-z0-9]+)-(?:user|externalfetcher)') AS user_fetcher_stem,
-            extract(lower(referer), 'https?://(?:www\\.)?([^/.:;\\s]+)') AS ref_dom FROM base),
-    classified AS (SELECT ip, is_w, is_b, r_bytes, raw_tok, ua_dom, (raw_tok != '') AS is_crawler, (raw_tok = '') AS is_human,
-            if(replaceRegexpOne(raw_tok, '(-searchbot|-assistbot|-externalagent|-extended|-user|searchbot|assistbot|externalagent|extended|crawler|spider|slurp|archiver|scraper|preview|other|bot).*$', '') != '',
-               replaceRegexpOne(raw_tok, '(-searchbot|-assistbot|-externalagent|-extended|-user|searchbot|assistbot|externalagent|extended|crawler|spider|slurp|archiver|scraper|preview|other|bot).*$', ''), raw_tok) AS bot_stem,
-            if(user_fetcher_stem != '', user_fetcher_stem, ref_dom) AS ref_stem FROM tagged),
-    site_win AS (SELECT greatest(sumIf(r_bytes, is_w), 1) AS total_site_bytes FROM classified),
-    crawler_traffic AS (SELECT bot_stem, min(raw_tok) AS raw_tok, max(ua_dom) AS ua_dom, countIf(is_w) AS w_crawls, countIf(is_b) AS b_crawls,
-               sumIf(r_bytes, is_w) AS w_bytes, sumIf(r_bytes, is_b) AS b_bytes FROM classified WHERE is_crawler AND bot_stem != '' GROUP BY bot_stem HAVING w_crawls >= 50),
-    human_refs AS (SELECT ip, is_w, is_b, ref_stem FROM classified WHERE is_human AND ip != '' AND ref_stem != ''),
-    referred AS (SELECT c.bot_stem AS bot_stem, uniqExactIf(h.ip, h.is_w) AS w_referrals, uniqExactIf(h.ip, h.is_b) AS b_referrals
-        FROM crawler_traffic c CROSS JOIN human_refs h
-        WHERE c.bot_stem = h.ref_stem OR (length(replaceRegexpAll(c.bot_stem, '[aeiou]', '')) >= 3 AND replaceRegexpAll(c.bot_stem, '[aeiou]', '') = replaceRegexpAll(h.ref_stem, '[aeiou]', ''))
-           OR (length(c.bot_stem) >= 3 AND length(h.ref_stem) >= 3 AND (position(h.ref_stem, c.bot_stem) > 0 OR position(c.bot_stem, h.ref_stem) > 0))
-           OR (c.ua_dom != '' AND c.ua_dom = h.ref_stem) GROUP BY c.bot_stem)
-    SELECT c.raw_tok AS label, c.w_crawls, ifNull(r.w_referrals, 0) AS w_referrals, c.w_bytes,
-        c.w_crawls * 1.0 / greatest(ifNull(r.w_referrals, 0), 1) AS crawls_per_referral,
-        c.b_crawls * 1.0 / greatest(ifNull(r.b_referrals, 0), 1) AS baseline_crawls_per_referral,
-        c.w_bytes * 1.0 / greatest(ifNull(r.w_referrals, 0), 1) AS bytes_per_referral,
-        c.b_bytes * 1.0 / greatest(ifNull(r.b_referrals, 0), 1) AS baseline_bytes_per_referral,
-        round(c.w_bytes * 100.0 / s.total_site_bytes, 2) AS bandwidth_share_pct
-    FROM crawler_traffic c CROSS JOIN site_win s LEFT JOIN referred r ON c.bot_stem = r.bot_stem
-    WHERE c.w_crawls >= 50 AND (ifNull(r.w_referrals, 0) = 0 OR c.w_crawls * 1.0 / greatest(ifNull(r.w_referrals, 0), 1) >= 100.0 OR c.w_bytes * 1.0 / greatest(ifNull(r.w_referrals, 0), 1) >= 1048576.0)
+        f""" , ua_groups AS (SELECT lower(ua) AS l_ua, countIf(is_w) AS w_cnt, countIf(is_b) AS b_cnt,
+            sumIf(coalesce(resp_bytes, 0), is_w) AS w_b, sumIf(coalesce(resp_bytes, 0), is_b) AS b_b,
+            greatest(sum(sumIf(coalesce(resp_bytes, 0), is_w)) OVER (), 1) AS site_resp_total FROM base WHERE is_w OR lower(ua) IN (SELECT lower(ua) FROM base WHERE is_w GROUP BY lower(ua)) GROUP BY l_ua),
+    ua_tagged AS (SELECT w_cnt, b_cnt, w_b, b_b, site_resp_total,
+            extract(l_ua, {_CRAWLER_TOKEN}) AS raw_tok,
+            extract(l_ua, 'https?://(?:www\\.)?([^/.:;\\s)]+)') AS ua_dom FROM ua_groups),
+    ua_classified AS (SELECT w_cnt, b_cnt, w_b, b_b, site_resp_total, raw_tok, ua_dom,
+            {_BOT_STEM} AS bot_stem
+            FROM ua_tagged WHERE raw_tok != ''),
+    crawler_traffic AS (SELECT bot_stem, min(raw_tok) AS raw_tok, max(ua_dom) AS ua_dom, sum(w_cnt) AS w_crawls, sum(b_cnt) AS b_crawls,
+               sum(w_b) AS w_bytes, sum(b_b) AS b_bytes, any(site_resp_total) AS site_resp_total FROM ua_classified WHERE bot_stem != '' GROUP BY bot_stem HAVING w_crawls >= 50),
+    human_refs AS (SELECT ip, max(is_w) AS is_w, max(is_b) AS is_b,
+            if(extract(lower(ua), '([a-z0-9]+)-(?:user|externalfetcher)') != '',
+               extract(lower(ua), '([a-z0-9]+)-(?:user|externalfetcher)'),
+               extract(lower(referer), 'https?://(?:www\\.)?([^/.:;\\s]+)')) AS ref_stem
+        FROM base
+        WHERE {_CRAWLER_IN_WINDOW} AND ip != '' AND (referer != '' OR positionCaseInsensitive(ua, '-user') > 0 OR positionCaseInsensitive(ua, '-externalfetcher') > 0)
+          AND extract(lower(ua), {_CRAWLER_TOKEN}) = ''
+        GROUP BY ip, ref_stem HAVING ref_stem != ''
+        UNION ALL SELECT '' AS ip, 0 AS is_w, 0 AS is_b, '' AS ref_stem),
+    combined AS (SELECT c.bot_stem AS bot_stem, any(c.raw_tok) AS raw_tok, any(c.w_crawls) AS w_crawls, any(c.b_crawls) AS b_crawls,
+            any(c.w_bytes) AS w_bytes, any(c.b_bytes) AS b_bytes, any(c.site_resp_total) AS site_resp_total,
+            uniqExactIf(h.ip, toBool(h.is_w) AND h.ref_stem != '' AND (c.bot_stem = h.ref_stem OR (length(replaceRegexpAll(c.bot_stem, '[aeiou]', '')) >= 3 AND replaceRegexpAll(c.bot_stem, '[aeiou]', '') = replaceRegexpAll(h.ref_stem, '[aeiou]', '')) OR (length(c.bot_stem) >= 3 AND length(h.ref_stem) >= 3 AND (position(h.ref_stem, c.bot_stem) > 0 OR position(c.bot_stem, h.ref_stem) > 0)) OR (c.ua_dom != '' AND c.ua_dom = h.ref_stem))) AS w_referrals,
+            uniqExactIf(h.ip, toBool(h.is_b) AND h.ref_stem != '' AND (c.bot_stem = h.ref_stem OR (length(replaceRegexpAll(c.bot_stem, '[aeiou]', '')) >= 3 AND replaceRegexpAll(c.bot_stem, '[aeiou]', '') = replaceRegexpAll(h.ref_stem, '[aeiou]', '')) OR (length(c.bot_stem) >= 3 AND length(h.ref_stem) >= 3 AND (position(h.ref_stem, c.bot_stem) > 0 OR position(c.bot_stem, h.ref_stem) > 0)) OR (c.ua_dom != '' AND c.ua_dom = h.ref_stem))) AS b_referrals
+        FROM crawler_traffic c CROSS JOIN human_refs h GROUP BY c.bot_stem)
+    SELECT c.raw_tok AS label, c.w_crawls, c.w_referrals, c.w_bytes,
+        c.w_crawls * 1.0 / greatest(c.w_referrals, 1) AS crawls_per_referral,
+        c.b_crawls * 1.0 / greatest(c.b_referrals, 1) AS baseline_crawls_per_referral,
+        c.w_bytes * 1.0 / greatest(c.w_referrals, 1) AS bytes_per_referral,
+        c.b_bytes * 1.0 / greatest(c.b_referrals, 1) AS baseline_bytes_per_referral,
+        round(c.w_bytes * 100.0 / c.site_resp_total, 2) AS bandwidth_share_pct
+    FROM combined c
+    WHERE c.w_crawls >= 50 AND (c.w_referrals = 0 OR c.w_crawls * 1.0 / greatest(c.w_referrals, 1) >= 100.0 OR c.w_bytes * 1.0 / greatest(c.w_referrals, 1) >= 1048576.0)
     ORDER BY crawls_per_referral DESC, c.w_bytes DESC LIMIT 10 """,
         row_filter="ua != ''",
     ),
@@ -730,12 +779,13 @@ def _base_sql(detection: Detection, insight_id: str) -> str:
     projection = ", ".join(f"{COLUMNS[column]} AS {column}" for column in detection.columns)
     lower = "{window_start:DateTime64(3)}" if detection.window_only else "{baseline_start:DateTime64(3)}"
     row_filter = f" AND ({detection.row_filter})" if detection.row_filter else ""
+    prewhere = f" PREWHERE {detection.prewhere}" if detection.prewhere else ""
     scope = " AND ".join(visible_fact_clauses("request"))
     return (
         f"/* insight:{insight_id} */ WITH base AS (SELECT {projection}, "
         "event_timestamp < {window_start:DateTime64(3)} AS is_b, "
         "event_timestamp >= {window_start:DateTime64(3)} AS is_w "
-        f"FROM request_facts WHERE {scope} AND event_timestamp >= {lower} "
+        f"FROM request_facts{prewhere} WHERE {scope} AND event_timestamp >= {lower} "
         f"AND event_timestamp <= {{window_end:DateTime64(3)}}{row_filter}) {detection.sql}"
     )
 

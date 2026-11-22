@@ -11,6 +11,7 @@ import os
 import re
 import signal
 import socket
+import sqlite3
 import ssl
 import subprocess
 import sys
@@ -25,7 +26,6 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request
 
-import duckdb
 import httpx
 import pytest
 from fastapi import FastAPI
@@ -430,11 +430,30 @@ def test_audit_target_private_mtls_timeout_adds_vpn_hint(monkeypatch: pytest.Mon
         "https://10.0.0.10:8443",
         "https://10.0.0.10:8443/dashboard",
         "svc-hs",
-        True,
     )
     res = audit.audit_target(env, timeout=1.0)
     assert not res.reachable
     assert any("VPN/tunnel" in err and "10.0.0.10:8443" in err for err in res.errors)
+
+
+def test_audit_target_ignores_a_celery_block_from_an_older_backend(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    snapshot = {"vcpus": 4, "celery": {"broker_reachable": True, "queue_depth": 0, "active_workers": 0}}
+
+    def fake_get(url: str, headers=None, timeout: float = 5.0) -> tuple[int, Any]:
+        if "/api/health?" in url:
+            return 200, {"status": "ok", "version": "3"}
+        return (200, snapshot) if "/api/admin/health-snapshot" in url else (404, {})
+
+    monkeypatch.setattr(audit, "http_get_json", fake_get)
+    monkeypatch.setattr(audit, "http_post_json", lambda url, payload=None, headers=None, timeout=5.0: (404, {}))
+    env = audit.EnvironmentConfig("hs", "High-Scale", "https://hs.example", "https://hs.example/dashboard", "svc-hs")
+    res = audit.audit_target(env, timeout=1.0)
+    assert res.reachable
+    assert not [m for m in res.errors + res.warnings if "celery" in m.lower()]
+    audit.print_audit_report([res])
+    assert "celery" not in capsys.readouterr().out.lower()
 
 
 # ── Merged from test_lib_helpers.py ──────────────────────────────────────────────────────
@@ -1096,7 +1115,7 @@ paths = {{
     "cwd": Path.cwd(),
     "configs": config.CONFIGS_DIR,
     "data": config.DATA_DIR,
-    "duckdb": config.duckdb_path("sandbox-service"),
+    "services": config.SERVICES_DATA_DIR,
     "usage_config": config._USAGE_LOGGING_CONFIG_PATH,
     "buffer_cache": Path("cache"),
 }}
@@ -1109,7 +1128,7 @@ print(json.dumps({{key: str(Path(value).resolve()) for key, value in paths.items
         "cwd": str(sandbox),
         "configs": str(configs),
         "data": str(data),
-        "duckdb": str(data / "services/sandbox-service.duckdb"),
+        "services": str(data / "services"),
         "usage_config": str(data / "system/usage_logging.json"),
         "buffer_cache": str(sandbox / "cache"),
     }
@@ -1476,20 +1495,19 @@ def test_correlated_query_uses_exact_safe_literals_and_separate_datasets(monkeyp
             (200, {"data": [], "truncated": False, "_response_cache": {"state": "bypass"}}),
         )[1],
     )
-    for high_scale in (False, True):
-        for stream in ("request", "vitals", "errors"):
-            key = "10000001" if stream == "vitals" else "/?customer=O'Brien&probe=owned"
-            probe = {"key": key, "sent": 0.0}
-            result = freshness.poll_correlated_stream("https://admin.example.test", "svc", stream, [probe], high_scale)
-            assert result["error"] is None and "last_absent" in probe
-            body = calls[-1]
-            column = {"request": "url", "vitals": "metric_value", "errors": "error_message"}[stream]
-            literal = "10000001" if stream == "vitals" else "'/?customer=O''Brien&probe=owned'"
-            assert f"{column} IN ({literal})" in body["sql"]
-            assert "cid" not in body["sql"] and "client_id" not in body["sql"]
-            assert body["dataset"] == {"request": "logs", "vitals": "client_vitals", "errors": "client_errors"}[stream]
-            assert "LIMIT 100" in body["sql"] and "INTERVAL 1 HOUR" in body["sql"] and body["max_rows"] == 100
-            assert ("metric_name = 'LCP'" in body["sql"]) == (stream == "vitals")
+    for stream in ("request", "vitals", "errors"):
+        key = "10000001" if stream == "vitals" else "/?customer=O'Brien&probe=owned"
+        probe = {"key": key, "sent": 0.0}
+        result = freshness.poll_correlated_stream("https://admin.example.test", "svc", stream, [probe])
+        assert result["error"] is None and "last_absent" in probe
+        body = calls[-1]
+        column = {"request": "url", "vitals": "metric_value", "errors": "error_message"}[stream]
+        literal = "10000001" if stream == "vitals" else "'/?customer=O''Brien&probe=owned'"
+        assert f"{column} IN ({literal})" in body["sql"]
+        assert "cid" not in body["sql"] and "client_id" not in body["sql"]
+        assert body["dataset"] == {"request": "logs", "vitals": "client_vitals", "errors": "client_errors"}[stream]
+        assert "LIMIT 100" in body["sql"] and "INTERVAL 1 HOUR" in body["sql"] and body["max_rows"] == 100
+        assert ("metric_name = 'LCP'" in body["sql"]) == (stream == "vitals")
 
 
 def test_correlated_upper_bound_and_censoring_and_population_floor(monkeypatch):
@@ -1542,19 +1560,24 @@ def test_correlated_upper_bound_and_censoring_and_population_floor(monkeypatch):
 
 def test_correlated_sql_finds_only_exact_recent_events(monkeypatch):
     key = "/approved/O'Brien?probe=owned&seq=0"
-    with duckdb.connect(":memory:") as connection:
-        connection.execute("CREATE TABLE logs(url VARCHAR, timestamp TIMESTAMPTZ)")
+    with sqlite3.connect(":memory:") as connection:
+        connection.execute("CREATE TABLE logs(url TEXT, timestamp TEXT)")
         connection.execute(
-            "INSERT INTO logs VALUES (?, CURRENT_TIMESTAMP), (?, CURRENT_TIMESTAMP), (?, CURRENT_TIMESTAMP - INTERVAL 2 HOUR)",
+            "INSERT INTO logs VALUES (?, datetime('now')), (?, datetime('now')), (?, datetime('now', '-2 hours'))",
             [key, key + "unrelated", "/old?probe=owned"],
         )
 
         def post(url, body, headers, **kwargs):
-            result = connection.execute(body["sql"])
+            sql = (
+                body["sql"]
+                .replace("CURRENT_TIMESTAMP - INTERVAL 1 HOUR", "datetime('now', '-1 hour')")
+                .replace("CURRENT_TIMESTAMP + INTERVAL 1 MINUTE", "datetime('now', '+1 minute')")
+            )
+            result = connection.execute(sql)
             columns = [col[0] for col in result.description]
             rows = [dict(zip(columns, row, strict=True)) for row in result.fetchall()]
             for row in rows:
-                row["timestamp"] = row["timestamp"].isoformat()
+                row["timestamp"] = row["timestamp"].replace(" ", "T") + "Z"
             return 200, {"data": rows, "truncated": False, "_response_cache": {"state": "bypass"}}
 
         monkeypatch.setattr(freshness, "http_post", post)
@@ -1642,7 +1665,6 @@ def test_print_active_scorecard_verified_and_ended_span_guard(capsys):
         [
             {
                 "name": "Local Standard",
-                "deployment_mode": "standard",
                 "qualification": "verified",
                 "active_benchmark": {
                     "header_lag": {"min": 1.0, "max": 3.0, "avg": 2.0, "p95": 3.0},

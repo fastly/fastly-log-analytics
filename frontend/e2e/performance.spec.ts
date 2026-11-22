@@ -90,6 +90,12 @@ function getCookieValue(headers: { name: string; value: string }[], cookieName: 
 async function loginAsAnalyst(request: APIRequestContext, context: BrowserContext, serviceId: string): Promise<string> {
   const email = `e2e-analyst-${Date.now()}@example.com`
 
+  // 0. Ensure remote sharing is active (earlier RBAC specs stop sharing on teardown)
+  await request.post(`http://127.0.0.1:${E2E_BACKEND_PORT}/api/admin/share/start`, {
+    headers: { 'Content-Type': 'application/json' },
+    data: JSON.stringify({ public_endpoint: 'https://share-e2e.example.com', forward_port: 13004 }),
+  })
+
   // 1. Seed an OAuth invite
   const created = await request.post(`http://127.0.0.1:${E2E_BACKEND_PORT}/api/admin/share/invites`, {
     headers: { 'Content-Type': 'application/json' },

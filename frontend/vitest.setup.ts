@@ -3,6 +3,7 @@ import { afterAll, afterEach, expect } from 'vitest'
 import { act } from 'react'
 import { cleanup, configure } from '@testing-library/react'
 import * as matchers from 'vitest-axe/matchers'
+import { HttpNetworkFrame } from 'msw/experimental'
 import { server } from './__tests__/helpers/msw/handlers'
 
 // waitFor/findBy poll observable state and only use this as a failure bound; the
@@ -74,7 +75,7 @@ if (typeof window !== 'undefined') {
 // test can do ``expect(await axe(container)).toHaveNoViolations()``.
 expect.extend(matchers)
 
-// MSW lifecycle. ``onUnhandledRequest`` is a callback (R-2) so that:
+// MSW lifecycle. ``onUnhandledFrame`` is a callback (R-2) so that:
 //  - unmatched calls to the backend base URL fail loudly (the old
 //    ``'bypass'`` default silently let tests pass against responses
 //    that never resolved); and
@@ -91,7 +92,9 @@ expect.extend(matchers)
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
 
 server.listen({
-  onUnhandledRequest(request, print) {
+  async onUnhandledFrame({ frame, defaults }) {
+    if (!(frame instanceof HttpNetworkFrame)) return
+    const { request } = frame.data
     let url: URL
     try {
       url = new URL(request.url)
@@ -99,18 +102,19 @@ server.listen({
       // Relative URL without a base origin in a test stub.
       return
     }
-    // Reject any unhandled request to a non-loopback (external) host.
-    if (!LOOPBACK_HOSTS.has(url.hostname)) {
-      print.error()
-      return
-    }
-    // Backend base URL = 127.0.0.1:8000 (see ``handlers.ts``). Any
+    // Reject any unhandled request to a non-loopback (external) host, and
+    // to the backend base URL = 127.0.0.1:8000 (see ``handlers.ts``). Any
     // other loopback port belongs to a test-owned http server (the
     // SSR helper tests stand one up on a random port) or jsdom's
     // relative-URL origin; let those through untouched.
+    const isExternal = !LOOPBACK_HOSTS.has(url.hostname)
     const isBackendBase = url.hostname === '127.0.0.1' && url.port === '8000'
-    if (!isBackendBase) return
-    print.error()
+    if (!isExternal && !isBackendBase) return
+    // MSW 3's ``defaults.error()`` only prints. Throwing a network-error
+    // response fails the request the way MSW 2's ``print.error()`` did; a
+    // thrown Error would instead become a mocked 500 the app could render.
+    await defaults.error()
+    throw Response.error()
   },
 })
 
@@ -136,3 +140,30 @@ afterEach(async () => {
 afterEach(() => {
   cleanup()
 })
+
+if (typeof globalThis.ResizeObserver === 'undefined') {
+  globalThis.ResizeObserver = class ResizeObserver {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  } as unknown as typeof ResizeObserver
+}
+
+if (typeof Blob !== 'undefined' && typeof Blob.prototype.arrayBuffer !== 'function') {
+  Blob.prototype.arrayBuffer = function () {
+    return new Promise<ArrayBuffer>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(reader.result as ArrayBuffer)
+      reader.onerror = () => reject(reader.error)
+      reader.readAsArrayBuffer(this)
+    })
+  }
+}
+
+if (
+  typeof File !== 'undefined' &&
+  typeof Blob !== 'undefined' &&
+  typeof File.prototype.arrayBuffer !== 'function'
+) {
+  File.prototype.arrayBuffer = Blob.prototype.arrayBuffer
+}

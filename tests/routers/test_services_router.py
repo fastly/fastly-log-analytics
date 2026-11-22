@@ -35,7 +35,6 @@ _BASE_CFG = {
     "log_period": 60,
     "provisioning": {
         "cron_sync": {"enabled": True, "interval_mins": 1},
-        "cron_compact": {"enabled": True, "commit_interval_mins": 60},
     },
 }
 
@@ -46,7 +45,7 @@ _FIELD_CREATE_BODY = {
     "label": "Environment",
     "vcl_log_expression": "req.http.X-Env",
     "collection_stage": "edge",
-    "duckdb_type": "VARCHAR",
+    "sql_type": "VARCHAR",
     "value_type": "string",
     "bytes_estimate": 10,
     "enabled": True,
@@ -112,7 +111,7 @@ def _mutate_cfg_ctx(initial_cfg: dict | None = None, *extra_patches):
 
 # ── Credentials & Cron Settings ──
 def test_credentials_access_key_saves_to_config():
-    with _mutate_cfg_ctx(_cfg()) as saved, patch("backend.core.duckdb._get_fos_client") as mock_fos:
+    with _mutate_cfg_ctx(_cfg()) as saved, patch("backend.core.fos_client._get_fos_client") as mock_fos:
         mock_fos.return_value.list_objects_v2.return_value = {"Contents": []}
         response = _client().patch("/api/services/svc1/credentials", json={"access_key": "AKID", "secret_key": "SEC"})
 
@@ -136,7 +135,7 @@ def test_credentials_fos_validation_failure_returns_400():
     error_response = {"Error": {"Code": "AccessDenied", "Message": "Forbidden"}}
     with (
         patch("backend.config.load_config", return_value=_cfg()),
-        patch("backend.core.duckdb._get_fos_client") as mock_fos,
+        patch("backend.core.fos_client._get_fos_client") as mock_fos,
     ):
         mock_fos.return_value.list_objects_v2.side_effect = botocore.exceptions.ClientError(
             error_response, "ListObjectsV2"
@@ -196,7 +195,7 @@ def test_log_fields_set_reinjects_cmcd_fields_when_cmcd_enabled():
                     "preset": "standard",
                     "groups": ["A", "B", "C"],
                     "schema_version": 2,
-                    "custom_fields": [{"name": "my_custom", "duckdb_type": "VARCHAR", "enabled": True}],
+                    "custom_fields": [{"name": "my_custom", "sql_type": "VARCHAR", "enabled": True}],
                 }
             },
         )
@@ -218,8 +217,8 @@ def test_log_fields_set_strips_cmcd_fields_when_cmcd_disabled():
                     "groups": ["A", "B", "C"],
                     "schema_version": 2,
                     "custom_fields": [
-                        {"name": "my_custom", "duckdb_type": "VARCHAR", "enabled": True},
-                        {"name": "cmcd_sid", "duckdb_type": "VARCHAR", "enabled": True},
+                        {"name": "my_custom", "sql_type": "VARCHAR", "enabled": True},
+                        {"name": "cmcd_sid", "sql_type": "VARCHAR", "enabled": True},
                     ],
                 }
             },
@@ -333,17 +332,17 @@ def test_custom_field_patch_rejects_type_change_when_field_in_storage():
     with _mutate_cfg_ctx(
         _cfg_with_field(),
         patch("backend.provision.validate_log_format", return_value=[]),
-        patch("backend.core.duckdb.get_source_for_service", return_value={"name": "svc1", "bucket": "b"}),
-        patch("backend.routers.services.core._committed_duckdb_field_types", return_value={"cf_env": "VARCHAR"}),
+        patch("backend.core.fos_client.get_source_for_service", return_value={"name": "svc1", "bucket": "b"}),
+        patch("backend.routers.services.core._committed_field_types", return_value={"cf_env": "VARCHAR"}),
     ) as saved:
         response = _client().patch(
             "/api/services/svc1/custom-fields/cf_env",
-            json={"duckdb_type": "BIGINT", "value_type": "numeric"},
+            json={"sql_type": "BIGINT", "value_type": "numeric"},
         )
 
     assert response.status_code == 422
     errors = response.json().get("detail", {}).get("errors", [])
-    assert any("duckdb_type" in e.lower() or "data type" in e.lower() for e in errors)
+    assert any("sql_type" in e.lower() or "data type" in e.lower() for e in errors)
     assert saved == {}
 
 
@@ -351,18 +350,50 @@ def test_custom_field_patch_allows_type_change_before_storage_write():
     with _mutate_cfg_ctx(
         _cfg_with_field(),
         patch("backend.provision.validate_log_format", return_value=[]),
-        patch("backend.core.duckdb.get_source_for_service", return_value={"name": "svc1", "bucket": "b"}),
-        patch("backend.routers.services.core._committed_duckdb_field_types", return_value={}),
+        patch("backend.core.fos_client.get_source_for_service", return_value={"name": "svc1", "bucket": "b"}),
+        patch("backend.routers.services.core._committed_field_types", return_value={}),
     ) as saved:
         response = _client().patch(
             "/api/services/svc1/custom-fields/cf_env",
-            json={"duckdb_type": "BIGINT", "value_type": "numeric"},
+            json={"sql_type": "BIGINT", "value_type": "numeric"},
         )
 
     assert response.status_code == 200
     updated = response.json()["field"]
-    assert updated["duckdb_type"] == "BIGINT" and updated["value_type"] == "numeric"
+    assert updated["sql_type"] == "BIGINT" and updated["value_type"] == "numeric"
     assert saved
+
+
+@pytest.mark.no_postgres
+def test_custom_field_lifecycle_validates_changes_rejects_unsupported_values_and_removes():
+    cfg = _cfg(log_fields={"preset": "standard", "groups": ["A"], "schema_version": 2, "custom_fields": []})
+    with _mutate_cfg_ctx(
+        cfg,
+        patch("backend.provision.validate_log_format", return_value=[]),
+        patch("backend.core.fos_client.get_source_for_service", return_value={"name": "svc1", "bucket": "b"}),
+        patch("backend.routers.services.core._committed_field_types", return_value={}),
+    ) as saved:
+        created = _client().post("/api/services/svc1/custom-fields", json=_FIELD_CREATE_BODY)
+        assert created.status_code == 200
+
+        changed = _client().patch(
+            "/api/services/svc1/custom-fields/cf_env",
+            json={"label": "Changed", "sql_type": "BIGINT", "value_type": "numeric"},
+        )
+        assert changed.status_code == 200
+        assert changed.json()["field"]["sql_type"] == "BIGINT"
+
+        before_rejection = copy.deepcopy(saved)
+        rejected = _client().patch(
+            "/api/services/svc1/custom-fields/cf_env",
+            json={"sql_type": "BOOLEAN", "value_type": "numeric"},
+        )
+        assert rejected.status_code == 422
+        assert saved == before_rejection
+
+        removed = _client().delete("/api/services/svc1/custom-fields/cf_env")
+        assert removed.status_code == 200
+        assert saved["log_fields"]["custom_fields"] == []
 
 
 # ── API Token Rotation ──
@@ -450,7 +481,7 @@ def test_ngwaf_sync_source_missing_yields_error_event():
     with (
         patch("backend.config.load_config", return_value=_cfg(fastly_api_key="key")),
         patch("backend.config.get_ngwaf_workspace_id", return_value="ws-1"),
-        patch("backend.core.duckdb.get_source_for_service", return_value=None),
+        patch("backend.core.fos_client.get_source_for_service", return_value=None),
     ):
         resp = _client().post("/api/services/svc1/ngwaf-sync")
     events = _parse_sse_events(resp.text)
@@ -461,8 +492,8 @@ def test_ngwaf_sync_start_cron_run_raises_yields_error_event():
     with (
         patch("backend.config.load_config", return_value=_cfg(fastly_api_key="key")),
         patch("backend.config.get_ngwaf_workspace_id", return_value="ws-1"),
-        patch("backend.core.duckdb.get_source_for_service", return_value={"name": "svc1", "service_id": "svc1"}),
-        patch("backend.core.duckdb.start_cron_run", side_effect=CronLeaseHeldError("already running")),
+        patch("backend.core.fos_client.get_source_for_service", return_value={"name": "svc1", "service_id": "svc1"}),
+        patch("backend.core.fos_client.start_cron_run", side_effect=CronLeaseHeldError("already running")),
     ):
         resp = _client().post("/api/services/svc1/ngwaf-sync")
     events = _parse_sse_events(resp.text)
@@ -482,29 +513,25 @@ def _ngwaf_sync_ctx(
         stack.enter_context(patch("backend.config.load_config", return_value=_cfg(fastly_api_key="key")))
         stack.enter_context(patch("backend.config.get_ngwaf_workspace_id", return_value="ws-1"))
         stack.enter_context(
-            patch("backend.core.duckdb.get_source_for_service", return_value={"name": "svc1", "service_id": "svc1"})
+            patch("backend.core.fos_client.get_source_for_service", return_value={"name": "svc1", "service_id": "svc1"})
         )
-        stack.enter_context(patch("backend.core.duckdb.start_cron_run", return_value=42))
+        stack.enter_context(patch("backend.core.fos_client.start_cron_run", return_value=42))
         stack.enter_context(
-            patch("backend.core.duckdb.log_cron_run", side_effect=lambda *a, **kw: log_calls.append((a, kw)))
+            patch("backend.core.fos_client.log_cron_run", side_effect=lambda *a, **kw: log_calls.append((a, kw)))
         )
         stack.enter_context(patch("backend.utils.bot_sources.build_matcher", return_value=matcher or (lambda ua: ())))
-        stack.enter_context(
-            patch("backend.core.rollups.security_dims.oldest_unenriched_timestamp", return_value=oldest_ts)
-        )
+        stack.enter_context(patch("backend.cron.jobs.metadata.oldest_unenriched_timestamp", return_value=oldest_ts))
         mock_fetch = stack.enter_context(
-            fetch_patch
-            if fetch_patch is not None
-            else patch("backend.core.rollups.security_dims.fetch_verified_bots_paged")
+            fetch_patch if fetch_patch is not None else patch("backend.cron.jobs.metadata.fetch_verified_bots_paged")
         )
         if upsert_calls is not None:
             stack.enter_context(
                 patch(
-                    "backend.core.rollups.security_dims.upsert_bots",
+                    "backend.cron.jobs.metadata.upsert_bots",
                     side_effect=lambda rows, ws, ts: upsert_calls.append((list(rows), ws, ts)),
                 )
             )
-            stack.enter_context(patch("backend.core.rollups.security_dims.cleanup_old_bots", return_value=0))
+            stack.enter_context(patch("backend.cron.jobs.metadata.cleanup_old_bots", return_value=0))
         yield log_calls, mock_fetch
 
 
@@ -524,7 +551,7 @@ def test_ngwaf_sync_happy_path_streams_page_status_then_done():
 
     with _ngwaf_sync_ctx(
         matcher=lambda ua: ({"id": "googlebot", "name": "Google Bot"},) if "Google" in (ua or "") else (),
-        fetch_patch=patch("backend.core.rollups.security_dims.fetch_verified_bots_paged", return_value=iter(pages)),
+        fetch_patch=patch("backend.cron.jobs.metadata.fetch_verified_bots_paged", return_value=iter(pages)),
         upsert_calls=upsert_calls,
     ):
         resp = _client().post("/api/services/svc1/ngwaf-sync")
@@ -540,9 +567,7 @@ def test_ngwaf_sync_happy_path_streams_page_status_then_done():
 
 def test_ngwaf_sync_fetcher_exception_yields_error_event_and_logs():
     with _ngwaf_sync_ctx(
-        fetch_patch=patch(
-            "backend.core.rollups.security_dims.fetch_verified_bots_paged", side_effect=RuntimeError("NGWAF 503")
-        )
+        fetch_patch=patch("backend.cron.jobs.metadata.fetch_verified_bots_paged", side_effect=RuntimeError("NGWAF 503"))
     ) as (log_calls, _):
         resp = _client().post("/api/services/svc1/ngwaf-sync")
 
@@ -559,7 +584,7 @@ def _post(body: dict, stored_cron_sync: dict) -> dict:
         "service_id": "svc1",
         "name": "Test Service",
         "log_period": 60,
-        "provisioning": {"cron_sync": dict(stored_cron_sync), "cron_compact": {"enabled": True}},
+        "provisioning": {"cron_sync": dict(stored_cron_sync)},
     }
     with _mutate_cfg_ctx(cfg) as saved:
         resp = TestClient(app).post("/api/services/svc1/cron-settings", json=body)
@@ -612,6 +637,152 @@ def test_expiry_tuning_fields_round_trip():
         {"enabled": True, "interval_seconds": 30},
     )
     assert out["keep_snapshot_days"] == 3 and out["expire_interval_mins"] == 30
+
+
+@pytest.mark.no_postgres
+@pytest.mark.parametrize("interval", [5, 15, 30, 60, 360, 1440])
+def test_snapshot_interval_minutes_accepts_all_valid_values(interval: int):
+    model = CronSettingsPartial(snapshot_interval_minutes=interval)  # type: ignore[arg-type]
+    assert model.snapshot_interval_minutes == interval
+
+
+@pytest.mark.no_postgres
+@pytest.mark.parametrize("bad_interval", [0, 1, 10, -5, 1441])
+def test_snapshot_interval_minutes_rejects_invalid_values(bad_interval: int):
+    with pytest.raises(ValidationError, match="snapshot_interval_minutes"):
+        CronSettingsPartial(snapshot_interval_minutes=bad_interval)  # type: ignore[arg-type]
+
+
+@pytest.mark.no_postgres
+def test_service_cron_sync_defaults_snapshot_interval_minutes_to_5():
+    from backend.models.common.services import ServiceCronSync
+
+    sync = ServiceCronSync(enabled=True)
+    assert sync.snapshot_interval_minutes == 5
+
+
+@pytest.mark.no_postgres
+def test_cron_settings_endpoint_persists_and_validates_snapshot_interval_minutes():
+    out = _post(
+        {"cron_sync": {"snapshot_interval_minutes": 60}},
+        {"enabled": True, "interval_seconds": 30, "delete_after": True},
+    )
+    assert out["snapshot_interval_minutes"] == 60
+    assert out["delete_after"] is True and out["enabled"] is True
+
+    # Partial update to unrelated field preserves snapshot_interval_minutes
+    out2 = _post(
+        {"cron_sync": {"enabled": False}},
+        {"enabled": True, "snapshot_interval_minutes": 360},
+    )
+    assert out2["enabled"] is False and out2["snapshot_interval_minutes"] == 360
+
+    # Invalid interval returns HTTP 422
+    cfg = {"service_id": "svc1", "name": "Test", "provisioning": {"cron_sync": {"enabled": True}}}
+    with _mutate_cfg_ctx(cfg):
+        resp = TestClient(app).post(
+            "/api/services/svc1/cron-settings",
+            json={"cron_sync": {"snapshot_interval_minutes": 10}},
+        )
+    assert resp.status_code == 422
+
+
+@pytest.mark.no_postgres
+def test_get_enriched_services_normalizes_legacy_and_custom_snapshot_interval():
+    from backend.services.service_manager import get_enriched_services
+
+    legacy_cfg = {
+        "service_id": "svc_legacy",
+        "name": "Legacy",
+        "provisioning": {"cron_sync": {"enabled": True, "delete_after": True}},
+    }
+    custom_cfg = {
+        "service_id": "svc_custom",
+        "name": "Custom",
+        "provisioning": {"cron_sync": {"enabled": True, "snapshot_interval_minutes": 60}},
+    }
+    with (
+        patch("backend.services.service_manager.svcconfig.list_configs", return_value=[legacy_cfg, custom_cfg]),
+        patch(
+            "backend.services.service_manager.svcconfig.refresh_all_service_names",
+            return_value={"svc_legacy": "Legacy", "svc_custom": "Custom"},
+        ),
+        patch("backend.services.service_manager.svcconfig.get_status", return_value={}),
+        patch("backend.services.service_manager._get_dir_stats", return_value=(0, 0)),
+    ):
+        services = get_enriched_services()
+    by_id = {s["service_id"]: s for s in services}
+    assert by_id["svc_legacy"]["cron_sync"]["snapshot_interval_minutes"] == 5
+    assert by_id["svc_custom"]["cron_sync"]["snapshot_interval_minutes"] == 60
+
+
+@pytest.mark.no_postgres
+def test_write_service_config_persists_and_preserves_snapshot_interval_minutes():
+    from backend import config as svcconfig
+    from backend.provision.orchestrator import write_service_config
+
+    write_service_config(
+        {
+            "logging_service_id": "svc_snap_1",
+            "name": "SnapSvc",
+            "fos_region": "us-east-1",
+            "fos_bucket_name": "bucket",
+            "snapshot_interval_minutes": 60,
+        }
+    )
+    cfg = svcconfig.load_config("svc_snap_1")
+    assert cfg is not None
+    assert cfg["provisioning"]["cron_sync"]["snapshot_interval_minutes"] == 60
+
+    # Re-writing without snapshot_interval_minutes preserves 60
+    write_service_config(
+        {
+            "logging_service_id": "svc_snap_1",
+            "name": "SnapSvc",
+            "fos_region": "us-east-1",
+            "fos_bucket_name": "bucket",
+        }
+    )
+    cfg2 = svcconfig.load_config("svc_snap_1")
+    assert cfg2 is not None
+    assert cfg2["provisioning"]["cron_sync"]["snapshot_interval_minutes"] == 60
+
+    # New service without snapshot_interval_minutes defaults to 5
+    write_service_config(
+        {
+            "logging_service_id": "svc_snap_2",
+            "name": "SnapSvc2",
+            "fos_region": "us-east-1",
+            "fos_bucket_name": "bucket",
+        }
+    )
+    cfg3 = svcconfig.load_config("svc_snap_2")
+    assert cfg3 is not None
+    assert cfg3["provisioning"]["cron_sync"]["snapshot_interval_minutes"] == 5
+
+
+@pytest.mark.no_postgres
+def test_provision_models_validate_snapshot_interval_minutes():
+    from backend.models.common.provision import ProvisionConfigRequest, ProvisionExecuteRequest
+
+    req = ProvisionExecuteRequest(token="tok", service_id="svc1", fos_bucket_name="bkt")
+    assert req.snapshot_interval_minutes == 5
+    req_custom = ProvisionExecuteRequest(
+        token="tok", service_id="svc1", fos_bucket_name="bkt", snapshot_interval_minutes=360
+    )
+    assert req_custom.snapshot_interval_minutes == 360
+    with pytest.raises(ValidationError, match="snapshot_interval_minutes"):
+        ProvisionExecuteRequest(
+            token="tok",
+            service_id="svc1",
+            fos_bucket_name="bkt",
+            snapshot_interval_minutes=12,  # type: ignore[arg-type]
+        )
+
+    cfg_req = ProvisionConfigRequest(snapshot_interval_minutes=1440)
+    assert cfg_req.snapshot_interval_minutes == 1440
+    with pytest.raises(ValidationError, match="snapshot_interval_minutes"):
+        ProvisionConfigRequest(snapshot_interval_minutes=99)  # type: ignore[arg-type]
 
 
 # ── Viewer Key Generation ──
@@ -743,7 +914,7 @@ def _run_logging_settings_update(
         patch("backend.config.save_config", side_effect=_save) as mock_save,
         patch("backend.config.mutate_config", side_effect=mutate_via_save(mock_save)),
         patch("backend.provision.update_logging_endpoint", side_effect=_gen),
-        patch("backend.core.duckdb.get_source_for_service", return_value=None),
+        patch("backend.core.fos_client.get_source_for_service", return_value=None),
     ):
         response = client.post(f"/api/services/{service_id}/logging-settings/update", params=params)
 
@@ -882,7 +1053,7 @@ def test_api_create_custom_field_validation_errors(tmp_path, monkeypatch):
 
 @patch("backend.config.load_config")
 @patch("backend.config.save_config")
-@patch("backend.core.duckdb.get_source_for_service")
+@patch("backend.core.fos_client.get_source_for_service")
 def test_custom_fields_persist_on_log_fields_update(mock_get_source, mock_save_config, mock_load_config):
     mock_get_source.return_value = None
     mock_load_config.return_value = {
@@ -913,7 +1084,7 @@ _BASE_PAYLOAD = {
     "description": "",
     "vcl_log_expression": "req.http.Host",
     "collection_stage": "edge",
-    "duckdb_type": "VARCHAR",
+    "sql_type": "VARCHAR",
     "value_type": "string",
     "bytes_estimate": 20,
     "nullable": True,
@@ -1483,7 +1654,7 @@ def test_export_and_import_custom_fields(client, tmp_path, monkeypatch):
                         "label": "Existing",
                         "enabled": True,
                         "vcl_log_expression": "req.http.x-keep-me",
-                        "duckdb_type": "VARCHAR",
+                        "sql_type": "VARCHAR",
                         "value_type": "string",
                         "bytes_estimate": 20,
                     }
@@ -1506,7 +1677,7 @@ def test_export_and_import_custom_fields(client, tmp_path, monkeypatch):
     assert any(e.get("loc", [])[-1] == "custom_fields" for e in bad_list.json()["detail"])
 
     with (
-        patch("backend.core.duckdb.get_source_for_service", return_value=None),
+        patch("backend.core.fos_client.get_source_for_service", return_value=None),
         patch("backend.provision.validate_log_format", return_value=[]),
     ):
         imp = client.post(
@@ -1518,7 +1689,7 @@ def test_export_and_import_custom_fields(client, tmp_path, monkeypatch):
                         "name": "new_one",
                         "label": "New",
                         "enabled": True,
-                        "duckdb_type": "VARCHAR",
+                        "sql_type": "VARCHAR",
                         "value_type": "string",
                         "vcl_log_expression": "req.http.x-new-one",
                         "bytes_estimate": 20,
@@ -1532,19 +1703,19 @@ def test_export_and_import_custom_fields(client, tmp_path, monkeypatch):
 
     # Locked type change on import & PATCH
     with (
-        patch("backend.core.duckdb.get_source_for_service", return_value={"name": "svc"}),
-        patch("backend.routers.services.core._committed_duckdb_field_types", return_value={"keep_me": "VARCHAR"}),
+        patch("backend.core.fos_client.get_source_for_service", return_value={"name": "svc"}),
+        patch("backend.routers.services.core._committed_field_types", return_value={"keep_me": "VARCHAR"}),
         patch("backend.provision.validate_log_format", return_value=[]),
     ):
         imp_locked = client.post(
             f"/api/services/{MOCK_SERVICE_ID}/custom-fields/import",
             headers=_SVC_HEADERS,
-            json={"custom_fields": [{"name": "keep_me", "label": "x", "duckdb_type": "INTEGER"}]},
+            json={"custom_fields": [{"name": "keep_me", "label": "x", "sql_type": "INTEGER"}]},
         )
         patch_locked = client.patch(
             f"/api/services/{MOCK_SERVICE_ID}/custom-fields/keep_me",
             headers=_SVC_HEADERS,
-            json={"duckdb_type": "INTEGER"},
+            json={"sql_type": "INTEGER"},
         )
     assert imp_locked.status_code == 422 and any("keep_me" in e for e in imp_locked.json()["detail"]["errors"])
     assert patch_locked.status_code == 422 and any(
@@ -1553,7 +1724,7 @@ def test_export_and_import_custom_fields(client, tmp_path, monkeypatch):
 
     # Format exceeds limit
     with (
-        patch("backend.core.duckdb.get_source_for_service", return_value=None),
+        patch("backend.core.fos_client.get_source_for_service", return_value=None),
         patch("backend.provision.validate_log_format", return_value=["LOG_FORMAT_TOO_LONG: would be 12000 chars"]),
     ):
         imp_long = client.post(
@@ -1565,7 +1736,7 @@ def test_export_and_import_custom_fields(client, tmp_path, monkeypatch):
                         "name": "x",
                         "label": "x",
                         "vcl_log_expression": "req.http.x",
-                        "duckdb_type": "VARCHAR",
+                        "sql_type": "VARCHAR",
                         "value_type": "string",
                         "bytes_estimate": 20,
                     }
@@ -1636,14 +1807,13 @@ def test_cron_settings_sse_and_clear_time_range(client, tmp_path, monkeypatch):
             f"/api/services/{MOCK_SERVICE_ID}/cron-settings",
             json={
                 "cron_sync": {"enabled": True, "interval_mins": 5, "evil_arbitrary_key": "should-be-dropped"},
-                "cron_compact": {"enabled": True, "log_retention_days": 30},
                 "cron_ngwaf": {"enabled": False, "interval_mins": 10},
             },
         )
     assert resp.status_code == 200 and "done" in resp.text
     prov = config.load_config(MOCK_SERVICE_ID)["provisioning"]
     assert prov["cron_sync"] == {"enabled": True, "interval_mins": 5}
-    assert prov["cron_compact"]["log_retention_days"] == 30 and prov["cron_ngwaf"]["enabled"] is False
+    assert prov["cron_ngwaf"]["enabled"] is False
 
     with (
         patch("backend.provision._sync_crontab", side_effect=CronLeaseHeldError("scheduler busy")),
@@ -1712,7 +1882,7 @@ def test_cron_logs_list_filters_pagination_and_since_id(client, test_service_sou
         [
             {"task": "sync", "status": "success"},
             {"task": "sync", "status": "running"},
-            {"task": "commit", "status": "error"},
+            {"task": "maintenance", "status": "error"},
         ],
     )
     r_all = client.get("/api/cron-runs", headers=_SVC_HEADERS).json()
@@ -1738,7 +1908,7 @@ def test_cron_logs_list_filters_pagination_and_since_id(client, test_service_sou
 @pytest.mark.usefixtures("_clear_cron_schedule_ttl_cache")
 def test_cron_logs_delete_and_purge(client, test_service_source):
     svc = test_service_source["name"]
-    [keep, kill, c1] = _seed_cron_runs(svc, [{"task": "sync"}, {"task": "sync"}, {"task": "commit"}])
+    [keep, kill, c1] = _seed_cron_runs(svc, [{"task": "sync"}, {"task": "sync"}, {"task": "maintenance"}])
 
     r_del = client.delete(f"/api/cron-runs/{kill}", headers=_SVC_HEADERS)
     assert r_del.status_code == 204 and r_del.content == b""
@@ -1749,7 +1919,7 @@ def test_cron_logs_delete_and_purge(client, test_service_source):
     assert kill not in remaining and keep in remaining and c1 in remaining
 
     assert client.delete("/api/cron-runs", params={"task": "sync"}, headers=_SVC_HEADERS).status_code == 204
-    assert [row[0] for row in con.execute("SELECT task FROM cron_runs").fetchall()] == ["commit"]
+    assert [row[0] for row in con.execute("SELECT task FROM cron_runs").fetchall()] == ["maintenance"]
 
     assert client.delete("/api/cron-runs", headers=_SVC_HEADERS).status_code == 204
     assert con.execute("SELECT count(*) FROM cron_runs").fetchone()[0] == 0
@@ -1852,3 +2022,41 @@ def test_completed_run_streams_from_db_and_cross_tenant_isolation(isolate_metada
 
     for event in _parse_sse_events(iso_body):
         assert "tenant-b" not in (event.get("message") or "")
+
+
+@pytest.mark.no_postgres
+def test_custom_fields_null_description_coalesced_across_log_fields_set_patch_and_delete():
+    cf_null_desc = {
+        **_FIELD_CREATE_BODY,
+        "description": None,
+    }
+    with _mutate_cfg_ctx(_cfg(log_fields=_BASE_LF)) as saved_set:
+        resp_set = _client().post(
+            "/api/services/svc1/log-fields",
+            json={
+                "log_fields": {
+                    "preset": "standard",
+                    "groups": ["A"],
+                    "schema_version": 2,
+                    "custom_fields": [cf_null_desc],
+                }
+            },
+        )
+    assert resp_set.status_code == 200
+    persisted_cf = next(cf for cf in saved_set["log_fields"]["custom_fields"] if cf["name"] == "cf_env")
+    assert persisted_cf["description"] == ""
+
+    legacy_null_cfg = _cfg_with_field()
+    legacy_null_cfg["log_fields"]["custom_fields"][0]["description"] = None
+    with _mutate_cfg_ctx(
+        copy.deepcopy(legacy_null_cfg), patch("backend.provision.validate_log_format", return_value=[])
+    ):
+        resp_patch = _client().patch("/api/services/svc1/custom-fields/cf_env", json={"label": "Env Updated"})
+    assert resp_patch.status_code == 200
+    assert resp_patch.json()["field"]["description"] == ""
+    assert resp_patch.json()["field"]["label"] == "Env Updated"
+
+    with _mutate_cfg_ctx(copy.deepcopy(legacy_null_cfg)):
+        resp_del = _client().delete("/api/services/svc1/custom-fields/cf_env")
+    assert resp_del.status_code == 200
+    assert resp_del.json()["field"]["description"] == ""

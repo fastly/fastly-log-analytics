@@ -1,9 +1,11 @@
 'use client'
 
 import React from 'react'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { useMutation } from '@tanstack/react-query'
 import { Activity, ChevronRight, Flag, Loader2 } from 'lucide-react'
-import { ColumnDef, flexRender, getCoreRowModel, useReactTable } from '@tanstack/react-table'
+import { flexRender, useTable } from '@tanstack/react-table'
+import { basicTableFeatures, type BasicColumnDef } from '@/lib/table'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -130,11 +132,11 @@ export function FlagSessionPopover({
   }
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover open={open && !disabled} onOpenChange={(value) => !disabled && setOpen(value)}>
       <PopoverTrigger
         render={(props: React.ComponentPropsWithRef<'button'>) =>
           trigger ? (
-            <button {...props}>{trigger}</button>
+            <button {...props} disabled={disabled}>{trigger}</button>
           ) : (
             <Button
               {...props}
@@ -223,7 +225,7 @@ type SessionEventRow = {
   prev: SessionEvent | null
 }
 
-const EVENT_COLUMNS: ColumnDef<SessionEventRow>[] = [
+const EVENT_COLUMNS: BasicColumnDef<SessionEventRow>[] = [
   {
     id: 'index',
     cell: ({ row }) => <span className="text-muted-foreground font-mono">{row.original.index + 1}.</span>,
@@ -297,10 +299,10 @@ export function SessionEventsDialog({ serviceId, sid, label, trigger }: SessionE
       ),
     [data?.events],
   )
-  const eventsTable = useReactTable({
+  const eventsTable = useTable({
+    features: basicTableFeatures,
     data: eventRows,
     columns: EVENT_COLUMNS,
-    getCoreRowModel: getCoreRowModel(),
   })
   const tableRows = eventsTable.getRowModel().rows
   const scrollParentRef = React.useRef<HTMLDivElement>(null)

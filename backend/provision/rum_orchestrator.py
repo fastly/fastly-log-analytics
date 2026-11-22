@@ -34,9 +34,10 @@ _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "description": "Fastly Service ID handling the request.",
         "vcl_log_expression": "req.service_id",
         "collection_stage": "beacon",
-        "duckdb_type": "VARCHAR",
+        "sql_type": "VARCHAR",
         "value_type": "string",
         "bytes_estimate": 22,
+        "byte_limit": 180,
         "enabled": True,
     },
     {
@@ -45,9 +46,10 @@ _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "description": "Derived from session scoring sid; per-session correlation key for joining with edge_sid.",
         "vcl_log_expression": "req.http.x-fos-edge-data:rum_cid",
         "collection_stage": "beacon",
-        "duckdb_type": "VARCHAR",
+        "sql_type": "VARCHAR",
         "value_type": "string",
-        "bytes_estimate": 12,
+        "bytes_estimate": 36,
+        "byte_limit": 240,
         "enabled": True,
     },
     {
@@ -56,9 +58,10 @@ _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "description": "Per-request correlation key (minted at edge) for joining client-reported TTFB with server-side metrics.",
         "vcl_log_expression": "req.http.x-fos-edge-data:fastly_req_id",
         "collection_stage": "beacon",
-        "duckdb_type": "VARCHAR",
+        "sql_type": "VARCHAR",
         "value_type": "string",
-        "bytes_estimate": 12,
+        "bytes_estimate": 36,
+        "byte_limit": 240,
         "enabled": True,
     },
     {
@@ -67,9 +70,10 @@ _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "description": "Web Vital name (LCP, INP, CLS, FCP, TTFB) or event type (navigation, error, console).",
         "vcl_log_expression": "req.http.x-fos-edge-data:rum_metric_name",
         "collection_stage": "beacon",
-        "duckdb_type": "VARCHAR",
+        "sql_type": "VARCHAR",
         "value_type": "string",
         "bytes_estimate": 12,
+        "byte_limit": 108,
         "enabled": True,
     },
     {
@@ -78,7 +82,7 @@ _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "description": "Numeric value of the metric (milliseconds for timing, unitless for rating).",
         "vcl_log_expression": "req.http.x-fos-edge-data:rum_metric_value",
         "collection_stage": "beacon",
-        "duckdb_type": "DOUBLE",
+        "sql_type": "DOUBLE",
         "value_type": "numeric",
         "bytes_estimate": 8,
         "enabled": True,
@@ -89,9 +93,10 @@ _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "description": "Web Vital rating: good, needs-improvement, poor.",
         "vcl_log_expression": "req.http.x-fos-edge-data:rum_metric_rating",
         "collection_stage": "beacon",
-        "duckdb_type": "VARCHAR",
+        "sql_type": "VARCHAR",
         "value_type": "string",
         "bytes_estimate": 18,
+        "byte_limit": 108,
         "enabled": True,
     },
     {
@@ -100,10 +105,10 @@ _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "description": "JavaScript error message (PII scrubbed, byte-capped).",
         "vcl_log_expression": "req.http.x-fos-edge-data:rum_error_message",
         "collection_stage": "beacon",
-        "duckdb_type": "VARCHAR",
+        "sql_type": "VARCHAR",
         "value_type": "string",
-        "bytes_estimate": 200,
-        "byte_limit": 500,
+        "bytes_estimate": 150,
+        "byte_limit": 240,
         "enabled": True,
     },
     {
@@ -112,10 +117,10 @@ _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "description": "JavaScript stack trace (PII scrubbed, byte-capped).",
         "vcl_log_expression": "req.http.x-fos-edge-data:rum_error_stack",
         "collection_stage": "beacon",
-        "duckdb_type": "VARCHAR",
+        "sql_type": "VARCHAR",
         "value_type": "string",
-        "bytes_estimate": 400,
-        "byte_limit": 2000,
+        "bytes_estimate": 200,
+        "byte_limit": 240,
         "enabled": True,
     },
     {
@@ -124,10 +129,10 @@ _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "description": "OpenTelemetry trace_id from Faro Web Tracing (32 hex chars).",
         "vcl_log_expression": "req.http.x-fos-edge-data:rum_trace_id",
         "collection_stage": "beacon",
-        "duckdb_type": "VARCHAR",
+        "sql_type": "VARCHAR",
         "value_type": "string",
         "bytes_estimate": 32,
-        "byte_limit": 40,
+        "byte_limit": 204,
         "enabled": True,
     },
     {
@@ -136,10 +141,10 @@ _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "description": "OpenTelemetry span_id from Faro Web Tracing (16 hex chars).",
         "vcl_log_expression": "req.http.x-fos-edge-data:rum_span_id",
         "collection_stage": "beacon",
-        "duckdb_type": "VARCHAR",
+        "sql_type": "VARCHAR",
         "value_type": "string",
         "bytes_estimate": 16,
-        "byte_limit": 24,
+        "byte_limit": 108,
         "enabled": True,
     },
     {
@@ -148,9 +153,10 @@ _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "description": "Client-reported window.location.pathname.",
         "vcl_log_expression": "req.http.x-fos-edge-data:rum_pathname",
         "collection_stage": "beacon",
-        "duckdb_type": "VARCHAR",
+        "sql_type": "VARCHAR",
         "value_type": "string",
-        "bytes_estimate": 256,
+        "bytes_estimate": 128,
+        "byte_limit": 240,
         "enabled": True,
     },
     {
@@ -159,9 +165,10 @@ _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "description": "navigator.connection.effectiveType (4g, 3g, 2g, slow-2g, unknown).",
         "vcl_log_expression": "req.http.x-fos-edge-data:rum_connection_speed",
         "collection_stage": "beacon",
-        "duckdb_type": "VARCHAR",
+        "sql_type": "VARCHAR",
         "value_type": "string",
         "bytes_estimate": 10,
+        "byte_limit": 60,
         "enabled": True,
     },
     {
@@ -170,7 +177,7 @@ _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "description": "Navigation timing: domainLookupEnd - domainLookupStart.",
         "vcl_log_expression": "req.http.x-fos-edge-data:rum_dns_ms",
         "collection_stage": "beacon",
-        "duckdb_type": "INTEGER",
+        "sql_type": "INTEGER",
         "value_type": "numeric",
         "bytes_estimate": 5,
         "enabled": True,
@@ -181,7 +188,7 @@ _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "description": "Navigation timing: connectEnd - connectStart.",
         "vcl_log_expression": "req.http.x-fos-edge-data:rum_tcp_ms",
         "collection_stage": "beacon",
-        "duckdb_type": "INTEGER",
+        "sql_type": "INTEGER",
         "value_type": "numeric",
         "bytes_estimate": 5,
         "enabled": True,
@@ -192,7 +199,7 @@ _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "description": "Navigation timing: requestStart - secureConnectionStart.",
         "vcl_log_expression": "req.http.x-fos-edge-data:rum_tls_ms",
         "collection_stage": "beacon",
-        "duckdb_type": "INTEGER",
+        "sql_type": "INTEGER",
         "value_type": "numeric",
         "bytes_estimate": 5,
         "enabled": True,
@@ -203,7 +210,7 @@ _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "description": "Navigation timing: responseStart - requestStart.",
         "vcl_log_expression": "req.http.x-fos-edge-data:rum_ttfb_ms",
         "collection_stage": "beacon",
-        "duckdb_type": "INTEGER",
+        "sql_type": "INTEGER",
         "value_type": "numeric",
         "bytes_estimate": 5,
         "enabled": True,
@@ -214,10 +221,10 @@ _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "description": "Complete raw querystring from beacon (event_N_* params encoded as one opaque string).",
         "vcl_log_expression": "req.http.x-fos-edge-data:rum_raw_query",
         "collection_stage": "beacon",
-        "duckdb_type": "VARCHAR",
+        "sql_type": "VARCHAR",
         "value_type": "string",
-        "bytes_estimate": 800,
-        "byte_limit": 8192,
+        "bytes_estimate": 300,
+        "byte_limit": 300,
         "enabled": True,
     },
     {
@@ -226,10 +233,10 @@ _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "description": "Raw JSON POST body from Faro Web SDK beacon (capped at 8KB).",
         "vcl_log_expression": "req.http.x-fos-edge-data:rum_body",
         "collection_stage": "beacon",
-        "duckdb_type": "VARCHAR",
+        "sql_type": "VARCHAR",
         "value_type": "string",
         "bytes_estimate": 1024,
-        "byte_limit": 8192,
+        "byte_limit": 9600,
         "enabled": True,
     },
 ]
@@ -440,16 +447,12 @@ def enable_rum(
     if status_cb:
         status_cb(f"✅ Using FOS bucket '{bucket_name}'.")
 
-    # Step 3: Update config to enable RUM (+ pin faro_version if given)
+    # Snapshot the prior pin for rollback; persist enablement only after the asset exists.
     previous_rum_cfg = dict(cfg.get("rum") or {})
     enabled_at = _dt.datetime.now(_dt.UTC).isoformat()
 
-    # Persist the pinned version BEFORE reconciling so the generator (which
-    # reads cfg["rum"]["faro_version"]) sees it. If anything below fails, the
-    # rollback below restores previous_rum_cfg so config never claims a
-    # version that isn't actually deployed. Always pinned now — there is no
-    # more "enabled but unpinned" state, since the tracker's unconditional
-    # /js/faro-sdk.js load requires a bundle to always be behind that path.
+    # The upload pins the asset version; this mutation enables the VCL only
+    # after the object has been written successfully.
     def _apply_enable(target: dict[str, Any]) -> None:
         target["rum_enabled"] = True
         target["rum_enabled_at"] = enabled_at
@@ -458,11 +461,6 @@ def enable_rum(
         # depends on the pinned version (F-4 fix), so it must be derived from
         # the state about to be deployed, not a read from before the version was set.
         target["rum_vcl_sha"] = rum_vcl_fingerprint(logging_service_id, target)
-
-    # Only the keys this flow owns are written, on a fresh read under the config lock.
-    if svcconfig.mutate_config(logging_service_id, _apply_enable) is None:
-        raise RuntimeError(f"No config found for logging service {logging_service_id}")
-    ok("Config updated: rum_enabled=True, rum_vcl_sha saved")
 
     def _rollback_config() -> None:
         # Undo only what _apply_enable wrote. A step between the save above and here
@@ -473,7 +471,8 @@ def enable_rum(
             target.pop("rum_vcl_sha", None)
             _restore_faro_pin(target, previous_rum_cfg)
 
-        svcconfig.mutate_config(logging_service_id, _undo)
+        if svcconfig.mutate_config(logging_service_id, _undo) is None:
+            raise RuntimeError(f"No config found while rolling back RUM enable for {logging_service_id}")
 
     # Step 4: Upload the pinned Faro Web SDK bundle to FOS (blocks RUM enable
     # if it fails) so the VCL the reconciler is about to deploy routes
@@ -488,9 +487,12 @@ def enable_rum(
         asyncio.run(download_and_upload_faro(logging_service_id, resolved_faro_version, token, status_cb=status_cb))
         ok(f"Faro Web SDK v{resolved_faro_version} uploaded")
     except Exception as e:
-        _rollback_config()
         fail(f"Faro Web SDK upload failed: {e}")
         raise
+
+    if svcconfig.mutate_config(logging_service_id, _apply_enable) is None:
+        raise RuntimeError(f"No config found for logging service {logging_service_id}")
+    ok("Config updated: rum_enabled=True, rum_vcl_sha saved")
 
     if status_cb:
         status_cb("⏳ Reconciling VCL state...")
@@ -630,7 +632,11 @@ def upgrade_faro_version(
         # config must not claim a version whose VCL isn't actually deployed.
         # Restore the whole previous rum block (not just faro_version) so a
         # stale faro_content_hash from the failed upgrade can't linger either.
-        svcconfig.mutate_config(logging_service_id, lambda target: _restore_faro_pin(target, previous_rum_cfg))
+        if (
+            svcconfig.mutate_config(logging_service_id, lambda target: _restore_faro_pin(target, previous_rum_cfg))
+            is None
+        ):
+            raise RuntimeError(f"No config found while rolling back RUM upgrade for {logging_service_id}") from e
         fail(f"Reconciliation failed: {e}")
         raise
 
@@ -655,7 +661,8 @@ def upgrade_faro_version(
         def _refresh_sha(target: dict[str, Any]) -> None:
             target["rum_vcl_sha"] = rum_vcl_fingerprint(logging_service_id, target)
 
-        svcconfig.mutate_config(logging_service_id, _refresh_sha)
+        if svcconfig.mutate_config(logging_service_id, _refresh_sha) is None:
+            raise RuntimeError(f"No config found while persisting RUM fingerprint for {logging_service_id}")
 
     # Step 3: Best-effort purge of the cached bundle so the edge stops
     # serving the old version. A purge failure is a warning, never an
@@ -738,22 +745,9 @@ def disable_rum(
         target["rum_enabled"] = False
         target.pop("rum_vcl_sha", None)
 
-    svcconfig.mutate_config(logging_service_id, _apply_disable)
+    if svcconfig.mutate_config(logging_service_id, _apply_disable) is None:
+        raise RuntimeError(f"No config found for logging service {logging_service_id}")
     ok("Config updated: rum_enabled=False, rum_vcl_sha cleared")
-
-    # Step 3: Delete JS from FOS (NON-BLOCKING)
-    if status_cb:
-        status_cb("⏳ Deleting RUM tracker JS…")
-
-    from backend.provision.rum_assets import delete_rum_tracker_js
-
-    try:
-        delete_rum_tracker_js(logging_service_id, token, status_cb=status_cb)
-    except Exception as e:
-        # Non-blocking: log warning and continue with reconciliation
-        logger.warning(f"Failed to delete RUM tracker JS: {e}")
-        if status_cb:
-            status_cb(f"⚠️  JS deletion failed (non-blocking): {e}")
 
     if status_cb:
         status_cb("⏳ Reconciling VCL state...")
@@ -768,9 +762,36 @@ def disable_rum(
             target["rum_enabled"] = True
             target["rum_vcl_sha"] = rum_vcl_fingerprint(logging_service_id, target)
 
-        svcconfig.mutate_config(logging_service_id, _undo_disable)
+        if svcconfig.mutate_config(logging_service_id, _undo_disable) is None:
+            raise RuntimeError(f"No config found while rolling back RUM disable for {logging_service_id}") from e
         fail(f"Reconciliation failed: {e}")
         raise
+
+    activated = result.activated_version is not None
+    if not activated:
+
+        def _restore_live_state(target: dict[str, Any]) -> None:
+            target["rum_enabled"] = True
+            if cfg.get("rum_vcl_sha") is not None:
+                target["rum_vcl_sha"] = cfg["rum_vcl_sha"]
+            else:
+                target.pop("rum_vcl_sha", None)
+
+        if svcconfig.mutate_config(logging_service_id, _restore_live_state) is None:
+            raise RuntimeError(f"No config found while restoring live RUM state for {logging_service_id}")
+
+    # Remove the object only after the active VCL no longer references it.
+    if activated:
+        if status_cb:
+            status_cb("⏳ Deleting RUM tracker JS…")
+        from backend.provision.rum_assets import delete_rum_tracker_js
+
+        try:
+            delete_rum_tracker_js(logging_service_id, token, status_cb=status_cb)
+        except Exception as e:
+            logger.warning(f"Failed to delete RUM tracker JS: {e}")
+            if status_cb:
+                status_cb(f"⚠️  JS deletion failed (non-blocking): {e}")
 
     if result.activated_version:
         ok(f"RUM disabled: version {result.activated_version} activated")
@@ -785,7 +806,7 @@ def disable_rum(
     fos_access_key = cfg.get("fos_access_key_id", "")
     fos_secret_key = cfg.get("fos_secret_access_key", "")
 
-    if remove_cloud_files and fos_bucket and fos_access_key and fos_secret_key:
+    if activated and remove_cloud_files and fos_bucket and fos_access_key and fos_secret_key:
         try:
             from backend.provision.fos_setup import delete_fos_prefix
 
@@ -807,7 +828,7 @@ def disable_rum(
             if status_cb:
                 status_cb(f"⚠️ Warning: Failed to delete RUM cloud files: {e}")
 
-    if remove_bucket and fos_bucket and fos_access_key and fos_secret_key:
+    if activated and remove_bucket and fos_bucket and fos_access_key and fos_secret_key:
         if cfg.get("logging_enabled", False):
             warn("Cannot delete FOS bucket while request logging is still enabled (bucket is shared)")
             if status_cb:

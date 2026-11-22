@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import re
 from typing import Any
 
@@ -124,7 +125,29 @@ def generate_consolidated_snippet(state: FeatureState, subroutine: str) -> str:
                 *(f"  {scrub}" for scrub in get_scrub_vcl_statements(log_fields_dict)),
             ]
         )
+    if not state.logging_enabled and state.scoring.enabled:
+        edge_first_hop_statements.extend(
+            [
+                "  # [security] strip client-supplied scoring & NGWAF headers when full log scrub is disabled",
+                "  unset req.http.X-Edge-Scoring-Pass;",
+                "  unset req.http.x-edge-score;",
+                "  unset req.http.X-Edge-Score;",
+                "  unset req.http.X-Edge-Score-Reason;",
+                "  unset req.http.X-Edge-Score-Enforce;",
+                "  unset req.http.X-Edge-Sid;",
+                "  unset req.http.X-Edge-Score-Set-Cookie;",
+                "  unset req.http.X-Edge-Prev-Anchor;",
+                "  unset req.http.x-sigsci-skip-inspection-once;",
+            ]
+        )
     if state.rum_enabled:
+        if not state.logging_enabled:
+            edge_first_hop_statements.extend(
+                [
+                    "  # [security] strip client-supplied FOS signing header when full log scrub is disabled",
+                    "  unset req.http.X-FOS-Request;",
+                ]
+            )
         edge_first_hop_statements.extend(
             [
                 "  # Mint a per-request ID for RUM beacons on fresh requests",
@@ -164,9 +187,17 @@ def generate_consolidated_snippet(state: FeatureState, subroutine: str) -> str:
             ]
         )
     if state.scoring.enabled:
-        from backend.provision.session_scoring_orchestrator import SCORING_BACKEND_VCL_NAME, resolve_exclude_url_regex
+        from backend.core.vcl_generator import validate_url_exclusion_regex
+        from backend.provision.session_scoring_orchestrator import (
+            SCORING_BACKEND_VCL_NAME,
+            _assert_vcl_string_safe,
+            resolve_exclude_url_regex,
+        )
 
+        if state.scoring.exclude_url_regex is not None:
+            validate_url_exclusion_regex(state.scoring.exclude_url_regex)
         effective_regex = resolve_exclude_url_regex(state.scoring.exclude_url_regex)
+        _assert_vcl_string_safe(effective_regex, field="exclude_url_regex", allow_backslash=True)
         rum_asset_guard = (
             ' && req.url.path != "/js/rum.js" && req.url.path != "/js/faro-sdk.js"' if state.rum_enabled else ""
         )
@@ -286,7 +317,7 @@ def _generate_rum_section_vcl(state: FeatureState, subroutine: str) -> str:
     if subroutine == "vcl_fetch":
         body = """# Cache RUM tracker JS at the edge; browsers get a short TTL so a
 # Surrogate-Key purge of "rum-js" becomes visible to clients quickly.
-if (req.url.path == "/js/rum.js") {
+if (req.url.path == "/js/rum.js" && req.http.X-FOS-Request == "1") {
     if (beresp.status == 200) {
         set beresp.ttl = 86400s;
         set beresp.cacheable = true;
@@ -320,13 +351,13 @@ def generate_log_format(state: FeatureState) -> str:
 
 
 def desired_logging_endpoints(state: FeatureState) -> list[LoggingEndpoint]:
-    """Return desired logging endpoints (main S3 + secondary RUM if enabled)."""
+    """Return desired logging endpoints (main + secondary RUM if enabled) as native FOS endpoints."""
     endpoints: list[LoggingEndpoint] = []
     if state.logging_enabled:
         endpoints.append(
             LoggingEndpoint(
                 name=state.logging_endpoint_name,
-                endpoint_type="s3",
+                endpoint_type="fos",
                 path=log_paths.analytics_log_path(),
                 period=state.log_period,
                 response_condition="log_analytics_condition",
@@ -348,7 +379,7 @@ def desired_logging_endpoints(state: FeatureState) -> list[LoggingEndpoint]:
         endpoints.append(
             LoggingEndpoint(
                 name=state.rum_endpoint_name,
-                endpoint_type="s3",
+                endpoint_type="fos",
                 path=log_paths.rum_log_path(),
                 period=state.rum_log_period if state.rum_log_period is not None else state.log_period,
                 response_condition="rum_log_condition",
@@ -369,13 +400,17 @@ def desired_backends(state: FeatureState) -> list[Backend]:
                 name=SCORING_BACKEND_API_NAME,
                 address=state.scoring.domain,
                 port=443,
-                ssl_check_cert=False,
+                ssl_check_cert=True,
                 ssl_hostname=state.scoring.domain,
                 connect_timeout=100,
                 first_byte_timeout=100,
                 between_bytes_timeout=200,
                 auto_loadbalance=False,
+                use_ssl=True,
+                override_host=state.scoring.domain,
                 request_condition="fastly_log_analytics_false",
+                ssl_cert_hostname=state.scoring.domain,
+                ssl_sni_hostname=state.scoring.domain,
             )
         )
     if state.rum_enabled:
@@ -394,6 +429,8 @@ def desired_backends(state: FeatureState) -> list[Backend]:
                 auto_loadbalance=False,
                 shield=shield_pop if shield_pop.lower() != "none" else "",
                 request_condition="fastly_log_analytics_false",
+                ssl_cert_hostname=state.fos_endpoint,
+                ssl_sni_hostname=state.fos_endpoint,
             )
         )
     return backends
@@ -414,6 +451,29 @@ def desired_dictionaries(state: FeatureState) -> list[ServiceDictionary]:
         else {}
     )
     return [ServiceDictionary(name="fos_credentials", write_only=True, items=items)]
+
+
+_LEGACY_ENDPOINT_NAMES = frozenset(
+    {"Fastly Log Analytics", "Fastly Object Storage Logs", "Fastly RUM Logs", "Fastly RUM Object Storage Logs"}
+)
+
+
+def adopt_live_endpoint_types(desired: list[LoggingEndpoint], current: list[LoggingEndpoint]) -> list[LoggingEndpoint]:
+    # A managed endpoint already live as legacy S3 stays S3: reconcile never converts, duplicates or deletes it.
+    live_types = {e.name: e.endpoint_type for e in current}
+    return [
+        dataclasses.replace(ep, endpoint_type=live_types[ep.name])
+        if live_types.get(ep.name, ep.endpoint_type) != ep.endpoint_type
+        else ep
+        for ep in desired
+    ]
+
+
+def _is_managed_endpoint(name: str, state: FeatureState | None) -> bool:
+    # Exact names only: a customer's own endpoint or another install's endpoint on the same service must survive reconcile.
+    if name in _LEGACY_ENDPOINT_NAMES:
+        return True
+    return state is not None and name in (state.logging_endpoint_name, state.rum_endpoint_name)
 
 
 def _is_managed_snippet(name: str) -> bool:

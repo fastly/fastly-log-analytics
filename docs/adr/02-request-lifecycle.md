@@ -3,7 +3,7 @@
 **Status:** Accepted
 
 > [!NOTE]
-> The Iceberg/PyIceberg references below describe the earlier design. Storage is DuckLake now ([ADR-14](14-ducklake-replacement.md)); `backend/core/iceberg/` (removed) was replaced by `backend/core/storage/`.
+> The Iceberg/PyIceberg and DuckDB connection references below describe the earlier design. Analytical serving now runs on ClickHouse + FOS batch archive ([ADR-21](21-high-scale-serving-architecture.md)) and metadata on PostgreSQL 16 ([ADR-22](22-postgres-only-metadata.md)); `RequestContext` in `backend/core/request_context.py` carries `high_scale` instead of `con`.
 **Decided by:** Engineering retrospective
 **Supersedes:** `AnalyticsDeps` bundle + standalone `require_service_access` calls (backend/deps.py)
 

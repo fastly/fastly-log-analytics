@@ -44,6 +44,8 @@ export function ApproxBadge({ message }: { message: string }) {
   )
 }
 
+const msValue = (value: number | null | undefined) => value == null ? '—' : `${value.toFixed(1)}ms`
+
 export function Aggregates({ summary }: { summary: SectionQuery<OriginSummary> }) {
   const error = summary.error as AnalyticsCardError | null
   const d = summary.data
@@ -51,28 +53,28 @@ export function Aggregates({ summary }: { summary: SectionQuery<OriginSummary> }
     {
       title: 'Origin TTFB (P50)',
       help: 'Median time taken by your backend to start returning a response after Fastly forwards a request. Lower is better.',
-      value: `${d?.ottfb_p50_ms?.toFixed(1)}ms`,
+      value: msValue(d?.ottfb_p50_ms),
       sub: 'Median backend response time',
       danger: false,
     },
     {
       title: 'Origin TTFB (P95)',
       help: 'The 95th percentile of backend response times. Indicates the tail latency experienced by the slowest 5% of requests.',
-      value: `${d?.ottfb_p95_ms?.toFixed(1)}ms`,
+      value: msValue(d?.ottfb_p95_ms),
       sub: 'Tail latency (95th percentile)',
       danger: false,
     },
     {
       title: 'Origin Error Rate',
       help: 'Percentage of cache miss/pass requests where the backend returned a 5xx HTTP status code.',
-      value: `${((d?.origin_error_rate || 0) * 100).toFixed(2)}%`,
+      value: d ? `${((d.origin_error_rate || 0) * 100).toFixed(2)}%` : '—',
       sub: 'Percentage of 5xx responses',
       danger: (d?.origin_error_rate || 0) > 0.01,
     },
     {
       title: 'Fetch Volume',
       help: 'The total number of requests sent to the backend (cache misses and passes) during this time window.',
-      value: formatCount((d?.total_misses || 0) + (d?.total_passes || 0)),
+      value: d ? formatCount((d.total_misses || 0) + (d.total_passes || 0)) : '—',
       sub: 'Total cache misses & passes',
       danger: false,
     },
@@ -95,7 +97,7 @@ export function Aggregates({ summary }: { summary: SectionQuery<OriginSummary> }
           <AnalyticsCard
             key={kpi.title}
             title={kpi.title}
-            isLoading={summary.isLoading}
+            isLoading={summary.isLoading || (!d && !error)}
             isFetching={summary.isFetching}
             loadingMessage={`Loading ${kpi.title}...`}
             error={error}

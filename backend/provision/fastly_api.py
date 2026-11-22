@@ -28,7 +28,7 @@ from backend.core.fastly.client import (
     get_active_version,
     get_generated_vcl,
     is_mock_mode,
-    list_s3_endpoints,
+    list_log_endpoints,
     load_vcl,
     parse_period,
     region_endpoint,
@@ -144,6 +144,7 @@ _SCRUB_HEADERS = (
     "X-Edge-Score-Set-Cookie",
     "X-Edge-Prev-Anchor",
     "x-sigsci-skip-inspection-once",
+    "X-FOS-Request",
 )
 
 
@@ -171,7 +172,10 @@ def get_capture_vcl_statements(log_fields_config: dict | None) -> list[str]:
 
     required = set(get_required_edge_headers(log_fields_config)) - {"ip"}
     group_l = "L" in (log_fields_config.get("groups") or [])
-    limits = log_fields_config.get("field_limits") or {}
+    raw_limits = log_fields_config.get("field_limits")
+    if raw_limits is not None and not isinstance(raw_limits, dict):
+        raise ValueError("field_limits must be a dict")
+    limits = raw_limits or {}
     custom_edge = [
         cf for cf in _resolve_enabled_custom_fields(log_fields_config) if cf.get("collection_stage", "edge") == "edge"
     ]
@@ -187,7 +191,16 @@ def get_capture_vcl_statements(log_fields_config: dict | None) -> list[str]:
         if key in EDGE_DATA_MAPPING:
             expr = EDGE_DATA_MAPPING[key]
             if key in ("ua", "referer"):
-                expr = f"substr({expr}, 0, {limits.get(key, 1000)})"
+                raw_limit = limits.get(key, 1000)
+                if raw_limit is None:
+                    raw_limit = 1000
+                if isinstance(raw_limit, bool):
+                    raise ValueError(f"field_limits[{key!r}] must be an integer, got bool")
+                try:
+                    limit = int(raw_limit)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"field_limits[{key!r}] must be an integer, got {raw_limit!r}") from exc
+                expr = f"substr({expr}, 0, {limit})"
             lines.append(f"set req.http.x-fos-edge-data:{key} = {expr};")
 
     for cf in custom_edge:
@@ -267,9 +280,17 @@ def generate_capture_vcl(
         scrub_lines.append("  }")
 
     if scoring_enabled:
-        from backend.provision.session_scoring_orchestrator import SCORING_BACKEND_VCL_NAME, resolve_exclude_url_regex
+        from backend.core.vcl_generator import validate_url_exclusion_regex
+        from backend.provision.session_scoring_orchestrator import (
+            SCORING_BACKEND_VCL_NAME,
+            _assert_vcl_string_safe,
+            resolve_exclude_url_regex,
+        )
 
+        if scoring_exclude_url_regex is not None:
+            validate_url_exclusion_regex(scoring_exclude_url_regex)
         effective_regex = resolve_exclude_url_regex(scoring_exclude_url_regex)
+        _assert_vcl_string_safe(effective_regex, field="scoring_exclude_url_regex", allow_backslash=True)
         scrub_lines.extend(
             [
                 "  # Section 4: Session Scoring (vcl_recv)",
@@ -441,7 +462,7 @@ def generate_capture_vcl(
             _m_stats = (("ifsz", "[0-9]+"), ("ofsz", "[0-9]+"), ("ifmt", "[a-zA-Z0-9]+"), ("ofmt", "[a-zA-Z0-9]+"))
             _m_hdrs = tuple(f"x-fos-io-{s}" for s, _ in _m_stats)
             _m_promote = "\n".join(
-                f'if (req.http.{h} == "" && resp.http.{h} != "") {{ set req.http.{h} = resp.http.{h}; }}'
+                f'if ((!req.http.{h} || req.http.{h} == "") && resp.http.{h} != "") {{ set req.http.{h} = resp.http.{h}; }}'
                 for h in _m_hdrs
             )
             _m_extract = "\n".join(
@@ -457,8 +478,14 @@ def generate_capture_vcl(
             deliver_lines.append(
                 "# [group-M] Extract IO metrics from Fastly-Io-Transform-Stats\n"
                 f"{_m_promote}\n"
-                'if (resp.http.Fastly-Io-Transform-Stats != "") {\n'
+                'if (!req.http.x-fos-edge-data:io && resp.http.Fastly-Io-Transform-Stats != "") {\n'
                 f"{_m_extract}\n"
+                '  if ((!req.http.x-fos-io-ifmt || req.http.x-fos-io-ifmt == "") && resp.http.Fastly-Io-Transform-Stats ~ "dc_fmt=") {\n'
+                '    set req.http.x-fos-io-ifmt = regsub(resp.http.Fastly-Io-Transform-Stats, ".*dc_fmt=([a-z0-9]+).*", "\\1");\n'
+                "  }\n"
+                "}\n"
+                'if ((!req.http.x-fos-io-ifmt || req.http.x-fos-io-ifmt == "") && resp.http.Fastly-Io-Info ~ "ifmt=") {\n'
+                '  set req.http.x-fos-io-ifmt = regsub(resp.http.Fastly-Io-Info, ".*ifmt=([a-zA-Z0-9]+).*", "\\1");\n'
                 "}\n"
                 'if (req.http.x-is-cluster-fetch != "1") {\n'
                 f"{_m_unset}\n"
@@ -639,31 +666,31 @@ def ensure_cdn_service(
         updated = json.loads(config_path.read_text())
         return updated, updated.get("fos_proxy", {}).get("service_id") or updated.get("cdn_service_id", "")
 
-    try:
-        reconcile_cdn_service_state(
-            logging_service_id=logging_service_id,
-            token=token,
-            status_cb=status_cb,
-            activate=True,
-        )
-    except Exception:
-        if config_path.exists():
-            try:
-                _, cdn_sid = _read_cdn_sid()
-                if on_created and cdn_sid:
-                    on_created(cdn_sid)
-            except Exception:
-                pass
-        raise
+    creation_notified = False
+
+    def _created(service_id: str) -> None:
+        nonlocal creation_notified
+        if on_created and not creation_notified:
+            creation_notified = True
+            on_created(service_id)
+
+    reconciliation = reconcile_cdn_service_state(
+        logging_service_id=logging_service_id,
+        token=token,
+        status_cb=status_cb,
+        activate=True,
+        on_created=_created if on_created else None,
+    )
 
     updated_cfg, cdn_sid = _read_cdn_sid()
-    if on_created and cdn_sid:
-        on_created(cdn_sid)
+    if cdn_sid and reconciliation.created:
+        _created(cdn_sid)
 
     return {
         "id": cdn_sid,
         "name": updated_cfg.get("cdn_service_name") or f"Log Analysis CDN Service for {logging_service_id}",
         "rate_limiting": account_has_rate_limiting(token, logging_service_id),
+        "created": reconciliation.created,
     }
 
 
@@ -760,7 +787,7 @@ def remove_logging_endpoint(
         return
     ok(f"Active version: {active_ver}")
 
-    existing = list_s3_endpoints(service_id, active_ver, token)
+    existing = list_log_endpoints(service_id, active_ver, token)
     eps_list = []
     if remove_logging:
         eps_list.extend(["Fastly Log Analytics", "Fastly Object Storage Logs", endpoint_name])
@@ -809,7 +836,7 @@ def remove_logging_endpoint(
 
         for ep in endpoints_to_delete:
             info(f"Removing '{_c(BOLD, ep)}' from draft…")
-            if _delete_draft_resource("logging/s3", ep):
+            if _delete_draft_resource(f"logging/{existing[ep]}", ep):
                 ok(f"Logging endpoint '{ep}' removed from draft")
 
         info("Removing VCL snippets…")
@@ -885,6 +912,30 @@ def update_logging_endpoint(cfg: dict, token: str):
         cfg.get("log_period"),
         cfg.get("fos_path"),
     )
+    custom_condition_req = (
+        cfg["custom_condition"]
+        if "custom_condition" in cfg
+        else (cfg.get("provisioning") or {}).get("custom_condition")
+        if isinstance(cfg.get("provisioning"), dict) and "custom_condition" in cfg["provisioning"]
+        else None
+    )
+    if custom_condition_req is not None:
+        from backend.core.catalog import validate_vcl_custom_condition
+
+        cond_err = validate_vcl_custom_condition(custom_condition_req, field_name="custom_condition")
+        if cond_err:
+            raise ValueError(cond_err)
+    if isinstance(cfg.get("log_fields"), dict):
+        from backend.core.catalog import _is_system_field, validate_vcl_log_expression
+
+        for cf in cfg["log_fields"].get("custom_fields") or []:
+            if isinstance(cf, dict) and not _is_system_field(str(cf.get("name", ""))):
+                expr_errs = validate_vcl_log_expression(
+                    str(cf.get("vcl_log_expression") or ""),
+                    field_name=f"custom_fields[{cf.get('name', '?')}].vcl_log_expression",
+                )
+                if expr_errs:
+                    raise ValueError("; ".join(expr_errs))
     total_steps = 5
     yield {"type": "progress", "current": 0, "total": total_steps}
 
@@ -940,6 +991,8 @@ def update_logging_endpoint(cfg: dict, token: str):
             target["log_period"] = int(period)
         if endpoint_name is not None:
             prov["endpoint_name"] = endpoint_name
+        if custom_condition_req is not None:
+            prov["custom_condition"] = str(custom_condition_req).strip()
         if cfg.get("log_fields") is not None:
             incoming_lf = dict(cfg["log_fields"])
             if not incoming_lf.get("custom_fields"):
@@ -1091,7 +1144,7 @@ def deploy_remote_frontend(
         "address": origin_host,
         "port": origin_port,
         "use_ssl": use_ssl,
-        "ssl_check_cert": False,
+        "ssl_check_cert": True,
     }
     if override_host:
         backend_payload["override_host"] = override_host

@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from backend.core import duckdb as _db
+from backend.core import fos_client as _db
 from backend.core import log_fields as lf_module
 from backend.core.log_fields import _filter_user_custom_fields, _is_system_field
+from backend.core.request_context import require_admin
 from backend.models.common import (
     CustomFieldCreate,
     CustomFieldResponse,
@@ -28,7 +29,7 @@ from backend.utils.router_utils import load_service_config, mutate_service_confi
 from .storage import _check_storage_type_lock, _locked_storage_field_names
 from .vcl import _persist_log_fields, _validate_log_format_version
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_admin)])
 
 
 def _persist_custom_fields_change(
@@ -81,7 +82,11 @@ def api_list_custom_fields(request: Request, service_id: str) -> CustomFieldsLis
     require_service_in_scope(request, service_id)
     cfg = load_service_config(service_id)
     lf = lf_module.get_lf_config(cfg)
-    return CustomFieldsListResponse(fields=_filter_user_custom_fields(lf.get("custom_fields", [])))  # type: ignore
+    user_fields = [
+        {**cf, "description": "" if cf.get("description") is None else cf.get("description", "")}
+        for cf in _filter_user_custom_fields(lf.get("custom_fields", []))
+    ]
+    return CustomFieldsListResponse(fields=user_fields)  # type: ignore
 
 
 @router.post("/services/{service_id}/custom-fields", response_model=CustomFieldResponse)
@@ -90,9 +95,7 @@ def api_create_custom_field(request: Request, service_id: str, body: CustomField
     cfg, lf, existing = _load_modifiable_custom_fields(
         request, service_id, field_dict.get("name", ""), "created manually"
     )
-    _check_storage_type_lock(
-        service_id, field_dict["name"], field_dict.get("duckdb_type"), field_dict.get("value_type")
-    )
+    _check_storage_type_lock(service_id, field_dict["name"], field_dict.get("sql_type"), field_dict.get("value_type"))
     now = datetime.now(UTC).isoformat()
     field_dict["created_at"] = field_dict["updated_at"] = now
     return _validate_and_save_custom_field(
@@ -108,7 +111,7 @@ def api_update_custom_field(request: Request, service_id: str, field_name: str, 
         raise HTTPException(status_code=404, detail={"error": f"Custom field '{field_name}' not found"})
     updates = body.model_dump(exclude_unset=True)
     old_field = existing[idx]
-    changing_type = ("duckdb_type" in updates and updates["duckdb_type"] != old_field.get("duckdb_type")) or (
+    changing_type = ("sql_type" in updates and updates["sql_type"] != old_field.get("sql_type")) or (
         "value_type" in updates and updates["value_type"] != old_field.get("value_type")
     )
     if changing_type:
@@ -123,12 +126,14 @@ def api_update_custom_field(request: Request, service_id: str, field_name: str, 
                 status_code=422,
                 detail={
                     "errors": [
-                        "Cannot change 'duckdb_type' or 'value_type' after the field has been created in the database. Please create a new field instead."
+                        "Cannot change 'sql_type' or 'value_type' after the field has been created in the database. Please create a new field instead."
                     ]
                 },
             )
     now = datetime.now(UTC).isoformat()
     updated = {**old_field, **{k: v for k, v in updates.items() if v is not None}, "updated_at": now}
+    if updated.get("description") is None:
+        updated["description"] = ""
     other_names = [cf["name"] for cf in existing if cf["name"] != field_name]
     new_custom = existing[:idx] + [updated] + existing[idx + 1 :]
     return _validate_and_save_custom_field(service_id, cfg, lf, updated, other_names, new_custom, now)
@@ -143,7 +148,10 @@ def api_delete_custom_field(request: Request, service_id: str, field_name: str):
     new_custom = [cf for cf in existing if cf["name"] != field_name]
     now = datetime.now(UTC).isoformat()
     _persist_custom_fields_change(service_id, cfg, lf, new_custom, {**lf, "custom_fields": new_custom}, now)
-    return {"ok": True, "field": field}
+    return {
+        "ok": True,
+        "field": {**field, "description": "" if field.get("description") is None else field.get("description", "")},
+    }
 
 
 @router.post("/services/{service_id}/custom-fields/validate-vcl", response_model=VclLintResponse)
@@ -158,7 +166,7 @@ def api_validate_custom_vcl(request: Request, service_id: str, body: VclLintRequ
         "label": "Lint Check",
         "vcl_log_expression": body.vcl_log_expression,
         "collection_stage": body.collection_stage,
-        "duckdb_type": "VARCHAR",
+        "sql_type": "VARCHAR",
         "value_type": "string",
         "bytes_estimate": 20,
         "enabled": True,
@@ -210,7 +218,9 @@ def api_import_custom_fields(request: Request, service_id: str, body: CustomFiel
     cfg = load_service_config(service_id)
     fields_to_import = body.custom_fields
     lf = lf_module.get_lf_config(cfg)
-    existing_map = {cf["name"]: cf for cf in lf.get("custom_fields", [])}
+    existing_map = {
+        cf["name"]: cf for cf in lf.get("custom_fields", []) if isinstance(cf, dict) and isinstance(cf.get("name"), str)
+    }
     locked_field_names = _locked_storage_field_names(
         _db.get_source_for_service(service_id),
         error_lead="Could not verify committed fields for import",
@@ -221,15 +231,21 @@ def api_import_custom_fields(request: Request, service_id: str, body: CustomFiel
     type_lock_errors: list[str] = []
     validation_errors: list[str] = []
     for field_dict in fields_to_import:
+        if not isinstance(field_dict, dict):
+            validation_errors.append("Custom field entry must be an object")
+            continue
         if "name" not in field_dict:
             continue
         fname = field_dict["name"]
+        if not isinstance(fname, str) or not fname:
+            validation_errors.append("Custom field 'name' must be a non-empty string")
+            continue
         if _is_system_field(fname):
             validation_errors.append(f"{fname}: cannot import system-managed field")
             continue
         existing_field = existing_map.get(fname, {})
         if fname in locked_field_names:
-            for tk in ("duckdb_type", "value_type"):
+            for tk in ("sql_type", "value_type"):
                 if field_dict.get(tk) and field_dict[tk] != existing_field.get(tk):
                     type_lock_errors.append(
                         f"Cannot change '{tk}' of '{fname}': field is already committed to the database."
@@ -239,15 +255,23 @@ def api_import_custom_fields(request: Request, service_id: str, body: CustomFiel
                 pass
             if any(fname in err for err in type_lock_errors):
                 continue
+        field_copy = dict(field_dict)
+        if field_copy.get("description") is None:
+            field_copy["description"] = ""
         other_names = [n for n in new_custom_map if n != fname]
-        for err in lf_module.validate_custom_field(field_dict, other_names):
+        for err in lf_module.validate_custom_field(field_copy, other_names):
             if not err.startswith("WARN:"):
                 validation_errors.append(f"{fname}: {err}")
-        field_dict.pop("created_at", None)
-        field_dict.pop("updated_at", None)
-        field_dict["created_at"] = existing_field.get("created_at", now)
-        field_dict["updated_at"] = now
-        new_custom_map[fname] = field_dict
+        if isinstance(field_copy.get("bytes_estimate"), str):
+            try:
+                field_copy["bytes_estimate"] = int(field_copy["bytes_estimate"].strip())
+            except ValueError:
+                pass
+        field_copy.pop("created_at", None)
+        field_copy.pop("updated_at", None)
+        field_copy["created_at"] = existing_field.get("created_at", now)
+        field_copy["updated_at"] = now
+        new_custom_map[fname] = field_copy
     if type_lock_errors:
         raise HTTPException(status_code=422, detail={"errors": type_lock_errors})
     if validation_errors:

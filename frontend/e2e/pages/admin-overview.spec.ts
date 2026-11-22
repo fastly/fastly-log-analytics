@@ -61,7 +61,7 @@ function buildProvisionPayload(sid: string, label: string, prefix: string) {
     fos_region: 'us-east-1', fos_bucket_name: `${slug}-bucket-${ts}`, fos_prefix: '', sample_rate: '100',
     edge_only: true, custom_condition: '', log_period: '60', cdn_service_name: `${prefix} CDN`,
     cdn_url: `https://${slug}-${ts}.example`, cdn_shield: 'none', enable_cron_sync: false, delete_after: true,
-    commit_interval_mins: 5, enable_cron_compact: false, log_retention_days: 30, log_fields: null,
+    log_retention_days: 30, log_fields: null,
   }
 }
 
@@ -110,7 +110,7 @@ test.describe('Admin Overview & Ingest Operations Page Contract (/admin)', () =>
     await assertAnalyst403(page, 'Admin', () => ['/api/admin/sync-status'])
   })
 
-  test('3. Backend REST contracts (/api/admin/sync-status, /api/admin/system-metrics, /api/admin/health, /api/admin/compaction-status)', async ({ page }) => {
+  test('3. Backend REST contracts (/api/admin/sync-status, /api/admin/system-metrics, /api/admin/health, /api/admin/log-accounting)', async ({ page }) => {
     const [syncRes, metricsRes, healthRes, servicesRes] = await Promise.all([
       page.request.get('/api/admin/sync-status'), page.request.get('/api/admin/system-metrics'),
       page.request.get('/api/admin/health'), page.request.get('/api/services'),
@@ -120,18 +120,14 @@ test.describe('Admin Overview & Ingest Operations Page Contract (/admin)', () =>
       syncRes.json(), metricsRes.json(), healthRes.json(), servicesRes.json(),
     ])
     for (const p of ['configured']) expect(syncData).toHaveProperty(p)
-    for (const p of ['load', 'vcpus', 'in_flight_runs', 'compaction']) expect(metricsData).toHaveProperty(p)
+    for (const p of ['load', 'vcpus', 'in_flight_runs']) expect(metricsData).toHaveProperty(p)
     for (const p of ['load', 'recent_cron_failures']) expect(healthData).toHaveProperty(p)
     expect(Array.isArray(servicesData.services)).toBeTruthy()
     if (servicesData.services.length > 0) {
       const firstId = servicesData.services[0].service_id
-      const [compRes, acctRes] = await Promise.all([
-        page.request.get(`/api/admin/compaction-status/${firstId}`),
-        page.request.get(`/api/admin/log-accounting/${firstId}?hours=24`),
-      ])
-      expect(compRes.ok() && acctRes.ok()).toBeTruthy()
-      const [compData, acctData] = await Promise.all([compRes.json(), acctRes.json()])
-      for (const p of ['partitions', 'total_files']) expect(compData).toHaveProperty(p)
+      const acctRes = await page.request.get(`/api/admin/log-accounting/${firstId}?hours=24`)
+      expect(acctRes.ok()).toBeTruthy()
+      const acctData = await acctRes.json()
       for (const p of ['buckets', 'totals']) expect(acctData).toHaveProperty(p)
     }
   })
@@ -147,7 +143,7 @@ test.describe('Admin Overview & Ingest Operations Page Contract (/admin)', () =>
     await page.goto('/admin')
     await expect(page.locator('[data-testid="admin-operations-overview"]:visible')).toBeVisible({ timeout: 30_000 })
     await expect(page.getByRole('link', { name: /Live Queries/ }).first()).toBeVisible({ timeout: 10_000 })
-    for (const text of ['Ingest Gap', 'Notable Slow Queries', 'Workers & Queues', 'System Health']) {
+    for (const text of ['Ingest Gap', 'Notable Slow Queries', 'Ingest Ledger', 'System Health']) {
       await expect(page.getByText(text).first()).toBeVisible({ timeout: 15_000 })
     }
     await expect(page.locator('[data-testid="admin-services-section"]:visible')).toBeVisible({ timeout: 15_000 })
@@ -182,11 +178,14 @@ test.describe('/admin/share — Admin Live Share Management Contract', () => {
   test.setTimeout(90_000)
 
   test('1. Route accessibility, ServerFooter identity, Live Share layout mount, zero-CLS reservations & warm-load budget', async ({ page }) => {
+    // React can client-render the page while its streamed copy still sits in a hidden <div id="S:…"> outside #main.
+    const main = page.locator('#main')
     await assertAdminMount(page, '/admin/share', {
       rootTestId: 'admin-share-root', heading: 'Remote Dashboard Sharing', domContentLoaded: true, warmReload: true,
       testIds: ['back-to-admin-link', 'admin-share-refresh-btn', 'admin-share-control-reservation', 'admin-share-tabs', 'admin-share-panel-reservation'],
+      scope: main,
       minHeights: [['admin-share-control-reservation', 180], ['admin-share-panel-reservation', 240]],
-      warmLocators: [page.getByTestId('admin-share-root'), page.getByTestId('admin-share-control-panel')],
+      warmLocators: [main.getByTestId('admin-share-root'), main.getByTestId('admin-share-control-panel')],
     })
   })
 
@@ -330,11 +329,13 @@ test.describe('/admin/session-scoring — Admin Session Scoring Configuration Co
   test.setTimeout(90_000)
 
   test('1. Route accessibility, ServerFooter identity, Session Scoring layout mount, zero-CLS reservations & warm-load budget', async ({ page }) => {
+    const main = page.locator('#main')
     await assertAdminMount(page, '/admin/session-scoring', {
       rootTestId: 'admin-session-scoring-root', heading: 'Session Scoring', domContentLoaded: true, warmReload: true,
       testIds: ['back-to-admin-link', 'admin-session-scoring-refresh-btn', 'admin-session-scoring-status-reservation', 'admin-session-scoring-tabs'],
+      scope: main,
       minHeights: [['admin-session-scoring-status-reservation', 200], ['admin-session-scoring-overview-reservation', 400]],
-      warmLocators: [page.getByTestId('admin-session-scoring-root'), page.getByTestId('admin-session-scoring-status-line')],
+      warmLocators: [main.getByTestId('admin-session-scoring-root'), main.getByTestId('admin-session-scoring-status-line')],
     })
   })
 
@@ -423,44 +424,20 @@ test.describe('Admin Task Queue & Ingest Ledger Page Contract (/admin/queue)', (
     await assertAdminMount(page, '/admin/queue', {
       rootTestId: 'admin-queue-root', heading: 'Queue & Workers', exactHeading: true, visibleTestIds: ['admin-queue-client'],
       footerPattern: /Admin View|Analyst View/i, warmLocators: [page.locator('[data-testid="admin-queue-root"]:visible')],
-      intrinsicIds: ['admin-queue-trends-reservation', 'admin-queue-depths-reservation', 'admin-queue-workers-reservation', 'admin-queue-ledger-reservation', 'admin-queue-schedules-reservation'],
+      intrinsicIds: ['admin-queue-ledger-reservation', 'admin-queue-schedules-reservation'],
     })
-    const [statusRes, batchRes] = await Promise.all([page.request.get('/api/admin/celery/status'), page.request.get('/api/admin/metric-history/batch?since=1h')])
-    expect(statusRes.status() === 200 && batchRes.status() === 200).toBe(true)
-    const [statusBody, batchBody] = await Promise.all([statusRes.json(), batchRes.json()])
-    expect(typeof statusBody.broker_reachable === 'boolean' && typeof statusBody.workers?.count === 'number' && typeof statusBody.queues === 'object').toBe(true)
-    expect(Array.isArray(statusBody.inprocess_schedules)).toBe(true)
+    const statusRes = await page.request.get('/api/admin/celery/status')
+    expect(statusRes.status()).toBe(200)
+    const statusBody = await statusRes.json()
+    expect(Object.keys(statusBody).filter((k) => !k.startsWith('_')).sort()).toEqual(['inprocess_active_runs', 'inprocess_schedules', 'ledger'])
+    expect(Array.isArray(statusBody.inprocess_schedules) && Array.isArray(statusBody.inprocess_active_runs)).toBe(true)
     for (const [, count] of Object.entries(statusBody.ledger as Record<string, unknown>)) expect(typeof count).toBe('number')
-    for (const [, points] of Object.entries(batchBody.series as Record<string, unknown>)) expect(Array.isArray(points)).toBe(true)
-    await assertAnalyst403(page, 'Queue', () => ['/api/admin/celery/status', '/api/admin/metric-history/batch?since=1h'])
+    await assertAnalyst403(page, 'Queue', () => ['/api/admin/celery/status'])
   })
 
-  test('4. Mode-aware sections (Standard In-Process vs High-Scale Celery) and Ingest Ledger render cleanly', async ({ page }) => {
+  test('4. Queue sections, in-process schedules, and Ingest Ledger render cleanly', async ({ page }) => {
     await page.goto('/admin/queue')
     await expect(page.locator('[data-testid="admin-queue-root"]:visible')).toBeVisible({ timeout: 30_000 })
-    const statusBody = await (await page.request.get('/api/admin/celery/status')).json()
-    const isStandardMode = statusBody.deployment_mode === 'standard' && !statusBody.broker_reachable
-    const brokerBadge = page.locator('[data-testid="admin-queue-broker-badge"]:visible')
-    await expect(brokerBadge).toBeVisible({ timeout: 15_000 })
-    const trendsCard = page.locator('[data-testid="admin-queue-trends-reservation"]:visible')
-    const depthsCard = page.locator('[data-testid="admin-queue-depths-reservation"]:visible')
-    const workersCard = page.locator('[data-testid="admin-queue-workers-reservation"]:visible')
-
-    if (isStandardMode) {
-      await expect(brokerBadge).toContainText(/Standard Mode · In-Process Scheduler/i)
-      await expect(trendsCard).toContainText(/Standard Ingest Summary/i, { timeout: 15_000 })
-      await expect(trendsCard).toContainText(/In-Process Scheduler Overview/i, { timeout: 15_000 })
-      await expect(depthsCard).toContainText(/Quarantined Files & Corrupt Lines \(\d+\)/i, { timeout: 15_000 })
-      await expect(depthsCard).not.toContainText(/Queue Depths/i)
-      await expect(workersCard).toContainText(/Active In-Process Jobs \(\d+\)/i, { timeout: 15_000 })
-    } else {
-      await expect(brokerBadge).toContainText(/Broker Reachable|Broker Unreachable \/ Standard Mode/i)
-      await expect(trendsCard).toContainText(/Total Queue Depth \(1h\)/i, { timeout: 15_000 })
-      await expect(trendsCard).toContainText(/Active Tasks \(1h\)/i, { timeout: 15_000 })
-      await expect(depthsCard).toContainText(/Queue Depths/i, { timeout: 15_000 })
-      await expect(depthsCard).toContainText(/Queue Name|No queues found or Celery mode is inactive/i, { timeout: 15_000 })
-      await expect(workersCard).toContainText(/Active Workers \(\d+\)/i, { timeout: 15_000 })
-    }
     await expect(page.locator('[data-testid="admin-queue-schedules-reservation"]:visible')).toContainText(/In-Process Schedules \(\d+\)/i, { timeout: 15_000 })
     const ledgerSection = page.locator('[data-testid="admin-queue-ledger-reservation"]:visible')
     await expect(ledgerSection).toContainText(/Ingest Ledger Status/i, { timeout: 15_000 })
@@ -468,7 +445,7 @@ test.describe('Admin Task Queue & Ingest Ledger Page Contract (/admin/queue)', (
     await assertManualRefreshAttribution(page, {
       url: '/admin/queue', readyLocator: page.locator('[data-testid="admin-queue-root"]:visible'),
       refreshLocator: page.locator('[data-testid="admin-queue-refresh-btn"]:visible'),
-      requestFilter: (url) => url.includes('/api/admin/celery/status') || url.includes('/api/admin/metric-history/batch'),
+      requestFilter: (url) => url.includes('/api/admin/celery/status'),
     })
   })
 })
@@ -601,7 +578,7 @@ test.describe('/admin/trends — Operational Trends & Health Sparklines Contract
     expect((await page.request.get('/api/admin/metric-history/batch?since=invalid')).status()).toBe(400)
   })
 
-  test('4. Time-window selector interaction (1h -> 6h -> 24h -> 7d) and 7 sparkline cards', async ({ page }) => {
+  test('4. Time-window selector interaction (1h -> 6h -> 24h -> 7d) and 6 sparkline cards', async ({ page }) => {
     const windowStatuses = new Map<string, number>()
     page.on('response', (res) => {
       if (res.url().includes('/api/admin/metric-history/batch') && res.request().method() === 'GET') {
@@ -611,7 +588,7 @@ test.describe('/admin/trends — Operational Trends & Health Sparklines Contract
     })
     await page.goto('/admin/trends')
     await expect(page.locator('[data-testid="admin-trends-root"]:visible')).toBeVisible({ timeout: 30_000 })
-    for (const metric of ['cpu_load_1m', 'mem_used_pct', 'disk_used_pct', 'disk_used_pct_root', 'active_query_count', 'pool_wait_p95_ms', 'ingest_lag_s']) {
+    for (const metric of ['cpu_load_1m', 'mem_used_pct', 'disk_used_pct', 'disk_used_pct_root', 'active_query_count', 'ingest_lag_s']) {
       await expect(page.locator(`[data-testid="admin-trends-card-${metric}"]:visible`)).toBeVisible({ timeout: 15_000 })
     }
     await expect(page.locator('[data-testid="admin-trends-window-1h"]:visible')).toHaveAttribute('aria-pressed', 'true')
@@ -637,11 +614,13 @@ test.describe('/admin/rum — Admin RUM Ingestion & Configuration Contract', () 
   test.setTimeout(90_000)
 
   test('1. Route accessibility, ServerFooter identity, RUM layout mount, zero-CLS reservations & warm-load budget', async ({ page }) => {
+    // React can client-render the page while its streamed copy still sits in a hidden <div id="S:…"> outside #main.
+    const main = page.locator('#main')
     await assertAdminMount(page, '/admin/rum', {
       rootTestId: 'admin-rum-root', heading: 'Real User Monitoring', domContentLoaded: true, warmReload: true,
-      testIds: ['back-to-admin-link', 'admin-rum-toolbar'],
+      testIds: ['back-to-admin-link', 'admin-rum-toolbar'], scope: main,
       minHeights: [['admin-rum-toolbar', 48], ['admin-rum-status-reservation', 200]],
-      warmLocators: [page.getByTestId('admin-rum-root'), page.getByTestId('admin-rum-status-line')],
+      warmLocators: [main.getByTestId('admin-rum-root'), main.getByTestId('admin-rum-status-line')],
     })
   })
 
@@ -662,9 +641,10 @@ test.describe('/admin/rum — Admin RUM Ingestion & Configuration Contract', () 
   })
 
   test('4. RUM Status card, Enable/Disable controls, and Faro SDK version state', async ({ page }) => {
+    const main = page.locator('#main')
     await page.goto('/admin/rum', { waitUntil: 'domcontentloaded' })
     await expect(page.getByTestId('admin-rum-status-line')).toBeVisible({ timeout: 30_000 })
-    expect((await page.getByTestId('admin-rum-status-badge').textContent()) ?? '').toMatch(/Beacon Pipeline (Active|Inactive)/)
+    expect((await main.getByTestId('admin-rum-status-badge').textContent()) ?? '').toMatch(/Beacon Pipeline (Active|Inactive)/)
     const isEnabled = ((await page.getByTestId('admin-rum-status-line').textContent()) ?? '').includes('Enabled')
     const enableBtn = page.getByTestId('admin-rum-enable-btn'), disableBtn = page.getByTestId('admin-rum-disable-btn')
     await expect(enableBtn).toBeVisible()
@@ -679,7 +659,7 @@ test.describe('/admin/rum — Admin RUM Ingestion & Configuration Contract', () 
     }
     await assertManualRefreshAttribution(page, {
       url: '/admin/rum', readyLocator: page.getByTestId('admin-rum-status-line'),
-      refreshLocator: page.getByTestId('admin-rum-refresh-btn'),
+      refreshLocator: main.getByTestId('admin-rum-refresh-btn'),
       requestFilter: (url) => /\/api\/services\/[^/]+\/rum\/status/.test(url),
     })
   })
@@ -758,34 +738,23 @@ test.describe('/admin/usage-log — Admin FOS Usage & Class A/B Ledger Contract'
   })
 })
 
-async function isClickHouseEnabledForEnv(page: Page): Promise<boolean> {
-  const serviceId = await resolveFirstServiceId(page)
-  const statusRes = await page.request.get(`/api/admin/clickhouse/status?service_id=${encodeURIComponent(serviceId)}`)
-  return statusRes.status() === 200 ? Boolean((await statusRes.json()).enabled) : false
-}
-
 test.describe('Page Spec: /admin/clickhouse (Admin ClickHouse Replay & Cluster Operations)', () => {
   test('1. Route accessibility, ServerFooter, ClickHouse layout mount, zero-CLS reservations & warm-load budget', async ({ page }) => {
-    const enabled = await isClickHouseEnabledForEnv(page)
-    expect([200, 404]).toContain((await page.goto('/admin/clickhouse'))?.status())
+    expect((await page.goto('/admin/clickhouse'))?.status()).toBe(200)
     await page.addInitScript(clsInitScript)
     const status = (await page.reload({ waitUntil: 'domcontentloaded' }))?.status() ?? 0
-    expect([200, 404]).toContain(status)
-    if (!enabled || status === 404) {
-      await expect(page.getByTestId('admin-clickhouse-root')).toHaveCount(0)
-    } else {
-      await expect(page.getByRole('heading', { name: 'ClickHouse Replay & Cluster Operations' })).toBeVisible()
-      await expect(page.getByTestId('admin-clickhouse-root')).toBeVisible()
-      await assertFooterVisible(page, /Admin View.*(standard|high-scale)/i)
-      await expect(page.getByTestId('admin-clickhouse-toolbar')).toBeVisible()
-      for (const [id, minH] of [['admin-clickhouse-vitals-reservation', 200], ['admin-clickhouse-generation-reservation', 180], ['admin-clickhouse-replay-reservation', 260]] as const) {
-        const loc = page.getByTestId(id)
-        await expect(loc).toBeVisible()
-        await expect.poll(async () => (await loc.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(minH)
-      }
-      await expect(page.getByTestId('admin-clickhouse-health-badge')).toHaveText(/^(ok|disabled|unavailable)$/)
-      await page.waitForTimeout(300)
+    expect(status).toBe(200)
+    await expect(page.getByRole('heading', { name: 'ClickHouse Replay & Cluster Operations' })).toBeVisible()
+    await expect(page.getByTestId('admin-clickhouse-root')).toBeVisible()
+    await assertFooterVisible(page, /Admin View/i)
+    await expect(page.getByTestId('admin-clickhouse-toolbar')).toBeVisible()
+    for (const [id, minH] of [['admin-clickhouse-vitals-reservation', 200], ['admin-clickhouse-generation-reservation', 180], ['admin-clickhouse-replay-reservation', 260]] as const) {
+      const loc = page.getByTestId(id)
+      await expect(loc).toBeVisible()
+      await expect.poll(async () => (await loc.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(minH)
     }
+    await expect(page.getByTestId('admin-clickhouse-health-badge')).toHaveText(/^(ok|disabled|unavailable)$/)
+    await page.waitForTimeout(300)
     const clsScore = await readClsScore(page)
     const vitalsPerf = await page.evaluate(() => {
       const fcpEntry = performance.getEntriesByName('first-contentful-paint')[0] as PerformanceEntry | undefined
@@ -820,16 +789,11 @@ test.describe('Page Spec: /admin/clickhouse (Admin ClickHouse Replay & Cluster O
   })
 
   test('5. Interactive manual refresh workflow with X-Page-Load-ID telemetry attribution', async ({ page }) => {
-    const enabled = await isClickHouseEnabledForEnv(page), observedPageLoadIds: string[] = []
+    const observedPageLoadIds: string[] = []
     page.on('request', (req) => {
       if (req.url().includes('/api/admin/clickhouse/status') && req.headers()['x-page-load-id']) observedPageLoadIds.push(req.headers()['x-page-load-id'])
     })
-    const response = await page.goto('/admin/clickhouse', { waitUntil: 'domcontentloaded' })
-    if (!enabled || response?.status() === 404) {
-      await expect(page.getByTestId('admin-clickhouse-root')).toHaveCount(0)
-      expect(observedPageLoadIds.length).toBe(0)
-      return
-    }
+    await page.goto('/admin/clickhouse', { waitUntil: 'domcontentloaded' })
     await expect(page.getByTestId('admin-clickhouse-health-badge')).toHaveText(/^(ok|disabled|unavailable)$/)
     const refreshBtn = page.getByTestId('admin-clickhouse-refresh-btn')
     await expect(refreshBtn).toBeVisible()

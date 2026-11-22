@@ -16,13 +16,13 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
 
-import duckdb
+import orjson
 import zstandard as zstd
 
-from backend.core.log_fields import DuckType, try_get
-from backend.core.share_db import IP_FAMILY_KEYS, SESSION_ID_KEYS, mask_ip_values
+from backend.core.log_fields import SqlType, try_get
+from backend.core.share_db import apply_pii_policy, is_saved_view_pii_key, mask_ip_values, scrub_ip_text
 from backend.core.sql_validator import SAFE_IDENT_RE, SQLValidationError, validate_user_sql
-from backend.high_scale._common import _FIELD_DIMENSIONS
+from backend.high_scale._common import _FIELD_DIMENSIONS, clickhouse_string_literal
 from backend.high_scale._common import range_value as _range_value
 from backend.high_scale.archive import (
     ArchiveSourceObject,
@@ -32,9 +32,13 @@ from backend.high_scale.archive import (
     row_matches_serving_domain,
 )
 from backend.models.analytics import QueryRequest as DashboardQueryRequest
-from backend.repositories._base import SectionTimer, _compact_sql_for_debug, _safe_table
 from backend.repositories.query import MAX_QUERY_ROWS
-from backend.repositories.utils.response_shaping import build_query_response_envelope
+from backend.repositories.utils.response_shaping import (
+    SectionTimer,
+    _compact_sql_for_debug,
+    _safe_table,
+    build_query_response_envelope,
+)
 from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
 from backend.utils.telemetry import get_tracked_calls
 
@@ -80,7 +84,7 @@ def decode_source_object(
         if not raw_line.strip():
             continue
         try:
-            value = json.loads(raw_line)
+            value = orjson.loads(raw_line)
             if not isinstance(value, dict):
                 raise ValueError("record is not a JSON object")
             raw_json_str = raw_line.decode("utf-8")
@@ -107,7 +111,7 @@ def decode_source_object(
                     event["event_id"] = _event_id(event, selected_domain, sub_ordinal=sub_ordinal)
                     events.append(event)
             else:
-                event = dict(value)
+                event = value if selected_domain == "request" else dict(value)
                 event.update(base_meta)
                 _normalize_serving_fields(event, selected_domain)
                 if selected_domain in {"rum_vitals", "rum_errors"} and not row_matches_serving_domain(
@@ -155,68 +159,109 @@ _FIELD_ALIASES: dict[str, str] = {
     "client_ip": "ip",
 }
 
+_SKIP_REQUEST_KEYS: frozenset[str] = frozenset(
+    {
+        "service_id",
+        "domain",
+        "source_object_key",
+        "source_object_version",
+        "line_ordinal",
+        "transform_version",
+        "raw_json",
+        "event_id",
+        "custom_fields",
+        "cmcd",
+    }
+)
+_PASSTHROUGH_NON_CATALOG_KEYS: frozenset[str] = frozenset(
+    {"timestamp", "time_stamp", "client_ip", "ip", "url", "fastly_pop"}
+)
+_INT_SQL_TYPES: frozenset[SqlType] = frozenset(
+    {
+        SqlType.UTINYINT,
+        SqlType.USMALLINT,
+        SqlType.UINTEGER,
+        SqlType.UBIGINT,
+        SqlType.BIGINT,
+        SqlType.INTEGER,
+    }
+)
+_FLOAT_SQL_TYPES: frozenset[SqlType] = frozenset({SqlType.FLOAT, SqlType.DOUBLE})
+_REQUEST_KEY_ACTION: dict[str, int] = {}
+
+
+def _get_request_key_action(k: str) -> int:
+    if k in _SKIP_REQUEST_KEYS:
+        action = 0
+    elif k.startswith("cmcd_") or k.startswith("cmcd."):
+        action = 5
+    else:
+        field = try_get(k) or try_get(_FIELD_ALIASES.get(k, ""))
+        if field is not None:
+            if field.sql_type in _INT_SQL_TYPES:
+                action = 1
+            elif field.sql_type in _FLOAT_SQL_TYPES:
+                action = 2
+            elif field.sql_type == SqlType.BOOLEAN:
+                action = 3
+            elif field.sql_type == SqlType.VARCHAR:
+                action = 4
+            else:
+                action = 0
+        elif k in _PASSTHROUGH_NON_CATALOG_KEYS:
+            action = 0
+        else:
+            action = 6
+    _REQUEST_KEY_ACTION[k] = action
+    return action
+
 
 def _normalize_serving_fields(event: dict[str, Any], domain: str) -> None:
+    if domain in {"rum_vitals", "rum_errors"}:
+        event["req_id"] = (
+            event.get("req_id")
+            or event.get("fastly_req_id")
+            or _first_qparam(_rum_querystring_params(event), "req")
+            or ""
+        )
     if domain == "request":
         custom_fields = event.setdefault("custom_fields", {})
         cmcd = event.setdefault("cmcd", {})
-        keys_to_check = [
-            k
-            for k in list(event.keys())
-            if k
-            not in {
-                "service_id",
-                "domain",
-                "source_object_key",
-                "source_object_version",
-                "line_ordinal",
-                "transform_version",
-                "raw_json",
-                "event_id",
-                "custom_fields",
-                "cmcd",
-            }
-        ]
-        for k in keys_to_check:
-            val = event[k]
-            if k.startswith("cmcd_") or k.startswith("cmcd."):
-                cmcd[k] = str(val) if val is not None else ""
-                short_k = k[5:]
-                if short_k:
-                    cmcd[short_k] = str(val) if val is not None else ""
+        key_actions = _REQUEST_KEY_ACTION
+        for k, val in event.items():
+            action = key_actions.get(k)
+            if action is None:
+                action = _get_request_key_action(k)
+            if action == 0:
                 continue
-            field = try_get(k) or try_get(_FIELD_ALIASES.get(k, ""))
-            if field is not None:
-                if field.duck_type in (
-                    DuckType.UTINYINT,
-                    DuckType.USMALLINT,
-                    DuckType.UINTEGER,
-                    DuckType.UBIGINT,
-                    DuckType.BIGINT,
-                    DuckType.INTEGER,
-                ):
-                    if val not in (None, ""):
-                        try:
-                            event[k] = int(val)
-                        except (ValueError, TypeError):
-                            pass
-                elif field.duck_type in (DuckType.FLOAT, DuckType.DOUBLE):
-                    if val not in (None, ""):
-                        try:
-                            event[k] = float(val)
-                        except (ValueError, TypeError):
-                            pass
-                elif field.duck_type == DuckType.BOOLEAN:
+            if action == 4:
+                if val is not None and type(val) is not str:
+                    event[k] = str(val)
+            elif action == 1:
+                if type(val) is not int and val not in (None, ""):
+                    try:
+                        event[k] = int(val)
+                    except (ValueError, TypeError):
+                        pass
+            elif action == 2:
+                if type(val) is not float and val not in (None, ""):
+                    try:
+                        event[k] = float(val)
+                    except (ValueError, TypeError):
+                        pass
+            elif action == 3:
+                if type(val) is not bool:
                     if isinstance(val, str):
                         event[k] = val.lower() in ("true", "1", "t", "yes")
                     elif val is not None:
                         event[k] = bool(val)
-                elif field.duck_type == DuckType.VARCHAR:
-                    if val is not None and not isinstance(val, str):
-                        event[k] = str(val)
+            elif action == 5:
+                s_val = str(val) if val is not None else ""
+                cmcd[k] = s_val
+                short_k = k[5:]
+                if short_k:
+                    cmcd[short_k] = s_val
             else:
-                if k in {"timestamp", "time_stamp", "client_ip", "ip", "url", "fastly_pop"}:
-                    continue
                 custom_fields[k] = str(val) if val is not None else ""
     elif domain == "rum_vitals":
         client_id = event.get("rum_cid") or event.get("client_id") or ""
@@ -297,7 +342,10 @@ def _expand_faro_rum_events(log_data: dict[str, Any], domain: str) -> list[dict[
     raw_body = log_data.get("rum_body")
     extracted: list[dict[str, Any]] = []
     if raw_body:
-        from backend.core.rum_ingest import extract_metrics_from_faro_payload
+        from backend.core.rum_ingest import (
+            extract_metrics_from_faro_payload,
+            extract_metrics_from_query_params,
+        )
 
         try:
             payload = json.loads(raw_body) if isinstance(raw_body, str) else raw_body
@@ -307,7 +355,30 @@ def _expand_faro_rum_events(log_data: dict[str, Any], domain: str) -> list[dict[
                 raise ValueError("Faro RUM body must be an object")
             extracted = extract_metrics_from_faro_payload(payload, log_data)
         except (ValueError, TypeError, AttributeError) as exc:
-            raise ValueError("invalid Faro RUM body") from exc
+            qparams = _rum_querystring_params(log_data)
+            if qparams:
+                extracted = extract_metrics_from_query_params(qparams, log_data)
+            if not extracted:
+                has_fallback_fields = bool(
+                    (log_data.get("rum_metric_name") and log_data.get("rum_metric_value") not in (None, ""))
+                    or log_data.get("rum_error_message")
+                    or log_data.get("rum_error_file")
+                    or log_data.get("rum_error_stack")
+                    or (
+                        qparams
+                        and (
+                            (
+                                _first_qparam(qparams, "rum_metric_name")
+                                and _first_qparam(qparams, "rum_metric_value") not in (None, "")
+                            )
+                            or _first_qparam(qparams, "rum_error_message")
+                            or _first_qparam(qparams, "rum_error_file")
+                        )
+                    )
+                )
+                if has_fallback_fields:
+                    return []
+                raise ValueError("invalid Faro RUM body") from exc
     else:
         qparams = _rum_querystring_params(log_data)
         if qparams:
@@ -433,11 +504,12 @@ _FACT_DOMAINS = {"request_facts": "request", "rum_vitals_facts": "rum_vitals", "
 
 
 def _literal(value: str) -> str:
-    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+    return clickhouse_string_literal(value)
 
 
 def _instant(value: datetime) -> str:
-    return f"toDateTime64({_literal(value.astimezone(UTC).strftime('%Y-%m-%d %H:%M:%S.%f'))}, 6, 'UTC')"
+    value_literal = clickhouse_string_literal(value.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S.%f"))
+    return f"toDateTime64({value_literal}, 6, 'UTC')"
 
 
 def _table_filters(
@@ -534,14 +606,16 @@ def _code_only(sql: str) -> str:
 
 _STRING_LITERAL = re.compile(r"'(?:[^']|'')*'")
 _QUOTE_SCAN = re.compile(r"""'(?:[^']|'')*'|\"""")
-_COMMENT_OR_ESCAPE = re.compile(r"--|/\*|\*/|#|\$|`")
+_COMMENT_OR_ESCAPE = re.compile(r"--|/\*|\*/|#|\$|`|[{}]")
 _RESULT_CLAUSES = re.compile(
-    r"\bSETTINGS\b|\bFORMAT\b(?!\s*\()|\bINTO\s+OUTFILE\b|\bINFILE\b|\bRECURSIVE\b", re.IGNORECASE
+    r"\bSETTINGS\b|\bFORMAT\b(?!\s*\()|\bINTO\s+OUTFILE\b|\bINFILE\b|\bRECURSIVE\b"
+    r"|\bTABLE\b|\bPIVOT\b|\bUNPIVOT\b|\bPIVOT_WIDER\b|\bPIVOT_LONGER\b|\bONLY\b",
+    re.IGNORECASE,
 )
 
 
 def _reject_ambiguous_syntax(sql: str, table_names: frozenset[str]) -> None:
-    """Reject text DuckDB (which validates the SQL) and ClickHouse (which runs it) could tokenise differently."""
+    """Reject text the SQL validator and ClickHouse could tokenise differently."""
     if "\\" in sql:
         raise PermissionError("backslashes are not allowed in console queries")
     for token in _QUOTE_SCAN.finditer(sql):
@@ -578,6 +652,1543 @@ def _reject_unsafe_functions(sql: str) -> None:
 _HS_QUERY_RESULT_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=256, ttl_seconds=15.0)
 CacheRegistry.register("high_scale.query._HS_QUERY_RESULT_CACHE", _HS_QUERY_RESULT_CACHE)
 
+_CONSOLE_SQL_LEX_RE = re.compile(
+    r"(?P<COMMENT>--[^\n]*|/\*[\s\S]*?\*/)"
+    r"|(?P<STR>'(?:''|[^'])*')"
+    r'|(?P<DQUOTE>"(?:""|[^"])*"|`(?:``|[^`])*`)'
+    r"|(?P<WS>\s+)"
+    r'|(?P<NUM>(?:0(?:[xX][0-9a-fA-F][0-9a-fA-F_]*(?:\.(?!\.)[0-9a-fA-F_]*)?(?:[pP][+-]?\d+(?:_\d+)*)?|[bB][01][01_]*|[oO][0-7][0-7_]*)|(?:\d+(?:_\d+)*(?:\.(?!\.)(?:\d+(?:_\d+)*)?)?|(?<![A-Za-z0-9_)\]}"\'`])\.\d+(?:_\d+)*)(?:[eE][+-]?\d+(?:_\d+)*)?))'
+    r"|(?P<IDENT>" + SAFE_IDENT_RE.pattern + ")"
+    r"|(?P<OP><=|>=|!=|<>|[=<>(),.\[\]{}*+-/;])"
+    r"|(?P<OTHER>.)"
+)
+_FROM_EXIT_KEYWORDS = frozenset(
+    {
+        "WHERE",
+        "PREWHERE",
+        "GROUP",
+        "HAVING",
+        "ORDER",
+        "LIMIT",
+        "OFFSET",
+        "FETCH",
+        "WINDOW",
+        "QUALIFY",
+        "UNION",
+        "INTERSECT",
+        "EXCEPT",
+        "SETTINGS",
+        "FORMAT",
+        "INTO",
+        "SET",
+        "FOR",
+    }
+)
+_JOIN_MODIFIER_KEYWORDS = frozenset(
+    {
+        "INNER",
+        "LEFT",
+        "RIGHT",
+        "FULL",
+        "OUTER",
+        "CROSS",
+        "NATURAL",
+        "GLOBAL",
+        "ANY",
+        "ALL",
+        "ASOF",
+        "SEMI",
+        "ANTI",
+    }
+)
+_SQL_CLAUSE_STOPWORDS = (
+    _FROM_EXIT_KEYWORDS
+    | _JOIN_MODIFIER_KEYWORDS
+    | frozenset(
+        {
+            "JOIN",
+            "ON",
+            "USING",
+            "FINAL",
+            "SAMPLE",
+            "ARRAY",
+            "AS",
+            "SELECT",
+            "FROM",
+            "LATERAL",
+        }
+    )
+)
+_ON_EXPR_PREV_WORDS = frozenset(
+    {
+        "ON",
+        "AND",
+        "OR",
+        "XOR",
+        "NOT",
+        "IS",
+        "IN",
+        "LIKE",
+        "ILIKE",
+        "RLIKE",
+        "REGEXP",
+        "GLOB",
+        "SIMILAR",
+        "TO",
+        "ESCAPE",
+        "BETWEEN",
+        "SYMMETRIC",
+        "ASYMMETRIC",
+        "CASE",
+        "WHEN",
+        "THEN",
+        "ELSE",
+        "DIV",
+        "MOD",
+        "FROM",
+        "COLLATE",
+        "ZONE",
+        "INTERVAL",
+    }
+)
+_ON_EXPR_NEXT_WORDS = frozenset(
+    {
+        "NOT",
+        "AT",
+        "IS",
+        "IN",
+        "BETWEEN",
+        "LIKE",
+        "ILIKE",
+        "RLIKE",
+        "REGEXP",
+        "GLOB",
+        "SIMILAR",
+        "DIV",
+        "MOD",
+        "COLLATE",
+        "WHEN",
+        "THEN",
+        "ELSE",
+        "END",
+        "AND",
+        "OR",
+        "XOR",
+    }
+)
+_AS_CLAUSE_OPENING_WORDS = frozenset(
+    {
+        "SELECT",
+        "WITH",
+        "WHERE",
+        "PREWHERE",
+        "HAVING",
+        "QUALIFY",
+        "LIMIT",
+        "OFFSET",
+        "BY",
+        "FROM",
+        "JOIN",
+        "TABLE",
+        "USING",
+    }
+)
+_SQL_INTERVAL_UNITS = frozenset(
+    {
+        "YEAR",
+        "YEARS",
+        "QUARTER",
+        "QUARTERS",
+        "MONTH",
+        "MONTHS",
+        "WEEK",
+        "WEEKS",
+        "DAY",
+        "DAYS",
+        "HOUR",
+        "HOURS",
+        "MINUTE",
+        "MINUTES",
+        "SECOND",
+        "SECONDS",
+        "MILLISECOND",
+        "MILLISECONDS",
+        "MICROSECOND",
+        "MICROSECONDS",
+        "NANOSECOND",
+        "NANOSECONDS",
+    }
+)
+_ON_OPERATOR_CONTEXT_WORDS = frozenset(
+    {
+        "SELECT",
+        "DISTINCT",
+        "ALL",
+        "WHERE",
+        "PREWHERE",
+        "HAVING",
+        "QUALIFY",
+        "ON",
+        "AND",
+        "OR",
+        "XOR",
+        "NOT",
+        "IS",
+        "IN",
+        "LIKE",
+        "ILIKE",
+        "RLIKE",
+        "REGEXP",
+        "GLOB",
+        "SIMILAR",
+        "TO",
+        "BETWEEN",
+        "CASE",
+        "WHEN",
+        "THEN",
+        "ELSE",
+        "DIV",
+        "MOD",
+        "COLLATE",
+    }
+)
+_FROM_FIRST_SELECT_FN_KEYWORDS = frozenset({"ANY", "ARRAY", "LEFT", "RIGHT", "FORMAT", "SAMPLE", "WINDOW"})
+_REQUEST_CF_FIELDS = frozenset(
+    f for f in _FIELD_DIMENSIONS.values() if f not in {"client_ip", "country", "url", "cmcd", "custom_fields"}
+)
+
+
+def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Mapping[str, str]) -> tuple[str, set[str]]:
+    import secrets as _secrets
+
+    iso_lit_re = re.compile(r"^'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)'$")
+    cf_key_lit_re = re.compile(r"^'[A-Za-z0-9_]+'$")
+
+    def _normalize_iso(lit: str) -> str:
+        m_iso = iso_lit_re.fullmatch(lit)
+        if not m_iso:
+            return lit
+        raw = m_iso.group(1)
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(UTC)
+            return f"'{dt.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}'"
+        except ValueError:
+            return lit
+
+    table_map: dict[str, tuple[str, str, str]] = {}
+    if "request_facts" in names:
+        req_target = names["request_facts"]
+        table_map["logs"] = (req_target, "request", "request_facts")
+        table_map["request_facts"] = (req_target, "request", "request_facts")
+        table_map[svc_table.lower()] = (req_target, "request", "request_facts")
+    if "rum_vitals_facts" in names:
+        vit_target = names["rum_vitals_facts"]
+        table_map["client_vitals"] = (vit_target, "rum_vitals", "rum_vitals_facts")
+        table_map["rum_page_load_facts"] = (vit_target, "rum_vitals", "rum_vitals_facts")
+        table_map["rum_vitals_facts"] = (vit_target, "rum_vitals", "rum_vitals_facts")
+    if "rum_error_facts" in names:
+        err_target = names["rum_error_facts"]
+        table_map["client_errors"] = (err_target, "rum_errors", "rum_error_facts")
+        table_map["rum_error_facts"] = (err_target, "rum_errors", "rum_error_facts")
+    for canonical, domain in _FACT_DOMAINS.items():
+        if canonical in names:
+            table_map[names[canonical].lower()] = (names[canonical], domain, canonical)
+
+    def _sig_indices(tokens: list[tuple[str, str]]) -> list[int]:
+        return [i for i, (k, _) in enumerate(tokens) if k not in ("WS", "COMMENT")]
+
+    def _prev_sig_idx(tokens: list[tuple[str, str]], start_before: int) -> int | None:
+        for p in range(start_before - 1, -1, -1):
+            if tokens[p][0] not in ("WS", "COMMENT"):
+                return p
+        return None
+
+    def _is_dot_or_dcolon_lex(tokens: list[tuple[str, str]], pos: int | None) -> bool:
+        if pos is None or pos < 0:
+            return False
+        pk, pt = tokens[pos]
+        if (pk, pt) == ("OP", "."):
+            return True
+        return (
+            (pk, pt) == ("OTHER", ":")
+            and pos >= 1
+            and tokens[pos - 1] == ("OTHER", ":")
+            and not (pos >= 2 and tokens[pos - 2] == ("OTHER", ":"))
+        )
+
+    def _find_matching_open_paren_lex(tokens: list[tuple[str, str]], close_s_pos: int, sig_list: list[int]) -> int:
+        rev_pairs = {")": "(", "]": "[", "}": "{"}
+        stack: list[str] = []
+        for s_i in range(close_s_pos, -1, -1):
+            tk, tt = tokens[sig_list[s_i]]
+            if tk == "OP" and tt in rev_pairs:
+                stack.append(rev_pairs[tt])
+            elif tk == "OP" and tt in ("(", "[", "{"):
+                if not stack or stack[-1] != tt:
+                    return -1
+                stack.pop()
+                if not stack:
+                    return s_i
+        return -1
+
+    def _is_kw_lex_pos(tokens: list[tuple[str, str]], s_idx: int, sig_list: list[int], *words: str) -> bool:
+        if s_idx < 0 or s_idx >= len(sig_list):
+            return False
+        tok_idx = sig_list[s_idx]
+        return (
+            tokens[tok_idx][0] == "IDENT"
+            and tokens[tok_idx][1].upper() in words
+            and not _is_non_kw_lex_pos(tokens, tok_idx)
+        )
+
+    def _is_select_head_top_prefix_lex(tokens: list[tuple[str, str]], top_s_pos: int, sig_list: list[int]) -> bool:
+        if top_s_pos < 1 or not _is_kw_lex_pos(tokens, top_s_pos, sig_list, "TOP"):
+            return False
+        if _is_kw_lex_pos(tokens, top_s_pos - 1, sig_list, "SELECT"):
+            return True
+        if top_s_pos >= 2 and _is_kw_lex_pos(tokens, top_s_pos - 1, sig_list, "ALL", "DISTINCT"):
+            return _is_kw_lex_pos(tokens, top_s_pos - 2, sig_list, "SELECT")
+        prev_tok = tokens[sig_list[top_s_pos - 1]]
+        if prev_tok == ("OP", ")") or prev_tok[0] == "SUBQ":
+            open_s = (
+                top_s_pos - 1
+                if prev_tok[0] == "SUBQ"
+                else _find_matching_open_paren_lex(tokens, top_s_pos - 1, sig_list)
+            )
+            return (
+                open_s >= 3
+                and _is_kw_lex_pos(tokens, open_s - 1, sig_list, "ON")
+                and _is_kw_lex_pos(tokens, open_s - 2, sig_list, "DISTINCT")
+                and _is_kw_lex_pos(tokens, open_s - 3, sig_list, "SELECT")
+            )
+        return False
+
+    def _is_select_head_signed_top_end_lex(tokens: list[tuple[str, str]], s_pos: int, sig_list: list[int]) -> bool:
+        if s_pos < 2 or s_pos >= len(sig_list):
+            return False
+        return (
+            tokens[sig_list[s_pos]][0] == "NUM"
+            and tokens[sig_list[s_pos - 1]] in (("OP", "+"), ("OP", "-"))
+            and _is_select_head_top_prefix_lex(tokens, s_pos - 2, sig_list)
+        )
+
+    def _is_select_head_top_end_lex(tokens: list[tuple[str, str]], s_pos: int, sig_list: list[int]) -> bool:
+        if s_pos < 1 or s_pos >= len(sig_list):
+            return False
+        pk, pt = tokens[sig_list[s_pos]]
+        if pk == "NUM":
+            prev_s = s_pos - 1
+            if prev_s >= 1 and tokens[sig_list[prev_s]] in (("OP", "+"), ("OP", "-")):
+                prev_s -= 1
+            return _is_select_head_top_prefix_lex(tokens, prev_s, sig_list)
+        if (pk == "OP" and pt == ")") or pk == "SUBQ":
+            open_s_pos = s_pos if pk == "SUBQ" else _find_matching_open_paren_lex(tokens, s_pos, sig_list)
+            return open_s_pos >= 2 and _is_select_head_top_prefix_lex(tokens, open_s_pos - 1, sig_list)
+        return False
+
+    def _is_select_head_modifier_end_lex(tokens: list[tuple[str, str]], s_pos: int, sig_list: list[int]) -> bool:
+        if s_pos < 1 or s_pos >= len(sig_list):
+            return False
+        if _is_select_head_top_end_lex(tokens, s_pos, sig_list):
+            return True
+        pk, pt = tokens[sig_list[s_pos]]
+        if (pk == "OP" and pt == ")") or pk == "SUBQ":
+            open_s_pos = s_pos if pk == "SUBQ" else _find_matching_open_paren_lex(tokens, s_pos, sig_list)
+            return (
+                open_s_pos >= 3
+                and _is_kw_lex_pos(tokens, open_s_pos - 1, sig_list, "ON")
+                and _is_kw_lex_pos(tokens, open_s_pos - 2, sig_list, "DISTINCT")
+                and _is_kw_lex_pos(tokens, open_s_pos - 3, sig_list, "SELECT")
+            )
+        if (
+            s_pos >= 3
+            and _is_kw_lex_pos(tokens, s_pos, sig_list, "TIES")
+            and _is_kw_lex_pos(tokens, s_pos - 1, sig_list, "WITH")
+        ):
+            return _is_select_head_top_end_lex(tokens, s_pos - 2, sig_list)
+        return False
+
+    def _is_postfix_factorial_lex(tokens: list[tuple[str, str]], s_pos: int, sig_list: list[int]) -> bool:
+        return (
+            0 < s_pos < len(sig_list)
+            and tokens[sig_list[s_pos]] == ("OTHER", "!")
+            and not _is_lex_on_operator_tok(tokens, s_pos - 1, sig_list)
+        )
+
+    active_case_scans: set[tuple[int, int]] = set()
+
+    def _has_matching_case_when_end_lex(tokens: list[tuple[str, str]], case_s_pos: int, sig_list: list[int]) -> bool:
+        key = (len(tokens), case_s_pos)
+        if key in active_case_scans:
+            return False
+        active_case_scans.add(key)
+        try:
+            delim_depth = 0
+            case_depth = 1
+            saw_top_when = False
+            for k_s in range(case_s_pos + 1, len(sig_list)):
+                tok_idx = sig_list[k_s]
+                tk, tt = tokens[tok_idx]
+                if tk == "OP" and tt in ("(", "[", "{"):
+                    delim_depth += 1
+                    continue
+                if tk == "OP" and tt in (")", "]", "}"):
+                    if delim_depth == 0:
+                        return False
+                    delim_depth -= 1
+                    continue
+                if delim_depth > 0:
+                    continue
+                if tk == "OP" and tt == ";":
+                    return False
+                if tk == "IDENT":
+                    wu = tt.upper()
+                    if (
+                        wu in ("CASE", "WHEN", "END")
+                        and not _is_non_kw_lex_pos(tokens, tok_idx)
+                        and not _is_lex_dot_qualifier(tokens, k_s, sig_list)
+                    ):
+                        if wu == "CASE":
+                            case_depth += 1
+                        elif wu == "WHEN" and case_depth == 1:
+                            saw_top_when = True
+                        elif wu == "END":
+                            case_depth -= 1
+                            if case_depth == 0:
+                                return saw_top_when
+            return False
+        finally:
+            active_case_scans.discard(key)
+
+    def _cannot_end_aliasable_lex(tokens: list[tuple[str, str]], pos: int | None, r: int, after_as_idx: int) -> bool:
+        if pos is None or pos < 0 or _is_dot_or_dcolon_lex(tokens, pos):
+            return True
+        pk, pt = tokens[pos]
+        if pk == "OP" and pt not in (")", "]", "}"):
+            return True
+        sig_list: list[int] | None = None
+        s_pos = -1
+        if pk == "OTHER":
+            if pt != "!":
+                return True
+            sig_list = _sig_indices(tokens)
+            try:
+                s_pos = sig_list.index(pos)
+            except ValueError:
+                return True
+            return not _is_postfix_factorial_lex(tokens, s_pos, sig_list)
+        if pk in ("NUM", "SUBQ") or (pk == "OP" and pt == ")") or (pk == "IDENT" and pt.upper() == "TIES"):
+            sig_list = _sig_indices(tokens)
+            try:
+                s_pos = sig_list.index(pos)
+            except ValueError:
+                s_pos = -1
+            if s_pos >= 0 and _is_select_head_modifier_end_lex(tokens, s_pos, sig_list):
+                if (r % 2) == 0:
+                    return False
+                if r == 1 and _is_select_head_signed_top_end_lex(tokens, s_pos, sig_list):
+                    after_sig_top = tokens[after_as_idx] if after_as_idx < len(tokens) else None
+                    if (
+                        after_sig_top is not None
+                        and after_sig_top[0] == "IDENT"
+                        and after_sig_top[1].upper() in ("WHERE", "SELECT")
+                    ):
+                        try:
+                            after_s = sig_list.index(after_as_idx)
+                        except ValueError:
+                            after_s = -1
+                        nxt_sig = (
+                            tokens[sig_list[after_s + 1]] if 0 <= after_s and after_s + 1 < len(sig_list) else None
+                        )
+                        if (
+                            nxt_sig is None
+                            or nxt_sig in (("OP", ","), ("OP", ")"), ("OP", ";"))
+                            or (
+                                nxt_sig[0] == "IDENT"
+                                and nxt_sig[1].upper()
+                                in (
+                                    "FROM",
+                                    "WHERE",
+                                    "GROUP",
+                                    "HAVING",
+                                    "ORDER",
+                                    "LIMIT",
+                                    "UNION",
+                                    "INTERSECT",
+                                    "EXCEPT",
+                                )
+                            )
+                        ):
+                            return False
+                return True
+        if pk != "IDENT" or _is_non_kw_lex_pos(tokens, pos):
+            return False
+        wu = pt.upper()
+        after_sig = tokens[after_as_idx] if after_as_idx < len(tokens) else None
+        if wu == "CASE":
+            return after_sig is not None and after_sig[0] == "IDENT" and after_sig[1].upper() == "WHEN"
+        if wu == "NOT":
+            if r == 2 and (
+                after_sig is None
+                or after_sig in (("OP", ","), ("OP", ")"), ("OP", ";"))
+                or (
+                    after_sig[0] == "IDENT"
+                    and (after_sig[1].upper() in _FROM_EXIT_KEYWORDS or after_sig[1].upper() in ("FROM", "JOIN"))
+                )
+            ):
+                return False
+            return True
+        if wu == "INTERVAL":
+            return (
+                (r % 2) == 1
+                and after_sig is not None
+                and after_sig[0] == "IDENT"
+                and after_sig[1].upper() in _SQL_INTERVAL_UNITS
+            )
+        if sig_list is None:
+            sig_list = _sig_indices(tokens)
+            try:
+                s_pos = sig_list.index(pos)
+            except ValueError:
+                return False
+        elif s_pos < 0:
+            return False
+        if _is_lex_prev_word_operator(tokens, s_pos, sig_list, after_sig):
+            return True
+        if wu in ("DISTINCT", "ALL"):
+            return (
+                s_pos >= 1
+                and tokens[sig_list[s_pos - 1]][0] == "IDENT"
+                and tokens[sig_list[s_pos - 1]][1].upper() in ("SELECT", "UNION", "INTERSECT", "EXCEPT")
+                and not _is_non_kw_lex_pos(tokens, sig_list[s_pos - 1])
+            )
+        if wu in _AS_CLAUSE_OPENING_WORDS:
+            if s_pos == 0:
+                return True
+            if _is_select_head_modifier_end_lex(tokens, s_pos - 1, sig_list):
+                return False
+            prev_idx = sig_list[s_pos - 1]
+            prev_k, prev_t = tokens[prev_idx]
+            if (prev_k == "OTHER" and not _is_postfix_factorial_lex(tokens, s_pos - 1, sig_list)) or (
+                prev_k == "OP" and prev_t not in (")", "]", "}", ";")
+            ):
+                return False
+            if prev_k == "IDENT" and not _is_non_kw_lex_pos(tokens, prev_idx):
+                pw = prev_t.upper()
+                if pw in ("SELECT", "FROM", "JOIN", "TABLE", "IN", "GLOBAL"):
+                    return False
+                if pw in ("DISTINCT", "ALL"):
+                    is_setop_mod = (
+                        s_pos >= 2
+                        and tokens[sig_list[s_pos - 2]][0] == "IDENT"
+                        and tokens[sig_list[s_pos - 2]][1].upper() in ("UNION", "INTERSECT", "EXCEPT")
+                        and not _is_non_kw_lex_pos(tokens, sig_list[s_pos - 2])
+                    )
+                    if not is_setop_mod:
+                        return False
+                if _is_lex_prev_word_operator(tokens, s_pos - 1, sig_list, tokens[pos]):
+                    is_bare_table_alias = (
+                        s_pos >= 3
+                        and tokens[sig_list[s_pos - 2]][0] in ("IDENT", "DQUOTE")
+                        and tokens[sig_list[s_pos - 3]][0] == "IDENT"
+                        and tokens[sig_list[s_pos - 3]][1].upper() in ("FROM", "JOIN")
+                        and not _is_non_kw_lex_pos(tokens, sig_list[s_pos - 3])
+                        and not _is_lex_distinct_from(tokens, s_pos - 3, sig_list)
+                    )
+                    if not is_bare_table_alias:
+                        return False
+            return True
+        return False
+
+    def _is_non_kw_lex_pos(tokens: list[tuple[str, str]], idx: int) -> bool:
+        p = _prev_sig_idx(tokens, idx)
+        if p is None:
+            return False
+        if _is_dot_or_dcolon_lex(tokens, p):
+            return True
+        r = 0
+        while p is not None and tokens[p][0] == "IDENT" and tokens[p][1].upper() == "AS":
+            r += 1
+            p = _prev_sig_idx(tokens, p)
+        if r == 0:
+            return False
+        if _cannot_end_aliasable_lex(tokens, p, r, idx):
+            r -= 1
+        return (r % 2) == 1
+
+    def _is_valid_lex_ident_list(tokens: list[tuple[str, str]]) -> bool:
+        sig = _sig_indices(tokens)
+        if not sig or len(sig) % 2 == 0:
+            return False
+        return all(
+            (tokens[t_i][0] in ("IDENT", "DQUOTE") if pos % 2 == 0 else tokens[t_i] == ("OP", ","))
+            for pos, t_i in enumerate(sig)
+        )
+
+    def _is_lex_distinct_from(tokens: list[tuple[str, str]], s_pos: int, sig_list: list[int]) -> bool:
+        if s_pos < 2:
+            return False
+        p1 = tokens[sig_list[s_pos - 1]]
+        if p1[0] != "IDENT" or p1[1].upper() != "DISTINCT":
+            return False
+        p2 = tokens[sig_list[s_pos - 2]]
+        if p2[0] != "IDENT":
+            return False
+        if p2[1].upper() == "IS":
+            return True
+        if p2[1].upper() == "NOT" and s_pos >= 3:
+            p3 = tokens[sig_list[s_pos - 3]]
+            return p3[0] == "IDENT" and p3[1].upper() == "IS"
+        return False
+
+    def _is_lex_dot_qualifier(tokens: list[tuple[str, str]], s_pos: int, sig_list: list[int]) -> bool:
+        return (
+            s_pos + 2 < len(sig_list)
+            and tokens[sig_list[s_pos + 1]] == ("OP", ".")
+            and (
+                tokens[sig_list[s_pos + 2]][0] in ("IDENT", "DQUOTE", "STR")
+                or tokens[sig_list[s_pos + 2]] == ("OP", "*")
+                or (tokens[sig_list[s_pos + 2]][0] == "NUM" and tokens[sig_list[s_pos + 2]][1][0].isdigit())
+            )
+        )
+
+    def _is_lex_within_group(tokens: list[tuple[str, str]], s_pos: int, sig_list: list[int]) -> bool:
+        if s_pos <= 0 or s_pos + 1 >= len(sig_list):
+            return False
+        cur_idx = sig_list[s_pos]
+        prev_idx = sig_list[s_pos - 1]
+        nxt_tok = tokens[sig_list[s_pos + 1]]
+        return (
+            tokens[cur_idx][0] == "IDENT"
+            and tokens[cur_idx][1].upper() == "GROUP"
+            and not _is_non_kw_lex_pos(tokens, cur_idx)
+            and tokens[prev_idx][0] == "IDENT"
+            and tokens[prev_idx][1].upper() == "WITHIN"
+            and not _is_non_kw_lex_pos(tokens, prev_idx)
+            and (nxt_tok == ("OP", "(") or nxt_tok[0] == "SUBQ")
+        )
+
+    def _is_lex_on_operator_tok(tokens: list[tuple[str, str]], s_pos: int, sig_list: list[int]) -> bool:
+        if s_pos < 0:
+            return True
+        if _is_select_head_modifier_end_lex(tokens, s_pos, sig_list):
+            return True
+        tok_idx = sig_list[s_pos]
+        tk, tt = tokens[tok_idx]
+        if tk == "OTHER":
+            return not _is_postfix_factorial_lex(tokens, s_pos, sig_list)
+        if tk == "OP" and tt not in (")", "]", "}"):
+            return True
+        if tk != "IDENT" or _is_non_kw_lex_pos(tokens, tok_idx):
+            return False
+        wu = tt.upper()
+        if wu in ("SELECT", "WHERE", "PREWHERE", "HAVING", "QUALIFY"):
+            if s_pos == 0:
+                return True
+            prev_k, prev_t = tokens[sig_list[s_pos - 1]]
+            if (prev_k == "OTHER" and not _is_postfix_factorial_lex(tokens, s_pos - 1, sig_list)) or (
+                prev_k == "OP" and prev_t not in (")", "]", "}", ";")
+            ):
+                return False
+            if prev_k == "IDENT" and _is_lex_prev_word_operator(tokens, s_pos - 1, sig_list, tokens[tok_idx]):
+                return False
+            return True
+        if wu in ("DISTINCT", "ALL"):
+            return (
+                s_pos >= 1
+                and tokens[sig_list[s_pos - 1]][0] == "IDENT"
+                and tokens[sig_list[s_pos - 1]][1].upper() in ("SELECT", "UNION", "INTERSECT", "EXCEPT")
+                and not _is_non_kw_lex_pos(tokens, sig_list[s_pos - 1])
+            ) or (
+                wu == "ALL"
+                and s_pos + 1 < len(sig_list)
+                and (tokens[sig_list[s_pos + 1]] == ("OP", "(") or tokens[sig_list[s_pos + 1]][0] == "SUBQ")
+            )
+        after_operand = tokens[sig_list[s_pos + 2]] if s_pos + 2 < len(sig_list) else None
+        return _is_lex_prev_word_operator(tokens, s_pos, sig_list, after_operand)
+
+    def _is_lex_prev_word_operator(
+        tokens: list[tuple[str, str]], prev_s_pos: int, sig_list: list[int], nxt_sig: tuple[str, str] | None
+    ) -> bool:
+        prev_idx = sig_list[prev_s_pos]
+        pw = tokens[prev_idx][1].upper()
+        if pw not in _ON_EXPR_PREV_WORDS or _is_non_kw_lex_pos(tokens, prev_idx):
+            return False
+        if pw == "FROM":
+            return _is_lex_distinct_from(tokens, prev_s_pos, sig_list)
+        if pw == "TO":
+            return (
+                prev_s_pos >= 1
+                and tokens[sig_list[prev_s_pos - 1]][0] == "IDENT"
+                and tokens[sig_list[prev_s_pos - 1]][1].upper() == "SIMILAR"
+                and not _is_non_kw_lex_pos(tokens, sig_list[prev_s_pos - 1])
+            )
+        if pw == "ZONE":
+            return (
+                prev_s_pos >= 2
+                and tokens[sig_list[prev_s_pos - 1]][0] == "IDENT"
+                and tokens[sig_list[prev_s_pos - 1]][1].upper() == "TIME"
+                and not _is_non_kw_lex_pos(tokens, sig_list[prev_s_pos - 1])
+                and tokens[sig_list[prev_s_pos - 2]][0] == "IDENT"
+                and tokens[sig_list[prev_s_pos - 2]][1].upper() == "AT"
+                and not _is_non_kw_lex_pos(tokens, sig_list[prev_s_pos - 2])
+            )
+        if pw == "INTERVAL":
+            return (
+                nxt_sig is not None
+                and nxt_sig[0] == "IDENT"
+                and nxt_sig[1].upper() in _SQL_INTERVAL_UNITS
+                and prev_s_pos + 2 < len(sig_list)
+                and not _is_non_kw_lex_pos(tokens, sig_list[prev_s_pos + 2])
+            )
+        if pw == "ESCAPE":
+            return prev_s_pos >= 1 and not _is_lex_on_operator_tok(tokens, prev_s_pos - 1, sig_list)
+        if pw in ("SYMMETRIC", "ASYMMETRIC"):
+            return (
+                prev_s_pos >= 1
+                and tokens[sig_list[prev_s_pos - 1]][0] == "IDENT"
+                and tokens[sig_list[prev_s_pos - 1]][1].upper() == "BETWEEN"
+                and not _is_non_kw_lex_pos(tokens, sig_list[prev_s_pos - 1])
+            )
+        if pw == "NOT":
+            return True
+        if pw == "CASE":
+            if not _has_matching_case_when_end_lex(tokens, prev_s_pos, sig_list):
+                return False
+            first_after = tokens[sig_list[prev_s_pos + 1]] if prev_s_pos + 1 < len(sig_list) else None
+            if first_after is None:
+                return False
+            if (
+                first_after[0] == "IDENT"
+                and first_after[1].upper() == "WHEN"
+                and not _is_non_kw_lex_pos(tokens, sig_list[prev_s_pos + 1])
+            ):
+                return True
+            if first_after[0] != "IDENT":
+                return True
+            if nxt_sig is None:
+                return False
+            if (
+                nxt_sig in (("OP", "."), ("OP", "("), ("OP", "["))
+                or nxt_sig[0] in ("OTHER", "SUBQ")
+                or (nxt_sig[0] == "OP" and nxt_sig[1] not in ("(", ")", "[", "]", "{", "}", ",", ";"))
+            ):
+                return True
+            return (
+                nxt_sig[0] == "IDENT"
+                and nxt_sig[1].upper() in _ON_EXPR_NEXT_WORDS
+                and (prev_s_pos + 2 >= len(sig_list) or not _is_non_kw_lex_pos(tokens, sig_list[prev_s_pos + 2]))
+            )
+        if pw == "ON":
+            return prev_s_pos == 0 or not _is_lex_on_operator_tok(tokens, prev_s_pos - 1, sig_list)
+        if pw == "WHEN":
+            if (
+                prev_s_pos >= 1
+                and tokens[sig_list[prev_s_pos - 1]][0] == "IDENT"
+                and tokens[sig_list[prev_s_pos - 1]][1].upper() == "CASE"
+            ):
+                return not _is_non_kw_lex_pos(tokens, sig_list[prev_s_pos - 1])
+            return prev_s_pos >= 1 and not _is_lex_on_operator_tok(tokens, prev_s_pos - 1, sig_list)
+        if (
+            pw in ("IN", "LIKE", "ILIKE", "RLIKE", "REGEXP", "GLOB", "SIMILAR", "BETWEEN")
+            and prev_s_pos >= 2
+            and tokens[sig_list[prev_s_pos - 1]][0] == "IDENT"
+            and tokens[sig_list[prev_s_pos - 1]][1].upper() == "NOT"
+            and not _is_non_kw_lex_pos(tokens, sig_list[prev_s_pos - 1])
+        ):
+            return not _is_lex_on_operator_tok(tokens, prev_s_pos - 2, sig_list)
+        return prev_s_pos >= 1 and not _is_lex_on_operator_tok(tokens, prev_s_pos - 1, sig_list)
+
+    def _is_lex_multi_token_post_on_exit(tokens: list[tuple[str, str]], s_pos: int, sig_list: list[int]) -> bool:
+        if _is_lex_within_group(tokens, s_pos, sig_list):
+            return False
+        wu = tokens[sig_list[s_pos]][1].upper()
+        nxt_sig = tokens[sig_list[s_pos + 1]] if s_pos + 1 < len(sig_list) else None
+        if nxt_sig is None:
+            return False
+        nxt_is_kw = nxt_sig[0] == "IDENT" and not _is_non_kw_lex_pos(tokens, sig_list[s_pos + 1])
+        if wu in ("GROUP", "ORDER"):
+            return nxt_is_kw and nxt_sig[1].upper() in ("BY", "ALL")
+        if wu == "FETCH":
+            return nxt_is_kw and nxt_sig[1].upper() in ("FIRST", "NEXT")
+        if wu == "INTO":
+            return nxt_is_kw and nxt_sig[1].upper() == "OUTFILE"
+        if wu in ("UNION", "INTERSECT", "EXCEPT"):
+            if nxt_sig == ("OP", "(") or nxt_sig[0] == "SUBQ":
+                return True
+            return (
+                nxt_is_kw
+                and not _is_lex_dot_qualifier(tokens, s_pos + 1, sig_list)
+                and nxt_sig[1].upper() in ("ALL", "DISTINCT", "BY", "SELECT", "WITH", "FROM", "VALUES", "TABLE")
+            )
+        return False
+
+    def _is_lex_on_expr_ident(tokens: list[tuple[str, str]], s_pos: int, sig_list: list[int]) -> bool:
+        if _is_lex_dot_qualifier(tokens, s_pos, sig_list):
+            return True
+        if _is_lex_within_group(tokens, s_pos, sig_list):
+            return True
+        if _is_lex_multi_token_post_on_exit(tokens, s_pos, sig_list):
+            return False
+        wu = tokens[sig_list[s_pos]][1].upper()
+        prev_idx = sig_list[s_pos - 1] if s_pos > 0 else None
+        prev_sig = tokens[prev_idx] if prev_idx is not None else None
+        nxt_sig = tokens[sig_list[s_pos + 1]] if s_pos + 1 < len(sig_list) else None
+        if prev_sig is not None:
+            if (prev_sig[0] == "OTHER" and not _is_postfix_factorial_lex(tokens, s_pos - 1, sig_list)) or (
+                prev_sig[0] == "OP" and prev_sig[1] not in (")", "]", "}", ";")
+            ):
+                return True
+            if prev_sig[0] == "IDENT" and _is_lex_prev_word_operator(tokens, s_pos - 1, sig_list, nxt_sig):
+                return True
+        if nxt_sig is not None:
+            if nxt_sig[0] == "OTHER":
+                if wu in ("SELECT", "WHERE", "PREWHERE", "HAVING", "QUALIFY", "LIMIT", "OFFSET") and nxt_sig[1] in (
+                    "~",
+                    "!",
+                ):
+                    return False
+                return True
+            if nxt_sig == ("OP", "[") and wu not in (
+                "SELECT",
+                "WHERE",
+                "PREWHERE",
+                "HAVING",
+                "QUALIFY",
+                "LIMIT",
+                "OFFSET",
+            ):
+                return True
+            if nxt_sig[0] == "OP" and nxt_sig[1] not in ("(", ")", "[", "]", "{", "}", ",", ";"):
+                if wu == "SELECT" and nxt_sig[1] in ("*", "+", "-"):
+                    return False
+                if wu in ("WHERE", "PREWHERE", "HAVING", "QUALIFY", "LIMIT", "OFFSET") and nxt_sig[1] in ("+", "-"):
+                    return False
+                return True
+            if (
+                nxt_sig[0] == "IDENT"
+                and nxt_sig[1].upper() in _ON_EXPR_NEXT_WORDS
+                and not _is_non_kw_lex_pos(tokens, sig_list[s_pos + 1])
+                and wu not in ("SELECT", "WHERE", "PREWHERE", "HAVING", "QUALIFY", "LIMIT", "OFFSET")
+            ):
+                return True
+        return False
+
+    def _can_exit_from_lex(
+        tokens: list[tuple[str, str]], s_pos: int, sig_list: list[int], *, in_on_clause: bool
+    ) -> bool:
+        if _is_lex_within_group(tokens, s_pos, sig_list):
+            return False
+        if not in_on_clause:
+            return True
+        wu = tokens[sig_list[s_pos]][1].upper()
+        nxt_sig = tokens[sig_list[s_pos + 1]] if s_pos + 1 < len(sig_list) else None
+        if wu in ("GROUP", "ORDER"):
+            return nxt_sig is not None and nxt_sig[0] == "IDENT" and nxt_sig[1].upper() in ("BY", "ALL")
+        if wu == "FETCH":
+            return nxt_sig is not None and nxt_sig[0] == "IDENT" and nxt_sig[1].upper() in ("FIRST", "NEXT")
+        return True
+
+    def _find_matching_paren(tokens: list[tuple[str, str]], open_idx: int) -> int:
+        depth = 0
+        for idx in range(open_idx, len(tokens)):
+            k, t = tokens[idx]
+            if k == "OP" and t == "(":
+                depth += 1
+            elif k == "OP" and t == ")":
+                depth -= 1
+                if depth == 0:
+                    return idx
+        return len(tokens) - 1
+
+    def _has_enclosing_parens(tokens: list[tuple[str, str]]) -> tuple[int, int] | None:
+        sig = _sig_indices(tokens)
+        if len(sig) >= 2 and tokens[sig[0]] == ("OP", "(") and _find_matching_paren(tokens, sig[0]) == sig[-1]:
+            return sig[0], sig[-1]
+        return None
+
+    def _is_subquery_tokens(inner_tokens: list[tuple[str, str]]) -> bool:
+        cur = inner_tokens
+        while (enc := _has_enclosing_parens(cur)) is not None:
+            cur = cur[enc[0] + 1 : enc[1]]
+        sig = _sig_indices(cur)
+        if not sig:
+            return False
+        k0, t0 = cur[sig[0]]
+        if k0 == "IDENT" and t0.upper() in ("SELECT", "WITH", "FROM", "TABLE"):
+            return True
+        if k0 == "OP" and t0 == "(":
+            close_first = _find_matching_paren(cur, sig[0])
+            if close_first < sig[-1]:
+                j = close_first + 1
+                while j < len(cur) and cur[j][0] in ("WS", "COMMENT"):
+                    j += 1
+                if (
+                    j < len(cur)
+                    and cur[j][0] == "IDENT"
+                    and cur[j][1].upper() in ("UNION", "INTERSECT", "EXCEPT", "ORDER", "LIMIT", "OFFSET", "FETCH")
+                ):
+                    return _is_subquery_tokens(cur[sig[0] + 1 : close_first])
+        return False
+
+    def _coerce_request_predicates(segment_tokens: list[tuple[str, str]]) -> str:
+        lit_nonce = _secrets.token_hex(8)
+        saved_lits: list[str] = []
+        parts: list[str] = []
+        sig_idxs = _sig_indices(segment_tokens)
+        sig_pos_map = {idx: pos for pos, idx in enumerate(sig_idxs)}
+        for idx, (k, t) in enumerate(segment_tokens):
+            if k == "STR":
+                t_norm = _normalize_iso(t)
+                s_pos = sig_pos_map.get(idx, -1)
+                is_cf_key = (
+                    cf_key_lit_re.fullmatch(t_norm) is not None
+                    and s_pos >= 2
+                    and s_pos + 1 < len(sig_idxs)
+                    and segment_tokens[sig_idxs[s_pos - 2]][1].lower() == "custom_fields"
+                    and segment_tokens[sig_idxs[s_pos - 1]] == ("OP", "[")
+                    and segment_tokens[sig_idxs[s_pos + 1]] == ("OP", "]")
+                )
+                if is_cf_key or t_norm.lower() in ("'true'", "'false'"):
+                    parts.append(t_norm)
+                else:
+                    s_idx = len(saved_lits)
+                    saved_lits.append(t_norm)
+                    parts.append(f"__fla_str_lit_{lit_nonce}_{s_idx}__")
+            else:
+                parts.append(t)
+        seg_sql = "".join(parts)
+        for b_field in ("edge", "is_ipv6", "waf"):
+            for pat, repl in (
+                (r"IN\s*\(\s*'true'\s*\)", "IN ('true', '1')"),
+                (r"NOT\s+IN\s*\(\s*'true'\s*\)", "NOT IN ('true', '1')"),
+                (r"IN\s*\(\s*'false'\s*\)", "IN ('false', '0', '')"),
+                (r"=\s*'true'", "IN ('true', '1')"),
+                (r"=\s*'false'", "IN ('false', '0', '')"),
+                (r"=\s*\btrue\b", "IN ('true', '1')"),
+                (r"=\s*\bfalse\b", "IN ('false', '0', '')"),
+            ):
+                seg_sql = re.sub(
+                    rf"custom_fields\['{b_field}'\]\s*{pat}",
+                    f"lower(custom_fields['{b_field}']) {repl}",
+                    seg_sql,
+                    flags=re.IGNORECASE,
+                )
+        for pat, repl in (
+            (r"(custom_fields\['[a-zA-Z0-9_]+'\])\s*(=|!=|<>)\s*(-?\d+(?:\.\d+)?)\b", r"\1 \2 '\3'"),
+            (r"(custom_fields\['[a-zA-Z0-9_]+'\])\s*(<=|>=|<|>)\s*(-?\d+(?:\.\d+)?)\b", r"toFloat64OrZero(\1) \2 \3"),
+        ):
+            seg_sql = re.sub(pat, repl, seg_sql)
+        if saved_lits:
+            seg_sql = re.sub(rf"__fla_str_lit_{lit_nonce}_(\d+)__", lambda m: saved_lits[int(m.group(1))], seg_sql)
+        return seg_sql
+
+    def _rewrite_tokens(
+        tokens: list[tuple[str, str]], inherited_ctes: dict[str, set[str]]
+    ) -> tuple[str, set[str], set[str]]:
+        prefix_wrap: list[str] = []
+        suffix_wrap: list[str] = []
+        while (enc := _has_enclosing_parens(tokens)) is not None:
+            open_i, close_i = enc
+            prefix_wrap.append("".join(tk for _, tk in tokens[: open_i + 1]))
+            suffix_wrap.append("".join(tk for _, tk in tokens[close_i:]))
+            tokens = tokens[open_i + 1 : close_i]
+
+        def _wrap(s: str) -> str:
+            if not prefix_wrap:
+                return s
+            return "".join(prefix_wrap) + s + "".join(reversed(suffix_wrap))
+
+        ctes = dict(inherited_ctes)
+        all_canonicals: set[str] = set()
+        sig = _sig_indices(tokens)
+        if not sig:
+            return _wrap("".join(t for _, t in tokens)), set(), set()
+
+        out_prefix = ""
+        if tokens[sig[0]][0] == "IDENT" and tokens[sig[0]][1].upper() == "WITH":
+            buf: list[str] = []
+            w_idx = sig[0]
+            buf.extend(tk for _, tk in tokens[: w_idx + 1])
+            i_tok = w_idx + 1
+            p_rec = i_tok
+            while p_rec < len(tokens) and tokens[p_rec][0] in ("WS", "COMMENT"):
+                p_rec += 1
+            if p_rec < len(tokens) and tokens[p_rec][0] == "IDENT" and tokens[p_rec][1].upper() == "RECURSIVE":
+                buf.extend(tk for _, tk in tokens[i_tok : p_rec + 1])
+                i_tok = p_rec + 1
+
+            parsed_any_cte = False
+            while i_tok < len(tokens):
+                p = i_tok
+                while p < len(tokens) and tokens[p][0] in ("WS", "COMMENT"):
+                    p += 1
+                if p >= len(tokens) or tokens[p][0] != "IDENT" or tokens[p][1].upper() == "SELECT":
+                    break
+                cte_name = tokens[p][1]
+                p2 = p + 1
+                while p2 < len(tokens) and tokens[p2][0] in ("WS", "COMMENT"):
+                    p2 += 1
+                if p2 < len(tokens) and tokens[p2] == ("OP", "("):
+                    rp_cols = _find_matching_paren(tokens, p2)
+                    if not _is_valid_lex_ident_list(tokens[p2 + 1 : rp_cols]):
+                        break
+                    p2 = rp_cols + 1
+                    while p2 < len(tokens) and tokens[p2][0] in ("WS", "COMMENT"):
+                        p2 += 1
+                if (
+                    p2 >= len(tokens)
+                    or tokens[p2][0] != "IDENT"
+                    or tokens[p2][1].upper() != "AS"
+                    or _is_non_kw_lex_pos(tokens, p2)
+                ):
+                    break
+                p2 += 1
+                while p2 < len(tokens):
+                    if tokens[p2][0] in ("WS", "COMMENT"):
+                        p2 += 1
+                    elif tokens[p2][0] == "IDENT" and tokens[p2][1].upper() in ("NOT", "MATERIALIZED"):
+                        p2 += 1
+                    else:
+                        break
+                if p2 >= len(tokens) or tokens[p2] != ("OP", "("):
+                    break
+                close_idx = _find_matching_paren(tokens, p2)
+                if not _is_subquery_tokens(tokens[p2 + 1 : close_idx]):
+                    break
+                inner_sql, inner_domains, inner_canonicals = _rewrite_tokens(tokens[p2 + 1 : close_idx], ctes)
+                ctes[cte_name.lower()] = inner_domains
+                all_canonicals |= inner_canonicals
+                buf.extend(tk for _, tk in tokens[i_tok : p2 + 1])
+                buf.append(inner_sql)
+                buf.append(")")
+                i_tok = close_idx + 1
+                parsed_any_cte = True
+
+                next_sig = i_tok
+                while next_sig < len(tokens) and tokens[next_sig][0] in ("WS", "COMMENT"):
+                    next_sig += 1
+                if next_sig < len(tokens) and tokens[next_sig] == ("OP", ","):
+                    buf.extend(tk for _, tk in tokens[i_tok : next_sig + 1])
+                    i_tok = next_sig + 1
+                    continue
+                break
+
+            if parsed_any_cte:
+                out_prefix = "".join(buf)
+                tokens = tokens[i_tok:]
+                if not tokens:
+                    return _wrap(out_prefix), set(), all_canonicals
+
+        top_sig = _sig_indices(tokens)
+        top_sig_pos = {idx: pos for pos, idx in enumerate(top_sig)}
+        branches: list[tuple[list[tuple[str, str]], list[tuple[str, str]]]] = []
+        cur_branch: list[tuple[str, str]] = []
+        i_tok = 0
+        depth = 0
+        split_in_from = False
+        split_expect_table = False
+        split_in_on = False
+        while i_tok < len(tokens):
+            k, t = tokens[i_tok]
+            if k == "OP" and t in ("(", "[", "{"):
+                if depth == 0 and split_in_from and split_expect_table:
+                    split_expect_table = False
+                depth += 1
+            elif k == "OP" and t in (")", "]", "}"):
+                depth = max(0, depth - 1)
+            elif depth == 0 and k == "OP" and t == "," and split_in_from:
+                split_expect_table = True
+                split_in_on = False
+            elif depth == 0 and k == "IDENT" and not _is_non_kw_lex_pos(tokens, i_tok):
+                wu_top = t.upper()
+                s_pos_top = top_sig_pos[i_tok]
+                is_top_dot = _is_lex_dot_qualifier(tokens, s_pos_top, top_sig)
+                is_top_within = _is_lex_within_group(tokens, s_pos_top, top_sig)
+                is_top_on_ident = (
+                    split_in_on
+                    and not split_expect_table
+                    and (wu_top in _FROM_EXIT_KEYWORDS or wu_top in ("SELECT", "FROM", "JOIN", "TABLE"))
+                    and _is_lex_on_expr_ident(tokens, s_pos_top, top_sig)
+                )
+                if not is_top_dot and not is_top_within and not is_top_on_ident:
+                    if wu_top in ("UNION", "INTERSECT", "EXCEPT") and _is_lex_multi_token_post_on_exit(
+                        tokens, s_pos_top, top_sig
+                    ):
+                        sep: list[tuple[str, str]] = [tokens[i_tok]]
+                        j = i_tok + 1
+                        while j < len(tokens) and tokens[j][0] in ("WS", "COMMENT"):
+                            sep.append(tokens[j])
+                            j += 1
+                        if j < len(tokens) and tokens[j][0] == "IDENT" and tokens[j][1].upper() in ("ALL", "DISTINCT"):
+                            sep.append(tokens[j])
+                            j += 1
+                        branches.append((cur_branch, sep))
+                        cur_branch = []
+                        split_in_from = False
+                        split_expect_table = False
+                        split_in_on = False
+                        i_tok = j
+                        continue
+                    if (wu_top == "FROM" and not _is_lex_distinct_from(tokens, s_pos_top, top_sig)) or wu_top == "JOIN":
+                        split_in_from = True
+                        split_expect_table = True
+                        split_in_on = False
+                    elif wu_top in _JOIN_MODIFIER_KEYWORDS:
+                        if split_in_from:
+                            split_expect_table = False
+                    elif split_in_from and not split_expect_table and not split_in_on and wu_top == "SELECT":
+                        after_top = tokens[top_sig[s_pos_top + 1]] if s_pos_top + 1 < len(top_sig) else None
+                        is_fn_proj_top = (
+                            after_top is not None
+                            and after_top[0] == "IDENT"
+                            and after_top[1].upper() in _FROM_FIRST_SELECT_FN_KEYWORDS
+                            and s_pos_top + 2 < len(top_sig)
+                            and tokens[top_sig[s_pos_top + 2]] == ("OP", "(")
+                        )
+                        is_bare_sel_top = not is_fn_proj_top and (
+                            after_top is None
+                            or after_top == ("OP", ",")
+                            or (
+                                after_top[0] == "IDENT"
+                                and not _is_lex_dot_qualifier(tokens, s_pos_top + 1, top_sig)
+                                and after_top[1].upper() in (_SQL_CLAUSE_STOPWORDS - {"ALL"})
+                            )
+                        )
+                        if not is_bare_sel_top:
+                            split_in_from = False
+                            split_in_on = False
+                    elif (
+                        split_in_from
+                        and not split_expect_table
+                        and not split_in_on
+                        and wu_top
+                        in (
+                            "PREWHERE",
+                            "SAMPLE",
+                            "SETTINGS",
+                            "FORMAT",
+                            "FOR",
+                            "SET",
+                        )
+                    ):
+                        after_top = tokens[top_sig[s_pos_top + 1]] if s_pos_top + 1 < len(top_sig) else None
+                        is_bare_top = (
+                            after_top is None
+                            or after_top in (("OP", ","), ("OP", "("))
+                            or (after_top[0] == "IDENT" and after_top[1].upper() in _SQL_CLAUSE_STOPWORDS)
+                        )
+                        if not is_bare_top and wu_top != "SAMPLE":
+                            split_in_from = False
+                            split_in_on = False
+                    elif (
+                        wu_top in _FROM_EXIT_KEYWORDS or (split_in_from and wu_top == "SELECT")
+                    ) and _can_exit_from_lex(tokens, s_pos_top, top_sig, in_on_clause=split_in_on):
+                        split_in_from = False
+                        split_expect_table = False
+                        split_in_on = False
+                    elif split_in_from and (wu_top == "ON" or (wu_top == "USING" and not split_in_on)):
+                        split_expect_table = False
+                        split_in_on = wu_top == "ON"
+                    elif split_in_from and not split_in_on and wu_top in ("FINAL", "SAMPLE"):
+                        split_expect_table = False
+                    elif split_in_from and split_expect_table and wu_top not in ("LATERAL", "ONLY"):
+                        split_expect_table = False
+            elif depth == 0 and split_in_from and split_expect_table and k in ("DQUOTE", "STR"):
+                split_expect_table = False
+            cur_branch.append(tokens[i_tok])
+            i_tok += 1
+        branches.append((cur_branch, []))
+
+        all_domains: set[str] = set()
+        rendered_parts: list[str] = [out_prefix]
+        for b_tokens, sep_tokens in branches:
+            if _has_enclosing_parens(b_tokens) is not None:
+                b_sql, b_domains, b_canonicals = _rewrite_tokens(b_tokens, ctes)
+            else:
+                b_sql, b_domains, b_canonicals = _rewrite_single_branch(b_tokens, ctes)
+            all_domains |= b_domains
+            all_canonicals |= b_canonicals
+            rendered_parts.append(b_sql)
+            rendered_parts.extend(tk for _, tk in sep_tokens)
+        return _wrap("".join(rendered_parts)), all_domains, all_canonicals
+
+    def _rewrite_single_branch(
+        tokens: list[tuple[str, str]], ctes: dict[str, set[str]]
+    ) -> tuple[str, set[str], set[str]]:
+        domains: set[str] = set()
+        branch_canonicals: set[str] = set()
+        alias_domains: dict[str, set[str]] = {}
+        processed: list[tuple[str, str]] = []
+        subquery_placeholders: dict[str, str] = {}
+        subquery_domains: dict[str, set[str]] = {}
+        sub_nonce = _secrets.token_hex(6)
+
+        i = 0
+        while i < len(tokens):
+            k, t = tokens[i]
+            if k == "OP" and t == "(":
+                close_idx = _find_matching_paren(tokens, i)
+                inner = tokens[i + 1 : close_idx]
+                prev_sig_idx = next((p for p in range(i - 1, -1, -1) if tokens[p][0] not in ("WS", "COMMENT")), None)
+                prev_fn_upper = (
+                    tokens[prev_sig_idx][1].upper()
+                    if prev_sig_idx is not None and tokens[prev_sig_idx][0] == "IDENT"
+                    else ""
+                )
+                inner_sig = _sig_indices(inner)
+                is_trim_from = (
+                    prev_fn_upper in ("TRIM", "BTRIM", "LTRIM", "RTRIM")
+                    and bool(inner_sig)
+                    and inner[inner_sig[0]][0] == "IDENT"
+                    and inner[inner_sig[0]][1].upper() == "FROM"
+                )
+                if not is_trim_from and _is_subquery_tokens(inner):
+                    sub_sql, sub_doms, sub_canons = _rewrite_tokens(inner, ctes)
+                    branch_canonicals |= sub_canons
+                    ph = f"__fla_subq_{sub_nonce}_{len(subquery_placeholders)}__"
+                    subquery_placeholders[ph] = f"({sub_sql})"
+                    subquery_domains[ph] = sub_doms
+                    processed.append(("SUBQ", ph))
+                    i = close_idx + 1
+                    continue
+            processed.append((k, t))
+            i += 1
+
+        sig_idxs = _sig_indices(processed)
+
+        def _is_bare_clause_alias_at(cand_s_pos: int) -> bool:
+            if cand_s_pos >= len(sig_idxs):
+                return False
+            ck, ct = processed[sig_idxs[cand_s_pos]]
+            if ck != "IDENT":
+                return False
+            cu = ct.upper()
+            after = processed[sig_idxs[cand_s_pos + 1]] if cand_s_pos + 1 < len(sig_idxs) else None
+            if cu == "SELECT":
+                if after is None or after == ("OP", ","):
+                    return True
+                if (
+                    after[0] == "IDENT"
+                    and not _is_lex_dot_qualifier(processed, cand_s_pos + 1, sig_idxs)
+                    and after[1].upper() in (_SQL_CLAUSE_STOPWORDS - {"ALL"})
+                ):
+                    if (
+                        after[1].upper() in _FROM_FIRST_SELECT_FN_KEYWORDS
+                        and cand_s_pos + 2 < len(sig_idxs)
+                        and (
+                            processed[sig_idxs[cand_s_pos + 2]] == ("OP", "(")
+                            or processed[sig_idxs[cand_s_pos + 2]][0] == "SUBQ"
+                        )
+                    ):
+                        return False
+                    return True
+                return False
+            if cu not in ("PREWHERE", "SAMPLE", "SETTINGS", "FORMAT", "FOR", "SET"):
+                return False
+            return (
+                after is None
+                or after in (("OP", ","), ("OP", "("))
+                or (after[0] == "IDENT" and after[1].upper() in _SQL_CLAUSE_STOPWORDS)
+            )
+
+        table_token_idxs: dict[int, str] = {}
+        table_alias_idxs: set[int] = set()
+        func_stack: list[str] = []
+        in_from = False
+        expect_table = False
+        in_sample_clause = False
+        in_on_clause = False
+        depth = 0
+        s_pos = 0
+        while s_pos < len(sig_idxs):
+            idx = sig_idxs[s_pos]
+            k, t = processed[idx]
+            if k == "OP" and t in ("(", "[", "{"):
+                if depth == 0 and in_from and expect_table:
+                    raise PermissionError(
+                        "parenthesized non-subquery table expressions are not allowed in console queries"
+                    )
+                if t == "(":
+                    prev_fn = processed[sig_idxs[s_pos - 1]] if s_pos > 0 else None
+                    func_stack.append(prev_fn[1].upper() if prev_fn and prev_fn[0] == "IDENT" else "")
+                else:
+                    func_stack.append(t)
+                depth += 1
+                s_pos += 1
+                continue
+            if k == "OP" and t in (")", "]", "}"):
+                if func_stack:
+                    func_stack.pop()
+                depth = max(0, depth - 1)
+                s_pos += 1
+                continue
+
+            if k == "IDENT" and t.upper() == "IN" and not _is_non_kw_lex_pos(processed, idx):
+                if not (func_stack and func_stack[-1] in ("POSITION", "OVERLAY", "TRIM")):
+                    nxt_tok = processed[sig_idxs[s_pos + 1]] if s_pos + 1 < len(sig_idxs) else None
+                    if nxt_tok is None or (nxt_tok[0] != "SUBQ" and nxt_tok != ("OP", "(")):
+                        raise PermissionError(
+                            "IN must be followed by a parenthesized list or subquery in console queries"
+                        )
+
+            if depth > 0:
+                s_pos += 1
+                continue
+
+            if k == "IDENT" and not _is_non_kw_lex_pos(processed, idx):
+                wu = t.upper()
+                if (
+                    _is_lex_dot_qualifier(processed, s_pos, sig_idxs)
+                    or (
+                        in_on_clause
+                        and not expect_table
+                        and (wu in _FROM_EXIT_KEYWORDS or wu in ("SELECT", "FROM", "JOIN", "TABLE"))
+                        and _is_lex_on_expr_ident(processed, s_pos, sig_idxs)
+                    )
+                    or _is_lex_within_group(processed, s_pos, sig_idxs)
+                ):
+                    in_sample_clause = False
+                    s_pos += 1
+                    continue
+                if (wu == "FROM" and not _is_lex_distinct_from(processed, s_pos, sig_idxs)) or wu == "JOIN":
+                    in_from = True
+                    expect_table = True
+                    in_sample_clause = False
+                    in_on_clause = False
+                    s_pos += 1
+                    continue
+                if wu in _JOIN_MODIFIER_KEYWORDS:
+                    if in_from and not (
+                        in_on_clause
+                        and s_pos + 1 < len(sig_idxs)
+                        and (
+                            processed[sig_idxs[s_pos + 1]] == ("OP", "(") or processed[sig_idxs[s_pos + 1]][0] == "SUBQ"
+                        )
+                    ):
+                        expect_table = False
+                        in_sample_clause = False
+                    s_pos += 1
+                    continue
+                if in_from and not expect_table and not in_on_clause and _is_bare_clause_alias_at(s_pos):
+                    table_alias_idxs.add(idx)
+                    in_sample_clause = False
+                    s_pos += 1
+                    continue
+                if in_from and in_sample_clause and wu == "OFFSET":
+                    in_sample_clause = False
+                    s_pos += 1
+                    continue
+                if (wu in _FROM_EXIT_KEYWORDS or (in_from and wu == "SELECT")) and _can_exit_from_lex(
+                    processed, s_pos, sig_idxs, in_on_clause=in_on_clause
+                ):
+                    in_from = False
+                    expect_table = False
+                    in_sample_clause = False
+                    in_on_clause = False
+                    s_pos += 1
+                    continue
+                if in_from and (wu == "ON" or (wu == "USING" and not in_on_clause)):
+                    expect_table = False
+                    in_sample_clause = False
+                    in_on_clause = wu == "ON"
+                    s_pos += 1
+                    continue
+                if in_from and not in_on_clause and wu in ("FINAL", "SAMPLE"):
+                    expect_table = False
+                    in_sample_clause = wu == "SAMPLE"
+                    s_pos += 1
+                    continue
+
+            if in_from and k == "OP" and t == ",":
+                expect_table = True
+                in_sample_clause = False
+                in_on_clause = False
+                s_pos += 1
+                continue
+
+            if in_from and expect_table:
+                if k == "IDENT" and t.upper() in ("LATERAL", "ONLY"):
+                    s_pos += 1
+                    continue
+                if k == "SUBQ":
+                    sub_doms = subquery_domains.get(t, set())
+                    domains |= sub_doms
+                    a_pos = s_pos + 1
+                    if (
+                        a_pos < len(sig_idxs)
+                        and processed[sig_idxs[a_pos]][0] == "IDENT"
+                        and processed[sig_idxs[a_pos]][1].upper() == "AS"
+                    ):
+                        a_pos += 1
+                        if a_pos < len(sig_idxs) and processed[sig_idxs[a_pos]][0] == "IDENT":
+                            a_idx = sig_idxs[a_pos]
+                            table_alias_idxs.add(a_idx)
+                            alias_domains[processed[a_idx][1].lower()] = sub_doms
+                            expect_table = False
+                            s_pos = a_pos + 1
+                            continue
+                    elif (
+                        a_pos < len(sig_idxs)
+                        and processed[sig_idxs[a_pos]][0] == "IDENT"
+                        and (
+                            processed[sig_idxs[a_pos]][1].upper() not in _SQL_CLAUSE_STOPWORDS
+                            or _is_bare_clause_alias_at(a_pos)
+                        )
+                    ):
+                        a_idx = sig_idxs[a_pos]
+                        table_alias_idxs.add(a_idx)
+                        alias_domains[processed[a_idx][1].lower()] = sub_doms
+                        expect_table = False
+                        s_pos = a_pos + 1
+                        continue
+                    expect_table = False
+                    s_pos += 1
+                    continue
+                if k == "IDENT":
+                    if s_pos + 1 < len(sig_idxs) and processed[sig_idxs[s_pos + 1]] == ("OP", "("):
+                        expect_table = False
+                        s_pos += 1
+                        continue
+                    low_tbl = t.lower()
+                    item_doms: set[str] = set()
+                    if low_tbl in ctes:
+                        item_doms = ctes[low_tbl]
+                        domains |= item_doms
+                        alias_domains[low_tbl] = item_doms
+                    elif low_tbl in table_map:
+                        mapped_name, dom, canonical_name = table_map[low_tbl]
+                        table_token_idxs[idx] = mapped_name
+                        item_doms = {dom}
+                        domains.add(dom)
+                        branch_canonicals.add(canonical_name)
+                        alias_domains[low_tbl] = item_doms
+                        alias_domains[mapped_name.lower()] = item_doms
+                    elif low_tbl == "as" and not _is_non_kw_lex_pos(processed, idx):
+                        raise PermissionError("SQL parse error: expected table reference")
+                    a_pos = s_pos + 1
+                    if (
+                        a_pos < len(sig_idxs)
+                        and processed[sig_idxs[a_pos]][0] == "IDENT"
+                        and processed[sig_idxs[a_pos]][1].upper() == "AS"
+                    ):
+                        a_pos += 1
+                        if a_pos < len(sig_idxs) and processed[sig_idxs[a_pos]][0] == "IDENT":
+                            a_idx = sig_idxs[a_pos]
+                            table_alias_idxs.add(a_idx)
+                            alias_domains[processed[a_idx][1].lower()] = item_doms
+                            expect_table = False
+                            s_pos = a_pos + 1
+                            continue
+                    elif (
+                        a_pos < len(sig_idxs)
+                        and processed[sig_idxs[a_pos]][0] == "IDENT"
+                        and (
+                            processed[sig_idxs[a_pos]][1].upper() not in _SQL_CLAUSE_STOPWORDS
+                            or _is_bare_clause_alias_at(a_pos)
+                        )
+                    ):
+                        a_idx = sig_idxs[a_pos]
+                        table_alias_idxs.add(a_idx)
+                        alias_domains[processed[a_idx][1].lower()] = item_doms
+                        expect_table = False
+                        s_pos = a_pos + 1
+                        continue
+                    expect_table = False
+                    s_pos += 1
+                    continue
+                expect_table = False
+
+            s_pos += 1
+
+        touches_request = "request" in domains
+        touches_any_fact = bool(domains)
+        rewritten_tokens: list[tuple[str, str]] = []
+        sig_pos_by_idx = {idx: pos for pos, idx in enumerate(sig_idxs)}
+        for idx, (k, t) in enumerate(processed):
+            if idx in table_token_idxs:
+                rewritten_tokens.append(("IDENT", table_token_idxs[idx]))
+                continue
+            if idx in table_alias_idxs or k != "IDENT":
+                rewritten_tokens.append((k, t))
+                continue
+            s_pos = sig_pos_by_idx[idx]
+            prev_tok = processed[sig_idxs[s_pos - 1]] if s_pos > 0 else None
+            next_tok = processed[sig_idxs[s_pos + 1]] if s_pos + 1 < len(sig_idxs) else None
+            if (
+                prev_tok is not None
+                and prev_tok[0] == "IDENT"
+                and prev_tok[1].upper() == "AS"
+                and not _is_non_kw_lex_pos(processed, sig_idxs[s_pos - 1])
+            ):
+                rewritten_tokens.append((k, t))
+                continue
+            if next_tok == ("OP", "("):
+                rewritten_tokens.append((k, t))
+                continue
+            if next_tok == ("OP", "."):
+                low_q = t.lower()
+                if low_q in table_map and low_q not in ctes:
+                    rewritten_tokens.append(("IDENT", table_map[low_q][0]))
+                else:
+                    rewritten_tokens.append((k, t))
+                continue
+            if prev_tok == ("OP", "."):
+                qual_tok = processed[sig_idxs[s_pos - 2]] if s_pos >= 2 else None
+                q_domains = (
+                    alias_domains.get(qual_tok[1].lower(), domains)
+                    if (qual_tok and qual_tok[0] == "IDENT")
+                    else domains
+                )
+                low_c = t.lower()
+                if low_c == "timestamp" and q_domains:
+                    rewritten_tokens.append(("IDENT", "event_timestamp"))
+                elif low_c == "ip" and "request" in q_domains:
+                    rewritten_tokens.append(("IDENT", "client_ip"))
+                elif low_c in _REQUEST_CF_FIELDS and "request" in q_domains:
+                    rewritten_tokens.append(("IDENT", f"custom_fields['{low_c}']"))
+                else:
+                    rewritten_tokens.append((k, t))
+                continue
+            low_ident = t.lower()
+            if low_ident == "timestamp" and touches_any_fact:
+                rewritten_tokens.append(("IDENT", "event_timestamp"))
+            elif low_ident == "ip" and touches_request:
+                rewritten_tokens.append(("IDENT", "client_ip"))
+            elif low_ident in _REQUEST_CF_FIELDS and touches_request:
+                rewritten_tokens.append(("IDENT", f"custom_fields['{low_ident}']"))
+            else:
+                rewritten_tokens.append((k, t))
+
+        if touches_request:
+            branch_sql = _coerce_request_predicates(rewritten_tokens)
+        else:
+            branch_sql = "".join(_normalize_iso(tk) if kd == "STR" else tk for kd, tk in rewritten_tokens)
+        for ph, sub_rendered in subquery_placeholders.items():
+            branch_sql = branch_sql.replace(ph, sub_rendered)
+        return branch_sql, domains, branch_canonicals
+
+    tokens = [(m.lastgroup or "OTHER", m.group(0)) for m in _CONSOLE_SQL_LEX_RE.finditer(sql)]
+    rewritten, _, canonicals = _rewrite_tokens(tokens, {})
+    return rewritten, canonicals
+
+
+def _rewrite_console_sql(sql: str, *, svc_table: str, names: Mapping[str, str]) -> str:
+    rewritten, _ = _rewrite_console_sql_with_canonicals(sql, svc_table=svc_table, names=names)
+    return rewritten
+
+
+def _scrub_ip_leaves(obj: Any) -> Any:
+    if isinstance(obj, dict):
+        return {k: _scrub_ip_leaves(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_scrub_ip_leaves(x) for x in obj]
+    if isinstance(obj, tuple):
+        return tuple(_scrub_ip_leaves(x) for x in obj)
+    if isinstance(obj, str) and obj != "[redacted]":
+        return scrub_ip_text(obj)
+    return obj
+
 
 def query_endpoint(
     service: HighScaleService,
@@ -592,78 +2203,99 @@ def query_endpoint(
 ) -> dict[str, Any]:
     """Run a console query."""
     client = client if client is not None else service.client
-    names = {canonical: (tables or {}).get(canonical, canonical) for canonical in _FACT_DOMAINS}
+    names = (
+        {canonical: tables[canonical] for canonical in _FACT_DOMAINS if canonical in tables}
+        if tables is not None
+        else {canonical: canonical for canonical in _FACT_DOMAINS}
+    )
     timer = SectionTimer()
     section_timings = timer.entries
     raw_sql = req.sql.strip()
     max_rows = max(1, min(int(req.max_rows), MAX_QUERY_ROWS))
     svc_table = _safe_table(service.service_id)
-    allowed_tables = frozenset({"logs", "client_vitals", "client_errors", svc_table.lower()})
+    allowed_tables = frozenset(
+        {
+            "logs",
+            "client_vitals",
+            "client_errors",
+            "request_facts",
+            "rum_vitals_facts",
+            "rum_error_facts",
+            "rum_page_load_facts",
+            svc_table.lower(),
+        }
+    )
     _t_val = time.perf_counter()
     _reject_ambiguous_syntax(raw_sql, allowed_tables | frozenset(names.values()))
-    with duckdb.connect(":memory:") as parser_con:
-        try:
-            validate_user_sql(
-                raw_sql,
-                parser_con=parser_con,
-                session_id=session_id,
-                service_id=service.service_id,
-                allowed_tables=allowed_tables,
-            )
-        except SQLValidationError as exc:
-            raise PermissionError(exc.message) from exc
+    try:
+        validate_user_sql(
+            raw_sql,
+            session_id=session_id,
+            service_id=service.service_id,
+            allowed_tables=allowed_tables,
+        )
+    except SQLValidationError as exc:
+        raise PermissionError(exc.message) from exc
     timer.mark("validate_user_sql", _t_val)
-    sql = raw_sql.rstrip().rstrip(";")
-    for pat, repl in (
-        *([(rf"\b{re.escape(svc_table)}\b", names["request_facts"])] if svc_table != "logs" else []),
-        (r"\blogs\b", names["request_facts"]),
-        (r"\bclient_vitals\b", names["rum_vitals_facts"]),
-        (r"\bclient_errors\b", names["rum_error_facts"]),
-        (r"(?<!AS\s)(?<!')\btimestamp\b(?!')", "event_timestamp"),
-        (r"(?<!AS\s)(?<!')\bip\b(?!')", "client_ip"),
-    ):
-        sql = re.sub(pat, repl, sql, flags=re.IGNORECASE)
-
-    def _normalize_iso_literal(match: re.Match[str]) -> str:
-        raw = match.group(1)
-        try:
-            dt = datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(UTC)
-            return f"'{dt.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}'"
-        except ValueError:
-            return match.group(0)
-
-    sql = re.sub(
-        r"'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)'", _normalize_iso_literal, sql
+    sql, referenced_canonicals = _rewrite_console_sql_with_canonicals(
+        raw_sql.rstrip().rstrip(";"), svc_table=svc_table, names=names
     )
-    for field in _FIELD_DIMENSIONS.values():
-        if field in {"client_ip", "country", "url", "cmcd", "custom_fields"}:
-            continue
-        sql = re.sub(rf"(?<!')\b{field}\b(?!')", f"custom_fields['{field}']", sql)
-    for b_field in ("edge", "is_ipv6", "waf"):
-        for pat, repl in (
-            (r"IN\s*\(\s*'true'\s*\)", "IN ('true', '1')"),
-            (r"NOT\s+IN\s*\(\s*'true'\s*\)", "NOT IN ('true', '1')"),
-            (r"IN\s*\(\s*'false'\s*\)", "IN ('false', '0', '')"),
-            (r"=\s*'true'", "IN ('true', '1')"),
-            (r"=\s*'false'", "IN ('false', '0', '')"),
-        ):
-            sql = re.sub(
-                rf"custom_fields\['{b_field}'\]\s*{pat}",
-                f"lower(custom_fields['{b_field}']) {repl}",
-                sql,
-                flags=re.IGNORECASE,
-            )
-    for pat, repl in (
-        (r"(custom_fields\['[a-zA-Z0-9_]+'\])\s*(=|!=|<>)\s*(-?\d+(?:\.\d+)?)\b", r"\1 \2 '\3'"),
-        (r"(custom_fields\['[a-zA-Z0-9_]+'\])\s*(<=|>=|<|>)\s*(-?\d+(?:\.\d+)?)\b", r"toFloat64OrZero(\1) \2 \3"),
-    ):
-        sql = re.sub(pat, repl, sql)
+
+    post_allowed_tables = frozenset(t.lower() for t in names.values())
+    _reject_ambiguous_syntax(sql, allowed_tables | post_allowed_tables)
+    try:
+        post_val = validate_user_sql(
+            sql,
+            session_id=session_id,
+            service_id=service.service_id,
+            allowed_tables=post_allowed_tables,
+        )
+    except SQLValidationError as exc:
+        raise PermissionError(exc.message) from exc
+
+    def _collect_non_cte_base_tables(node_obj: Any, active_ctes: frozenset[str] = frozenset()) -> set[str]:
+        found: set[str] = set()
+        if isinstance(node_obj, dict):
+            if isinstance(cte_map := node_obj.get("cte_map"), dict) and isinstance(entries := cte_map.get("map"), list):
+                for entry in entries:
+                    if isinstance(entry, dict):
+                        key = entry.get("key")
+                        alias_fs = frozenset({key.strip().lower()}) if isinstance(key, str) and key else frozenset()
+                        if (val := entry.get("value")) is not None:
+                            found |= _collect_non_cte_base_tables(val, active_ctes)
+                        active_ctes = active_ctes | alias_fs
+            if node_obj.get("type") == "BASE_TABLE" or "table_name" in node_obj:
+                tname = str(node_obj.get("table_name") or "").strip().lower()
+                sname = str(node_obj.get("schema_name") or "").strip().lower()
+                cname = str(node_obj.get("catalog_name") or "").strip().lower()
+                if tname and not (tname in active_ctes and not sname and not cname):
+                    found.add(tname)
+            for k_child, v_child in node_obj.items():
+                if k_child != "cte_map":
+                    found |= _collect_non_cte_base_tables(v_child, active_ctes)
+        elif isinstance(node_obj, list):
+            for item in node_obj:
+                found |= _collect_non_cte_base_tables(item, active_ctes)
+        return found
+
+    code_sql = _code_only(sql)
     fact_tables = {
         names[canonical]: domain
         for canonical, domain in _FACT_DOMAINS.items()
-        if re.search(rf"\b{re.escape(names[canonical])}\b", sql, flags=re.IGNORECASE)
+        if canonical in names
+        and (
+            canonical in referenced_canonicals
+            or re.search(rf"\b{re.escape(names[canonical])}\b", code_sql, flags=re.IGNORECASE)
+        )
     }
-    has_explicit_limit = bool(re.search(r"\bLIMIT\b", _code_only(sql), flags=re.IGNORECASE))
+    non_cte_tables = _collect_non_cte_base_tables(post_val.parse_tree)
+    resolved_fact_lower = {tbl.lower() for tbl in fact_tables}
+    if non_cte_tables and (not fact_tables or not non_cte_tables.issubset(resolved_fact_lower)):
+        raise PermissionError("Query referenced an allowed table without resolving a scoped fact table")
+    if any(re.search(rf"\b{re.escape(tbl)}\b", code_sql, flags=re.IGNORECASE) for tbl in post_allowed_tables):
+        if not fact_tables:
+            raise PermissionError("Query referenced an allowed table without resolving a scoped fact table")
+    has_explicit_limit = bool(re.search(r"\bLIMIT\b", code_sql, flags=re.IGNORECASE))
     _reject_unsafe_functions(sql)
     row_cap = (MAX_QUERY_ROWS if has_explicit_limit else max_rows) + 1
     sql = f"SELECT * FROM (\n{sql}\n) LIMIT {row_cap}"
@@ -688,6 +2320,7 @@ def query_endpoint(
             mask_ips,
             start_time,
             end_time,
+            tuple(sorted((tables or {}).items())),
             os.getenv("DEBUG_RESPONSES", ""),
         )
         if (cached_res := _HS_QUERY_RESULT_CACHE.get(cache_key)) is not None:
@@ -709,18 +2342,19 @@ def query_endpoint(
     _t_serialize = time.perf_counter()
     data: list[dict[str, Any]] = []
     cols = list(res[0].keys()) if res else []
-    redact_keys = IP_FAMILY_KEYS | SESSION_ID_KEYS | {"client_ip"}
     for d in res:
         row_copy = dict(d)
         for k, v in row_copy.items():
             if hasattr(v, "isoformat"):
                 val = v.isoformat()
                 row_copy[k] = val.replace("+00:00", "Z") if "+" in val else val + "Z"
-            elif mask_ips and k.lower() in redact_keys and v:
+            elif mask_ips and is_saved_view_pii_key(str(k)) and v:
                 row_copy[k] = "[redacted]"
         data.append(row_copy)
     if mask_ips:
+        data = apply_pii_policy(data, {"mask_ips": True})
         data = mask_ip_values(data)
+        data = _scrub_ip_leaves(data)
     timer.mark("serialize_json", _t_serialize)
     out = build_query_response_envelope(
         columns=cols,

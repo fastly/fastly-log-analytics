@@ -7,8 +7,7 @@ and nothing is dropped — an existing, populated database is left intact.
 Any DDL failure is printed with the offending statement and the script
 exits nonzero (errors are never swallowed).
 
-The backend and the Celery workers now ensure this schema themselves at
-startup; this script remains the explicit ops entry point for
+The backend ensures this schema itself at startup; this script remains the explicit ops entry point for
 provisioning a database ahead of a deploy, or for re-checking one by
 hand.
 """

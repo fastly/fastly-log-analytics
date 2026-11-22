@@ -101,6 +101,18 @@ def raise_internal(
     raise HTTPException(status_code=status, detail=detail) from exc
 
 
+def _caused_by_out_of_memory(e: BaseException) -> bool:
+    """True when ``e`` or anything in its ``__cause__`` / ``__context__`` chain is an out-of-memory error."""
+    seen: set[int] = set()
+    current: BaseException | None = e
+    while current is not None and id(current) not in seen:
+        if isinstance(current, MemoryError) or type(current).__name__ == "OutOfMemoryException":
+            return True
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
+
+
 def _handle_query_error(
     e: Exception,
     *,
@@ -110,6 +122,16 @@ def _handle_query_error(
 ) -> NoReturn:
     if isinstance(e, HTTPException):
         raise e
+    if _caused_by_out_of_memory(e):
+        # A scan that exhausts query memory or the temp-spill cap is a capacity limit, not a server bug: tell the user
+        # how to get unstuck. The engine message carries server paths, so it stays in the log.
+        raise_internal(
+            logger_obj,
+            e,
+            code="query_resource_limit",
+            status=503,
+            message="This query needed more memory than is available. Narrow the time range or add a filter, then retry.",
+        )
     if isinstance(e, ValueError):
         raise HTTPException(status_code=400, detail=make_error("bad_request", redact_error_text(e))) from e
     if isinstance(e, LookupError):

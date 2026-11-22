@@ -69,7 +69,7 @@ logger = logging.getLogger("backend.utils.telemetry_proxy")
 # instead of the default ``boto3.<op>``. Callers that want their hint to
 # survive across the boto3 paginator's internal threading should keep the
 # token in scope for the entire paginate() iteration — see
-# backend/core/duckdb.py:_ProxyPaginatorShim.
+# backend/core/fos_client.py:_ProxyPaginatorShim.
 _BOTO3_CALLER_HINT: contextvars.ContextVar[str | None] = contextvars.ContextVar("fos_boto3_caller_hint", default=None)
 
 # Module-level state (intentionally process-singleton; reset in tests via
@@ -510,20 +510,34 @@ def start_proxy_server() -> None:
 
 def stop_proxy_server() -> None:
     global _RUNNER, _LOOP, _SERVER_THREAD, _SESSION, _PORT
-    if _LOOP is not None:
+    loop = _LOOP
+    thread = _SERVER_THREAD
+    if loop is not None:
         if _SESSION is not None:
             try:
-                asyncio.run_coroutine_threadsafe(_SESSION.close(), _LOOP).result(timeout=2.0)
+                asyncio.run_coroutine_threadsafe(_SESSION.close(), loop).result(timeout=2.0)
             except Exception:
                 logger.debug("stop_proxy_server: asyncio.run_coroutine_threadsafe failed (ignored)", exc_info=True)
         if _RUNNER is not None:
             try:
-                asyncio.run_coroutine_threadsafe(_RUNNER.cleanup(), _LOOP).result(timeout=2.0)
+                asyncio.run_coroutine_threadsafe(_RUNNER.cleanup(), loop).result(timeout=2.0)
             except Exception:
                 logger.debug("stop_proxy_server: asyncio.run_coroutine_threadsafe failed (ignored)", exc_info=True)
-        _LOOP.call_soon_threadsafe(_LOOP.stop)
-    if _SERVER_THREAD is not None:
-        _SERVER_THREAD.join(timeout=2.0)
+        loop.call_soon_threadsafe(loop.stop)
+    if thread is not None:
+        thread.join(timeout=2.0)
+    if loop is not None and not loop.is_running() and not loop.is_closed():
+        loop.close()
+    _RUNNER = None
+    _LOOP = None
+    _SERVER_THREAD = None
+    _SESSION = None
+    _PORT = None
+    _READY.clear()
+    _self = sys.modules[__name__]
+    for name in ("_RUNNER", "_LOOP", "_SERVER_THREAD", "_SESSION", "_PORT"):
+        setattr(_self, name, globals()[name])
+    _log_flusher.stop_log_flusher()
 
 
 def proxy_endpoint() -> str:

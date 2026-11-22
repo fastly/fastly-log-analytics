@@ -1,179 +1,26 @@
-"""Celery application for the distributed ingest / cron data plane, plus
-broker queue-depth probing and SSE in-process/sync-status publishers.
+"""Admin status helpers and SSE publishers.
 
-Queues:
-- ``q.ingest``  — file-level ingest work (discovery dispatch, convert, sweep).
-- ``q.control`` — cron-family jobs wrapped by ``@cron_task`` / ``global_job``.
-
-Anything not matched by ``task_routes`` lands on the default ``celery``
-queue; workers must consume all three (see docker-compose.multipod.yml and
-deploy/chart worker args). tests/routers/test_admin_system_and_streams.py pins
-that every route key matches a registered task and that the advertised
-queue set covers every routed queue.
+Holds the in-process / Valkey sync-status publishers, the ingest-ledger
+summary, list, purge and retry helpers, the in-process APScheduler schedule
+and active-run snapshots, and the cached status payload served at
+``/api/admin/celery/status`` and on the ``celery-status`` SSE channel. Ingest
+runs in ``backend.high_scale.worker``; the module and route names predate it.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import threading
 import time
 from collections import defaultdict, deque
 from collections.abc import AsyncIterator
 from typing import Any
 
-from celery import Celery
-from celery.signals import setup_logging, worker_process_init
-
 from backend.config import SSE_BACKPLANE
+from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
 
 logger = logging.getLogger(__name__)
-
-broker_url = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
-
-app = Celery("fla_worker", broker=broker_url)
-
-app.conf.update(
-    task_serializer="json",
-    accept_content=["json"],
-    result_serializer="json",
-    timezone="UTC",
-    enable_utc=True,
-    # No result backend: task return values are unused; recording them in the
-    # broker would just grow keys. Outcomes are tracked in cron_runs and the
-    # ingest_ledger instead.
-    task_ignore_result=True,
-    # At-least-once semantics: a worker killed mid-task must not silently
-    # lose the message. Tasks are idempotent (ledger claim + delete-then-
-    # insert convert), so redelivery is safe.
-    task_acks_late=True,
-    task_reject_on_worker_lost=True,
-    # Long-running converts must not let one worker hoard the queue.
-    worker_prefetch_multiplier=1,
-    # Hard cap a wedged FOS download / DuckDB insert (prefork pool only;
-    # the threads pool does not support time limits).
-    task_time_limit=15 * 60,
-    task_soft_time_limit=13 * 60,
-    broker_connection_retry_on_startup=True,
-    # Redis-broker redelivery window. Must exceed task_time_limit so a
-    # still-running task isn't redelivered to a second worker mid-flight.
-    broker_transport_options={"visibility_timeout": 30 * 60},
-    include=[
-        "backend.core.ingest",
-        "backend.cron.jobs.sync",
-        "backend.cron.jobs.compaction",
-        "backend.cron.jobs.metadata",
-        "backend.cron.jobs.insights_prewarmer",
-        "backend.cron.jobs.metric_snapshots",
-        "backend.cron.jobs.rum_sync",
-        "backend.cron.jobs.rum_commit",
-    ],
-    task_routes={
-        "backend.core.ingest.*": {"queue": "q.ingest"},
-    },
-)
-
-
-@setup_logging.connect
-def _configure_worker_logging(**_kwargs):
-    """Workers share the backend's structlog format so their logs carry the
-    same processors/fields as the API process (and log shipping filters
-    keep working)."""
-    from backend.utils.telemetry import configure_structlog
-
-    configure_structlog()
-
-
-@worker_process_init.connect
-def _worker_process_init(**_kwargs):
-    # Re-run per forked child (prefork pool) — signal handlers registered in
-    # the parent don't carry logging config into children.
-    from backend.utils.telemetry import configure_structlog
-
-    configure_structlog()
-
-    # Fail the worker fast on incoherent celery-mode config (missing broker,
-    # file-based DuckLake catalog) instead of degrading invisibly — same
-    # guard the backend lifespan runs.
-    from backend.config import validate_deployment_mode
-    from backend.utils.runtime_modes import validate_mock_modes
-
-    validate_mock_modes()
-    validate_deployment_mode()
-
-    # Start Prometheus metrics server for worker if configured
-    if os.environ.get("OTEL_EXPORTER") == "prometheus":
-        try:
-            from prometheus_client import start_http_server
-
-            logging.info("Starting Prometheus metrics server on port 8000")
-            start_http_server(8000)
-        except Exception as e:
-            logging.warning(f"Failed to start prometheus_client: {e}")
-
-    # Workers issue metadata queries (ingest ledger, cron_runs) and may boot
-    # before — or without — the API pod, so they cannot rely on the backend
-    # lifespan having created the Postgres schema. Idempotent and
-    # race-tolerant; no-op when METADATA_DSN is unset.
-    from backend.core.metadata.base import ensure_pg_schema
-
-    ensure_pg_schema()
-
-
-# ── Low-level Valkey/Redis broker queue-depth probe (folded from celery_queue.py) ──
-
-_redis_lock = threading.Lock()
-_redis_client: Any = None
-
-# Queues the app actually uses: Celery's default queue plus the explicit
-# routed queues from backend/celery_app.py. Keep in sync with task_routes.
-KNOWN_QUEUES = ("celery", "q.ingest", "q.control")
-
-
-def _get_redis():
-    """Lazily create (and cache) one sync Redis client for status reads."""
-    global _redis_client
-    from backend import config as svcconfig
-
-    if not svcconfig.is_high_scale_mode() and not os.environ.get("CELERY_BROKER_URL"):
-        raise ConnectionError("Celery broker not configured in standard mode")
-    with _redis_lock:
-        if _redis_client is None:
-            import redis
-
-            _broker_url = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
-            _redis_client = redis.Redis.from_url(
-                _broker_url,
-                socket_connect_timeout=0.25,
-                socket_timeout=0.5,
-                decode_responses=True,
-            )
-        return _redis_client
-
-
-def celery_queue_depths() -> tuple[dict[str, int], bool]:
-    """Return ({queue: depth}, broker_reachable).
-
-    Checks the known queue names directly (LLEN on a missing key is 0) and
-    SCANs for any additional ``q.*`` queues a future route might add.
-    """
-    queues: dict[str, int] = {}
-    try:
-        r = _get_redis()
-        names = set(KNOWN_QUEUES)
-        for key in r.scan_iter(match="q.*", count=200):
-            names.add(key)
-        for q in sorted(names):
-            try:
-                if r.type(q) in ("list", "none"):
-                    queues[q] = int(r.llen(q))
-            except Exception:
-                continue
-        return queues, True
-    except Exception as e:
-        logger.debug("[celery_status] broker unreachable for queue depths: %s", e)
-        return {}, False
 
 
 # ── In-process pub/sub primitive & sync-status publisher ─────────────────────
@@ -271,11 +118,26 @@ else:
     publisher = SyncStatusPublisher()
 
 
-# ── Celery/APScheduler/ledger status snapshot & sampler (folded from celery_status.py) ──
+# ── APScheduler/ledger status snapshot & sampler ──
+
+
+# Admin pages poll status every few seconds; the ledger totals are the slow part
+# (one metadata scan per service) and move slowly, so reuse them briefly.
+_LEDGER_SUMMARY_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=1, ttl_seconds=30.0)
+CacheRegistry.register("celery_app._LEDGER_SUMMARY_CACHE", _LEDGER_SUMMARY_CACHE)
 
 
 def ingest_ledger_summary() -> dict[str, int]:
     """Aggregate ingest_ledger status counts across all configured services."""
+    cached: dict[str, int] | None = _LEDGER_SUMMARY_CACHE.get("ledger")
+    if cached is not None:
+        return dict(cached)
+    ledger = _read_ingest_ledger_summary()
+    _LEDGER_SUMMARY_CACHE["ledger"] = dict(ledger)
+    return ledger
+
+
+def _read_ingest_ledger_summary() -> dict[str, int]:
     ledger: dict[str, int] = {}
     try:
         from backend.config import list_configs
@@ -297,7 +159,7 @@ def ingest_ledger_summary() -> dict[str, int]:
             except Exception:
                 continue
     except Exception as e:
-        logger.debug("[celery_status] ledger summary failed: %s", e)
+        logger.debug("[admin_status] ledger summary failed: %s", e)
     return ledger
 
 
@@ -326,7 +188,7 @@ def inprocess_schedule_entries() -> list[dict[str, Any]]:
             )
         entries.sort(key=lambda item: item["name"])
     except Exception as e:
-        logger.debug("[celery_status] inprocess_schedule_entries failed: %s", e)
+        logger.debug("[admin_status] inprocess_schedule_entries failed: %s", e)
     return entries
 
 
@@ -350,104 +212,21 @@ def inprocess_active_runs_entries() -> list[dict[str, Any]]:
                 }
             )
     except Exception as e:
-        logger.debug("[celery_status] inprocess_active_runs_entries failed: %s", e)
+        logger.debug("[admin_status] inprocess_active_runs_entries failed: %s", e)
     return out
 
 
-def standard_ingest_summary() -> dict[str, int]:
-    """Aggregate standard-mode ingested_files and quarantine counts across all configured services."""
-    ingested_files = 0
-    quarantined_items = 0
-    try:
-        from backend.config import list_configs
-        from backend.core.metadata.base import get_con
-
-        sids = list(dict.fromkeys(sid for svc in list_configs() if (sid := (svc.get("service_id") or svc.get("name")))))
-        if sids:
-            placeholders = ", ".join("?" for _ in sids)
-            con = get_con(sids[0])
-            cur = con.cursor()
-            try:
-                cur.execute(
-                    f"SELECT COALESCE(SUM(file_count), 0) FROM ingested_files_summary WHERE source_name IN ({placeholders})",
-                    tuple(sids),
-                )
-                rows = cur.fetchall()
-                if rows and len(rows[0]) == 1 and isinstance(rows[0][0], (int, float)):
-                    ingested_files = int(rows[0][0])
-            except Exception:
-                pass
-            if ingested_files == 0:
-                try:
-                    cur.execute(
-                        f"SELECT count(*) FROM ingested_files WHERE source_name IN ({placeholders})",
-                        tuple(sids),
-                    )
-                    rows = cur.fetchall()
-                    if rows and len(rows[0]) == 1 and isinstance(rows[0][0], (int, float)):
-                        ingested_files = int(rows[0][0])
-                except Exception:
-                    pass
-    except Exception as e:
-        logger.debug("[celery_status] standard_ingest_summary failed: %s", e)
-    return {
-        "ingested_files": ingested_files,
-        "quarantined_items": quarantined_items,
-    }
-
-
-def get_celery_status(timeout: float = 0.25) -> dict[str, Any]:
+def get_celery_status() -> dict[str, Any]:
     """Full status payload for the admin endpoint / SSE feeder."""
-    from backend import config as svcconfig
-
-    is_high_scale = bool(svcconfig.is_high_scale_mode())
-    deployment_mode = "high_scale" if is_high_scale else "standard"
-
-    queues, broker_reachable = celery_queue_depths()
-
-    workers_error: str | None = None
-    active: dict[str, Any] = {}
-    stats: dict[str, Any] = {}
-    registered: dict[str, Any] = {}
-    scheduled: dict[str, Any] = {}
-
-    if not broker_reachable:
-        workers_error = "Broker unreachable (Broker connection timeout)"
-    else:
-        try:
-            i = app.control.inspect(timeout=timeout)
-            stats = i.stats() or {}
-            if stats:
-                active = i.active() or {}
-                registered = i.registered() or {}
-                scheduled = i.scheduled() or {}
-        except Exception as e:
-            workers_error = str(e)[:200]
-
-    ledger = ingest_ledger_summary()
-
     return {
-        "deployment_mode": deployment_mode,
-        "broker_reachable": broker_reachable,
-        "workers": {
-            "active_tasks": active,
-            "stats": stats,
-            "registered": registered,
-            "scheduled": scheduled,
-            "count": len(stats) if stats else 0,
-            **({"error": workers_error} if workers_error else {}),
-        },
-        "queues": queues,
-        "ledger": ledger,
+        "ledger": ingest_ledger_summary(),
         "inprocess_schedules": inprocess_schedule_entries(),
         "inprocess_active_runs": inprocess_active_runs_entries(),
-        "standard_ingest": standard_ingest_summary(),
     }
 
 
 _LEDGER_PROBLEM_STATUSES = ("dead_letter", "quarantined")
 _LEDGER_VALID_STATUSES = ("discovered", "claimed", "committed", "quarantined", "dead_letter")
-_LEDGER_DISPATCH_BATCH_SIZE = 25
 
 
 def _is_rum_object_key(object_key: str) -> bool:
@@ -536,7 +315,7 @@ def list_ingest_ledger_entries(
                     }
                 )
         except Exception as e:
-            logger.debug("[celery_status] list_ingest_ledger_entries failed for %s: %s", sid, e)
+            logger.debug("[admin_status] list_ingest_ledger_entries failed for %s: %s", sid, e)
             continue
 
     entries.sort(
@@ -584,7 +363,7 @@ def purge_ingest_ledger_entries(
                         affected += int(cur.rowcount)
                 con.commit()
             except Exception as e:
-                logger.warning("[celery_status] purge_ingest_ledger_entries failed for %s: %s", sid, e)
+                logger.warning("[admin_status] purge_ingest_ledger_entries failed for %s: %s", sid, e)
     else:
         norm_status = (status or "problem").strip().lower()
         for sid in _resolve_ledger_service_ids(service_id):
@@ -605,9 +384,9 @@ def purge_ingest_ledger_entries(
                     affected += int(cur.rowcount)
                 con.commit()
             except Exception as e:
-                logger.warning("[celery_status] bulk purge_ingest_ledger_entries failed for %s: %s", sid, e)
+                logger.warning("[admin_status] bulk purge_ingest_ledger_entries failed for %s: %s", sid, e)
 
-    return {"ok": True, "affected": affected, "dispatched": 0}
+    return {"ok": True, "affected": affected}
 
 
 def retry_ingest_ledger_entries(
@@ -616,11 +395,9 @@ def retry_ingest_ledger_entries(
     service_id: str | None = None,
 ) -> dict[str, Any]:
     """Reset ``dead_letter`` / ``quarantined`` rows in ``ingest_ledger`` back to
-    ``discovered`` (with ``attempts=0`` and cleared error fields) and best-effort
-    dispatch Celery convert batches for immediate retry."""
+    ``discovered`` (with ``attempts=0`` and cleared error fields) for ingest retry."""
     from backend.core.metadata.base import get_con
 
-    requeued_by_service: dict[str, list[str]] = {}
     affected = 0
 
     if items:
@@ -645,10 +422,9 @@ def retry_ingest_ledger_entries(
                     )
                     if cur.rowcount and cur.rowcount > 0:
                         affected += int(cur.rowcount)
-                        requeued_by_service.setdefault(sid, []).append(key)
                 con.commit()
             except Exception as e:
-                logger.warning("[celery_status] retry_ingest_ledger_entries failed for %s: %s", sid, e)
+                logger.warning("[admin_status] retry_ingest_ledger_entries failed for %s: %s", sid, e)
     else:
         norm_status = (status or "problem").strip().lower()
         for sid in _resolve_ledger_service_ids(service_id):
@@ -657,64 +433,30 @@ def retry_ingest_ledger_entries(
                 cur = con.cursor()
                 if norm_status in _LEDGER_PROBLEM_STATUSES:
                     cur.execute(
-                        "SELECT object_key FROM ingest_ledger WHERE service_id = ? AND status = ?",
+                        "UPDATE ingest_ledger "
+                        "SET status = 'discovered', attempts = 0, last_error = NULL, error_kind = NULL, "
+                        "claimed_by = NULL, claimed_at = NULL, next_attempt_at = NULL "
+                        "WHERE service_id = ? AND status = ?",
                         (sid, norm_status),
                     )
-                    keys = [str(r[0]) for r in cur.fetchall()]
-                    if keys:
-                        cur.execute(
-                            "UPDATE ingest_ledger "
-                            "SET status = 'discovered', attempts = 0, last_error = NULL, error_kind = NULL, "
-                            "claimed_by = NULL, claimed_at = NULL, next_attempt_at = NULL "
-                            "WHERE service_id = ? AND status = ?",
-                            (sid, norm_status),
-                        )
-                        if cur.rowcount and cur.rowcount > 0:
-                            affected += int(cur.rowcount)
-                            requeued_by_service.setdefault(sid, []).extend(keys)
-                        con.commit()
+                    if cur.rowcount and cur.rowcount > 0:
+                        affected += int(cur.rowcount)
+                    con.commit()
                 else:
                     cur.execute(
-                        "SELECT object_key FROM ingest_ledger "
+                        "UPDATE ingest_ledger "
+                        "SET status = 'discovered', attempts = 0, last_error = NULL, error_kind = NULL, "
+                        "claimed_by = NULL, claimed_at = NULL, next_attempt_at = NULL "
                         "WHERE service_id = ? AND status IN ('dead_letter', 'quarantined')",
                         (sid,),
                     )
-                    keys = [str(r[0]) for r in cur.fetchall()]
-                    if keys:
-                        cur.execute(
-                            "UPDATE ingest_ledger "
-                            "SET status = 'discovered', attempts = 0, last_error = NULL, error_kind = NULL, "
-                            "claimed_by = NULL, claimed_at = NULL, next_attempt_at = NULL "
-                            "WHERE service_id = ? AND status IN ('dead_letter', 'quarantined')",
-                            (sid,),
-                        )
-                        if cur.rowcount and cur.rowcount > 0:
-                            affected += int(cur.rowcount)
-                            requeued_by_service.setdefault(sid, []).extend(keys)
-                        con.commit()
+                    if cur.rowcount and cur.rowcount > 0:
+                        affected += int(cur.rowcount)
+                    con.commit()
             except Exception as e:
-                logger.warning("[celery_status] bulk retry_ingest_ledger_entries failed for %s: %s", sid, e)
+                logger.warning("[admin_status] bulk retry_ingest_ledger_entries failed for %s: %s", sid, e)
 
-    dispatched = 0
-    if requeued_by_service:
-        try:
-            from backend.core.ingest import convert_batch_files, convert_batch_rum_files
-
-            for sid, keys in requeued_by_service.items():
-                req_keys = [k for k in keys if not _is_rum_object_key(k)]
-                rum_keys = [k for k in keys if _is_rum_object_key(k)]
-                for i in range(0, len(req_keys), _LEDGER_DISPATCH_BATCH_SIZE):
-                    batch = req_keys[i : i + _LEDGER_DISPATCH_BATCH_SIZE]
-                    convert_batch_files.delay(sid, batch)
-                    dispatched += len(batch)
-                for i in range(0, len(rum_keys), _LEDGER_DISPATCH_BATCH_SIZE):
-                    batch = rum_keys[i : i + _LEDGER_DISPATCH_BATCH_SIZE]
-                    convert_batch_rum_files.delay(sid, batch)
-                    dispatched += len(batch)
-        except Exception as e:
-            logger.debug("[celery_status] best-effort Celery dispatch on ledger retry skipped: %s", e)
-
-    return {"ok": True, "affected": affected, "dispatched": dispatched}
+    return {"ok": True, "affected": affected}
 
 
 _CACHE_TTL_S = 4.0

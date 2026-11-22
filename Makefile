@@ -1,7 +1,10 @@
-.PHONY: test test-ci fast-ci lint lint-frontend format typecheck ci install install-hooks dev clean gen-types openapi-types verify-deps secret-scan security-scan-bandit deps-check knip osv outdated perf perf-ci security-regression baseline verify ratchet scorer-package scorer-test scorer-audit test-frontend-ci openapi-drift test-browser-measurements e2e e2e-all deploy-validate stray-file-gate stack-restart stack-up stack-down stack-ps stack-logs stack-health otel-guard urllib-guard dateparse-guard retry-guard coalesce-guard audit audit-watch
+.PHONY: help test test-ci fast-ci release-confidence-tests release-confidence-offline lint lint-frontend format typecheck ci install install-hooks dev clean gen-types gen-cloud-types openapi-types verify-deps secret-scan security-scan-bandit deps-check knip osv outdated perf perf-ci security-regression baseline verify ratchet scorer-package scorer-test scorer-audit compute-test compute-lint compute-audit cloud-sync-catalog cloud-test cloud-lint cloud-audit cloud-soak cloud-build cloud-deploy admin-reset trim-target test-frontend-ci openapi-drift test-browser-measurements e2e e2e-all deploy-validate stray-file-gate stack-restart stack-up stack-down stack-ps stack-logs stack-health otel-guard urllib-guard dateparse-guard retry-guard coalesce-guard audit audit-watch
 
 # Prevent a VIRTUAL_ENV from another project leaking into uv commands
 unexport VIRTUAL_ENV
+
+help:
+	@echo "Targets: make test, make fast-ci, make release-confidence-offline, make ci, make cloud-test, make admin-reset [NAME=flp] [VERBOSE=1]"
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
 
@@ -18,11 +21,11 @@ install-hooks:
 dev:
 	./run.sh --dev
 
-# ── Scorer (Fastly Compute) ─────────────────────────────────────────────────
+# ── Scorer & Cloud (Fastly Compute Workspace) ─────────────────────────────────
 
 # Rebuild the matrix-less scorer Wasm package and refresh the committed
 # artifact the backend ships + deploys via the Fastly API. Run this off-VM
-# (needs rustup-pinned Rust 1.90 + the Fastly CLI) whenever compute/scorer/src
+# (needs rustup-pinned Rust + the Fastly CLI) whenever compute/scorer/src
 # changes, then commit compute/scorer/pkg/session-scorer.tar.gz. The matrix is
 # NOT embedded — it's served from the scoring_matrix KV Store at runtime.
 # --auto-yes auto-approves the fastly.toml post_build (wasm-opt) script prompt;
@@ -33,18 +36,103 @@ scorer-package:
 
 # Run the Rust scorer's native unit tests (normalize/cookie/matrix
 # cross-language parity, session-expiry boundaries, wire-format round-trips).
-# These run at native speed (the dev profile builds for the host, not Wasm), so
-# `cargo test` needs no Fastly CLI — just the rust-toolchain.toml-pinned Rust.
-# Skips with a warning if cargo isn't on PATH (mirrors vcl-test / secret-scan);
-# the Scorer CI job hard-requires it. The pre-push hook runs it when
-# compute/scorer/ changes.
 scorer-test:
 	@if command -v cargo > /dev/null || [ -x "$$HOME/.cargo/bin/cargo" ]; then \
-		PATH="$$HOME/.cargo/bin:$$PATH" cargo test --manifest-path compute/scorer/Cargo.toml --locked; \
+		PATH="$$HOME/.cargo/bin:$$PATH" cargo test --manifest-path compute/Cargo.toml -p session-scorer --locked; \
 	else \
 		echo "⚠️  Skipping scorer-test: cargo not on PATH."; \
 		echo "    Install: https://rustup.rs   (rust-toolchain.toml pins the version)"; \
 	fi
+
+compute-test:
+	@if command -v cargo-nextest > /dev/null || [ -x "$$HOME/.cargo/bin/cargo-nextest" ]; then \
+		cd compute && PATH="$$HOME/.cargo/bin:$$PATH" cargo nextest run --workspace --locked --all-targets --no-fail-fast; \
+	else \
+		cd compute && PATH="$$HOME/.cargo/bin:$$PATH" cargo test --workspace --locked --all-targets; \
+	fi
+
+# rustup resolves rust-toolchain.toml from cwd, not --manifest-path. Run
+# inside compute so local and CI checks both use the pinned workspace toolchain.
+compute-lint:
+	cd compute && PATH="$$HOME/.cargo/bin:$$PATH" cargo fmt --all -- --check
+	cd compute && PATH="$$HOME/.cargo/bin:$$PATH" cargo clippy --workspace --locked --all-targets --all-features -- -D warnings
+
+.PHONY: compute-wasm-check cloud-infra-test cloud-browser-test cloud-e2e cloud-ci
+
+compute-wasm-check:
+	cd compute && PATH="$$HOME/.cargo/bin:$$PATH" cargo check -p fastly-logs-parquet-shell --locked --target wasm32-wasip1 --bin flp
+	cd compute && PATH="$$HOME/.cargo/bin:$$PATH" cargo clippy -p fastly-logs-parquet-shell --locked --target wasm32-wasip1 --bin flp -- -D warnings
+
+cloud-infra-test:
+	PYTHONPATH=. uv run pytest compute/cloud/infra compute/cloud/tools -o addopts="-q --strict-markers"
+	uv run python scripts/check_secret_values.py
+
+cloud-browser-test:
+	cd frontend && STATIC_EXPORT=1 NEXT_PUBLIC_DEPLOYMENT_MODE=cloud npx vitest run lib/cloud-engine/
+
+cloud-e2e:
+	cd frontend && node e2e/cloud/native-servers.mjs --build-only
+	cd frontend && FLP_SKIP_NEXT_BUILD=1 FLP_E2E_NATIVE=1 PROJECTS=chromium PLAYWRIGHT_WORKERS=1 npx playwright test --project=chromium --output=test-results/cloud
+
+# Mirrors the Cloud Compute & Browser Engine job, including dedicated native
+# browser acceptance. Excluding Cloud specs from Standard must not drop coverage.
+cloud-ci:
+	$(MAKE) cloud-sync-catalog
+	git diff --exit-code compute/cloud/src/logging/catalog.json compute/cloud/vcl/capture/templates.json
+	$(MAKE) openapi-drift
+	$(MAKE) compute-lint
+	$(MAKE) compute-test
+	$(MAKE) compute-wasm-check
+	$(MAKE) vcl-test
+	$(MAKE) cloud-infra-test
+	$(MAKE) cloud-browser-test
+	$(MAKE) cloud-e2e
+
+compute-audit:
+	@if command -v cargo-audit > /dev/null || [ -x "$$HOME/.cargo/bin/cargo-audit" ]; then \
+		PATH="$$HOME/.cargo/bin:$$PATH" cargo audit --file compute/Cargo.lock; \
+	else \
+		echo "⚠️  Skipping compute-audit: cargo-audit not on PATH (cargo install cargo-audit --locked)."; \
+	fi
+
+NAME ?= flp
+VERBOSE ?= 0
+TARGET_MAX_GB ?= 20
+AR_wasm32_wasip1 ?= $(shell PATH="$$HOME/.cargo/bin:$$PATH" rustc +1.96.0 --print sysroot 2>/dev/null)/lib/rustlib/$(shell PATH="$$HOME/.cargo/bin:$$PATH" rustc +1.96.0 -vV 2>/dev/null | sed -n 's/^host: //p')/bin/llvm-ar
+export AR_wasm32_wasip1
+# zstd-sys builds freestanding for wasm32-wasip1 against its own wasm-shim headers.
+# Ubuntu clang otherwise searches the host glibc /usr/include for wasm targets and
+# fails; Apple clang has no such path, so this is a no-op on macOS.
+CFLAGS_wasm32_wasip1 ?= -nostdlibinc
+export CFLAGS_wasm32_wasip1
+
+cloud-sync-catalog:
+	PYTHONPATH=. uv run python compute/cloud/tools/generator_fixtures.py --write
+
+cloud-test:
+	$(MAKE) -C compute/cloud test
+
+cloud-lint:
+	$(MAKE) -C compute/cloud lint
+
+cloud-audit: compute-audit
+	uv run python scripts/check_secret_values.py
+
+cloud-soak:
+	$(MAKE) -C compute/cloud soak
+
+cloud-build:
+	$(MAKE) -C compute/cloud build
+
+cloud-deploy:
+	$(MAKE) -C compute/cloud deploy
+
+admin-reset:
+	@$(MAKE) --no-print-directory -C compute/cloud admin-reset NAME="$(NAME)" VERBOSE="$(VERBOSE)"
+
+trim-target:
+	$(MAKE) -C compute/cloud trim-target TARGET_MAX_GB="$(TARGET_MAX_GB)"
+
 
 # ── Backend ───────────────────────────────────────────────────────────────────
 
@@ -82,6 +170,9 @@ import-contracts:
 
 gen-types:
 	cd frontend && npm run gen:types
+
+gen-cloud-types:
+	cd frontend && npm run gen:cloud-types
 
 openapi-types: gen-types
 
@@ -124,6 +215,7 @@ osv:
 # Skips cleanly with a loud warning if the binary isn't on PATH. Production
 # CI installs it via curl in .github/workflows/ci.yml (same pattern as falco).
 secret-scan:
+	uv run python scripts/check_secret_values.py
 	@if command -v gitleaks > /dev/null; then \
 		gitleaks detect --no-banner --redact --config .gitleaks.toml --exit-code 1; \
 	else \
@@ -172,7 +264,9 @@ verify-deps:
 
 vcl-test:
 	@if command -v falco > /dev/null; then \
-		uv run pytest tests/core/test_vcl_semantics.py; \
+		uv run pytest tests/core/test_vcl_semantics.py && \
+		falco lint -I compute/cloud/vcl/front -I compute/cloud/vcl/front/tests compute/cloud/vcl/front/tests/main.vcl && \
+		falco test -I compute/cloud/vcl/front -I compute/cloud/vcl/front/tests compute/cloud/vcl/front/tests/main.vcl; \
 	else \
 		echo "Skipping VCL tests: falco linter not found in PATH"; \
 	fi
@@ -233,17 +327,12 @@ test-frontend-ci:
 
 # RustSec advisory scan (ci.yml scorer "Audit dependencies"). cargo test
 # does NOT check advisories. Skips with a warning if cargo-audit is absent.
-scorer-audit:
-	@if command -v cargo-audit > /dev/null || [ -x "$$HOME/.cargo/bin/cargo-audit" ]; then \
-		PATH="$$HOME/.cargo/bin:$$PATH" cargo audit --file compute/scorer/Cargo.lock; \
-	else \
-		echo "⚠️  Skipping scorer-audit: cargo-audit not on PATH (cargo install cargo-audit --locked)."; \
-	fi
+scorer-audit: compute-audit
 
 # OpenAPI type-drift guard (ci.yml frontend "Detect drift in generated
 # OpenAPI types"). Regenerates then fails if the tracked output changed.
-openapi-drift: gen-types
-	@cd frontend && git diff --exit-code types/api.generated.ts openapi.json \
+openapi-drift: gen-types gen-cloud-types
+	@cd frontend && git diff --exit-code types/api.generated.ts openapi.json lib/cloud-engine/cloud-api.generated.ts \
 		|| { echo "OpenAPI types out of sync — run 'make gen-types' and commit." >&2; exit 1; }
 
 # Perf gate AS CI RUNS IT: emit latest.json from synthetic load, then compare
@@ -257,6 +346,26 @@ fast-ci:
 	@$(MAKE) -j4 typecheck-frontend lint-frontend lint format-check typecheck stray-file-gate
 	cd frontend && npx vitest run hooks/ lib/ stores/ __tests__/contract/backend-contract.test.ts
 	uv run pytest tests/contract tests/security tests/models tests/architecture tests/utils
+	$(MAKE) release-confidence-tests
+
+# Deterministic cross-stack release assertions omitted by the directory-scoped
+# fast suites above. Cloud browser-side assertions remain in `hooks/ lib/`.
+release-confidence-tests:
+	uv run pytest \
+		tests/high_scale/test_ingest_controller.py::test_canonical_fixture_ingest_and_query_parity \
+		tests/high_scale/test_canonical_parity.py::test_canonical_fixture_six_paginated_objects_interrupted_publication_parity \
+		tests/remote_access/test_middleware.py::test_admin_attachment_analyst_scope_and_revocation_lifecycle \
+		tests/routers/test_services_router.py::test_custom_field_lifecycle_validates_changes_rejects_unsupported_values_and_removes
+	cd compute && PATH="$$HOME/.cargo/bin:$$PATH" cargo test --locked -p fastly-logs-parquet-shell --test ingest canonical_fixture_has_cross_stack_ingest_parity
+	cd compute && PATH="$$HOME/.cargo/bin:$$PATH" cargo test --locked -p fastly-logs-parquet-shell --test ingest canonical_fixture_six_paginated_objects_interrupted_publication_parity
+	cd compute && PATH="$$HOME/.cargo/bin:$$PATH" cargo test --locked -p fastly-logs-parquet-shell --test ingest storage_tree_replays_the_same_cursor_after_a_failed_list
+	cd compute && PATH="$$HOME/.cargo/bin:$$PATH" cargo test --locked -p fastly-logs-parquet-shell --test route_auth analyst_attachment_is_read_only_and_revocation_invalidates_the_session
+	cd compute && PATH="$$HOME/.cargo/bin:$$PATH" cargo test --locked -p fastly-logs-parquet-shell --test service_jobs custom_field_lifecycle_rejects_bad_types_and_allows_change_and_removal_before_commit
+
+# Offline release soak: no deploy, browser, or generated live traffic. The
+# ignored simulation asserts sustained-ingest backlog, scan lag, and latency.
+release-confidence-offline:
+	$(MAKE) cloud-soak
 
 # Native Chromium measurement regressions; reuses the E2E Playwright install.
 # Serialize files so timing-sensitive paint tests do not contend for browsers.
@@ -291,6 +400,7 @@ ci:
 	@$(MAKE) -j4 typecheck-frontend lint-frontend lint format-check typecheck import-contracts vcl-test scorer-test scorer-audit verify-deps secret-scan osv otel-guard urllib-guard dateparse-guard retry-guard coalesce-guard security-regression openapi-drift deploy-validate stray-file-gate
 	$(MAKE) test-ci
 	$(MAKE) test-frontend-ci
+	$(MAKE) cloud-ci
 	$(MAKE) perf-ci
 	$(MAKE) e2e
 
@@ -329,7 +439,7 @@ retry-guard:
 	bash scripts/check_no_handrolled_retry.sh
 
 # B3/B6/B11: ban new inline COALESCE( null-default SQL in repositories and
-# rollup writers (use backend/core/metric_expressions.py).
+# analytical query builders (use backend/core/metric_expressions.py).
 coalesce-guard:
 	bash scripts/check_no_inline_metric_coalesce.sh
 
@@ -338,8 +448,8 @@ coalesce-guard:
 # Grafana/Prometheus/Tempo and their exporters.
 COMPOSE_STACK := -f docker-compose.multipod.yml -f docker-compose.observability.yml
 
-# App services whose image bakes in the source tree. Only configs/, data/ and
-# cache/ are bind-mounted, so a .py edit is invisible until the image is
+# App services whose image bakes in the source tree. Only configs/ and data/
+# are bind-mounted, so a .py edit is invisible until the image is
 # rebuilt — `stack-restart` rebuilds these, `stack-up` does not.
 #
 # metadata-schema-init belongs here even though it is a one-shot: it has its
@@ -367,7 +477,7 @@ stack-up:
 	@$(MAKE) --no-print-directory stack-health
 
 # Stop the containers, keeping volumes (never `down -v` — that drops Postgres,
-# which now holds both the metadata and the DuckLake catalog).
+# which holds the operational metadata and ingest control plane).
 stack-down:
 	docker compose $(COMPOSE_STACK) down
 
@@ -398,15 +508,14 @@ stack-health:
 # skipped with a note otherwise).
 # Mirrors the "Deploy config validation" step in ci.yml.
 deploy-validate:
+	docker compose -f docker-compose.yml config -q
 	docker compose -f docker-compose.yml -f docker-compose.prod.yml config -q
-	docker compose -f docker-compose.yml -f docker-compose.observability.standard.yml config -q
-	docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.observability.standard.yml -f docker-compose.observability.standard.prod.yml config -q
 	docker compose -f docker-compose.multipod.yml config -q
 	docker compose -f docker-compose.multipod.yml -f docker-compose.observability.yml config -q
 	@if command -v helm >/dev/null 2>&1; then \
-		helm lint deploy/chart/fastly-log-analytics --set config.ducklakeCatalog=postgresql://fla:pw@postgres:5432/ducklake --set secrets.metadataDsn=postgresql://fla:pw@postgres:5432/ducklake && \
-		helm template ci-validate deploy/chart/fastly-log-analytics --set config.ducklakeCatalog=postgresql://fla:pw@postgres:5432/ducklake --set secrets.metadataDsn=postgresql://fla:pw@postgres:5432/ducklake >/dev/null && \
-		helm template ci-validate deploy/chart/fastly-log-analytics --set global.privateObservability.enabled=true --set config.ducklakeCatalog=postgresql://fla:pw@postgres:5432/ducklake --set secrets.metadataDsn=postgresql://fla:pw@postgres:5432/ducklake >/dev/null; \
+		helm lint deploy/chart/fastly-log-analytics --set secrets.metadataDsn=postgresql://fla:pw@postgres:5432/fla && \
+		helm template ci-validate deploy/chart/fastly-log-analytics --set secrets.metadataDsn=postgresql://fla:pw@postgres:5432/fla >/dev/null && \
+		helm template ci-validate deploy/chart/fastly-log-analytics --set global.privateObservability.enabled=true --set secrets.metadataDsn=postgresql://fla:pw@postgres:5432/fla >/dev/null; \
 	else \
 		echo "helm not installed; skipping chart lint/template"; \
 	fi

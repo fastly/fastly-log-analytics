@@ -11,6 +11,7 @@ import {
   INTERVAL_SECONDS,
   statusHex,
   useTimeseriesToTraces,
+  type RangeWire,
   type RangeWireArgs,
 } from '@/lib/utils'
 import {
@@ -20,6 +21,9 @@ import {
 } from '@/hooks/useReportPageState'
 import { useActiveLogFields } from '@/hooks/useBootstrap'
 import { ReportLayout, type ReportLayoutRenderProps } from '@/components/ReportLayout'
+import { approxMark, boundMark, readRollupMeta, RollupDataThroughSlot } from '@/components/network/rollupLabels'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
+import { hasFilterValues, originRollupSections } from '@/lib/cloud-engine/rollup-sections'
 import {
   Aggregates,
   ApproxBadge,
@@ -67,8 +71,10 @@ export {
   type LatencyHeatmapProps,
 }
 
+type OriginSection = NonNullable<components['schemas']['OriginAggregatesRequest']['sections']>[number]
+
 // Must stay in lockstep with ORIGIN_SSR_SECTIONS in lib/ssr/origin.ts
-const ORIGIN_SECTIONS: NonNullable<components['schemas']['OriginAggregatesRequest']['sections']> = [
+const ORIGIN_SECTIONS: OriginSection[] = [
   'summary', 'timeseries', 'slow_urls', 'status_codes', 'path_breakdown', 'pop_latency', 'ip_health',
 ]
 
@@ -90,41 +96,103 @@ function OriginReportContent({
   const [ipVisibility, setIpVisibility, onIpVisChange] = useColumnVisibility()
   const bucketMinutes = INTERVAL_MAP[config.effectiveInterval] || 5
 
+  // Cloud answers these sections from summaries only when unfiltered; read them apart so they paint
+  // without waiting on the raw scan the remaining sections need.
+  const rollupSections: OriginSection[] = isCloudMode() && !hasFilterValues(filterPayload)
+    ? originRollupSections({ metric: originMetric, bucketMinutes, splitByLeg: false })
+    : []
+  const rawSections = ORIGIN_SECTIONS.filter((section) => !rollupSections.includes(section))
+  const range = { relativeRange, isAutoRange, startTime, endTime, anchor }
+
+  const postOrigin = (sections: OriginSection[], rangeBody: RangeWire['rangeBody'], signal: AbortSignal | undefined) =>
+    unwrapClient(
+      client.POST('/api/origin/aggregates', {
+        signal,
+        body: {
+          filters: filterPayload,
+          bucket_minutes: bucketMinutes,
+          split_by_leg: false,
+          timeseries_metric: originMetric,
+          timeseries_percentile: originPercentile,
+          slow_urls_limit: 20,
+          slow_urls_min_requests: 50,
+          pop_latency_limit: 30,
+          ip_health_limit: 30,
+          sections,
+          ...rangeBody,
+        },
+      }),
+      'Failed to load origin aggregates',
+    )
+
   const bundle = useAnalyticsReportQuery<OriginAggregates | undefined>({
     namespace: ['origin', 'aggregates'],
     serviceId: activeServiceId,
     filterPayload,
-    range: { relativeRange, isAutoRange, startTime, endTime, anchor },
-    keyParts: [bucketMinutes, originMetric, originPercentile, ORIGIN_SECTIONS],
-    queryFn: async ({ rangeBody, signal }) =>
-      unwrapClient(
-        client.POST('/api/origin/aggregates', {
-          signal,
-          body: {
-            filters: filterPayload,
-            bucket_minutes: bucketMinutes,
-            split_by_leg: false,
-            timeseries_metric: originMetric,
-            timeseries_percentile: originPercentile,
-            slow_urls_limit: 20,
-            slow_urls_min_requests: 50,
-            pop_latency_limit: 30,
-            ip_health_limit: 30,
-            sections: ORIGIN_SECTIONS,
-            ...rangeBody,
-          },
-        }),
-        'Failed to load origin aggregates',
-      ),
+    range,
+    keyParts: [bucketMinutes, originMetric, originPercentile, rawSections],
+    queryOptions: { enabled: rawSections.length > 0 },
+    queryFn: ({ rangeBody, signal }) => postOrigin(rawSections, rangeBody, signal),
   })
 
-  const { isLoading, isFetching, error } = bundle
-  const summary = React.useMemo(() => ({ data: bundle.data?.summary, isLoading, isFetching, error }), [bundle.data?.summary, isLoading, isFetching, error])
-  const originTs = React.useMemo(() => ({ data: bundle.data?.timeseries, isLoading, isFetching, error }), [bundle.data?.timeseries, isLoading, isFetching, error])
-  const slowUrls = React.useMemo(() => ({ data: bundle.data?.slow_urls, isLoading, isFetching, error }), [bundle.data?.slow_urls, isLoading, isFetching, error])
-  const statusCodes = React.useMemo(() => ({ data: bundle.data?.status_codes, isLoading, isFetching, error }), [bundle.data?.status_codes, isLoading, isFetching, error])
-  const popLatency = React.useMemo(() => ({ data: bundle.data?.pop_latency, isLoading, isFetching, error }), [bundle.data?.pop_latency, isLoading, isFetching, error])
-  const ipHealth = React.useMemo(() => ({ data: bundle.data?.ip_health, isLoading, isFetching, error }), [bundle.data?.ip_health, isLoading, isFetching, error])
+  const rollupQuery = useAnalyticsReportQuery<OriginAggregates | undefined>({
+    namespace: ['origin', 'aggregates', 'rollup'],
+    serviceId: activeServiceId,
+    filterPayload,
+    range,
+    keyParts: [bucketMinutes, originMetric, originPercentile, rollupSections],
+    queryOptions: { enabled: rollupSections.length > 0 },
+    queryFn: ({ rangeBody, signal }) => postOrigin(rollupSections, rangeBody, signal),
+  })
+  const rollup = rollupSections.length > 0 ? readRollupMeta(rollupQuery.data) : undefined
+
+  const sourceOf = (section: OriginSection) => (rollupSections.includes(section) ? rollupQuery : bundle)
+  const approxNote = (section: string, field: string) =>
+    approxMark(rollup, `${section}.${field}`) === ''
+      ? null
+      : boundMark(rollup, `${section}.requests`) === ''
+        ? 'Percentiles are estimated from summary histograms (≈). Counts are exact.'
+        : 'Percentiles are estimated from summary histograms (≈). Request counts are lower bounds (≥): summaries keep only their busiest values.'
+  const summarySource = sourceOf('summary')
+  const summaryData = summarySource.data?.summary
+  const summaryNote = approxNote('summary', 'ottfb_p50_ms')
+  const summary = React.useMemo(() => ({
+    data: summaryNote && summaryData ? { ...summaryData, _approx: true, _approx_note: summaryNote } : summaryData,
+    isLoading: summarySource.isLoading, isFetching: summarySource.isFetching, error: summarySource.error,
+  }), [summaryData, summaryNote, summarySource.isLoading, summarySource.isFetching, summarySource.error])
+  const tsSource = sourceOf('timeseries')
+  const tsData = tsSource.data?.timeseries
+  const tsApprox = approxMark(rollup, 'timeseries.value') !== ''
+  const originTs = React.useMemo(() => ({
+    data: tsApprox && tsData
+      ? { ...tsData, _approx: true, _approx_note: 'Percentiles are estimated from summary histograms (≈). Miss counts are exact.' }
+      : tsData,
+    isLoading: tsSource.isLoading, isFetching: tsSource.isFetching, error: tsSource.error,
+  }), [tsData, tsApprox, tsSource.isLoading, tsSource.isFetching, tsSource.error])
+  const slowSource = sourceOf('slow_urls')
+  const slowData = slowSource.data?.slow_urls
+  const slowNote = approxNote('slow_urls', 'p95_ms')
+  const slowUrls = React.useMemo(() => ({
+    data: slowNote && slowData ? { ...slowData, _approx: true, _approx_note: slowNote } : slowData,
+    isLoading: slowSource.isLoading, isFetching: slowSource.isFetching, error: slowSource.error,
+  }), [slowData, slowNote, slowSource.isLoading, slowSource.isFetching, slowSource.error])
+  const statusSource = sourceOf('status_codes')
+  const statusCodes = React.useMemo(
+    () => ({ data: statusSource.data?.status_codes, isLoading: statusSource.isLoading, isFetching: statusSource.isFetching, error: statusSource.error }),
+    [statusSource.data?.status_codes, statusSource.isLoading, statusSource.isFetching, statusSource.error],
+  )
+  const popSource = sourceOf('pop_latency')
+  const popData = popSource.data?.pop_latency
+  const popNote = approxNote('pop_latency', 'p95_ms')
+  const popLatency = React.useMemo(() => ({
+    data: popNote && popData ? { ...popData, _approx: true, _approx_note: popNote } : popData,
+    isLoading: popSource.isLoading, isFetching: popSource.isFetching, error: popSource.error,
+  }), [popData, popNote, popSource.isLoading, popSource.isFetching, popSource.error])
+  const ipSource = sourceOf('ip_health')
+  const ipHealth = React.useMemo(
+    () => ({ data: ipSource.data?.ip_health, isLoading: ipSource.isLoading, isFetching: ipSource.isFetching, error: ipSource.error }),
+    [ipSource.data?.ip_health, ipSource.isLoading, ipSource.isFetching, ipSource.error],
+  )
 
   const baseOriginTraces = useTimeseriesToTraces(
     originTs.data?.series,
@@ -207,6 +275,7 @@ function OriginReportContent({
 
   return (
     <>
+      <RollupDataThroughSlot reserve={rollupSections.length > 0} meta={rollup} className="mb-4" />
       <Aggregates summary={summary} />
       <Timeseries
         originTs={originTs}
@@ -229,6 +298,7 @@ function OriginReportContent({
         slowUrls={slowUrls}
         popLatency={popLatency}
         ipHealth={ipHealth}
+        ipRollup={rollup}
         summary={summary}
         urlVisibility={urlVisibility}
         setUrlVisibility={setUrlVisibility}

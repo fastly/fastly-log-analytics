@@ -22,6 +22,7 @@ import {
   useBootstrapResolved,
   useIsAnalyst,
 } from '@/hooks/useBootstrap'
+import { keepPreviousWithinService } from '@/hooks/useDashboardCards'
 import { useDateFormat, useDeferredDeleteWithUndo } from '@/hooks/useSSE'
 import { ReportShell } from '@/components/ReportLayout'
 import { Button } from '@/components/ui/button'
@@ -38,8 +39,9 @@ import {
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { showToast } from '@/lib/utils'
+import { SERVICE_DEFAULTS } from '@/lib/serviceDefaults'
 import { ColumnVisibilityDropdown } from '@/components/DataTable'
-import type { VisibilityState } from '@tanstack/react-table'
+import type { ColumnVisibilityState } from '@tanstack/react-table'
 import type { components } from '@/types/api.generated'
 import { AlertPreview } from './AlertPreview'
 import { CreateAlertForm } from './CreateAlertForm'
@@ -62,7 +64,7 @@ export default function AlertsClient() {
   const [deleteTarget, setDeleteTarget] = React.useState<string | null>(null)
   const [statusFilter, setStatusFilter] = useQueryState('status', alertStatusParser)
   const { pendingDeleteIds, scheduleDelete } = useDeferredDeleteWithUndo()
-  const [columnVisibility, setColumnVisibility] = React.useState<VisibilityState>({})
+  const [columnVisibility, setColumnVisibility] = React.useState<ColumnVisibilityState>({})
   const { full } = useDateFormat()
 
   const [logSettingsIdle, setLogSettingsIdle] = React.useState(false)
@@ -96,7 +98,7 @@ export default function AlertsClient() {
     enabled: !!activeServiceId && !isAnalyst && logSettingsIdle,
     staleTime: 5 * 60_000,
   })
-  const logPeriodSeconds = loggingSettings?.period || 30
+  const logPeriodSeconds = loggingSettings?.period || SERVICE_DEFAULTS.logPeriodSeconds
 
   const {
     data: alertsRes,
@@ -115,7 +117,7 @@ export default function AlertsClient() {
             }),
           )
         : unwrapClient(client.GET('/api/alerts/', { signal })),
-    placeholderData: (prev) => prev ?? queryClient.getQueryData(['alerts', null]),
+    placeholderData: keepPreviousWithinService(['alerts', activeServiceId], 1),
     enabled: !isAnalyst,
     refetchInterval: logPeriodSeconds * 1000,
     refetchIntervalInBackground: false,
@@ -323,7 +325,7 @@ export default function AlertsClient() {
                 </p>
                 <div className="bg-muted p-2 rounded text-xs mt-2 text-muted-foreground">
                   Note: Alert queries execute in the background server process, so they do not
-                  appear in the DuckDB Queries debug panel.
+                  appear in the Data Queries debug panel.
                 </div>
               </div>
             </PopoverContent>

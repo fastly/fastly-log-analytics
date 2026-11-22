@@ -8,13 +8,14 @@ import random
 import time
 from argparse import ArgumentParser
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from threading import Event, Thread
 from typing import TYPE_CHECKING, Any
 
 from backend import config as app_config
 from backend.core.clickhouse import ClickHouseClient
+from backend.core.metadata.base import closing_pg_pool
 from backend.high_scale.archive import (
     ArchivePublication,
     ClickHouseBatchAdapter,
@@ -30,6 +31,7 @@ from backend.high_scale.postgres_control import (
     PostgresControlPlane,
     PostgresDeletionLedger,
 )
+from backend.high_scale.publication_reaper import reaper_from_environment
 
 if TYPE_CHECKING:
     from backend.high_scale.ingest_controller import (
@@ -140,6 +142,10 @@ class HighScaleWorkerLoop:
         deletion_sweep_limit: int = 100,
         pages_per_tick: int | None = None,
         service_weights: Mapping[str, int] | None = None,
+        publication_retry_interval_seconds: float = 30.0,
+        publication_retry_limit: int = 4,
+        snapshot_interval_loader: Callable[[str], int] | None = None,
+        archive_flush_check_interval_seconds: float = 10.0,
     ) -> None:
         if coordinators is not None:
             resolved_coordinators = coordinators
@@ -157,6 +163,8 @@ class HighScaleWorkerLoop:
             raise ValueError("at least one high-scale domain is required")
         if interval_seconds < 0:
             raise ValueError("worker interval must be non-negative")
+        if publication_retry_interval_seconds < 0 or publication_retry_limit <= 0:
+            raise ValueError("publication retry interval must be non-negative and its limit positive")
         self._coordinator = coordinator
         self._coordinators = resolved_coordinators
         self._service_ids = resolved_service_ids
@@ -171,7 +179,14 @@ class HighScaleWorkerLoop:
             self._deletion_sweepers = tuple((service_id, deletion_sweeper) for service_id in resolved_service_ids)
         self._deletion_sweep_limit = deletion_sweep_limit
         self._deletion_thread: Thread | None = None
+        self._last_deletion_sweep = 0.0
         self._last_system_cleanup = 0.0
+        self._publication_retry_interval_seconds = publication_retry_interval_seconds
+        self._publication_retry_limit = publication_retry_limit
+        self._last_publication_retry: float | None = None
+        self._snapshot_interval_loader = snapshot_interval_loader or self._default_snapshot_interval_minutes
+        self._archive_flush_check_interval_seconds = max(0.0, float(archive_flush_check_interval_seconds))
+        self._last_archive_flush_check: float | None = None
         pair_list = tuple((service_id, domain) for service_id in resolved_service_ids for domain in domains)
         self._selector = FairPageSelector(
             pair_list,
@@ -192,9 +207,62 @@ class HighScaleWorkerLoop:
                 results.append(WorkerPageResult(service_id, domain, None, exc))
             else:
                 results.append(WorkerPageResult(service_id, domain, page))
+        self._run_archive_flushes()
+        self._run_publication_retries()
         self._run_deletion_sweeps()
         self._run_system_cleanups()
         return tuple(results)
+
+    @staticmethod
+    def _default_snapshot_interval_minutes(service_id: str) -> int:
+        try:
+            cfg = app_config.load_config(service_id)
+        except Exception:
+            cfg = None
+        return app_config.resolve_snapshot_interval_minutes(cfg)
+
+    def _run_archive_flushes(self) -> None:
+        now = time.monotonic()
+        if (
+            self._last_archive_flush_check is not None
+            and now - self._last_archive_flush_check < self._archive_flush_check_interval_seconds
+        ):
+            return
+        self._last_archive_flush_check = now
+        for service_id, coordinator in self._coordinators:
+            flush_fn = getattr(coordinator, "flush_archive_snapshot", None)
+            if flush_fn is None:
+                continue
+            interval_mins = self._snapshot_interval_loader(service_id)
+            for domain in self._domains:
+                try:
+                    flush_fn(
+                        service_id=service_id,
+                        domain=domain,
+                        snapshot_interval_minutes=interval_mins,
+                    )
+                except Exception:
+                    _worker_logger.exception(
+                        "high-scale archive snapshot flush failed",
+                        extra={"service_id": service_id, "domain": domain},
+                    )
+
+    def _run_publication_retries(self) -> None:
+        now = time.monotonic()
+        if (
+            self._last_publication_retry is not None
+            and now - self._last_publication_retry < self._publication_retry_interval_seconds
+        ):
+            return
+        self._last_publication_retry = now
+        for service_id, coordinator in self._coordinators:
+            retry = getattr(coordinator, "retry_archived_publications", None)
+            if retry is None:
+                continue
+            try:
+                retry(service_id=service_id, limit=self._publication_retry_limit)
+            except Exception:
+                _worker_logger.exception("high-scale publication retry failed", extra={"service_id": service_id})
 
     def _deletion_targets(self) -> tuple[tuple[str, HighScaleDeletionSweeper], ...]:
         return tuple((service_id, sweeper) for service_id, sweeper in self._deletion_sweepers if sweeper is not None)
@@ -203,6 +271,11 @@ class HighScaleWorkerLoop:
         targets = self._deletion_targets()
         if not targets or (self._deletion_thread is not None and self._deletion_thread.is_alive()):
             return
+        now = time.time()
+        min_interval = min(30.0, self._interval_seconds * 15.0)
+        if self._last_deletion_sweep > 0.0 and now - self._last_deletion_sweep < min_interval:
+            return
+        self._last_deletion_sweep = now
         self._deletion_thread = Thread(
             target=self._sweep_targets, args=(targets,), name="high-scale-deletion-sweep", daemon=True
         )
@@ -218,6 +291,7 @@ class HighScaleWorkerLoop:
     def wait_for_deletion_sweep(self, timeout: float | None = None) -> None:
         if self._deletion_thread is not None:
             self._deletion_thread.join(timeout)
+        self._last_deletion_sweep = 0.0
 
     def _run_system_cleanups(self) -> None:
         now = time.time()
@@ -268,9 +342,9 @@ class HighScaleWorkerLoop:
         self._stop_event.set()
 
 
-def build_worker_from_environment() -> HighScaleWorkerLoop:
+def build_worker_from_environment(worker_suffix: str = "") -> HighScaleWorkerLoop:
     """Build the durable FOS → archive → ClickHouse worker from process config."""
-    from backend.core.duckdb import _get_fos_client, get_source_for_service
+    from backend.core.fos_client import _get_fos_client, get_source_for_service
     from backend.high_scale.ingest_controller import (
         AggregateBatchAdapter,
         HighScaleIngestController,
@@ -282,8 +356,6 @@ def build_worker_from_environment() -> HighScaleWorkerLoop:
 
     validate_mock_modes()
     high_scale_config = from_environment()
-    if not high_scale_config.enabled:
-        raise RuntimeError("high-scale worker requires HIGH_SCALE_ENABLED=1")
     topology = high_scale_config.topology_profile()
     _worker_logger.info(
         "high_scale.topology_profile",
@@ -302,11 +374,12 @@ def build_worker_from_environment() -> HighScaleWorkerLoop:
         )
     if not service_ids:
         raise ValueError("HIGH_SCALE_SERVICE_IDS is required (none found in configs/)")
-    worker_id = (
+    base_worker_id = (
         os.getenv("HIGH_SCALE_WORKER_ID", "").strip()
         or os.getenv("POD_NAME", "").strip()
         or f"high-scale-{os.getpid()}"
     )
+    worker_id = f"{base_worker_id}{worker_suffix}"
     page_size = int(os.getenv("HIGH_SCALE_PAGE_SIZE", "100"))
     lease_seconds = float(os.getenv("HIGH_SCALE_LEASE_SECONDS", "300"))
     object_concurrency = int(os.getenv("HIGH_SCALE_OBJECT_CONCURRENCY", "4"))
@@ -330,6 +403,12 @@ def build_worker_from_environment() -> HighScaleWorkerLoop:
     deletion_enabled = os.getenv("HIGH_SCALE_DELETION_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
     deletion_sweep_limit = int(os.getenv("HIGH_SCALE_DELETION_SWEEP_LIMIT", "100"))
     deletion_grace = int(os.getenv("HIGH_SCALE_DELETION_GRACE_SECONDS", "900"))
+    defer_archive_flush = os.getenv("HIGH_SCALE_DEFER_ARCHIVE_FLUSH", "1").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     archive_prefix = os.getenv("HIGH_SCALE_ARCHIVE_PREFIX", "high-scale/archive")
     coordinators: list[HighScaleWorkerCoordinator] = []
     sweepers: list[HighScaleDeletionSweeper | None] = []
@@ -352,6 +431,7 @@ def build_worker_from_environment() -> HighScaleWorkerLoop:
             worker_id=worker_id,
             lease_seconds=lease_seconds,
             deletion_grace_seconds=deletion_grace,
+            defer_archive_flush=defer_archive_flush,
         )
         coordinators.append(
             HighScaleWorkerCoordinator(
@@ -377,11 +457,14 @@ def build_worker_from_environment() -> HighScaleWorkerLoop:
                     control=control,
                     controller=deletion_controller,
                     archive_expirer=HighScaleArchiveExpirer(control=control, archive=archive),
+                    publication_reaper=reaper_from_environment(control, clickhouse),
                 )
             )
         else:
             sweepers.append(None)
     pages_per_tick = int(os.getenv("HIGH_SCALE_PAGES_PER_TICK", "0") or "0") or None
+    publication_retry_interval = float(os.getenv("HIGH_SCALE_PUBLICATION_RETRY_INTERVAL_SECONDS", "30"))
+    publication_retry_limit = int(os.getenv("HIGH_SCALE_PUBLICATION_RETRY_LIMIT", "4"))
     return _MultiServiceWorkerLoop(
         coordinators=tuple(zip(service_ids, coordinators, strict=True)),
         deletion_sweepers=tuple(zip(service_ids, sweepers, strict=True)),
@@ -390,6 +473,8 @@ def build_worker_from_environment() -> HighScaleWorkerLoop:
         interval_seconds=interval_seconds,
         pages_per_tick=pages_per_tick,
         service_weights=_weights_from_env(),
+        publication_retry_interval_seconds=publication_retry_interval,
+        publication_retry_limit=publication_retry_limit,
     )
 
 
@@ -401,6 +486,12 @@ def _csv_env(name: str) -> tuple[str, ...]:
 
 
 def main() -> int:
+    with closing_pg_pool():
+        return _main()
+
+
+def _main() -> int:
+    os.environ.setdefault("METADATA_PG_POOL_MAX", "8")
     if os.environ.get("OTEL_EXPORTER") == "prometheus":
         try:
             from prometheus_client import start_http_server
@@ -413,6 +504,16 @@ def main() -> int:
     parser.add_argument("--once", action="store_true", help="process one bounded page per service and domain")
     parser.add_argument("--iterations", type=int, default=None)
     args = parser.parse_args()
+    worker_threads = max(1, int(os.getenv("HIGH_SCALE_WORKER_THREADS", "1") or "1"))
+    if worker_threads > 1 and not args.once and args.iterations is None:
+        bg_threads: list[Thread] = []
+        for idx in range(1, worker_threads):
+            loop_worker = build_worker_from_environment(worker_suffix=f"-t{idx}")
+            t = Thread(target=loop_worker.run, name=f"hs-worker-{idx}", daemon=True)
+            t.start()
+            bg_threads.append(t)
+        build_worker_from_environment(worker_suffix="-t0").run()
+        return 0
     build_worker_from_environment().run(max_iterations=1 if args.once else args.iterations)
     return 0
 

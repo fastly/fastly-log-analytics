@@ -19,7 +19,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import MagicMock, patch
 from uuid import UUID, uuid4
 
-import duckdb
 import httpx
 import pytest
 from psycopg_pool import ConnectionPool
@@ -395,14 +394,35 @@ def test_internal_ddl_and_insert_and_delete(clients, settings):
     assert clients(handler).insert_rows(ch.CLICKHOUSE_FACT_TABLE, columns, [r]) is None
     clients(lambda _: pytest.fail("HTTP called for empty batch")).insert_rows(ch.CLICKHOUSE_FACT_TABLE, ["country"], [])
 
-    seen = {}
-    clients(lambda req: seen.update(query_form(req)) or httpx.Response(200, content=b"")).delete_batch_rows(
-        "request_facts", "123e4567-e89b-12d3-a456-426614174000"
-    )
-    assert seen["query"] == [
-        "ALTER TABLE `request_facts` DELETE WHERE batch_id={batch_id:UUID} SETTINGS mutations_sync=2"
+    seen: list[dict] = []
+    rollup_installed = [True]
+
+    def delete_handler(req):
+        form = query_form(req)
+        if "system.tables" in form["query"][0]:
+            return httpx.Response(200, json={"data": [{"n": int(rollup_installed[0])}]})
+        seen.append(form)
+        return httpx.Response(200, content=b"")
+
+    client = clients(delete_handler)
+    client.delete_batch_rows("request_facts", "123e4567-e89b-12d3-a456-426614174000")
+    assert [form["query"] for form in seen] == [
+        ["ALTER TABLE `request_facts` DELETE WHERE batch_id={batch_id:UUID} SETTINGS mutations_sync=2"],
+        ["ALTER TABLE `request_insight_hourly` DELETE WHERE batch_id={batch_id:UUID} SETTINGS mutations_sync=2"],
     ]
-    assert seen["param_batch_id"] == ["123e4567-e89b-12d3-a456-426614174000"]
+    assert all(form["param_batch_id"] == ["123e4567-e89b-12d3-a456-426614174000"] for form in seen)
+    seen.clear()
+    # Before the rollup schema is installed, retry cleanup must still succeed on request_facts alone.
+    rollup_installed[0] = False
+    client.delete_batch_rows("request_facts", "123e4567-e89b-12d3-a456-426614174000")
+    assert [form["query"] for form in seen] == [
+        ["ALTER TABLE `request_facts` DELETE WHERE batch_id={batch_id:UUID} SETTINGS mutations_sync=2"]
+    ]
+    seen.clear()
+    client.delete_batch_rows("rum_vitals_facts", "123e4567-e89b-12d3-a456-426614174000")
+    assert [form["query"] for form in seen] == [
+        ["ALTER TABLE `rum_vitals_facts` DELETE WHERE batch_id={batch_id:UUID} SETTINGS mutations_sync=2"]
+    ]
 
 
 @pytest.mark.parametrize("table", ["arbitrary_table", "system.users", "logs; DROP TABLE logs", "`logs`", ""])
@@ -689,11 +709,14 @@ def test_app_lifecycle_initializes_probes_and_always_closes(monkeypatch, failure
         patch("backend.main._enforce_data_dir_mounted"),
         patch("backend.main._enforce_proxy_headers_configured"),
         patch("backend.core.metadata.base.ensure_pg_schema"),
-        patch("backend.config.validate_deployment_mode"),
+        patch(
+            "backend.main.register_high_scale_services_from_environment",
+            side_effect=RuntimeError("startup") if failure == "startup" else None,
+            return_value=(),
+        ),
         patch("backend.utils.telemetry.start_proxy_server"),
         patch("backend.utils.tunnel.get_tunnel_manager"),
         patch("backend.main._bounded_scheduler_shutdown"),
-        patch("backend.core.duckdb.close_all_connections"),
         patch("backend.core.clickhouse.get_clickhouse_client", return_value=c) as initialize,
         patch("backend.core.clickhouse.close_clickhouse_client") as close,
     ):
@@ -705,10 +728,6 @@ def test_app_lifecycle_initializes_probes_and_always_closes(monkeypatch, failure
                 if failure == "serving":
                     raise RuntimeError("serving failure")
 
-        if failure == "startup":
-            monkeypatch.setattr(
-                main, "register_high_scale_services_from_environment", MagicMock(side_effect=RuntimeError("startup"))
-            )
         if failure:
             with pytest.raises((RuntimeError, ch.ClickHouseError)):
                 asyncio.run(run_lifespan())
@@ -844,6 +863,36 @@ def test_query_settings_and_credential_redaction(clients):
         telemetry._QUERIES.reset(token)
     assert "hunter2-super-secret" not in recorded and "BY '[REDACTED]'" in recorded
 
+    analyzer_seen: list[httpx.Request] = []
+
+    class AnalyzerTransport(httpx.BaseTransport):
+        def handle_request(self, req: httpx.Request) -> httpx.Response:
+            analyzer_seen.append(req)
+            if "enable_analyzer" in req.url.params:
+                return httpx.Response(
+                    500,
+                    headers={"X-ClickHouse-Exception-Code": "452"},
+                    text="Code: 452. DB::Exception: Setting 'enable_analyzer' cannot be disabled",
+                )
+            return response([{"n": 1}])
+
+    subquery_filter = "{'request_facts': 'batch_id IN (SELECT batch_id FROM pub)'}"
+    ch_client = ch.ClickHouseClient(
+        ch.config.ClickHouseConfig(
+            host="localhost", port=8123, database="analytics", user="default", password="", secure=False
+        ),
+        transport=AnalyzerTransport(),
+    )
+    try:
+        assert ch_client.execute("SELECT 1 AS n", settings={"additional_table_filters": subquery_filter}) == [{"n": 1}]
+        assert ch_client.execute("SELECT 1 AS n", settings={"additional_table_filters": subquery_filter}) == [{"n": 1}]
+    finally:
+        ch_client.close()
+    assert len(analyzer_seen) == 3
+    assert "enable_analyzer" in analyzer_seen[0].url.params
+    assert "enable_analyzer" not in analyzer_seen[1].url.params
+    assert "enable_analyzer" not in analyzer_seen[2].url.params
+
 
 @pytest.fixture
 def instruments(monkeypatch):
@@ -943,11 +992,12 @@ def test_observer_gauges_errors_and_stop(monkeypatch):
     make.assert_not_called()
 
 
-def _rows_from_fixture(con) -> list[tuple]:
+def _rows_from_fixture(rows_data: list[dict]) -> list[tuple]:
     out = []
-    for idx, r in enumerate(con.execute("SELECT * FROM fixture").fetch_arrow_table().to_pylist()):
-        r["row_ordinal"] = idx
-        out.append(canonical_row(r))
+    for idx, r in enumerate(rows_data):
+        row_copy = dict(r)
+        row_copy["row_ordinal"] = idx
+        out.append(canonical_row(row_copy))
     return out
 
 
@@ -968,19 +1018,23 @@ def fixture():
         0,
         digest_rows(()),
     )
-    con = duckdb.connect()
-    con.execute(
-        "CREATE TABLE fixture AS SELECT 'source' AS source_identity, "
-        "'2026-09-01 00:00:00'::TIMESTAMP AS timestamp, NULL::VARCHAR AS country, "
-        "'192.0.2.1' AS ip, '/' AS url, 1::BIGINT AS conn_requests FROM range(5)"
-    )
-    yield dataset, objects, fos, con
-    con.close()
+    rows_data = [
+        {
+            "source_identity": "source",
+            "timestamp": datetime(2026, 9, 1, 0, 0, 0),
+            "country": None,
+            "ip": "192.0.2.1",
+            "url": "/",
+            "conn_requests": 1,
+        }
+        for _ in range(5)
+    ]
+    yield dataset, objects, fos, rows_data
 
 
 def test_fos_artifacts_roundtrip_corrupt_and_head_mismatch(fixture):
-    dataset, objects, fos, con = fixture
-    all_rows = _rows_from_fixture(con)
+    dataset, objects, fos, rows_data = fixture
+    all_rows = _rows_from_fixture(rows_data)
     artifacts = [objects.put(dataset, tuple(all_rows[i : i + 2])) for i in range(0, len(all_rows), 2)]
     rows = tuple(r for a in artifacts for r in objects.load(a).rows)
     assert [r[1] for r in rows] == list(range(5)) and digest_rows(rows) == digest_rows(tuple(all_rows))
@@ -1378,9 +1432,12 @@ def _archive_row(
 def test_schema_and_operational_snapshot_and_db_errors() -> None:
     store, pool, connection = _fake_store()
     store.create_schema()
-    pool.connection.assert_called_once_with()
+    # The schema transaction commits first; the reaper index then builds on its own autocommit connection.
+    assert pool.connection.call_count == 2
     connection.transaction.assert_called_once_with()
-    ddl = connection.execute.call_args.args[0]
+    statements = [c.args[0] for c in connection.execute.call_args_list]
+    ddl = next(s for s in statements if "CREATE TABLE IF NOT EXISTS" in s)
+    assert statements.index(ddl) < statements.index("SELECT pg_try_advisory_lock(%s)")
     for tbl in (
         "high_scale_ownership",
         "high_scale_source_objects",
@@ -1645,7 +1702,11 @@ def test_postgres_control_plane_end_to_end() -> None:
                 expected_owner_epoch=owner.owner_epoch,
             )
         store.acknowledge_sources_batch(
-            service_id, [source.object_key], manifest_id=manifest.manifest_id, expected_owner_epoch=owner.owner_epoch
+            service_id,
+            [source.object_key],
+            manifest_id=manifest.manifest_id,
+            expected_owner_epoch=owner.owner_epoch,
+            claim_tokens=(store.source(service_id, source.object_key).claim_token,),
         )
         store.transition_archive_manifest(
             manifest.manifest_id,

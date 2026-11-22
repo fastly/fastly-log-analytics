@@ -83,6 +83,28 @@ payload and publishes the rows that pass `row_matches_serving_domain` under a
 distinct batch id (`{manifest_id}:{sibling}`), before acknowledging the source.
 Retained archive `raw_json` preserves the original beacon; repair, if ever needed, must be scoped and duplicate-checked, never a cursor reset.
 
+### Publication failures after the archive commit
+
+When a ClickHouse fact, sibling or derived publication fails after the archive
+manifest reached `manifest_committed`, the sources are bound to that manifest
+(`status='archived'`, `archive_manifest_id` set, no owner or lease) instead of
+returning to `discovered`. Discovery treats them as already handled, and raw
+deletion waits for `acknowledged`. Each worker loop then retries bound manifests
+every `HIGH_SCALE_PUBLICATION_RETRY_INTERVAL_SECONDS` (default 30), at most
+`HIGH_SCALE_PUBLICATION_RETRY_LIMIT` (default 4) per service. A retry leases the
+manifest's sources and reads the checksum-verified artifact. It re-decodes each
+archived line at its original ordinal, so the rows still match the manifest's
+canonical digest. Then it publishes under the original batch ids and generation
+(`{manifest_id}`, `{manifest_id}:cmcd`, `{manifest_id}:{domain}_aggregate`, the
+sibling id and so on) and acknowledges the sources. The raw object does not need
+to exist. The NGWAF bot lookup made at ingest is stored in each request row's
+`_ngwaf_enrichment` archive column and replayed, so a retried batch matches its
+pending digest even after `ngwaf_bots` changes. A failed retry keeps the binding
+and backs off exponentially, up to an hour per manifest. An artifact that cannot
+be read or re-decoded returns the sources to `discovered` with `last_error`
+naming the manifest, and the worker logs `archive publication retry cannot read
+archive`.
+
 ### Diagnose mixed RUM archives before repairing them
 
 The claimed domain describes source ownership, not every archived row's kind.

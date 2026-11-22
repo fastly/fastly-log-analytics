@@ -1,0 +1,177 @@
+{
+  "fields": [
+    {
+      "name": "cmcd_sid",
+      "label": "CMCD Session ID",
+      "vcl_log_expression": "req.http.x-cmcd:sid",
+      "collection_stage": "edge",
+      "duckdb_type": "VARCHAR",
+      "value_type": "string",
+      "bytes_estimate": 40,
+      "byte_limit": 288,
+      "enabled": true
+    },
+    {
+      "name": "cmcd_cid",
+      "label": "CMCD Content ID",
+      "vcl_log_expression": "req.http.x-cmcd:cid",
+      "collection_stage": "edge",
+      "duckdb_type": "VARCHAR",
+      "value_type": "string",
+      "bytes_estimate": 30,
+      "byte_limit": 288,
+      "enabled": true
+    },
+    {
+      "name": "cmcd_br",
+      "label": "Encoded Bitrate (kbps)",
+      "vcl_log_expression": "req.http.x-cmcd:br",
+      "collection_stage": "edge",
+      "duckdb_type": "INTEGER",
+      "value_type": "numeric",
+      "bytes_estimate": 5,
+      "enabled": true
+    },
+    {
+      "name": "cmcd_bl",
+      "label": "Buffer Length (ms)",
+      "vcl_log_expression": "req.http.x-cmcd:bl",
+      "collection_stage": "edge",
+      "duckdb_type": "INTEGER",
+      "value_type": "numeric",
+      "bytes_estimate": 5,
+      "enabled": true
+    },
+    {
+      "name": "cmcd_bs",
+      "label": "Buffer Starvation",
+      "vcl_log_expression": "req.http.x-cmcd:bs",
+      "collection_stage": "edge",
+      "duckdb_type": "BOOLEAN",
+      "value_type": "boolean",
+      "bytes_estimate": 1,
+      "enabled": true
+    },
+    {
+      "name": "cmcd_d",
+      "label": "Object Duration (ms)",
+      "vcl_log_expression": "req.http.x-cmcd:d",
+      "collection_stage": "edge",
+      "duckdb_type": "INTEGER",
+      "value_type": "numeric",
+      "bytes_estimate": 5,
+      "enabled": true
+    },
+    {
+      "name": "cmcd_dl",
+      "label": "Deadline (ms)",
+      "vcl_log_expression": "req.http.x-cmcd:dl",
+      "vcl_log_expression_note": "ms",
+      "collection_stage": "edge",
+      "duckdb_type": "INTEGER",
+      "value_type": "numeric",
+      "bytes_estimate": 5,
+      "enabled": true
+    },
+    {
+      "name": "cmcd_mtp",
+      "label": "Measured Throughput (kbps)",
+      "vcl_log_expression": "req.http.x-cmcd:mtp",
+      "collection_stage": "edge",
+      "duckdb_type": "INTEGER",
+      "value_type": "numeric",
+      "bytes_estimate": 5,
+      "enabled": true
+    },
+    {
+      "name": "cmcd_ot",
+      "label": "Object Type",
+      "vcl_log_expression": "req.http.x-cmcd:ot",
+      "collection_stage": "edge",
+      "duckdb_type": "VARCHAR",
+      "value_type": "string",
+      "bytes_estimate": 2,
+      "enabled": true
+    },
+    {
+      "name": "cmcd_sf",
+      "label": "Streaming Format",
+      "vcl_log_expression": "req.http.x-cmcd:sf",
+      "collection_stage": "edge",
+      "duckdb_type": "VARCHAR",
+      "value_type": "string",
+      "bytes_estimate": 2,
+      "enabled": true
+    },
+    {
+      "name": "cmcd_st",
+      "label": "Stream Type",
+      "vcl_log_expression": "req.http.x-cmcd:st",
+      "collection_stage": "edge",
+      "duckdb_type": "VARCHAR",
+      "value_type": "string",
+      "bytes_estimate": 2,
+      "enabled": true
+    },
+    {
+      "name": "cmcd_su",
+      "label": "Startup",
+      "vcl_log_expression": "req.http.x-cmcd:su",
+      "collection_stage": "edge",
+      "duckdb_type": "BOOLEAN",
+      "value_type": "boolean",
+      "bytes_estimate": 1,
+      "enabled": true
+    },
+    {
+      "name": "cmcd_tb",
+      "label": "Top Bitrate (kbps)",
+      "vcl_log_expression": "req.http.x-cmcd:tb",
+      "collection_stage": "edge",
+      "duckdb_type": "INTEGER",
+      "value_type": "numeric",
+      "bytes_estimate": 5,
+      "enabled": true
+    },
+    {
+      "name": "cmcd_rtp",
+      "label": "Requested Max Throughput (kbps)",
+      "vcl_log_expression": "req.http.x-cmcd:rtp",
+      "collection_stage": "edge",
+      "duckdb_type": "INTEGER",
+      "value_type": "numeric",
+      "bytes_estimate": 5,
+      "enabled": true
+    }
+  ],
+  "variants": [
+    {
+      "mode": "query_string",
+      "version": 1,
+      "vcl": {
+        "CMCD Extraction": "# CMCD v1 query-string-mode extraction.\ndeclare local var.cmcd STRING;\nset var.cmcd = urldecode(querystring.get(req.url, \"CMCD\"));\n\nif (var.cmcd != \"\") {\n\n  declare local var.cmcd_pad STRING;\n  set var.cmcd_pad = \",\" var.cmcd \",\";\n\n  # CMCD-Object fields\n  set req.http.x-cmcd:br = subfield(var.cmcd, \"br\", \",\");\n  set req.http.x-cmcd:d = subfield(var.cmcd, \"d\", \",\");\n  set req.http.x-cmcd:ot = subfield(var.cmcd, \"ot\", \",\");\n  set req.http.x-cmcd:tb = subfield(var.cmcd, \"tb\", \",\");\n\n  # CMCD-Request fields\n  set req.http.x-cmcd:bl = subfield(var.cmcd, \"bl\", \",\");\n  set req.http.x-cmcd:dl = subfield(var.cmcd, \"dl\", \",\");\n  set req.http.x-cmcd:mtp = subfield(var.cmcd, \"mtp\", \",\");\n  set req.http.x-cmcd:su = if(var.cmcd_pad ~ \",su,\", \"1\", \"\");\n\n  # CMCD-Session fields — strip quotes from string values.\n  set req.http.x-cmcd:sid = regsuball(subfield(var.cmcd, \"sid\", \",\"), {\"^\"|\"$\"}, \"\");\n  set req.http.x-cmcd:cid = regsuball(subfield(var.cmcd, \"cid\", \",\"), {\"^\"|\"$\"}, \"\");\n  set req.http.x-cmcd:sf = subfield(var.cmcd, \"sf\", \",\");\n  set req.http.x-cmcd:st = subfield(var.cmcd, \"st\", \",\");\n\n  # CMCD-Status fields\n  set req.http.x-cmcd:bs = if(var.cmcd_pad ~ \",bs,\", \"1\", \"\");\n  set req.http.x-cmcd:rtp = subfield(var.cmcd, \"rtp\", \",\");\n\n  # Strip CMCD from URL to prevent cache key pollution.\n  set req.url = querystring.filter(req.url, \"CMCD\");\n}"
+      }
+    },
+    {
+      "mode": "query_string",
+      "version": 2,
+      "vcl": {
+        "CMCD Extraction": "# CMCD v2 query-string-mode extraction.\ndeclare local var.cmcd STRING;\nset var.cmcd = urldecode(querystring.get(req.url, \"CMCD\"));\n\nif (var.cmcd != \"\") {\n\n  # CMCD-Object fields\n  set req.http.x-cmcd:br = subfield(var.cmcd, \"br\", \",\");\n  set req.http.x-cmcd:d = subfield(var.cmcd, \"d\", \",\");\n  set req.http.x-cmcd:ot = subfield(var.cmcd, \"ot\", \",\");\n  set req.http.x-cmcd:tb = subfield(var.cmcd, \"tb\", \",\");\n\n  # CMCD-Request fields\n  set req.http.x-cmcd:bl = subfield(var.cmcd, \"bl\", \",\");\n  set req.http.x-cmcd:dl = subfield(var.cmcd, \"dl\", \",\");\n  set req.http.x-cmcd:mtp = subfield(var.cmcd, \"mtp\", \",\");\n  set req.http.x-cmcd:su = if(subfield(var.cmcd, \"su\", \",\") == \"?1\", \"1\", \"\");\n\n  # CMCD-Session fields — strip quotes from string values.\n  set req.http.x-cmcd:sid = regsuball(subfield(var.cmcd, \"sid\", \",\"), {\"^\"|\"$\"}, \"\");\n  set req.http.x-cmcd:cid = regsuball(subfield(var.cmcd, \"cid\", \",\"), {\"^\"|\"$\"}, \"\");\n  set req.http.x-cmcd:sf = subfield(var.cmcd, \"sf\", \",\");\n  set req.http.x-cmcd:st = subfield(var.cmcd, \"st\", \",\");\n\n  # CMCD-Status fields\n  set req.http.x-cmcd:bs = if(subfield(var.cmcd, \"bs\", \",\") == \"?1\", \"1\", \"\");\n  set req.http.x-cmcd:rtp = subfield(var.cmcd, \"rtp\", \",\");\n\n  # Strip CMCD from URL to prevent cache key pollution.\n  set req.url = querystring.filter(req.url, \"CMCD\");\n}"
+      }
+    },
+    {
+      "mode": "headers",
+      "version": 1,
+      "vcl": {
+        "CMCD Extraction": "# CMCD v1 header-mode extraction.\nif (req.http.CMCD-Object != \"\" || req.http.CMCD-Request != \"\" || req.http.CMCD-Session != \"\" || req.http.CMCD-Status != \"\") {\n\n  # Pad header values with commas for bare-key boolean matching.\n  declare local var.cmcd_req_pad STRING;\n  set var.cmcd_req_pad = \",\" req.http.CMCD-Request \",\";\n  declare local var.cmcd_status_pad STRING;\n  set var.cmcd_status_pad = \",\" req.http.CMCD-Status \",\";\n\n  # CMCD-Object fields\n  set req.http.x-cmcd:br = subfield(req.http.CMCD-Object, \"br\", \",\");\n  set req.http.x-cmcd:d = subfield(req.http.CMCD-Object, \"d\", \",\");\n  set req.http.x-cmcd:ot = subfield(req.http.CMCD-Object, \"ot\", \",\");\n  set req.http.x-cmcd:tb = subfield(req.http.CMCD-Object, \"tb\", \",\");\n\n  # CMCD-Request fields\n  set req.http.x-cmcd:bl = subfield(req.http.CMCD-Request, \"bl\", \",\");\n  set req.http.x-cmcd:dl = subfield(req.http.CMCD-Request, \"dl\", \",\");\n  set req.http.x-cmcd:mtp = subfield(req.http.CMCD-Request, \"mtp\", \",\");\n  set req.http.x-cmcd:su = if(var.cmcd_req_pad ~ \",su,\", \"1\", \"\");\n\n  # CMCD-Session fields — strip quotes from string values.\n  set req.http.x-cmcd:sid = regsuball(subfield(req.http.CMCD-Session, \"sid\", \",\"), {\"^\"|\"$\"}, \"\");\n  set req.http.x-cmcd:cid = regsuball(subfield(req.http.CMCD-Session, \"cid\", \",\"), {\"^\"|\"$\"}, \"\");\n  set req.http.x-cmcd:sf = subfield(req.http.CMCD-Session, \"sf\", \",\");\n  set req.http.x-cmcd:st = subfield(req.http.CMCD-Session, \"st\", \",\");\n\n  # CMCD-Status fields\n  set req.http.x-cmcd:bs = if(var.cmcd_status_pad ~ \",bs,\", \"1\", \"\");\n  set req.http.x-cmcd:rtp = subfield(req.http.CMCD-Status, \"rtp\", \",\");\n\n  # Strip CMCD headers before forwarding to origin.\n  unset req.http.CMCD-Object;\n  unset req.http.CMCD-Request;\n  unset req.http.CMCD-Session;\n  unset req.http.CMCD-Status;\n}"
+      }
+    },
+    {
+      "mode": "headers",
+      "version": 2,
+      "vcl": {
+        "CMCD Extraction": "# CMCD v2 header-mode extraction.\nif (req.http.CMCD-Object != \"\" || req.http.CMCD-Request != \"\" || req.http.CMCD-Session != \"\" || req.http.CMCD-Status != \"\") {\n\n  # CMCD-Object fields\n  set req.http.x-cmcd:br = subfield(req.http.CMCD-Object, \"br\", \",\");\n  set req.http.x-cmcd:d = subfield(req.http.CMCD-Object, \"d\", \",\");\n  set req.http.x-cmcd:ot = subfield(req.http.CMCD-Object, \"ot\", \",\");\n  set req.http.x-cmcd:tb = subfield(req.http.CMCD-Object, \"tb\", \",\");\n\n  # CMCD-Request fields\n  set req.http.x-cmcd:bl = subfield(req.http.CMCD-Request, \"bl\", \",\");\n  set req.http.x-cmcd:dl = subfield(req.http.CMCD-Request, \"dl\", \",\");\n  set req.http.x-cmcd:mtp = subfield(req.http.CMCD-Request, \"mtp\", \",\");\n  set req.http.x-cmcd:su = if(subfield(req.http.CMCD-Request, \"su\", \",\") == \"?1\", \"1\", \"\");\n\n  # CMCD-Session fields — strip quotes from string values.\n  set req.http.x-cmcd:sid = regsuball(subfield(req.http.CMCD-Session, \"sid\", \",\"), {\"^\"|\"$\"}, \"\");\n  set req.http.x-cmcd:cid = regsuball(subfield(req.http.CMCD-Session, \"cid\", \",\"), {\"^\"|\"$\"}, \"\");\n  set req.http.x-cmcd:sf = subfield(req.http.CMCD-Session, \"sf\", \",\");\n  set req.http.x-cmcd:st = subfield(req.http.CMCD-Session, \"st\", \",\");\n\n  # CMCD-Status fields\n  set req.http.x-cmcd:bs = if(subfield(req.http.CMCD-Status, \"bs\", \",\") == \"?1\", \"1\", \"\");\n  set req.http.x-cmcd:rtp = subfield(req.http.CMCD-Status, \"rtp\", \",\");\n\n  # Strip CMCD headers before forwarding to origin.\n  unset req.http.CMCD-Object;\n  unset req.http.CMCD-Request;\n  unset req.http.CMCD-Session;\n  unset req.http.CMCD-Status;\n}"
+      }
+    }
+  ]
+}

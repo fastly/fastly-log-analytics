@@ -6,6 +6,7 @@ import csv
 import io
 import logging
 import os
+import re
 import time
 from collections import deque
 from collections.abc import Iterator
@@ -83,6 +84,9 @@ class _CancelHistoryCache(BoundedTTLCache[str, deque[float]]):
         with _cancel_limiter._lock:
             _cancel_limiter._events.clear()
             _cancel_limiter._locks.clear()
+            _cancel_limiter._saturated.clear()
+            _cancel_limiter._single_hit_keys.clear()
+            _cancel_limiter._overflow_locked_until = 0.0
 
 
 _cancel_history: BoundedTTLCache = _CancelHistoryCache(maxsize=1024, ttl_seconds=60.0)
@@ -178,7 +182,7 @@ def list_persisted_slow_queries(
     since_hours: int = Query(24, ge=1, le=24 * 30),
     threshold_ms: float = Query(100.0, ge=0.0),
     kind: str | None = Query(None, pattern="^(analyst|admin|cron|system)$"),
-    db_type: str | None = Query(None, pattern="^(DuckDB|Postgres|ClickHouse)$"),
+    db_type: str | None = Query(None, pattern="^(Postgres|ClickHouse)$"),
     sort: str = Query("recent", pattern="^(recent|duration)$"),
     limit: int = Query(200, ge=1, le=2000),
 ) -> SlowQueriesResponse:
@@ -573,19 +577,39 @@ def usage_log_export(
                     row["status"],
                     row["count"] if "count" in row.keys() else 1,
                 ]
-                writer.writerow(
-                    [
-                        f"'{v}" if isinstance(v, str) and v.lstrip().startswith(("=", "+", "-", "@")) else v
-                        for v in row_data
-                    ]
-                )
+                writer.writerow([_sanitize_csv_cell(v) for v in row_data])
             buf.seek(0)
             yield buf.read()
             buf.seek(0)
             buf.truncate(0)
 
-    headers = {"Content-Disposition": "attachment; filename=usage_log.csv"}
+    headers = {"Content-Disposition": 'attachment; filename="usage_log.csv"'}
     return StreamingResponse(generate(), media_type="text/csv", headers=headers)
+
+
+_CLEAN_SIGNED_DECIMAL_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$", re.ASCII)
+_CSV_DIRECT_DANGEROUS_LEAD = ("=", "+", "-", "@", "|", "%", "\t", "\r", "\n")
+_CSV_FORMULA_TRIGGERS = ("=", "+", "-", "@", "|", "%")
+_CSV_CONTROL_AND_ZERO_WIDTH = "".join(chr(c) for c in range(0x20)) + "\x7f\x85\ufeff\u200b\u200c\u200d\u2060"
+
+
+def _sanitize_csv_cell(val: Any) -> Any:
+    """Prefix spreadsheet formula triggers so Excel/Sheets treat them as literal text."""
+    if not isinstance(val, str) or not val:
+        return val
+    if val[0] in _CSV_DIRECT_DANGEROUS_LEAD:
+        if _CLEAN_SIGNED_DECIMAL_RE.fullmatch(val):
+            return val
+        return f"'{val}"
+    stripped = val
+    while stripped:
+        nxt = stripped.lstrip().lstrip(_CSV_CONTROL_AND_ZERO_WIDTH)
+        if nxt == stripped:
+            break
+        stripped = nxt
+    if stripped and stripped[0] in _CSV_FORMULA_TRIGGERS:
+        return f"'{val}"
+    return val
 
 
 @router.delete(
@@ -608,36 +632,9 @@ def purge_usage_log_endpoint(source: dict[str, Any] = Depends(get_source)) -> Ok
 )
 def get_system_jobs_endpoint() -> Any:
     """Return status and schedule info for global background jobs."""
-    from backend.cron.scheduler import get_scheduler, get_system_job_status
+    from backend.cron.scheduler import get_system_jobs_snapshot
 
-    statuses = get_system_job_status()
-    result = []
-    job_labels = {
-        "bot_data_refresh": "Bot Data Refresh",
-        "rdns_enrichment": "rDNS Enrichment",
-        "share_audit_purge": "Share Audit Purge",
-    }
-    sched = get_scheduler()
-    for job_id, label in job_labels.items():
-        entry = {
-            "id": job_id,
-            "name": label,
-            "next_run_at": None,
-            **statuses.get(job_id, {"last_run_at": None, "status": None, "duration_s": None, "detail": ""}),
-        }
-        if sched is not None:
-            try:
-                job = sched.get_job(job_id)
-            except Exception:
-                job = None
-            next_run = getattr(job, "next_run_time", None) if job else None
-            if next_run:
-                from backend.utils.date_utils import iso_z
-
-                entry["next_run_at"] = iso_z(next_run)
-        result.append(entry)
-
-    return SystemJobsResponse.with_telemetry(jobs=result)
+    return SystemJobsResponse.with_telemetry(jobs=get_system_jobs_snapshot())
 
 
 _CacheRegistry.register("routers.admin_queries._cancel_history", _cancel_history)

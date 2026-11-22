@@ -14,7 +14,7 @@ import { toggleLogFieldGroup, toggleLogFieldOverride, toggleLogFieldPreset, upda
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, test, vi } from 'vitest'
-import { http, HttpResponse } from 'msw'
+import { http, HttpResponse } from 'msw/http'
 import { axe } from 'vitest-axe'
 import { DeleteDataDialog, TeardownDialog } from '@/components/TeardownDialog'
 import { LogSettingsModal } from '@/components/LogSettingsModal/LogSettingsModal'
@@ -27,7 +27,8 @@ import {
   type LogFieldsCatalog, type WizardDraft, type WizardState,
   ConnectStep,
 } from '@/components/ProvisionWizard/ProvisionWizard'
-import { RumVersionPicker } from '@/components/ProvisionWizard/steps/StorageStep'
+import { RumVersionPicker, StorageStep } from '@/components/ProvisionWizard/steps/StorageStep'
+import { TokenStep } from '@/components/ProvisionWizard/steps/CredentialsStep'
 import {
   WIZARD_DRAFT_KEY, buildHandleModalClose, buildValidateOnSuccess, clearDraft, loadDraft,
   mergePersistedConfig, runAdminIngest, runCheckConfig, runCheckDomain,
@@ -35,6 +36,7 @@ import {
   validateMutationFn,
 } from '@/components/ProvisionWizard/useWizardState'
 import { useServiceStore } from '@/stores/filterStore'
+import { setCloudModeRuntime } from '@/lib/cloud-engine/mode'
 import { server } from '@/__tests__/helpers/msw/handlers'
 
 vi.mock('@tanstack/react-virtual', async () => (await import('../../helpers/page-smoke')).reactVirtualModuleMock())
@@ -121,6 +123,18 @@ describe('ProvisionWizard modes and ingest connect step', () => {
     expect(screen.queryByRole('button', { name: /analyst/i })).not.toBeInTheDocument()
   })
 
+  it('offers only Provision in Cloud, which has no Terraform-connect ingest route', () => {
+    setCloudModeRuntime(true)
+    try {
+      render(<ModeStep s={makeConnectState({ step: 'mode', mode: null })} />)
+      expect(screen.getAllByRole('button')).toHaveLength(1)
+      expect(screen.getByRole('button', { name: /admin: provision/i })).toBeEnabled()
+      expect(screen.queryByText(/CDN proxy/i)).not.toBeInTheDocument()
+    } finally {
+      setCloudModeRuntime(false)
+    }
+  })
+
   it.each([
     ['provision', 'Admin: Provision'],
     ['ingest', 'Admin: Connect Terraform'],
@@ -132,7 +146,7 @@ describe('ProvisionWizard modes and ingest connect step', () => {
     expect(s.setStep).toHaveBeenCalledWith('token')
   })
 
-  it('renders the ingest connect form without DuckLake or analyst-invite inputs', () => {
+  it('renders the ingest connect form without legacy catalog or analyst-invite inputs', () => {
     render(<ConnectStep s={makeConnectState()} />)
     expect(screen.getByText(/connect to existing storage/i)).toBeVisible()
     expect(screen.getByText('Logging Service', { selector: 'label, span, div' })).toBeVisible()
@@ -163,6 +177,16 @@ describe('getStepsForMode', () => {
   it('drops the NGWAF and log-field steps when logging is disabled', () => {
     expect(ids('ingest', { logging_enabled: false })).toEqual(['mode', 'token', 'service', 'connect', 'features', 'storage', 'execute'])
     expect(ids('provision', { logging_enabled: false })).toEqual(['mode', 'token', 'service', 'features', 'storage', 'execute'])
+  })
+
+  it('drops the NGWAF and mode steps in Cloud mode, where the server has no NGWAF or CDN front', () => {
+    setCloudModeRuntime(true)
+    try {
+      expect(ids('provision')).toEqual(['token', 'service', 'features', 'storage', 'fields', 'execute'])
+      expect(ids('provision', { logging_enabled: false })).toEqual(['token', 'service', 'features', 'storage', 'execute'])
+    } finally {
+      setCloudModeRuntime(false)
+    }
   })
 
   it('never contains the removed analyst-join steps', () => {
@@ -214,6 +238,78 @@ function makeFooterState(overrides: Partial<WizardState> = {}): WizardState {
     ...overrides,
   } as WizardState
 }
+
+describe('WizardFooter — Cloud mode skips the NGWAF step', () => {
+  afterEach(() => setCloudModeRuntime(false))
+
+  it('storage Continue goes straight to log fields in Cloud and to NGWAF when self-hosted', async () => {
+    const selfHosted = vi.fn()
+    const { unmount } = render(<WizardFooter s={makeFooterState({ step: 'storage', setStep: selfHosted, config: { logging_enabled: true } as never })} />)
+    await userEvent.click(screen.getByRole('button', { name: /^continue$/i }))
+    expect(selfHosted).toHaveBeenCalledWith('ngwaf')
+    unmount()
+    setCloudModeRuntime(true)
+    const cloud = vi.fn()
+    render(<WizardFooter s={makeFooterState({ step: 'storage', setStep: cloud, config: { logging_enabled: true } as never })} />)
+    await userEvent.click(screen.getByRole('button', { name: /^continue$/i }))
+    expect(cloud).toHaveBeenCalledWith('fields')
+  })
+
+  it('Back from log fields returns to storage in Cloud', async () => {
+    setCloudModeRuntime(true)
+    const setStep = vi.fn()
+    render(<WizardFooter s={makeFooterState({ step: 'fields', setStep, config: { logging_enabled: true } as never })} />)
+    await userEvent.click(screen.getByRole('button', { name: /back/i }))
+    expect(setStep).toHaveBeenCalledWith('storage')
+  })
+})
+
+describe('StorageStep — Cloud mode hides self-hosted-only sections', () => {
+  afterEach(() => setCloudModeRuntime(false))
+
+  const storageState = () => makeFooterState({
+    step: 'storage', checkDomain: vi.fn(), setConfig: vi.fn(), domainMessage: '',
+    config: { ...INITIAL_CONFIG, logging_enabled: true, cdn_prefix: 'demo' },
+  } as Partial<WizardState>)
+
+  it('self-hosted shows the CDN front, Background Sync, and Cloud Snapshot Interval controls', () => {
+    renderWithQuery(<StorageStep s={storageState()} />)
+    expect(screen.getByText(/CDN Performance Front/i)).toBeInTheDocument()
+    expect(screen.getByLabelText('Background Sync')).toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: 'Cloud Snapshot Interval' })).toBeInTheDocument()
+  })
+
+  it('Cloud hides them: the Cloud server has no CDN prefix, domain check, cron sync, or snapshot interval', () => {
+    setCloudModeRuntime(true)
+    renderWithQuery(<StorageStep s={storageState()} />)
+    expect(screen.queryByText(/CDN Performance Front/i)).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Background Sync')).not.toBeInTheDocument()
+    expect(screen.queryByRole('combobox', { name: 'Cloud Snapshot Interval' })).not.toBeInTheDocument()
+  })
+})
+
+describe('TokenStep — role copy matches the server role check', () => {
+  afterEach(() => setCloudModeRuntime(false))
+
+  const tokenState = () => makeFooterState({ step: 'token', token: '', setToken: vi.fn() } as Partial<WizardState>)
+  const roleCopy = () =>
+    screen.getByText((_, el) => el?.tagName === 'P' && (el.textContent ?? '').includes('engineer'))
+
+  it('self-hosted accepts an engineer token with access to all services, or a superuser token', () => {
+    render(<TokenStep s={tokenState()} />)
+    const copy = roleCopy()
+    expect(copy).toHaveTextContent(/engineer token with access to all services, or a superuser token/)
+    expect(copy).not.toHaveTextContent(/cannot create new services/)
+  })
+
+  it('Cloud accepts an engineer token with access to all services, or a superuser token', () => {
+    setCloudModeRuntime(true)
+    render(<TokenStep s={tokenState()} />)
+    const copy = roleCopy()
+    expect(copy).toHaveTextContent(/engineer token with access to all services, or a superuser token/)
+    expect(copy).not.toHaveTextContent(/cannot create new services/)
+  })
+})
 
 describe('WizardFooter — terraform (Terraform & VCL preview) step', () => {
   it("provision and ingest modes: 'Back to Review' returns to Review without deploying or ingesting", async () => {
@@ -340,6 +436,107 @@ describe('ResumeBanner', () => {
     saveDraft(makeDraft({ currentStep: 'fields' }))
     renderWithQuery(<ProvisionWizard open={true} onOpenChange={vi.fn()} />, { queryClient: draftQueryClient })
     expect(screen.getByText(/Resume previous wizard/i)).toBeInTheDocument()
+  })
+})
+
+describe('ProvisionWizard — Cloud mode skips the mode step', () => {
+  afterEach(() => {
+    setCloudModeRuntime(false)
+    window.localStorage.removeItem(WIZARD_DRAFT_KEY)
+  })
+
+  it('opens directly on the token step with provision mode pre-selected and no mode step in STEPS', () => {
+    setCloudModeRuntime(true)
+    renderWithQuery(<ProvisionWizard open={true} onOpenChange={vi.fn()} />, { queryClient: draftQueryClient })
+    expect(screen.getByText(/Enter Fastly API Token/i)).toBeInTheDocument()
+    expect(screen.queryByText(/Select your role/i)).not.toBeInTheDocument()
+    expect(screen.getByText((_, el) => el?.textContent === 'Step 1 of 6')).toBeInTheDocument()
+  })
+
+  it('does not show the Back button on the token step in Cloud mode', () => {
+    setCloudModeRuntime(true)
+    render(<WizardFooter s={makeFooterState({ step: 'token', mode: 'provision' })} />)
+    expect(screen.queryByRole('button', { name: /back/i })).not.toBeInTheDocument()
+  })
+
+  it('shows ResumeBanner when pendingDraft exists in Cloud mode, and Start fresh resets to token', async () => {
+    setCloudModeRuntime(true)
+    const user = userEvent.setup()
+    saveDraft(makeDraft({ currentStep: 'fields' }))
+    renderWithQuery(<ProvisionWizard open={true} onOpenChange={vi.fn()} />, { queryClient: draftQueryClient })
+    expect(screen.getByText(/Resume previous wizard/i)).toBeInTheDocument()
+    await user.click(screen.getByTestId('resume-banner-start-fresh'))
+    expect(screen.queryByText(/Resume previous wizard/i)).not.toBeInTheDocument()
+    expect(screen.getByText(/Enter Fastly API Token/i)).toBeInTheDocument()
+    expect(screen.queryByText(/Select your role/i)).not.toBeInTheDocument()
+  })
+
+  it('starts on the mode step in non-Cloud mode', () => {
+    setCloudModeRuntime(false)
+    renderWithQuery(<ProvisionWizard open={true} onOpenChange={vi.fn()} />, { queryClient: draftQueryClient })
+    expect(screen.getByText(/Select your role/i)).toBeInTheDocument()
+    expect(screen.queryByText(/Enter Fastly API Token/i)).not.toBeInTheDocument()
+  })
+})
+
+describe('ProvisionWizard — token submission (/api/provision/services)', () => {
+  afterEach(() => {
+    setCloudModeRuntime(false)
+    window.localStorage.removeItem(WIZARD_DRAFT_KEY)
+  })
+
+  it('calls POST /api/provision/services with JSON { token } in Cloud mode and advances to service step', async () => {
+    setCloudModeRuntime(true)
+    const user = userEvent.setup()
+    let receivedPost: unknown = null
+    let getCalled = false
+    server.use(
+      http.post(`${API_BASE}/api/provision/services`, async ({ request }) => {
+        receivedPost = await request.json()
+        return HttpResponse.json({
+          customer_id: 'cust-1',
+          services: [{ id: 'svc-1', name: 'Cloud Svc', type: 'vcl', customer_id: 'cust-1' }],
+        })
+      }),
+      http.get(`${API_BASE}/api/provision/services`, () => {
+        getCalled = true
+        return HttpResponse.json({ error: 'cloud_endpoint_unsupported' }, { status: 501 })
+      }),
+    )
+
+    renderWithQuery(<ProvisionWizard open={true} onOpenChange={vi.fn()} />, { queryClient: createTestQueryClient() })
+    await user.type(screen.getByLabelText(/api token/i), 'tok-cloud-123')
+    await user.click(screen.getByRole('button', { name: /fetch services/i }))
+
+    expect(await screen.findByText('Cloud Svc')).toBeInTheDocument()
+    expect(receivedPost).toEqual({ token: 'tok-cloud-123' })
+    expect(getCalled).toBe(false)
+  })
+
+  it('sends the Fastly token in Authorization in non-Cloud mode', async () => {
+    setCloudModeRuntime(false)
+    const user = userEvent.setup()
+    let receivedAuthorization: string | null = null
+    let postCalled = false
+    server.use(
+      http.get(`${API_BASE}/api/provision/services`, ({ request }) => {
+        receivedAuthorization = request.headers.get('Authorization')
+        return HttpResponse.json([{ id: 'svc-2', name: 'Local Svc', provisioned: false }])
+      }),
+      http.post(`${API_BASE}/api/provision/services`, () => {
+        postCalled = true
+        return HttpResponse.json({}, { status: 405 })
+      }),
+    )
+
+    renderWithQuery(<ProvisionWizard open={true} onOpenChange={vi.fn()} />, { queryClient: createTestQueryClient() })
+    await user.click(screen.getByRole('button', { name: /admin: provision/i }))
+    await user.type(screen.getByLabelText(/api token/i), 'tok-local-456')
+    await user.click(screen.getByRole('button', { name: /fetch services/i }))
+
+    expect(await screen.findByText('Local Svc')).toBeInTheDocument()
+    expect(receivedAuthorization).toBe('Bearer tok-local-456')
+    expect(postCalled).toBe(false)
   })
 })
 
@@ -798,14 +995,16 @@ describe('runDeploy', () => {
     expect(path).toBe('/api/provision/execute')
     expect(body).toMatchObject({
       token: 'TOK', service_id: 'svc-1', service_name: 'svc', endpoint_name: 'My EP',
-      fos_bucket_name: 'my-bucket', sample_rate: '1', log_period: '60', commit_interval_mins: 5,
+      fos_bucket_name: 'my-bucket', sample_rate: '1', log_period: '60',
+      snapshot_interval_minutes: 5,
       cdn_url: 'https://mycdn.global.ssl.fastly.net',
     })
 
-    const noCdn = makeArgs({ config: { ...FULL_CONFIG, cdn_prefix: '', faro_version: '1.9.0', log_fields: { groups: ['core', 'http'] } } })
+    const noCdn = makeArgs({ config: { ...FULL_CONFIG, cdn_prefix: '', snapshot_interval_minutes: 60, faro_version: '1.9.0', log_fields: { groups: ['core', 'http'] } } })
     runDeploy(noCdn)
     const [, bodyNoCdn] = (noCdn.start as ReturnType<typeof vi.fn>).mock.calls[0]
     expect(bodyNoCdn).not.toHaveProperty('cdn_url')
+    expect(bodyNoCdn.snapshot_interval_minutes).toBe(60)
     expect(bodyNoCdn.faro_version).toBe('1.9.0')
     expect(bodyNoCdn.log_fields).toBe('{"groups":["core","http"]}')
 
@@ -834,9 +1033,14 @@ describe('runAdminIngest', () => {
   })
 
   it('on success registers the ingested service (deduping existing) and marks setup done', async () => {
-    server.use(http.post(`${API_BASE}/api/provision/ingest`, () => HttpResponse.json({ ok: true })))
-    const args = makeArgs()
+    const capturedIngestBodies: Record<string, unknown>[] = []
+    server.use(http.post(`${API_BASE}/api/provision/ingest`, async ({ request }) => {
+      capturedIngestBodies.push((await request.json()) as Record<string, unknown>)
+      return HttpResponse.json({ ok: true })
+    }))
+    const args = makeArgs({ config: { ...FULL_CONFIG, snapshot_interval_minutes: 30 } })
     await runAdminIngest(args)
+    expect(capturedIngestBodies[0]?.snapshot_interval_minutes).toBe(30)
     expect(args.setIsDeploying).toHaveBeenNthCalledWith(1, true)
     expect(args.setActiveServiceId).toHaveBeenCalledWith('svc-1')
     expect(args.setServices).toHaveBeenCalledOnce()
@@ -923,6 +1127,33 @@ test('LogSettingsModal navigates through wizard steps', async () => {
   await user.click(screen.getByRole('button', { name: /^Back$/i }))
 
   await waitFor(() => expect(screen.getByText('Define Custom Log Fields')).toBeDefined())
+})
+
+test('LogSettingsModal hides computed Aggregate Metrics from field selection', async () => {
+  vi.spyOn(apiLib.client, 'GET').mockImplementation(async (url: string) => {
+    if (url.includes('/api/log-fields/catalog')) {
+      return getOk({
+        groups: [
+          { id: 'core', label: 'Core', fields: [] },
+          { id: 'METRICS', label: 'Aggregate Metrics', fields: [], locked: true, total_bytes: 0 },
+        ],
+        fields: [],
+        presets: {},
+      })
+    }
+    return getOk({ log_fields: { groups: ['core'] } })
+  })
+
+  renderWithQuery(
+    <LogSettingsModal
+      service={{ service_id: 'test-svc', name: 'Test Service' } as ServiceConfig}
+      open
+      onOpenChange={vi.fn()}
+    />,
+  )
+
+  await waitFor(() => expect(screen.getByText('Core')).toBeInTheDocument())
+  expect(screen.queryByText('Aggregate Metrics')).not.toBeInTheDocument()
 })
 
 test('LogSettingsModal shows custom fields in review step', async () => {
@@ -1131,7 +1362,7 @@ test('submits valid custom field and displays validation errors when invalid', a
         vcl_log_expression: 'req.http.Host',
         collection_stage: 'edge',
         origin_log_frequency: 'all',
-        duckdb_type: 'VARCHAR',
+        sql_type: 'VARCHAR',
         value_type: 'string',
         bytes_estimate: 32,
         nullable: true,
@@ -1194,7 +1425,7 @@ test('renders custom fields and handles deletion', async () => {
         vcl_log_expression: 'req.http.Host',
         collection_stage: 'edge',
         origin_log_frequency: 'all',
-        duckdb_type: 'VARCHAR',
+        sql_type: 'VARCHAR',
         value_type: 'string',
         bytes_estimate: 20,
         nullable: true,
@@ -1237,8 +1468,6 @@ describe('DeleteDataDialog & TeardownDialog', () => {
         service={{
           service_id: 'test-svc',
           name: 'Test Service',
-          duckdb_size_bytes: 5_000_000,
-          cache_file_count: 12,
         } as ServiceConfig}
         open={true}
         onOpenChange={vi.fn()}
@@ -1248,26 +1477,12 @@ describe('DeleteDataDialog & TeardownDialog', () => {
     )
   }
 
-  test('DeleteDataDialog shows local + cloud file counts and sizes before confirming', async () => {
+  test('DeleteDataDialog shows ClickHouse and Fastly Object Storage Archive scope before confirming', async () => {
     sseState.status = 'idle'
-    server.use(
-      http.get(`${API_BASE}/api/admin/storage-info`, ({ request }) => {
-        const url = new URL(request.url)
-        if (url.searchParams.get('service_id') !== 'test-svc') {
-          return HttpResponse.json({ error: 'wrong service targeted' }, { status: 400 })
-        }
-        return HttpResponse.json({ data_files: 42, size_bytes: 123_456_789, snapshots: 3 })
-      }),
-    )
-
     renderDialog()
 
     expect(screen.getByText('Delete Data: Test Service')).toBeDefined()
-    expect(await screen.findByText('12 files')).toBeInTheDocument()
-
-    await waitFor(() => {
-      expect(screen.getByText('42 files')).toBeInTheDocument()
-    })
+    expect(screen.getByText(/ClickHouse and canonical Archive Parquet in Fastly Object Storage/i)).toBeInTheDocument()
   })
 
   test('DeleteDataDialog keeps Delete Data disabled on a near-miss confirmation', async () => {
@@ -1299,7 +1514,7 @@ describe('DeleteDataDialog & TeardownDialog', () => {
     renderDialog({ onOpenChange, onComplete })
 
     expect(screen.getByText('Delete Data: Test Service')).toBeDefined()
-    expect(screen.getByText(/local.*and cloud-stored/i)).toBeDefined()
+    expect(screen.getByText(/ClickHouse and canonical Archive Parquet in Fastly Object Storage/i)).toBeDefined()
     expect(screen.getByText(/preserved:/i)).toBeDefined()
 
     const deleteBtn = screen.getByRole('button', { name: /^delete data$/i })
@@ -1388,6 +1603,45 @@ describe('DeleteDataDialog & TeardownDialog', () => {
         },
       )
     })
+  })
+
+  test('TeardownDialog blocks whitespace tokens and a zero-action selection', async () => {
+    const user = userEvent.setup()
+    render(
+      <TeardownDialog
+        service={{ service_id: 'test-svc', name: 'Test Service', rum_enabled: true } as ServiceConfig}
+        open={true}
+        onOpenChange={vi.fn()}
+      />,
+    )
+
+    const execute = screen.getByRole('button', { name: /execute teardown/i })
+    const token = screen.getByLabelText(/fastly token with the/i)
+    await user.type(token, '   ')
+    expect(execute).toBeDisabled()
+
+    await user.click(screen.getByRole('switch', { name: /remove request logging/i }))
+    await user.click(screen.getByRole('switch', { name: /remove real user monitoring/i }))
+    await user.click(screen.getByRole('switch', { name: /purge local database and cache/i }))
+    expect(execute).toBeDisabled()
+  })
+
+  test('TeardownDialog hides the CDN proxy and local-cache rows in Cloud, which has neither', () => {
+    setCloudModeRuntime(true)
+    try {
+      render(
+        <TeardownDialog
+          service={{ service_id: 'test-svc', name: 'Test Service', rum_enabled: true } as ServiceConfig}
+          open={true}
+          onOpenChange={vi.fn()}
+        />,
+      )
+      expect(screen.queryByText(/Delete CDN VCL proxy service/i)).toBeNull()
+      expect(screen.queryByText(/Purge local database and cache/i)).toBeNull()
+      expect(screen.getByText(/Delete Fastly logging endpoint/i)).toBeDefined()
+    } finally {
+      setCloudModeRuntime(false)
+    }
   })
 
 })

@@ -2,9 +2,8 @@
 
 import * as React from 'react'
 import {
-  flexRender, type Header, type ColumnDef, type ColumnFiltersState, type ColumnOrderState,
-  type SortingState, type Row, type Table as ReactTable, type VisibilityState,
-  getCoreRowModel, getFilteredRowModel, getPaginationRowModel, getSortedRowModel, useReactTable,
+  flexRender, useTable, type ColumnFiltersState, type ColumnOrderState, type ColumnVisibilityState,
+  type RowData, type SortingState,
 } from '@tanstack/react-table'
 import { useVirtualizer, type Virtualizer } from '@tanstack/react-virtual'
 import { ArrowDown, ArrowUp, ArrowUpDown, GripVertical, Inbox } from 'lucide-react'
@@ -18,41 +17,42 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { getApiBase } from '@/lib/api'
+import { dataTableFeatures, type ColumnDef, type Header, type Row, type Table as ReactTable } from '@/lib/table'
 import type { Schema } from '@/types/api'
 import { ColumnVisibilityDropdown } from './DataTableCells'
 
 export * from './DataTableCells'
 
-export interface DataTableBaseProps<TData, TValue> {
-  columns: ColumnDef<TData, TValue>[]; data: TData[]; searchKey?: string; isLoading?: boolean; showPagination?: boolean
-  sorting?: SortingState; onSortingChange?: (sorting: SortingState) => void; initialSorting?: SortingState; initialVisibility?: VisibilityState
+export interface DataTableBaseProps<TData extends RowData> {
+  columns: ColumnDef<TData>[]; data: TData[]; searchKey?: string; isLoading?: boolean; showPagination?: boolean
+  sorting?: SortingState; onSortingChange?: (sorting: SortingState) => void; initialSorting?: SortingState; initialVisibility?: ColumnVisibilityState
   title?: React.ReactNode; compactToolbar?: boolean; extraToolbarContent?: React.ReactNode
   renderToolbar?: (table: ReactTable<TData>) => React.ReactNode; hideToolbar?: boolean
-  columnVisibility?: VisibilityState; onColumnVisibilityChange?: (visibility: VisibilityState) => void
+  columnVisibility?: ColumnVisibilityState; onColumnVisibilityChange?: (visibility: ColumnVisibilityState) => void
   emptyMessage?: string; emptyHint?: React.ReactNode; onClearFilter?: () => void
   onRowClick?: (row: TData) => void; getRowClassName?: (row: TData) => string; tableCaption?: string
 }
 
-interface UseDataTableStateArgs<TData, TValue> {
-  columns: ColumnDef<TData, TValue>[]; data?: TData[]; showPagination?: boolean
+interface UseDataTableStateArgs<TData extends RowData> {
+  columns: ColumnDef<TData>[]; data?: TData[]; showPagination?: boolean
   controlledSorting?: SortingState; onSortingChange?: (sorting: SortingState) => void; initialSorting?: SortingState
-  controlledVisibility?: VisibilityState; onColumnVisibilityChange?: (visibility: VisibilityState) => void; initialVisibility?: VisibilityState
+  controlledVisibility?: ColumnVisibilityState; onColumnVisibilityChange?: (visibility: ColumnVisibilityState) => void; initialVisibility?: ColumnVisibilityState
   initialColumnOrder?: string[]; enableColumnOrder?: boolean
 }
 
-export function useDataTableState<TData, TValue>({
+export function useDataTableState<TData extends RowData>({
   columns, data = [], showPagination = true, controlledSorting, onSortingChange, initialSorting = [],
   controlledVisibility, onColumnVisibilityChange, initialVisibility = {}, initialColumnOrder, enableColumnOrder = false,
-}: UseDataTableStateArgs<TData, TValue>) {
+}: UseDataTableStateArgs<TData>) {
   const isControlled = controlledVisibility !== undefined
   const isSortingControlled = controlledSorting !== undefined
   const [internalSorting, setInternalSorting] = React.useState<SortingState>(initialSorting)
   const sorting = isSortingControlled ? controlledSorting : internalSorting
 
-  const [internalVisibility, setInternalVisibility] = React.useState<VisibilityState>(initialVisibility)
+  const [internalVisibility, setInternalVisibility] = React.useState<ColumnVisibilityState>(initialVisibility)
   const columnVisibility = isControlled ? controlledVisibility! : internalVisibility
   const setColumnVisibility = React.useCallback(
-    (updater: VisibilityState | ((prev: VisibilityState) => VisibilityState)) => {
+    (updater: ColumnVisibilityState | ((prev: ColumnVisibilityState) => ColumnVisibilityState)) => {
       if (isControlled) onColumnVisibilityChange?.(typeof updater === 'function' ? updater(controlledVisibility!) : updater)
       else setInternalVisibility(updater)
     },
@@ -108,14 +108,13 @@ export function useDataTableState<TData, TValue>({
   const [columnSizing, setColumnSizing] = React.useState<Record<string, number>>({})
   const tableColumns = React.useMemo(() => columns, [columns])
 
-  const table = useReactTable({
+  // manualSorting/manualPagination skip those row models, as omitting them did in v8.
+  const table = useTable({
+    features: dataTableFeatures,
     data: tableData, columns: tableColumns, onSortingChange: handleSortingChange, manualSorting: isSortingControlled,
+    manualPagination: !showPagination,
     onColumnFiltersChange: setColumnFilters, onPaginationChange: setPagination,
     ...(enableColumnOrder ? { onColumnOrderChange: setColumnOrder } : {}),
-    getCoreRowModel: getCoreRowModel(),
-    getPaginationRowModel: showPagination ? getPaginationRowModel() : undefined,
-    getSortedRowModel: isSortingControlled ? undefined : getSortedRowModel(),
-    getFilteredRowModel: getFilteredRowModel(),
     onColumnVisibilityChange: setColumnVisibility, onRowSelectionChange: setRowSelection,
     columnResizeMode: 'onChange', onColumnSizingChange: setColumnSizing,
     state: {
@@ -136,12 +135,12 @@ export function useDataTableState<TData, TValue>({
 
 // ─── DataTableBody / MemoizedTableRow ────────────────────────────────────────
 
-interface TableRowProps<TData> {
+interface TableRowProps<TData extends RowData> {
   row: Row<TData>; onRowClick?: (row: TData) => void; rowClassName?: string
-  columnVisibility: VisibilityState; columnSizing?: Record<string, number>
+  columnVisibility: ColumnVisibilityState; columnSizing?: Record<string, number>
 }
 
-function TableRowImpl<TData>({ row, onRowClick, rowClassName }: TableRowProps<TData>) {
+function TableRowImpl<TData extends RowData>({ row, onRowClick, rowClassName }: TableRowProps<TData>) {
   return (
     <TableRow
       data-state={row.getIsSelected() && 'selected'}
@@ -172,9 +171,9 @@ function TableRowImpl<TData>({ row, onRowClick, rowClassName }: TableRowProps<TD
 
 export const MemoizedTableRow = React.memo(TableRowImpl) as typeof TableRowImpl
 
-interface DataTableBodyProps<TData, TValue> {
+interface DataTableBodyProps<TData extends RowData> {
   table: ReactTable<TData>; rows: Row<TData>[]; rowVirtualizer: Virtualizer<HTMLDivElement, Element>
-  columns: ColumnDef<TData, TValue>[]; columnVisibility: VisibilityState; columnSizing?: Record<string, number>
+  columns: ColumnDef<TData>[]; columnVisibility: ColumnVisibilityState; columnSizing?: Record<string, number>
   isLoading?: boolean; onRowClick?: (row: TData) => void; getRowClassName?: (row: TData) => string
   emptyMessage?: string; emptyHint?: React.ReactNode; onClearFilter?: () => void
 }
@@ -188,10 +187,10 @@ function VirtualSpacerRow({ colSpan, height }: { colSpan: number; height: number
   )
 }
 
-export function DataTableBody<TData, TValue>({
+export function DataTableBody<TData extends RowData>({
   table, rows, rowVirtualizer, columns, columnVisibility, columnSizing, isLoading,
   onRowClick, getRowClassName, emptyMessage = 'No results.', emptyHint, onClearFilter,
-}: DataTableBodyProps<TData, TValue>) {
+}: DataTableBodyProps<TData>) {
   const virtualItems = rowVirtualizer.getVirtualItems()
   const topPad = virtualItems.length > 0 ? virtualItems[0].start : 0
   const bottomPad = virtualItems.length > 0 ? rowVirtualizer.getTotalSize() - virtualItems[virtualItems.length - 1].end : 0
@@ -238,13 +237,13 @@ export function DataTableBody<TData, TValue>({
 
 // ─── StaticHeader / DraggableTableHeader ─────────────────────────────────────
 
-export function getHeaderAriaSort<TData>(header: Header<TData, unknown>): 'ascending' | 'descending' | 'none' | undefined {
+export function getHeaderAriaSort<TData extends RowData>(header: Header<TData, unknown>): 'ascending' | 'descending' | 'none' | undefined {
   if (!header.column.getCanSort()) return undefined
   const sorted = header.column.getIsSorted()
   return sorted === 'asc' ? 'ascending' : sorted === 'desc' ? 'descending' : 'none'
 }
 
-export function HeaderCellContent<TData>({ header, dragHandle }: { header: Header<TData, unknown>; dragHandle?: React.ReactNode }) {
+export function HeaderCellContent<TData extends RowData>({ header, dragHandle }: { header: Header<TData, unknown>; dragHandle?: React.ReactNode }) {
   return (
     <div className="flex items-center justify-between gap-1 w-full h-full pl-3 pr-2 overflow-hidden">
       {header.column.getCanSort() && !header.isPlaceholder ? (
@@ -279,7 +278,7 @@ export function HeaderCellContent<TData>({ header, dragHandle }: { header: Heade
   )
 }
 
-export const StaticTableHeader = <TData,>({ header }: { header: Header<TData, unknown> }) => (
+export const StaticTableHeader = <TData extends RowData>({ header }: { header: Header<TData, unknown> }) => (
   <TableHead
     style={{ width: header.column.getSize(), whiteSpace: 'nowrap' }}
     aria-sort={getHeaderAriaSort(header)}
@@ -289,7 +288,7 @@ export const StaticTableHeader = <TData,>({ header }: { header: Header<TData, un
   </TableHead>
 )
 
-export const DraggableTableHeader = <TData,>({ header }: { header: Header<TData, unknown> }) => {
+export const DraggableTableHeader = <TData extends RowData>({ header }: { header: Header<TData, unknown> }) => {
   const { attributes, isDragging, listeners, setNodeRef, transform, transition } = useSortable({ id: header.column.id })
   return (
     <TableHead
@@ -315,11 +314,11 @@ export const DraggableTableHeader = <TData,>({ header }: { header: Header<TData,
 
 // ─── DataTable ───────────────────────────────────────────────────────────────
 
-interface DataTableToolbarProps<TData> {
+interface DataTableToolbarProps<TData extends RowData> {
   table: ReactTable<TData>; title?: React.ReactNode; searchKey?: string; compactToolbar?: boolean; extraToolbarContent?: React.ReactNode
 }
 
-export const DataTableToolbar = <TData,>({ table, title, searchKey, compactToolbar = false, extraToolbarContent }: DataTableToolbarProps<TData>) => (
+export const DataTableToolbar = <TData extends RowData>({ table, title, searchKey, compactToolbar = false, extraToolbarContent }: DataTableToolbarProps<TData>) => (
   <div className={cn('flex items-center gap-4', compactToolbar ? 'mb-2' : 'py-4 px-4')}>
     {title && <div className="flex-1">{title}</div>}
     {searchKey && (
@@ -337,16 +336,16 @@ export const DataTableToolbar = <TData,>({ table, title, searchKey, compactToolb
   </div>
 )
 
-export function DataTablePagination<TData>({ table }: { table: ReactTable<TData> }) {
+export function DataTablePagination<TData extends RowData>({ table }: { table: ReactTable<TData> }) {
   if (table.getFilteredRowModel().rows.length < 19) return null
   return (
     <div className="flex items-center justify-end px-4 py-4 border-t">
       <div className="flex items-center space-x-6 lg:space-x-8">
         <div className="flex items-center space-x-2">
           <p className="text-sm font-medium">Rows per page</p>
-          <Select value={`${table.getState().pagination.pageSize}`} onValueChange={(v) => table.setPageSize(Number(v))}>
+          <Select value={`${table.store.state.pagination.pageSize}`} onValueChange={(v) => table.setPageSize(Number(v))}>
             <SelectTrigger className="h-8 w-[70px]">
-              <SelectValue placeholder={table.getState().pagination.pageSize} />
+              <SelectValue placeholder={table.store.state.pagination.pageSize} />
             </SelectTrigger>
             <SelectContent side="top">
               {[10, 20, 50, 100, 500].map((pageSize) => (
@@ -356,7 +355,7 @@ export function DataTablePagination<TData>({ table }: { table: ReactTable<TData>
           </Select>
         </div>
         <div className="flex w-[100px] items-center justify-center text-sm font-medium">
-          Page {table.getState().pagination.pageIndex + 1} of {table.getPageCount() || 1}
+          Page {table.store.state.pagination.pageIndex + 1} of {table.getPageCount() || 1}
         </div>
         <div className="flex items-center space-x-2">
           <Button variant="outline" size="sm" onClick={() => table.previousPage()} disabled={!table.getCanPreviousPage()}>Previous</Button>
@@ -367,7 +366,7 @@ export function DataTablePagination<TData>({ table }: { table: ReactTable<TData>
   )
 }
 
-export function columnIdOf<TData, TValue>(c: ColumnDef<TData, TValue>): string {
+export function columnIdOf<TData extends RowData>(c: ColumnDef<TData>): string {
   return c.id || (typeof (c as { accessorKey?: string }).accessorKey === 'string' ? (c as { accessorKey: string }).accessorKey : '')
 }
 
@@ -384,19 +383,19 @@ export function reportUxEvent(evt: UxEvent): void {
   } catch { /* Swallow — telemetry never breaks the page */ }
 }
 
-export interface DataTableProps<TData, TValue> extends DataTableBaseProps<TData, TValue> {
+export interface DataTableProps<TData extends RowData> extends DataTableBaseProps<TData> {
   tableContainerClassName?: string; tableClassName?: string; headerRowClassName?: string
   initialColumnOrder?: string[]; enableColumnReorder?: boolean
 }
 
-function DataTableImpl<TData, TValue>({
+function DataTableImpl<TData extends RowData>({
   tableContainerClassName, tableClassName, headerRowClassName, columns, data, searchKey, isLoading,
   showPagination = true, sorting: controlledSorting, onSortingChange, initialSorting = [],
   initialVisibility = {}, initialColumnOrder, enableColumnReorder = true, title, compactToolbar = false,
   extraToolbarContent, renderToolbar, hideToolbar = false, columnVisibility: controlledVisibility,
   onColumnVisibilityChange, emptyMessage = 'No results.', emptyHint, onClearFilter, onRowClick,
   getRowClassName, tableCaption,
-}: DataTableProps<TData, TValue>) {
+}: DataTableProps<TData>) {
   const {
     table, rows, rowVirtualizer, tableContainerRef, columnVisibility, columnSizing, columnOrder, setColumnOrder,
   } = useDataTableState({
@@ -476,8 +475,8 @@ function DataTableImpl<TData, TValue>({
 }
 
 export const DataTable = React.memo(DataTableImpl) as typeof DataTableImpl
-export type DataTableReadonlyProps<TData, TValue> = DataTableBaseProps<TData, TValue>
-function DataTableReadonlyImpl<TData, TValue>(props: DataTableReadonlyProps<TData, TValue>) {
+export type DataTableReadonlyProps<TData extends RowData> = DataTableBaseProps<TData>
+function DataTableReadonlyImpl<TData extends RowData>(props: DataTableReadonlyProps<TData>) {
   return <DataTableImpl {...props} enableColumnReorder={false} />
 }
 export const DataTableReadonly = React.memo(DataTableReadonlyImpl) as typeof DataTableReadonlyImpl

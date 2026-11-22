@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import psycopg
 from psycopg_pool import ConnectionPool
 
 from backend.core.metadata.base import get_pg_pool
@@ -26,7 +27,37 @@ from backend.high_scale.ingest_controller import INITIAL_SOURCE_CURSOR, RUM_SOUR
 
 logger = logging.getLogger("backend.high_scale.postgres_control")
 
-SCHEMA_DDL = """
+# Bucket labels match the legacy ``ingested_files`` log-activity shape the usage page joins with Fastly stats.
+# About 130 flushes on a ~35-node service: the average settles within ~1% of a 4x larger sample.
+REQUEST_FLUSH_SAMPLE_OBJECTS = 5000
+
+# Request keys sort by delivery minute, so bounding ``object_key`` walks the ``(service_id, object_key)`` index.
+# The anchor recovers the service's configured key prefix, and request keys all sort below its RUM keys.
+_REQUEST_KEY_BASE_CTE = (
+    "anchor AS (SELECT left(object_key, strpos(object_key, 'raw/request/') - 1) AS base "
+    "FROM high_scale_source_objects WHERE service_id=%s AND domain='request' "
+    "AND strpos(object_key, 'raw/request/') > 0 LIMIT 1)"
+)
+_FLUSH_TIMESTAMP_RE = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
+_INGESTED = "status NOT IN ('discovered', 'claimed')"
+# Fastly names the minute partition and the basename from the same timestamp; the pad matches the legacy reader.
+_FLUSH_PARTITION_PAD = timedelta(hours=2)
+
+_ACTIVITY_BUCKET_FORMATS = {
+    "second": 'YYYY-MM-DD"T"HH24:MI:SS',
+    "minute": 'YYYY-MM-DD"T"HH24:MI',
+    "hour": 'YYYY-MM-DD"T"HH24:"00"',
+    "day": "YYYY-MM-DD",
+}
+
+# Advisory lock keys; 2080406 is the ClickHouse control schema lock in backend/core/clickhouse/health.py.
+SCHEMA_LOCK_KEY = 2080407
+COMMITTED_MANIFEST_INDEX_LOCK_KEY = 2080408
+
+# Every pod runs this at boot. The transaction lock serializes them: concurrent CREATE TABLE IF NOT EXISTS races on
+# the catalog, and concurrent constraint swaps would each drop the other's constraint.
+SCHEMA_DDL = f"""
+SELECT pg_advisory_xact_lock({SCHEMA_LOCK_KEY});
 CREATE TABLE IF NOT EXISTS high_scale_ownership (
     service_id TEXT PRIMARY KEY, owner_epoch BIGINT NOT NULL CHECK (owner_epoch > 0),
     current_owner TEXT NOT NULL, previous_owner TEXT, source_cursor TEXT NOT NULL,
@@ -67,6 +98,7 @@ ALTER TABLE high_scale_source_objects ADD CONSTRAINT high_scale_source_objects_s
     'discovered', 'claimed', 'appended', 'archived', 'acknowledged', 'source_deleted', 'source_missing'
 ));
 CREATE INDEX IF NOT EXISTS high_scale_source_objects_claim_idx ON high_scale_source_objects (service_id, status, lease_until);
+CREATE INDEX IF NOT EXISTS high_scale_source_objects_domain_status_idx ON high_scale_source_objects (service_id, domain, status);
 CREATE TABLE IF NOT EXISTS high_scale_archive_manifests (
     manifest_id TEXT PRIMARY KEY, service_id TEXT NOT NULL, domain TEXT NOT NULL,
     source_key TEXT NOT NULL, source_checksum TEXT NOT NULL, source_size BIGINT NOT NULL CHECK (source_size >= 0),
@@ -86,9 +118,33 @@ CREATE TABLE IF NOT EXISTS high_scale_archive_manifests (
     CHECK (coverage_end >= coverage_start), CHECK (retention_deadline >= coverage_end),
     CHECK (deletion_authorization_deadline >= retention_deadline)
 );
-ALTER TABLE high_scale_archive_manifests ADD COLUMN IF NOT EXISTS sources_json TEXT;
-ALTER TABLE high_scale_archive_manifests ADD COLUMN IF NOT EXISTS archive_expired_at TIMESTAMPTZ;
-CREATE INDEX IF NOT EXISTS high_scale_archive_manifest_source_idx ON high_scale_archive_manifests (service_id, source_key);
+-- Catalog-guarded so a boot with nothing to change takes no lock on the table. ALTER and CREATE INDEX lock it
+-- even when IF NOT EXISTS makes them no-ops, which would queue them (and every writer behind them) behind
+-- another pod's concurrent index build, and that build would then deadlock waiting for this transaction.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_attribute WHERE attrelid = 'high_scale_archive_manifests'::regclass
+          AND attname = 'sources_json' AND NOT attisdropped
+    ) THEN
+        ALTER TABLE high_scale_archive_manifests ADD COLUMN IF NOT EXISTS sources_json TEXT;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_attribute WHERE attrelid = 'high_scale_archive_manifests'::regclass
+          AND attname = 'archive_expired_at' AND NOT attisdropped
+    ) THEN
+        ALTER TABLE high_scale_archive_manifests ADD COLUMN IF NOT EXISTS archive_expired_at TIMESTAMPTZ;
+    END IF;
+    IF to_regclass('high_scale_archive_manifest_source_idx') IS NULL THEN
+        CREATE INDEX IF NOT EXISTS high_scale_archive_manifest_source_idx
+            ON high_scale_archive_manifests (service_id, source_key);
+    END IF;
+    IF to_regclass('high_scale_archive_manifests_domain_expiry_idx') IS NULL THEN
+        CREATE INDEX IF NOT EXISTS high_scale_archive_manifests_domain_expiry_idx
+            ON high_scale_archive_manifests (service_id, domain, coverage_end)
+            WHERE state = 'source_deleted' AND archive_expired_at IS NULL;
+    END IF;
+END $$;
 CREATE TABLE IF NOT EXISTS high_scale_archive_manifest_sources (
     manifest_id TEXT NOT NULL REFERENCES high_scale_archive_manifests(manifest_id) ON DELETE CASCADE,
     source_key TEXT NOT NULL, source_checksum TEXT NOT NULL, source_size BIGINT NOT NULL CHECK (source_size >= 0),
@@ -109,9 +165,24 @@ CREATE TABLE IF NOT EXISTS high_scale_publication_manifests (
     batch_id TEXT PRIMARY KEY, service_id TEXT NOT NULL, domain TEXT NOT NULL, generation TEXT NOT NULL,
     batch_digest TEXT NOT NULL, expected_rows BIGINT NOT NULL CHECK (expected_rows >= 0),
     visible_rows BIGINT NOT NULL DEFAULT 0 CHECK (visible_rows >= 0),
-    status TEXT NOT NULL CHECK (status IN ('pending', 'visible')),
+    status TEXT NOT NULL CHECK (status IN ('pending', 'visible', 'superseded', 'abandoned')),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'high_scale_publication_manifests'::regclass
+          AND conname = 'high_scale_publication_manifests_status_check'
+          AND position('abandoned' IN pg_get_constraintdef(oid)) > 0
+    ) THEN
+        ALTER TABLE high_scale_publication_manifests DROP CONSTRAINT IF EXISTS high_scale_publication_manifests_status_check;
+        ALTER TABLE high_scale_publication_manifests ADD CONSTRAINT high_scale_publication_manifests_status_check
+            CHECK (status IN ('pending', 'visible', 'superseded', 'abandoned')) NOT VALID;
+    END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS high_scale_publication_manifests_domain_status_idx
+    ON high_scale_publication_manifests (service_id, domain, status);
 CREATE TABLE IF NOT EXISTS high_scale_deletion_authorizations (
     object_id TEXT NOT NULL REFERENCES high_scale_source_objects(object_id),
     manifest_id TEXT NOT NULL REFERENCES high_scale_archive_manifests(manifest_id),
@@ -120,6 +191,16 @@ CREATE TABLE IF NOT EXISTS high_scale_deletion_authorizations (
     PRIMARY KEY (object_id, manifest_id)
 );
 """
+
+# Built by ``ensure_committed_manifest_index``, not SCHEMA_DDL: CONCURRENTLY cannot run inside a transaction.
+COMMITTED_MANIFEST_INDEX = "high_scale_archive_manifests_committed_idx"
+_COMMITTED_MANIFEST_INDEX_DDL = (
+    f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {COMMITTED_MANIFEST_INDEX} "
+    "ON high_scale_archive_manifests (service_id, created_at, manifest_id) WHERE state = 'manifest_committed'"
+)
+# A concurrent build waits for every older transaction in the database; an idle-in-transaction session would
+# otherwise stall the booting worker forever. Timing out leaves an INVALID index the next boot rebuilds.
+_INDEX_BUILD_LOCK_TIMEOUT = "60s"
 
 
 @dataclass(frozen=True)
@@ -152,12 +233,29 @@ class SourceObjectRecord:
     malformed_rows: int
     accepted_rows: int
     last_error: str | None = None
+    discovered_at: datetime | None = None
+
+    @property
+    def claim_token(self) -> SourceClaimToken:
+        if self.status != "claimed" or not self.owner or self.owner_epoch is None:
+            raise ValueError(f"source {self.object_key} does not have an active claim")
+        return SourceClaimToken(self.object_key, self.owner, self.owner_epoch, self.lease_generation)
 
 
 @dataclass(frozen=True)
 class SourceClaim:
     object_id: str
     claimed: bool
+    lease_generation: int
+    owner: str | None = None
+    owner_epoch: int | None = None
+
+
+@dataclass(frozen=True)
+class SourceClaimToken:
+    object_key: str
+    owner: str
+    owner_epoch: int
     lease_generation: int
 
 
@@ -166,6 +264,16 @@ class ArchiveManifestRecord:
     manifest: ArchiveManifest
     state: ArchiveState
     owner_epoch: int
+
+
+@dataclass(frozen=True)
+class ArchivedPublicationClaim:
+    """Sources bound to a committed archive manifest whose publications this worker now retries."""
+
+    manifest_id: str
+    object_keys: tuple[str, ...]
+    publication_epoch: int
+    claim_tokens: tuple[SourceClaimToken, ...] = ()
 
 
 class PostgresControlPlane:
@@ -188,6 +296,39 @@ class PostgresControlPlane:
     def create_schema(self) -> None:
         with self.transaction() as connection:
             connection.execute(SCHEMA_DDL)
+        try:
+            self.ensure_committed_manifest_index()
+        except psycopg.Error:
+            logger.warning(
+                "high-scale committed-manifest index build failed; the publication reaper scans without it",
+                exc_info=True,
+            )
+
+    def ensure_committed_manifest_index(self) -> str:
+        """Build the publication reaper's partial index without blocking writers.
+
+        Runs on an autocommit connection after the schema transaction has committed. One pod builds under a
+        session advisory lock and the others skip; an INVALID leftover of an interrupted build is dropped and
+        rebuilt. The reaper only reads faster with the index. Returns present, built, rebuilt or skipped.
+        """
+        ctx = (
+            self.pool.connection(timeout=self.pool_timeout) if self.pool_timeout is not None else self.pool.connection()
+        )
+        with ctx as connection:
+            autocommit = connection.autocommit
+            connection.autocommit = True
+            try:
+                locked = connection.execute(
+                    "SELECT pg_try_advisory_lock(%s)", (COMMITTED_MANIFEST_INDEX_LOCK_KEY,)
+                ).fetchone()
+                if locked is None or not locked[0]:
+                    return "skipped"
+                try:
+                    return _build_committed_manifest_index(connection)
+                finally:
+                    connection.execute("SELECT pg_advisory_unlock(%s)", (COMMITTED_MANIFEST_INDEX_LOCK_KEY,))
+            finally:
+                connection.autocommit = autocommit
 
     def operational_snapshot(self, service_id: str) -> dict[str, list[dict[str, Any]]]:
         """Return bounded aggregate state for high-scale operational metrics."""
@@ -248,10 +389,11 @@ class PostgresControlPlane:
         expected_owner: str,
         expected_owner_epoch: int,
         domain: str | None = None,
+        partition_id: str = "default",
         reinspection_cursor: str | None = None,
         forward_pages_since_reinspection: int | None = None,
     ) -> OwnerEpochRecord:
-        _require_texts(source_cursor=source_cursor, expected_owner=expected_owner)
+        _require_texts(source_cursor=source_cursor, expected_owner=expected_owner, partition_id=partition_id)
         if forward_pages_since_reinspection is not None and forward_pages_since_reinspection < 0:
             raise ValueError("forward_pages_since_reinspection cannot be negative")
         with self.transaction() as connection:
@@ -264,6 +406,15 @@ class PostgresControlPlane:
             )
             if domain is not None:
                 _require_text(domain, "domain")
+                if partition_id != "default":
+                    connection.execute(
+                        "INSERT INTO high_scale_partition_cursors (service_id, domain, partition_id, source_cursor, updated_at) "
+                        "VALUES (%s, %s, %s, %s, clock_timestamp()) "
+                        "ON CONFLICT (service_id, domain, partition_id) DO UPDATE "
+                        "SET source_cursor=EXCLUDED.source_cursor, updated_at=clock_timestamp()",
+                        (service_id, domain, partition_id, source_cursor),
+                    )
+                    return current
                 _upsert_domain_cursor(
                     connection,
                     service_id,
@@ -327,10 +478,16 @@ class PostgresControlPlane:
             if getattr(updated, "rowcount", None) == 0:
                 raise RuntimeError("RUM reinspection cursor state disappeared during update")
 
-    def source_cursor_for(self, service_id: str, domain: str) -> str:
+    def source_cursor_for(self, service_id: str, domain: str, *, partition_id: str = "default") -> str:
         """Return this domain's persisted cursor or INITIAL_SOURCE_CURSOR (never the owner-level cursor)."""
-        _require_text(domain, "domain")
+        _require_texts(domain=domain, partition_id=partition_id)
         with self.transaction(read_only=True) as connection:
+            if partition_id != "default":
+                row = connection.execute(
+                    "SELECT source_cursor FROM high_scale_partition_cursors WHERE service_id=%s AND domain=%s AND partition_id=%s",
+                    (service_id, domain, partition_id),
+                ).fetchone()
+                return str(row[0]) if row is not None else INITIAL_SOURCE_CURSOR
             row = connection.execute(
                 "SELECT source_cursor FROM high_scale_source_cursors WHERE service_id=%s AND domain=%s",
                 (service_id, domain),
@@ -348,8 +505,12 @@ class PostgresControlPlane:
         with self.transaction(read_only=True) as connection:
             rows = connection.execute(
                 "SELECT * FROM high_scale_source_objects WHERE service_id=%s AND domain=%s "
-                "AND status='claimed' AND lease_until IS NOT NULL AND lease_until <= clock_timestamp() "
-                "ORDER BY lease_until, object_key LIMIT %s",
+                "AND ("
+                "(status='claimed' AND lease_until IS NOT NULL AND lease_until <= clock_timestamp()) "
+                "OR (status='discovered' AND lease_until IS NULL AND "
+                "(last_error IS NOT NULL OR updated_at <= clock_timestamp() - interval '30 seconds'))"
+                ") "
+                "ORDER BY COALESCE(lease_until, updated_at), object_key LIMIT %s",
                 (service_id, domain, limit),
             ).fetchall()
         return tuple(_source_from_row(row) for row in rows)
@@ -424,6 +585,78 @@ class PostgresControlPlane:
                 raise ValueError(f"source identity changed for {object_key}")
             return source
 
+    def discover_sources_batch(
+        self,
+        service_id: str,
+        domain: str,
+        objects: Sequence[Any],
+        *,
+        expected_owner: str,
+        expected_owner_epoch: int,
+    ) -> dict[str, SourceObjectRecord]:
+        _require_texts(service_id=service_id, domain=domain, expected_owner=expected_owner)
+        if expected_owner_epoch <= 0:
+            raise ValueError("owner epoch must be positive")
+        if not objects:
+            return {}
+        for obj in objects:
+            _require_texts(object_key=obj.object_key, checksum=obj.checksum)
+            if obj.size_bytes < 0:
+                raise ValueError("size_bytes must be non-negative")
+        object_keys = [obj.object_key for obj in objects]
+        with self.transaction() as connection:
+            self._fenced_owner(
+                connection,
+                service_id,
+                expected_owner_epoch=expected_owner_epoch,
+                expected_owner=expected_owner,
+                fence_name="source discovery",
+            )
+            existing_rows = connection.execute(
+                "SELECT * FROM high_scale_source_objects WHERE service_id=%s AND object_key = ANY(%s) FOR UPDATE",
+                (service_id, object_keys),
+            ).fetchall()
+            by_key: dict[str, SourceObjectRecord] = {}
+            for row in existing_rows:
+                rec = _source_from_row(row)
+                by_key[rec.object_key] = rec
+            missing = [obj for obj in objects if obj.object_key not in by_key]
+            if missing:
+                placeholders = ", ".join(["(%s, %s, %s, %s, %s, %s, %s, 'discovered')"] * len(missing))
+                params: list[Any] = []
+                for obj in missing:
+                    params.extend(
+                        (
+                            _source_object_id(service_id, domain, obj.object_key, obj.checksum),
+                            service_id,
+                            domain,
+                            obj.object_key,
+                            obj.checksum,
+                            obj.size_bytes,
+                            obj.version,
+                        )
+                    )
+                connection.execute(
+                    "INSERT INTO high_scale_source_objects "
+                    "(object_id, service_id, domain, object_key, checksum, size_bytes, version, status) "
+                    f"VALUES {placeholders} ON CONFLICT (service_id, object_key) DO NOTHING",
+                    tuple(params),
+                )
+                new_rows = connection.execute(
+                    "SELECT * FROM high_scale_source_objects WHERE service_id=%s AND object_key = ANY(%s) FOR UPDATE",
+                    (service_id, [obj.object_key for obj in missing]),
+                ).fetchall()
+                for row in new_rows:
+                    rec = _source_from_row(row)
+                    by_key[rec.object_key] = rec
+            for obj in objects:
+                source = by_key.get(obj.object_key)
+                if source is None:
+                    raise RuntimeError(f"source discovery insert did not produce a row for {obj.object_key}")
+                if source.checksum != obj.checksum or source.version != obj.version:
+                    raise ValueError(f"source identity changed for {obj.object_key}")
+            return by_key
+
     def claim_source(
         self,
         service_id: str,
@@ -453,11 +686,17 @@ class PostgresControlPlane:
             if source.status not in {"discovered", "claimed"}:
                 raise ValueError(f"source object is not claimable: {object_key}")
             if source.lease_until is not None and source.lease_until > observed:
-                return SourceClaim(source.object_id, source.owner == worker_id, source.lease_generation)
+                return SourceClaim(
+                    source.object_id,
+                    source.owner == worker_id,
+                    source.lease_generation,
+                    source.owner,
+                    source.owner_epoch,
+                )
             generation = source.lease_generation + 1
             connection.execute(
                 "UPDATE high_scale_source_objects SET status='claimed', owner=%s, lease_until=%s, "
-                "lease_generation=%s, owner_epoch=%s, updated_at=clock_timestamp() WHERE object_id=%s",
+                "lease_generation=%s, owner_epoch=%s, last_error=NULL, updated_at=clock_timestamp() WHERE object_id=%s",
                 (
                     worker_id,
                     observed + timedelta(seconds=lease_seconds),
@@ -466,7 +705,7 @@ class PostgresControlPlane:
                     source.object_id,
                 ),
             )
-            return SourceClaim(source.object_id, True, generation)
+            return SourceClaim(source.object_id, True, generation, worker_id, expected_owner_epoch)
 
     def claim_sources_batch(
         self,
@@ -512,7 +751,7 @@ class PostgresControlPlane:
             if keys_to_claim:
                 connection.execute(
                     "UPDATE high_scale_source_objects SET status='claimed', owner=%s, lease_until=%s, "
-                    "lease_generation=lease_generation + 1, owner_epoch=%s, updated_at=clock_timestamp() "
+                    "lease_generation=lease_generation + 1, owner_epoch=%s, last_error=NULL, updated_at=clock_timestamp() "
                     "WHERE service_id=%s AND object_key = ANY(%s)",
                     (worker_id, lease_until, expected_owner_epoch, service_id, keys_to_claim),
                 )
@@ -575,6 +814,43 @@ class PostgresControlPlane:
                 (accepted_rows, malformed_rows, source.object_id, expected_owner_epoch),
             )
 
+    def record_source_counts_batch(
+        self,
+        service_id: str,
+        counts: Sequence[tuple[str, int, int]],
+        *,
+        expected_owner_epoch: int,
+    ) -> None:
+        if not counts:
+            return
+        for _, accepted_rows, malformed_rows in counts:
+            if min(accepted_rows, malformed_rows) < 0:
+                raise ValueError("ledger counts must be non-negative")
+        object_keys = [key for key, _, _ in counts]
+        with self.transaction() as connection:
+            self._fenced_owner(connection, service_id, expected_owner_epoch=expected_owner_epoch)
+            rows = connection.execute(
+                "SELECT * FROM high_scale_source_objects WHERE service_id=%s AND object_key = ANY(%s) FOR UPDATE",
+                (service_id, object_keys),
+            ).fetchall()
+            by_key = {rec.object_key: rec for rec in (_source_from_row(r) for r in rows)}
+            for object_key, _, _ in counts:
+                source = by_key.get(object_key)
+                if source is None or source.status != "claimed" or source.owner_epoch != expected_owner_epoch:
+                    raise RuntimeError(f"stale or missing claim for {object_key}")
+            placeholders = ", ".join(["(%s, %s::bigint, %s::bigint)"] * len(counts))
+            params: list[Any] = []
+            for object_key, accepted_rows, malformed_rows in counts:
+                params.extend((by_key[object_key].object_id, accepted_rows, malformed_rows))
+            params.append(expected_owner_epoch)
+            connection.execute(
+                "UPDATE high_scale_source_objects AS o "
+                "SET accepted_rows = v.accepted_rows, malformed_rows = v.malformed_rows, updated_at = clock_timestamp() "
+                f"FROM (VALUES {placeholders}) AS v(object_id, accepted_rows, malformed_rows) "
+                "WHERE o.object_id = v.object_id AND o.status = 'claimed' AND o.owner_epoch = %s",
+                tuple(params),
+            )
+
     def get_batch_manifest(self, batch_id: str) -> Any | None:
         from backend.high_scale.archive import BatchManifest, PublicationStatus
 
@@ -617,6 +893,110 @@ class PostgresControlPlane:
                     manifest.status.value,
                 ),
             )
+
+    def committed_archive_manifests(
+        self,
+        service_id: str,
+        *,
+        min_age_seconds: float,
+        max_age_seconds: float | None = None,
+        after: tuple[datetime, str] | None = None,
+        limit: int = 500,
+    ) -> list[tuple[str, str, datetime]]:
+        """Archive manifests still ``manifest_committed`` (never acknowledged), oldest first, keyset-paged."""
+        _require_text(service_id, "service_id")
+        sql = (
+            "SELECT manifest_id, domain, created_at FROM high_scale_archive_manifests "
+            "WHERE service_id=%s AND state='manifest_committed' "
+            "AND created_at < clock_timestamp() - make_interval(secs => %s)"
+        )
+        params: list[Any] = [service_id, float(min_age_seconds)]
+        if max_age_seconds is not None:
+            sql += " AND created_at >= clock_timestamp() - make_interval(secs => %s)"
+            params.append(float(max_age_seconds))
+        if after is not None:
+            sql += " AND (created_at, manifest_id) > (%s, %s)"
+            params.extend(after)
+        sql += " ORDER BY created_at, manifest_id LIMIT %s"
+        params.append(max(1, int(limit)))
+        with self.transaction(read_only=True) as connection:
+            rows = connection.execute(sql, tuple(params)).fetchall()
+        return [(str(r[0]), str(r[1]), r[2]) for r in rows]
+
+    def pending_publication_domains(self, service_id: str) -> tuple[str, ...]:
+        _require_text(service_id, "service_id")
+        with self.transaction(read_only=True) as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT domain FROM high_scale_publication_manifests WHERE service_id=%s AND status='pending'",
+                (service_id,),
+            ).fetchall()
+        return tuple(sorted(str(r[0]) for r in rows))
+
+    def publication_manifest_states(self, service_id: str, batch_ids: Sequence[str]) -> dict[str, dict[str, Any]]:
+        _require_text(service_id, "service_id")
+        if not batch_ids:
+            return {}
+        with self.transaction(read_only=True) as connection:
+            rows = connection.execute(
+                "SELECT batch_id, status, domain, generation, "
+                "EXTRACT(EPOCH FROM (clock_timestamp() - updated_at)) FROM high_scale_publication_manifests "
+                "WHERE service_id=%s AND batch_id = ANY(%s)",
+                (service_id, list(batch_ids)),
+            ).fetchall()
+        return {
+            str(r[0]): {"status": str(r[1]), "domain": str(r[2]), "generation": str(r[3]), "age_seconds": float(r[4])}
+            for r in rows
+        }
+
+    def archive_manifest_source_states(
+        self, service_id: str, manifest_ids: Sequence[str]
+    ) -> dict[str, list[tuple[str | None, str | None]]]:
+        """``(source status, owning archive manifest)`` for each source of each manifest; ``None`` when untracked."""
+        _require_text(service_id, "service_id")
+        if not manifest_ids:
+            return {}
+        with self.transaction(read_only=True) as connection:
+            rows = connection.execute(
+                "SELECT ms.manifest_id, so.status, so.archive_manifest_id FROM high_scale_archive_manifest_sources ms "
+                "LEFT JOIN high_scale_source_objects so ON so.service_id=%s AND so.object_key=ms.source_key "
+                "WHERE ms.manifest_id = ANY(%s)",
+                (service_id, list(manifest_ids)),
+            ).fetchall()
+        states: dict[str, list[tuple[str | None, str | None]]] = {}
+        for manifest_id, status, owner in rows:
+            states.setdefault(str(manifest_id), []).append((status, owner))
+        return states
+
+    def archive_manifest_domains(self, service_id: str, manifest_ids: Sequence[str]) -> dict[str, str]:
+        _require_text(service_id, "service_id")
+        if not manifest_ids:
+            return {}
+        with self.transaction(read_only=True) as connection:
+            rows = connection.execute(
+                "SELECT manifest_id, domain FROM high_scale_archive_manifests WHERE service_id=%s AND manifest_id = ANY(%s)",
+                (service_id, list(manifest_ids)),
+            ).fetchall()
+        return {str(r[0]): str(r[1]) for r in rows}
+
+    def mark_publications_superseded(self, service_id: str, batch_ids: Sequence[str]) -> int:
+        """Move still-pending publications to ``superseded``; never touches a row that became visible."""
+        return self._retire_pending_publications(service_id, batch_ids, "superseded")
+
+    def mark_publications_abandoned(self, service_id: str, batch_ids: Sequence[str]) -> int:
+        """Move still-pending publications to ``abandoned``; never touches a row that became visible."""
+        return self._retire_pending_publications(service_id, batch_ids, "abandoned")
+
+    def _retire_pending_publications(self, service_id: str, batch_ids: Sequence[str], status: str) -> int:
+        _require_text(service_id, "service_id")
+        if not batch_ids:
+            return 0
+        with self.transaction() as connection:
+            cursor = connection.execute(
+                "UPDATE high_scale_publication_manifests SET status=%s, updated_at=clock_timestamp() "
+                "WHERE service_id=%s AND batch_id = ANY(%s) AND status='pending'",
+                (status, service_id, list(batch_ids)),
+            )
+            return int(cursor.rowcount or 0)
 
     def register_archive_manifest(
         self, manifest: ArchiveManifest, *, owner_epoch: int, state: ArchiveState = ArchiveState.ARTIFACT_UPLOADING
@@ -689,11 +1069,10 @@ class PostgresControlPlane:
                 ),
             )
             if sources:
+                placeholders = ", ".join(["(%s, %s, %s, %s, %s, %s, %s, %s)"] * len(sources))
+                src_params: list[Any] = []
                 for src in sources:
-                    connection.execute(
-                        "INSERT INTO high_scale_archive_manifest_sources "
-                        "(manifest_id, source_key, source_checksum, source_size, source_version, row_start, row_count, deletion_deadline) "
-                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (manifest_id, source_key) DO NOTHING",
+                    src_params.extend(
                         (
                             manifest.manifest_id,
                             src.key,
@@ -703,8 +1082,14 @@ class PostgresControlPlane:
                             src.row_start,
                             src.row_count,
                             manifest.deletion_authorization_deadline,
-                        ),
+                        )
                     )
+                connection.execute(
+                    "INSERT INTO high_scale_archive_manifest_sources "
+                    "(manifest_id, source_key, source_checksum, source_size, source_version, row_start, row_count, deletion_deadline) "
+                    f"VALUES {placeholders} ON CONFLICT (manifest_id, source_key) DO NOTHING",
+                    tuple(src_params),
+                )
             result = self._archive_manifest(connection, manifest.manifest_id)
             if result.manifest != manifest or result.owner_epoch != owner_epoch:
                 raise ValueError("archive manifest identity changed")
@@ -755,9 +1140,9 @@ class PostgresControlPlane:
             rows = connection.execute(
                 "SELECT o.* FROM high_scale_source_objects o "
                 "JOIN high_scale_archive_manifests m ON m.manifest_id = o.archive_manifest_id "
-                "WHERE o.service_id = %s AND o.status IN ('archived', 'acknowledged') "
+                "WHERE o.service_id = %s AND o.status = 'acknowledged' "
                 "AND m.state IN ('manifest_committed', 'deletion_eligible') "
-                "AND m.deletion_authorization_deadline <= clock_timestamp() "
+                "AND m.deletion_authorization_deadline <= statement_timestamp() "
                 "ORDER BY o.discovered_at LIMIT %s",
                 (service_id, limit),
             ).fetchall()
@@ -777,7 +1162,7 @@ class PostgresControlPlane:
         if not windows:
             return ()
         predicate = " OR ".join(
-            "(domain = %s AND coverage_end < clock_timestamp() - make_interval(days => %s))" for _ in windows
+            "(domain = %s AND coverage_end < statement_timestamp() - make_interval(days => %s))" for _ in windows
         )
         params = [value for window in windows for value in window]
         with self.transaction(read_only=True) as connection:
@@ -800,11 +1185,114 @@ class PostgresControlPlane:
                 "SELECT "
                 "coalesce(sum(artifact_size) FILTER (WHERE archive_expired_at IS NULL), 0), "
                 "count(*) FILTER (WHERE archive_expired_at IS NULL), "
-                "coalesce(sum(artifact_size) FILTER (WHERE archive_expired_at > clock_timestamp() - interval '30 days'), 0) "
+                "coalesce(sum(artifact_size) FILTER (WHERE archive_expired_at > statement_timestamp() - interval '30 days'), 0) "
                 "FROM high_scale_archive_manifests WHERE service_id = %s AND state <> 'artifact_uploading'",
                 (service_id,),
             ).fetchone()
         return {"live_bytes": int(row[0]), "live_objects": int(row[1]) * 3, "expired_30d_bytes": int(row[2])}
+
+    def source_activity(self, service_id: str, start: datetime, end: datetime, by: str) -> list[tuple[str, int, int]]:
+        """``(bucket, accepted_rows, size_bytes)`` of processed source objects by UTC discovery time.
+
+        The window is inclusive at both ends. Objects still ``discovered`` or ``claimed`` are not processed yet.
+        """
+        _require_text(service_id, "service_id")
+        if by not in _ACTIVITY_BUCKET_FORMATS:
+            raise ValueError(f"unsupported activity bucket: {by}")
+        with self.transaction(read_only=True) as connection:
+            rows = connection.execute(
+                "SELECT to_char(date_trunc(%s, discovered_at AT TIME ZONE 'UTC'), %s) AS bucket, "
+                "coalesce(sum(accepted_rows), 0), coalesce(sum(size_bytes), 0) FROM high_scale_source_objects "
+                "WHERE service_id=%s AND status NOT IN ('discovered', 'claimed') "
+                "AND discovered_at >= %s AND discovered_at <= %s GROUP BY bucket ORDER BY bucket",
+                (by, _ACTIVITY_BUCKET_FORMATS[by], service_id, start, end),
+            ).fetchall()
+        return [(str(r[0]), int(r[1]), int(r[2])) for r in rows]
+
+    def source_storage_window(self, service_id: str, start: datetime, end: datetime) -> dict[str, int]:
+        """Source objects discovered in the inclusive window: count, bytes, and the RUM share of those bytes.
+
+        Every discovered object was written to FOS, so each one counts whatever its processing state.
+        """
+        _require_text(service_id, "service_id")
+        with self.transaction(read_only=True) as connection:
+            row = connection.execute(
+                "SELECT count(*), coalesce(sum(size_bytes), 0), "
+                "coalesce(sum(size_bytes) FILTER (WHERE domain = ANY(%s)), 0) FROM high_scale_source_objects "
+                "WHERE service_id=%s AND discovered_at >= %s AND discovered_at <= %s",
+                (sorted(RUM_SOURCE_DOMAINS), service_id, start, end),
+            ).fetchone()
+        return {"files": int(row[0]), "bytes": int(row[1]), "rum_bytes": int(row[2])}
+
+    def request_files_per_flush(
+        self, service_id: str, recent_objects: int = REQUEST_FLUSH_SAMPLE_OBJECTS
+    ) -> float | None:
+        """Average request source objects per log flush among the most recent request objects.
+
+        Request keys sort by delivery minute, so the newest objects are a backward walk of the
+        ``(service_id, object_key)`` index that stops below the service's RUM keys. Flushes group by the
+        basename timestamp Fastly writes; the oldest sampled flush may be cut off by the sample and the
+        newest may still be arriving, so both are left out.
+        """
+        _require_text(service_id, "service_id")
+        with self.transaction(read_only=True) as connection:
+            row = connection.execute(
+                f"WITH {_REQUEST_KEY_BASE_CTE}, "
+                f"recent AS (SELECT substring(object_key from '{_FLUSH_TIMESTAMP_RE}') AS flushed_at "
+                "FROM high_scale_source_objects WHERE service_id=%s AND domain='request' "
+                "AND object_key < (SELECT base || 'raw/rum/' FROM anchor) ORDER BY object_key DESC LIMIT %s), "
+                "flushes AS (SELECT flushed_at, count(*) AS files FROM recent WHERE flushed_at IS NOT NULL "
+                "GROUP BY flushed_at) "
+                "SELECT avg(files) FROM flushes WHERE flushed_at > (SELECT min(flushed_at) FROM flushes) "
+                "AND flushed_at < (SELECT max(flushed_at) FROM flushes)",
+                (service_id, service_id, recent_objects),
+            ).fetchone()
+        return None if row[0] is None else float(row[0])
+
+    def request_flush_accounting(
+        self, service_id: str, start: datetime, end: datetime, width: int
+    ) -> dict[str, tuple[int, int]]:
+        """``{emission bucket: (rows, files)}`` for ingested request objects, buckets inclusive of ``start``/``end``.
+
+        Buckets are the first ``width`` characters (13 = hour, 10 = day) of the basename timestamp Fastly writes.
+        """
+        from backend.provision.cli import minute_list_prefix
+
+        _require_text(service_id, "service_id")
+        if width not in (10, 13):
+            raise ValueError("width must be 10 (day) or 13 (hour)")
+        with self.transaction(read_only=True) as connection:
+            rows = connection.execute(
+                f"WITH {_REQUEST_KEY_BASE_CTE}, "
+                f"files AS (SELECT left(substring(object_key from '{_FLUSH_TIMESTAMP_RE}'), %s) AS bucket, "
+                "accepted_rows FROM high_scale_source_objects "
+                f"WHERE service_id=%s AND domain='request' AND {_INGESTED} "
+                "AND object_key >= (SELECT base || %s FROM anchor) AND object_key < (SELECT base || %s FROM anchor)) "
+                "SELECT bucket, sum(accepted_rows), count(*) FROM files WHERE bucket >= %s AND bucket <= %s "
+                "GROUP BY bucket",
+                (
+                    service_id,
+                    width,
+                    service_id,
+                    minute_list_prefix(start.astimezone(UTC) - _FLUSH_PARTITION_PAD),
+                    minute_list_prefix(end.astimezone(UTC) + _FLUSH_PARTITION_PAD),
+                    start.astimezone(UTC).strftime("%Y-%m-%dT%H")[:width],
+                    end.astimezone(UTC).strftime("%Y-%m-%dT%H")[:width],
+                ),
+            ).fetchall()
+        return {str(bucket): (int(rows_sum or 0), int(files)) for bucket, rows_sum, files in rows}
+
+    def latest_request_ingest(self, service_id: str) -> datetime | None:
+        """Discovery time of the newest ingested request object: everything up to it has been picked up."""
+        _require_text(service_id, "service_id")
+        with self.transaction(read_only=True) as connection:
+            row = connection.execute(
+                f"WITH {_REQUEST_KEY_BASE_CTE} SELECT discovered_at FROM high_scale_source_objects "
+                f"WHERE service_id=%s AND domain='request' AND {_INGESTED} "
+                "AND object_key < (SELECT base || 'raw/rum/' FROM anchor) ORDER BY object_key DESC LIMIT 1",
+                (service_id, service_id),
+            ).fetchone()
+        return None if row is None else row[0]
 
     def mark_archive_expired(self, manifest_id: str) -> None:
         _require_text(manifest_id, "manifest_id")
@@ -815,6 +1303,45 @@ class PostgresControlPlane:
                 (manifest_id,),
             )
 
+    @staticmethod
+    def _locked_claim_rows(
+        connection: Any,
+        service_id: str,
+        object_keys: Sequence[str],
+        *,
+        claim_tokens: Sequence[SourceClaimToken],
+        expected_owner_epoch: int,
+    ) -> dict[str, SourceObjectRecord]:
+        expected_keys = list(dict.fromkeys(object_keys))
+        if not claim_tokens:
+            raise RuntimeError("source claim tokens are required")
+        tokens = {token.object_key: token for token in claim_tokens}
+        if len(tokens) != len(claim_tokens) or set(tokens) != set(expected_keys):
+            raise RuntimeError("source claim tokens do not match the requested objects")
+        if any(token.owner_epoch != expected_owner_epoch or not token.owner for token in tokens.values()):
+            raise RuntimeError("stale or missing claim")
+        rows = (
+            connection.execute(
+                "SELECT * FROM high_scale_source_objects WHERE service_id=%s AND object_key = ANY(%s) FOR UPDATE",
+                (service_id, expected_keys),
+            ).fetchall()
+            if expected_keys
+            else ()
+        )
+        sources = {source.object_key: source for source in (_source_from_row(row) for row in rows)}
+        if len(sources) != len(expected_keys):
+            raise RuntimeError("stale or missing claim")
+        for key, token in tokens.items():
+            source = sources[key]
+            if (
+                source.status not in {"claimed", "archived"}
+                or source.owner != token.owner
+                or source.owner_epoch != token.owner_epoch
+                or source.lease_generation != token.lease_generation
+            ):
+                raise RuntimeError(f"stale or missing claim for {key}")
+        return sources
+
     def acknowledge_sources_batch(
         self,
         service_id: str,
@@ -822,6 +1349,7 @@ class PostgresControlPlane:
         *,
         manifest_id: str,
         expected_owner_epoch: int,
+        claim_tokens: Sequence[SourceClaimToken],
         next_cursor: str | None = None,
         domain: str = "request",
         partition_id: str = "default",
@@ -831,10 +1359,18 @@ class PostgresControlPlane:
             raise ValueError("owner epoch must be positive")
         with self.transaction() as connection:
             self._fenced_owner(connection, service_id, expected_owner_epoch=expected_owner_epoch)
+            self._locked_claim_rows(
+                connection,
+                service_id,
+                object_keys,
+                claim_tokens=claim_tokens,
+                expected_owner_epoch=expected_owner_epoch,
+            )
             if object_keys:
                 connection.execute(
                     "UPDATE high_scale_source_objects SET status='acknowledged', archive_manifest_id=%s, "
-                    "lease_until=NULL, updated_at=clock_timestamp() WHERE service_id=%s AND object_key = ANY(%s)",
+                    "lease_until=NULL, last_error=NULL, updated_at=clock_timestamp() "
+                    "WHERE service_id=%s AND object_key = ANY(%s)",
                     (manifest_id, service_id, list(object_keys)),
                 )
             if next_cursor is not None:
@@ -848,6 +1384,192 @@ class PostgresControlPlane:
                 if partition_id == "default":
                     _upsert_domain_cursor(connection, service_id, domain, next_cursor)
 
+    def mark_sources_appended_batch(
+        self,
+        service_id: str,
+        object_keys: Sequence[str],
+        *,
+        expected_owner_epoch: int,
+        claim_tokens: Sequence[SourceClaimToken],
+        next_cursor: str | None = None,
+        domain: str = "request",
+        partition_id: str = "default",
+    ) -> None:
+        """Mark claimed sources as 'appended' (visible in ClickHouse, archive flush deferred)."""
+        _require_texts(service_id=service_id)
+        if expected_owner_epoch <= 0:
+            raise ValueError("owner epoch must be positive")
+        with self.transaction() as connection:
+            self._fenced_owner(connection, service_id, expected_owner_epoch=expected_owner_epoch)
+            self._locked_claim_rows(
+                connection,
+                service_id,
+                object_keys,
+                claim_tokens=claim_tokens,
+                expected_owner_epoch=expected_owner_epoch,
+            )
+            if object_keys:
+                connection.execute(
+                    "UPDATE high_scale_source_objects SET status='appended', archive_manifest_id=NULL, "
+                    "owner=NULL, lease_until=NULL, last_error=NULL, updated_at=clock_timestamp() "
+                    "WHERE service_id=%s AND object_key = ANY(%s)",
+                    (service_id, list(object_keys)),
+                )
+            if next_cursor is not None:
+                connection.execute(
+                    "INSERT INTO high_scale_partition_cursors (service_id, domain, partition_id, source_cursor, updated_at) "
+                    "VALUES (%s, %s, %s, %s, clock_timestamp()) "
+                    "ON CONFLICT (service_id, domain, partition_id) DO UPDATE "
+                    "SET source_cursor=EXCLUDED.source_cursor, updated_at=clock_timestamp()",
+                    (service_id, domain, partition_id, next_cursor),
+                )
+                if partition_id == "default":
+                    _upsert_domain_cursor(connection, service_id, domain, next_cursor)
+
+    def unarchived_appended_summary(self, service_id: str, domain: str) -> tuple[int, int, datetime | None]:
+        """Return (count, total_bytes, oldest_updated_at) for 'appended' sources awaiting archive flush."""
+        _require_texts(service_id=service_id, domain=domain)
+        with self.transaction(read_only=True) as connection:
+            row = connection.execute(
+                "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0), MIN(updated_at) "
+                "FROM high_scale_source_objects "
+                "WHERE service_id=%s AND domain=%s AND status='appended' AND archive_manifest_id IS NULL",
+                (service_id, domain),
+            ).fetchone()
+        if not row:
+            return (0, 0, None)
+        return (int(row[0] or 0), int(row[1] or 0), _parse_iso_or_dt(row[2]))
+
+    def unarchived_appended_sources(
+        self,
+        service_id: str,
+        domain: str,
+        *,
+        limit: int = 500,
+    ) -> tuple[SourceObjectRecord, ...]:
+        """List 'appended' sources awaiting archive flush in discovery order."""
+        _require_texts(service_id=service_id, domain=domain)
+        with self.transaction(read_only=True) as connection:
+            rows = connection.execute(
+                "SELECT * FROM high_scale_source_objects "
+                "WHERE service_id=%s AND domain=%s AND status='appended' AND archive_manifest_id IS NULL "
+                "ORDER BY discovered_at, object_key LIMIT %s",
+                (service_id, domain, max(1, int(limit))),
+            ).fetchall()
+        return tuple(_source_from_row(row) for row in rows)
+
+    def claim_unarchived_appended_sources(
+        self,
+        service_id: str,
+        domain: str,
+        worker_id: str,
+        *,
+        expected_owner_epoch: int,
+        lease_seconds: float = 300.0,
+        limit: int = 500,
+        max_bytes: int | None = None,
+        now: datetime | None = None,
+    ) -> tuple[SourceObjectRecord, ...]:
+        """Lease a bounded batch of 'appended' sources for consolidated archive flushing."""
+        _require_texts(service_id=service_id, domain=domain, worker_id=worker_id)
+        if expected_owner_epoch <= 0:
+            raise ValueError("owner epoch must be positive")
+        observed = (now or datetime.now(UTC)).astimezone(UTC)
+        lease_until = observed + timedelta(seconds=max(1.0, float(lease_seconds)))
+        with self.transaction() as connection:
+            self._fenced_owner(
+                connection,
+                service_id,
+                expected_owner_epoch=expected_owner_epoch,
+                expected_owner="high_scale",
+            )
+            rows = connection.execute(
+                "SELECT * FROM high_scale_source_objects "
+                "WHERE service_id=%s AND domain=%s AND status='appended' AND archive_manifest_id IS NULL "
+                "AND (lease_until IS NULL OR lease_until <= %s) "
+                "ORDER BY discovered_at, object_key LIMIT %s FOR UPDATE SKIP LOCKED",
+                (service_id, domain, observed, max(1, int(limit))),
+            ).fetchall()
+            candidates = [_source_from_row(row) for row in rows]
+            if not candidates:
+                return ()
+            selected: list[SourceObjectRecord] = []
+            running_bytes = 0
+            for rec in candidates:
+                if max_bytes is not None and selected and running_bytes + rec.size_bytes > max_bytes:
+                    break
+                selected.append(rec)
+                running_bytes += rec.size_bytes
+            selected_keys = [rec.object_key for rec in selected]
+            updated_rows = connection.execute(
+                "UPDATE high_scale_source_objects "
+                "SET owner=%s, owner_epoch=%s, lease_until=%s, lease_generation=lease_generation+1 "
+                "WHERE service_id=%s AND object_key = ANY(%s) RETURNING *",
+                (worker_id, expected_owner_epoch, lease_until, service_id, selected_keys),
+            ).fetchall()
+        updated_by_key = {rec.object_key: rec for rec in (_source_from_row(row) for row in updated_rows)}
+        return tuple(updated_by_key[key] for key in selected_keys if key in updated_by_key)
+
+    def release_unarchived_appended_sources(
+        self,
+        service_id: str,
+        object_keys: Sequence[str],
+        *,
+        worker_id: str,
+        error: str | None = None,
+    ) -> None:
+        """Release flush leases on 'appended' sources after a transient archive error."""
+        _require_texts(service_id=service_id, worker_id=worker_id)
+        if not object_keys:
+            return
+        with self.transaction() as connection:
+            connection.execute(
+                "UPDATE high_scale_source_objects "
+                "SET owner=NULL, lease_until=NULL, last_error=%s "
+                "WHERE service_id=%s AND object_key = ANY(%s) "
+                "AND status='appended' AND archive_manifest_id IS NULL AND owner=%s",
+                (error, service_id, list(object_keys), worker_id),
+            )
+
+    def attach_archive_manifest_to_sources(
+        self,
+        service_id: str,
+        object_keys: Sequence[str],
+        *,
+        manifest_id: str,
+        expected_owner_epoch: int,
+        worker_id: str | None = None,
+    ) -> None:
+        """Transition 'appended' sources to 'acknowledged' once their archive manifest is committed."""
+        _require_texts(service_id=service_id, manifest_id=manifest_id)
+        if expected_owner_epoch <= 0:
+            raise ValueError("owner epoch must be positive")
+        if not object_keys:
+            return
+        with self.transaction() as connection:
+            self._fenced_owner(connection, service_id, expected_owner_epoch=expected_owner_epoch)
+            manifest = self._archive_manifest(connection, manifest_id)
+            if manifest.state not in {ArchiveState.MANIFEST_COMMITTED, ArchiveState.DELETION_ELIGIBLE}:
+                raise RuntimeError(f"archive manifest {manifest_id} is not committed (state={manifest.state.value})")
+            if worker_id is not None:
+                connection.execute(
+                    "UPDATE high_scale_source_objects "
+                    "SET status='acknowledged', archive_manifest_id=%s, owner_epoch=%s, owner=NULL, lease_until=NULL, "
+                    "last_error=NULL, updated_at=clock_timestamp() "
+                    "WHERE service_id=%s AND object_key = ANY(%s) "
+                    "AND status='appended' AND archive_manifest_id IS NULL AND owner=%s",
+                    (manifest_id, expected_owner_epoch, service_id, list(object_keys), worker_id),
+                )
+            else:
+                connection.execute(
+                    "UPDATE high_scale_source_objects "
+                    "SET status='acknowledged', archive_manifest_id=%s, owner_epoch=%s, owner=NULL, lease_until=NULL, "
+                    "last_error=NULL, updated_at=clock_timestamp() "
+                    "WHERE service_id=%s AND object_key = ANY(%s) "
+                    "AND status='appended' AND archive_manifest_id IS NULL",
+                    (manifest_id, expected_owner_epoch, service_id, list(object_keys)),
+                )
+
     def fail_sources_batch(
         self,
         service_id: str,
@@ -855,12 +1577,20 @@ class PostgresControlPlane:
         *,
         expected_owner_epoch: int,
         error: str,
+        claim_tokens: Sequence[SourceClaimToken],
     ) -> None:
         _require_texts(service_id=service_id, error=error)
         if expected_owner_epoch <= 0:
             raise ValueError("owner epoch must be positive")
         with self.transaction() as connection:
             self._fenced_owner(connection, service_id, expected_owner_epoch=expected_owner_epoch)
+            self._locked_claim_rows(
+                connection,
+                service_id,
+                object_keys,
+                claim_tokens=claim_tokens,
+                expected_owner_epoch=expected_owner_epoch,
+            )
             if object_keys:
                 connection.execute(
                     "UPDATE high_scale_source_objects SET status='discovered', owner=NULL, lease_until=NULL, "
@@ -868,6 +1598,171 @@ class PostgresControlPlane:
                     "WHERE service_id=%s AND object_key = ANY(%s) AND status='claimed' AND owner_epoch=%s",
                     (error, service_id, list(object_keys), expected_owner_epoch),
                 )
+
+    def bind_sources_to_archive_manifest(
+        self,
+        service_id: str,
+        object_keys: Sequence[str],
+        *,
+        manifest_id: str,
+        expected_owner_epoch: int,
+        error: str,
+        claim_tokens: Sequence[SourceClaimToken],
+    ) -> None:
+        """Hold claimed sources on their committed archive so a failed publication retries from it, not from raw."""
+        _require_texts(service_id=service_id, manifest_id=manifest_id, error=error)
+        if expected_owner_epoch <= 0:
+            raise ValueError("owner epoch must be positive")
+        with self.transaction() as connection:
+            self._fenced_owner(connection, service_id, expected_owner_epoch=expected_owner_epoch)
+            self._locked_claim_rows(
+                connection,
+                service_id,
+                object_keys,
+                claim_tokens=claim_tokens,
+                expected_owner_epoch=expected_owner_epoch,
+            )
+            state = self._archive_manifest(connection, manifest_id).state
+            if state not in {ArchiveState.MANIFEST_COMMITTED, ArchiveState.DELETION_ELIGIBLE}:
+                raise ValueError(f"archive manifest {manifest_id} is not committed: {state.value}")
+            if object_keys:
+                connection.execute(
+                    "UPDATE high_scale_source_objects SET status='archived', archive_manifest_id=%s, owner=NULL, "
+                    "lease_until=NULL, last_error=%s, updated_at=clock_timestamp() "
+                    "WHERE service_id=%s AND object_key = ANY(%s) AND status='claimed' AND owner_epoch=%s",
+                    (manifest_id, error, service_id, list(object_keys), expected_owner_epoch),
+                )
+
+    def claim_archived_publication_retries(
+        self,
+        service_id: str,
+        worker_id: str,
+        *,
+        expected_owner_epoch: int,
+        lease_seconds: float,
+        min_idle_seconds: float = 0.0,
+        limit: int = 1,
+        exclude_manifest_ids: Sequence[str] = (),
+    ) -> tuple[ArchivedPublicationClaim, ...]:
+        """Lease committed manifests whose bound sources still wait for their publications."""
+        _require_texts(service_id=service_id, worker_id=worker_id)
+        if expected_owner_epoch <= 0 or lease_seconds <= 0:
+            raise ValueError("owner epoch and lease duration must be positive")
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        if min_idle_seconds < 0:
+            raise ValueError("min_idle_seconds must be non-negative")
+        claims: list[ArchivedPublicationClaim] = []
+        with self.transaction() as connection:
+            self._fenced_owner(
+                connection,
+                service_id,
+                expected_owner_epoch=expected_owner_epoch,
+                expected_owner="high_scale",
+                fence_name="publication-retry",
+            )
+            candidates = connection.execute(
+                "SELECT o.archive_manifest_id FROM high_scale_source_objects o "
+                "JOIN high_scale_archive_manifests m ON m.manifest_id = o.archive_manifest_id "
+                "WHERE o.service_id = %s AND o.status = 'archived' "
+                "AND m.state IN ('manifest_committed', 'deletion_eligible') "
+                "AND NOT (o.archive_manifest_id = ANY(%s)) "
+                "GROUP BY o.archive_manifest_id "
+                "HAVING bool_and(o.lease_until IS NULL OR o.lease_until <= clock_timestamp()) "
+                "AND MAX(o.updated_at) <= clock_timestamp() - make_interval(secs => %s) "
+                "ORDER BY MIN(o.updated_at), o.archive_manifest_id LIMIT %s",
+                (service_id, list(exclude_manifest_ids), min_idle_seconds, limit),
+            ).fetchall()
+            for (manifest_id,) in candidates:
+                rows = connection.execute(
+                    "SELECT object_key, owner_epoch, lease_generation, COALESCE(lease_until > clock_timestamp(), FALSE) "
+                    "FROM high_scale_source_objects WHERE service_id = %s AND archive_manifest_id = %s "
+                    "AND status = 'archived' ORDER BY object_key FOR UPDATE",
+                    (service_id, manifest_id),
+                ).fetchall()
+                if not rows or any(row[3] for row in rows):
+                    continue
+                keys = [str(row[0]) for row in rows]
+                connection.execute(
+                    "UPDATE high_scale_source_objects SET owner=%s, "
+                    "lease_generation=lease_generation+1, "
+                    "lease_until=clock_timestamp() + make_interval(secs => %s) "
+                    "WHERE service_id=%s AND object_key = ANY(%s)",
+                    (worker_id, lease_seconds, service_id, keys),
+                )
+                tokens = tuple(
+                    SourceClaimToken(str(row[0]), worker_id, int(row[1] or expected_owner_epoch), int(row[2]) + 1)
+                    for row in rows
+                )
+                claims.append(
+                    ArchivedPublicationClaim(
+                        str(manifest_id),
+                        tuple(keys),
+                        max(int(row[1] or expected_owner_epoch) for row in rows),
+                        tokens,
+                    )
+                )
+        return tuple(claims)
+
+    def release_archived_publication_retry(
+        self,
+        service_id: str,
+        manifest_id: str,
+        worker_id: str,
+        *,
+        expected_owner_epoch: int,
+        error: str,
+    ) -> None:
+        """Drop a retry lease and keep the sources bound to their archive manifest for the next attempt."""
+        self._end_archived_publication_retry(
+            service_id,
+            manifest_id,
+            worker_id,
+            expected_owner_epoch=expected_owner_epoch,
+            error=error,
+            assignments="",
+        )
+
+    def unbind_archived_sources(
+        self,
+        service_id: str,
+        manifest_id: str,
+        worker_id: str,
+        *,
+        expected_owner_epoch: int,
+        error: str,
+    ) -> None:
+        """Return bound sources to raw ingest when their archive manifest cannot be republished."""
+        self._end_archived_publication_retry(
+            service_id,
+            manifest_id,
+            worker_id,
+            expected_owner_epoch=expected_owner_epoch,
+            error=error,
+            assignments="status='discovered', archive_manifest_id=NULL, ",
+        )
+
+    def _end_archived_publication_retry(
+        self,
+        service_id: str,
+        manifest_id: str,
+        worker_id: str,
+        *,
+        expected_owner_epoch: int,
+        error: str,
+        assignments: str,
+    ) -> None:
+        _require_texts(service_id=service_id, manifest_id=manifest_id, worker_id=worker_id, error=error)
+        if expected_owner_epoch <= 0:
+            raise ValueError("owner epoch must be positive")
+        with self.transaction() as connection:
+            self._fenced_owner(connection, service_id, expected_owner_epoch=expected_owner_epoch)
+            connection.execute(
+                f"UPDATE high_scale_source_objects SET {assignments}owner=NULL, lease_until=NULL, last_error=%s, "
+                "updated_at=clock_timestamp() "
+                "WHERE service_id=%s AND archive_manifest_id=%s AND status='archived' AND owner=%s",
+                (error, service_id, manifest_id, worker_id),
+            )
 
     def authorize_source_delete(
         self,
@@ -1028,6 +1923,23 @@ class PostgresControlPlane:
         return cls._archive_manifest(connection, manifest_id, for_update=True)
 
 
+def _build_committed_manifest_index(connection: Any) -> str:
+    row = connection.execute(
+        "SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass(%s)", (COMMITTED_MANIFEST_INDEX,)
+    ).fetchone()
+    if row is not None and row[0]:
+        return "present"
+    if row is not None:
+        logger.warning("dropping invalid %s left by an interrupted concurrent build", COMMITTED_MANIFEST_INDEX)
+        connection.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {COMMITTED_MANIFEST_INDEX}")
+    connection.execute(f"SET lock_timeout = '{_INDEX_BUILD_LOCK_TIMEOUT}'")
+    try:
+        connection.execute(_COMMITTED_MANIFEST_INDEX_DDL)
+    finally:
+        connection.execute("RESET lock_timeout")
+    return "built" if row is None else "rebuilt"
+
+
 def _fetch_required(connection: Any, sql: str, params: Sequence[Any], key: Any, *, for_update: bool = False) -> Any:
     row = connection.execute(f"{sql}{' FOR UPDATE' if for_update else ''}", tuple(params)).fetchone()
     if row is None:
@@ -1101,6 +2013,7 @@ def _source_from_row(row: Mapping[str, Any] | Any) -> SourceObjectRecord:
         int(_row_value(row, "malformed_rows", 13)),
         int(_row_value(row, "accepted_rows", 14)),
         _row_value(row, "last_error", 15),
+        _parse_iso_or_dt(_row_value_optional(row, "discovered_at", 16)),
     )
 
 

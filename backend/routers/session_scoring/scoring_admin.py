@@ -240,15 +240,17 @@ def scoring_config_composite(service_id: str = Path(..., description="Logging se
 )
 def scoring_retrain(
     service_id: ServiceId,
-    since_days: int = Query(default=7, ge=1, le=90, description="Window of DuckDB traffic to train on"),
+    since_days: int = Query(default=7, ge=1, le=90, description="Window of ClickHouse traffic to train on"),
     version: str | None = Query(default=None, description="Override matrix version label; defaults to today's date"),
 ) -> dict:
-    """Build a transition matrix from DuckDB traffic, publish to FOS + KV, and evaluate AUC."""
+    """Build a transition matrix from ClickHouse traffic, publish to FOS + KV, and evaluate AUC."""
     import backend.scoring as _fixtures
     import backend.scoring as _labels
     import backend.scoring as _matrix
     from backend import config as svcconfig
-    from backend.core.duckdb import get_connection, get_source_for_service
+    from backend.core.clickhouse import get_clickhouse_client
+    from backend.core.fos_client import get_source_for_service
+    from backend.high_scale.ingest_controller import get_high_scale_service_registry
     from backend.scoring import DEFAULT_MIN_AUC
     from backend.scoring import evaluate as _evaluate
 
@@ -258,15 +260,34 @@ def scoring_retrain(
     cfg = svcconfig.load_config(service_id) or {}
     matrix_version = version or _matrix.default_version()
     start = datetime.now(UTC) - timedelta(days=int(since_days))
-    con = get_connection(source=src, max_wait=3, skip_view_update=True, read_only=True)
-    try:
-        sessions_iter = _fixtures.extract_traces(con, service_id=service_id, start=start)
-        tmatrix, stats = _matrix.build_matrix(s.to_jsonl_dict() for s in sessions_iter)
-    finally:
-        try:
-            con.close()
-        except Exception:
-            logger.debug("scoring_retrain: con.close failed (ignored)", exc_info=True)
+    hs = get_high_scale_service_registry().resolve(service_id)
+    ch_client = hs.client if hs is not None and getattr(hs, "client", None) is not None else get_clickhouse_client()
+    if ch_client is None:
+        raise HTTPException(status_code=503, detail={"error": "ClickHouse client unavailable"})
+    trace_rows = ch_client.execute(
+        """
+        SELECT
+            event_timestamp AS timestamp,
+            client_ip AS ip,
+            custom_fields['ua'] AS ua,
+            url,
+            custom_fields['method'] AS method,
+            toInt32OrZero(custom_fields['status']) AS status,
+            custom_fields['referer'] AS referer,
+            toFloat64OrZero(custom_fields['ttfb']) AS ttfb,
+            country,
+            toInt32OrNull(nullIf(custom_fields['asn'], '')) AS asn
+        FROM request_facts
+        WHERE service_id = {service_id:String}
+          AND publication_state = 'visible'
+          AND event_timestamp >= {start_time:DateTime64(3)}
+        ORDER BY ip, ua, timestamp
+        """,
+        {"service_id": service_id, "start_time": start},
+    )
+    row_tuples = (tuple(r.get(col) for col in _fixtures._TRACE_COLUMNS) for r in (trace_rows or []))
+    sessions_iter = _fixtures.sessionize(_fixtures.rows_to_events(row_tuples))
+    tmatrix, stats = _matrix.build_matrix(s.to_jsonl_dict() for s in sessions_iter)
     matrix_dict = tmatrix.to_json_dict(version=matrix_version)
     auc_result = None
     label_rows = _labels.list_labels(service_id)

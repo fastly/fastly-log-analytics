@@ -13,7 +13,7 @@ RUN apk add --no-cache --upgrade 'ca-certificates>=20261020-r0' 'ca-certificates
 RUN xcaddy build v2.11.7
 
 FROM ${CADDY_IMAGE}
-RUN apk add --no-cache --upgrade 'ca-certificates>=20261020-r0' 'ca-certificates-bundle>=20261020-r0'
+RUN apk add --no-cache --upgrade 'ca-certificates>=20261020-r0' 'ca-certificates-bundle>=20261020-r0' 'brotli-libs>=1.2.1-r0'
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy
 # The CI-built image retained the base layer's file capability
 # despite the guarded strip. Replace the file without preserving xattrs so

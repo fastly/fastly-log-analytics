@@ -19,18 +19,16 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
+from urllib.parse import urlencode
 
 import httpx
 import pytest
 import structlog
-from structlog.testing import capture_logs
 
 import backend.high_scale.archive as disk_sampler
 from backend.config import ClickHouseConfig
 from backend.core.clickhouse import ClickHouseClient
 from backend.core.rum_ingest import extract_metrics_from_faro_payload
-from backend.cron.jobs import metric_snapshots
-from backend.cron.jobs.metric_snapshots import _run_metric_snapshot, _sample_high_scale_disk
 from backend.high_scale import cmcd as hs_cmcd
 from backend.high_scale import sessions as hs_sessions
 from backend.high_scale.archive import (
@@ -561,7 +559,140 @@ def test_decode_normalizes_rum_fields_and_querystring_fallback(
         assert res.events[0][k] == v
 
 
-def test_decode_expands_faro_rum_body_matching_standard_mode_parity() -> None:
+@pytest.mark.parametrize("domain", ["rum_vitals", "rum_errors"])
+@pytest.mark.parametrize(
+    ("encoding", "identity_source"),
+    [
+        ("flat", "fastly_req_id"),
+        ("flat", "req_id"),
+        ("flat", "req"),
+        ("query", "req"),
+        ("url", "req"),
+        ("batch", "req"),
+        ("body", "fastly_req_id"),
+        ("body", "req"),
+        ("body_object", "fastly_req_id"),
+        ("encoded_body", "fastly_req_id"),
+        ("fallback_body", "req"),
+    ],
+)
+def test_rum_receipt_identity_survives_decode_and_http_insert(domain: str, encoding: str, identity_source: str) -> None:
+    from backend.high_scale.archive.clickhouse_batch import _DOMAIN_COLUMNS
+
+    req_id = "run-20261106-seq-000042/é+final"
+    record: dict[str, Any] = {"timestamp": "2026-11-06T12:00:00Z", "rum_cid": "session-not-request"}
+    params = [("cid", "session-not-request")]
+    if domain == "rum_vitals":
+        fields = {"rum_metric_name": "LCP", "rum_metric_value": "123.5"}
+        body = {"measurements": [{"type": "web-vitals", "values": {"lcp": 123.5, "cls": 0.02}}]}
+    else:
+        fields = {"rum_error_message": "boom", "rum_error_file": "app.js"}
+        body = {"exceptions": [{"value": "boom"}, {"value": "another error"}]}
+    if encoding == "flat":
+        record.update(fields)
+    elif encoding in {"query", "url", "batch", "fallback_body"}:
+        params.extend(fields.items())
+        if encoding == "batch":
+            params.extend(fields.items())
+        if encoding == "fallback_body":
+            record["rum_body"] = "{truncated"
+    else:
+        record["rum_body"] = body if encoding == "body_object" else json.dumps(body)
+        if encoding == "encoded_body":
+            record["rum_body"] = json.dumps(record["rum_body"])
+    if identity_source == "req":
+        params.append(("req", req_id))
+    else:
+        record[identity_source] = req_id
+        params.append(("req", "different-query-identity"))
+        if identity_source == "req_id":
+            record["fastly_req_id"] = "different-logged-identity"
+    record["url" if encoding == "url" else "rum_raw_query"] = "/beacon?" + urlencode(params)
+    payload = gzip.compress(json.dumps(record, separators=(",", ":")).encode())
+    source = _source(domain, "raw/rum/receipt.gz")
+    result = decode_source_object(source, payload, transform_version="normalize.v1")
+    replay = decode_source_object(source, payload, transform_version="normalize.v1")
+    expected_count = 2 if encoding in {"batch", "body", "body_object", "encoded_body"} else 1
+    assert result.quarantined_rows == 0 and result.accepted_rows == expected_count
+    assert [event["req_id"] for event in result.events] == [req_id] * expected_count
+    assert [event["event_id"] for event in result.events] == [event["event_id"] for event in replay.events]
+    assert len({event["event_id"] for event in result.events}) == expected_count
+    assert all(event["client_id"] == "session-not-request" for event in result.events)
+    assert all(json.loads(event["raw_json"]) == record for event in result.events)
+    batch = HighScaleBatch("receipt", "svc", domain, "1", result.events)
+    rows = [
+        dict(zip(_DOMAIN_COLUMNS[domain], row, strict=True))
+        for row in _rows_for_domain(batch, "00000000-0000-0000-0000-000000000001")
+    ]
+    assert [row["req_id"] for row in rows] == [req_id] * expected_count
+    assert all(row["request_event_id"] is None for row in rows)
+    sent: list[tuple[str, list[list[Any]]]] = []
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        sent.append((request.url.params["query"], [json.loads(line) for line in request.content.splitlines()]))
+        return httpx.Response(200)
+
+    client = ClickHouseClient(
+        ClickHouseConfig(host="localhost", port=8123, database="default", user="default", password=""),
+        transport=httpx.MockTransport(transport),
+    )
+    table = "rum_vitals_facts" if domain == "rum_vitals" else "rum_error_facts"
+    try:
+        client.insert_rows(
+            table,
+            list(_DOMAIN_COLUMNS[domain]),
+            _rows_for_domain(batch, "00000000-0000-0000-0000-000000000001"),
+        )
+    finally:
+        client.close()
+    assert len(sent) == 1
+    sql, wire_rows = sent[0]
+    wire_columns = re.findall(r"`([^`]+)`", sql)[1:]
+    wire_records = [dict(zip(wire_columns, row, strict=True)) for row in wire_rows]
+    assert [row["req_id"] for row in wire_records] == [req_id] * expected_count
+    assert all(row["client_id"] == "session-not-request" and row["request_event_id"] is None for row in wire_records)
+
+
+@pytest.mark.parametrize("domain", ["rum_vitals", "rum_errors"])
+@pytest.mark.parametrize("identity_fields", [{}, {"fastly_req_id": None}, {"req_id": None}, {"req_id": ""}])
+def test_legacy_rum_receipt_identity_stays_empty_in_decode_and_projection(
+    domain: str, identity_fields: dict[str, Any]
+) -> None:
+    from backend.high_scale.archive.clickhouse_batch import _DOMAIN_COLUMNS
+
+    record = {
+        "timestamp": "2026-11-06T12:00:00Z",
+        "rum_cid": "not-a-receipt",
+        **(
+            {"rum_metric_name": "LCP", "rum_metric_value": 1.0}
+            if domain == "rum_vitals"
+            else {"rum_error_message": "boom"}
+        ),
+        **identity_fields,
+    }
+    result = decode_source_object(
+        _source(domain, "raw/rum/legacy.gz"),
+        gzip.compress(json.dumps(record).encode()),
+        transform_version="normalize.v1",
+    )
+    assert result.accepted_rows == 1 and result.events[0]["req_id"] == ""
+    for event in (
+        result.events[0],
+        {k: v for k, v in result.events[0].items() if k != "req_id"},
+        {**result.events[0], "req_id": None},
+    ):
+        batch = HighScaleBatch("legacy", "svc", domain, "1", (event,))
+        row = dict(
+            zip(
+                _DOMAIN_COLUMNS[domain],
+                _rows_for_domain(batch, "00000000-0000-0000-0000-000000000001")[0],
+                strict=True,
+            )
+        )
+        assert row["req_id"] == "" and row["request_event_id"] is None
+
+
+def test_decode_expands_faro_rum_body_matching_canonical_parity() -> None:
     faro_payload = {
         "meta": {
             "browser": {"name": "Firefox", "mobile": True},
@@ -651,7 +782,7 @@ def test_decode_expands_faro_rum_body_matching_standard_mode_parity() -> None:
         assert len(ch_tuples) == expected_len and len({row[1] for row in ch_tuples}) == expected_len
 
 
-def test_decode_expands_batched_querystring_matching_standard_mode_parity() -> None:
+def test_decode_expands_batched_querystring_matching_canonical_parity() -> None:
     batched_url = (
         "/rum-beacon?service_id=svc"
         "&rum_metric_name=FCP&rum_metric_value=450&rum_metric_rating=good"
@@ -811,6 +942,7 @@ def _schema() -> str:
             r"ReplicatedReplacingMergeTree\(([^)]+)\)\s*\('[^']+',\s*'[^']+'\)", r"ReplacingMergeTree(\1)", text
         )
         text = re.sub(r"ReplicatedMergeTree\([^;]*?\)", "MergeTree()", text)
+        text = re.sub(r"ReplicatedSummingMergeTree\([^;]*?\)", "SummingMergeTree()", text)
         parts.append(re.sub(r"\nTTL [^;]*;", ";", text))
     return "\n".join(parts)
 
@@ -909,6 +1041,46 @@ def _make_client(seed: str) -> ClickHouseClient:
         ClickHouseConfig(host="localhost", port=8123, database="default", user="default", password=""),
         transport=httpx.MockTransport(transport),
     )
+
+
+@_CH_SKIP
+def test_rum_receipt_identity_schema_upgrade_preserves_legacy_rows_and_is_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.high_scale.archive import clickhouse_batch
+
+    installed: list[str] = []
+    monkeypatch.setattr(clickhouse_batch, "get_clickhouse_client", lambda: SimpleNamespace(execute=installed.append))
+    clickhouse_batch.install_clickhouse_schema()
+    clickhouse_batch.install_clickhouse_schema()
+    rum_statements = [
+        sql
+        for sql in installed
+        if re.match(r"(?:CREATE TABLE IF NOT EXISTS|ALTER TABLE) rum_(?:vitals|error)_facts\b", sql)
+    ]
+    creates = [sql for sql in rum_statements if sql.startswith("CREATE TABLE")]
+    legacy_schema = [re.sub(r"\s+req_id String,", "", sql) for sql in creates[:2]]
+    legacy_schema = [re.sub(r"\nTTL .*", "", sql) for sql in legacy_schema]
+    seed = ";\n".join(legacy_schema) + ";\n"
+    for table in ("rum_vitals_facts", "rum_error_facts"):
+        seed += f"INSERT INTO {table} (client_id) VALUES ('legacy-session');\n"
+    seed += ";\n".join(rum_statements) + ";\n"
+    for table in ("rum_vitals_facts", "rum_error_facts"):
+        seed += f"INSERT INTO {table} (client_id, req_id) VALUES ('new-session', 'run-seq-42-not-a-uuid');\n"
+    client = _make_client(seed)
+    try:
+        rows = client.execute(
+            "SELECT * FROM (SELECT 'vitals' AS domain, client_id, req_id, request_event_id FROM rum_vitals_facts "
+            "UNION ALL SELECT 'errors', client_id, req_id, request_event_id FROM rum_error_facts "
+            ") ORDER BY domain, client_id"
+        )
+    finally:
+        client.close()
+    assert rows == [
+        {"domain": domain, "client_id": cid, "req_id": req_id, "request_event_id": None}
+        for domain in ("errors", "vitals")
+        for cid, req_id in (("legacy-session", ""), ("new-session", "run-seq-42-not-a-uuid"))
+    ]
 
 
 @pytest.fixture
@@ -1563,8 +1735,7 @@ def test_export_can_be_cancelled() -> None:
 
 def test_high_scale_config_validation() -> None:
     with pytest.raises(ValueError, match="ClickHouse"):
-        HighScaleConfig(True, None, None, None).validate()
-    HighScaleConfig(False, None, None, None).validate()
+        HighScaleConfig(None, None, None).validate()
 
 
 def test_retention_recommendation_preserves_disk_reserve_and_accounts_for_fields() -> None:
@@ -1659,9 +1830,18 @@ def test_register_high_scale_services_rejects_empty_secret_and_missing_env_servi
     with pytest.raises(ValueError, match="high-scale cursor secret is required"):
         _reg_svc(cursor_secret=b"")
 
-    monkeypatch.setenv("HIGH_SCALE_ENABLED", "1")
     monkeypatch.delenv("HIGH_SCALE_SERVICE_IDS", raising=False)
+    monkeypatch.delenv("HIGH_SCALE_CURSOR_SECRET", raising=False)
     with pytest.raises(ValueError, match="HIGH_SCALE_SERVICE_IDS"):
+        register_high_scale_services_from_environment(HighScaleServiceRegistry(), client=FakeClickHouse())
+
+
+@pytest.mark.no_postgres
+def test_environment_registration_requires_cursor_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HIGH_SCALE_SERVICE_IDS", "svc")
+    monkeypatch.delenv("HIGH_SCALE_CURSOR_SECRET", raising=False)
+
+    with pytest.raises(ValueError, match="HIGH_SCALE_CURSOR_SECRET"):
         register_high_scale_services_from_environment(HighScaleServiceRegistry(), client=FakeClickHouse())
 
 
@@ -1678,7 +1858,6 @@ def test_register_high_scale_services_cold_tier_wiring() -> None:
 
 
 def test_environment_registration_wires_and_degrades_cold_tier(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("HIGH_SCALE_ENABLED", "1")
     monkeypatch.setenv("HIGH_SCALE_SERVICE_IDS", "svc")
     monkeypatch.setenv("HIGH_SCALE_CURSOR_SECRET", "local-test-secret")
 
@@ -1723,10 +1902,6 @@ def _reset_sampler() -> Iterator[None]:
     disk_sampler.reset_for_tests()
 
 
-def _history(metric: str) -> list[dict[str, Any]]:
-    return metric_snapshots.get_batch(since=datetime.now(UTC) - timedelta(hours=1)).get(metric, [])
-
-
 def test_sampler_reads_real_volume_stats_and_one_batch_floor(monkeypatch: pytest.MonkeyPatch) -> None:
     probe = _FakeClickHouse(free_fraction=0.12)
     snapshot = disk_sampler.sample_disk_state(probe)
@@ -1758,55 +1933,12 @@ def test_mode_transitions_are_logged_once_each(monkeypatch: pytest.MonkeyPatch) 
     assert changes[-1][0] == "warning"
 
 
-def test_metric_snapshot_tick_high_scale_vs_standard_and_probe_failure() -> None:
-    probe = _FakeClickHouse(free_fraction=0.12)
-    with (
-        patch("backend.config.is_high_scale_mode", return_value=True),
-        patch("backend.core.clickhouse.get_clickhouse_client", return_value=probe),
-    ):
-        _run_metric_snapshot()
-    assert probe.calls == 1
-    assert _history("high_scale_disk_mode_level")[-1]["value"] == 2.0
-    assert _history("high_scale_disk_free_fraction")[-1]["value"] == pytest.approx(0.12, abs=1e-3)
-
-    disk_sampler.reset_for_tests()
-    with (
-        patch("backend.config.is_high_scale_mode", return_value=False),
-        patch("backend.core.clickhouse.get_clickhouse_client") as get_client,
-    ):
-        assert _sample_high_scale_disk() == 0
-        _run_metric_snapshot()
-    get_client.assert_not_called()
-    assert disk_sampler.latest_disk_snapshot() is None
-
-    class _Down:
-        def storage_health(self) -> dict:
-            raise RuntimeError("clickhouse unavailable")
-
-    with (
-        capture_logs() as logs,
-        patch("backend.config.is_high_scale_mode", return_value=True),
-        patch("backend.core.clickhouse.get_clickhouse_client", return_value=_Down()),
-    ):
-        assert _sample_high_scale_disk() == 0
-    assert any(e["event"] == "high_scale.disk_sample_failed" and e["error_kind"] == "RuntimeError" for e in logs)
-    assert disk_sampler.latest_disk_snapshot() is None
-
-
 def test_health_snapshot_disk_states(client: Any) -> None:
-    with patch("backend.config.is_high_scale_mode", return_value=False):
-        assert "high_scale" not in client.get("/api/admin/health-snapshot").json()
-
-    with patch("backend.config.is_high_scale_mode", return_value=True):
-        assert client.get("/api/admin/health-snapshot").json()["high_scale"]["disk"] is None
+    assert client.get("/api/admin/health-snapshot").json()["high_scale"]["disk"] is None
 
     probe = _FakeClickHouse(free_fraction=0.09)
-    with (
-        patch("backend.config.is_high_scale_mode", return_value=True),
-        patch("backend.core.clickhouse.get_clickhouse_client", return_value=probe),
-    ):
-        _run_metric_snapshot()
-        resp = client.get("/api/admin/health-snapshot")
+    disk_sampler.sample_disk_state(probe)
+    resp = client.get("/api/admin/health-snapshot")
     assert resp.status_code == 200
     disk = resp.json()["high_scale"]["disk"]
     assert disk["mode"] == "emergency" and disk["free_fraction"] == pytest.approx(0.09, abs=1e-3)
@@ -1864,10 +1996,7 @@ def _cfg(retention_days: int | None = None) -> dict[str, Any]:
 
 def _get(client: Any, cfg: dict[str, Any] | None, **params: Any) -> Any:
     query = {"service_id": "svc-hs", "events_per_second": 1000, **params}
-    with (
-        patch("backend.config.is_high_scale_mode", return_value=True),
-        patch("backend.config.load_config", return_value=cfg),
-    ):
+    with patch("backend.config.load_config", return_value=cfg):
         return client.get(_PATH, params=query)
 
 
@@ -1909,10 +2038,6 @@ def test_recommendation_endpoint_sampled_volume_and_error_cases(client: Any) -> 
     sampled = _get(client, _cfg()).json()
     assert sampled["volume_total_bytes"] == 2 * _TB and sampled["volume_total_source"] == "sampled"
 
-    with patch("backend.config.is_high_scale_mode", return_value=False):
-        r_disabled = client.get(_PATH, params={"service_id": "svc-hs", "events_per_second": 1000, "total_bytes": _TB})
-    assert r_disabled.status_code == 404 and r_disabled.json()["detail"]["error"] == "high_scale_not_enabled"
-
     r_missing = _get(client, None, service_id="nope", events_per_second=1, total_bytes=_TB)
     assert r_missing.status_code == 404 and r_missing.json()["detail"]["error"] == "service_not_found"
 
@@ -1922,7 +2047,6 @@ def test_recommendation_endpoint_sampled_volume_and_error_cases(client: Any) -> 
 def test_recommendation_is_logged_and_never_writes_config(client: Any, caplog: pytest.LogCaptureFixture) -> None:
     assert _is_blocked_path(_PATH) is True
     with (
-        patch("backend.config.is_high_scale_mode", return_value=True),
         patch("backend.config.load_config", return_value=_cfg()),
         patch("backend.config.save_config") as save,
     ):
@@ -1953,3 +2077,57 @@ def test_recommendation_is_logged_and_never_writes_config(client: Any, caplog: p
         _TB,
         "request",
     )
+
+
+@pytest.mark.no_postgres
+def test_request_schema_defines_dimension_projection_and_hourly_rollup_mv() -> None:
+    request_sql = (SQL_ROOT / "request_schema.sql").read_text()
+    assert "ALTER TABLE request_aggregates ADD PROJECTION IF NOT EXISTS proj_by_dimension" in request_sql
+    assert "CREATE TABLE IF NOT EXISTS request_aggregates_1h" in request_sql
+    assert "ReplicatedSummingMergeTree" in request_sql
+    assert "ORDER BY (service_id, dimension, bucket_start, value, batch_id)" in request_sql
+    assert "CREATE MATERIALIZED VIEW IF NOT EXISTS request_aggregates_1h_mv" in request_sql
+    assert "batch_id UUID DEFAULT toUUID('00000000-0000-0000-0000-000000000000')" in request_sql
+    assert (
+        "ADD COLUMN IF NOT EXISTS batch_id UUID DEFAULT toUUID('00000000-0000-0000-0000-000000000000')" in request_sql
+    )
+    assert "sum(request_count) AS request_count" in request_sql
+    assert (
+        "ADD COLUMN IF NOT EXISTS `_cf_cache` LowCardinality(String) MATERIALIZED custom_fields['cache']" in request_sql
+    )
+    rewritten = _schema()
+    assert "SummingMergeTree()" in rewritten and "ReplicatedSummingMergeTree" not in rewritten
+
+
+def test_clickhouse_client_rewrites_materialized_custom_fields_in_select_and_where() -> None:
+    def _handler(request: httpx.Request) -> httpx.Response:
+        body = request.content.decode("utf-8", errors="ignore")
+        if "FROM system.columns" in body:
+            return httpx.Response(200, json={"data": [{"cnt": 74}]})
+        if "FROM system.mutations" in body:
+            return httpx.Response(200, json={"data": [{"cnt": 0}]})
+        return httpx.Response(200, json={"data": []})
+
+    ch = ClickHouseClient(
+        ClickHouseConfig(host="localhost", port=8123, database="fastly_log_analytics", user="default", password=""),
+        transport=httpx.MockTransport(_handler),
+    )
+    ch._enable_cf_rewrite_in_tests = True
+    ch._mat_cf_ready_override = True
+
+    rewritten_q = ch.rewrite_publication_fence(
+        "SELECT custom_fields['ua'] AS ua, count() FROM request_facts "
+        "WHERE service_id={service_id:String} AND custom_fields[{f0_k:String}] IN {f0_v:Array(String)} GROUP BY ua",
+        {"service_id": "svc", "f0_k": "cache", "f0_v": ["MISS"]},
+    )
+    assert "`_cf_ua` AS ua" in rewritten_q
+    assert "`_cf_cache` IN {f0_v:Array(String)}" in rewritten_q
+
+    rewritten_where = ch.rewrite_publication_fence(
+        "service_id = {service_id:String} AND custom_fields[{f0_k:String}] IN {f0_v:Array(String)}",
+        {"service_id": "svc", "f0_k": "status", "f0_v": ["500", "502"]},
+    )
+    assert "`_cf_status` IN {f0_v:Array(String)}" in rewritten_where
+
+    raw_map_select = "SELECT custom_fields FROM request_facts WHERE service_id={service_id:String}"
+    assert ch.rewrite_publication_fence(raw_map_select, {"service_id": "svc"}) == raw_map_select

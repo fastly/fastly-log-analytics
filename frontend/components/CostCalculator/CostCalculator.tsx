@@ -2,8 +2,10 @@
 
 import React, { useEffect, useMemo, useReducer } from 'react'
 import { useRouter } from 'next/navigation'
-import { flexRender, getCoreRowModel, useReactTable, type ColumnDef } from '@tanstack/react-table'
+import { flexRender, useTable } from '@tanstack/react-table'
+import { basicTableFeatures, type BasicColumnDef } from '@/lib/table'
 import { cn, buildServiceHref, formatBytes, formatUSD } from "@/lib/utils"
+import { SNAPSHOT_INTERVAL_LABELS, SNAPSHOT_INTERVAL_OPTIONS } from '@/lib/serviceDefaults'
 import { useServiceStore } from '@/stores/filterStore'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -23,7 +25,6 @@ import {
   BILLING_ZONE_DESCRIPTIONS,
   RAW_LOG_COMPRESSION_RATIO,
   RUM_COMPRESSED_BYTES_PER_BEACON,
-  type DeploymentMode,
   type CalcState,
   type CalcAction,
   DEFAULTS,
@@ -40,7 +41,6 @@ export {
   BILLING_ZONE_DESCRIPTIONS,
   RAW_LOG_COMPRESSION_RATIO,
   RUM_COMPRESSED_BYTES_PER_BEACON,
-  type DeploymentMode,
   type CalcState,
   type CalcAction,
   DEFAULTS,
@@ -118,7 +118,7 @@ export function ResultRow({ label, detail, cost, highlight }: {
 interface InputsProps {
   s: CalcState
   r: CalcResults
-  set: (key: keyof CalcState) => (value: number | boolean | DeploymentMode) => void
+  set: (key: keyof CalcState) => (value: number | boolean) => void
 }
 
 export function Inputs({ s, r, set }: InputsProps) {
@@ -147,25 +147,37 @@ export function Inputs({ s, r, set }: InputsProps) {
         <Row label='Log file period (seconds)' tooltip="How often Fastly closes and uploads a log file. Controlled by the Fastly logging configuration.">
           <NumInput value={s.logPeriod} onChange={set('logPeriod')} min={1} />
         </Row>
-        <Row label='Deployment mode' tooltip="High-Scale also writes an archive Parquet artifact per page of raw log objects to FOS: about 33 KB fixed plus 417 bytes per row (measured on a dev High-Scale deployment). The worker deletes archive artifacts a day after the data retention window.">
-          <select aria-label="Deployment mode" value={s.deploymentMode} onChange={(e) => set('deploymentMode')(e.target.value as DeploymentMode)} className="h-8 rounded-md border bg-background px-2 text-xs">
-            <option value="standard">Standard</option>
-            <option value="high_scale">High-Scale</option>
-          </select>
+        <Row
+          label='Cloud snapshot interval'
+          tooltip="How often High-Scale flushes consolidated FOS Parquet archives and meta/dr_state.json DR state snapshots. Raw logs remain in FOS until archived plus a 15-minute grace period for zero data loss."
+        >
+          <div className='inline-flex items-center gap-0.5 p-0.5 bg-muted/80 rounded-md' role='group' aria-label='Cloud snapshot interval'>
+            {SNAPSHOT_INTERVAL_OPTIONS.map((mins) => {
+              const selected = s.snapshotIntervalMinutes === mins
+              return (
+                <button
+                  key={mins}
+                  type='button'
+                  aria-pressed={selected}
+                  onClick={() => set('snapshotIntervalMinutes')(mins)}
+                  className={cn(
+                    'px-2 py-1 text-xs font-medium rounded transition-all',
+                    selected
+                      ? 'bg-background text-foreground shadow-sm font-semibold'
+                      : 'text-muted-foreground hover:text-foreground hover:bg-background/50',
+                  )}
+                >
+                  {SNAPSHOT_INTERVAL_LABELS[mins]}
+                </button>
+              )
+            })}
+          </div>
         </Row>
-        {s.deploymentMode === 'high_scale' && (
-          <Row label='Raw objects per archive batch' tooltip="Upper bound of source objects per archive artifact (HIGH_SCALE_PAGE_SIZE, default 100). Quiet services archive about one object per page. Each page costs 3 writes (artifact, manifest, commit marker) and 3 verification reads.">
-            <NumInput value={s.archiveBatchObjects} onChange={set('archiveBatchObjects')} min={1} max={500} />
-          </Row>
-        )}
-        <Row label='Cloud Commit Interval (minutes)' tooltip="How often the local buffer is committed to DuckLake and the new Parquet files are pushed to FOS (e.g., 5).">
-          <NumInput value={s.commitMins} onChange={set('commitMins')} min={1} />
+        <Row label='Raw objects per archive batch' tooltip="Upper bound of source objects per consolidated archive flush (HIGH_SCALE_SNAPSHOT_MAX_OBJECTS, default 500). Quiet services flush once per snapshot interval. Each flush costs 3 writes (Parquet artifact, manifest, commit marker) and 3 verification reads.">
+          <NumInput value={s.archiveBatchObjects} onChange={set('archiveBatchObjects')} min={1} max={2000} />
         </Row>
         <Row label='Average bytes per log line' tooltip="The average uncompressed bytes per request based on your selected fields. Compressed ~15× with ZSTD (.zst) in Object Storage and ~4× in Parquet.">
           <NumInput value={s.bytesPerLine} onChange={set('bytesPerLine')} min={1} />
-        </Row>
-        <Row label='Parquet target size (MB)' tooltip="Target file size for the nightly DuckLake compaction. Larger targets mean fewer rewritten objects (and lower FOS storage cost in High-Scale).">
-          <NumInput value={s.parquetMB} onChange={set('parquetMB')} min={1} />
         </Row>
         <Row label='Log nodes / fan-out' tooltip="Estimated number of Fastly aggregators/cache nodes flushing per period. Higher traffic = more nodes.">
           <NumInput value={s.logNodes} onChange={set('logNodes')} min={1} max={72} />
@@ -176,17 +188,14 @@ export function Inputs({ s, r, set }: InputsProps) {
         <Row label='CDN fronting FOS reads' tooltip="Use a Fastly CDN service to cache reads from Fastly Object Storage, reducing Class B operations.">
           <Switch aria-label="CDN fronting FOS reads" checked={s.cdnEnabled} onCheckedChange={set('cdnEnabled')} />
         </Row>
-        <Row label='Data retention (days)' tooltip="The service's data retention. Request data, its cloud copy and (High-Scale) its archive artifacts are deleted after this many days (archive a day later). A retention of 0 keeps data forever and is modelled as a year here. Deleted objects are still billed for the 30-day FOS minimum.">
+        <Row label='Data retention (days)' tooltip="The service's data retention. ClickHouse rows and FOS archive Parquet artifacts are deleted after this many days (archive a day later). A retention of 0 keeps data forever and is modelled as a year here. Deleted objects are still billed for the 30-day FOS minimum.">
           <NumInput value={s.retentionDays} onChange={set('retentionDays')} min={1} />
         </Row>
-        <Row label='RUM retention (days)' tooltip="The service's RUM retention, which can differ from the request retention. It sizes RUM storage and, in High-Scale, the RUM archive artifacts.">
+        <Row label='RUM retention (days)' tooltip="The service's RUM retention, which can differ from the request retention. It sizes RUM storage and the RUM archive artifacts.">
           <NumInput value={s.rumRetentionDays} onChange={set('rumRetentionDays')} min={1} />
         </Row>
-        <Row label='Auto-delete raw .zst logs after ingest' tooltip="Delete raw .zst log files once they are committed to DuckLake. They are still billed for the FOS minimum 30 days, but this prevents redundant long-term storage.">
+        <Row label='Auto-delete raw .zst logs after ingest' tooltip="Delete raw .zst log files after their consolidated archive checkpoint commits plus a 15-minute grace window (steady-state window = snapshot interval + 15m). Objects are still billed for the FOS minimum 30 days, but this prevents redundant long-term storage.">
           <Switch aria-label="Auto-delete raw .zst logs after ingest" checked={s.deleteLogs} onCheckedChange={set('deleteLogs')} />
-        </Row>
-        <Row label='DuckLake compaction enabled' tooltip="Periodically rewrite and merge small Parquet files into larger ones. The merged files are pushed to FOS and the replaced ones deleted (30-day minimum billing applies).">
-          <Switch aria-label="DuckLake compaction enabled" checked={s.compactionEnabled} onCheckedChange={set('compactionEnabled')} />
         </Row>
       </div>
 
@@ -220,21 +229,10 @@ const OPS_SECTIONS = [
     valCls: 'text-right',
     rows: [
       ['Fastly writes each log file', '1 op/file'],
-      ['Raw Parquet upload per sync', '1 op/file'],
+      ['Archive batch publish (Parquet + manifest + marker)', '3 ops/batch'],
       ['List during sync (per 1,000 objects)', '1 op/page'],
       ['Manual log checks (LIST)', '1 op/check'],
-      ['Admin sync state to FOS', '1 op/sync'],
-    ],
-  },
-  {
-    title: 'DuckLake Cloud Copy (if compaction enabled)',
-    cls: 'py-1 font-semibold text-blue-500 dark:text-blue-300 italic',
-    rowCls: 'pl-3 py-0.5 text-muted-foreground/70',
-    valCls: 'text-right text-muted-foreground/70',
-    rows: [
-      ['DuckLake commit (append data)', '1 op/sync'],
-      ['Table optimization (rewrite)', '1 op/file'],
-      ['Weekly snapshot expiry', '1 op/week'],
+      ['DR state snapshot (meta/dr_state.json)', '1 op/snapshot'],
     ],
   },
   {
@@ -244,6 +242,7 @@ const OPS_SECTIONS = [
     valCls: 'text-right',
     rows: [
       ['Read each .zst during ingest', '1 op/file'],
+      ['Archive publish verification reads', '3 ops/batch'],
     ],
   },
   {
@@ -272,16 +271,16 @@ function OpsSectionsTable() {
     }
     return out
   }, [])
-  const columns = useMemo<ColumnDef<OpsSectionFlatRow>[]>(
+  const columns = useMemo<BasicColumnDef<OpsSectionFlatRow>[]>(
     () => [
       { id: 'label', cell: ({ row }) => (row.original.kind === 'header' ? row.original.title : row.original.label) },
       { id: 'value', cell: ({ row }) => (row.original.kind === 'row' ? row.original.value : null) },
     ],
     [],
   )
-  const table = useReactTable({ data, columns, getCoreRowModel: getCoreRowModel() })
+  const table = useTable({ features: basicTableFeatures, data, columns })
   return (
-    <Table className='w-full text-xs text-muted-foreground'>
+    <Table scrollFocusable className='w-full text-xs text-muted-foreground'>
       <TableBody>
         {table.getRowModel().rows.map((row) => {
           const item = row.original
@@ -380,9 +379,7 @@ export function Pricing({ s, setZone }: PricingProps) {
 
       <section>
         <h3 className='text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3'>What generates operations</h3>
-        <div className='overflow-x-auto'>
-          <OpsSectionsTable />
-        </div>
+        <OpsSectionsTable />
       </section>
     </>
   )
@@ -391,9 +388,34 @@ export function Pricing({ s, setZone }: PricingProps) {
 interface ResultsProps {
   s: CalcState
   r: CalcResults
+  observedStorageGbHours?: number | null
 }
 
-export function Results({ s, r }: ResultsProps) {
+export function Results({ s, r, observedStorageGbHours }: ResultsProps) {
+  const observedStorageGbMonths = observedStorageGbHours == null
+    ? null
+    : observedStorageGbHours / 720
+  const observedStorageCost = observedStorageGbMonths == null
+    ? null
+    : observedStorageGbMonths * s.rateStorage
+  const displayedResult = observedStorageCost == null
+    ? r
+    : {
+        ...r,
+        costStorage: observedStorageCost,
+        totalCost: r.totalCost - r.costStorage + observedStorageCost,
+        storageTiers: [{
+          label: 'Fastly Platform (account-wide)',
+          gbMonths: observedStorageGbMonths ?? 0,
+          flagged: false,
+        }],
+      }
+  const storageTierDetail = displayedResult.storageTiers
+    .map((tier) => {
+      const value = observedStorageCost == null ? Math.max(0.001, tier.gbMonths) : tier.gbMonths
+      return `${tier.label}: ${value.toFixed(3)} GB-mo${tier.flagged ? '*' : ''}`
+    })
+    .join(' · ')
   return (
     <div className='bg-muted/30 border rounded-lg p-5'>
       <h3 className='text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-4'>Monthly Estimate Breakdown</h3>
@@ -410,8 +432,8 @@ export function Results({ s, r }: ResultsProps) {
         />
         <ResultRow
           label='Storage (GB-months billed)'
-          detail={r.storageTiers.map(t => `${t.label}: ${Math.max(0.001, t.gbMonths).toFixed(3)} GB-mo${t.flagged ? '*' : ''}`).join(' · ')}
-          cost={formatUSD(r.costStorage)}
+          detail={storageTierDetail}
+          cost={formatUSD(displayedResult.costStorage)}
         />
         <ResultRow
           label='CDN Egress'
@@ -427,10 +449,16 @@ export function Results({ s, r }: ResultsProps) {
         )}
         <ResultRow
           label='Total Estimated Monthly Cost'
-          cost={formatUSD(r.totalCost)}
+          cost={formatUSD(displayedResult.totalCost)}
           highlight
         />
       </div>
+
+      {observedStorageCost != null && (
+        <div className="mt-3 text-xs text-muted-foreground">
+          Measured · Fastly Platform (account-wide)
+        </div>
+      )}
 
       <div className='mt-5 pt-4 border-t border-border/40'>
         <h4 className='text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3'>Volume Estimates</h4>
@@ -442,7 +470,8 @@ export function Results({ s, r }: ResultsProps) {
             ['Raw volume / month (uncompressed)', formatBytes(r.totalBytesPerMonth)],
             ['Est. volume / month (.zst compressed)', formatBytes(r.totalGzBytesPerMonth)],
             ['Log files written / month', fmtN(Math.round(r.logFilesPerMonth))],
-            ['DuckLake data files pushed to FOS / month', fmtN(Math.round(r.parquetFilesPerMonth))],
+            ['Archive Parquet batches pushed to FOS / month', fmtN(Math.round(r.parquetFilesPerMonth))],
+            ['DR state snapshots / month', fmtN(Math.round(r.drStateSnapshotsPerMonth))],
             ['Billed footprint (30d min)', fmtN(Math.round(r.objectsBilled)) + ' objects'],
             ['Syncs / month', fmtN(Math.round(r.syncsPerMonth))],
             ...(s.rumBeaconsDay > 0 ? [
@@ -464,16 +493,17 @@ export function Results({ s, r }: ResultsProps) {
 interface CostCalculatorProps {
   prefillData?: PrefillResponse
   prefillNote?: string
+  observedStorageGbHours?: number | null
 }
 
-export function CostCalculator({ prefillData, prefillNote }: CostCalculatorProps) {
+export function CostCalculator({ prefillData, prefillNote, observedStorageGbHours }: CostCalculatorProps) {
   const [s, dispatch] = useReducer(reducer, DEFAULTS)
 
   useEffect(() => {
     if (prefillData) dispatch({ type: 'PREFILL', prefill: prefillData })
   }, [prefillData])
 
-  const set = (key: keyof CalcState) => (value: number | boolean | DeploymentMode) => dispatch({ type: 'SET', key, value })
+  const set = (key: keyof CalcState) => (value: number | boolean) => dispatch({ type: 'SET', key, value })
   const setZone = (zone: BillingZone) => dispatch({ type: 'SET_ZONE', zone })
   const r = useMemo(() => calculate(s), [s])
 
@@ -494,13 +524,12 @@ export function CostCalculator({ prefillData, prefillNote }: CostCalculatorProps
         </div>
       </div>
 
-      <Results s={s} r={r} />
+      <Results s={s} r={r} observedStorageGbHours={observedStorageGbHours} />
 
       <p className='text-xs text-muted-foreground leading-relaxed'>
-        * Estimates assume ~{RAW_LOG_COMPRESSION_RATIO}× ZSTD compression for raw JSON logs (.zst), ~4× compression of log JSON to Parquet (ZSTD), and client-side RUM beacon batching. Storage is billed in GB-hours;
+        * Estimates assume ~{RAW_LOG_COMPRESSION_RATIO}× ZSTD compression for raw JSON logs (.zst), ~4× compression of log JSON to Parquet (ZSTD), and client-side RUM beacon batching. Consolidated FOS archive flushes and DR state snapshots (meta/dr_state.json) run on the configured snapshot interval, keeping raw logs in FOS for snapshot interval + 15m grace before auto-delete. Storage is billed in GB-hours;
         the calculator converts to GB-months (1 month = 720 hours). Each object is billed for a minimum
-        of {s.minDays} days regardless of when it is deleted. CDN caching eliminates Class B ops for cached
-        parquet reads; local cache eliminates them entirely for query reads. Actual usage may vary.
+        of {s.minDays} days regardless of when it is deleted. Analytical queries execute against ClickHouse, so interactive dashboard reads do not incur FOS Class B operations. Actual usage may vary.
       </p>
     </div>
   )

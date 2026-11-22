@@ -1,0 +1,150 @@
+import { afterEach, expect, it, vi } from "vitest";
+import { measureCloudQuery } from "./readiness";
+import { setCloudModeRuntime } from "./mode";
+
+afterEach(() => setCloudModeRuntime(false));
+
+it("captures the originating service through a late query completion without requiring window", async () => {
+  setCloudModeRuntime(true);
+  const events: unknown[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  const scope = window;
+  scope.addEventListener("fla:cloud-query", listener);
+  try {
+    vi.stubGlobal("window", undefined);
+    let finish!: (data: { total_rows: number }) => void;
+    const result = measureCloudQuery("dashboard.bundle",
+      () => new Promise(resolve => { finish = resolve; }), undefined, "service-a");
+    expect(events).toMatchObject([{ serviceId: "service-a", state: "pending" }]);
+    finish({ total_rows: 0 });
+    await result;
+    expect(events).toMatchObject([
+      { serviceId: "service-a", state: "pending" },
+      { serviceId: "service-a", state: "success", totalRows: 0 },
+    ]);
+  } finally {
+    vi.unstubAllGlobals();
+    scope.removeEventListener("fla:cloud-query", listener);
+  }
+});
+
+it("reports real completion only after a pending query resolves, preserving zero rows", async () => {
+  setCloudModeRuntime(true);
+  const events: unknown[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    let finish!: (data: { aggregates: { total_rows: number } }) => void;
+    const result = measureCloudQuery("dashboard.bundle", () => new Promise(resolve => { finish = resolve; }));
+    expect(events).toMatchObject([{ state: "pending", section: "dashboard.bundle" }]);
+    finish({ aggregates: { total_rows: 0 } });
+    expect(await result).toEqual({ aggregates: { total_rows: 0 } });
+    expect(events).toMatchObject([
+      { state: "pending" }, { state: "success", totalRows: 0 },
+    ]);
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+  }
+});
+
+it("does not turn stale-view exceptions into successful readiness", async () => {
+  setCloudModeRuntime(true);
+  const events: unknown[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    const error = new Error("sentinel-private-query-token");
+    await expect(measureCloudQuery("dashboard.bundle", async () => { throw error; })).rejects.toBe(error);
+    expect(events).toMatchObject([{ state: "pending" }, { state: "error", totalRows: null, error: "Error" }]);
+    expect(JSON.stringify(events)).not.toContain(error.message);
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+  }
+});
+
+it("names a dropped connection a network error without exposing the failing URL", async () => {
+  setCloudModeRuntime(true);
+  const events: unknown[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    const error = new TypeError("Failed to fetch https://sentinel-private-host/api/file");
+    await expect(measureCloudQuery("api./api/insight-availability", async () => { throw error; })).rejects.toBe(error);
+    expect(events).toMatchObject([{ state: "pending" }, { state: "error", error: "NetworkError" }]);
+    expect(JSON.stringify(events)).not.toContain("sentinel");
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+  }
+});
+
+it("emits cancelled instead of error on AbortError without poisoning readiness", async () => {
+  setCloudModeRuntime(true);
+  const events: unknown[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    const error = new DOMException("Aborted", "AbortError");
+    await expect(measureCloudQuery("api./api/services/svc/scoring/labels", async () => { throw error; })).rejects.toBe(error);
+    expect(events).toMatchObject([{ state: "pending" }, { state: "cancelled", totalRows: null }]);
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+  }
+});
+
+it("reports failed local API responses as errors without exposing response bodies", async () => {
+  setCloudModeRuntime(true);
+  const events: unknown[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    const response = Response.json({ secret: "sentinel-private-response" }, { status: 503 });
+    expect(await measureCloudQuery("api./api/origin/aggregates", async () => response)).toBe(response);
+    expect(events).toMatchObject([{ state: "pending" }, { state: "error", status: 503, error: "HTTP 503" }]);
+    expect(JSON.stringify(events)).not.toContain("sentinel");
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+  }
+});
+
+it("names an over-budget scan without exposing its response body", async () => {
+  setCloudModeRuntime(true);
+  const events: unknown[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    const response = Response.json({ detail: "sentinel-private-detail" }, { status: 413 });
+    await measureCloudQuery("api./api/origin/aggregates", async () => response);
+    expect(events).toMatchObject([{ state: "pending" },
+      { state: "error", status: 413, error: "HTTP 413: query exceeds the browser scan budget" }]);
+    expect(JSON.stringify(events)).not.toContain("sentinel");
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+  }
+});
+
+it("keeps High-Scale silent and allowlists worker statistics without SQL or tokens", async () => {
+  for (const name of ["NEXT_PUBLIC_DEPLOYMENT_MODE", "NEXT_PUBLIC_STATIC_EXPORT", "NEXT_PUBLIC_RUNTIME_MODE"]) {
+    vi.stubEnv(name, "");
+  }
+  // IS_CLOUD_MODE is fixed at import, and the Cloud CI job exports the Cloud flags.
+  vi.resetModules();
+  const mode = await import("./mode");
+  const readiness = await import("./readiness");
+  const events: unknown[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-worker", listener);
+  try {
+    expect(mode.IS_CLOUD_MODE).toBe(false);
+    await readiness.measureCloudQuery("dashboard.bundle", async () => ({ aggregates: { total_rows: 42 } }));
+    readiness.publishCloudWorkerTelemetry({ files_fetched: 3, sql: "sentinel-private-sql" });
+    expect(events).toEqual([]);
+    mode.setCloudModeRuntime(true);
+    readiness.publishCloudWorkerTelemetry({ files_fetched: 3, files_cached: 0, sql: "sentinel-private-sql" });
+    expect(events).toMatchObject([{ filesFetched: 3, filesCached: 0 }]);
+    expect(JSON.stringify(events)).not.toContain("sentinel");
+  } finally {
+    mode.setCloudModeRuntime(false);
+    vi.unstubAllEnvs();
+    window.removeEventListener("fla:cloud-worker", listener);
+  }
+});

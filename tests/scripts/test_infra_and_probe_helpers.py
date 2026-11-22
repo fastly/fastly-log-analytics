@@ -18,17 +18,7 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 import pytest
 
-from scripts.dev import scale_harness
-from scripts.dev.scale_harness import (
-    TrafficProfile,
-    build_request,
-    build_request_url,
-    freshness_lag_seconds,
-    parse_stages,
-    render_report,
-)
 from scripts.lib import log_factory as lf
-from scripts.lib.log_factory import BOT_USER_AGENTS, build_cmcd_request, build_cmcd_sessions
 
 REPO = Path(__file__).resolve().parents[2]
 LIB = REPO / "scripts" / "lib" / "gce_ssh.sh"
@@ -347,17 +337,6 @@ def test_source_ip_is_seeded_and_in_range() -> None:
         assert 12 <= a <= 223 and all(1 <= x <= 254 for x in (b, c, d))
 
 
-def test_scale_harness_build_request_url_uses_injected_rng() -> None:
-    assert scale_harness.build_request_url("https://x.example.com", 0.0, random.Random(1)) == "https://x.example.com"
-    seeded = [scale_harness.build_request_url("https://x.example.com", 1.0, random.Random(4)) for _ in range(2)]
-    assert seeded[0] == seeded[1] and "/rum-beacon?" in seeded[0]
-    rng = random.Random(11)
-    beacons = sum(
-        "/rum-beacon?" in scale_harness.build_request_url("https://x.example.com", 0.5, rng) for _ in range(200)
-    )
-    assert 60 < beacons < 140
-
-
 @pytest.mark.parametrize("seed", [0, 1, 2])
 def test_global_random_state_is_untouched_when_rng_is_injected(seed: int) -> None:
     random.seed(1234)
@@ -366,122 +345,6 @@ def test_global_random_state_is_untouched_when_rng_is_injected(seed: int) -> Non
     lf.generate_rum_records("svc", 50, NOW, random.Random(seed))
     lf.build_rum_beacon_url("https://x.example.com", random.Random(seed))
     assert random.random() == expected
-
-
-# ── Merged from test_scale_harness.py ──────────────────────────────────────────────────────
-
-
-def test_parse_stages_and_high_rate_gate() -> None:
-    stages = parse_stages("100:10,500:2")
-    assert [(stage.target_rps, stage.duration_s) for stage in stages] == [(100, 10), (500, 2)]
-    with pytest.raises(ValueError, match="allow-high-rate"):
-        parse_stages("2500:10")
-    assert parse_stages("2500:10", allow_high_rate=True)[0].target_rps == 2500
-
-
-def test_rum_urls_and_freshness_lag_and_render_report() -> None:
-    url = build_request_url("https://logs.example.com", 1.0)
-    query = parse_qs(urlparse(url).query)
-    assert query["cid"][0] == query["rum_cid"][0]
-    assert query["req"][0].startswith("req-") and query["req"][0] != query["cid"][0]
-
-    now = datetime(2026, 9, 6, 17, 42, 35, tzinfo=UTC)
-    assert freshness_lag_seconds("2026-09-06T17:32:08Z", now) == 627.0 and freshness_lag_seconds(None, now) is None
-
-    report = {
-        "started_at": "2026-09-06T17:00:00+00:00",
-        "stages": [
-            {
-                "index": 1,
-                "result": {
-                    "target_rps": 100,
-                    "achieved_rps": 98,
-                    "completed": 10,
-                    "successful": 10,
-                    "latency_ms": {"p95": 20},
-                },
-                "checkpoint": {},
-            }
-        ],
-    }
-    assert "| 1 | 100 | 98.00 | 10 | 10 | 20 | - |" in render_report(report)
-
-
-def _cmcd_profile(rng: random.Random) -> TrafficProfile:
-    return TrafficProfile(cmcd_ratio=1.0, sessions=build_cmcd_sessions(rng, 5))
-
-
-def test_cmcd_requests_headers_startup_flag_v2_and_ratio() -> None:
-    rng = random.Random(7)
-    url, headers = build_request("https://logs.example.com", 0.0, rng, _cmcd_profile(rng))
-    parsed = urlparse(url)
-    assert parsed.path.startswith("/video/")
-    cmcd = parse_qs(parsed.query)["CMCD"][0].split(",")
-    assert {"CMCD-Object", "CMCD-Request", "CMCD-Session", "CMCD-Status"} <= headers.keys()
-    for header in ("CMCD-Object", "CMCD-Request", "CMCD-Session", "CMCD-Status"):
-        assert set(headers[header].split(",")) <= set(cmcd)
-    assert any(field.startswith("sid=") for field in cmcd) and any(field.startswith("ot=") for field in cmcd)
-
-    rng3 = random.Random(3)
-    session = build_cmcd_sessions(rng3, 1)[0]
-    session.version = 1
-    first = build_cmcd_request(session, rng3)[1]["CMCD-Request"].split(",")
-    second = build_cmcd_request(session, rng3)[1]["CMCD-Request"].split(",")
-    assert "su" in first and "su" not in second
-
-    rng_v2 = random.Random(3)
-    session_v2 = build_cmcd_sessions(rng_v2, 1)[0]
-    session_v2.version = 2
-    assert "su=?1" in build_cmcd_request(session_v2, rng_v2)[1]["CMCD-Request"].split(",")
-
-    rng11 = random.Random(11)
-    profile = TrafficProfile(cmcd_ratio=0.5, sessions=build_cmcd_sessions(rng11, 5))
-    cmcd_hits = sum("CMCD" in build_request("https://x.example.com", 0.0, rng11, profile)[0] for _ in range(400))
-    assert 120 < cmcd_hits < 280
-
-
-def test_default_profile_diversify_and_rum_beacon_isolation() -> None:
-    assert build_request("https://x.example.com", 0.0, random.Random(1), None) == ("https://x.example.com", {})
-    assert build_request("https://x.example.com", 0.0, random.Random(1), TrafficProfile()) == (
-        "https://x.example.com",
-        {},
-    )
-
-    rng = random.Random(5)
-    results = [build_request("https://x.example.com", 0.0, rng, TrafficProfile(diversify=True)) for _ in range(300)]
-    assert len({urlparse(url).path for url, _ in results}) > 5
-    assert any(ua in BOT_USER_AGENTS for ua in (headers["User-Agent"] for _, headers in results))
-
-    rng2 = random.Random(2)
-    profile = TrafficProfile(cmcd_ratio=1.0, diversify=True, sessions=build_cmcd_sessions(rng2, 3))
-    url, headers = build_request("https://x.example.com", 1.0, rng2, profile)
-    assert urlparse(url).path == "/rum-beacon" and headers == {}
-
-    posted: list[tuple[str, dict[str, object]]] = []
-
-    class _FakeResp:
-        status = 204
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_):
-            return False
-
-        async def read(self):
-            return b""
-
-    class _FakeSession:
-        def post(self, u: str, **kw: object) -> _FakeResp:
-            posted.append((u, kw))
-            return _FakeResp()
-
-    status, _ = asyncio.run(
-        scale_harness._request(_FakeSession(), "http://demo.global.ssl.fastly.net/rum-beacon?rum_metric_name=LCP", {})
-    )
-    assert status == 204 and len(posted) == 1
-    assert posted[0][0].startswith("https://demo.global.ssl.fastly.net/rum-beacon")
-    assert posted[0][1].get("allow_redirects") is False
 
 
 # ── Merged from test_verify_dashboard*.py ──────────────────────────────────────────────────────
@@ -803,20 +666,21 @@ process.stdout.write(JSON.stringify({values}));
 
 
 @pytest.mark.parametrize(
-    ("flags", "request_count", "beacons", "age", "charts", "exit_code"),
+    ("flags", "request_count", "beacons", "age", "charts", "stall", "exit_code"),
     [
-        (["--no-traffic"], None, 0, "6h 26m ago", True, 0),
-        (["--no-traffic"], None, 0, "Never", False, 1),
-        (["--no-traffic"], None, 0, "6h 26m ago", "/rum", 1),
-        (["--no-traffic"], None, 0, "6h 26m ago", "/streaming", 1),
-        ([], None, 100, "1s ago", True, 1),
-        ([], 149, 100, "1s ago", True, 1),
-        ([], 150, 49, "1s ago", True, 1),
-        ([], 150, 50, "6h 26m ago", True, 1),
-        ([], 150, 50, {"REQUEST": "1s ago", "RUM": "6h 26m ago"}, True, 1),
-        ([], 150, 50, "1s ago", True, 0),
-        ([], [149, 150], [49, 50], "1s ago", True, 0),
-        (["--no-trafic"], 150, 50, "1s ago", True, 1),
+        (["--no-traffic"], None, 0, "6h 26m ago", True, None, 0),
+        (["--no-traffic"], None, 0, "6h 26m ago", True, "/dashboard?range=24h", 0),
+        (["--no-traffic"], None, 0, "Never", False, None, 1),
+        (["--no-traffic"], None, 0, "6h 26m ago", "/rum", None, 1),
+        (["--no-traffic"], None, 0, "6h 26m ago", "/streaming", None, 1),
+        ([], None, 100, "1s ago", True, None, 1),
+        ([], 149, 100, "1s ago", True, None, 1),
+        ([], 150, 49, "1s ago", True, None, 1),
+        ([], 150, 50, "6h 26m ago", True, None, 1),
+        ([], 150, 50, {"REQUEST": "1s ago", "RUM": "6h 26m ago"}, True, None, 1),
+        ([], 150, 50, "1s ago", True, None, 0),
+        ([], [149, 150], [49, 50], "1s ago", True, None, 0),
+        (["--no-trafic"], 150, 50, "1s ago", True, None, 1),
     ],
 )
 def test_verify_script_modes_without_browser_or_network(
@@ -825,9 +689,17 @@ def test_verify_script_modes_without_browser_or_network(
     beacons: int | list[int],
     age: str | dict,
     charts: bool | str,
+    stall: str | None,
     exit_code: int,
 ) -> None:
-    options = {"flags": flags, "requestCount": request_count, "beacons": beacons, "age": age, "charts": charts}
+    options = {
+        "flags": flags,
+        "requestCount": request_count,
+        "beacons": beacons,
+        "age": age,
+        "charts": charts,
+        "stall": stall,
+    }
     result = _verify_node(
         _frontend_node_runtime()
         + f"\nconst vm = require('node:vm'); const source = {json.dumps(_src())}; const opts = {json.dumps(options)};"
@@ -847,6 +719,7 @@ const document = {
 };
 const page = {
   on() {}, async goto(url) {
+    if (opts.stall && url.endsWith(opts.stall)) { opts.stall = null; now += 20000; throw Error('page.goto: Timeout 20000ms exceeded.'); }
     currentUrl = url; visits.push(url); now += 1000; displayedBeacons = 1000;
     if (pendingResponse) {
       const pending = pendingResponse; pendingResponse = null;
@@ -1996,7 +1869,7 @@ def args(*extra):
     return parser().parse_args(
         [
             "--engine",
-            "ducklake",
+            "baseline",
             "--output",
             "local-docs/test-evidence.json",
             "--apply",
@@ -2076,24 +1949,22 @@ def test_removed_dashboard_route_cannot_be_reported_as_hybrid():
     assert summary["clickhouse_calls"] == 0
 
 
-def test_current_ducklake_dashboard_needs_no_retired_dispatch_marker():
+def test_current_baseline_dashboard_needs_no_retired_dispatch_marker():
     payload = top_n_payload()
     payload["_section_timings"] = [{"section": "agg:query", "time_ms": 1.0}]
-    summary = summarize_payload(payload, "top_n", "ducklake")
+    summary = summarize_payload(payload, "top_n", "baseline")
     assert summary["error"] is None
-    assert summary["dispatch"] == "ducklake"
-    assert summary["duckdb_queries"] == 1
+    assert summary["dispatch"] == "baseline"
+    assert summary["debug_queries"] == 1
 
 
 @pytest.mark.parametrize("enabled", ["true", "false"])
-def test_ducklake_benchmark_does_not_require_disabling_diagnostics(enabled):
+def test_baseline_benchmark_does_not_require_disabling_diagnostics(enabled):
     container = {
         "Config": {
             "Env": [
-                "DEPLOYMENT_MODE=high_scale",
                 f"CLICKHOUSE_ENABLED={enabled}",
                 "METADATA_DSN=postgresql://fixture",
-                "DUCKLAKE_CATALOG=postgresql://fixture",
                 "CLICKHOUSE_HOST=clickhouse",
             ],
             "Labels": {
@@ -2126,7 +1997,7 @@ def test_failures_retained_and_response_secrets_omitted(status):
                 lambda _: httpx.Response(status, json={"secret": "NEVER_COPY_SECRET", "sql": "SELECT PRIVATE"})
             ),
         ) as client:
-            return await attempt(client, "PRIVATE_SERVICE", "bundle", "ducklake", 1)
+            return await attempt(client, "PRIVATE_SERVICE", "bundle", "baseline", 1)
 
     sample = asyncio.run(run())
     assert sample.error == "http" and sample.status_code == status and sample.duration_ms > 0
@@ -2141,7 +2012,7 @@ def test_deadline_retains_slow_attempt():
 
     async def run():
         async with httpx.AsyncClient(base_url="http://127.0.0.1", transport=httpx.MockTransport(handler)) as client:
-            return await attempt(client, "fixture", "bundle", "ducklake", 0.01)
+            return await attempt(client, "fixture", "bundle", "baseline", 0.01)
 
     sample = asyncio.run(run())
     assert sample.error == "timeout" and sample.duration_ms >= 10
@@ -2180,14 +2051,14 @@ def top_n_payload(dispatch="disabled"):
 
 
 def test_top_n_has_no_chart_and_uses_existing_minute_metadata():
-    summary = summarize_payload(top_n_payload(), "top_n", "ducklake")
+    summary = summarize_payload(top_n_payload(), "top_n", "baseline")
     assert summary["error"] is None
     assert summary["semantic_digest"] is not None
     assert "PRIVATE" not in json.dumps(summary)
 
 
 def test_disabled_engine_must_not_be_mislabeled_fallback():
-    summary = summarize_payload(top_n_payload("unsupported_sections"), "top_n", "ducklake")
+    summary = summarize_payload(top_n_payload("unsupported_sections"), "top_n", "baseline")
     assert summary["error"] == "engine"
     assert summarize_payload(top_n_payload("unsupported_sections"), "top_n", "clickhouse_hybrid")["error"] is None
 
@@ -2232,7 +2103,7 @@ def test_scheduler_respects_budget_and_records_errors(monkeypatch, memory):
             error=None if n <= 3 else "http",
             dispatch="disabled",
             response_cached=False,
-            duckdb_queries=0,
+            debug_queries=0,
             clickhouse_calls=0,
             clickhouse_errors=0,
             rows_read=0,
@@ -2280,7 +2151,7 @@ def test_recovery_contract_never_accepts_credentials_or_nonfinite_durations():
 def report():
     return {
         "schema_version": 1,
-        "engine": "ducklake",
+        "engine": "baseline",
         "dataset_size_rows": 190334,
         "eligible_window_rows": 184374,
         "concurrency": 1,
@@ -2584,3 +2455,115 @@ def test_generate_synthetic_traffic_rejects_nonpositive_arguments(
     with pytest.raises(SystemExit) as exc_info:
         generate_synthetic_traffic.main()
     assert exc_info.value.code == 2
+
+
+def test_generate_synthetic_traffic_fos_zstd_and_pop_wave_simulation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify .zst/.gz chunk encoding, POP-wave allocation, RUM ratio, and High-Scale decoder parity."""
+    from datetime import timedelta
+    from typing import Any
+
+    from backend.high_scale.archive import ArchiveSourceObject
+    from backend.high_scale.query import decode_source_object
+    from scripts.lib.log_factory import build_pop_wave_weights
+    from scripts.load_test import generate_synthetic_traffic
+
+    pops, weights = build_pop_wave_weights(20)
+    assert len(pops) == 20
+    assert pops[0] == "IAD"
+    assert abs(sum(weights) - 1.0) < 1e-9
+    assert weights[0] > weights[-1]
+
+    chunks = generate_synthetic_traffic._allocate_pop_wave_chunks(total_rows=1000, pop_count=10, max_chunk_rows=120)
+    assert sum(c for _, c in chunks) == 1000
+    assert all(0 < c <= 120 for _, c in chunks)
+
+    now = datetime(2026, 8, 5, 12, 0, 0, tzinfo=UTC)
+    start_dt = now - timedelta(minutes=10)
+    start_ms, end_ms = int(start_dt.timestamp() * 1000), int(now.timestamp() * 1000)
+
+    zst_bytes, n_zst, ext_zst, ct_zst = generate_synthetic_traffic._build_fos_chunk_worker(
+        25, start_ms, end_ms, "diurnal", 42, "zstd", "LHR"
+    )
+    assert n_zst == 25
+    assert ext_zst == "zst"
+    assert ct_zst == "application/zstd"
+    assert zst_bytes.startswith(b"\x28\xb5\x2f\xfd")
+
+    decoded = decode_source_object(
+        ArchiveSourceObject(
+            service_id="svc-hs",
+            domain="request",
+            object_key="raw/request/year=2026/month=08/day=05/hour=12/minute=00/2026-08-05T12:00:00.000-svc-hs-LHR-00000.log.zst",
+            checksum="etag1",
+            size_bytes=len(zst_bytes),
+            version="v1",
+        ),
+        zst_bytes,
+        transform_version="v1",
+    )
+    assert len(decoded.events) == 25
+    assert decoded.dead_letters == ()
+    assert all(r["pop"] == "LHR" for r in decoded.events)
+
+    gz_bytes, n_gz, ext_gz, ct_gz = generate_synthetic_traffic._build_fos_chunk_worker(
+        10, start_ms, end_ms, "diurnal", 42, "gzip", "NRT"
+    )
+    assert n_gz == 10
+    assert ext_gz == "gz"
+    assert ct_gz == "application/gzip"
+    assert gz_bytes.startswith(b"\x1f\x8b")
+
+    uploaded: list[dict[str, Any]] = []
+
+    class _FakeS3:
+        def put_object(self, **kwargs: Any) -> None:
+            uploaded.append(kwargs)
+
+    import boto3
+
+    monkeypatch.setattr(boto3, "client", lambda *a, **kw: _FakeS3())
+    rc = generate_synthetic_traffic.run_target_fos(
+        src={
+            "service_id": "svc-hs",
+            "s3_bucket": "test-bucket",
+            "s3_endpoint": "https://us-east.object.fastlystorage.app",
+            "s3_access_key": "k",
+            "s3_secret_key": "s",
+        },
+        scenario="diurnal",
+        rows=200,
+        start_dt=start_dt,
+        end_dt=now,
+        batch_size=50,
+        seed=42,
+        dry_run=False,
+        upload_workers=2,
+        compression="zstd",
+        gen_workers=1,
+        simulate_pops=True,
+        pop_count=5,
+        log_period=10,
+        rum_ratio=0.1,
+    )
+    assert rc == 0
+    req_uploads = [u for u in uploaded if "/raw/request/" in f"/{u['Key']}"]
+    rum_uploads = [u for u in uploaded if "/raw/rum/" in f"/{u['Key']}"]
+    assert len(req_uploads) >= 5
+    assert len(rum_uploads) >= 1
+    assert all(u["Key"].endswith(".log.zst") for u in uploaded)
+    assert all(u["ContentType"] == "application/zstd" for u in uploaded)
+
+
+def test_wave_window_is_the_last_log_period_when_live_and_the_run_window_otherwise():
+    from scripts.load_test.generate_synthetic_traffic import _wave_window_ms
+
+    now = 1_800_000_000_000
+    run_window = (now - 3_600_000, now - 5_000)
+    # Live feed: event times sit inside the last log period, as in real Fastly delivery, so only the current hour is
+    # touched and closed-hour rollups are not re-run on every tick.
+    assert _wave_window_ms(now, 10, True, run_window) == (now - 10_000, now)
+    # Backfill keeps the run window, stretched up to now (the previous behaviour).
+    assert _wave_window_ms(now, 10, False, run_window) == (now - 3_600_000, now)
+    assert _wave_window_ms(now, 10, False, (now - 3_600_000, now + 5_000)) == (now - 3_600_000, now + 5_000)

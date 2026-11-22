@@ -6,7 +6,8 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { http, HttpResponse, type JsonBodyType } from 'msw'
+import type { JsonBodyType } from 'msw'
+import { http, HttpResponse } from 'msw/http'
 import { setupServer } from 'msw/node'
 import type { paths } from '@/types/api.generated'
 
@@ -98,28 +99,7 @@ export const handlers = [
   get('/api/query/schema/:service_id', { source: 'svc-default', table_name: 'logs', schema: [], columns: [] }),
   get('/api/admin/sync-status', { configured: false, state: 'idle' }),
   get('/api/admin/health', { status: 'ok', load: [0, 0, 0], recent_cron_failures: [] }),
-  get('/api/admin/system-metrics', { load: [0, 0, 0], vcpus: 1, in_flight_runs: [], compaction: {} }),
-  post('/api/admin/commit/:service_id', { type: 'done', message: 'ok' }),
-  http.post(url('/api/admin/rebuild-country-daily-rollup'), okFor('/api/admin/rebuild-country-daily-rollup', 'post', {
-    service_id: 'svc-default',
-    day: '2026-01-01',
-    snapshot_id: 1,
-    raw_requests: 24,
-    hourly_requests: Array.from({ length: 24 }, () => 1),
-    country_counts: { US: 24 },
-    raw_first_event: '2026-01-01T00:00:00+00:00',
-    raw_last_event: '2026-01-01T23:00:00+00:00',
-  })),
-  http.post(url('/api/admin/rebuild-daily-rollup-fields'), okFor('/api/admin/rebuild-daily-rollup-fields', 'post', {
-    service_id: 'svc-default',
-    day: '2026-01-01',
-    snapshot_id: 1,
-    raw_requests: 24,
-    hourly_requests: Array.from({ length: 24 }, () => 1),
-    field_counts: { status: { '200': 24 }, method: { GET: 24 }, pop: { TEST: 24 } },
-    raw_first_event: '2026-01-01T00:00:00+00:00',
-    raw_last_event: '2026-01-01T23:00:00+00:00',
-  })),
+  get('/api/admin/system-metrics', { load: [0, 0, 0], vcpus: 1, in_flight_runs: [] }),
   get('/api/admin/log-accounting/:service_id', {
     configured: true,
     hours: 24,
@@ -177,6 +157,17 @@ export const handlers = [
   post('/api/high-scale/services/:service_id/exports', { export_id: 'export-default', service_id: 'svc-default', status: 'queued' }),
   get('/api/high-scale/services/:service_id/exports/:export_id', { export_id: 'export-default', service_id: 'svc-default', status: 'queued' }),
   post('/api/high-scale/services/:service_id/exports/:export_id/cancel', { export_id: 'export-default', service_id: 'svc-default', status: 'cancelled', cancelled: true }),
+  post('/api/high-scale/restore-from-fos', {
+    status: 'ok',
+    service_id: 'svc-default',
+    dr_state_restored: true,
+    views_restored: 0,
+    alerts_restored: 0,
+    scoring_labels_restored: 0,
+    audit_logs_restored: 0,
+    manifests_registered: 0,
+    domains_rebuilt: {},
+  }),
   http.get(url('/api/admin/clickhouse/status'), ({ request }) =>
     HttpResponse.json({
       service_id: new URL(request.url).searchParams.get('service_id') ?? 'svc-default',
@@ -347,10 +338,7 @@ export const handlers = [
   get('/api/admin/system-jobs', { jobs: [] }),
   get('/api/admin/usage-logging', { enabled: false, retention_days: 30 }),
   http.patch(url('/api/admin/usage-logging'), okFor('/api/admin/usage-logging', 'patch', { ok: true })),
-  http.post(url('/api/admin/commit-storage'), okFor('/api/admin/commit-storage', 'post', { ok: true })),
   http.post(url('/api/admin/ingest-logs'), okFor('/api/admin/ingest-logs', 'post', { ok: true })),
-  get('/api/admin/storage-info', { snapshots: [], current_snapshot_id: null }),
-  get('/api/admin/storage-calendar', { days: [] }),
   get('/api/admin/ingested-files', { files: [], total: 0 }),
   http.post(url('/api/admin/metadata-cleanup'), okFor('/api/admin/metadata-cleanup', 'post', { ok: true, removed: 0 })),
   get('/api/admin/pop-locations', { pops: [] }),
@@ -360,13 +348,10 @@ export const handlers = [
   get('/api/audit-logs', { logs: [] }),
   get('/api/cron-runs', { runs: [] }),
   get('/api/cron-schedule', { schedule: [], next_run_at: null }),
-  get('/api/admin/celery/status', { workers: [], schedule: [], queues: [] }),
+  get('/api/admin/celery/status', { ledger: {}, inprocess_schedules: [], inprocess_active_runs: [] }),
   http.get(url('/api/admin/celery/ledger'), okFor('/api/admin/celery/ledger', 'get', { items: [], total: 0 })),
-  http.post(url('/api/admin/celery/ledger/retry'), okFor('/api/admin/celery/ledger/retry', 'post', { ok: true, affected: 0, dispatched: 0 })),
-  http.post(url('/api/admin/celery/ledger/purge'), okFor('/api/admin/celery/ledger/purge', 'post', { ok: true, affected: 0, dispatched: 0 })),
-  http.post(url('/api/admin/duckdb/recycle'), okFor('/api/admin/duckdb/recycle', 'post', { ok: true, status: 'skipped' })),
-  http.get(url('/api/admin/duckdb/status'), okFor('/api/admin/duckdb/status', 'get', { ok: true, memory: {}, barrier: { is_active: false, active_paths: [] }, pools: {}, retired_pools: [] })),
-  http.post(url('/api/admin/optimize/:service_id'), okFor('/api/admin/optimize/{service_id}', 'post', { files_rewritten: 0, files_added: 0, eligible_partitions: 0, partition_errors: [], error: null })),
+  http.post(url('/api/admin/celery/ledger/retry'), okFor('/api/admin/celery/ledger/retry', 'post', { ok: true, affected: 0 })),
+  http.post(url('/api/admin/celery/ledger/purge'), okFor('/api/admin/celery/ledger/purge', 'post', { ok: true, affected: 0 })),
   http.post(url('/api/admin/ngwaf/sync/:service_id'), okFor('/api/admin/ngwaf/sync/{service_id}', 'post', { ok: true, service_id: 'svc-default', workspace_id: 'ws-default', stats: {} })),
   http.post(url('/api/admin/rum/ledger/sweep/:service_id'), okFor('/api/admin/rum/ledger/sweep/{service_id}', 'post', { ok: true, run_id: 1 })),
   http.get(url('/api/admin/ngwaf/status'), okFor('/api/admin/ngwaf/status', 'get', { ok: true })),
@@ -386,7 +371,7 @@ export const handlers = [
   post('/api/origin/aggregates', { rows: [], columns: [], total: 0 }),
   post('/api/query', { rows: [], columns: [] }),
   http.get(url('/api/presets'), okFor('/api/presets', 'get', [])),
-  http.get(url('/api/admin/health-snapshot'), okFor('/api/admin/health-snapshot', 'get', { in_flight_runs: [], compaction: {}, pool_wait: [], recent_cron_failures: [], config_lock_degraded: false })),
+  http.get(url('/api/admin/health-snapshot'), okFor('/api/admin/health-snapshot', 'get', { in_flight_runs: [], recent_cron_failures: [], config_lock_degraded: false })),
   get('/api/admin/debug-settings', { query_debug_visibility: 'disabled', api_call_debug_visibility: 'disabled' }),
   http.patch(url('/api/admin/debug-settings'), async ({ request }) => {
     const b = (await request.json()) as { query_debug_visibility?: string; api_call_debug_visibility?: string }
@@ -396,7 +381,6 @@ export const handlers = [
   http.patch(url('/api/admin/metadata-retention'), okFor('/api/admin/metadata-retention', 'patch', { ok: true })),
   get('/api/admin/log-accounting', { entries: [] }),
   get('/api/admin/metric-history/batch', { series: [] }),
-  http.post(url('/api/admin/rebuild-local-view'), okFor('/api/admin/rebuild-local-view', 'post', { ok: true })),
   http.post(url('/api/admin/reset-logs'), okFor('/api/admin/reset-logs', 'post', { type: 'done', message: 'ok' })),
   get('/api/admin/usage-log', { rows: [] }),
   del('/api/admin/usage-log'),
@@ -502,7 +486,7 @@ interface MockOAuth {
   registryPath: string
 }
 
-const DEFAULT_CONTRACT_TEST_POSTGRES_DSN = 'postgresql://fla:fla_test_password@localhost:5432/ducklake_test'
+const DEFAULT_CONTRACT_TEST_POSTGRES_DSN = 'postgresql://fla:fla_test_password@localhost:5432/fla_test'
 
 function assertIsolatedTestPostgresDsn(dsn: string, envName: string): string {
   let parsed: URL
@@ -530,11 +514,6 @@ export function backendTestEnvironment(sandboxDir: string, oauth?: MockOAuth): N
     process.env.TEST_METADATA_DSN ||
     DEFAULT_CONTRACT_TEST_POSTGRES_DSN
   const metaDsn = assertIsolatedTestPostgresDsn(rawMetaDsn, 'FLA_CONTRACT_TEST_METADATA_POSTGRES_DSN')
-  const rawDuckCatalog =
-    process.env.FLA_CONTRACT_TEST_CATALOG_POSTGRES_DSN ||
-    process.env.TEST_DUCKLAKE_CATALOG ||
-    metaDsn
-  const duckCatalog = assertIsolatedTestPostgresDsn(rawDuckCatalog, 'FLA_CONTRACT_TEST_CATALOG_POSTGRES_DSN')
 
   Object.assign(env, {
     UV_NO_CACHE: '1',
@@ -546,14 +525,11 @@ export function backendTestEnvironment(sandboxDir: string, oauth?: MockOAuth): N
     FASTLY_MOCK_MODE: '1',
     FLA_DEV_NO_CRONS: '1',
     FLA_DEV_LOCAL_CRONS: '0',
-    DEPLOYMENT_MODE: 'standard',
     SSE_BACKPLANE: 'local',
     OTEL_EXPORTER: 'none',
-    DUCKDB_POOL_MAX_SIZE: '16',
     CONTRACT_CONFIGS_DIR: join(sandboxDir, 'configs'),
     CONTRACT_DATA_DIR: join(sandboxDir, 'data'),
     METADATA_DSN: metaDsn,
-    DUCKLAKE_CATALOG: duckCatalog,
   })
   if (oauth) {
     Object.assign(env, {

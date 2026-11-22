@@ -27,6 +27,9 @@ export default defineConfig({
     // shape no longer typechecks under tsc (which `next build` runs
     // over every .ts file, including this config).
     maxWorkers: 4,
+    // Node 25+ defines a global localStorage that is undefined without
+    // --localstorage-file, and it shadows jsdom's Storage in test workers.
+    execArgv: ['--no-experimental-webstorage'],
     // Pin the API base for openapi-fetch under jsdom. lib/api.ts's
     // getApiBase() returns "" in the browser (same-origin via Caddy in
     // prod) — fine for real fetches, fatal for MSW: the openapi-fetch
@@ -41,14 +44,16 @@ export default defineConfig({
     css: false,
     deps: {
       optimizer: {
-        web: {
+        client: {
           include: [
             'plotly.js-dist-min',
             'plotly.js',
             'react-plotly.js',
             'maplibre-gl',
-            'msw',
+            'msw/http',
             'msw/node',
+            'msw/experimental',
+            'msw/utils/delay',
             '@testing-library/react',
             '@testing-library/jest-dom',
             '@testing-library/user-event',

@@ -21,13 +21,13 @@ ADR-03 (Tenancy) and the original ingest design assume one backend process per s
 - `PgConnectionWrapper`/`PgCursorWrapper` translate SQLite-shaped SQL to Postgres dialect at the query layer (`?` → `%s` placeholders, `INSERT OR REPLACE/IGNORE` → `ON CONFLICT`, `cursor.lastrowid` emulated via `RETURNING id` for `cron_runs`) so the large existing body of SQLite-flavored queries across the metadata layer did not need a parallel Postgres rewrite.
 - Both wrappers register with the Live Query Monitor (`backend.utils.sqlite_profiler._live_register`/`_live_deregister`) — Postgres metadata queries are not a blind spot in `/admin/queries`.
 
-### 2. DuckLake's catalog must also be Postgres in multi-writer mode
+### 2. Catalog and control plane in multi-writer mode
 
-Independently of metadata, `DUCKLAKE_CATALOG` must be a Postgres DSN whenever `DEPLOYMENT_MODE=high_scale` (enforced by `config.validate_deployment_mode()`, see [ADR-14](14-ducklake-replacement.md)). These are two separate Postgres roles serving two separate concerns — cron/ingest bookkeeping vs. the commit-path catalog — that happen to both require a real multi-writer database once you have more than one writer process. They may point at the same Postgres instance (and even the same database — every DuckLake table is `ducklake_`-prefixed, so it does not collide with the metadata schema; `docker-compose.multipod.yml` shares one), but the code does not assume they do: `_ducklake_attach` reads `DUCKLAKE_CATALOG` and nothing else. It briefly fell back to `METADATA_DSN`, which made this claim false in `DEPLOYMENT_MODE=standard`; the fallback was removed rather than the claim weakened, because standard mode would then silently plant the catalog inside the metadata database and abandon the `.ducklake` file holding the real table state.
+Independently of metadata, the analytical control plane also required a real multi-writer database (`METADATA_DSN` in PostgreSQL 16) once more than one writer process was active (later unified with ClickHouse in [ADR-21](21-high-scale-serving-architecture.md)).
 
-### 3. Unified In-Process APScheduler + Celery Worker Dispatch
+### 3. Unified In-Process APScheduler + Worker Dispatch
 
-Scheduled triggers run on the single serving pod's unified in-process APScheduler across both `standard` and `high_scale` modes. Jobs like rollup computation, local compaction, alert evaluation, and snapshot maintenance read and write the **pod-local** DuckDB file and cache directly on the serving pod, while high-scale discovery and sweep jobs enqueue batch conversion tasks onto Celery workers via Valkey.
+Scheduled triggers run on the serving pod's unified in-process APScheduler, while discovery and sweep jobs coordinate batch conversion across stateless ingest workers.
 
 ### 4. Cron leases must be atomic under Postgres autocommit
 
@@ -43,7 +43,7 @@ CREATE UNIQUE INDEX idx_job_runs_running_lease ON job_runs(service_id, job_name)
 
 ## Consequences
 
-- A deployment can run single-pod/SQLite (default), or multi-pod with `METADATA_DSN` + `DUCKLAKE_CATALOG` both pointed at Postgres and `DEPLOYMENT_MODE=high_scale`. There is no partial state where only one of the two is Postgres-backed while high-throughput mode is enabled — `validate_deployment_mode()` refuses to boot in that configuration. (This was asserted here before the `METADATA_DSN` half of the gate existed; it is now enforced and covered by `tests/test_validate_deployment_mode.py` (test removed).)
+- A deployment runs with `METADATA_DSN` pointed at PostgreSQL 16 ([ADR-22](22-postgres-only-metadata.md)).
 - **"Multi-pod" in this ADR means the INGEST tier.** The serving tier — the backend Deployment that answers API requests — remains single-pod for reasons this ADR does not address: the per-service `.duckdb` file is process-exclusive, and several cron jobs write pod-local output under a cross-pod lease. See [ADR-18](18-serving-tier-single-pod.md) before scaling backend replicas past 1.
 - The Postgres metadata schema is created at startup, by every process that needs it. `metadata/base.py` wires `_init_schema` as the SQLite pool's `schema_fn` only, so SQLite self-initializes and Postgres did not — making `scripts/setup_pg_schema.py` a mandatory deploy step, which, when skipped, produced a stack that booted clean and then failed every metadata query with `relation "cron_runs" does not exist`. `backend/core/metadata/pg_schema.py::ensure_pg_schema()` now closes that gap: the backend lifespan and each Celery worker's `worker_process_init` call it, it runs once per process, and it tolerates the `duplicate_table` / `duplicate_object` / `unique_violation` SQLSTATEs that concurrent pods can still produce from `CREATE ... IF NOT EXISTS`. The DDL lives in that module so the script and the boot path can never drift; the script remains the explicit ops entry point. Any table added by a SQLite migration rather than by `_SCHEMA` still needs an explicit DDL entry there (`slow_queries` and `committed_buffers` both do).
 - Every future scheduled job runs on the serving pod's in-process APScheduler and dispatches worker tasks only when operating on shared Postgres/FOS state.

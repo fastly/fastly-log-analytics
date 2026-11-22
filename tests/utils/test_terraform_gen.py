@@ -15,6 +15,8 @@ from filelock import FileLock
 from backend import config as svcconfig
 from backend.utils.terraform_gen import generate_terraform
 
+pytestmark = pytest.mark.no_postgres
+
 TERRAFORM_INSTALLED = shutil.which("terraform") is not None
 RUN_VALIDATE = os.environ.get("TERRAFORM_VALIDATE") == "1"
 TFLINT_INSTALLED = shutil.which("tflint") is not None
@@ -124,8 +126,9 @@ def test_versions_tf_pins_fastly_and_aws_providers_by_major():
     assert providers["aws"]["version"] == "~> 5.0", (
         f"expected '~> 5.0' on aws to gate major bumps; got {providers['aws']['version']!r}"
     )
-    assert providers["fastly"]["version"] == "~> 5.0", (
-        f"expected '~> 5.0' on fastly to gate major bumps; got {providers['fastly']['version']!r}"
+    # logging_fos first shipped in fastly/fastly 10.3.0.
+    assert providers["fastly"]["version"] == "~> 10.3", (
+        f"expected '~> 10.3' on fastly for logging_fos; got {providers['fastly']['version']!r}"
     )
     assert set(providers.keys()) == {"aws", "fastly"}
 
@@ -242,6 +245,45 @@ def test_output_differs_when_cfg_differs():
     assert parsed["resource"]["aws_s3_bucket"]["fos_bucket"]["bucket"] == "different-bucket"
 
 
+def _logging_service_block(out: dict[str, str]) -> dict:
+    return json.loads(out["logging_service.tf.json"])["resource"]["fastly_service_vcl"]["logging_service"]
+
+
+def test_new_install_exports_native_fos_endpoint_without_keys():
+    out = generate_terraform(_baseline_cfg(), "AKIA_EXPORT_KEY", "export-secret-value")
+    block = _logging_service_block(out)
+    assert "logging_s3" not in block
+    [endpoint] = block["logging_fos"]
+    assert endpoint["bucket_name"] == "${aws_s3_bucket.fos_bucket.bucket}"
+    assert endpoint["region"] == "us-east-1"
+    assert endpoint["path"].endswith("/") and endpoint["compression_codec"] == "zstd"
+    assert "AKIA_EXPORT_KEY" not in out["logging_service.tf.json"]
+    assert "export-secret-value" not in out["logging_service.tf.json"]
+    assert "logging_fos" in out["instructions"]
+
+
+def test_legacy_s3_endpoint_stays_s3_in_export(monkeypatch):
+    from backend.provision.declarative.models import LoggingEndpoint
+    from backend.utils import terraform_gen
+
+    seen: list[tuple] = []
+    monkeypatch.setattr(
+        terraform_gen,
+        "_fetch_logging_endpoints",
+        lambda sid, tok: (
+            seen.append((sid, tok))
+            or [LoggingEndpoint("Fastly Log Analytics", "s3", "/raw/", 60, "c", "%h", "none", "")]
+        ),
+    )
+    cfg = {**_baseline_cfg(), "token": "tok", "rum_enabled": True}
+    block = _logging_service_block(generate_terraform(cfg, "AKIA_EXPORT_KEY", "export-secret-value"))
+    assert seen == [("SU3xxxxxxxxxxxxxx0000", "tok")]
+    [legacy] = block["logging_s3"]
+    assert legacy["name"] == "Fastly Log Analytics"
+    assert legacy["s3_access_key"] == "AKIA_EXPORT_KEY"
+    assert [e["name"] for e in block["logging_fos"]] == ["Fastly RUM Logs"]
+
+
 # ── Custom field round trip ──────────────────────────────────────────────────
 
 
@@ -253,7 +295,7 @@ def test_custom_field_emits_matching_capture_snippet():
             "label": "Environment",
             "vcl_log_expression": "req.http.X-Env",
             "collection_stage": "edge",
-            "duckdb_type": "VARCHAR",
+            "sql_type": "VARCHAR",
             "value_type": "string",
             "bytes_estimate": 10,
             "enabled": True,
@@ -275,7 +317,7 @@ def test_custom_origin_field_emits_in_deliver_phase():
             "vcl_log_expression": "beresp.http.x-something",
             "collection_stage": "origin",
             "origin_log_frequency": "all",
-            "duckdb_type": "VARCHAR",
+            "sql_type": "VARCHAR",
             "value_type": "string",
             "bytes_estimate": 20,
             "enabled": True,
@@ -433,3 +475,305 @@ provider "fastly" {
     assert "fail" not in test.stdout.lower() or "0 failed" in test.stdout.lower(), (
         f"unexpected failure in terraform test output:\n{test.stdout}"
     )
+
+
+# ── M2 Security Regressions (SEC-12 / SEC-14 / SEC-15) ──────────────────────
+
+
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+def test_sec12_cdn_auth_dictionary_write_only_and_secret_key_alignment():
+    out = generate_terraform(_baseline_cfg(), "AKIA", "sec")
+    cdn = json.loads(out["cdn_proxy.tf.json"])
+    dicts = {d["name"]: d for d in cdn["resource"]["fastly_service_vcl"]["cdn_proxy"]["dictionary"]}
+    assert dicts["cdn_auth"]["write_only"] is True
+    assert dicts["fos_credentials"]["write_only"] is True
+    cdn_items = cdn["resource"]["fastly_service_dictionary_items"]["cdn_auth"]["items"]
+    assert cdn_items == {"secret_key": "test-secret-do-not-use"}
+
+
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+def test_sec14_scoring_backend_in_terraform_enforces_tls_and_override_host():
+    cfg = {
+        **_baseline_cfg(),
+        "scoring": {
+            "enabled": True,
+            "domain": "fos-svc-session-scorer.edgecompute.app",
+            "request_secret": "scorer-secret-123",
+        },
+    }
+    out = generate_terraform(cfg, "AKIA", "sec")
+    block = _logging_service_block(out)
+    scorer = next(b for b in block["backend"] if b["name"] == "session_scorer")
+    assert scorer["use_ssl"] is True
+    assert scorer["ssl_check_cert"] is True
+    assert scorer["override_host"] == "fos-svc-session-scorer.edgecompute.app"
+    assert scorer["ssl_cert_hostname"] == "fos-svc-session-scorer.edgecompute.app"
+    assert scorer["ssl_sni_hostname"] == "fos-svc-session-scorer.edgecompute.app"
+
+
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+@pytest.mark.parametrize(
+    ("bad_cfg_patch", "match_re"),
+    [
+        ({"custom_condition": "true) || (true"}, "custom_condition"),
+        ({"custom_condition": "\nreq.restarts == 0\n"}, "custom_condition"),
+        ({"provisioning": {"custom_condition": "\nreq.restarts == 0\n"}}, "custom_condition"),
+        ({"custom_condition": 'table.lookup(fos_credentials, "secret_key", "") != ""'}, "custom_condition"),
+        ({"rum_enabled": True, "rum": {"enabled": True, "custom_condition": "true /* x */"}}, "rum_custom_condition"),
+        (
+            {"rum_enabled": True, "rum": {"enabled": True, "custom_condition": "\nreq.restarts == 0\n"}},
+            "rum_custom_condition",
+        ),
+        (
+            {"rum_enabled": True, "rum": {"enabled": True, "custom_condition": 'req.url.path == "/foo"'}},
+            "rum_custom_condition",
+        ),
+        ({"rum_enabled": True, "rum_custom_condition": '(now + 0msreq.url.path) != ""'}, "rum_custom_condition"),
+        (
+            {
+                "log_fields": {
+                    "groups": ["A"],
+                    "schema_version": 2,
+                    "custom_fields": [
+                        {
+                            "name": "exfil_field",
+                            "vcl_log_expression": 'table.lookup(cdn_auth, "secret_key", "")',
+                            "collection_stage": "edge",
+                            "sql_type": "VARCHAR",
+                            "value_type": "string",
+                            "bytes_estimate": 32,
+                            "enabled": True,
+                        }
+                    ],
+                }
+            },
+            "exfil_field",
+        ),
+    ],
+)
+def test_sec15_generate_terraform_rejects_vcl_injection_and_secret_exfil(bad_cfg_patch, match_re):
+    cfg = {**_baseline_cfg(), **bad_cfg_patch}
+    with pytest.raises(ValueError, match=match_re):
+        generate_terraform(cfg, "AKIA", "sec")
+
+
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+def test_sec15_safe_filename_stem_and_readme_hcl_escaping(monkeypatch):
+    from backend.provision.declarative.models import LoggingEndpoint
+    from backend.utils import terraform_gen
+
+    monkeypatch.setattr(
+        terraform_gen,
+        "desired_logging_endpoints",
+        lambda _state: [
+            LoggingEndpoint(
+                '../../etc/passwd"${file("pwn")}',
+                "fos",
+                "/raw/rum/",
+                60,
+                "",
+                "%h",
+                "none",
+                "",
+            )
+        ],
+    )
+    cfg = {
+        **_baseline_cfg(),
+        "fos_region": 'us-east-1"\n}\nresource "evil" "r" {\n  x = "${file(\\"/etc/passwd\\")}',
+        "logging_service_id": 'svc"\n${pwn}',
+        "deployment_mode": "cloud",
+        "install_name": 'flp"\n../evil${x}',
+    }
+    out = generate_terraform(cfg, "AKIA", "sec")
+    assert all(".." not in fname and not fname.startswith("/") for fname in out)
+    block = _logging_service_block(out)
+    fmt_ref = block["logging_fos"][0]["format"]
+    assert fmt_ref == '${file("${path.module}/etc_passwd_file_pwn_format.vcl")}'
+    assert 'resource "evil" "r"' not in out["instructions"]
+    assert "${file(" not in out["instructions"] or "$${file(" in out["instructions"]
+    cloud_tf = json.loads(out["cloud_compute.tf.json"])
+    assert '"' not in cloud_tf["resource"]["fastly_service_compute"]["flp"]["name"]
+    assert "\n" not in cloud_tf["resource"]["fastly_service_compute"]["flp"]["name"]
+
+
+@pytest.mark.security_regression
+def test_sec14_terraform_gen_resolves_scoring_domain_variants_and_pins_cdn_proxy_tls():
+    # 1. Nested scoring.scoring_domain (written by enable_scoring)
+    cfg_nested = {
+        **_baseline_cfg(),
+        "edge_only": True,
+        "scoring": {
+            "enabled": True,
+            "scoring_domain": "my-scorer.edgecompute.app",
+            "request_secret": "scorer-sec-1",
+        },
+    }
+    out_nested = generate_terraform(cfg_nested, "AKIA", "sec")
+    svc_block = _logging_service_block(out_nested)
+    scorer_backends = [b for b in svc_block.get("backend", []) if b["name"] == "session_scorer"]
+    assert len(scorer_backends) == 1
+    b = scorer_backends[0]
+    assert b["address"] == "my-scorer.edgecompute.app"
+    assert b["use_ssl"] is True and b["ssl_check_cert"] is True
+    assert b["override_host"] == "my-scorer.edgecompute.app"
+    assert b["ssl_cert_hostname"] == "my-scorer.edgecompute.app"
+    assert b["ssl_sni_hostname"] == "my-scorer.edgecompute.app"
+
+    # 2. Top-level scoring_enabled + scoring_domain
+    cfg_top = {
+        **_baseline_cfg(),
+        "edge_only": True,
+        "scoring_enabled": True,
+        "scoring_domain": "top-scorer.edgecompute.app",
+        "scoring": {"request_secret": "scorer-sec-2"},
+    }
+    out_top = generate_terraform(cfg_top, "AKIA", "sec")
+    svc_top = _logging_service_block(out_top)
+    top_backends = [bk for bk in svc_top.get("backend", []) if bk["name"] == "session_scorer"]
+    assert len(top_backends) == 1
+    assert top_backends[0]["address"] == "top-scorer.edgecompute.app"
+    assert top_backends[0]["override_host"] == "top-scorer.edgecompute.app"
+    assert "req.restarts == 0" not in svc_top["condition"][0]["statement"]
+
+    # 3. cdn_proxy.tf.json fos_origin pins ssl_check_cert=True and override_host
+    cdn_tf = json.loads(out_nested["cdn_proxy.tf.json"])
+    cdn_fos = cdn_tf["resource"]["fastly_service_vcl"]["cdn_proxy"]["backend"][0]
+    assert cdn_fos["name"] == "fos_origin"
+    assert cdn_fos["use_ssl"] is True
+    assert cdn_fos["ssl_check_cert"] is True
+    assert cdn_fos["override_host"] == "us-east-1.object.fastlystorage.app"
+    assert cdn_fos["ssl_cert_hostname"] == "us-east-1.object.fastlystorage.app"
+    assert cdn_fos["ssl_sni_hostname"] == "us-east-1.object.fastlystorage.app"
+
+
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+def test_sec15_generate_terraform_rejects_exclude_url_regex_and_cdn_shield_breakouts():
+    breakout_regex = r'") { error 999; } if (req.url !~ "'
+    for bad_patch in (
+        {"scoring": {"enabled": True, "domain": "scorer.edgecompute.app", "exclude_url_regex": breakout_regex}},
+        {
+            "scoring_enabled": True,
+            "scoring_domain": "scorer.edgecompute.app",
+            "scoring_exclude_url_regex": breakout_regex,
+        },
+        {"cdn_shield": "iad_va_us, F_fos_origin); error 999; //"},
+    ):
+        with pytest.raises(ValueError):
+            generate_terraform({**_baseline_cfg(), **bad_patch}, "AKIA", "sec")
+
+
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+def test_sec15_wave6_generate_terraform_null_coalescing_and_type_confusion(monkeypatch):
+    from backend.provision.declarative.models import FeatureState
+    from backend.utils import terraform_gen
+
+    seen_states: list[FeatureState] = []
+    real_from_config = FeatureState.from_config
+
+    def _spy_from_config(fs_cfg: dict) -> FeatureState:
+        st = real_from_config(fs_cfg)
+        seen_states.append(st)
+        return st
+
+    monkeypatch.setattr(terraform_gen.FeatureState, "from_config", staticmethod(_spy_from_config))
+    out = generate_terraform(
+        {
+            **_baseline_cfg(),
+            "rum": {"enabled": True, "custom_condition": None},
+            "faro_version": "2.9.0",
+        },
+        "AKIA",
+        "sec",
+    )
+    assert "/rum-beacon" in out["capture_snippets/recv.vcl"]
+    assert len(seen_states) == 1
+    assert seen_states[0].faro_version == "2.9.0"
+    assert seen_states[0].rum_custom_condition == ""
+
+    for bad_patch in (
+        {"provisioning": ["bad"]},
+        {"rum": ["bad"]},
+        {"cmcd": ["bad"]},
+        {"scoring": "bad"},
+        {"fos_proxy": 123},
+        {"cmcd": {"enabled": True, "version": []}},
+        {"cmcd": {"enabled": True, "version": True}},
+        {"scoring": {"enabled": True, "domain": "a.example.com", "enforce_status_code": []}},
+        {"scoring": {"enabled": True, "domain": "a.example.com", "enforce_status_code": True}},
+        {"provisioning": {"sample_rate": []}},
+        {"provisioning": {"sample_rate": True}},
+        {"provisioning": {"cdn_shield": "iad); error 999;"}},
+        {"fos_proxy": {"shield": "iad); error 999;"}},
+        {"faro_version": '1.0.0"; error 999;'},
+        {
+            "rum_enabled": True,
+            "rum_custom_condition": "",
+            "rum": {"custom_condition": 'req.http.Host != "x") { error 999; } if (true'},
+        },
+    ):
+        with pytest.raises(ValueError):
+            generate_terraform({**_baseline_cfg(), **bad_patch}, "AKIA", "sec")
+
+
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+def test_sec15_wave7_generate_terraform_empty_service_id_and_scoring_aliases():
+    """SEC-15 Wave 7: empty logging_service_id falls back cleanly and all scoring_* aliases are validated without short-circuiting."""
+    out_empty = generate_terraform({"logging_service_id": ""}, "AKIA", "sec")
+    assert "YOUR_SERVICE_ID" in out_empty["instructions"]
+
+    out_fallback_sid = generate_terraform({"service_id": "svc_fallback_1", "logging_service_id": ""}, "AKIA", "sec")
+    assert "svc_fallback_1" in out_fallback_sid["instructions"]
+
+    out_crlf_sid = generate_terraform({"logging_service_id": "\r\n"}, "AKIA", "sec")
+    assert "YOUR_SERVICE_ID" in out_crlf_sid["instructions"]
+
+    out_ws_cond = generate_terraform(
+        {**_baseline_cfg(), "custom_condition": "   ", "rum_custom_condition": "   "},
+        "AKIA",
+        "sec",
+    )
+    assert "logging_service.tf.json" in out_ws_cond
+
+    out_null_desc = generate_terraform(
+        {
+            **_baseline_cfg(),
+            "log_fields": {
+                "groups": ["A"],
+                "custom_fields": [
+                    {
+                        "name": "my_cf",
+                        "label": "My CF",
+                        "description": None,
+                        "vcl_log_expression": "req.http.X-My-Hdr",
+                        "sql_type": "VARCHAR",
+                        "value_type": "string",
+                        "bytes_estimate": 24,
+                    }
+                ],
+            },
+        },
+        "AKIA",
+        "sec",
+    )
+    assert "my_cf" in out_null_desc["capture_snippets/recv.vcl"]
+
+    for bad_cfg in (
+        {"logging_service_id": 123},
+        {"service_id": ["bad"]},
+        {"scoring": {"enabled": False, "domain": "valid.com"}, "scoring_domain": 'bad"domain'},
+        {"scoring_domain": "valid.com", "scoring": {"scoring_domain": "bad..domain"}},
+        {"scoring": {"request_secret": ""}, "scoring_request_secret": 'bad"sec'},
+        {"scoring_request_secret": "", "scoring": {"request_secret": "bad\\sec"}},
+        {"scoring_exclude_url_regex": "", "scoring": {"exclude_url_regex": '") { error 999; }'}},
+        {"scoring": {"exclude_url_regex": ""}, "scoring_exclude_url_regex": '") { error 999; }'},
+    ):
+        with pytest.raises(ValueError):
+            generate_terraform(bad_cfg, "AKIA", "sec")

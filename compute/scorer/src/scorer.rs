@@ -54,7 +54,7 @@ pub fn l2_score_from_trans_prob(p: f64) -> u8 {
     // diverge by one point, breaking the Python/Rust parity this function
     // is pinned to mirror. Match Python with `round_ties_even` (same fix
     // as cookie.rs's bucket rounding).
-    clamped.round_ties_even() as u8
+    compute_common::num::round_ties_even(clamped) as u8
 }
 
 // ── Combined output ─────────────────────────────────────────────────────────
@@ -275,7 +275,10 @@ pub struct ScoreInputs<'a> {
 pub fn score_combined(inp: ScoreInputs<'_>) -> ScoreResult {
     let mut result = ScoreResult {
         cookie_compliance: inp.cookie_compliance.to_string(),
-        matrix_version: inp.matrix.map(|m| m.version().to_string()).unwrap_or_default(),
+        matrix_version: inp
+            .matrix
+            .map(|m| m.version().to_string())
+            .unwrap_or_default(),
         ..Default::default()
     };
 
@@ -542,7 +545,11 @@ mod tests {
         // /products is only ever a destination, so its row_total is 0; using it as
         // prev must map to the max L2 score, not the lenient uniform prior.
         let m = matrix(&[("/home", &[("/products", 100)])], 10);
-        assert_eq!(m.row_total(m.route_id("/products").unwrap()), 0, "fixture: /products is curr-only");
+        assert_eq!(
+            m.row_total(m.route_id("/products").unwrap()),
+            0,
+            "fixture: /products is curr-only"
+        );
         let (score, reasons, p) = score_layer2(
             Some(&m),
             Some(&r("/products", "product")), // present in matrix, row_total 0
@@ -672,8 +679,14 @@ mod tests {
                 l2_enforce_enabled: false,
                 l2_days_since_optin: days,
             });
-            assert_eq!(result.l2_score, 100, "days {days}: L2 sub-score still computed");
-            assert_eq!(result.l1_score, 0, "L1 must be clean so L2 is the only mover");
+            assert_eq!(
+                result.l2_score, 100,
+                "days {days}: L2 sub-score still computed"
+            );
+            assert_eq!(
+                result.l1_score, 0,
+                "L1 must be clean so L2 is the only mover"
+            );
             assert_eq!(
                 result.score,
                 quantize_score(result.l1_score as f64),

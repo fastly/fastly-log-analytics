@@ -133,7 +133,17 @@ export function formatCountMaybe(n: number | null | undefined, options?: Intl.Nu
 
 export function formatValue(field: string | undefined, value: string | number | null | undefined): string {
   if (value === null || value === undefined) return 'null'
-  if (typeof value === 'number') return field?.includes('bytes') ? formatBytes(value) : formatCount(value)
+  if (field === 'metro') return String(value).trim()
+  if (field === 'asn' || field === 'client_asn') {
+    const str = String(value).trim()
+    if (!str) return ''
+    return /^AS/i.test(str) ? `AS${str.slice(2)}` : `AS${str}`
+  }
+  if (typeof value === 'number') {
+    if (field?.includes('bytes')) return formatBytes(value)
+    if (field === 'ttl' || field === 'age') return formatCount(Math.round(value))
+    return formatCount(value)
+  }
   const str = String(value)
   if (field === 'country' && str.length === 2) return resolveCountryName(str)
   if (field === 'pop' || field === 'region') return str.toUpperCase()
@@ -245,7 +255,7 @@ export function getTimezoneAbbr(date: Date, tz: string) {
 }
 
 export function formatLocalDateTime(value: string | number | Date, options?: Intl.DateTimeFormatOptions): string {
-  const d = value instanceof Date ? value : new Date(value)
+  const d = value instanceof Date || typeof value === 'number' ? value instanceof Date ? value : new Date(value) : toUTCDate(value)
   if (isNaN(d.getTime())) return d.toLocaleString(undefined, options)
   return options ? getDateTimeFormat(undefined, options).format(d) : d.toLocaleString()
 }
@@ -272,7 +282,7 @@ export function formatDuration(seconds: number | null | undefined, options?: { r
 export function formatDeterministicUTC(iso: string | null | undefined): string {
   if (!iso) return '—'
   try {
-    const d = new Date(iso)
+    const d = toUTCDate(iso)
     if (isNaN(d.getTime())) return iso
     const formatted = getDateTimeFormat('en-US', {
       timeZone: 'UTC',

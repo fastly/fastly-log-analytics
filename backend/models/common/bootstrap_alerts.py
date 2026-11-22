@@ -28,7 +28,6 @@ class BootstrapService(WireSafeModel):
     cmcd_enabled: bool | None = None
     rum_enabled: bool | None = None
     rum_log_period: int | None = None
-    is_high_scale: bool | None = None
 
 
 class BootstrapSettings(WireSafeModel):
@@ -98,7 +97,6 @@ class CronRunEntry(WireSafeModel):
     rows_ingested: int | None = None
     corrupt_rows: int | None = None
     parquet_files_created: int | None = None
-    parquet_files_optimized: int | None = None
     parquet_keys: list[str] = []
     summary: str | None = None
 
@@ -215,6 +213,8 @@ class BootstrapResponse(BaseResponse):
     custom_dashboard_cards: list[CustomCard] = Field(default_factory=list)
     active_log_field_ids: list[str] = Field(default_factory=list)
     ngwaf_configured: bool = False
+    # False hides the Fastly Bots card on an install without a known-bot classifier.
+    fastly_bots_available: bool = True
     # Saved views for the active service, folded in so the frontend can
     # render ViewSelector and rehydrate from URL view params without a
     # second /api/views/{service_id} round-trip on every page nav.

@@ -320,10 +320,10 @@ SID = "srv_123"
 MOD = "backend.provision.declarative.reconciler"
 
 
-SCORING_FIELD = {"name": sorted(_SCORING_FIELD_NAMES)[0], "duckdb_type": "VARCHAR", "enabled": True}
+SCORING_FIELD = {"name": sorted(_SCORING_FIELD_NAMES)[0], "sql_type": "VARCHAR", "enabled": True}
 
 
-USER_FIELD = {"name": "my_custom", "duckdb_type": "VARCHAR", "enabled": True}
+USER_FIELD = {"name": "my_custom", "sql_type": "VARCHAR", "enabled": True}
 
 
 def _lock_held() -> bool:
@@ -390,6 +390,7 @@ def scoring_not_desired():
         yield build
 
 
+@pytest.mark.no_postgres
 def test_enable_persists_only_scoring_and_keeps_concurrent_writes(enable_stubs, scoring_desired):
     seeded = _seed(scoring={"enabled": True, "request_secret": "r" * 8})
 
@@ -424,6 +425,7 @@ def test_enable_does_not_hold_the_config_lock_across_fastly_calls(enable_stubs, 
     assert held == [False, False]
 
 
+@pytest.mark.no_postgres
 def test_failure_after_persist_rolls_back_only_scoring_and_keeps_concurrent_writes(enable_stubs, scoring_desired):
     original_scoring = {"enabled": True, "scoring_domain": "old.example.test"}
     seeded = _seed(scoring=original_scoring)
@@ -434,16 +436,28 @@ def test_failure_after_persist_rolls_back_only_scoring_and_keeps_concurrent_writ
         raise RuntimeError("vcl sync failed")
 
     enable_stubs.reconcile.side_effect = _boom
+    created = {
+        "scoring_service_id": "compute_id",
+        "scoring_keys_store_id": "keys_id",
+        "scoring_config_store_id": "config_id",
+        "scoring_matrix_store_id": "matrix_id",
+    }
+    enable_stubs.ensure.return_value["created_resources"] = created
 
-    with pytest.raises(RuntimeError, match="vcl sync failed"):
+    with (
+        patch(f"{MOD}.delete_scoring_service") as delete,
+        pytest.raises(RuntimeError, match="vcl sync failed"),
+    ):
         reconcile_infrastructure(SID, "tok")
 
     saved = _persisted()
     assert saved["scoring"] == original_scoring
     assert saved["concurrent_key"] == "kept"
     assert saved["rum"]["cid_salt"] == seeded["rum"]["cid_salt"]
+    delete.assert_called_once_with(token="tok", **created)
 
 
+@pytest.mark.no_postgres
 def test_failure_after_persist_removes_scoring_that_did_not_exist_before(enable_stubs, scoring_desired):
     _seed()
     enable_stubs.reconcile.side_effect = RuntimeError("vcl sync failed")
@@ -482,6 +496,7 @@ def test_disable_strips_scoring_fields_and_block_and_keeps_concurrent_writes(dis
     assert disable_stubs.delete.call_args.kwargs["scoring_keys_store_id"] == "k"
 
 
+@pytest.mark.no_postgres
 def test_disable_failure_restores_scoring_block_and_fields_and_keeps_concurrent_writes(
     disable_stubs, scoring_not_desired
 ):
@@ -691,12 +706,17 @@ def test_update_local_config_goes_through_the_locked_mutate_config(tmp_path, mon
     assert saved["last_activated_version"] == 7 and saved["other"] == "keep"
 
 
-def test_update_local_config_skips_a_read_only_volume(monkeypatch):
+def test_update_local_config_raises_on_oserror_and_missing_config(monkeypatch):
     def boom(*a, **k):
         raise OSError("read-only file system")
 
     monkeypatch.setattr(svcconfig, "mutate_config", boom)
-    reconciler._update_local_config("svc-x", lambda c: None)
+    with pytest.raises(OSError, match="read-only file system"):
+        reconciler._update_local_config("svc-x", lambda c: None)
+
+    monkeypatch.setattr(svcconfig, "mutate_config", lambda *a, **k: None)
+    with pytest.raises(RuntimeError, match="No config found for service svc-x"):
+        reconciler._update_local_config("svc-x", lambda c: None)
 
 
 # ── Merged from tests/provision/declarative/test_state.py ──
@@ -747,11 +767,11 @@ class TestFeatureStateDependencyInjection:
         cmcd_fields = {f["name"]: f for f in state.log_fields.custom_fields if "cmcd" in f["name"]}
         assert len(cmcd_fields) == 14
         for name in ("cmcd_sid", "cmcd_cid", "cmcd_ot", "cmcd_sf", "cmcd_st"):
-            assert cmcd_fields[name]["value_type"] == "string" and cmcd_fields[name]["duckdb_type"] == "VARCHAR"
+            assert cmcd_fields[name]["value_type"] == "string" and cmcd_fields[name]["sql_type"] == "VARCHAR"
         for name in ("cmcd_br", "cmcd_bl", "cmcd_d", "cmcd_dl", "cmcd_mtp", "cmcd_tb", "cmcd_rtp"):
-            assert cmcd_fields[name]["value_type"] == "numeric" and cmcd_fields[name]["duckdb_type"] == "INTEGER"
+            assert cmcd_fields[name]["value_type"] == "numeric" and cmcd_fields[name]["sql_type"] == "INTEGER"
         for name in ("cmcd_bs", "cmcd_su"):
-            assert cmcd_fields[name]["value_type"] == "boolean" and cmcd_fields[name]["duckdb_type"] == "BOOLEAN"
+            assert cmcd_fields[name]["value_type"] == "boolean" and cmcd_fields[name]["sql_type"] == "BOOLEAN"
 
     def test_featurestate_from_config_does_not_duplicate_injected_fields(self):
         state = _state(
@@ -866,6 +886,7 @@ def _reconcile_env(*, snippets=None, endpoints=None, backends=None, dicts=None, 
         patch("backend.provision.declarative.reconciler._activate_draft") as m_act,
         patch("backend.provision.declarative.reconciler.upload_rum_tracker_js") as m_upload,
         patch("backend.provision.declarative.reconciler._purge_rum_surrogate_key") as m_purge,
+        patch("backend.provision.declarative.reconciler._update_local_config"),
     ):
         yield {
             "validate": m_val,
@@ -1035,6 +1056,243 @@ class TestDictionaryFiltering:
         with _reconcile_env(dicts=dicts), _mock_cfg_file(rum_enabled=True):
             result = reconcile_vcl_state("srv_test", "token", dry_run=True)
             assert result.changes_applied is not None and result.changes_applied.get("dictionaries_removed", 0) == 0
+
+
+def _s3(name: str) -> LoggingEndpoint:
+    return LoggingEndpoint(
+        name=name,
+        endpoint_type="s3",
+        path="/elsewhere/",
+        period=300,
+        response_condition="",
+        format_string="{}",
+        placement=None,
+        response_object_name="",
+    )
+
+
+class TestEndpointOwnership:
+    def test_reconcile_leaves_foreign_endpoints_alone(self):
+        endpoints = [_s3("Customer Archive"), _s3("FLP Cloud Logs")]
+        with _reconcile_env(endpoints=endpoints) as m, _mock_cfg_file():
+            reconcile_vcl_state("srv_test", "token", dry_run=False)
+        diff = m["apply"].call_args.args[3]
+        assert diff.endpoints_to_remove == []
+        assert [ep.name for ep in diff.endpoints_to_add + diff.endpoints_to_update] == ["Fastly Log Analytics"]
+
+    def test_reconcile_removes_own_endpoint_after_rename(self):
+        endpoints = [_s3("Fastly Log Analytics"), _s3("Fastly RUM Logs"), _s3("Customer Archive")]
+        with (
+            _reconcile_env(endpoints=endpoints) as m,
+            _mock_cfg_file(provisioning={"endpoint_name": "Request Logs"}, rum={"endpoint_name": "RUM Logs"}),
+        ):
+            reconcile_vcl_state("srv_test", "token", dry_run=False)
+        diff = m["apply"].call_args.args[3]
+        assert sorted(diff.endpoints_to_remove) == ["Fastly Log Analytics", "Fastly RUM Logs"]
+        assert [ep.name for ep in diff.endpoints_to_add] == ["Request Logs"]
+
+    def test_apply_diff_never_deletes_a_foreign_endpoint(self):
+        diff = DiffResult(endpoints_to_remove=["Customer Archive", "Fastly Object Storage Logs"])
+        with patch("backend.provision.declarative.reconciler.fastly_integration") as fi_mock:
+            _apply_diff("srv_test", "token", 2, diff, desired_state=_state())
+        deleted = [c.args[2] for c in fi_mock.delete_logging_endpoint.call_args_list]
+        assert deleted == ["Fastly Object Storage Logs"]
+
+
+def _typed(name: str, endpoint_type: str) -> LoggingEndpoint:
+    ep = _s3(name)
+    ep.endpoint_type = endpoint_type
+    return ep
+
+
+class TestNativeFosEndpoint:
+    def test_new_install_desires_native_fos_endpoints(self):
+        endpoints = desired_logging_endpoints(_state(rum_enabled=True, fos_prefix="raw"))
+        assert [(e.name, e.endpoint_type) for e in endpoints] == [
+            ("Fastly Log Analytics", "fos"),
+            ("Fastly RUM Logs", "fos"),
+        ]
+
+    def test_reconcile_adds_fos_endpoint_on_a_new_install(self):
+        with _reconcile_env() as m, _mock_cfg_file():
+            reconcile_vcl_state("srv_test", "token", dry_run=False)
+        diff = m["apply"].call_args.args[3]
+        assert [(e.name, e.endpoint_type) for e in diff.endpoints_to_add] == [("Fastly Log Analytics", "fos")]
+
+    def test_reconcile_keeps_a_legacy_s3_endpoint_as_s3(self):
+        endpoints = [_s3("Fastly Log Analytics")]
+        with _reconcile_env(endpoints=endpoints) as m, _mock_cfg_file():
+            reconcile_vcl_state("srv_test", "token", dry_run=False)
+        diff = m["apply"].call_args.args[3]
+        assert diff.endpoints_to_add == [] and diff.endpoints_to_remove == []
+        assert [(e.name, e.endpoint_type) for e in diff.endpoints_to_update] == [("Fastly Log Analytics", "s3")]
+        assert m["apply"].call_args.kwargs["current_endpoints"] == endpoints
+
+    def test_reconcile_leaves_foreign_fos_endpoints_alone(self):
+        endpoints = [_typed("Customer FOS Archive", "fos"), _typed("Fastly Log Analytics (other)", "fos")]
+        with _reconcile_env(endpoints=endpoints) as m, _mock_cfg_file():
+            reconcile_vcl_state("srv_test", "token", dry_run=False)
+        diff = m["apply"].call_args.args[3]
+        assert diff.endpoints_to_remove == []
+        assert [e.name for e in diff.endpoints_to_add] == ["Fastly Log Analytics"]
+
+    def test_apply_diff_deletes_each_endpoint_through_its_own_type(self):
+        diff = DiffResult(endpoints_to_remove=["Fastly Log Analytics", "Fastly RUM Logs", "Customer FOS Archive"])
+        current = [
+            _typed("Fastly Log Analytics", "fos"),
+            _typed("Fastly RUM Logs", "s3"),
+            _typed("Customer FOS Archive", "fos"),
+        ]
+        with patch("backend.provision.declarative.reconciler.fastly_integration") as fi_mock:
+            _apply_diff(
+                "srv_test",
+                "token",
+                2,
+                diff,
+                desired_state=_state(logging_enabled=False),
+                current_endpoints=current,
+            )
+        deleted = [(c.args[2], c.kwargs["endpoint_type"]) for c in fi_mock.delete_logging_endpoint.call_args_list]
+        assert deleted == [("Fastly Log Analytics", "fos"), ("Fastly RUM Logs", "s3")]
+
+    def test_apply_diff_sends_keys_only_to_legacy_s3_endpoints(self):
+        fos_ep, s3_ep = _typed("Fastly Log Analytics", "fos"), _typed("Fastly RUM Logs", "s3")
+        diff = DiffResult(endpoints_to_add=[fos_ep], endpoints_to_update=[s3_ep])
+        with (
+            patch("backend.provision.declarative.reconciler.fastly_integration") as fi_mock,
+            _mock_cfg_file(
+                fos_bucket="bkt",
+                fos_region="eu-central-1",
+                fos_access_key_id="AKID",
+                fos_secret_access_key="SECRET",
+            ),
+        ):
+            _apply_diff("srv_test", "token", 2, diff, desired_state=_state())
+        calls = {c.args[2].name: c.kwargs for c in fi_mock.create_or_update_logging_endpoint.call_args_list}
+        assert calls["Fastly Log Analytics"] == {"bucket_name": "bkt", "region": "eu-central-1"}
+        assert calls["Fastly RUM Logs"] == {
+            "bucket_name": "bkt",
+            "domain": "eu-central-1.object.fastlystorage.app",
+            "access_key": "AKID",
+            "secret_key": "SECRET",
+        }
+
+    def test_fos_create_request_shape(self):
+        calls: list[tuple[str, str, Any]] = []
+
+        def _fake(m, p, b=None, **kw):
+            calls.append((m, p, b))
+            if m == "GET":
+                raise RuntimeError("HTTP 404")
+            return {}
+
+        ep = LoggingEndpoint(
+            "Fastly Log Analytics", "fos", "raw/request/", 60, "log_analytics_condition", "%h", None, ""
+        )
+        with patch.object(fi, "fastly", _fake):
+            fi.create_or_update_logging_endpoint(
+                "svc1",
+                3,
+                ep,
+                "tok",
+                bucket_name="bkt",
+                region="us-east-1",
+                domain="ignored.example",
+                access_key="AKID",
+                secret_key="SECRET",
+            )
+        assert calls == [
+            ("GET", "/service/svc1/version/3/logging/fos/Fastly%20Log%20Analytics", None),
+            (
+                "POST",
+                "/service/svc1/version/3/logging/fos",
+                {
+                    "name": "Fastly Log Analytics",
+                    "path": "raw/request/",
+                    "period": 60,
+                    "format": "%h",
+                    "format_version": 2,
+                    "placement": None,
+                    "compression_codec": "zstd",
+                    "response_condition": "log_analytics_condition",
+                    "bucket_name": "bkt",
+                    "region": "us-east-1",
+                },
+            ),
+        ]
+
+    def test_fos_body_matches_s3_body_except_for_credentials_and_domain(self):
+        bodies: dict[str, dict] = {}
+
+        def _fake(m, p, b=None, **kw):
+            if m == "GET":
+                raise RuntimeError("HTTP 404")
+            bodies[p.rsplit("/", 1)[-1]] = b
+            return {}
+
+        kwargs = {
+            "bucket_name": "bkt",
+            "region": "us-east-1",
+            "domain": "us-east-1.object.fastlystorage.app",
+            "access_key": "AKID",
+            "secret_key": "SECRET",
+        }
+        with patch.object(fi, "fastly", _fake):
+            for kind in ("s3", "fos"):
+                ep = LoggingEndpoint("ep", kind, "raw/request/", 300, "cond", "%h", None, "")
+                fi.create_or_update_logging_endpoint("svc1", 3, ep, "tok", **kwargs)
+        s3_body, fos_body = bodies["s3"], bodies["fos"]
+        shared = s3_body.keys() & fos_body.keys()
+        assert shared == {
+            "name",
+            "path",
+            "period",
+            "format",
+            "format_version",
+            "placement",
+            "compression_codec",
+            "response_condition",
+            "bucket_name",
+        }
+        assert all(s3_body[k] == fos_body[k] for k in shared)
+        assert s3_body.keys() - shared == {"domain", "access_key", "secret_key", "response_object_name"}
+        assert fos_body.keys() - shared == {"region"}
+
+    def test_fos_update_clears_gzip_level_before_setting_codec(self):
+        calls: list[tuple[str, str, Any]] = []
+        ep = LoggingEndpoint("ep", "fos", "raw/request/", 60, "", "%h", None, "")
+        with patch.object(
+            fi, "fastly", lambda m, p, b=None, **kw: (calls.append((m, p, b)), {"name": "ep", "gzip_level": 9})[1]
+        ):
+            fi.create_or_update_logging_endpoint("svc1", 3, ep, "tok")
+        assert [(m, p) for m, p, _ in calls] == [("GET", "/service/svc1/version/3/logging/fos/ep")] + [
+            ("PUT", "/service/svc1/version/3/logging/fos/ep")
+        ] * 2
+        assert calls[1][2] == {"gzip_level": 0}
+
+    def test_fetch_returns_both_endpoint_types(self):
+        raw = {"path": "raw/", "period": 60, "response_condition": "c", "format": "%h", "placement": "none"}
+        responses = {
+            ("GET", "/service/svc1/version/3/logging/s3"): [{**raw, "name": "legacy"}],
+            ("GET", "/service/svc1/version/3/logging/fos"): [{**raw, "name": "native", "access_key": "minted-id"}],
+        }
+        with patch.object(fi, "fastly", _fastly_mock(responses)):
+            fetched = fi.fetch_logging_endpoints("svc1", 3, "tok")
+        assert [(e.name, e.endpoint_type) for e in fetched] == [("legacy", "s3"), ("native", "fos")]
+
+        responses[("GET", "/service/svc1/version/3/logging/fos")] = RuntimeError("HTTP 500")
+        with patch.object(fi, "fastly", _fastly_mock(responses)):
+            assert [e.name for e in fi.fetch_logging_endpoints("svc1", 3, "tok")] == ["legacy"]
+
+    def test_delete_uses_the_endpoint_type_path(self):
+        calls: list[tuple[str, str]] = []
+        with patch.object(fi, "fastly", lambda m, p, b=None, **kw: (calls.append((m, p)), {})[1]):
+            fi.delete_logging_endpoint("svc1", 3, "My Endpoint", "tok", endpoint_type="fos")
+            fi.delete_logging_endpoint("svc1", 3, "My Endpoint", "tok", endpoint_type="s3")
+        assert calls == [
+            ("DELETE", "/service/svc1/version/3/logging/fos/My%20Endpoint"),
+            ("DELETE", "/service/svc1/version/3/logging/s3/My%20Endpoint"),
+        ]
 
 
 class TestBootstrapFeatureState:
@@ -1329,7 +1587,7 @@ class TestGeneratorVCLStructure:
 
     def test_rum_js_caching_gates_on_200_status(self):
         vcl = generate_consolidated_snippet(_state(rum_enabled=True), "vcl_fetch")
-        rum_block = vcl.split('if (req.url.path == "/js/rum.js") {', 1)[1]
+        rum_block = vcl.split('if (req.url.path == "/js/rum.js" && req.http.X-FOS-Request == "1") {', 1)[1]
         status_idx = rum_block.index("if (beresp.status == 200)")
         for directive in (
             "set beresp.ttl = 86400s;",
@@ -1405,6 +1663,10 @@ class TestBackendGeneration:
         assert len(scorer) == 1
         assert scorer[0].address == "scorer.example.com" and scorer[0].port == 443
         assert scorer[0].ssl_hostname == "scorer.example.com"
+        assert scorer[0].ssl_check_cert is True
+        assert scorer[0].override_host == "scorer.example.com"
+        assert scorer[0].ssl_cert_hostname == "scorer.example.com"
+        assert scorer[0].ssl_sni_hostname == "scorer.example.com"
 
     def test_generator_rum_backend_created_when_enabled(self):
         fos = [b for b in desired_backends(_state(rum_enabled=True)) if b.name == "fos_origin"]
@@ -1522,7 +1784,7 @@ if (req.url.path == "/js/rum.js" && req.method == "GET") {
             == """# Section 5: RUM (vcl_fetch)
 # Cache RUM tracker JS at the edge; browsers get a short TTL so a
 # Surrogate-Key purge of "rum-js" becomes visible to clients quickly.
-if (req.url.path == "/js/rum.js") {
+if (req.url.path == "/js/rum.js" && req.http.X-FOS-Request == "1") {
     if (beresp.status == 200) {
         set beresp.ttl = 86400s;
         set beresp.cacheable = true;
@@ -1558,7 +1820,10 @@ if (req.url.path == "/js/rum.js") {
         assert [set(k.split()) for k in keys] == [{"rum-js"}, {"rum-faro-sdk", "rum-js"}]
 
     def test_faro_version_invalid_rejected_at_generation(self):
-        state = self._rum_state(faro_version="not-a-version")
+        with pytest.raises(ValueError, match="faro_version must be a plain"):
+            self._rum_state(faro_version="not-a-version")
+        state = self._rum_state(faro_version="2.9.0")
+        object.__setattr__(state, "faro_version", "not-a-version")
         for sub in ("vcl_recv", "vcl_miss"):
             with pytest.raises(ValueError, match="faro_version must be a plain"):
                 generate_consolidated_snippet(state, sub)
@@ -2029,3 +2294,1233 @@ def test_logging_endpoint_zstd_compression_and_migration_from_gzip():
     )
     logging_tf = tf_files["logging_service.tf.json"]
     assert '"compression_codec": "zstd"' in logging_tf and "gzip_level" not in logging_tf
+
+
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+def test_sec12_create_or_update_dictionary_preserves_existing_without_mutating_write_only():
+    from backend.provision.declarative import fastly_ops as fi
+
+    calls: list[tuple[str, str, Any]] = []
+
+    def _fake_live_fastly(method: str, path: str, body: Any = None, **_kw: Any) -> Any:
+        calls.append((method, path, body))
+        if method == "GET" and path == "/service/svc1/version/3/dictionary/cdn_auth":
+            return {"id": "dict-live-1", "name": "cdn_auth", "write_only": False}
+        if method == "PUT" and path == "/service/svc1/version/3/dictionary/cdn_auth":
+            raise RuntimeError("HTTP 400 Bad Request: write_only cannot be modified")
+        return {}
+
+    with patch.object(fi, "fastly", _fake_live_fastly):
+        fi.create_or_update_dictionary(
+            "svc1",
+            3,
+            ServiceDictionary(name="cdn_auth", write_only=True, items={"secret_key": "s1", "secret": "s1"}),
+            "tok",
+        )
+    assert [c[0] for c in calls] == ["GET", "PUT", "PUT"]
+    assert all(c[1] != "/service/svc1/version/3/dictionary/cdn_auth" or c[0] == "GET" for c in calls)
+    assert {c[1].rsplit("/", 1)[-1] for c in calls[1:]} == {"secret_key", "secret"}
+
+    post_calls: list[tuple[str, str, Any]] = []
+
+    def _fake_missing_fastly(method: str, path: str, body: Any = None, **_kw: Any) -> Any:
+        post_calls.append((method, path, body))
+        if method == "GET":
+            raise RuntimeError("HTTP 404 Not Found")
+        if method == "POST" and path == "/service/svc1/version/3/dictionary":
+            return {"id": "dict-new-1", "name": "cdn_auth", "write_only": True}
+        return {}
+
+    with patch.object(fi, "fastly", _fake_missing_fastly):
+        fi.create_or_update_dictionary(
+            "svc1",
+            3,
+            ServiceDictionary(name="cdn_auth", write_only=True, items={"secret_key": "s1"}),
+            "tok",
+        )
+    assert post_calls[1] == (
+        "POST",
+        "/service/svc1/version/3/dictionary",
+        {"name": "cdn_auth", "write_only": True},
+    )
+
+
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+def test_sec14_backend_tls_fields_roundtrip_without_drift():
+    from backend.provision.declarative import fastly_ops as fi
+
+    state = _state(
+        rum_enabled=True,
+        rum={"faro_version": "2.9.0"},
+        fos_endpoint="us-east-1.object.fastlystorage.app",
+        scoring={"enabled": True, "domain": "scorer.edgecompute.app"},
+    )
+    desired = {b.name: b for b in desired_backends(state)}
+    for name, host in (
+        ("session_scorer", "scorer.edgecompute.app"),
+        ("fos_origin", "us-east-1.object.fastlystorage.app"),
+    ):
+        b = desired[name]
+        assert b.use_ssl is True and b.ssl_check_cert is True
+        assert b.override_host == host
+        assert b.ssl_cert_hostname == host and b.ssl_sni_hostname == host
+
+    sent_payloads: list[dict[str, Any]] = []
+    with patch.object(
+        fi,
+        "fastly",
+        lambda m, p, b=None, **_kw: (
+            sent_payloads.append(b) if m == "POST" else None,
+            (_ for _ in ()).throw(RuntimeError("404")) if m == "GET" else {},
+        )[1],
+    ):
+        fi.create_or_update_backend("svc1", 1, desired["session_scorer"], "tok")
+    assert len(sent_payloads) == 1
+    payload = sent_payloads[0]
+    assert payload["ssl_check_cert"] is True
+    assert payload["override_host"] == "scorer.edgecompute.app"
+    assert payload["ssl_cert_hostname"] == "scorer.edgecompute.app"
+    assert payload["ssl_sni_hostname"] == "scorer.edgecompute.app"
+    assert "ssl_hostname" not in payload
+
+    live_fastly_json = [
+        {
+            "name": "session_scorer",
+            "address": "scorer.edgecompute.app",
+            "port": 443,
+            "use_ssl": True,
+            "ssl_check_cert": True,
+            "ssl_hostname": None,
+            "ssl_cert_hostname": "scorer.edgecompute.app",
+            "ssl_sni_hostname": "scorer.edgecompute.app",
+            "override_host": "scorer.edgecompute.app",
+            "shield": None,
+            "connect_timeout": 100,
+            "first_byte_timeout": 100,
+            "between_bytes_timeout": 200,
+            "auto_loadbalance": False,
+            "request_condition": "fastly_log_analytics_false",
+        }
+    ]
+    with patch.object(fi, "fastly", lambda *_a, **_kw: live_fastly_json):
+        fetched = fi.fetch_backends("svc1", 1, "tok")
+    diff = _diff(current_backends=fetched, desired_backends=[desired["session_scorer"]])
+    assert diff.backends_to_add == [] and diff.backends_to_update == [] and diff.backends_to_remove == []
+
+
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+@pytest.mark.parametrize(
+    ("bad_kwargs", "err_match"),
+    [
+        ({"custom_condition": "true) || (true"}, "custom_condition.*unbalanced parentheses"),
+        (
+            {"rum_enabled": True, "rum": {"custom_condition": 'table.lookup(cdn_auth, "secret", "") != ""'}},
+            r"rum_custom_condition.*table\.lookup",
+        ),
+        (
+            {
+                "log_fields": {
+                    "groups": ["A"],
+                    "custom_fields": [{"name": "bad_cf", "vcl_log_expression": "req.http.Authorization"}],
+                }
+            },
+            r"custom_fields\[bad_cf\]\.vcl_log_expression",
+        ),
+        (
+            {
+                "log_fields": {
+                    "groups": ["A"],
+                    "custom_fields": [
+                        {
+                            "name": "edge_score",
+                            "collection_stage": "deliver",
+                            "vcl_log_expression": 'table.lookup(fos_credentials, "secret_key")}V',
+                        }
+                    ],
+                }
+            },
+            r"custom_fields\[edge_score\]\.vcl_log_expression",
+        ),
+        (
+            {
+                "log_fields": {
+                    "groups": ["A"],
+                    "custom_fields": [
+                        {
+                            "name": "user_deliver_cf",
+                            "collection_stage": "deliver",
+                            "vcl_log_expression": "resp.http.Server",
+                        }
+                    ],
+                }
+            },
+            r"collection_stage",
+        ),
+    ],
+)
+def test_sec15_feature_state_rejects_unsafe_conditions_and_expressions(bad_kwargs, err_match):
+    with pytest.raises(ValueError, match=err_match):
+        _state(**bad_kwargs)
+
+
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+def test_sec15_feature_state_allows_rum_url_condition_and_enforces_canonical_system_fields():
+    # 1. rum_custom_condition with req.url succeeds across FeatureState.from_config and FeatureState
+    st_rum = _state(rum_enabled=True, rum={"custom_condition": 'req.url !~ "^/healthz"'})
+    assert st_rum.rum_custom_condition == 'req.url !~ "^/healthz"'
+
+    # 2. FeatureState.from_config overwrites tampered non-malicious system field definitions with canonical
+    st_canon = _state(
+        scoring={"enabled": True, "domain": "scorer.edgecompute.app"},
+        log_fields={
+            "groups": ["A"],
+            "custom_fields": [
+                {
+                    "name": "edge_score",
+                    "collection_stage": "deliver",
+                    "vcl_log_expression": "resp.http.X-Spoofed-Header",
+                }
+            ],
+        },
+    )
+    edge_score_defs = [f for f in st_canon.log_fields.custom_fields if f["name"] == "edge_score"]
+    assert len(edge_score_defs) == 1
+    assert edge_score_defs[0]["vcl_log_expression"] != "resp.http.X-Spoofed-Header"
+
+    # 3. Direct FeatureState construction rejects tampered system field expression or non-system deliver stage
+    with pytest.raises(ValueError, match="edge_score"):
+        FeatureState(
+            service_id="svc1",
+            log_period=60,
+            sample_rate=100,
+            edge_only=False,
+            custom_condition="",
+            fos_prefix="raw",
+            fos_endpoint="us-east-1.object.fastlystorage.app",
+            log_fields=LogFieldsConfig(
+                custom_fields=[
+                    {
+                        "name": "edge_score",
+                        "collection_stage": "deliver",
+                        "vcl_log_expression": 'table.lookup(fos_credentials, "secret_key")}V',
+                    }
+                ]
+            ),
+        )
+    with pytest.raises(ValueError, match="edge_score"):
+        FeatureState(
+            service_id="svc1",
+            log_period=60,
+            sample_rate=100,
+            edge_only=False,
+            custom_condition="",
+            fos_prefix="raw",
+            fos_endpoint="us-east-1.object.fastlystorage.app",
+            log_fields=LogFieldsConfig(
+                custom_fields=[
+                    {
+                        "name": "edge_score",
+                        "collection_stage": "deliver",
+                        "vcl_log_expression": "resp.http.X-Spoofed-Header",
+                    }
+                ]
+            ),
+        )
+    with pytest.raises(ValueError, match="collection_stage"):
+        FeatureState(
+            service_id="svc1",
+            log_period=60,
+            sample_rate=100,
+            edge_only=False,
+            custom_condition="",
+            fos_prefix="raw",
+            fos_endpoint="us-east-1.object.fastlystorage.app",
+            log_fields=LogFieldsConfig(
+                custom_fields=[
+                    {
+                        "name": "non_system_deliver",
+                        "collection_stage": "deliver",
+                        "vcl_log_expression": "resp.http.Server",
+                    }
+                ]
+            ),
+        )
+
+
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+def test_sec12_reconcile_cdn_service_state_lifecycle_and_write_only_dictionaries(mock_config_dir):
+    from backend.core.fastly.client import load_vcl
+    from backend.provision.declarative import fastly_ops as fi
+    from backend.provision.declarative import orchestrate as orch_mod
+
+    sid = "srv_cdn_sec12"
+    cfg_file = mock_config_dir / f"{sid}.json"
+    cfg_file.write_text(
+        json.dumps(
+            {
+                "service_id": sid,
+                "log_period": 60,
+                "sample_rate": 100,
+                "fos_bucket": "my-bucket",
+                "fos_region": "us-east-1",
+                "fos_access_key_id": "AKIA_X",
+                "fos_secret_access_key": "SEC_X",
+                "cdn_url": "https://cdn-sec12.global.ssl.fastly.net",
+                "cdn_secret": "cdn-secret-abc",
+            }
+        )
+    )
+
+    # 1. Missing cdn_url raises ValueError
+    (mock_config_dir / "srv_no_url.json").write_text(json.dumps({"service_id": "srv_no_url"}))
+    with pytest.raises(ValueError, match="CDN URL is required"):
+        reconcile_cdn_service_state("srv_no_url", "tok")
+
+    # 2. dry_run=True when CDN service doesn't exist returns dry-run-cdn without creating service
+    msgs: list[str] = []
+    with patch.object(orch_mod, "find_service_by_name", return_value=None):
+        dry_res = reconcile_cdn_service_state(sid, "tok", dry_run=True, status_cb=msgs.append)
+    assert dry_res.service_id == "dry-run-cdn"
+
+    # 3. Full creation: refuses logging_service_id collision, creates new CDN service, installs write_only cdn_auth,
+    #    uploads deterministic main VCL via POST fallback, validates, and activates.
+    created_ids: list[str] = []
+    installed_dicts: list[ServiceDictionary] = []
+    installed_backends: list[Backend] = []
+    vcl_posts: list[dict[str, Any]] = []
+
+    def fake_orch_fastly(method: str, path: str, body: dict | None = None, **_kw: Any) -> Any:
+        if method == "POST" and path == "/service":
+            return {"id": "cdn_new_1"}
+        if method == "PUT" and path == "/service/cdn_new_1":
+            return {}
+        if method == "POST" and path == "/service/cdn_new_1/version/1/domain":
+            return {}
+        if method == "GET" and path.endswith("/vcl/main"):
+            return {"content": "old-vcl"}
+        if method == "PUT" and path.endswith("/vcl/main"):
+            raise RuntimeError("404 no main vcl yet")
+        if method == "POST" and path.endswith("/vcl"):
+            if body:
+                vcl_posts.append(body)
+            return {}
+        return {}
+
+    with (
+        patch.object(orch_mod, "find_service_by_name", return_value={"id": sid, "name": "collision"}),
+        patch.object(orch_mod, "fastly", side_effect=fake_orch_fastly),
+        patch.object(orch_mod, "_fetch_snippets", return_value=[]),
+        patch.object(orch_mod, "_fetch_backends", return_value=[]),
+        patch.object(orch_mod, "_fetch_dictionaries", return_value=[]),
+        patch.object(fi, "fetch_active_version", return_value=1),
+        patch.object(orch_mod, "_clone_active_version", return_value=2),
+        patch.object(fi, "create_or_update_backend", side_effect=lambda _s, _v, b, _t: installed_backends.append(b)),
+        patch.object(fi, "create_or_update_dictionary", side_effect=lambda _s, _v, d, _t: installed_dicts.append(d)),
+        patch.object(fi, "create_or_update_snippet"),
+        patch.object(orch_mod, "_validate_draft", return_value=None),
+        patch.object(orch_mod, "_activate_draft"),
+    ):
+        res = reconcile_cdn_service_state(sid, "tok", status_cb=msgs.append, on_created=created_ids.append)
+
+    assert res.created is True and res.activated_version == 2
+    assert created_ids == ["cdn_new_1"]
+    assert len(vcl_posts) == 1 and vcl_posts[0]["content"] == load_vcl(rate_limiting=True)
+    by_dict = {d.name: d for d in installed_dicts}
+    assert by_dict["cdn_auth"].write_only is True
+    assert by_dict["cdn_auth"].items == {"secret_key": "cdn-secret-abc", "secret": "cdn-secret-abc"}
+    assert installed_backends[0].ssl_check_cert is True
+    assert installed_backends[0].ssl_cert_hostname == "us-east-1.object.fastlystorage.app"
+    assert installed_backends[0].ssl_sni_hostname == "us-east-1.object.fastlystorage.app"
+
+    # 4. Reused CDN service missing domain calls _ensure_cdn_domain and clones/activates domain addition
+    (mock_config_dir / "srv_reuse.json").write_text(
+        json.dumps({"service_id": "srv_reuse", "cdn_url": "https://reuse-cdn.global.ssl.fastly.net"})
+    )
+    domain_posts: list[dict[str, Any]] = []
+    with (
+        patch.object(orch_mod, "find_service_by_name", return_value={"id": "cdn_existing_9"}),
+        patch.object(fi, "fetch_active_version", return_value=3),
+        patch.object(
+            fi,
+            "fastly",
+            side_effect=lambda m, p, b=None, **_k: (
+                [] if (m == "GET" and p.endswith("/domain")) else (domain_posts.append(b) or {} if m == "POST" else {})
+            ),
+        ),
+        patch.object(fi, "clone_version", return_value=4),
+        patch.object(fi, "_validate_draft", return_value=None),
+        patch.object(fi, "_activate_draft"),
+        patch.object(orch_mod, "_fetch_snippets", return_value=[]),
+        patch.object(orch_mod, "_fetch_backends", return_value=[]),
+        patch.object(orch_mod, "_fetch_dictionaries", return_value=[]),
+        patch.object(orch_mod, "fastly", return_value={"content": ""}),
+    ):
+        dry2 = reconcile_cdn_service_state("srv_reuse", "tok", dry_run=True, status_cb=msgs.append)
+    assert dry2.service_id == "cdn_existing_9"
+    # Direct _ensure_cdn_domain check when domain is missing
+    with (
+        patch.object(fi, "fetch_active_version", return_value=3),
+        patch.object(
+            fi,
+            "fastly",
+            side_effect=lambda m, p, b=None, **_k: (
+                [] if (m == "GET" and p.endswith("/domain")) else (domain_posts.append(b) or {})
+            ),
+        ),
+        patch.object(fi, "clone_version", return_value=4),
+        patch.object(fi, "_validate_draft", return_value=None),
+        patch.object(fi, "_activate_draft"),
+    ):
+        fi._ensure_cdn_domain("cdn_existing_9", "reuse-cdn.global.ssl.fastly.net", "tok", status_cb=msgs.append)
+    assert {"name": "reuse-cdn.global.ssl.fastly.net"} in domain_posts
+
+
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+def test_sec15_apply_diff_and_highest_version_helpers(mock_config_dir):
+    from backend.provision.declarative import fastly_ops as fi
+    from backend.provision.declarative.models import ServiceDictionary
+
+    sid = "srv_apply_sec15"
+    (mock_config_dir / f"{sid}.json").write_text(
+        json.dumps(
+            {
+                "service_id": sid,
+                "fos_bucket": "bkt",
+                "fos_region": "us-east-1",
+                "fos_access_key_id": "AKIA",
+                "fos_secret_access_key": "SK",
+            }
+        )
+    )
+    state = _state(
+        service_id=sid,
+        edge_only=True,
+        sample_rate=50,
+        custom_condition='req.http.Host == "shop.example.com"',
+        rum_enabled=True,
+        rum={"faro_version": "2.9.0", "custom_condition": 'req.http.User-Agent !~ "bot"'},
+        scoring={"enabled": True, "domain": "scorer.edgecompute.app"},
+    )
+    eps = desired_logging_endpoints(state)
+    bks = desired_backends(state)
+    dcts = [ServiceDictionary(name="fos_credentials", write_only=True, items={"access_key": "AKIA"})]
+    snips = [
+        VCLSnippet(
+            name="Fastly Log Analytics - vcl_miss",
+            priority=50,
+            body='declare local var.fosAccessKey STRING;\nset req.http.X-Test = "1";',
+            subroutine="miss",
+        )
+    ]
+    unmanaged = [
+        VCLSnippet(name="Customer Miss", priority=10, body="declare local var.fosAccessKey STRING;", subroutine="miss")
+    ]
+    diff = compute_diff([], snips, [], eps, [], bks, [], dcts)
+    conds: list[tuple[str, str, str]] = []
+    ep_calls: list[tuple[str, dict[str, Any]]] = []
+    msgs: list[str] = []
+
+    with (
+        patch(
+            "backend.core.fastly.client.ensure_condition",
+            side_effect=lambda **kw: conds.append((kw["name"], kw["statement"], kw["type"])),
+        ),
+        patch.object(fi, "create_or_update_backend"),
+        patch.object(fi, "create_or_update_dictionary"),
+        patch.object(fi, "create_or_update_snippet"),
+        patch.object(
+            fi,
+            "create_or_update_logging_endpoint",
+            side_effect=lambda _s, _v, ep, _t, **kw: ep_calls.append((ep.endpoint_type, kw)),
+        ),
+    ):
+        fi._apply_diff(
+            sid,
+            "tok",
+            7,
+            diff,
+            desired_endpoints=eps,
+            desired_state=state,
+            status_cb=msgs.append,
+            current_snippets=unmanaged,
+        )
+
+    cond_map = {name: (stmt, ctype) for name, stmt, ctype in conds}
+    assert "log_analytics_condition" in cond_map
+    assert '(req.http.Host == "shop.example.com")' in cond_map["log_analytics_condition"][0]
+    assert 'req.url.path != "/rum-beacon"' in cond_map["log_analytics_condition"][0]
+    assert "randombool(50, 100)" in cond_map["log_analytics_condition"][0]
+    assert "rum_log_condition" in cond_map
+    assert '(req.http.User-Agent !~ "bot")' in cond_map["rum_log_condition"][0]
+    assert cond_map["fastly_log_analytics_false"] == ("false", "REQUEST")
+    assert "# declare local var.fosAccessKey STRING;" in snips[0].body
+    assert any(etype == "fos" for etype, _ in ep_calls)
+
+    # Verify _fetch_highest_version list / dict / error handling
+    with patch.object(fi, "fastly", return_value=[{"number": 2}, {"number": 9}, {"number": 5}]):
+        assert fi._fetch_highest_version(sid, "tok") == 9
+    with patch.object(fi, "fastly", return_value={"items": [{"number": 4}]}):
+        assert fi._fetch_highest_version(sid, "tok") == 4
+    with patch.object(fi, "fastly", side_effect=RuntimeError("boom")):
+        assert fi._fetch_highest_version(sid, "tok") is None
+        with pytest.raises(RuntimeError, match="Cannot determine version"):
+            fi._fetch_highest_version(sid, "tok", raise_on_error=True)
+
+
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+def test_declarative_error_and_normalization_edge_cases(mock_config_dir):
+    from filelock import Timeout as FileLockTimeout
+
+    from backend.core.fastly.client import load_vcl
+    from backend.provision.declarative import fastly_ops as fi
+    from backend.provision.declarative import orchestrate as orch_mod
+    from backend.provision.declarative.models import (
+        CmcdConfig,
+        LockAcquisitionTimeout,
+        ScoringConfig,
+        ServiceDictionary,
+    )
+    from backend.provision.fastly_api import _CDN_SNIPPETS
+
+    # 1. Backend 3-way TLS hostname normalization & model hashes / validation bounds
+    b_from_legacy = Backend(name="b1", address="h1.example.com", port=443, ssl_hostname="h1.example.com")
+    assert b_from_legacy.ssl_cert_hostname == "h1.example.com" and b_from_legacy.ssl_sni_hostname == "h1.example.com"
+    b_from_cert = Backend(name="b2", address="h2.example.com", port=443, ssl_cert_hostname="h2.example.com")
+    assert b_from_cert.ssl_sni_hostname == "h2.example.com" and b_from_cert.ssl_hostname == "h2.example.com"
+    b_from_sni = Backend(name="b3", address="h3.example.com", port=443, ssl_sni_hostname="h3.example.com")
+    assert b_from_sni.ssl_cert_hostname == "h3.example.com" and b_from_sni.ssl_hostname == "h3.example.com"
+    ep_sample = desired_logging_endpoints(_state())[0]
+    assert isinstance(hash(ep_sample), int) and isinstance(hash(b_from_cert), int)
+    assert isinstance(hash(ServiceDictionary(name="d1", items={"a": "1"})), int)
+    timeout_exc = LockAcquisitionTimeout("svc_lock", 1.25)
+    assert timeout_exc.service_id == "svc_lock" and timeout_exc.elapsed_seconds == 1.25
+
+    with pytest.raises(ValueError, match="cmcd.mode"):
+        FeatureState("s", 60, 100, False, "", "", "f", cmcd=CmcdConfig(enabled=True, mode="bad"))
+    with pytest.raises(ValueError, match="cmcd.version"):
+        FeatureState("s", 60, 100, False, "", "", "f", cmcd=CmcdConfig(enabled=True, version=9))
+    with pytest.raises(ValueError, match="enforce_status_code"):
+        FeatureState(
+            "s", 60, 100, False, "", "", "f", scoring=ScoringConfig(enabled=True, domain="d", enforce_status_code=200)
+        )
+    with pytest.raises(KeyError, match="service_id"):
+        FeatureState.from_config({})
+    with pytest.raises(KeyError, match="log_period"):
+        FeatureState.from_config({"service_id": "s"})
+
+    # 2. Lock timeout, RUM tracker warning resilience, active-version helpers, and _apply_diff error branches
+    with patch("filelock.SoftFileLock.acquire", side_effect=FileLockTimeout("locked")):
+        with pytest.raises(LockAcquisitionTimeout):
+            fi.acquire_vcl_lock("svc_contended", timeout_sec=0)
+
+    warn_msgs: list[str] = []
+    with patch.object(fi, "upload_rum_tracker_js", side_effect=RuntimeError("s3 down")):
+        fi._upload_rum_tracker_best_effort("svc1", "tok", warn_msgs.append)
+    assert any("RUM JS upload warning" in m for m in warn_msgs)
+
+    with patch.object(fi, "fetch_active_version", return_value=None):
+        assert fi._fetch_snippets("svc1", "tok") == []
+        assert fi._fetch_logging_endpoints("svc1", "tok") == []
+        assert fi._fetch_backends("svc1", "tok") == []
+        assert fi._fetch_dictionaries("svc1", "tok") == []
+        fi._ensure_cdn_domain("svc1", "x.example.com", "tok")
+        with pytest.raises(RuntimeError, match="No active version"):
+            fi._fetch_active_version("svc1", "tok")
+
+    with (
+        patch.object(fi, "fetch_active_version", return_value=1),
+        patch.object(fi, "fastly", side_effect=lambda m, p, *_a, **_k: [] if m == "GET" else {}),
+        patch.object(fi, "clone_version", return_value=2),
+        patch.object(fi, "_validate_draft", return_value="syntax error"),
+    ):
+        with pytest.raises(RuntimeError, match="Failed to validate CDN domain addition"):
+            fi._ensure_cdn_domain("svc1", "missing.example.com", "tok")
+
+    purge_diff = DiffResult(
+        snippets_to_remove=["Fastly Log Analytics - vcl_recv"],
+        backends_to_remove=["fos_origin"],
+        dictionaries_to_remove=["fos_credentials"],
+        dictionaries_to_add=[ServiceDictionary(name="fos_credentials", write_only=True, items={})],
+        snippets_to_add=[VCLSnippet(name="Fastly Log Analytics - vcl_recv", priority=10, body="#", subroutine="recv")],
+        endpoints_to_add=[ep_sample],
+    )
+    with (
+        patch.object(fi, "delete_snippet", side_effect=RuntimeError("gone")),
+        patch.object(fi, "delete_backend", side_effect=RuntimeError("gone")),
+        patch.object(fi, "delete_dictionary", side_effect=RuntimeError("gone")),
+        patch("backend.core.fastly.client.ensure_condition"),
+        patch.object(fi, "create_or_update_dictionary", side_effect=RuntimeError("dict err")),
+        patch.object(fi, "create_or_update_snippet", side_effect=RuntimeError("snip err")),
+        patch.object(fi, "create_or_update_logging_endpoint", side_effect=RuntimeError("ep err")),
+    ):
+        fi._apply_diff("svc1", "tok", 2, purge_diff, desired_endpoints=[ep_sample], status_cb=warn_msgs.append)
+    assert any("Failed to install logging endpoint" in m for m in warn_msgs)
+
+    with patch.object(fi, "create_or_update_backend", side_effect=RuntimeError("backend err")):
+        with pytest.raises(RuntimeError, match="backend err"):
+            fi._apply_diff(
+                "svc1",
+                "tok",
+                2,
+                DiffResult(backends_to_add=[b_from_cert]),
+                status_cb=warn_msgs.append,
+            )
+
+    # 3. CDN reconcile up-to-date early exit, activate=False, and VclValidationError rollback message
+    sid = "srv_cdn_edges"
+    (mock_config_dir / f"{sid}.json").write_text(
+        json.dumps(
+            {
+                "service_id": sid,
+                "fos_bucket": "bkt",
+                "fos_region": "us-east-1",
+                "fos_access_key_id": "AKIA",
+                "fos_secret_access_key": "SK",
+                "cdn_service_id": "cdn_1",
+                "cdn_url": "https://cdn-edges.global.ssl.fastly.net",
+                "cdn_secret": "sec",
+            }
+        )
+    )
+    matching_snips = [VCLSnippet(name=n, subroutine=st, body=c, priority=pr) for n, st, c, pr in _CDN_SNIPPETS]
+    matching_bk = [
+        Backend(
+            name="fos_origin",
+            address="us-east-1.object.fastlystorage.app",
+            port=443,
+            ssl_check_cert=True,
+            ssl_hostname="us-east-1.object.fastlystorage.app",
+            use_ssl=True,
+            override_host="us-east-1.object.fastlystorage.app",
+            auto_loadbalance=False,
+            shield="iad-va-us",
+            connect_timeout=5000,
+            first_byte_timeout=60000,
+            between_bytes_timeout=30000,
+            ssl_cert_hostname="us-east-1.object.fastlystorage.app",
+            ssl_sni_hostname="us-east-1.object.fastlystorage.app",
+        )
+    ]
+    matching_dicts = [
+        ServiceDictionary(
+            name="fos_credentials",
+            write_only=True,
+            items={"access_key": "AKIA", "secret_key": "SK", "bucket": "bkt", "region": "us-east-1"},
+        ),
+        ServiceDictionary(name="cdn_auth", write_only=True, items={"secret_key": "sec", "secret": "sec"}),
+    ]
+    with (
+        patch.object(orch_mod, "_fetch_snippets", return_value=matching_snips),
+        patch.object(orch_mod, "_fetch_backends", return_value=matching_bk),
+        patch.object(orch_mod, "_fetch_dictionaries", return_value=matching_dicts),
+        patch.object(fi, "fetch_active_version", return_value=5),
+        patch.object(orch_mod, "fastly", return_value={"content": load_vcl(rate_limiting=True)}),
+    ):
+        noop_res = reconcile_cdn_service_state(sid, "tok", status_cb=warn_msgs.append)
+    assert noop_res.activated_version == 5
+
+    with (
+        patch.object(orch_mod, "_fetch_snippets", return_value=[]),
+        patch.object(orch_mod, "_fetch_backends", return_value=[]),
+        patch.object(orch_mod, "_fetch_dictionaries", return_value=[]),
+        patch.object(fi, "fetch_active_version", return_value=5),
+        patch.object(orch_mod, "fastly", return_value={"content": ""}),
+        patch.object(orch_mod, "_clone_active_version", return_value=6),
+        patch.object(orch_mod, "_apply_diff"),
+        patch.object(orch_mod, "_validate_draft", return_value=None),
+    ):
+        no_act = reconcile_cdn_service_state(sid, "tok", activate=False, status_cb=warn_msgs.append)
+    assert no_act.draft_version == 6 and no_act.activated_version is None
+
+    with (
+        patch.object(orch_mod, "_fetch_snippets", return_value=[]),
+        patch.object(orch_mod, "_fetch_backends", return_value=[]),
+        patch.object(orch_mod, "_fetch_dictionaries", return_value=[]),
+        patch.object(fi, "fetch_active_version", return_value=5),
+        patch.object(orch_mod, "fastly", return_value={"content": ""}),
+        patch.object(orch_mod, "_clone_active_version", return_value=7),
+        patch.object(orch_mod, "_apply_diff"),
+        patch.object(orch_mod, "_validate_draft", return_value="bad cdn vcl"),
+    ):
+        with pytest.raises(VclValidationError):
+            reconcile_cdn_service_state(sid, "tok", status_cb=warn_msgs.append)
+
+    # 4. Bootstrap when config missing + reconcile_infrastructure dry_run / missing-config guard
+    with (
+        patch.object(fi, "fetch_active_version", return_value=None),
+        patch.object(orch_mod, "_fetch_highest_version", return_value=None),
+    ):
+        boot_state = orch_mod._load_or_bootstrap_feature_state("srv_boot_missing", "tok", persist_bootstrap=True)
+    assert boot_state.service_id == "srv_boot_missing"
+
+    with (
+        patch.object(orch_mod, "build_desired_state"),
+        patch.object(orch_mod, "discover_current_state", return_value={}),
+    ):
+        reconcile_infrastructure("srv_unpersisted", "tok", dry_run=True, status_cb=warn_msgs.append)
+        with pytest.raises(RuntimeError, match="Configuration file"):
+            reconcile_infrastructure("srv_unpersisted", "tok", dry_run=False)
+
+
+@pytest.mark.no_postgres
+@pytest.mark.security_regression
+@pytest.mark.parametrize(
+    "err_msg",
+    [
+        "Fastly API error 401: Unauthorized",
+        "Fastly API error 403: Forbidden",
+        "Fastly API error 429: Too Many Requests",
+        "Fastly API error 500: Internal Server Error",
+    ],
+)
+def test_sec12_create_or_update_dictionary_reraises_non_404_errors(err_msg: str) -> None:
+    from backend.provision.declarative import fastly_ops
+
+    d = ServiceDictionary(name="cdn_auth", write_only=True, items={"secret_key": "s", "secret": "s"})
+    calls: list[tuple[str, str]] = []
+
+    def _fake_fastly(method: str, path: str, body=None, *, token: str, **_kw):
+        calls.append((method, path))
+        raise RuntimeError(err_msg)
+
+    with patch.object(fastly_ops, "fastly", side_effect=_fake_fastly):
+        with pytest.raises(RuntimeError, match=re.escape(err_msg)):
+            fastly_ops.create_or_update_dictionary("svc1", 2, d, "tok")
+
+    assert calls == [("GET", "/service/svc1/version/2/dictionary/cdn_auth")]
+
+
+@pytest.mark.no_postgres
+@pytest.mark.security_regression
+def test_sec12_create_or_update_dictionary_creates_only_on_404() -> None:
+    from backend.provision.declarative import fastly_ops
+
+    d = ServiceDictionary(name="cdn_auth", write_only=True, items={"secret_key": "s", "secret": "s"})
+    calls: list[tuple[str, str]] = []
+
+    def _fake_fastly(method: str, path: str, body=None, *, token: str, **_kw):
+        calls.append((method, path))
+        if method == "GET" and path == "/service/svc1/version/2/dictionary/cdn_auth":
+            raise RuntimeError("Fastly API error 404: Not Found")
+        if method == "POST" and path == "/service/svc1/version/2/dictionary":
+            return {"id": "dict_new", "name": "cdn_auth", "write_only": True}
+        if method == "PUT" and path.startswith("/service/svc1/dictionary/dict_new/item/"):
+            return {"item_key": "ok"}
+        raise AssertionError(f"Unexpected call: {method} {path}")
+
+    with patch.object(fastly_ops, "fastly", side_effect=_fake_fastly):
+        fastly_ops.create_or_update_dictionary("svc1", 2, d, "tok")
+
+    assert ("POST", "/service/svc1/version/2/dictionary") in calls
+
+
+@pytest.mark.no_postgres
+@pytest.mark.security_regression
+def test_sec15_log_fields_set_rejects_and_canonicalizes_system_custom_fields(mock_config_dir) -> None:
+    from fastapi.testclient import TestClient
+
+    from backend.main import app
+
+    sid = "svc_rum_lf_canon"
+    cfg_path = mock_config_dir / f"{sid}.json"
+    cfg_path.write_text(
+        json.dumps(
+            {
+                "service_id": sid,
+                "name": "RUM Canon Svc",
+                "log_period": 60,
+                "rum_enabled": True,
+                "rum": {"enabled": True},
+                "log_fields": {"schema_version": 2, "groups": ["A"], "custom_fields": []},
+            }
+        )
+    )
+
+    with (
+        patch("backend.core.metadata.base.export_admin_state"),
+        TestClient(app) as client,
+    ):
+        # 1. Tampered collection_stage or vcl_log_expression on rum_cid / edge_score / cmcd_sid rejected (422)
+        for tampered_cf in (
+            {"name": "rum_cid", "collection_stage": "deliver", "vcl_log_expression": "resp.http.Server"},
+            {"name": "rum_cid", "collection_stage": "deliver"},
+            {"name": "rum_cid", "vcl_log_expression": "req.http.X-Evil"},
+            {"name": "edge_score", "collection_stage": "edge"},
+            {"name": "cmcd_sid", "vcl_log_expression": "req.http.X-Evil"},
+        ):
+            r_bad = client.post(
+                f"/api/services/{sid}/log-fields",
+                json={"log_fields": {"groups": ["A"], "custom_fields": [tampered_cf]}},
+            )
+            assert r_bad.status_code == 422, f"Expected 422 for {tampered_cf}, got {r_bad.status_code}: {r_bad.text}"
+
+        # 2. Partial rum_cid entry (enabled=False + tampered metadata) is canonicalized before hash & persistence
+        r_partial = client.post(
+            f"/api/services/{sid}/log-fields",
+            json={
+                "log_fields": {
+                    "groups": ["A"],
+                    "custom_fields": [
+                        {
+                            "name": "rum_cid",
+                            "label": "Tampered Label",
+                            "sql_type": "DOUBLE",
+                            "enabled": False,
+                        }
+                    ],
+                }
+            },
+        )
+        assert r_partial.status_code == 200, r_partial.text
+        persisted = json.loads(cfg_path.read_text())
+        rum_entries = [cf for cf in persisted["log_fields"]["custom_fields"] if cf["name"] == "rum_cid"]
+        assert len(rum_entries) == 1
+        assert rum_entries[0]["collection_stage"] == "beacon"
+        assert rum_entries[0]["vcl_log_expression"] == "req.http.x-fos-edge-data:rum_cid"
+        assert rum_entries[0]["sql_type"] == "VARCHAR"
+        assert rum_entries[0]["label"] == "RUM Session ID"
+        assert rum_entries[0]["enabled"] is False
+
+        # 3. When RUM is disabled on the service, rum_* entries are stripped just like disabled CMCD/scoring
+        sid_off = "svc_rum_lf_off"
+        cfg_off_path = mock_config_dir / f"{sid_off}.json"
+        cfg_off_path.write_text(
+            json.dumps(
+                {
+                    "service_id": sid_off,
+                    "name": "RUM Off Svc",
+                    "log_period": 60,
+                    "rum_enabled": False,
+                    "log_fields": {"schema_version": 2, "groups": ["A"], "custom_fields": []},
+                }
+            )
+        )
+        r_off = client.post(
+            f"/api/services/{sid_off}/log-fields",
+            json={
+                "log_fields": {
+                    "groups": ["A"],
+                    "custom_fields": [
+                        {"name": "rum_cid", "enabled": True},
+                        {
+                            "name": "my_user_cf",
+                            "label": "User CF",
+                            "vcl_log_expression": "req.http.X-User",
+                            "collection_stage": "edge",
+                            "sql_type": "VARCHAR",
+                            "value_type": "string",
+                            "bytes_estimate": 20,
+                            "enabled": True,
+                        },
+                    ],
+                }
+            },
+        )
+        assert r_off.status_code == 200, r_off.text
+        persisted_off = json.loads(cfg_off_path.read_text())
+        assert [cf["name"] for cf in persisted_off["log_fields"]["custom_fields"]] == ["my_user_cf"]
+
+
+@pytest.mark.no_postgres
+@pytest.mark.security_regression
+def test_sec15_custom_fields_endpoints_protect_all_system_fields_and_list_cleanly_after_rum_toggle(
+    mock_config_dir,
+) -> None:
+    from fastapi.testclient import TestClient
+
+    from backend.main import app
+    from backend.provision import orchestrator
+
+    sid = "svc_rum_cf_endpoints"
+    cfg_path = mock_config_dir / f"{sid}.json"
+    cfg_path.write_text(
+        json.dumps(
+            {
+                "service_id": sid,
+                "name": "RUM CF Endpoints Svc",
+                "log_period": 60,
+                "rum_enabled": True,
+                "rum": {"enabled": True},
+                "log_fields": {"schema_version": 2, "groups": ["A"], "custom_fields": []},
+            }
+        )
+    )
+
+    with (
+        patch("backend.core.metadata.base.export_admin_state"),
+        patch("backend.provision.validate_log_format", return_value=[]),
+        patch("backend.core.fos_client.get_source_for_service", return_value=None),
+        TestClient(app, raise_server_exceptions=False) as client,
+    ):
+        r_set = client.post(
+            f"/api/services/{sid}/log-fields",
+            json={
+                "log_fields": {
+                    "groups": ["A"],
+                    "custom_fields": [
+                        {"name": "rum_cid", "sql_type": "VARCHAR", "enabled": False},
+                        {
+                            "name": "user_edge_cf",
+                            "label": "User Edge CF",
+                            "vcl_log_expression": "req.http.X-User",
+                            "collection_stage": "edge",
+                            "sql_type": "VARCHAR",
+                            "value_type": "string",
+                            "bytes_estimate": 25,
+                            "enabled": True,
+                        },
+                    ],
+                }
+            },
+        )
+        assert r_set.status_code == 200, r_set.text
+
+        r_list = client.get(f"/api/services/{sid}/custom-fields")
+        assert r_list.status_code == 200, f"GET /custom-fields failed with {r_list.status_code}: {r_list.text}"
+        assert [f["name"] for f in r_list.json()["fields"]] == ["user_edge_cf"]
+
+        r_export = client.get(f"/api/services/{sid}/custom-fields/export")
+        assert r_export.status_code == 200
+        assert [f["name"] for f in r_export.json()["custom_fields"]] == ["user_edge_cf"]
+
+        before_cfg = json.loads(cfg_path.read_text())
+
+        for sys_name in ("service_id", "rum_cid", "fastly_req_id", "rum_body", "edge_score", "cmcd_sid"):
+            r_post = client.post(
+                f"/api/services/{sid}/custom-fields",
+                json={
+                    "name": sys_name,
+                    "label": "Spoofed",
+                    "vcl_log_expression": "req.http.User-Agent",
+                    "collection_stage": "edge",
+                    "sql_type": "VARCHAR",
+                    "value_type": "string",
+                    "bytes_estimate": 30,
+                },
+            )
+            assert r_post.status_code == 422, f"POST {sys_name!r} returned {r_post.status_code}: {r_post.text}"
+
+            r_patch = client.patch(
+                f"/api/services/{sid}/custom-fields/{sys_name}",
+                json={"collection_stage": "edge", "vcl_log_expression": "req.http.User-Agent"},
+            )
+            assert r_patch.status_code == 422, f"PATCH {sys_name!r} returned {r_patch.status_code}: {r_patch.text}"
+
+            r_del = client.delete(f"/api/services/{sid}/custom-fields/{sys_name}")
+            assert r_del.status_code == 422, f"DELETE {sys_name!r} returned {r_del.status_code}: {r_del.text}"
+
+            r_imp = client.post(
+                f"/api/services/{sid}/custom-fields/import",
+                json={
+                    "custom_fields": [
+                        {
+                            "name": sys_name,
+                            "label": "Spoofed",
+                            "vcl_log_expression": "resp.http.Server",
+                            "collection_stage": "origin",
+                            "sql_type": "VARCHAR",
+                            "value_type": "string",
+                            "bytes_estimate": 30,
+                        }
+                    ]
+                },
+            )
+            assert r_imp.status_code == 422, f"IMPORT {sys_name!r} returned {r_imp.status_code}: {r_imp.text}"
+
+        assert json.loads(cfg_path.read_text()) == before_cfg
+
+    sid_ingest = "svc_rum_ingest_strip"
+    orchestrator.write_service_config(
+        {
+            "logging_service_id": sid_ingest,
+            "fos_bucket_name": "bucket-test",
+            "fos_region": "us-east-1",
+            "rum_enabled": True,
+            "log_fields": {
+                "groups": ["A"],
+                "custom_fields": [
+                    {"name": "rum_cid", "sql_type": "VARCHAR", "enabled": False},
+                    {
+                        "name": "user_kept_cf",
+                        "label": "User Kept",
+                        "vcl_log_expression": "req.http.X-Kept",
+                        "collection_stage": "edge",
+                        "sql_type": "VARCHAR",
+                        "value_type": "string",
+                        "bytes_estimate": 25,
+                    },
+                ],
+            },
+        }
+    )
+    ingested_cfg = json.loads((mock_config_dir / f"{sid_ingest}.json").read_text())
+    assert [cf["name"] for cf in ingested_cfg["log_fields"]["custom_fields"]] == ["user_kept_cf"]
+
+
+@pytest.mark.security_regression
+def test_sec15_declarative_rejects_exclude_url_regex_scoring_and_shield_breakouts():
+    """SEC-15 Wave 5: FeatureState and generate_consolidated_snippet reject scoring & shield VCL breakouts."""
+    breakout_regex = r'") { error 999; } if (req.url !~ "'
+    for bad_cfg in (
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "scoring": {"enabled": True, "domain": "scorer.edgecompute.app", "exclude_url_regex": breakout_regex},
+        },
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "scoring_enabled": True,
+            "scoring_domain": "scorer.edgecompute.app",
+            "scoring_exclude_url_regex": breakout_regex,
+        },
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "scoring": {
+                "enabled": True,
+                "domain": "scorer.edgecompute.app",
+                "request_secret": 'sec"; set req.http.X = "1',
+            },
+        },
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "scoring": {"enabled": True, "domain": 'scorer.edgecompute.app"; error 999; //'},
+        },
+        {
+            "service_id": 'svc"breakout',
+            "log_period": 60,
+            "scoring": {"enabled": True, "domain": "scorer.edgecompute.app"},
+        },
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "rum_enabled": True,
+            "cdn_shield": "iad); error 999; //",
+        },
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "rum_enabled": True,
+            "fos_region": "us-east-1); error 999; //",
+        },
+    ):
+        with pytest.raises(ValueError):
+            FeatureState.from_config(bad_cfg)
+
+    valid_state = FeatureState.from_config(
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "rum_enabled": True,
+            "fos_region": "us-east-1",
+            "cdn_shield": "iad-va-us",
+            "scoring": {
+                "enabled": True,
+                "domain": "scorer.edgecompute.app",
+                "request_secret": "hexsecret0123456789",  # gitleaks:allow
+                "exclude_url_regex": r"^/(?:health|metrics|static/)",
+            },
+        }
+    )
+    recv_vcl = generate_consolidated_snippet(valid_state, "vcl_recv")
+    assert r'std.tolower(req.url) !~ "^/(?:health|metrics|static/)"' in recv_vcl
+    assert "fastly.try_select_shield(ssl_shield_iad_va_us, F_fos_origin)" in recv_vcl
+
+    # Defense-in-depth at builder boundary even if FeatureState.__post_init__ is bypassed via object.__setattr__
+    tampered_scoring = ScoringConfig(enabled=True, domain="scorer.edgecompute.app")
+    object.__setattr__(tampered_scoring, "exclude_url_regex", breakout_regex)
+    object.__setattr__(valid_state, "scoring", tampered_scoring)
+    with pytest.raises(ValueError):
+        generate_consolidated_snippet(valid_state, "vcl_recv")
+
+
+@pytest.mark.security_regression
+def test_sec15_wave6_feature_state_type_safety_faro_and_shield_aliases():
+    """SEC-15 Wave 6: FeatureState handles null strings cleanly and raises ValueError on JSON type confusion & bad faro/shield aliases."""
+    # Benign null custom_condition and container nulls coalesce cleanly
+    null_state = FeatureState.from_config(
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "provisioning": None,
+            "cmcd": None,
+            "scoring": None,
+            "fos_proxy": None,
+            "custom_condition": None,
+            "rum": {"enabled": True, "custom_condition": None, "endpoint_name": "Custom RUM Logs"},
+            "faro_version": "2.9.0",
+        }
+    )
+    assert null_state.rum_enabled is True
+    assert null_state.custom_condition == ""
+    assert null_state.rum_custom_condition == ""
+    assert null_state.rum_endpoint_name == "Custom RUM Logs"
+    assert null_state.faro_version == "2.9.0"
+
+    shield_via_prov = FeatureState.from_config(
+        {"service_id": "svc1", "log_period": 60, "provisioning": {"cdn_shield": "bfi-wa-us"}}
+    )
+    assert shield_via_prov.cdn_shield == "bfi-wa-us"
+
+    shield_via_proxy = FeatureState.from_config(
+        {"service_id": "svc1", "log_period": 60, "fos_proxy": {"shield": "london-uk"}}
+    )
+    assert shield_via_proxy.cdn_shield == "london-uk"
+
+    for bad_fs in (
+        {"service_id": "svc1", "log_period": 60, "provisioning": ["bad"]},
+        {"service_id": "svc1", "log_period": 60, "rum": ["bad"]},
+        {"service_id": "svc1", "log_period": 60, "cmcd": 123},
+        {"service_id": "svc1", "log_period": 60, "scoring": "bad"},
+        {"service_id": "svc1", "log_period": 60, "fos_proxy": ["bad"]},
+        {"service_id": "svc1", "log_period": True},
+        {"service_id": "svc1", "log_period": []},
+        {"service_id": "svc1", "log_period": 60, "sample_rate": True},
+        {"service_id": "svc1", "log_period": 60, "provisioning": {"sample_rate": []}},
+        {"service_id": "svc1", "log_period": 60, "rum_log_period": []},
+        {"service_id": "svc1", "log_period": 60, "cmcd": {"enabled": True, "version": []}},
+        {"service_id": "svc1", "log_period": 60, "cmcd": {"enabled": True, "version": True}},
+        {"service_id": "svc1", "log_period": 60, "custom_condition": 123},
+        {"service_id": "svc1", "log_period": 60, "rum_enabled": True, "rum": {"custom_condition": 123}},
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "rum_enabled": True,
+            "rum_custom_condition": "",
+            "rum": {"custom_condition": 'req.http.Host != "x") { error 999; } if (true'},
+        },
+        {"service_id": "svc1", "log_period": 60, "rum_enabled": True, "rum": {"faro_version": '1.0.0"; error 999;'}},
+        {"service_id": "svc1", "log_period": 60, "rum_enabled": True, "faro_version": '1.0.0"; error 999;'},
+        {"service_id": "svc1", "log_period": 60, "rum_enabled": True, "faro_version": 123},
+        {"service_id": "svc1", "log_period": 60, "provisioning": {"cdn_shield": "iad); error 999;"}},
+        {"service_id": "svc1", "log_period": 60, "fos_proxy": {"shield": "iad); error 999;"}},
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "scoring": {"enabled": True, "domain": "a.example.com", "enforce_status_code": "bad"},
+        },
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "scoring": {"enabled": True, "domain": "a.example.com", "enforce_status_code": True},
+        },
+    ):
+        with pytest.raises(ValueError):
+            FeatureState.from_config(bad_fs)
+
+    # Direct __post_init__ checks
+    with pytest.raises(ValueError, match="faro_version"):
+        FeatureState("svc1", 60, 100, False, "", "", "fos.example.com", faro_version='1.0.0"; error 999;')
+    with pytest.raises(ValueError, match="enforce_status_code"):
+        FeatureState(
+            "svc1",
+            60,
+            100,
+            False,
+            "",
+            "",
+            "fos.example.com",
+            scoring=ScoringConfig(enabled=True, domain="a.example.com", enforce_status_code=True),  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.security_regression
+def test_sec15_wave7_feature_state_custom_fields_null_desc_and_type_confusion():
+    """SEC-15 Wave 7: FeatureState normalizes description=None and raises ValueError (never AttributeError/TypeError) on mistyped custom_fields."""
+    valid_cf_null_desc = {
+        "name": "my_cf",
+        "label": "My CF",
+        "description": None,
+        "vcl_log_expression": "req.http.X-My-Hdr",
+        "sql_type": "VARCHAR",
+        "value_type": "string",
+        "bytes_estimate": 24,
+    }
+    st_ok = FeatureState.from_config(
+        {"service_id": "svc1", "log_period": 60, "log_fields": {"custom_fields": [valid_cf_null_desc]}}
+    )
+    assert len(st_ok.log_fields.custom_fields) == 1
+    assert st_ok.log_fields.custom_fields[0]["description"] == ""
+
+    for bad_fs in (
+        {"service_id": "svc1", "log_period": 60, "custom_fields": "not-a-list"},
+        {"service_id": "svc1", "log_period": 60, "log_fields": {"custom_fields": False}},
+        {"service_id": "svc1", "log_period": 60, "rum_enabled": True, "custom_fields": ["not-a-dict"]},
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "scoring_enabled": True,
+            "scoring_domain": "s.example.com",
+            "custom_fields": [123],
+        },
+        {"service_id": "svc1", "log_period": 60, "log_fields": {"custom_fields": [{"name": ["unhashable"]}]}},
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "log_fields": {"custom_fields": [{"name": "my_cf", "vcl_log_expression": [1, 2]}]},
+        },
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "log_fields": {"custom_fields": [{"name": "my_cf", "vcl_log_expression": True}]},
+        },
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "log_fields": {"custom_fields": [{"name": "service_id", "vcl_log_expression": 123}]},
+        },
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "log_fields": {"custom_fields": [{**valid_cf_null_desc, "label": 123}]},
+        },
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "log_fields": {"custom_fields": [{**valid_cf_null_desc, "label": ["bad"]}]},
+        },
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "log_fields": {"custom_fields": [{**valid_cf_null_desc, "description": 123}]},
+        },
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "log_fields": {"custom_fields": [{**valid_cf_null_desc, "sql_type": ["VARCHAR"]}]},
+        },
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "log_fields": {"custom_fields": [{**valid_cf_null_desc, "bytes_estimate": True}]},
+        },
+    ):
+        with pytest.raises(ValueError):
+            FeatureState.from_config(bad_fs)
+
+    for bad_cfs in (
+        ["not-a-dict"],  # type: ignore[list-item]
+        [{"name": ["unhashable"]}],
+        [{"name": "my_cf", "vcl_log_expression": [1, 2]}],
+        [{"name": "my_cf", "collection_stage": ["edge"]}],
+    ):
+        with pytest.raises(ValueError):
+            FeatureState(
+                "svc1",
+                60,
+                100,
+                False,
+                "",
+                "",
+                "fos.example.com",
+                log_fields=LogFieldsConfig(custom_fields=bad_cfs),
+            )

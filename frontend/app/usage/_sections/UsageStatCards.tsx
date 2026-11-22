@@ -1,7 +1,8 @@
 'use client'
 
 import React, { useMemo } from 'react'
-import { flexRender, getCoreRowModel, useReactTable, type ColumnDef } from '@tanstack/react-table'
+import { flexRender, useTable } from '@tanstack/react-table'
+import { basicTableFeatures, type BasicColumnDef } from '@/lib/table'
 import { Database, DollarSign, HardDrive, Zap } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { StatCard } from '@/components/ui/confirm-dialog'
@@ -19,9 +20,13 @@ import {
   formatAbbreviatedCount,
   formatBytes,
   formatCount,
+  formatDuration,
   formatUSD,
 } from '@/lib/utils'
-import type { operations } from '@/types/api.generated'
+import type { ComputeUsageResponse } from '@/lib/cloud-engine/usage/computeSeries'
+import type { components, operations } from '@/types/api.generated'
+
+const formatVcpu = (ms: number) => (ms < 1000 ? `${Math.round(ms)}ms` : formatDuration(ms / 1000))
 
 export type StorageUsageData =
   operations['usage_current_storage_api_usage_current_storage_get']['responses'][200]['content']['application/json']
@@ -33,16 +38,16 @@ export type BreakdownRow = {
   rowClassName?: string
 }
 
-const BREAKDOWN_COLUMNS: ColumnDef<BreakdownRow>[] = [
+const BREAKDOWN_COLUMNS: BasicColumnDef<BreakdownRow>[] = [
   { id: 'label', cell: ({ row }) => row.original.label },
   { id: 'value', cell: ({ row }) => <div className="text-right">{row.original.value}</div> },
 ]
 
 export function BreakdownTable({ rows }: { rows: BreakdownRow[] }) {
-  const table = useReactTable({
+  const table = useTable({
+    features: basicTableFeatures,
     data: rows,
     columns: BREAKDOWN_COLUMNS,
-    getCoreRowModel: getCoreRowModel(),
   })
   return (
     <Table className="mt-1 text-[11px] font-normal">
@@ -82,6 +87,8 @@ export function UsageStatCards({
   rateStorage,
   activeServiceId,
   onNavigateToAdmin,
+  compute,
+  platformStorage,
 }: {
   storage: StorageUsageData | undefined
   loadingStorage: boolean
@@ -100,14 +107,36 @@ export function UsageStatCards({
   rateStorage: number
   activeServiceId: string | null
   onNavigateToAdmin: (href: string) => void
+  /** Cloud only: Fastly Platform Metrics Compute for the range; logs are the fallback. */
+  compute?: ComputeUsageResponse
+  platformStorage?: components['schemas']['PlatformStorageUsage']
 }) {
+  const observedStorageGbHours =
+    platformStorage?.status === 'ok' ? platformStorage.gb_hours ?? null : null
+  const billedGbHours = observedStorageGbHours ?? storage?.total_billed_gb_hours ?? 0
+  const loadingLocalStorage = loadingStorage && observedStorageGbHours == null
   const roughCostA = (totalClassA / 1000) * rateA
   const roughCostB = (totalClassB / 1000) * rateB
-  const roughStorage = ((storage?.total_billed_gb_hours ?? 0) / 720) * rateStorage
+  const roughStorage = (billedGbHours / 720) * rateStorage
   const roughBandwidth = totalBwGB * rateEgress
   const roughTotal = roughCostA + roughCostB + roughStorage + roughBandwidth
   const fmtUSD = (n: number) => formatUSD(n, { subDollarDigits: 2 })
 
+  const loggedRequests = ((storage as Record<string, unknown> | undefined)?.compute_requests as number | undefined) ?? 0
+  const computeRow = useMemo(
+    () =>
+      compute?.source === 'fastly'
+        ? { source: 'fastly' as const, requests: compute.requests, vcpuMs: compute.vcpu_ms, billedMs: compute.billed_ms }
+        : loggedRequests > 0
+          ? {
+              source: 'logged' as const,
+              requests: loggedRequests,
+              vcpuMs: ((storage as Record<string, unknown>)?.compute_vcpu_ms as number) ?? 0,
+              billedMs: null,
+            }
+          : null,
+    [compute, loggedRequests, storage],
+  )
   const storageBreakdownRows = useMemo<BreakdownRow[]>(
     () => [
       {
@@ -231,13 +260,15 @@ export function UsageStatCards({
         label: <span>Storage:</span>,
         value: (
           <div className="flex flex-col items-end">
-            {errorStorage ? (
+            {errorStorage && observedStorageGbHours == null ? (
               <strong className="text-destructive">n/a</strong>
             ) : (
               <strong className="text-foreground">{fmtUSD(roughStorage)}</strong>
             )}
             <span className="text-[9px] uppercase tracking-tighter text-muted-foreground">
-              Rate: ${rateStorage}/GB
+              {observedStorageGbHours != null
+                ? 'Measured · Fastly Platform (account-wide)'
+                : `Rate: $${rateStorage}/GB`}
             </span>
           </div>
         ),
@@ -266,9 +297,36 @@ export function UsageStatCards({
           </div>
         ),
       },
+      ...(computeRow
+        ? [
+            {
+              id: 'compute',
+              label: <span>Compute &amp; vCPU:</span>,
+              value: (
+                <div className="flex flex-col items-end">
+                  <strong className="text-foreground">
+                    {formatAbbreviatedCount(computeRow.requests)} reqs
+                  </strong>
+                  <span className="text-[9px] uppercase tracking-tighter text-muted-foreground">
+                    vCPU: {formatVcpu(computeRow.vcpuMs)}
+                    {computeRow.billedMs != null && <> · billed: {formatVcpu(computeRow.billedMs)}</>}
+                    {' '}· KV: {formatAbbreviatedCount(((storage as Record<string, unknown>)?.kv_ops as number) ?? 0)}
+                  </span>
+                  <span
+                    className="text-[9px] uppercase tracking-tighter text-muted-foreground"
+                    data-testid="compute-source"
+                  >
+                    {computeRow.source === 'fastly' ? 'Fastly stats · KV logged' : 'logged'}
+                  </span>
+                </div>
+              ),
+            },
+          ]
+        : []),
     ],
     [
       errorStorage,
+      observedStorageGbHours,
       roughStorage,
       rateStorage,
       roughCostA,
@@ -277,6 +335,8 @@ export function UsageStatCards({
       rateBPer10k,
       roughBandwidth,
       rateEgress,
+      storage,
+      computeRow,
     ],
   )
 
@@ -290,21 +350,21 @@ export function UsageStatCards({
       <StatCard
         title="Storage Impact (Period)"
         value={
-          errorStorage ? (
+          errorStorage && observedStorageGbHours == null ? (
             <span className="text-muted-foreground">—</span>
           ) : (
             <span className="text-green-600">
-              {(storage?.total_billed_gb_hours ?? 0).toFixed(2)} GB-hrs
+              {billedGbHours.toFixed(2)} GB-hrs
             </span>
           )
         }
         sub={
           <div className="min-h-[96px]">
-            {errorStorage ? (
+            {errorStorage && observedStorageGbHours == null ? (
               <span role="alert" className="text-[11px] text-destructive">
                 Failed to load storage usage.
               </span>
-            ) : loadingStorage ? (
+            ) : loadingLocalStorage ? (
               <div className="flex flex-col gap-1.5 mt-2">
                 <Skeleton className="h-3 w-full" />
                 <Skeleton className="h-3 w-full" />
@@ -315,7 +375,7 @@ export function UsageStatCards({
           </div>
         }
         icon={HardDrive}
-        loading={loadingStorage}
+        loading={loadingLocalStorage}
         tooltip="Estimated minimum billed storage hours for objects created in this period."
       />
       <StatCard
@@ -373,7 +433,7 @@ export function UsageStatCards({
         value={fmtUSD(roughTotal)}
         sub={
           <div className="min-h-[96px]">
-            {loadingOps || loadingStorage || loadingBw ? (
+            {loadingOps || loadingLocalStorage || loadingBw ? (
               <div className="flex flex-col gap-1.5 mt-2">
                 <Skeleton className="h-3 w-full" />
                 <Skeleton className="h-3 w-full" />
@@ -382,7 +442,7 @@ export function UsageStatCards({
             ) : (
               <div>
                 <BreakdownTable rows={costBreakdownRows} />
-                {errorStorage && (
+                {errorStorage && observedStorageGbHours == null && (
                   <div role="alert" className="text-[10px] text-destructive mt-0.5">
                     Partial estimate — storage cost excluded.
                   </div>
@@ -392,7 +452,7 @@ export function UsageStatCards({
           </div>
         }
         icon={DollarSign}
-        loading={loadingOps || loadingStorage || loadingBw}
+        loading={loadingOps || loadingLocalStorage || loadingBw}
         tooltip="Total estimated cost incurred for the selected period (Storage, Ops, Egress). Note: Operations are account-wide totals."
       />
     </div>

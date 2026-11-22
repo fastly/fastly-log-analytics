@@ -37,8 +37,39 @@ export function oneOf<T extends string>(allowed: readonly T[], value: string | n
 
 export const IP_FAMILY_FIELDS = ['ip', 'client_ip', 'ip_address', 'remote_addr'] as const
 
+export const SHARED_PII_FIELDS = [
+  'ip',
+  'client_ip',
+  'c_ip',
+  'ip_address',
+  'remote_addr',
+  'oip',
+  'x-forwarded-for',
+  'x_forwarded_for',
+  'true-client-ip',
+  'true_client_ip',
+  'fastly-client-ip',
+  'fastly_client_ip',
+  'cookie_session',
+  'cid',
+  'client_id',
+  'edge_sid',
+  'sid',
+  'session_id',
+] as const
+
+const PII_RESTRICTED_FIELD_SET = new Set<string>([
+  ...SHARED_PII_FIELDS,
+  'origin_ip',
+  'xff',
+  'cmcd_sid',
+  'cmcd_cid',
+  'cmcd_session',
+])
+
 export function isIpFamilyField(column: string): boolean {
-  return (IP_FAMILY_FIELDS as readonly string[]).includes(column)
+  if (typeof column !== 'string') return false
+  return PII_RESTRICTED_FIELD_SET.has(column.trim().toLowerCase())
 }
 
 export const ACTIVE_SERVICE_COOKIE = 'fla.activeServiceId'
@@ -53,7 +84,7 @@ export function setActiveServiceCookie(serviceId: string | null) {
 
 export const ACTIVE_WINDOW_MS = 120_000
 const MOUSE_THROTTLE_MS = 1_000
-let lastInteractionAt = typeof window !== 'undefined' ? Date.now() : 0
+let lastInteractionAt = globalThis.window ? Date.now() : 0
 let lastThrottledBump = 0
 let listenersAttached = false
 
@@ -68,24 +99,25 @@ function bumpThrottled() {
 }
 
 function ensureListeners() {
-  if (listenersAttached || typeof window === 'undefined' || typeof window.addEventListener !== 'function') return
+  const browserWindow = globalThis.window
+  if (listenersAttached || !browserWindow || typeof browserWindow.addEventListener !== 'function') return
   listenersAttached = true
-  window.addEventListener('mousemove', bumpThrottled, { passive: true })
-  window.addEventListener('wheel', bumpThrottled, { passive: true })
-  window.addEventListener('keydown', bump)
-  window.addEventListener('pointerdown', bump, { passive: true })
-  window.addEventListener('touchstart', bump, { passive: true })
+  browserWindow.addEventListener('mousemove', bumpThrottled, { passive: true })
+  browserWindow.addEventListener('wheel', bumpThrottled, { passive: true })
+  browserWindow.addEventListener('keydown', bump)
+  browserWindow.addEventListener('pointerdown', bump, { passive: true })
+  browserWindow.addEventListener('touchstart', bump, { passive: true })
 }
 ensureListeners()
 
 export function msSinceLastInteraction(): number {
-  if (typeof window === 'undefined') return 0
+  if (!globalThis.window) return 0
   ensureListeners()
   return Date.now() - lastInteractionAt
 }
 
 export function isUserActive(windowMs: number = ACTIVE_WINDOW_MS): boolean {
-  if (typeof window === 'undefined') return true
+  if (!globalThis.window) return true
   ensureListeners()
   return Date.now() - lastInteractionAt < windowMs
 }
@@ -324,8 +356,9 @@ export interface InsightSectionGroup<T> {
 
 export function groupInsightsBySection<T extends SectionableInsight>(
   cards: readonly T[],
-  options?: { includeAll?: boolean; includeEmptySections?: boolean },
+  options?: { includeAll?: boolean; includeEmptySections?: boolean; sort?: (cards: readonly T[]) => T[] },
 ): InsightSectionGroup<T>[] {
+  const sort = options?.sort ?? sortInsights
   const buckets = new Map<string, T[]>()
   for (const card of cards) {
     const key = categoryToSection(card.category).key
@@ -334,11 +367,11 @@ export function groupInsightsBySection<T extends SectionableInsight>(
     else buckets.set(key, [card])
   }
   const groups: InsightSectionGroup<T>[] = options?.includeAll
-    ? [{ section: ALL_SECTION, cards: sortInsights(cards) }]
+    ? [{ section: ALL_SECTION, cards: sort(cards) }]
     : []
   for (const section of [...INSIGHT_SECTIONS, OTHER_SECTION]) {
     const bucket = buckets.get(section.key)
-    if (bucket?.length) groups.push({ section, cards: sortInsights(bucket) })
+    if (bucket?.length) groups.push({ section, cards: sort(bucket) })
     else if (options?.includeEmptySections && section.key !== OTHER_SECTION.key) groups.push({ section, cards: [] })
   }
   return groups

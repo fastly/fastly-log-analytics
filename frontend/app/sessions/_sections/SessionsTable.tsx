@@ -1,7 +1,7 @@
 'use client'
 
 import React from 'react'
-import { ColumnDef } from '@tanstack/react-table'
+import type { ColumnDef } from '@/lib/table'
 import { AlertTriangle, Clock, ExternalLink, Film } from 'lucide-react'
 
 import { type LabelRow, type LabelValue } from '@/components/SessionScoring/ScoringAdminPanels'

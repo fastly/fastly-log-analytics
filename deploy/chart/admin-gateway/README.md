@@ -426,22 +426,10 @@ server CA trust setup before Playwright, and the frontend verifier gives the
 client certificate **only to the exact configured admin HTTPS origin**.
 It never sets `ignoreHTTPSErrors`.
 
-The canonical harness (`scripts/dev/deploy_test_all.sh`, a local-only script, gitignored and not in the public repo; a fresh clone will not have it)
-exposes gateway-only staged operations **after its pushed-HEAD check**:
-
-```sh
-scripts/dev/deploy_test_all.sh --admin-gateway-phase provision
-# Issue the server IP SAN/bundle explicitly on the operator machine.
-scripts/dev/deploy_test_all.sh --admin-gateway-phase gateway
-# After direct TLS/browser/server trust and all diagnostic callers are ready:
-ADMIN_GATEWAY_CALLERS_READY=1 scripts/dev/deploy_test_all.sh --admin-gateway-phase activate
-```
-
-Gateway and activation phases consume operator-local
-`REMOTE_HS_ADMIN_GATEWAY_HOST` and `REMOTE_HS_ADMIN_GATEWAY_CERT_DIR`.
-Phase-only operations do not claim complete canonical live acceptance; follow
-with the full approved canonical rollout/verification. Do not run ad-hoc
-cluster mutations in place of this harness for the canonical deployment.
+Use the operator's tracked deployment automation with the required gateway
+bundle, hostname, and client paths supplied from the local environment. Do not
+run ad-hoc cluster mutations in place of the approved rollout and verification
+workflow.
 
 Canonical standard deployment opts in through
 `LOCAL_STANDARD_ADMIN_MTLS=1` (local Compose overlays) or `GCE_ADMIN_MTLS=1`
@@ -508,12 +496,11 @@ Invoke standalone diagnostics from the repository root as modules:
 
 ```sh
 python3 -m scripts.dev.audit_environments --env remote-high-scale
-python3 -m scripts.dev.scale_harness --help
 python3 -m scripts.dev.measure_e2e_freshness --env remote-hs
 ```
 
 Existing direct-path invocations such as
-`uv run python scripts/dev/scale_harness.py --help` remain supported; each
+`uv run python scripts/dev/audit_environments.py --help` remain supported; each
 standalone dev script explicitly bootstraps the repository root for imports.
 
 The canonical harness now passes direct configured origins throughout commit

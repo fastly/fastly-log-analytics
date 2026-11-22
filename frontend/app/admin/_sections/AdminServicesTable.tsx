@@ -2,16 +2,20 @@
 import React, { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useRouter } from 'next/navigation'
-import { AlertCircle, Bot, ChevronDown, CloudDownload, Eraser, ExternalLink, Eye, KeyRound, Play, Plus, Settings, Settings2, Trash2 } from 'lucide-react'
-import type { ColumnDef } from '@tanstack/react-table'
+import { AlertCircle, Bot, ChevronDown, Eraser, ExternalLink, Eye, KeyRound, Play, Plus, RotateCcw, Settings, Settings2, Trash2 } from 'lucide-react'
+import type { ColumnDef } from '@/lib/table'
 import type { ServiceConfig } from '@/types/api'
-import { adminFetch, client, extractApiError, unwrapClient, queryKeys } from '@/lib/api'
-import { cn, downloadBlob, formatBytes, formatCount, panelDialogContent, panelDialogFooter, panelDialogHeaderSolid } from '@/lib/utils'
+import { client, extractApiError, unwrapClient, queryKeys } from '@/lib/api'
+import { IS_CLOUD_MODE, isCloudMode } from '@/lib/cloud-engine/mode'
+import { cn, formatCount, panelDialogContent, panelDialogFooter, panelDialogHeaderSolid } from '@/lib/utils'
+import { formatDuration } from '@/lib/format'
+import { SERVICE_DEFAULTS } from '@/lib/serviceDefaults'
 import { useMounted } from '@/hooks/useBootstrap'
 import { cronCacheBust } from '@/hooks/useSSE'
 import { useServiceStore } from '@/stores/filterStore'
 import { DataTableReadonly as DataTable } from '@/components/DataTable'
 import { ProvisionWizard } from '@/components/ProvisionWizard/ProvisionWizard'
+import { RestoreFromFosDialog } from '@/components/RestoreFromFosDialog'
 import { DeleteDataDialog, TeardownDialog } from '@/components/TeardownDialog'
 import { CronSettingsModal } from '@/components/CronSettingsModal/CronSettingsModal'
 import { LogSettingsModal } from '@/components/LogSettingsModal/LogSettingsModal'
@@ -64,35 +68,31 @@ function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceConfig>[
       cell: ({ row }) => <MonoExternalCell text={row.getValue('fos_bucket') as string} href="https://manage.fastly.com/resources/object-storage/buckets" title="View Object Storage in Fastly" />,
     },
     {
-      id: 'local_cache', accessorFn: (row) => row.duckdb_size_bytes, header: 'Local Cache', size: 180,
+      id: 'storage', accessorFn: (row) => row.log_row_count ?? 0, header: 'Storage', size: 180,
       cell: ({ row }) => {
-        const size = row.original.duckdb_size_bytes, files = row.original.cache_file_count || 0, rows = row.original.log_row_count || 0
-        if (!size) return <span className="text-xs text-muted-foreground italic">No cache</span>
+        const rows = row.original.log_row_count || 0
         return (
           <div className="flex flex-col gap-0.5">
-            <span className="font-mono text-xs tabular-nums text-muted-foreground">{formatBytes(size)}</span>
-            <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
-              <span className="flex items-center gap-1">
-                {formatCount(files)} file{files === 1 ? '' : 's'}
-                {files > 0 && (
-                  <Button variant="ghost" size="icon" aria-label="Download local cache as ZIP" className="h-4 w-4 p-0 ml-0.5 hover:bg-transparent text-muted-foreground hover:text-primary transition-colors" title="Download local cache as ZIP" onClick={(e) => {
-                    e.stopPropagation(); const sid = row.original.service_id
-                    void adminFetch(`/api/download-all?service_id=${encodeURIComponent(sid)}&include=local`).then(async (res) => { if (res.ok) downloadBlob(await res.blob(), `${sid}_local_cache.zip`) }).catch(() => {})
-                  }}><CloudDownload className="h-3 w-3" /></Button>
-                )}
-              </span>
-              <span>•</span><span>{formatCount(rows)} rows</span>
-            </div>
+            <span className="text-xs font-medium text-foreground">{IS_CLOUD_MODE ? 'FOS Parquet' : 'ClickHouse'}</span>
+            {!IS_CLOUD_MODE && <span className="text-[10px] text-muted-foreground tabular-nums">{formatCount(rows)} rows</span>}
           </div>
         )
       },
     },
     {
-      id: 'status', accessorFn: (row) => (row.cron_sync?.enabled ? 1 : 0), header: 'Cron Sync', size: 140,
+      id: 'status', accessorFn: (row) => (row.cron_sync?.enabled ? 1 : 0), header: IS_CLOUD_MODE ? 'Edge Clock' : 'Cron Sync', size: 140,
       cell: ({ row: { original: service } }) => (
         <div className="flex items-center gap-2">
-          {service.cron_sync?.enabled ? <Badge variant="success" className="shadow-none px-1.5 py-0 uppercase text-[10px] font-bold">Enabled</Badge> : <Badge variant="secondary" className="px-1.5 py-0 shadow-none uppercase text-[10px] font-bold">Disabled</Badge>}
-          <Button variant="ghost" size="icon" aria-label="Cron sync settings" className="h-6 w-6 hover:bg-muted cursor-pointer" onClick={() => setCronService(service)} title="Cron Sync Settings"><Settings className="h-3 w-3 text-muted-foreground" /></Button>
+          {IS_CLOUD_MODE ? (
+            <Badge variant="success" className="shadow-none px-1.5 py-0 uppercase text-[10px] font-bold" title="Ingest runs once per log period">
+              {formatDuration(Number(service.log_period) || SERVICE_DEFAULTS.logPeriodSeconds)} Tick
+            </Badge>
+          ) : (
+            <>
+              {service.cron_sync?.enabled ? <Badge variant="success" className="shadow-none px-1.5 py-0 uppercase text-[10px] font-bold">Enabled</Badge> : <Badge variant="secondary" className="px-1.5 py-0 shadow-none uppercase text-[10px] font-bold">Disabled</Badge>}
+              <Button variant="ghost" size="icon" aria-label="Cron sync settings" className="h-6 w-6 hover:bg-muted cursor-pointer" onClick={() => setCronService(service)} title="Cron Sync Settings"><Settings className="h-3 w-3 text-muted-foreground" /></Button>
+            </>
+          )}
         </div>
       ),
     },
@@ -108,8 +108,8 @@ function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceConfig>[
                 {isActive && <DropdownMenuItem disabled><Play className="mr-2 h-4 w-4" /> Active Service</DropdownMenuItem>}
                 <DropdownMenuItem onClick={() => setSettingsService(service)}><Settings2 className="mr-2 h-4 w-4" /> Log Settings</DropdownMenuItem>
                 {openRum && <DropdownMenuItem onClick={() => openRum(service)}><Eye className="mr-2 h-4 w-4" /> RUM Configuration</DropdownMenuItem>}
-                <DropdownMenuItem onClick={() => openNgwaf(service)}><Bot className="mr-2 h-4 w-4" /> NGWAF Config</DropdownMenuItem>
-                <DropdownMenuItem onClick={() => openCredentials(service)}><KeyRound className="mr-2 h-4 w-4" /> Rotate Key</DropdownMenuItem>
+                {!IS_CLOUD_MODE && <DropdownMenuItem onClick={() => openNgwaf(service)}><Bot className="mr-2 h-4 w-4" /> NGWAF Config</DropdownMenuItem>}
+                {!IS_CLOUD_MODE && <DropdownMenuItem onClick={() => openCredentials(service)}><KeyRound className="mr-2 h-4 w-4" /> Rotate Key</DropdownMenuItem>}
                 <DropdownMenuSeparator />
                 <DropdownMenuItem className="text-destructive focus:text-destructive focus:bg-destructive/10" onClick={() => setDeleteDataService(service)}><Eraser className="mr-2 h-4 w-4" /> Delete Data</DropdownMenuItem>
                 <DropdownMenuItem className="text-destructive focus:text-destructive focus:bg-destructive/10" onClick={() => setTeardownService(service)}><Trash2 className="mr-2 h-4 w-4" /> Teardown Service</DropdownMenuItem>
@@ -284,7 +284,9 @@ export function ServicesTable() {
   const [deleteDataService, setDeleteDataService] = useState<ServiceConfig | null>(null)
   const [credentialsService, setCredentialsService] = useState<ServiceConfig | null>(null)
   const [wizardOpen, setWizardOpen] = useState(false)
+  const [restoreOpen, setRestoreOpen] = useState(false)
   const [ngwafService, setNgwafService] = useState<ServiceConfig | null>(null)
+  const cloudMode = IS_CLOUD_MODE || isCloudMode()
 
   const openCredentials = React.useCallback((service: ServiceConfig) => setCredentialsService(service), [])
   const switchToService = React.useCallback((id: string) => {
@@ -316,7 +318,14 @@ export function ServicesTable() {
         <div className="flex items-center justify-between gap-4">
           <div className="flex items-center gap-4">
             <h2 className="text-xl font-semibold tracking-tight">Service Management</h2>
-            <Button size="sm" onClick={() => setWizardOpen(true)}><Plus className="h-4 w-4 mr-1" /> Add Service</Button>
+            {(!cloudMode || (services?.services?.length ?? 0) === 0) && (
+              <div className="flex items-center gap-2">
+                <Button size="sm" onClick={() => setWizardOpen(true)}><Plus className="h-4 w-4 mr-1" /> Add Service</Button>
+                <Button size="sm" variant="outline" data-testid="restore-from-fos-btn" onClick={() => setRestoreOpen(true)}>
+                  <RotateCcw className="h-4 w-4 mr-1" /> {cloudMode ? 'Recover from FOS' : 'Restore from FOS'}
+                </Button>
+              </div>
+            )}
           </div>
           <Button size="sm" variant="outline" data-testid="admin-overview-refresh-btn" onClick={handleRefreshAll} disabled={isFetching}>Refresh Status</Button>
         </div>
@@ -329,10 +338,18 @@ export function ServicesTable() {
           </Alert>
         )}
         <div data-testid="services-table-container" className={`border rounded-lg bg-card shadow-sm overflow-hidden min-h-[244px] transition-opacity ${isRefreshing ? 'opacity-40 pointer-events-none' : ''}`}>
-          <DataTable columns={columns} data={services?.services || []} isLoading={isLoading} searchKey="name" emptyMessage="No services yet" emptyHint="Add a service to get started." />
+          <DataTable columns={columns} data={services?.services || []} isLoading={isLoading} searchKey="name" emptyMessage="No services yet" emptyHint="Add a service or restore one from Fastly Object Storage." />
         </div>
       </div>
       <ProvisionWizard open={wizardOpen} onOpenChange={setWizardOpen} />
+      <RestoreFromFosDialog
+        open={restoreOpen}
+        onOpenChange={setRestoreOpen}
+        onRestored={(id) => {
+          setRestoreOpen(false)
+          switchToService(id)
+        }}
+      />
       {cronService && <CronSettingsModal service={cronService} open={!!cronService} onOpenChange={(open) => !open && setCronService(null)} />}
       {settingsService && <LogSettingsModal service={settingsService} open={!!settingsService} onOpenChange={(open) => !open && setSettingsService(null)} />}
       <TeardownDialog service={teardownService} open={!!teardownService} onOpenChange={(open) => !open && setTeardownService(null)} onComplete={() => {

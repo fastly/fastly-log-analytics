@@ -7,11 +7,15 @@ import { Activity as ActivityIcon } from 'lucide-react'
 import { useTheme } from 'next-themes'
 import { AnalyticsCard, useInViewOnce } from '@/components/AnalyticsCard'
 import { CostCalculator } from '@/components/CostCalculator/CostCalculator'
+import { CloudCostCalculator } from '@/components/CostCalculator/CloudCostCalculator'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
+import type { ComputeUsageResponse } from '@/lib/cloud-engine/usage/computeSeries'
+import type { MeasuredEstimate } from '@/lib/cloud-engine/usage/estimatePrefill'
 import { ReportLayout } from '@/components/ReportLayout'
 import { SkeletonGrid } from '@/components/ui/skeleton'
 import { useIsDataReady } from '@/hooks/useBootstrap'
 import type { ReportConfiguration } from '@/hooks/useDashboardCards'
-import { client, unwrapClient } from '@/lib/api'
+import { adminFetch, client, unwrapClient } from '@/lib/api'
 import type { ChartInterval } from '@/lib/utils'
 import { useServiceStore } from '@/stores/filterStore'
 import {
@@ -28,6 +32,8 @@ import {
   type BreakdownRow,
   type StorageUsageData,
 } from './UsageStatCards'
+import { PlatformUsageCards } from './PlatformUsageCards'
+import { GeographyCard } from './GeographyCard'
 
 export {
   FosOperationsHelp,
@@ -208,7 +214,7 @@ export function UsagePageContent({
   const estimatorRef = useRef<HTMLDivElement>(null)
   const estimatorVisible = useInViewOnce(estimatorRef, { rootMargin: '600px' })
 
-  const { data: prefillFull, isLoading: loadingPrefillFull } = useQuery({
+  const { data: prefillFull, isLoading: loadingPrefillFull, isError: prefillFullFailed } = useQuery({
     queryKey: ['usage', 'prefill-full', activeServiceId],
     queryFn: async ({ signal }) => {
       return unwrapClient(client.GET('/api/usage/prefill', { signal }))
@@ -217,7 +223,50 @@ export function UsagePageContent({
     staleTime: 5 * 60_000,
   })
 
+  const cloudMode = isCloudMode()
+
+  const {
+    data: platform,
+    isLoading: loadingPlatform,
+  } = useQuery({
+    queryKey: ['usage', 'platform', activeServiceId, startTime, endTime],
+    queryFn: async ({ signal }) => {
+      return unwrapClient(
+        client.GET('/api/usage/platform', {
+          signal,
+          params: { query: { start: startTime ?? undefined, end: endTime ?? undefined } },
+        }),
+      )
+    },
+    enabled: isReady,
+    staleTime: 60_000,
+  })
+  const observedStorageGbHours =
+    platform?.storage.status === 'ok' ? platform.storage.gb_hours ?? null : null
+
+  // One Platform Metrics read per range, shared by the cost card and both Compute charts.
+  const {
+    data: compute,
+    isLoading: loadingCompute,
+    isFetching: fetchingCompute,
+    error: errorCompute,
+  } = useQuery({
+    queryKey: ['usage', 'compute', activeServiceId, startTime, endTime],
+    queryFn: async ({ signal }): Promise<ComputeUsageResponse> => {
+      const params = new URLSearchParams()
+      if (startTime) params.set('start_time', startTime)
+      if (endTime) params.set('end_time', endTime)
+      const response = await adminFetch(`/api/usage/compute?${params}`, { signal })
+      if (!response.ok) throw new Error(`Compute usage failed (${response.status})`)
+      return response.json()
+    },
+    enabled: isReady && cloudMode,
+    staleTime: 60_000,
+  })
+
   const prefill = prefillFull ?? prefillRates
+  const cloudPrefill = cloudMode ? prefillFull as unknown as Partial<MeasuredEstimate> | undefined : undefined
+  const rateSettings = cloudMode ? cloudPrefill?.rates ?? prefillRates : prefill
   const loadingPrefill = !prefillRates && !prefillFull
 
   const isFetchingAny =
@@ -228,19 +277,30 @@ export function UsagePageContent({
   const totalClassB = ops?.total_class_b ?? 0
   const totalBwGB = (bw?.total_bytes ?? 0) / 1e9
 
-  const rateA = prefill?.class_a_rate_per_1k ?? 0.005
-  const rateBPer10k = prefill?.class_b_rate_per_10k ?? 0.01
+  const rateA = rateSettings?.class_a_rate_per_1k ?? 0.005
+  const rateBPer10k = rateSettings?.class_b_rate_per_10k ?? 0.01
   const rateB = rateBPer10k / 10
-  const rateEgress = prefill?.cdn_egress_rate_per_gb ?? 0.12
-  const rateStorage = prefill?.storage_rate_per_gb_month ?? 0.02
+  const rateEgress = rateSettings?.cdn_egress_rate_per_gb ?? 0.12
+  const rateStorage = rateSettings?.storage_rate_per_gb_month ?? 0.02
 
   const prefillNote =
-    prefill && !loadingPrefill
-      ? 'Calculator pre-filled from your current service configuration.'
+    prefill && !loadingPrefill && (prefillFull || prefillFullFailed)
+      ? prefillFull?.requests_per_day == null || (prefill.edge_only && prefillFull?.edge_requests_per_day == null)
+        ? 'Traffic measurements are unavailable; reference traffic assumptions are shown. Service configuration and rates are pre-filled where available.'
+        : 'Calculator pre-filled from your current service configuration.'
       : undefined
 
   return (
     <>
+      <PlatformUsageCards data={platform} loading={loadingPlatform} cloudMode={cloudMode} />
+
+      <GeographyCard
+        activeServiceId={activeServiceId}
+        startTime={startTime}
+        endTime={endTime}
+        enabled={isReady}
+      />
+
       <UsageStatCards
         storage={storage}
         loadingStorage={loadingStorage}
@@ -259,6 +319,8 @@ export function UsagePageContent({
         rateStorage={rateStorage}
         activeServiceId={activeServiceId}
         onNavigateToAdmin={(href) => router.push(href)}
+        compute={compute}
+        platformStorage={platform?.storage}
       />
 
       <UsageChartsGrid
@@ -287,6 +349,11 @@ export function UsagePageContent({
         rateEgress={rateEgress}
         effectiveInterval={config.effectiveInterval}
         setChartInterval={setChartInterval}
+        showCompute={cloudMode}
+        compute={compute}
+        loadingCompute={loadingCompute}
+        fetchingCompute={fetchingCompute}
+        errorCompute={errorCompute}
       />
 
       <div
@@ -295,14 +362,27 @@ export function UsagePageContent({
       >
         <AnalyticsCard
           title="Cost Estimator"
-          description="Estimate your monthly FOS cost based on your configuration and contract rates. Pre-filled from your active service and rate settings."
+          description={cloudMode
+            ? 'Estimate monthly Cloud Compute, storage, CDN and store costs from your service and contract rates.'
+            : 'Estimate your monthly FOS cost based on your configuration and contract rates. Pre-filled from your active service and rate settings.'}
         >
           {loadingPrefill || (estimatorVisible && loadingPrefillFull) ? (
             <div className="space-y-3">
               <SkeletonGrid count={4} height="36px" className="rounded-md" />
             </div>
+          ) : cloudMode ? (
+            <CloudCostCalculator
+              key={activeServiceId}
+              prefillData={cloudPrefill}
+              rates={prefillRates}
+              observedStorageGbHours={observedStorageGbHours}
+            />
           ) : (
-            <CostCalculator prefillData={prefill ?? undefined} prefillNote={prefillNote} />
+            <CostCalculator
+              prefillData={prefill ?? undefined}
+              prefillNote={prefillNote}
+              observedStorageGbHours={observedStorageGbHours}
+            />
           )}
         </AnalyticsCard>
       </div>

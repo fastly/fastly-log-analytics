@@ -4,9 +4,13 @@ import React, { useState } from 'react'
 import { TrendingUp } from 'lucide-react'
 import { useReportPageState, useAnalyticsReportQuery } from '@/hooks/useReportPageState'
 import { client, unwrapClient } from '@/lib/api'
+import type { RangeWire } from '@/lib/utils'
 import { ReportLayout } from '@/components/ReportLayout'
+import { readRollupMeta, RollupDataThroughSlot } from '@/components/network/rollupLabels'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { Skeleton } from '@/components/ui/skeleton'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
+import { hasFilterValues, VALUE_ROLLUP_SECTIONS } from '@/lib/cloud-engine/rollup-sections'
 import type { FiltersPayload } from '@/types/api'
 import { AssetsReportContent } from '@/app/assets-shield/_sections/AssetsClient'
 import {
@@ -26,6 +30,8 @@ import { IOValueTab } from './IOValueTab'
 
 export { OffloadAndCacheCharts, IOValueTab }
 
+type ValueSection = 'security' | 'caching' | 'bots' | 'performance' | 'network' | 'io' | 'overview'
+
 interface FastlyValueBodyProps {
   startTime: string | null
   endTime: string | null
@@ -40,33 +46,57 @@ function FastlyValueBody({ startTime, endTime, activeServiceId, filterPayload }:
     if (activeTab === 'summary') return [...SUMMARY_SECTIONS]
     if (activeTab === 'assets') return ['overview'] // dummy section, query disabled
     return [activeTab]
-  }, [activeTab]) as ('security' | 'caching' | 'bots' | 'performance' | 'network' | 'io' | 'overview')[]
+  }, [activeTab]) as ValueSection[]
+  // Cloud answers the VALUE_ROLLUP_SECTIONS from summaries when unfiltered; read them apart from any
+  // others so they paint without waiting on a raw scan.
+  const rollupFirst = isCloudMode() && !hasFilterValues(filterPayload)
+  const [rollupSections, rawSections] = React.useMemo(() => {
+    const servable = new Set<string>(VALUE_ROLLUP_SECTIONS)
+    const fromRollup = rollupFirst && activeTab !== 'assets' ? sections.filter((section) => servable.has(section)) : []
+    return [fromRollup, sections.filter((section) => !fromRollup.includes(section))]
+  }, [rollupFirst, activeTab, sections])
+  const split = rollupSections.length > 0
+  const range = { relativeRange, isAutoRange, startTime, endTime, anchor }
+  const postValue = (requested: ValueSection[], rangeBody: RangeWire['rangeBody'], signal: AbortSignal | undefined) =>
+    unwrapClient(
+      client.POST('/api/value/summary', {
+        signal,
+        body: {
+          filters: filterPayload,
+          chart_interval: '1 day',
+          sections: requested,
+          ...rangeBody,
+        },
+      }),
+    )
 
   const valueQuery = useAnalyticsReportQuery<ValueData | undefined>({
     namespace: ['value', 'summary'],
     serviceId: activeServiceId,
     filterPayload,
-    range: { relativeRange, isAutoRange, startTime, endTime, anchor },
-    keyParts: ['1 day', activeTab],
-    queryFn: async ({ rangeBody, signal }) => {
-      return unwrapClient(
-        client.POST('/api/value/summary', {
-          signal,
-          body: {
-            filters: filterPayload,
-            chart_interval: '1 day',
-            sections,
-            ...rangeBody,
-          },
-        }),
-      )
-    },
+    range,
+    keyParts: split ? ['1 day', activeTab, rawSections] : ['1 day', activeTab],
+    queryFn: ({ rangeBody, signal }) => postValue(rawSections, rangeBody, signal),
     queryOptions: {
-      enabled: activeTab !== 'assets',
+      enabled: activeTab !== 'assets' && rawSections.length > 0,
     },
   })
 
-  const data = valueQuery.data
+  const rollupQuery = useAnalyticsReportQuery<ValueData | undefined>({
+    namespace: ['value', 'summary', 'rollup'],
+    serviceId: activeServiceId,
+    filterPayload,
+    range,
+    keyParts: ['1 day', rollupSections],
+    queryFn: ({ rangeBody, signal }) => postValue(rollupSections, rangeBody, signal),
+    queryOptions: { enabled: split },
+  })
+
+  const firstQuery = split ? rollupQuery : valueQuery
+  const data = React.useMemo(
+    () => (split ? { ...valueQuery.data, ...rollupQuery.data } as ValueData : valueQuery.data),
+    [split, valueQuery.data, rollupQuery.data],
+  )
   const hasActiveSectionData =
     activeTab === 'summary'
       ? Boolean(data?.overview || data?.caching || data?.network)
@@ -83,11 +113,15 @@ function FastlyValueBody({ startTime, endTime, activeServiceId, filterPayload }:
                 : activeTab === 'io'
                   ? Boolean(data?.io)
                   : true
-  const loading = activeTab !== 'assets' && (valueQuery.isLoading || (valueQuery.isFetching && !hasActiveSectionData))
-  const refreshing = activeTab !== 'assets' && valueQuery.isFetching && hasActiveSectionData
+  const loading = activeTab !== 'assets' && (firstQuery.isLoading || (firstQuery.isFetching && !hasActiveSectionData))
+  const refreshing = activeTab !== 'assets' && (valueQuery.isFetching || rollupQuery.isFetching) && hasActiveSectionData
+  // On a split summary tab the caching cards wait on the raw scan while the overview cards paint.
+  const cachingLoading = split && rawSections.length > 0 && valueQuery.isLoading
+  const rollup = split ? readRollupMeta(rollupQuery.data) : undefined
 
   return (
     <div className="space-y-6">
+      <RollupDataThroughSlot reserve={split} meta={rollup} />
       <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as TabId)}>
         <TabsList className="flex flex-wrap h-auto gap-1">
           {TABS.map((tab) => (
@@ -120,19 +154,19 @@ function FastlyValueBody({ startTime, endTime, activeServiceId, filterPayload }:
           ) : (
             <div className={refreshing ? 'opacity-40 pointer-events-none transition-opacity' : 'transition-opacity'}>
               <TabsContent value="summary">
-                <SummaryValueTab data={data} loading={loading} />
+                <SummaryValueTab data={data} loading={loading} cachingLoading={cachingLoading} />
               </TabsContent>
               <TabsContent value="caching">
                 <CachingValueTab data={data?.caching} />
               </TabsContent>
               <TabsContent value="security">
-                <SecurityValueTab data={data?.security} />
+                <SecurityValueTab data={data?.security} rollup={rollup} />
               </TabsContent>
               <TabsContent value="bots">
-                <BotValueTab data={data?.bots} />
+                <BotValueTab data={data?.bots} rollup={rollup} />
               </TabsContent>
               <TabsContent value="performance">
-                <PerformanceValueTab data={data?.performance} />
+                <PerformanceValueTab data={data?.performance} rollup={rollup} />
               </TabsContent>
               <TabsContent value="network">
                 <NetworkValueTab data={data?.network} />
@@ -149,7 +183,7 @@ function FastlyValueBody({ startTime, endTime, activeServiceId, filterPayload }:
                 />
               </TabsContent>
               <TabsContent value="io">
-                <IOValueTab data={data?.io} loading={loading} />
+                <IOValueTab data={data?.io} loading={loading} rollup={rollup} />
               </TabsContent>
             </div>
           )}

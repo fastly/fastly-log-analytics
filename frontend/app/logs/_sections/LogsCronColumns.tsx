@@ -8,47 +8,32 @@ import { CopyButton } from '@/components/ui/confirm-dialog'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { LiveElapsed } from '@/components/SyncStatusBadge/SyncStatusBadge'
 import { DateTimeCell } from '@/components/DataTable'
-import type { ColumnDef } from '@tanstack/react-table'
+import type { ColumnDef } from '@/lib/table'
 import type { CronRun } from './useLogsPageState'
 import { CRON_DISPLAY_NAMES, CRON_EXPLANATIONS } from './LogsCronSchedule'
 
 const DASH_CELL = <span className="text-muted-foreground">—</span>
 const PROCESSING_CELL = <span className="font-mono text-muted-foreground text-xs italic">Processing...</span>
 const NO_FILES_TASKS = new Set([
-  'expire_snapshots',
-  'rollup_compact_daily',
-  'rollup_hour_heal',
   'metadata_cleanup',
   'insights_prewarmer',
-  'partial_hour_merge',
 ])
-const NO_ROWS_TASKS = new Set([...NO_FILES_TASKS, 'optimize', 'commit', 'rum_commit', 'local_compact'])
+const NO_ROWS_TASKS = new Set([...NO_FILES_TASKS])
 
 const COMMIT_CRON_COLUMNS: ColumnDef<CronRun>[] = [
   {
     accessorKey: 'files_deleted_fos',
     header: 'Log Files Deleted',
     cell: ({ row }) =>
-      row.original.status === 'running' || row.original.task !== 'log_discovery' ? (
+      row.original.status === 'running' ||
+      (row.original.task !== 'log_discovery' && row.original.task !== 'raw_delete') ||
+      (row.original.task === 'raw_delete' && row.original.files_deleted_fos == null) ? (
         DASH_CELL
       ) : (
         <span className="font-mono text-muted-foreground tabular-nums text-xs">
           {formatCount(row.original.files_deleted_fos || 0)}
         </span>
       ),
-  },
-  {
-    id: 'rows_committed',
-    header: 'Rows Committed',
-    cell: ({ row }) => {
-      if (row.original.status === 'running') return PROCESSING_CELL
-      const val = row.original.task === 'commit' ? row.original.rows_ingested : null
-      return (
-        <span className="font-mono text-muted-foreground tabular-nums text-xs">
-          {val != null ? formatCount(val) : DASH_CELL}
-        </span>
-      )
-    },
   },
 ]
 
@@ -140,15 +125,33 @@ export function useCronColumns(): ColumnDef<CronRun>[] {
           if (val === 'skipped') {
             return (
               <Badge variant="secondary" className="shadow-none px-1.5 py-0 uppercase text-[10px] font-bold">
-                No Alerts
+                {row.original.task === 'alerts' ? 'No Alerts' : 'Skipped'}
               </Badge>
             )
           }
           if (val === 'success' && (!corrupt_rows || corrupt_rows === 0)) {
-            return (
+            const success = (
               <Badge variant="success" className="shadow-none px-1.5 py-0 uppercase text-[10px] font-bold">
                 Success
               </Badge>
+            )
+            if (row.original.more_pending !== true) return success
+            return (
+              <div className="flex items-center gap-1.5">
+                {success}
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <Badge variant="outline" className="shadow-none px-1.5 py-0 text-[10px] text-muted-foreground" />
+                    }
+                  >
+                    More queued
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    <p>Stopped at its per-run budget with work left; continues on the next turn.</p>
+                  </TooltipContent>
+                </Tooltip>
+              </div>
             )
           }
           if (val === 'partial_success' || (val === 'success' && (corrupt_rows ?? 0) > 0)) {
@@ -213,32 +216,24 @@ export function useCronColumns(): ColumnDef<CronRun>[] {
         header: 'Files Processed',
         cell: ({ row }) => {
           if (row.original.status === 'running') return PROCESSING_CELL
-          const { task, files_downloaded, rows_ingested, parquet_files_optimized } = row.original
-          if (NO_FILES_TASKS.has(task) || ((task === 'commit' || task === 'rum_commit') && !rows_ingested)) {
+          const { task, files_downloaded } = row.original
+          if (files_downloaded == null && ('cron_kind' in row.original || task === 'cloud_ingest_clock')) return DASH_CELL
+          if (NO_FILES_TASKS.has(task)) {
             return DASH_CELL
           }
-          const count =
-            task === 'commit' || task === 'rum_commit'
-              ? 1
-              : task === 'optimize'
-                ? parquet_files_optimized || 0
-                : files_downloaded || 0
+          const count = files_downloaded || 0
           const label =
             task === 'alerts'
               ? count === 1
                 ? 'alert evaluated'
                 : 'alerts evaluated'
-              : task === 'commit' || task === 'rum_commit'
-                ? 'cloud file cached'
-                : task === 'optimize' || task === 'local_compact'
-                  ? 'files merged'
-                  : task === 'rum_sync' || task === 'rum_discovery'
-                    ? 'raw RUM logs'
-                    : task === 'ngwaf_sync'
-                      ? count === 1
-                        ? 'bot record'
-                        : 'bot records'
-                      : 'raw logs'
+              : task === 'rum_sync' || task === 'rum_discovery'
+                ? 'raw RUM logs'
+                : task === 'ngwaf_sync'
+                  ? count === 1
+                    ? 'bot record'
+                    : 'bot records'
+                  : 'raw logs'
           return (
             <span className="font-mono text-muted-foreground tabular-nums text-xs" title={label}>
               {formatCount(count)} <span className="text-[10px] text-muted-foreground">{label}</span>
@@ -252,6 +247,7 @@ export function useCronColumns(): ColumnDef<CronRun>[] {
         cell: ({ row }) => {
           if (row.original.status === 'running') return PROCESSING_CELL
           const { task, rows_ingested, corrupt_rows, error_message } = row.original
+          if (rows_ingested == null && ('cron_kind' in row.original || task === 'cloud_ingest_clock')) return DASH_CELL
           if (NO_ROWS_TASKS.has(task)) return DASH_CELL
           if (task === 'alerts') {
             const triggered = rows_ingested || 0

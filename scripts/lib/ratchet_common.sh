@@ -184,7 +184,7 @@ run_count_floor() {
   local floor="$1"
   local marker="${2:-security_regression}"
   local count
-  count=$(uv run pytest -m "$marker" --collect-only 2>/dev/null \
+  count=$({ uv run pytest -m "$marker" --collect-only 2>/dev/null || true; } \
     | grep -E "tests? collected" \
     | tail -1 \
     | sed -E 's|^([0-9]+)/.*|\1|')

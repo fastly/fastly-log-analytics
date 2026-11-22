@@ -1,0 +1,206 @@
+[
+  {
+    "end": 1800000900,
+    "file": "window=1800000000-1800000900-p1s0-n204.parquet",
+    "key": "processed/request/year=2027/month=01/day=15/hour=08/window=1800000000-1800000900-p1s0-n204.parquet",
+    "kind": "raw",
+    "rows": 204,
+    "size": 33792,
+    "start": 1800000000
+  },
+  {
+    "end": 1800000900,
+    "file": "summary=1800000000-1800000900-p1s0-n204.parquet",
+    "key": "processed/summary/request/year=2027/month=01/day=15/hour=08/summary=1800000000-1800000900-p1s0-n204.parquet",
+    "kind": "window",
+    "rows": 204,
+    "size": 54862,
+    "sources": 1,
+    "start": 1800000000
+  },
+  {
+    "end": 1800001800,
+    "file": "window=1800000900-1800001800-p1s0-n199.parquet",
+    "key": "processed/request/year=2027/month=01/day=15/hour=08/window=1800000900-1800001800-p1s0-n199.parquet",
+    "kind": "raw",
+    "rows": 199,
+    "size": 33525,
+    "start": 1800000900
+  },
+  {
+    "end": 1800001800,
+    "file": "summary=1800000900-1800001800-p1s0-n199.parquet",
+    "key": "processed/summary/request/year=2027/month=01/day=15/hour=08/summary=1800000900-1800001800-p1s0-n199.parquet",
+    "kind": "window",
+    "rows": 199,
+    "size": 54058,
+    "sources": 1,
+    "start": 1800000900
+  },
+  {
+    "end": 1800002700,
+    "file": "window=1800001800-1800002700-p1s0-n200.parquet",
+    "key": "processed/request/year=2027/month=01/day=15/hour=08/window=1800001800-1800002700-p1s0-n200.parquet",
+    "kind": "raw",
+    "rows": 200,
+    "size": 33507,
+    "start": 1800001800
+  },
+  {
+    "end": 1800002700,
+    "file": "summary=1800001800-1800002700-p1s0-n200.parquet",
+    "key": "processed/summary/request/year=2027/month=01/day=15/hour=08/summary=1800001800-1800002700-p1s0-n200.parquet",
+    "kind": "window",
+    "rows": 200,
+    "size": 53736,
+    "sources": 1,
+    "start": 1800001800
+  },
+  {
+    "end": 1800003600,
+    "file": "window=1800002700-1800003600-p1s0-n199.parquet",
+    "key": "processed/request/year=2027/month=01/day=15/hour=08/window=1800002700-1800003600-p1s0-n199.parquet",
+    "kind": "raw",
+    "rows": 199,
+    "size": 33464,
+    "start": 1800002700
+  },
+  {
+    "end": 1800003600,
+    "file": "summary=1800002700-1800003600-p1s0-n199.parquet",
+    "key": "processed/summary/request/year=2027/month=01/day=15/hour=08/summary=1800002700-1800003600-p1s0-n199.parquet",
+    "kind": "window",
+    "rows": 199,
+    "size": 53904,
+    "sources": 1,
+    "start": 1800002700
+  },
+  {
+    "end": 1800004500,
+    "file": "window=1800003600-1800004500-p1s0-n200.parquet",
+    "key": "processed/request/year=2027/month=01/day=15/hour=09/window=1800003600-1800004500-p1s0-n200.parquet",
+    "kind": "raw",
+    "rows": 200,
+    "size": 33503,
+    "start": 1800003600
+  },
+  {
+    "end": 1800004500,
+    "file": "summary=1800003600-1800004500-p1s0-n200.parquet",
+    "key": "processed/summary/request/year=2027/month=01/day=15/hour=09/summary=1800003600-1800004500-p1s0-n200.parquet",
+    "kind": "window",
+    "rows": 200,
+    "size": 53776,
+    "sources": 1,
+    "start": 1800003600
+  },
+  {
+    "end": 1800005400,
+    "file": "window=1800004500-1800005400-p1s0-n199.parquet",
+    "key": "processed/request/year=2027/month=01/day=15/hour=09/window=1800004500-1800005400-p1s0-n199.parquet",
+    "kind": "raw",
+    "rows": 199,
+    "size": 33571,
+    "start": 1800004500
+  },
+  {
+    "end": 1800005400,
+    "file": "summary=1800004500-1800005400-p1s0-n199.parquet",
+    "key": "processed/summary/request/year=2027/month=01/day=15/hour=09/summary=1800004500-1800005400-p1s0-n199.parquet",
+    "kind": "window",
+    "rows": 199,
+    "size": 53562,
+    "sources": 1,
+    "start": 1800004500
+  },
+  {
+    "end": 1800006300,
+    "file": "window=1800005400-1800006300-p1s0-n199.parquet",
+    "key": "processed/request/year=2027/month=01/day=15/hour=09/window=1800005400-1800006300-p1s0-n199.parquet",
+    "kind": "raw",
+    "rows": 199,
+    "size": 33540,
+    "start": 1800005400
+  },
+  {
+    "end": 1800006300,
+    "file": "summary=1800005400-1800006300-p1s0-n199.parquet",
+    "key": "processed/summary/request/year=2027/month=01/day=15/hour=09/summary=1800005400-1800006300-p1s0-n199.parquet",
+    "kind": "window",
+    "rows": 199,
+    "size": 53810,
+    "sources": 1,
+    "start": 1800005400
+  },
+  {
+    "end": 1800007200,
+    "file": "window=1800006300-1800007200-p1s0-n200.parquet",
+    "key": "processed/request/year=2027/month=01/day=15/hour=09/window=1800006300-1800007200-p1s0-n200.parquet",
+    "kind": "raw",
+    "rows": 200,
+    "size": 33520,
+    "start": 1800006300
+  },
+  {
+    "end": 1800007200,
+    "file": "summary=1800006300-1800007200-p1s0-n200.parquet",
+    "key": "processed/summary/request/year=2027/month=01/day=15/hour=09/summary=1800006300-1800007200-p1s0-n200.parquet",
+    "kind": "window",
+    "rows": 200,
+    "size": 53575,
+    "sources": 1,
+    "start": 1800006300
+  },
+  {
+    "end": 1800003600,
+    "file": "hour_bundle=08-c4-n802-hc5eae4c07a2da79c.parquet",
+    "key": "processed/summary_bundle/request/year=2027/month=01/day=15/hour_bundle=08-c4-n802-hc5eae4c07a2da79c.parquet",
+    "kind": "hour",
+    "rows": 802,
+    "size": 144617,
+    "sources": 4,
+    "start": 1800000000
+  },
+  {
+    "early": true,
+    "end": 1800003600,
+    "file": "hour_bundle=08-c3-n603-h6f68a2014fdd1f4f.parquet",
+    "key": "processed/summary_bundle/request/year=2027/month=01/day=15/hour_bundle=08-c3-n603-h6f68a2014fdd1f4f.parquet",
+    "kind": "hour",
+    "rows": 603,
+    "size": 140940,
+    "sources": 3,
+    "start": 1800000000
+  },
+  {
+    "end": 1800007200,
+    "file": "hour_bundle=09-c4-n798-h71377c093bda4c2d.parquet",
+    "key": "processed/summary_bundle/request/year=2027/month=01/day=15/hour_bundle=09-c4-n798-h71377c093bda4c2d.parquet",
+    "kind": "hour",
+    "rows": 798,
+    "size": 142528,
+    "sources": 4,
+    "start": 1800003600
+  },
+  {
+    "early": true,
+    "end": 1800007200,
+    "file": "hour_bundle=09-c3-n598-h2bed9d9201ad46ff.parquet",
+    "key": "processed/summary_bundle/request/year=2027/month=01/day=15/hour_bundle=09-c3-n598-h2bed9d9201ad46ff.parquet",
+    "kind": "hour",
+    "rows": 598,
+    "size": 139202,
+    "sources": 3,
+    "start": 1800003600
+  },
+  {
+    "end": 1800057600,
+    "file": "day_bundle=c2-n1600-h8f528b2c4a9f39e6.parquet",
+    "key": "processed/summary_bundle/request/year=2027/month=01/day=15/day_bundle=c2-n1600-h8f528b2c4a9f39e6.parquet",
+    "kind": "day",
+    "rows": 1600,
+    "size": 140634,
+    "sources": 8,
+    "start": 1799971200
+  }
+]

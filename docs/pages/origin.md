@@ -35,11 +35,21 @@ Routes in [`backend/routers/origin.py`](../../backend/routers/origin.py), models
 - `POST /api/origin/aggregates` (`OriginAggregatesResponse`): the page's single call. Request extends `RangeKeyedRequest` with `bucket_minutes`, `split_by_leg`, `timeseries_metric`, `timeseries_percentile`, `slow_urls_limit`, `slow_urls_min_requests`, `ip_health_limit`, `pop_latency_limit` and `sections` (any of `summary`, `timeseries`, `slow_urls`, `status_codes`, `path_breakdown`, `pop_latency`, `ip_health`). Requesting one of `timeseries` / `status_codes` / `path_breakdown`, or one of `pop_latency` / `ip_health`, pulls in the rest of its group (`_TS_STATUS_PATH_TRIPLE`, `_POP_IP_PAIR`).
 - Per-section endpoints (not called by the page): `/summary`, `/timeseries`, `/slow-urls`, `/status-codes`, `/path-breakdown`, `/pop-latency`, `/ip-health`, `/shielding-analysis`, `/drilldown`.
 
-Standard mode reads origin rollups (`origin_summary`, `origin_dims`, `origin_latency_ts`) on eligible unfiltered windows, otherwise scoped raw SQL; rollup-served percentile sections are weighted averages and set `_approx`.
+The ClickHouse reader ([`backend/high_scale/origin.py`](../../backend/high_scale/origin.py)) serves unfiltered requests from the per-minute origin projections, which carry a mergeable log-histogram sketch per percentile metric; sketches are merged across the window with `quantilesExactWeightedArray`, so percentiles are computed over the union of requests (relative error bounded by `RELATIVE_ERROR`, about 1%), counts stay exact, and percentile sections set `_approx` with an `_approx_note`. Minutes written before the sketch columns existed report `null` percentiles until rebuilt ([reader-parity backfill runbook](../runbooks/high-scale-reader-parity-backfill.md)). Any active filter reads `request_facts` with exact quantiles (`_approx: false`).
 
-High-scale mode ([`backend/high_scale/origin.py`](../../backend/high_scale/origin.py)): unfiltered requests read the per-minute origin projections, which carry a mergeable log-histogram sketch per percentile metric; sketches are merged across the window with `quantilesExactWeightedArray`, so percentiles are computed over the union of requests (relative error bounded by `RELATIVE_ERROR`, about 1%), counts stay exact, and percentile sections set `_approx` with an `_approx_note`. Minutes written before the sketch columns existed report `null` percentiles until rebuilt ([reader-parity backfill runbook](../runbooks/high-scale-reader-parity-backfill.md)). Any active filter reads `request_facts` with exact quantiles (`_approx: false`).
+## Cloud
+
+Unfiltered, the page sends the sections v3 summaries can answer as their own request ([`rollup-sections.ts`](../../frontend/lib/cloud-engine/rollup-sections.ts), [`origin-rollup.ts`](../../frontend/lib/cloud-engine/origin-rollup.ts)); the rest scan raw Parquet with exact percentiles. Any section the summaries can't match sends that whole request to the raw scan.
+
+- `status_codes`: exact, from the per-field origin status counts. Raw when those counts were cut to a top K.
+- `ip_health`: counts and error shares exact, p50/p95 ≈ from the IP's OTTFB or client TTFB histogram. Raw when an IP mixes the two or has rows without an origin status. Requests are shown as "≥ N" when the IP list was cut to a top K.
+- `timeseries`: TTFB or OTTLB, with or without the leg split, on whole 5-minute buckets that tile a day. Miss counts exact, percentiles ≈. TTFB and the split read the per-leg origin series (`COALESCE(ottfb, ttfb)` and OTTLB histograms); raw when a summary predates it.
+- `summary`: MISS/PASS counts and the origin 5xx rate exact; OTTFB, OTTLB, CDN overhead (`elapsed − ottlb`) and origin-bytes percentiles ≈, all over rows with an origin latency. Raw when the median CDN overhead falls among negative values, which the histogram can't place.
+- `slow_urls`: per-URL request counts exact, percentiles ≈, ranked by the histogram p95. Summaries keep each window's busiest 2,000 URLs (500 in day bundles); when the list was cut, request counts are lower bounds (the card's Approximate note says so) and the ranking is approximate.
+- `path_breakdown` and `pop_latency`: request counts per edge flag and per POP exact, percentiles ≈.
+- A section whose summary rows are missing (written before they existed) sends the request to the raw scan.
 
 ## Tests
 
-- Backend: [`tests/repositories/test_origin.py`](../../tests/repositories/test_origin.py), [`tests/routers/test_analytics_routers.py`](../../tests/routers/test_analytics_routers.py), [`tests/core/test_rollups_origin.py`](../../tests/core/test_rollups_origin.py)
+- Backend: [`tests/routers/test_analytics_routers.py`](../../tests/routers/test_analytics_routers.py), [`tests/high_scale/test_query_service.py`](../../tests/high_scale/test_query_service.py)
 - E2E: `Origin Page Contract` in [`frontend/e2e/pages/dashboard.spec.ts`](../../frontend/e2e/pages/dashboard.spec.ts)

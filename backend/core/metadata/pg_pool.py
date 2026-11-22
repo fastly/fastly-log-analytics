@@ -14,6 +14,7 @@ import re
 import sys
 import threading
 import weakref
+from collections.abc import Iterator
 from typing import Any
 
 import psycopg
@@ -110,8 +111,7 @@ def get_pg_pool() -> ConnectionPool:
         # back after the first sizing pass. 64 clears 40 + slack.
         #
         # Keep METADATA_PG_POOL_MAX * (backend + worker processes) below
-        # the server's max_connections (192 of 300 at this default), and
-        # remember DuckLake's own catalog connections share that budget.
+        # the server's max_connections (192 of 300 at this default).
         max_size = int(os.environ.get("METADATA_PG_POOL_MAX", "64"))
         min_size = min(int(os.environ.get("METADATA_PG_POOL_MIN", "2")), max_size)
         _pool = ConnectionPool(
@@ -124,6 +124,37 @@ def get_pg_pool() -> ConnectionPool:
         )
         setattr(sys.modules[__name__], "_pool", _pool)
     return _pool
+
+
+def close_pg_pool() -> None:
+    """Close the process pool and drop it, so the next ``get_pg_pool()`` opens a fresh one.
+
+    One-shot processes must call this before exiting: an unclosed pool's finalizer runs at
+    interpreter shutdown, when its worker threads can no longer stop, and waits 5 s for each.
+    The calling thread's connection is returned first; other threads' connections close as they
+    are returned.
+    """
+    global _pool
+    pool = _pool
+    if pool is None:
+        return
+    wrapper = getattr(_thread_local, "wrapper", None)
+    if wrapper is not None and wrapper._pool is pool:
+        release_pg_thread_connection()
+    _pool = None
+    setattr(sys.modules[__name__], "_pool", None)
+    pool.close()
+
+
+@contextlib.contextmanager
+def closing_pg_pool() -> Iterator[None]:
+    """Close the process pool on exit if this block opened it; one that already existed stays open."""
+    opened_here = _pool is None
+    try:
+        yield
+    finally:
+        if opened_here:
+            close_pg_pool()
 
 
 def reset_pg_pool_for_tests() -> None:

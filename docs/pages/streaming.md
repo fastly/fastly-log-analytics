@@ -27,10 +27,11 @@ Global range and filters apply, as on the other analytics pages (`ReportLayout`)
 
 `POST /api/cmcd/aggregates` ([`backend/routers/performance.py`](../../backend/routers/performance.py), models in [`backend/models/analytics/cmcd.py`](../../backend/models/analytics/cmcd.py)): `CmcdRequest` with `filters`, `bucket_seconds` (page sends 300), `top_n` (page sends 30), range fields, and optional `sections` from `overview`, `sessions_ts`, `buffer_health_ts`, `bitrate_ts`, `throughput_ts`, `top_content`, `rebuffer_by_country`, `rebuffer_by_asn`, `object_type_dist`, `streaming_format_dist`, `startup_ts`, `session_duration_dist`. Returns `CmcdAggregatesResponse` (`available`, `has_data`, each section).
 
-Standard mode computes the sections in one query runner over the request view ([`backend/repositories/cmcd.py`](../../backend/repositories/cmcd.py)). High-scale mode reads the `cmcd_projection_facts` table ([`backend/high_scale/cmcd.py`](../../backend/high_scale/cmcd.py)) with ClickHouse quantiles.
+The ClickHouse reader ([`backend/high_scale/cmcd.py`](../../backend/high_scale/cmcd.py)) computes the requested sections over the `cmcd_projection_facts` table with ClickHouse quantiles.
 
 ## Tests
 
 - Frontend unit: [`frontend/__tests__/app/usage-sessions-streaming.test.tsx`](../../frontend/__tests__/app/usage-sessions-streaming.test.tsx)
 - E2E: `Streaming (CMCD) Page Contract` in [`frontend/e2e/pages/dashboard.spec.ts`](../../frontend/e2e/pages/dashboard.spec.ts) (populated render, not-available state, accessibility and layout stability on a warm reload). The e2e dataset has no CMCD columns, so the isolated contract backend ([`scripts/run_contract_backend.py`](../../scripts/run_contract_backend.py)) serves a per-browser fixture when `CONTRACT_STREAMING_FIXTURES=1`.
-- Traffic: `scripts/dev/scale_harness.py` can send CMCD playback traffic (see its `--help`).
+- Traffic: the fdt-owned load harness sends CMCD playback traffic through the
+  `fla_video_cmcd` scenario (see [scripts/README.md](../../scripts/README.md)).

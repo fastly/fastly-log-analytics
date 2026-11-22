@@ -4,7 +4,7 @@ declare module '@tanstack/react-table' {
   // Column picker label shown instead of the (often JSX) header. The generics mirror the
   // library declaration so this merges into it.
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  interface ColumnMeta<TData extends RowData, TValue> {
+  interface ColumnMeta<in out TFeatures extends TableFeatures, in out TData extends RowData, TValue extends CellData = CellData> {
     label?: string
   }
 }

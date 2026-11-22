@@ -8,7 +8,7 @@ import { stubSystemTimeZone, stubResizeObserver, stubPointerCaptureAndScroll, re
 import { render, screen, act, cleanup, fireEvent, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, test, vi, beforeAll, beforeEach, afterEach } from 'vitest'
-import { http, HttpResponse } from 'msw'
+import { http, HttpResponse } from 'msw/http'
 import { axe } from 'vitest-axe'
 import { Server } from 'lucide-react'
 import { AppLayout } from '@/components/AppLayout'
@@ -25,6 +25,7 @@ import { useBootstrap } from '@/hooks/useBootstrap'
 import type { BootstrapResponse, InsightCardData } from '@/types/api'
 import { server } from '@/__tests__/helpers/msw/handlers'
 import { getApiBase } from '@/lib/api'
+import { setCloudModeRuntime } from '@/lib/cloud-engine/mode'
 import { usePathname, useRouter } from 'next/navigation'
 import React, { isValidElement } from 'react'
 
@@ -124,6 +125,68 @@ test('renders AppLayout with standard navigation', () => {
   expect(screen.getByText('Usage & Cost')).toBeInTheDocument()
 })
 
+test('renders RUM and Streaming on first paint from SSR capability props', () => {
+  vi.mocked(useBootstrap).mockReturnValue(partial<ReturnType<typeof useBootstrap>>({
+    data: undefined,
+    isLoading: true,
+    isSuccess: false,
+  }))
+
+  renderWithQueryClient(
+    <AppLayout
+      ssrActiveServiceId="svc-1"
+      ssrIsRumEnabled
+      ssrIsCmcdEnabled
+    >
+      <div>Content</div>
+    </AppLayout>,
+  )
+
+  expect(screen.getByRole('link', { name: /^RUM$/ })).toHaveAttribute('href', expect.stringMatching(/^\/rum(?:\?|$)/))
+  expect(screen.getByRole('link', { name: /^Streaming$/ })).toHaveAttribute('href', expect.stringMatching(/^\/streaming(?:\?|$)/))
+})
+
+test('does not wait for client bootstrap to hide disabled capability links', () => {
+  vi.mocked(useBootstrap).mockReturnValue(partial<ReturnType<typeof useBootstrap>>({
+    data: undefined,
+    isLoading: true,
+    isSuccess: false,
+  }))
+
+  renderWithQueryClient(
+    <AppLayout ssrActiveServiceId="svc-1" ssrIsRumEnabled={false} ssrIsCmcdEnabled={false}>
+      <div>Content</div>
+    </AppLayout>,
+  )
+
+  expect(screen.queryByRole('link', { name: /^RUM$/ })).not.toBeInTheDocument()
+  expect(screen.queryByRole('link', { name: /^Streaming$/ })).not.toBeInTheDocument()
+})
+
+test('client bootstrap refresh supersedes SSR capability props', () => {
+  vi.mocked(useBootstrap).mockReturnValue(partial<ReturnType<typeof useBootstrap>>({
+    data: partial<BootstrapData>({
+      services: [{
+        service_id: 'test-svc',
+        name: 'Test Service',
+        rum_enabled: false,
+        cmcd_enabled: false,
+      }],
+    }),
+    isLoading: false,
+    isSuccess: true,
+  }))
+
+  renderWithQueryClient(
+    <AppLayout ssrIsRumEnabled ssrIsCmcdEnabled>
+      <div>Content</div>
+    </AppLayout>,
+  )
+
+  expect(screen.queryByRole('link', { name: /^RUM$/ })).not.toBeInTheDocument()
+  expect(screen.queryByRole('link', { name: /^Streaming$/ })).not.toBeInTheDocument()
+})
+
 test('hides restricted items for analysts', async () => {
   const { useIsAnalyst } = await import('@/hooks/useBootstrap')
   vi.mocked(useIsAnalyst).mockReturnValue(true)
@@ -178,6 +241,48 @@ test('keeps anonymous visitors on sign-in before the analyst role hydrates', asy
   expect(screen.getByText('Analyst sign-in')).toBeInTheDocument()
   expect(replace).not.toHaveBeenCalled()
   expect(screen.queryByText('No services configured yet. Redirecting to the admin setup page.')).not.toBeInTheDocument()
+})
+
+describe('/how-it-works access', () => {
+  test('anonymous visitors read it without a sign-in redirect', () => {
+    vi.mocked(usePathname).mockReturnValue('/how-it-works')
+    const replace = vi.fn()
+    vi.mocked(useRouter).mockReturnValue({ ...useRouter(), replace })
+    vi.mocked(useBootstrap).mockReturnValue(partial<ReturnType<typeof useBootstrap>>({
+      data: partial<BootstrapData>({ services: [], settings: { needs_login: true } }),
+      isSuccess: true,
+      isLoading: false,
+    }))
+
+    renderWithQueryClient(<AppLayout><h1>How it works</h1></AppLayout>)
+    expect(screen.getByRole('heading', { level: 1, name: 'How it works' })).toBeInTheDocument()
+    expect(screen.queryByText('Sign in required. Redirecting to the sign-in page.')).not.toBeInTheDocument()
+    expect(replace).not.toHaveBeenCalled()
+  })
+
+  test('a signed-in install with no services yet still shows it instead of the setup redirect', () => {
+    vi.mocked(usePathname).mockReturnValue('/how-it-works')
+    const replace = vi.fn()
+    vi.mocked(useRouter).mockReturnValue({ ...useRouter(), replace })
+    vi.mocked(useBootstrap).mockReturnValue(partial<ReturnType<typeof useBootstrap>>({
+      data: partial<BootstrapData>({ services: [], settings: {} }),
+      isSuccess: true,
+      isLoading: false,
+    }))
+    act(() => { useServiceStore.setState({ activeServiceId: null, services: [] }) })
+
+    renderWithQueryClient(<AppLayout><h1>How it works</h1></AppLayout>)
+    expect(screen.getByRole('heading', { level: 1, name: 'How it works' })).toBeInTheDocument()
+    expect(replace).not.toHaveBeenCalledWith('/admin')
+  })
+
+  test('the sidebar links to it for analysts too', async () => {
+    const { useIsAnalyst } = await import('@/hooks/useBootstrap')
+    vi.mocked(useIsAnalyst).mockReturnValue(true)
+    renderWithQueryClient(<AppLayout><div>Content</div></AppLayout>)
+    expect(screen.getAllByRole('link', { name: /How it works/ })[0]).toHaveAttribute('href', expect.stringMatching(/^\/how-it-works/))
+    expect(screen.queryByRole('link', { name: /^Admin/ })).not.toBeInTheDocument()
+  })
 })
 
 describe('ReportShell', () => {
@@ -297,6 +402,24 @@ describe('StoreHydrator', () => {
   it('renders nothing (null)', () => {
     const { container } = render(<StoreHydrator />)
     expect(container.innerHTML).toBe('')
+  })
+
+  it('publishes the actual Cloud service selection and unsubscribes on unmount', () => {
+    setCloudModeRuntime(true)
+    const events: unknown[] = []
+    const listener = (event: Event) => events.push((event as CustomEvent).detail)
+    window.addEventListener('fla:cloud-service', listener)
+    try {
+      const { unmount } = render(<StoreHydrator />)
+      act(() => useServiceStore.setState({ activeServiceId: 'service-a' }))
+      act(() => useServiceStore.setState({ activeServiceId: 'service-b' }))
+      unmount()
+      act(() => useServiceStore.setState({ activeServiceId: 'service-c' }))
+      expect(events).toEqual([{ serviceId: null }, { serviceId: 'service-a' }, { serviceId: 'service-b' }])
+    } finally {
+      window.removeEventListener('fla:cloud-service', listener)
+      setCloudModeRuntime(false)
+    }
   })
 
   it('rehydrates serviceStore from localStorage after mount', async () => {

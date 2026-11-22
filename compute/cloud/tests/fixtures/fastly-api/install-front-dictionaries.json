@@ -1,0 +1,43 @@
+{
+  "provenance": "recorded authenticated GET of CLI-created install; redacted readback",
+  "recording_group": "install",
+  "recorded_at": "2026-10-28T23:24:48.558414+00:00",
+  "request": {
+    "method": "GET",
+    "path": "/service/INSTALL_FRONT_ID/version/1/dictionary"
+  },
+  "status": 200,
+  "redaction": "IDs consistently pseudonymized; fixed resource aliases preserved; identifying hosts/names/credentials removed; dictionary values never fetched",
+  "response": [
+    {
+      "name": "flp_fos_buckets",
+      "service_id": "INSTALL_FRONT_ID",
+      "id": "DICTIONARY_BUCKETS_ID",
+      "write_only": false,
+      "created_at": "2026-10-28T23:19:44Z",
+      "deleted_at": null,
+      "version": 1,
+      "updated_at": "2026-10-28T23:19:44Z"
+    },
+    {
+      "version": 1,
+      "updated_at": "2026-10-28T23:19:44Z",
+      "deleted_at": null,
+      "write_only": true,
+      "id": "DICTIONARY_CREDENTIALS_ID",
+      "created_at": "2026-10-28T23:19:44Z",
+      "name": "flp_fos_credentials",
+      "service_id": "INSTALL_FRONT_ID"
+    },
+    {
+      "created_at": "2026-10-28T23:19:43Z",
+      "id": "DICTIONARY_FRONT_AUTH_ID",
+      "write_only": true,
+      "service_id": "INSTALL_FRONT_ID",
+      "name": "flp_front_auth",
+      "updated_at": "2026-10-28T23:19:43Z",
+      "version": 1,
+      "deleted_at": null
+    }
+  ]
+}

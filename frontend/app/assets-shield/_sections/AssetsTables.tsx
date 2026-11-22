@@ -3,7 +3,7 @@
 import React from 'react'
 import Link from 'next/link'
 import { AlertTriangle, HelpCircle, Loader2 } from 'lucide-react'
-import type { ColumnDef } from '@tanstack/react-table'
+import type { ColumnDef } from '@/lib/table'
 import { DataTableReadonly } from '@/components/DataTable'
 import { formatBytes, formatCount } from '@/lib/utils'
 import type { components } from '@/types/api.generated'

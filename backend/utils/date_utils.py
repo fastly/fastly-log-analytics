@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
+
+_HOUR_KEY_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{2}\Z")
+_DAY_KEY_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}\Z")
 
 
 def parse_iso_utc(s: str | None) -> datetime | None:
@@ -31,6 +35,8 @@ def parse_window(start: str | None, end: str | None) -> tuple[datetime, datetime
 
 def parse_hour_key_strict(s: str) -> datetime:
     """Parse a ``YYYY-MM-DD-HH`` hour partition key into a UTC datetime or raise ``ValueError``."""
+    if _HOUR_KEY_RE.fullmatch(s) is None:
+        raise ValueError(f"Invalid hour key: {s!r}")
     return datetime.strptime(s, "%Y-%m-%d-%H").replace(tzinfo=UTC)
 
 
@@ -44,6 +50,8 @@ def parse_hour_key(s: str) -> datetime | None:
 
 def parse_day_key_strict(s: str) -> datetime:
     """Parse a ``YYYY-MM-DD`` day partition key into a UTC datetime or raise ``ValueError``."""
+    if _DAY_KEY_RE.fullmatch(s) is None:
+        raise ValueError(f"Invalid day key: {s!r}")
     return datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=UTC)
 
 

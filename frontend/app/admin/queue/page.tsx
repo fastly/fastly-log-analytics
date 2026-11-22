@@ -4,7 +4,6 @@ import React from 'react'
 import { RefreshCw } from 'lucide-react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { client, unwrapClient, queryKeys } from '@/lib/api'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { PageHeader } from '@/components/ui/confirm-dialog'
@@ -13,11 +12,7 @@ import { useAdminEventStream } from '@/hooks/useSSE'
 import {
   type LedgerEntry,
   type LedgerStatusFilter,
-  type TrendBatch,
   InProcessSchedulesSection,
-  QueueDepthsAndQuarantineSection,
-  QueueTrendsSection,
-  QueueWorkersSection,
 } from './_sections/QueueOverviewPanels'
 import { IngestLedgerSection } from './_sections/QueueLedgerInspector'
 
@@ -64,35 +59,13 @@ export function QueueClient() {
     enabled: shouldInspectLedger,
   })
 
-  const {
-    data: trends,
-    isLoading: trendsLoading,
-    isFetching: trendsFetching,
-    isFetched: trendsFetched,
-    error: trendsError,
-    refetch: refetchTrends,
-  } = useQuery({
-    queryKey: queryKeys.admin.metricHistoryBatch('1h'),
-    queryFn: async ({ signal }) =>
-      (await unwrapClient(
-        client.GET('/api/admin/metric-history/batch', {
-          params: { query: { since: '1h' } },
-          signal,
-        }),
-      )) as TrendBatch,
-    refetchInterval: 60_000,
-  })
-
   const isStatusRefetching = isFetching && isFetched && !isLoading
-  const isTrendsRefetching = trendsFetching && trendsFetched && !trendsLoading
-  const isRefreshing =
-    isStatusRefetching || isTrendsRefetching || (ledgerFetching && !ledgerLoading)
+  const isRefreshing = isStatusRefetching || (ledgerFetching && !ledgerLoading)
 
   const handleRefresh = React.useCallback(() => {
     void refetch()
-    void refetchTrends()
     if (shouldInspectLedger) void refetchLedger()
-  }, [refetch, refetchTrends, refetchLedger, shouldInspectLedger])
+  }, [refetch, refetchLedger, shouldInspectLedger])
 
   const refreshLedgerAfterAction = React.useCallback(async () => {
     await Promise.all([
@@ -136,9 +109,7 @@ export function QueueClient() {
               },
             }),
           )
-          return `Requeued ${res.affected ?? 1} file for ingest retry${
-            res.dispatched ? ` (dispatched ${res.dispatched} to Celery)` : ''
-          }.`
+          return `Requeued ${res.affected ?? 1} file for ingest retry.`
         },
       ),
     [runLedgerAction],
@@ -176,9 +147,7 @@ export function QueueClient() {
             body: { status: bulkTargetStatus },
           }),
         )
-        return `Requeued ${res.affected ?? 0} file(s) for retry${
-          res.dispatched ? ` (dispatched ${res.dispatched} to Celery)` : ''
-        }.`
+        return `Requeued ${res.affected ?? 0} file(s) for retry.`
       }),
     [bulkTargetStatus, runLedgerAction],
   )
@@ -196,28 +165,7 @@ export function QueueClient() {
     [bulkTargetStatus, runLedgerAction],
   )
 
-  const isStandardMode =
-    data?.deployment_mode === 'standard' && !data?.broker_reachable
-  const queues = data?.queues
-    ? Object.entries(data.queues).sort((a, b) => a[0].localeCompare(b[0]))
-    : []
-  const activeWorkers = data?.workers?.active_tasks
-    ? Object.entries(data.workers.active_tasks)
-    : []
-  const workerCount = data?.workers?.count ?? 0
   const inprocessSchedules = data?.inprocess_schedules || []
-  const inprocessActiveRuns = data?.inprocess_active_runs || []
-  const standardIngestedFiles = data?.standard_ingest?.ingested_files ?? 0
-  const standardQuarantinedItems = data?.standard_ingest?.quarantined_items ?? 0
-
-  const queuePoints = trends?.series?.['celery_queue_depth'] ?? []
-  const workerPoints = trends?.series?.['celery_active_tasks'] ?? []
-  const latestQueue = queuePoints.length
-    ? queuePoints[queuePoints.length - 1].value
-    : null
-  const latestWorker = workerPoints.length
-    ? workerPoints[workerPoints.length - 1].value
-    : null
 
   return (
     <div className="grid gap-6 min-w-0 overflow-hidden" data-testid="admin-queue-client">
@@ -233,29 +181,6 @@ export function QueueClient() {
                 Inspecting scheduler &amp; ingest status...
               </span>
             </>
-          ) : (
-            <Badge
-              variant={data?.broker_reachable || isStandardMode ? 'outline' : 'secondary'}
-              data-testid="admin-queue-broker-badge"
-              className={
-                data?.broker_reachable
-                  ? 'text-emerald-600 dark:text-emerald-400 border-emerald-500/30'
-                  : isStandardMode
-                    ? 'text-sky-600 dark:text-sky-400 border-sky-500/30'
-                    : undefined
-              }
-            >
-              {data?.broker_reachable
-                ? 'Broker Reachable'
-                : isStandardMode
-                  ? 'Standard Mode · In-Process Scheduler'
-                  : 'Broker Unreachable / Standard Mode'}
-            </Badge>
-          )}
-          {!isStandardMode && data?.workers?.error ? (
-            <span className="text-xs text-amber-600 dark:text-amber-400 font-mono">
-              Inspect warning: {data.workers.error}
-            </span>
           ) : null}
           {error ? (
             <span role="alert" className="text-xs text-red-500">
@@ -276,48 +201,10 @@ export function QueueClient() {
         </Button>
       </div>
 
-      <QueueTrendsSection
-        isStandardMode={isStandardMode}
-        isLoading={isLoading}
-        isStatusRefetching={isStatusRefetching}
-        error={error}
-        standardIngestedFiles={standardIngestedFiles}
-        standardQuarantinedItems={standardQuarantinedItems}
-        inprocessSchedulesCount={inprocessSchedules.length}
-        inprocessActiveRunsCount={inprocessActiveRuns.length}
-        latestQueue={latestQueue}
-        queuePoints={queuePoints}
-        latestWorker={latestWorker}
-        workerPoints={workerPoints}
-        trendsLoading={trendsLoading}
-        isTrendsRefetching={isTrendsRefetching}
-        trendsError={trendsError}
-      />
-
-      <QueueDepthsAndQuarantineSection
-        isStandardMode={isStandardMode}
-        isLoading={isLoading}
-        isStatusRefetching={isStatusRefetching}
-        error={error}
-        standardQuarantinedItems={standardQuarantinedItems}
-        queues={queues}
-      />
-
-      <QueueWorkersSection
-        isStandardMode={isStandardMode}
-        isLoading={isLoading}
-        isStatusRefetching={isStatusRefetching}
-        error={error}
-        inprocessActiveRuns={inprocessActiveRuns}
-        workerCount={workerCount}
-        activeWorkers={activeWorkers}
-      />
-
       <IngestLedgerSection
         isLoading={isLoading}
         isStatusRefetching={isStatusRefetching}
         error={error}
-        deploymentMode={data?.deployment_mode}
         ledger={data?.ledger}
         ledgerFilter={ledgerFilter}
         setLedgerFilter={setLedgerFilter}
@@ -352,7 +239,7 @@ export default function AdminQueuePage() {
     <div className="space-y-6" data-testid="admin-queue-root">
       <PageHeader
         title="Queue & Workers"
-        description="Monitor background job schedules, active workers, queue depths, and dead-letter / quarantine state."
+        description="Monitor in-process job schedules and the ingest ledger's dead-letter / quarantine state."
       >
         <BackToAdminLink />
       </PageHeader>

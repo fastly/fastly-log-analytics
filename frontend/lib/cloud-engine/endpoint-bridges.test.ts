@@ -1,0 +1,596 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { renderHook, waitFor } from "@testing-library/react";
+import { createElement, type ReactNode } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { cloudStreamFetch, handleCloudAnalyticalRequest, resetCloudMetadataCache } from "./adapter";
+import { useBootstrap } from "@/hooks/useBootstrap";
+import { queryKeys } from "@/lib/api";
+import contract from "./cloud-openapi.json";
+import { cloudLoadingStore } from "./loading-progress";
+import { NATIVE_ROUTES, isNativeCloudRoute } from "./native-routes";
+import { ensureCloudRange } from "./range-loader";
+import { getDuckDBEngine } from "./dashboard/duckdb";
+import { sealSessionToken } from "./sessions";
+import { updateDashboardCacheIdentity } from "./dashboard/sources";
+import { cloudServiceStatus } from "./service-bridges";
+
+vi.mock("./range-loader", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./range-loader")>(),
+  ensureCloudRange: vi.fn(async () => getDuckDBEngine().readContext()),
+}));
+
+const nativeBootstrap = {
+  runtime_mode: "cloud",
+  user: { id: "fixture-user", display_name: "Fixture User", role: "admin" },
+  services: [{ service_id: "fixture-a", service_name: "Fixture A", active_log_field_ids: ["status"] }],
+  active_service_id: "fixture-a",
+  active_log_field_ids: ["status"],
+  log_fields_catalog: { groups: [], fields: [{ id: "status", label: "Status" }] },
+  views: [{ view_id: "view-1", name: "Errors", service_id: "fixture-a", state: {} }],
+  build_sha: "abc123",
+  ngwaf_configured: false,
+  fastly_bots_available: true,
+  settings: {
+    needs_login: false,
+    is_remote_analyst: false,
+    mask_ips: false,
+    initializing: false,
+  },
+  debug_state: {
+    query_debug_visibility: "disabled",
+    api_call_debug_visibility: "disabled",
+  },
+};
+
+function request(path: string, method = "GET", body?: unknown, serviceId?: string) {
+  return new Request(`http://localhost${path}`, {
+    method,
+    headers: { "content-type": "application/json", ...(serviceId ? { "x-service-id": serviceId } : {}) },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+}
+
+beforeEach(() => {
+  localStorage.clear();
+  cloudLoadingStore.reset();
+  vi.mocked(ensureCloudRange).mockImplementation(async () => getDuckDBEngine().readContext());
+});
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); cloudLoadingStore.reset(); resetCloudMetadataCache(); });
+
+describe("Cloud endpoint bridges", () => {
+  it("forwards native bootstrap exactly once without synthesizing auth or services", async () => {
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json(nativeBootstrap));
+    vi.stubGlobal("fetch", fetcher);
+
+    const response = await handleCloudAnalyticalRequest(
+      request("/api/bootstrap?service_id=fixture-b", "GET", undefined, "fixture-b"),
+    );
+
+    expect(await response?.json()).toEqual(nativeBootstrap);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher.mock.calls[0][0]).toBe("/api/bootstrap?service_id=fixture-b");
+    expect(fetcher.mock.calls[0][1]).toMatchObject({
+      credentials: "include",
+      headers: expect.any(Headers),
+      signal: expect.any(AbortSignal),
+    });
+    expect(new Headers(fetcher.mock.calls[0][1]?.headers).get("x-service-id")).toBe("fixture-b");
+  });
+
+  it("always refetches bootstrap so auth changes cannot reuse cached state", async () => {
+    let bootstrapCalls = 0;
+    const fetcher = vi.fn(async () => {
+      bootstrapCalls += 1;
+      return Response.json({
+        ...nativeBootstrap,
+        user: bootstrapCalls === 1
+          ? nativeBootstrap.user
+          : { id: "other-user", display_name: "Other", role: "admin" },
+      });
+    });
+    vi.stubGlobal("fetch", fetcher);
+
+    await handleCloudAnalyticalRequest(request("/api/bootstrap"));
+    const second = await handleCloudAnalyticalRequest(request("/api/bootstrap"));
+
+    expect(await second?.json()).toMatchObject({ user: { id: "other-user" } });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects a malformed successful native bootstrap instead of synthesizing a fallback", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({
+      runtime_mode: "cloud",
+      user: { id: "fixture-user", role: "admin" },
+    })));
+
+    await expect(
+      handleCloudAnalyticalRequest(request("/api/bootstrap")),
+    ).rejects.toThrow("Invalid Cloud bootstrap response");
+  });
+
+  it("invalidates bootstrap and services React Query metadata after a config mutation", async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    queryClient.setQueryData(queryKeys.bootstrap(), {
+      runtime_mode: "cloud",
+      user: { id: "fixture-user", role: "admin" },
+      services: [{ service_id: "fixture-a" }],
+      active_service_id: "fixture-a",
+    });
+    queryClient.setQueryData(queryKeys.services(), {
+      services: [{ service_id: "fixture-a" }],
+    });
+    const invalidateQueries = vi.spyOn(queryClient, "invalidateQueries");
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client: queryClient }, children);
+    renderHook(() => useBootstrap(), { wrapper });
+    invalidateQueries.mockClear();
+
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === "/api/admin/services/fixture-a" && init?.method === "PATCH") {
+        return Response.json({ service: { log_fields: {} }, generation: "generation-2" });
+      }
+      if (path === "/api/admin/services/fixture-a") {
+        return Response.json({ service: { log_fields: {} }, generation: "generation-1" });
+      }
+      return Response.json({
+        user: { id: "fixture-user", role: "admin" },
+        services: [{ service_id: "fixture-a" }],
+      });
+    }));
+
+    const response = await handleCloudAnalyticalRequest(request("/api/services/fixture-a/log-fields", "POST", {
+      log_fields: {},
+    }));
+    expect(response?.ok).toBe(true);
+
+    await waitFor(() => {
+      expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: queryKeys.bootstrap() });
+      expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: queryKeys.services() });
+    });
+  });
+
+  it("uses the native RUM default version without claiming an up-to-date SDK needs updating", async () => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL) =>
+      String(input) === "/api/services"
+        ? Response.json({ services: [{ service_id: "fixture-a", rum: { enabled: true, faro_version: "2.13.0" } }] })
+        : Response.json({ versions: ["2.13.0", "2.10.0"], default: "2.13.0" }),
+    );
+    vi.stubGlobal("fetch", fetcher);
+    expect(await (await cloudServiceStatus(request("/api/services/fixture-a/rum/versions")))!.json()).toEqual({
+      available: ["2.13.0", "2.10.0"], current: "2.13.0", latest: "2.13.0", update_available: false,
+    });
+    resetCloudMetadataCache();
+    fetcher.mockImplementation(async (input: RequestInfo | URL) =>
+      String(input) === "/api/services"
+        ? Response.json({ services: [{ service_id: "fixture-a", rum: { enabled: true, faro_version: "2.10.0" } }] })
+        : Response.json({ versions: ["2.13.0", "2.10.0"], default: "2.13.0" }),
+    );
+    expect(await (await cloudServiceStatus(request("/api/services/fixture-a/rum/versions")))!.json())
+      .toMatchObject({ current: "2.10.0", latest: "2.13.0", update_available: true });
+    resetCloudMetadataCache();
+    fetcher.mockImplementation(async () => Response.json({ error: "unauthorized" }, { status: 401 }));
+    expect((await cloudServiceStatus(request("/api/services/fixture-a/rum/versions")))!.status).toBe(401);
+  });
+
+  it("preserves native auth and rejects unsupported stream requests without network leakage", async () => {
+    const fetcher = vi.fn(async () => Response.json({ user: { id: "fixture-user" } }));
+    vi.stubGlobal("fetch", fetcher);
+    expect(await (await handleCloudAnalyticalRequest(request("/api/auth/session")))!.json())
+      .toEqual({ user: { id: "fixture-user" } });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect((await cloudStreamFetch("/api/auth/session")).status).toBe(200);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect((await cloudStreamFetch("/api/admin/unsupported", { method: "POST" })).status).toBe(501);
+    expect((await cloudStreamFetch("/api/admin/unsupported")).status).toBe(501);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it("bridges native quarantine pagination and refuses false healthy accounting", async () => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.includes("logged-traffic")) return Response.json({ from: 0, to: 86400, days: [] });
+      return Response.json({
+        complete: path.includes("cursor="), next_cursor: "fixture-next",
+        items: [{ key: path.includes("cursor=") ? "raw/rum/failure" : "raw/request/failure",
+          size: 12, status: "unreadable", reason: "invalid gzip", first_seen: "2026-01-01T00:00:00Z" }],
+      });
+    });
+    vi.stubGlobal("fetch", fetcher);
+    expect(await (await handleCloudAnalyticalRequest(request("/api/admin/quarantine/summary")))!.json())
+      .toMatchObject({ total_items: 2, total_bytes: 24, request_items: 1, rum_items: 1 });
+    expect(await (await handleCloudAnalyticalRequest(request("/api/admin/quarantine?offset=1&limit=1")))!.json())
+      .toMatchObject({ total: 2, items: [{ source_type: "rum", evidence_metadata_available: false }] });
+    expect(await (await handleCloudAnalyticalRequest(request("/api/admin/log-accounting")))!.json())
+      .toMatchObject({ available: false, measurement_basis: "native_sample_adjusted_daily" });
+    fetcher.mockImplementation(async () => Response.json({
+      from: 0, to: 86400, days: [{ day: 0, expected_rows: 100, ingested_rows: 80 }],
+    }));
+    expect(await (await handleCloudAnalyticalRequest(request("/api/admin/log-accounting")))!.json())
+      .toMatchObject({ by: "day", totals: { gap: 20, gap_pct: 0.2 } });
+  });
+
+  it("shows an accepted invite's last sign-in and each user's latest sign-in on the share page", async () => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/admin/invites") return Response.json({ invites: [
+        { id: "i-used", display_name: "Guest", role: "analyst", expires_at: "2026-01-08T00:00:00Z", revoked: false, used: true,
+          accepted_at: "2026-01-02T00:00:00Z", user_id: "u-guest", last_login_at: "2026-01-05T09:30:00Z" },
+        { id: "i-legacy", display_name: "Old", role: "analyst", expires_at: "2026-01-08T00:00:00Z", revoked: false, used: true,
+          accepted_at: "2026-01-03T00:00:00Z", user_id: null, last_login_at: null },
+        { id: "i-open", display_name: "Pending", role: "analyst", expires_at: "2026-01-08T00:00:00Z", revoked: false, used: false,
+          accepted_at: null, user_id: null, last_login_at: null },
+      ] });
+      if (path === "/api/admin/users") return Response.json({ users: [
+        { id: "u-guest", display_name: "Guest", role: "analyst", revoked: false, passkeys: [],
+          created_at: "2026-01-02T00:00:00Z", last_login_at: "2026-01-05T09:30:00Z" },
+        { id: "u-new", display_name: "New", role: "analyst", revoked: false, passkeys: [],
+          created_at: "2026-01-04T00:00:00Z", last_login_at: null },
+      ] });
+      return Response.json({ services: [] });
+    });
+    vi.stubGlobal("fetch", fetcher);
+    const body = await (await handleCloudAnalyticalRequest(request("/api/admin/share/status")))!.json();
+    expect(Object.fromEntries(body.invites.map((i: { id: string; last_login_at: string | null }) => [i.id, i.last_login_at])))
+      .toEqual({ "i-used": "2026-01-05T09:30:00Z", "i-legacy": "2026-01-03T00:00:00Z", "i-open": null });
+    expect(Object.fromEntries(body.sessions.map((s: { session_id: string; last_active_time: string }) => [s.session_id, s.last_active_time])))
+      .toEqual({ "u-guest": "2026-01-05T09:30:00Z", "u-new": "2026-01-04T00:00:00Z" });
+  });
+
+  it("raises a sustained-loss alert for the longest run of 2+ days at a 5% gap like High-Scale", async () => {
+    const day = (n: number, expected: number, ingested: number) =>
+      ({ day: n * 86400, expected_rows: expected, ingested_rows: ingested });
+    const fetcher = vi.fn(async () => Response.json({
+      from: 0, to: 7 * 86400,
+      days: [day(0, 100, 90), day(1, 100, 100), day(2, 100, 95), day(3, 100, 80), day(4, 100, 94), day(5, 100, 99), day(6, 100, 50)],
+    }));
+    vi.stubGlobal("fetch", fetcher);
+    const body = await (await handleCloudAnalyticalRequest(request("/api/admin/log-accounting?hours=168")))!.json();
+    expect(body.sustained_loss).toEqual({
+      started_at: new Date(2 * 86400 * 1000).toISOString(), n_buckets: 3, max_gap_pct: 0.2, total_lost_lines: 31,
+    });
+    fetcher.mockImplementation(async () => Response.json({
+      from: 0, to: 3 * 86400, days: [day(0, 100, 90), day(1, 100, 100), day(2, 100, 90)],
+    }));
+    expect((await (await handleCloudAnalyticalRequest(request("/api/admin/log-accounting?hours=72")))!.json()).sustained_loss)
+      .toBeNull();
+  });
+
+  it("keeps the exact native passthrough allowlist in parity with the Compute contract", () => {
+    const declared = Object.entries(contract.paths).flatMap(([path, operations]) =>
+      Object.keys(operations).filter((key) => key !== "parameters").map((method) => `${method.toUpperCase()} ${path}`),
+    ).sort();
+    declared.push("GET /api/bootstrap");
+    declared.sort();
+    expect(NATIVE_ROUTES.flatMap(([methods, path]) => methods.split(",").map((method) => `${method} ${path}`)).sort()).toEqual(declared);
+    expect(isNativeCloudRoute("POST", "/api/admin/invites/fixture/revoke")).toBe(true);
+    expect(isNativeCloudRoute("POST", "/api/admin/provision/recover")).toBe(true);
+    expect(isNativeCloudRoute("POST", "/api/provision/recover")).toBe(true);
+    expect(isNativeCloudRoute("DELETE", "/api/admin/invites/fixture/revoke")).toBe(false);
+    expect(isNativeCloudRoute("POST", "/api/admin/services/fixture/unknown")).toBe(false);
+  });
+
+  it("passes saved views to the Compute origin after moving this browser's legacy local views there once", async () => {
+    localStorage.setItem("flp-saved-views-v2:fixture-a", JSON.stringify([
+      { id: "v1", service_id: "fixture-a", name: "Errors", filters_json: '{"status":["500"]}', page: "/dashboard" },
+      { id: "other", service_id: "fixture-b", name: "Not mine", filters_json: "{}" },
+      { id: "broken", service_id: "fixture-a", name: 42, filters_json: "{}" },
+    ]));
+    const fetcher = vi.fn(async () => Response.json({ id: "v1", status: "success" }, { status: 201 }));
+    vi.stubGlobal("fetch", fetcher);
+    expect(await handleCloudAnalyticalRequest(request("/api/views/fixture-a"))).toBeNull();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    const [url, init] = fetcher.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("/api/views/");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(String(init.body))).toMatchObject({ id: "v1", service_id: "fixture-a", name: "Errors", page: "/dashboard" });
+    expect(localStorage.getItem("flp-saved-views-v2:fixture-a")).toBeNull();
+    expect(await handleCloudAnalyticalRequest(request("/api/views/fixture-a"))).toBeNull();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    for (const [path, method] of [["/api/views/", "POST"], ["/api/views/v1", "DELETE"]] as const) {
+      expect(await handleCloudAnalyticalRequest(request(path, method, method === "POST" ? { name: "x" } : undefined))).toBeNull();
+    }
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps legacy local views when the origin refuses them for a reason other than validation", async () => {
+    localStorage.setItem("flp-saved-views-v2:fixture-a", JSON.stringify([
+      { id: "v1", service_id: "fixture-a", name: "Errors", filters_json: "{}" },
+    ]));
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ detail: "down" }, { status: 503 })));
+    expect(await handleCloudAnalyticalRequest(request("/api/views/fixture-a"))).toBeNull();
+    expect(localStorage.getItem("flp-saved-views-v2:fixture-a")).not.toBeNull();
+  });
+
+  it("normalizes catalog SQL types and includes active custom fields without physical metrics", async () => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).includes("/api/services")) return Response.json({ services: [{
+        service_id: "fixture-a", log_fields: { custom_fields: [
+          { name: "tenant", label: "Tenant", duckdb_type: "DOUBLE", enabled: true },
+          { name: "disabled_field", label: "Disabled", enabled: false },
+        ] },
+      }] });
+      return Response.json({ groups: [], fields: [
+        { id: "status", label: "Status", description: "", group: null, duckdb_type: "BIGINT" },
+        { id: "requests", label: "Requests", description: "", group: "METRICS", duckdb_type: "BIGINT" },
+      ] });
+    });
+    vi.stubGlobal("fetch", fetcher);
+    const catalog = await (await handleCloudAnalyticalRequest(request("/api/log-fields/catalog?service_id=fixture-a")))!.json();
+    expect(catalog.fields.map((field: { id: string }) => field.id)).toEqual(["status", "requests", "tenant"]);
+    expect(catalog.fields[0].sql_type).toBe("BIGINT");
+    expect(catalog.fields.find((field: { id: string }) => field.id === "tenant"))
+      .toMatchObject({ sql_type: "DOUBLE", duckdb_type: "DOUBLE" });
+    const schema = await (await handleCloudAnalyticalRequest(request("/api/schema", "GET", undefined, "fixture-a")))!.json();
+    expect(schema.table_name).toBe("logs");
+    expect(schema.schema.map((column: { name: string }) => column.name)).toEqual(["status", "tenant"]);
+    expect(schema.schema[0].type).toBe("BIGINT");
+  });
+
+  it.each([
+    ["POST", "/api/admin/share/start"],
+    ["PATCH", "/api/admin/share/settings"],
+    ["POST", "/api/services/fixture/rum/not-supported"],
+    ["PATCH", "/api/services/fixture/scoring/threshold"],
+    ["GET", "/api/admin/queries/summary"],
+    ["GET", "/api/not-a-compute-endpoint"],
+    ["POST", "/api/log-extents"],
+  ])("returns an explicit unsupported response without network leakage: %s %s", async (method, path) => {
+    const fetcher = vi.fn();
+    vi.stubGlobal("fetch", fetcher);
+    const response = await handleCloudAnalyticalRequest(request(path, method));
+    expect(response?.status).toBe(501);
+    expect((await response!.json()).detail.error).toBe("cloud_endpoint_unsupported");
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("tracks session/range/listing discovery through settlement and failure", async () => {
+    let resolve!: (response: Response) => void;
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((done) => { resolve = done; })));
+    for (const [path, stage] of [["/api/auth/session", "session"], ["/api/log-extents", "range"], ["/api/files", "listing"]]) {
+      const pending = handleCloudAnalyticalRequest(request(path));
+      expect(cloudLoadingStore.getSnapshot()?.stage).toBe(stage);
+      resolve(Response.json({}));
+      await pending;
+      expect(cloudLoadingStore.getSnapshot()).toBeNull();
+    }
+    resetCloudMetadataCache();
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
+    await expect(handleCloudAnalyticalRequest(request("/api/log-extents"))).rejects.toThrow("offline");
+    expect(cloudLoadingStore.getSnapshot()).toBeNull();
+  });
+
+  it("loads the requested range before executing SQL and does not conceal scan errors", async () => {
+    const engine = getDuckDBEngine();
+    vi.mocked(ensureCloudRange).mockResolvedValue({
+      ...engine.readContext(), executeSql: vi.fn().mockResolvedValue([{ requests: 7 }]),
+    });
+    const response = await handleCloudAnalyticalRequest(request("/api/query", "POST", {
+      sql: "SELECT count(*) AS requests FROM logs", start_time: "2026-11-01T00:00:00Z", end_time: "2026-11-02T00:00:00Z",
+    }));
+    expect(ensureCloudRange).toHaveBeenCalledWith("2026-11-01T00:00:00Z", "2026-11-02T00:00:00.001Z", expect.any(AbortSignal), ["request"], {
+      customFields: [], serviceId: undefined, projection: { columns: ["timestamp"] },
+    });
+    expect((await response!.json()).data).toEqual([{ requests: 7 }]);
+    vi.mocked(ensureCloudRange).mockRejectedValueOnce(new Error("incomplete listing"));
+    await expect(handleCloudAnalyticalRequest(request("/api/query", "POST", {
+      sql: "SELECT * FROM logs", start_time: "2026-11-01T00:00:00Z", end_time: "2026-11-02T00:00:00Z",
+    }))).rejects.toThrow("incomplete listing");
+    expect(cloudLoadingStore.getSnapshot()).toBeNull();
+  });
+
+  it("keeps the loading panel up while a queued scan waits for the one ahead of it", async () => {
+    const engine = getDuckDBEngine();
+    const context = { ...engine.readContext(), executeSql: vi.fn().mockResolvedValue([{ requests: 7 }]) };
+    let release!: () => void;
+    vi.mocked(ensureCloudRange)
+      .mockImplementationOnce(() => new Promise((done) => { release = () => done(context); }))
+      .mockResolvedValueOnce(context);
+    const body = { sql: "SELECT count(*) AS requests FROM logs", start_time: "2026-11-01T00:00:00Z", end_time: "2026-11-02T00:00:00Z" };
+    const first = handleCloudAnalyticalRequest(request("/api/query", "POST", body));
+    const second = handleCloudAnalyticalRequest(request("/api/query", "POST", body));
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    const states: Array<number | null> = [];
+    const unsubscribe = cloudLoadingStore.subscribe(() => states.push(cloudLoadingStore.getSnapshot() ? 1 : null));
+    release();
+    await Promise.all([first, second]);
+    unsubscribe();
+    expect(states.slice(0, -1)).not.toContain(null);
+    expect(cloudLoadingStore.getSnapshot()).toBeNull();
+  });
+
+  it("loads singleton session tokens with an inclusive last-event scan bound", async () => {
+    const at = "2026-11-01T00:00:00.000Z";
+    const token = sealSessionToken({ ip: "192.0.2.1", ja4: null, s: at, e: at, svc: "fixture-service" });
+    vi.spyOn(getDuckDBEngine(), "executeSql").mockResolvedValue([]);
+    vi.stubGlobal("fetch", vi.fn(async (path: RequestInfo | URL) => Response.json(
+      String(path).includes("/api/services") ? { services: [{ service_id: "fixture-service" }] } : { fields: [], groups: [] },
+    )));
+    const response = await handleCloudAnalyticalRequest(request("/api/sessions/detail", "POST", {
+      service_id: "fixture-service", session_token: token,
+    }));
+    expect(response?.ok).toBe(true);
+    expect(ensureCloudRange).toHaveBeenLastCalledWith(at, "2026-11-01T00:00:00.001Z",
+      expect.any(AbortSignal), ["request"], { serviceId: "fixture-service", customFields: [] });
+  });
+});
+
+describe("Cloud RUM status and versions services lookup", () => {
+  const services = { services: [{ service_id: "fixture-a", rum: { enabled: true, faro_version: "2.10.0" } }] };
+
+  function heldServices() {
+    const pending: Array<{ resolve: (response: Response) => void; signal?: AbortSignal | null }> = [];
+    const fetcher = vi.fn((input: RequestInfo | URL, init?: RequestInit) => String(input) === "/api/services"
+      ? new Promise<Response>((resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal!.reason), { once: true });
+        pending.push({ resolve, signal: init?.signal });
+      })
+      : Promise.resolve(Response.json({ versions: ["2.13.0", "2.10.0"], default: "2.13.0" })));
+    vi.stubGlobal("fetch", fetcher);
+    const servicesCalls = () => fetcher.mock.calls.filter(([input]) => String(input) === "/api/services").length;
+    return { fetcher, pending, servicesCalls };
+  }
+
+  it("shares one in-flight services read between the page's concurrent status and versions requests", async () => {
+    const { pending, servicesCalls } = heldServices();
+    const status = cloudServiceStatus(request("/api/services/fixture-a/rum/status"));
+    const versions = cloudServiceStatus(request("/api/services/fixture-a/rum/versions"));
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    pending[0].resolve(Response.json(services));
+    expect(await (await status)!.json()).toMatchObject({ enabled: true, faro_version: "2.10.0" });
+    expect(await (await versions)!.json()).toMatchObject({ current: "2.10.0", update_available: true });
+    expect(servicesCalls()).toBe(1);
+  });
+
+  it("uses native bootstrap, then shares one services lookup across cold RUM reads", async () => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/bootstrap") {
+        return Response.json({ ...nativeBootstrap, services: services.services });
+      }
+      if (path === "/api/services") return Response.json(services);
+      return Response.json({ versions: ["2.13.0", "2.10.0"], default: "2.13.0" });
+    });
+    vi.stubGlobal("fetch", fetcher);
+    expect((await handleCloudAnalyticalRequest(request("/api/bootstrap")))?.ok).toBe(true);
+    const status = await handleCloudAnalyticalRequest(request("/api/services/fixture-a/rum/status"));
+    expect(await status!.json()).toMatchObject({ enabled: true });
+    const versions = await handleCloudAnalyticalRequest(request("/api/services/fixture-a/rum/versions"));
+    expect(await versions!.json()).toMatchObject({ current: "2.10.0" });
+    expect(fetcher.mock.calls.filter(([input]) => String(input) === "/api/services")).toHaveLength(1);
+  });
+
+  it("preserves the native analyst header badge without follow-up requests", async () => {
+    const badge = {
+      configured: true,
+      request: { latest_log_at: "2026-01-01T00:10:00Z", total_rows: 42, total_rows_partial: false, last_sync_at: "2026-01-01T00:11:00Z" },
+      rum: { latest_log_at: "2026-01-01T00:09:00Z", total_rows: 7, last_sync_at: "2026-01-01T00:11:00Z" },
+    };
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      expect(path).toBe("/api/bootstrap");
+      return Response.json({
+        ...nativeBootstrap,
+        user: { id: "fixture-user", role: "analyst" },
+        header_badge: { request: badge.request, rum: badge.rum },
+      });
+    });
+    vi.stubGlobal("fetch", fetcher);
+    const analyst = await (await handleCloudAnalyticalRequest(request("/api/bootstrap")))!.json();
+    expect(analyst.header_badge).toEqual({ request: badge.request, rum: badge.rum });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes through a failed native bootstrap without synthesizing a fallback", async () => {
+    const fetcher = vi.fn(async () => Response.json({ detail: "unavailable" }, { status: 503 }));
+    vi.stubGlobal("fetch", fetcher);
+    const response = await handleCloudAnalyticalRequest(request("/api/bootstrap"));
+    expect(response?.status).toBe(503);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes through the active service's native logged fields and capability flags", async () => {
+    const listed = {
+      services: [
+        { service_id: "fixture-a", active_log_field_ids: ["status", "host"] },
+        {
+          service_id: "fixture-b",
+          active_log_field_ids: ["status", "pop", "tenant"],
+          cmcd: { enabled: true },
+          rum: { enabled: true },
+        },
+      ],
+    };
+    let bootstrapBody: Record<string, unknown> = {
+      ...nativeBootstrap,
+      services: listed.services.map((service) => ({
+        ...service,
+        cmcd_enabled: service.cmcd?.enabled ?? false,
+        rum_enabled: service.rum?.enabled ?? false,
+      })),
+      active_service_id: "fixture-b",
+      active_log_field_ids: ["status", "pop", "tenant"],
+    };
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      expect(path).toBe("/api/bootstrap");
+      return Response.json(bootstrapBody);
+    }));
+    const boot = async (serviceId?: string) =>
+      (await handleCloudAnalyticalRequest(request("/api/bootstrap", "GET", undefined, serviceId)))!.json();
+
+    const active = await boot("fixture-b");
+    expect(active.active_log_field_ids).toEqual(["status", "pop", "tenant"]);
+    expect(active.services.find((service: { service_id: string }) => service.service_id === "fixture-b")).toMatchObject({
+      cmcd_enabled: true,
+      rum_enabled: true,
+    });
+    expect(active.fastly_bots_available).toBe(true);
+    expect(active.ngwaf_configured).toBe(false);
+
+    resetCloudMetadataCache();
+    bootstrapBody = {
+      ...bootstrapBody,
+      services: [{ service_id: "fixture-a", name: "fixture-a", active_log_field_ids: [] }],
+      active_service_id: "fixture-a",
+      active_log_field_ids: [],
+    };
+    expect((await boot()).active_log_field_ids).toEqual([]);
+  });
+
+  it("lets one caller abort without cancelling the shared read for the others", async () => {
+    const { pending, servicesCalls } = heldServices();
+    const owner = new AbortController();
+    const first = cloudServiceStatus(new Request("http://localhost/api/services/fixture-a/rum/status", { signal: owner.signal }));
+    const second = cloudServiceStatus(request("/api/services/fixture-a/rum/status"));
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    owner.abort();
+    await expect(first).rejects.toMatchObject({ name: "AbortError" });
+    expect(pending[0].signal?.aborted).not.toBe(true);
+    pending[0].resolve(Response.json(services));
+    expect(await (await second)!.json()).toMatchObject({ enabled: true });
+    expect(servicesCalls()).toBe(1);
+  });
+
+  it("keeps the shared read for the page's next request after every caller has aborted", async () => {
+    const { pending, servicesCalls } = heldServices();
+    const owner = new AbortController();
+    const aborted = cloudServiceStatus(new Request("http://localhost/api/services/fixture-a/rum/status", { signal: owner.signal }));
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    owner.abort();
+    await expect(aborted).rejects.toMatchObject({ name: "AbortError" });
+    const next = cloudServiceStatus(request("/api/services/fixture-a/rum/status"));
+    pending[0].resolve(Response.json(services));
+    expect((await next)!.status).toBe(200);
+    expect(servicesCalls()).toBe(1);
+  });
+
+  it("does not keep a failed read, so the next request asks again", async () => {
+    const { pending, servicesCalls } = heldServices();
+    const first = cloudServiceStatus(request("/api/services/fixture-a/rum/status"));
+    const second = cloudServiceStatus(request("/api/services/fixture-a/rum/versions"));
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    pending[0].resolve(Response.json({ error: "busy" }, { status: 503 }));
+    expect((await first)!.status).toBe(503);
+    expect((await second)!.status).toBe(503);
+    const retry = cloudServiceStatus(request("/api/services/fixture-a/rum/status"));
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    pending[1].resolve(Response.json(services));
+    expect((await retry)!.status).toBe(200);
+    expect(servicesCalls()).toBe(2);
+  });
+
+  it("does not share a read across a change of signed-in identity", async () => {
+    const { pending, servicesCalls } = heldServices();
+    const before = cloudServiceStatus(request("/api/services/fixture-a/rum/status"));
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    updateDashboardCacheIdentity("other-user:admin");
+    const after = cloudServiceStatus(request("/api/services/fixture-a/rum/status"));
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    pending.forEach(({ resolve }) => resolve(Response.json(services)));
+    await Promise.all([before, after]);
+    expect(servicesCalls()).toBe(2);
+  });
+});

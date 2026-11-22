@@ -31,10 +31,56 @@ Routes in [`backend/routers/security.py`](../../backend/routers/security.py), mo
 - `GET /api/security/threat-intel` (`start_time`, `end_time`): `ThreatIntelListResponse` of TLS fingerprints with request count, top country, matched WAF rule count, bot percentage and proxy flag.
 - `GET /api/security/proxies/export` (`start_time`, `end_time`, `threshold`, `format` = `fastly-acl` CSV or plain text): streamed blocklist; the router masks IPs for analysts.
 
-Bot enrichment uses the PostgreSQL `ngwaf_bots` and `rdns` tables. Standard mode uses the `security_*` and verified-bot rollups where eligible with raw fallback. High-scale mode ([`backend/high_scale/security.py`](../../backend/high_scale/security.py)) reads `request_facts` with the request filters bound (unfiltered NGWAF bot cards read `security_minute_dimensions`); NGWAF names are resolved at ingest; a ClickHouse failure propagates as an error.
+Bot enrichment uses the PostgreSQL `ngwaf_bots` and `rdns` tables. The ClickHouse reader ([`backend/high_scale/security.py`](../../backend/high_scale/security.py)) reads `request_facts` with the request filters bound (unfiltered NGWAF bot cards read `security_minute_dimensions`); NGWAF names are resolved at ingest; a ClickHouse failure propagates as an error.
+
+### Known-bot classification
+
+`top_bots.bots` (here and in the dashboard bundle's Fastly Bots card) takes the top 2,000 user agents by request count in the filtered range and classifies them at query time: every well-known-bots entry with an accepted pattern that matches the UA (case-insensitive search) adds that UA's count to the entry. Rows are `{id, name, category, request_count}` with `name` the title-cased id and `category` the entry's first category, sorted descending, top 10. With no UA logged the list is empty.
+
+- High-Scale: `classify_ua_counts` in [`backend/repositories/security/watchdog.py`](../../backend/repositories/security/watchdog.py), using the list `bot_data_refresh` keeps current.
+- Cloud: [`frontend/lib/cloud-engine/bots/classify.ts`](../../frontend/lib/cloud-engine/bots/classify.ts) in the browser, against the bundled seed. The seed is generated from [`backend/utils/well_known_bots_seed.json`](../../backend/utils/well_known_bots_seed.json) into `well-known-bots.generated.ts` (id, first category, patterns, referral stems, verification domains and aliases, about 74 KB raw / 19 KB gzip) and loaded lazily on the first classification. After changing the backend seed, run `node scripts/generate-well-known-bots.mjs` from `frontend/`; `classify.test.ts` fails when ids, categories, patterns, domains or aliases drift, and [`tests/utils/test_well_known_bots_browser_copy.py`](../../tests/utils/test_well_known_bots_browser_copy.py) fails when the referral stems differ from the backend's `extract_entry_referral_stems`. Cloud's NGWAF bot lists stay empty.
+
+### Well-Known Bots and Bot Efficiency
+
+Both installs use the same classification and the same row shapes (`WellknownBotRow`, `BotEfficiencyRow`).
+
+- `wellknown_bots` keeps only user agents that match a known bot, takes the busiest 10,000 `(ua, ip)` pairs by request count, and groups them by bot: top 50 by requests, with unique IPs, sample IPs and per-IP verification counts. High-Scale takes up to 5,000 distinct user agents from its UA rollup, keeps up to 500 that match, reads the pairs for those only, and scales sampled counts back up (without a rollup it filters with the bots' UA regex instead). Cloud does the same against the bundled seed, but takes the 5,000 busiest user agents so the candidate list is deterministic.
+- Verification: High-Scale checks each IP against bot CIDRs and cached reverse DNS, and counts an IP as `pending` until its lookup finishes. Cloud can't do reverse DNS from the browser and the seed has no CIDRs, so it reports what High-Scale reports before a lookup: `pending` for bots that publish verification domains, `unverified` for the rest, and never `verified` or `spoofed`. On Cloud the card's intro drops the FCrDNS/CIDR verification claim, and the Pending help text and cell tooltip say the IPs are not verified because the browser can't run reverse-DNS checks, instead of High-Scale's "check back soon".
+- `bot_efficiency` ranks the top 2,000 user agents by response bytes, groups them by bot (or vendor) name, and sets each bot's share of site bytes against the unique human IPs referred by the same vendor (referer host stem, or a `<vendor>-user` / `-externalfetcher` UA): top 25 by bytes. High-Scale reads the sampled table and scales; Cloud reads every row. Cloud implements both in [`frontend/lib/cloud-engine/bots/summarize.ts`](../../frontend/lib/cloud-engine/bots/summarize.ts), ported from `summarize_wellknown_bot_rows` and `summarize_bot_efficiency_rows` in [`backend/repositories/security/watchdog.py`](../../backend/repositories/security/watchdog.py).
+
+### Cloud summaries
+
+With no filter values, Cloud answers every /security section from the v3 summary files. [`frontend/lib/cloud-engine/security-rollup.ts`](../../frontend/lib/cloud-engine/security-rollup.ts) builds the answers. The WAF Activity tab makes two requests:
+
+- The distributions request covers `ngwaf_verified_bots`, `ngwaf_verified_bots_ts`, `tls_fingerprints`, `fingerprint_coverage`, `req_size_dist`, `ipv6_adoption`, `proxy_dist` and `conn_reuse_dist`.
+- The row request covers `wellknown_bots`, `bot_efficiency`, `top_ips_header` and `proxies`, which also feed Proxy Watchdog.
+
+The row request is read from raw Parquet when the summaries predate the `header_ip`, `bot_ua` and `proxy` rows. The distribution cards paint without waiting for it. A "Data through" note gives the end of the summarized data on WAF Activity, Threat Intelligence and Proxy Watchdog. `verified_bots_ts` can also be served from summaries when `bucket_seconds` is a whole multiple of the files' step and divides a day. `top_bots` (asked for by `/api/security/bundle`) is classified in the browser from the summaries' top 2,000 user agents, so the bot catalog stays in one place. Threat Intelligence reads the `tls_fp` rows.
+
+Summaries return the raw response's shapes and values, with these exceptions:
+
+- Fingerprint `ip_count` merges HLL sketches, so it is marked ≈.
+- Bot efficiency referrals merge HLL sketches of the IPs each referrer stem sends, so the bot-efficiency card titles add "≈ referrals".
+- Values whose summary top-K or histogram was cut are lower bounds, marked ≥: fingerprint `request_count`, request-header size, proxy type, connection reuse, `verified_bots_ts`, well-known bots, bot efficiency, `top_bots` and threat-intel requests.
+- Threat-intel top country is marked ≈ when the per-fingerprint country list was cut. Ties go to the alphabetically first country, where the raw `MODE` picks any.
+- Proxy Watchdog reads a sample of up to 300 RTT rows per summary file. Once a range holds more than the raw scan's 5,000 rows, or any file's sample was cut, the tab is marked ≈.
+- Oversized headers keep every IP's largest header in each file, so they are exact.
+- Well-known bots count each user agent's distinct IPs rather than the busiest 10,000 `(ua, ip)` pairs, and their IPs show as unique counts without per-IP samples.
+- Threat intel shows no WAF rules or bot share, as on the raw Cloud scan, where those columns are absent.
+
+Cloud falls back to the raw scan when any of these holds:
+
+- A filter has values.
+- A summary file is missing or incomplete, or predates the rows a section needs.
+- `client_ip` or `proxy_type` is a custom field (`client_ip` also sends the row sections raw), or `waf_logged_rules`, `waf_blocked_rules` or `is_bot` is (threat intel).
+- The empty value is missing from a truncated `tls_ciphers_sha` list.
+- A connection count isn't an integer.
+- IPv6 is requested and a file spans more than one UTC hour (or only day bundles cover the range).
+
+The summaries keep the per-value distinct-IP sketches only for `tls_ciphers_sha` and the referrer stem; nothing reads the others.
 
 ## Tests
 
-- Frontend unit: [`frontend/__tests__/app/security.test.tsx`](../../frontend/__tests__/app/security.test.tsx)
-- Backend: [`tests/repositories/test_security.py`](../../tests/repositories/test_security.py), [`tests/core/test_rollups_security_and_bots.py`](../../tests/core/test_rollups_security_and_bots.py), [`tests/utils/test_rdns_cache.py`](../../tests/utils/test_rdns_cache.py)
+- Frontend unit: [`frontend/__tests__/app/security.test.tsx`](../../frontend/__tests__/app/security.test.tsx), [`frontend/__tests__/components/SecurityRollup.test.tsx`](../../frontend/__tests__/components/SecurityRollup.test.tsx), [`frontend/lib/cloud-engine/security-rollup.test.ts`](../../frontend/lib/cloud-engine/security-rollup.test.ts)
+- Backend: [`tests/routers/test_analytics_routers.py`](../../tests/routers/test_analytics_routers.py), [`tests/utils/test_rdns_cache.py`](../../tests/utils/test_rdns_cache.py)
 - E2E: `Security Page Contract` in [`frontend/e2e/pages/core-analytics-pages.spec.ts`](../../frontend/e2e/pages/core-analytics-pages.spec.ts)

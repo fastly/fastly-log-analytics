@@ -21,8 +21,8 @@ Admin and analyst both load the page. An analyst's IPs are masked per invite; th
 
 ## Backend
 
-`POST /api/sessions/detail` with `{session_token}` returns `SessionDetailResponse` (`columns`, `data`) from [`backend/routers/session_scoring/scoring_analytics.py`](../../backend/routers/session_scoring/scoring_analytics.py). Standard mode reads the request view for the unsealed session extent; high-scale mode reads `request_facts` for it.
+`POST /api/sessions/detail` with `{session_token}` returns `SessionDetailResponse` (`columns`, `data`) from [`backend/routers/session_scoring/scoring_analytics.py`](../../backend/routers/session_scoring/scoring_analytics.py), querying ClickHouse `request_facts` for the unsealed session extent.
 
 ## Tests
 
-Covered by [`frontend/__tests__/app/usage-sessions-streaming.test.tsx`](../../frontend/__tests__/app/usage-sessions-streaming.test.tsx), [`tests/core/test_session_token.py`](../../tests/core/test_session_token.py), and [`tests/repositories/test_sessions.py`](../../tests/repositories/test_sessions.py).
+Covered by [`frontend/__tests__/app/usage-sessions-streaming.test.tsx`](../../frontend/__tests__/app/usage-sessions-streaming.test.tsx) and [`tests/core/test_session_token.py`](../../tests/core/test_session_token.py).

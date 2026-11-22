@@ -15,8 +15,12 @@ import {
   applySystemMetrics,
   applyShare,
   makeCronRunsApplier,
+  parseSSEJson,
 } from './sseStreamAppliers'
 import { useEventStream } from './useEventStream'
+import { IS_CLOUD_MODE, isCloudMode } from '@/lib/cloud-engine/mode'
+import { observeCatalogCommit } from '@/lib/cloud-engine/dashboard/catalog-manifest'
+import { browserSource } from '@/lib/cloud-engine/dashboard/sources'
 
 // ── Service & Admin Multiplex Streams ────────────────────────────────────────
 
@@ -62,11 +66,162 @@ interface BootstrapShape {
 }
 type BadgeStreamEvent = Schema<'ShareHeaderBadgeResponse'>
 
+interface IngestEventFrame {
+  id?: string
+  event?: string
+  retry?: number
+  data?: {
+    generation?: unknown
+    manifest?: unknown
+  }
+}
+
+function parseIngestEventFrame(raw: string): IngestEventFrame | null {
+  let id: string | undefined
+  let event: string | undefined
+  let retry: number | undefined
+  const dataLines: string[] = []
+  for (const line of raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')) {
+    if (!line || line.startsWith(':')) continue
+    const separator = line.indexOf(':')
+    const field = separator === -1 ? line : line.slice(0, separator)
+    const value = separator === -1 ? '' : line.slice(separator + 1).replace(/^ /, '')
+    switch (field) {
+      case 'id':
+        id = value
+        break
+      case 'event':
+        event = value
+        break
+      case 'retry': {
+        const parsed = Number(value)
+        if (Number.isSafeInteger(parsed) && parsed >= 0) retry = parsed
+        break
+      }
+      case 'data':
+        dataLines.push(value)
+        break
+    }
+  }
+  if (dataLines.length === 0) return { ...(id ? { id } : {}), ...(event ? { event } : {}), ...(retry !== undefined ? { retry } : {}) }
+  try {
+    const data = JSON.parse(dataLines.join('\n')) as unknown
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return null
+    return {
+      ...(id ? { id } : {}),
+      ...(event ? { event } : {}),
+      ...(retry !== undefined ? { retry } : {}),
+      data: data as IngestEventFrame['data'],
+    }
+  } catch {
+    return null
+  }
+}
+
+async function notifyDashboardCatalogChanged(): Promise<void> {
+  const { notifyDashboardCatalogChange } = await import('@/lib/cloud-engine/dashboard/client')
+  notifyDashboardCatalogChange()
+}
+
 export function useHeaderBadgeStream(enabled: boolean) {
   const queryClient = useQueryClient()
-  return useServiceStream(enabled, '/api/log-extents/stream', (raw) => {
-    try {
-      const payload = JSON.parse(raw) as BadgeStreamEvent
+  const activeServiceId = useServiceStore((s) => s.activeServiceId)
+  const cursorRef = useRef<string | null>(null)
+  const cloudActive = IS_CLOUD_MODE || isCloudMode()
+
+  useEffect(() => {
+    if (!enabled || !cloudActive) return
+    cursorRef.current = null
+    const controller = new AbortController()
+    let stopped = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let inFlight = false
+    let resumePending = false
+    let reconnectMs = 5_000
+    const source = browserSource(
+      typeof window !== 'undefined' ? window.location.origin : '',
+      { serviceId: activeServiceId ?? undefined },
+    )
+
+    const poll = async () => {
+      if (stopped || controller.signal.aborted || document.hidden || inFlight) return
+      inFlight = true
+      try {
+        const url = new URL('/api/ingest/events', window.location.origin)
+        if (cursorRef.current) url.searchParams.set('cursor', cursorRef.current)
+        const response = await fetch(url.toString(), {
+          headers: {
+            Accept: 'text/event-stream',
+            'x-service-id': activeServiceId ?? '',
+          },
+          credentials: 'include',
+          signal: controller.signal,
+        })
+        if (response.status === 401 || response.status === 403) {
+          stopped = true
+          return
+        }
+        if (!response.ok) throw new Error(`Ingest event read failed (${response.status})`)
+        if (stopped || controller.signal.aborted || document.hidden) return
+        const parsed = parseIngestEventFrame(await response.text())
+        if (stopped || controller.signal.aborted || document.hidden || !parsed) return
+        if (parsed.retry !== undefined) {
+          reconnectMs = Math.min(30_000, Math.max(1_000, parsed.retry))
+        }
+        if (parsed.id) cursorRef.current = parsed.id
+        if (parsed.event === 'ready' || parsed.event === 'commit' || parsed.event === 'resync') {
+          const generation = Number(parsed.data?.generation)
+          if (Number.isSafeInteger(generation) && generation >= 0) {
+            observeCatalogCommit(source.fetchJson, {
+              type: parsed.event,
+              generation,
+              manifest: typeof parsed.data?.manifest === 'string' ? parsed.data.manifest : undefined,
+            })
+            void notifyDashboardCatalogChanged()
+            if (parsed.event !== 'ready') {
+              void queryClient.invalidateQueries({ queryKey: queryKeys.syncStatus(activeServiceId) })
+            }
+          }
+        }
+      } catch {
+        /* transient requests reconnect on the last bounded retry interval */
+      } finally {
+        inFlight = false
+        if (!stopped && !controller.signal.aborted && !document.hidden) {
+          if (resumePending) {
+            resumePending = false
+            void poll()
+          } else {
+            timer = setTimeout(() => {
+              timer = undefined
+              void poll()
+            }, reconnectMs)
+          }
+        }
+      }
+    }
+
+    const onVisibilityChange = () => {
+      if (timer !== undefined) clearTimeout(timer)
+      timer = undefined
+      resumePending = !document.hidden && inFlight
+      if (!document.hidden && !inFlight) void poll()
+    }
+
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    void poll()
+    return () => {
+      stopped = true
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+      if (timer !== undefined) clearTimeout(timer)
+      controller.abort()
+      cursorRef.current = null
+    }
+  }, [enabled, cloudActive, activeServiceId, queryClient])
+
+  return useServiceStream(enabled && !cloudActive, '/api/log-extents/stream', (raw) => {
+    const payload = parseSSEJson<BadgeStreamEvent>(raw)
+    if (payload) {
       queryClient.setQueryData<BootstrapShape | undefined>(queryKeys.bootstrap(), (prev) => {
         if (!prev) return prev
         return {
@@ -91,8 +246,6 @@ export function useHeaderBadgeStream(enabled: boolean) {
           },
         }
       })
-    } catch {
-      /* ignore */
     }
   })
 }
@@ -116,17 +269,13 @@ export function useAdminEventStream(enabled: boolean, channels: AdminEventChanne
     }
   }, [enabled, activeServiceId, channelsParam, queryClient])
 
+  const cloudActive = IS_CLOUD_MODE || isCloudMode()
   return adminStreamHooks.useServiceStream(
-    enabled && bootstrapSettled && channelsParam.length > 0,
+    enabled && !cloudActive && bootstrapSettled && channelsParam.length > 0,
     `/api/admin/events/stream?channels=${channelsParam}`,
     (raw) => {
-      let env: { channel?: string; data?: unknown }
-      try {
-        env = JSON.parse(raw) as { channel?: string; data?: unknown }
-      } catch {
-        return
-      }
-      if (!env || typeof env !== 'object') return
+      const env = parseSSEJson<{ channel?: string; data?: unknown }>(raw)
+      if (!env) return
       switch (env.channel) {
         case 'sync-status':
           adminStreamHooks.applySyncStatus(queryClient, activeServiceId, env.data)

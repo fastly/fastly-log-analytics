@@ -13,6 +13,10 @@ import {
   formatCountMaybe,
   type ChartInterval,
 } from '@/lib/utils'
+import {
+  rollupComputeByDay,
+  type ComputeUsageResponse,
+} from '@/lib/cloud-engine/usage/computeSeries'
 import type { PlotlyTrace } from '@/types/api'
 import type { operations } from '@/types/api.generated'
 
@@ -75,6 +79,11 @@ export function UsageChartsGrid({
   rateEgress,
   effectiveInterval,
   setChartInterval,
+  showCompute = false,
+  compute,
+  loadingCompute = false,
+  fetchingCompute = false,
+  errorCompute = null,
 }: {
   ops: OperationsUsageData | undefined
   loadingOps: boolean
@@ -101,9 +110,15 @@ export function UsageChartsGrid({
   rateEgress: number
   effectiveInterval: ChartInterval
   setChartInterval: (interval: ChartInterval) => void
+  /** Cloud only: the Compute Requests and Compute vCPU charts. */
+  showCompute?: boolean
+  compute?: ComputeUsageResponse
+  loadingCompute?: boolean
+  fetchingCompute?: boolean
+  errorCompute?: unknown
 }) {
-  // FOS Operations, Bandwidth, and Log Activity use Fastly's /stats/* APIs
-  // which only support hour/day granularity. Render a custom button group
+  // FOS Operations, Bandwidth, and Log Activity use historical Platform Metrics.
+  // Render a custom button group
   // with just those two so the user sees no misleading 1s/1m buttons.
   const restictedIntervalButtons = (
     <ButtonGroup>
@@ -157,6 +172,18 @@ export function UsageChartsGrid({
   const opsDates = useMemo(() => ops?.data.map((d) => d.date) ?? [], [ops?.data])
   const opsClassA = useMemo(() => ops?.data.map((d) => d.class_a) ?? [], [ops?.data])
   const opsClassB = useMemo(() => ops?.data.map((d) => d.class_b) ?? [], [ops?.data])
+  const kvClassA = useMemo(
+    () => ops?.data.map((d) => ((d as Record<string, unknown>).kv_class_a as number | undefined) ?? 0) ?? [],
+    [ops?.data],
+  )
+  const kvClassB = useMemo(
+    () => ops?.data.map((d) => ((d as Record<string, unknown>).kv_class_b as number | undefined) ?? 0) ?? [],
+    [ops?.data],
+  )
+  const hasKvOps = useMemo(
+    () => kvClassA.some((v) => v > 0) || kvClassB.some((v) => v > 0),
+    [kvClassA, kvClassB],
+  )
 
   const opsData = useMemo(
     () => [
@@ -176,8 +203,28 @@ export function UsageChartsGrid({
         marker: { color: accentB },
         hovertemplate: 'Class B: %{y:,}<extra></extra>',
       },
+      ...(hasKvOps
+        ? [
+            {
+              type: 'bar',
+              name: 'KV Class A',
+              x: opsDates,
+              y: kvClassA,
+              marker: { color: CHART_COLORS.warning },
+              hovertemplate: 'KV Class A: %{y:,}<extra></extra>',
+            },
+            {
+              type: 'bar',
+              name: 'KV Class B',
+              x: opsDates,
+              y: kvClassB,
+              marker: { color: '#a855f7' },
+              hovertemplate: 'KV Class B: %{y:,}<extra></extra>',
+            },
+          ]
+        : []),
     ],
-    [opsDates, opsClassA, opsClassB, accent, accentB],
+    [opsDates, opsClassA, opsClassB, kvClassA, kvClassB, hasKvOps, accent, accentB],
   )
   const opsLayout = useMemo(() => ({ ...baseLayout, barmode: 'stack' as const }), [baseLayout])
 
@@ -306,6 +353,66 @@ export function UsageChartsGrid({
     [baseLayout, gridColor],
   )
 
+  // ── Compute charts (Cloud: Platform Metrics, app + worker services) ──────
+  const computePoints = useMemo(() => {
+    if (compute?.source !== 'fastly') return []
+    return effectiveInterval === '1 day' ? rollupComputeByDay(compute.data) : compute.data
+  }, [compute, effectiveInterval])
+  const computeDescription =
+    compute?.source === 'unavailable' && compute.reason === 'range_over_31_days'
+      ? 'Fastly Platform Metrics Compute figures cover ranges of up to 31 days'
+      : 'Fastly Platform Metrics, app and worker services; the latest hour can still be filling in'
+  const computeRequestsData = useMemo<PlotlyTrace[]>(() => {
+    const x = computePoints.map((p) => p.time)
+    return [
+      {
+        type: 'bar',
+        name: 'App service',
+        x,
+        y: computePoints.map((p) => p.app_requests),
+        marker: { color: accent },
+        hovertemplate: 'App service: %{y:,}<extra></extra>',
+      },
+      {
+        type: 'bar',
+        name: 'Worker service',
+        x,
+        y: computePoints.map((p) => p.worker_requests),
+        marker: { color: accentB },
+        hovertemplate: 'Worker service: %{y:,}<extra></extra>',
+      },
+    ]
+  }, [computePoints, accent, accentB])
+  const computeVcpuData = useMemo<PlotlyTrace[]>(() => {
+    const x = computePoints.map((p) => p.time)
+    return [
+      {
+        type: 'bar',
+        name: 'App service',
+        x,
+        y: computePoints.map((p) => p.app_vcpu_ms / 1000),
+        marker: { color: accent },
+        hovertemplate: 'App service: %{y:,.2f} s<extra></extra>',
+      },
+      {
+        type: 'bar',
+        name: 'Worker service',
+        x,
+        y: computePoints.map((p) => p.worker_vcpu_ms / 1000),
+        marker: { color: accentB },
+        hovertemplate: 'Worker service: %{y:,.2f} s<extra></extra>',
+      },
+    ]
+  }, [computePoints, accent, accentB])
+  const computeVcpuLayout = useMemo(
+    () => ({
+      ...baseLayout,
+      barmode: 'stack' as const,
+      yaxis: { title: 'vCPU s', gridcolor: gridColor, zerolinecolor: gridColor, showspikes: false },
+    }),
+    [baseLayout, gridColor],
+  )
+
   return (
     <div
       className={cn(
@@ -315,7 +422,7 @@ export function UsageChartsGrid({
     >
       <AnalyticsCard
         title="FOS Operations"
-        description="Class A and Class B operations from the Historical Stats API"
+        description="Class A and Class B operations from Fastly Platform Metrics"
         headerAction={fosOpsIntervalButtons}
         isLoading={loadingOps}
         isFetching={fetchingOps}
@@ -370,6 +477,37 @@ export function UsageChartsGrid({
         <PlotlyChart data={logProcData} layout={baseLayout} height="100%" />
       </AnalyticsCard>
 
+      {showCompute && (
+        <>
+          <AnalyticsCard
+            title="Compute Requests"
+            description={computeDescription}
+            headerAction={restictedIntervalButtons}
+            isLoading={loadingCompute}
+            isFetching={fetchingCompute}
+            error={errorCompute as AnalyticsCardError | null}
+            isEmpty={computePoints.length === 0}
+            className="h-[360px]"
+            contentClassName="p-2"
+          >
+            <PlotlyChart data={computeRequestsData} layout={opsLayout} height="100%" />
+          </AnalyticsCard>
+
+          <AnalyticsCard
+            title="Compute vCPU"
+            description={computeDescription}
+            headerAction={restictedIntervalButtons}
+            isLoading={loadingCompute}
+            isFetching={fetchingCompute}
+            error={errorCompute as AnalyticsCardError | null}
+            isEmpty={computePoints.length === 0}
+            className="h-[360px]"
+            contentClassName="p-2"
+          >
+            <PlotlyChart data={computeVcpuData} layout={computeVcpuLayout} height="100%" />
+          </AnalyticsCard>
+        </>
+      )}
       {isRumEnabled && rumBreakdown && (
         <AnalyticsCard
           title="Real User Monitoring (RUM) Operations"

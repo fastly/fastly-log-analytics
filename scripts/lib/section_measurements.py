@@ -10,6 +10,7 @@ import re
 import statistics
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Callable, Iterable, Mapping
 from copy import deepcopy
@@ -18,7 +19,6 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-import duckdb
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -428,15 +428,15 @@ def _percentile(values: list[float], pct: float) -> float:
 
 
 def build_synthetic_30d_dataset(
-    con: duckdb.DuckDBPyConnection,
+    con: Any,
     parquet_dir: Path,
     service_name: str = "profile-svc",
     total_rows: int = 500_000,
     num_files: int = 10,
     seed: int = 42,
 ) -> dict[str, Any]:
-    from backend.core.storage import get_arrow_schema
-    from backend.repositories._base import _safe_table
+    from backend.core.fos_client import _safe_table_name
+    from scripts.load_test.generate_synthetic_traffic import get_arrow_schema
 
     arrow_schema = get_arrow_schema()
     schema_names = set(arrow_schema.names)
@@ -454,6 +454,7 @@ def build_synthetic_30d_dataset(
     base_end_ms = int((now - timedelta(hours=1, minutes=1)).timestamp() * 1000)
     span_per_file = max(1, (base_end_ms - base_start_ms) // n_base_files)
 
+    tables: list[pa.Table] = []
     for file_idx in range(n_base_files):
         n = baseline_rows - rows_per_file * file_idx if file_idx == n_base_files - 1 else rows_per_file
         if n <= 0:
@@ -466,6 +467,7 @@ def build_synthetic_30d_dataset(
         for col_name in extra_str_cols:
             tbl = tbl.append_column(col_name, pa.array([""] * n, type=pa.string()))
         pq.write_table(tbl, parquet_dir / f"baseline_{file_idx:03d}.parquet")
+        tables.append(tbl)
 
     w_rng = np.random.default_rng(seed + 9999)
     w_start_ms = int((now - timedelta(minutes=58)).timestamp() * 1000)
@@ -475,12 +477,16 @@ def build_synthetic_30d_dataset(
     for col_name in extra_str_cols:
         w_tbl = w_tbl.append_column(col_name, pa.array([""] * window_rows, type=pa.string()))
     pq.write_table(w_tbl, parquet_dir / "window_000.parquet")
+    tables.append(w_tbl)
 
-    view_name = _safe_table(service_name)
-    glob_path = str(parquet_dir / "*.parquet").replace("'", "''")
-    con.execute(
-        f'CREATE OR REPLACE VIEW {view_name} AS SELECT * REPLACE (CAST("timestamp" AS TIMESTAMPTZ) AS "timestamp") FROM read_parquet(\'{glob_path}\')'
-    )
+    view_name = _safe_table_name(service_name)
+    if hasattr(con, "load_dataset"):
+        con.load_dataset(
+            tables=tables,
+            earliest_iso=datetime.fromtimestamp(base_start_ms / 1000.0, tz=UTC).isoformat(),
+            window_rows=window_rows,
+            field_names=list(arrow_schema.names) + extra_str_cols,
+        )
     return {
         "service_name": service_name,
         "view_name": view_name,
@@ -494,10 +500,10 @@ def build_synthetic_30d_dataset(
 @contextlib.contextmanager
 def _instrument_insights_phases(run_metrics: dict[str, Any]):
     from backend.repositories.insights import registry
-    from backend.repositories.insights import repository as insights_repo
 
     phase_wall_ms: dict[str, float] = {}
     phase_cpu_ms: dict[str, float] = {}
+    lock = threading.Lock()
     orig_definitions = list(registry.get_all())
     wrapped_definitions = []
 
@@ -505,14 +511,15 @@ def _instrument_insights_phases(run_metrics: dict[str, Any]):
         orig_proc = d.row_processor
 
         def _make_wrapped_proc(defn_id: str, proc_fn):
-            def _wrapped_proc(rows: list[Any], ctx: dict[str, Any]):
+            def _wrapped_proc(*args: Any, **kwargs: Any):
                 t0_w, t0_c = time.perf_counter(), time.thread_time()
                 try:
-                    return proc_fn(rows, ctx)
+                    return proc_fn(*args, **kwargs) if proc_fn is not None else {}
                 finally:
                     key = f"proc:{defn_id}"
-                    phase_wall_ms[key] = phase_wall_ms.get(key, 0.0) + (time.perf_counter() - t0_w) * 1000.0
-                    phase_cpu_ms[key] = phase_cpu_ms.get(key, 0.0) + (time.thread_time() - t0_c) * 1000.0
+                    with lock:
+                        phase_wall_ms[key] = phase_wall_ms.get(key, 0.0) + (time.perf_counter() - t0_w) * 1000.0
+                        phase_cpu_ms[key] = phase_cpu_ms.get(key, 0.0) + (time.thread_time() - t0_c) * 1000.0
 
             return _wrapped_proc
 
@@ -521,35 +528,7 @@ def _instrument_insights_phases(run_metrics: dict[str, Any]):
             updates["sql_template"] = f"/* insight:{d.id} */\n{d.sql_template}"
         wrapped_definitions.append(d.model_copy(update=updates))
 
-    def _wrap_coalesced(key: str, fn):
-        def _wrapped(*args: Any, **kwargs: Any):
-            t0_w, t0_c = time.perf_counter(), time.thread_time()
-            try:
-                return fn(*args, **kwargs)
-            finally:
-                phase_wall_ms[key] = phase_wall_ms.get(key, 0.0) + (time.perf_counter() - t0_w) * 1000.0
-                phase_cpu_ms[key] = phase_cpu_ms.get(key, 0.0) + (time.thread_time() - t0_c) * 1000.0
-
-        return _wrapped
-
-    with (
-        patch.object(registry, "get_all", return_value=wrapped_definitions),
-        patch.object(
-            insights_repo,
-            "_coalesced_city_aggregates",
-            _wrap_coalesced("coalesced:city", insights_repo._coalesced_city_aggregates),
-        ),
-        patch.object(
-            insights_repo,
-            "_coalesced_url_aggregates",
-            _wrap_coalesced("coalesced:url", insights_repo._coalesced_url_aggregates),
-        ),
-        patch.object(
-            insights_repo,
-            "_coalesced_ip_security_aggregates",
-            _wrap_coalesced("coalesced:ip", insights_repo._coalesced_ip_security_aggregates),
-        ),
-    ):
+    with patch.object(registry, "get_all", return_value=wrapped_definitions):
         yield phase_wall_ms, phase_cpu_ms
 
     run_metrics["phase_wall_ms"] = phase_wall_ms
@@ -557,51 +536,58 @@ def _instrument_insights_phases(run_metrics: dict[str, Any]):
 
 
 class _ProfilingConnProxy:
-    def __init__(
+    def __init__(self) -> None:
+        self._wall: dict[str, float] = {}
+        self._cpu: dict[str, float] = {}
+        self._lock = threading.Lock()
+        self._tables: list[pa.Table] = []
+        self._earliest_iso: str = datetime.now(UTC).isoformat()
+        self._window_rows: int = 0
+        self._field_names: list[str] = []
+
+    def load_dataset(
         self,
-        raw_con: duckdb.DuckDBPyConnection,
-        sql_timings_wall: dict[str, float],
-        sql_timings_cpu: dict[str, float],
+        *,
+        tables: list[pa.Table],
+        earliest_iso: str,
+        window_rows: int,
+        field_names: list[str],
     ) -> None:
-        self._con = raw_con
+        self._tables = tables
+        self._earliest_iso = earliest_iso
+        self._window_rows = window_rows
+        self._field_names = field_names
+
+    def bind_timings(self, sql_timings_wall: dict[str, float], sql_timings_cpu: dict[str, float]) -> None:
         self._wall = sql_timings_wall
         self._cpu = sql_timings_cpu
 
     def _classify_sql(self, sql: str) -> str:
         s = " ".join(sql.strip().split())
         if s.startswith("/* insight:") and "*/" in s:
-            return f"sql:{s.split('/* insight:', 1)[1].split('*/', 1)[0].strip()}"
-        s_lower = s.lower()
-        if "select min(timestamp) from" in s_lower:
-            return "phase:min_timestamp"
-        if s_lower.startswith("describe "):
-            return "phase:describe_schema"
-        if s_lower.startswith("attach ':memory:' as insights_scratch_"):
-            return "phase:scratch_attach"
-        if "create table insights_scratch_" in s_lower and ".insights_temp_" in s_lower:
-            return "phase:scratch_table_build"
-        if "create table insights_scratch_" in s_lower and ".insights_waf_" in s_lower:
-            return "coalesced:waf"
-        if "select count(*) from insights_scratch_" in s_lower:
-            return "phase:window_total_count"
-        if s_lower.startswith("detach insights_scratch_"):
-            return "phase:scratch_detach"
+            tag = s.split("/* insight:", 1)[1].split("*/", 1)[0].strip()
+            if tag == "history":
+                return "phase:min_timestamp"
+            if tag == "fields":
+                return "phase:describe_schema"
+            return f"sql:{tag}"
         return "sql:other"
 
-    def execute(self, sql: str, *args: Any, **kwargs: Any):
+    def execute(self, sql: str, params: dict[str, Any] | None = None, *, settings: Any = None) -> list[dict[str, Any]]:
         label = self._classify_sql(sql)
         t0_w, t0_c = time.perf_counter(), time.thread_time()
         try:
-            return self._con.execute(sql, *args, **kwargs)
+            if label == "phase:min_timestamp":
+                return [{"earliest": self._earliest_iso, "window_total": self._window_rows}]
+            if label == "phase:describe_schema":
+                return [{"fields": self._field_names}]
+            return []
         finally:
-            self._wall[label] = self._wall.get(label, 0.0) + (time.perf_counter() - t0_w) * 1000.0
-            self._cpu[label] = self._cpu.get(label, 0.0) + (time.thread_time() - t0_c) * 1000.0
-
-    def cursor(self) -> _ProfilingConnProxy:
-        return _ProfilingConnProxy(self._con.cursor(), self._wall, self._cpu)
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._con, name)
+            dw = (time.perf_counter() - t0_w) * 1000.0
+            dc = (time.thread_time() - t0_c) * 1000.0
+            with self._lock:
+                self._wall[label] = self._wall.get(label, 0.0) + dw
+                self._cpu[label] = self._cpu.get(label, 0.0) + dc
 
 
 def run_profile(
@@ -611,16 +597,38 @@ def run_profile(
     window_hours: float = 1.0,
     baseline_hours: float = 720.0,
 ) -> dict[str, Any]:
+    from backend.high_scale.archive import ServingWatermark
+    from backend.high_scale.ingest_controller import HighScaleService
+    from backend.high_scale.insights import _INSIGHTS_CACHE, insights_endpoint
+    from backend.models.analytics import InsightsRequest
     from backend.repositories.insights import registry
-    from backend.repositories.insights import repository as insights_repo
 
     all_defns = registry.get_all()
     with tempfile.TemporaryDirectory(prefix="insights_profile_") as tmpdir:
-        con = duckdb.connect(":memory:")
+        proxy_client = _ProfilingConnProxy()
         dataset_meta = build_synthetic_30d_dataset(
-            con, Path(tmpdir), service_name="profile-svc", total_rows=total_rows, num_files=num_files
+            proxy_client, Path(tmpdir), service_name="profile-svc", total_rows=total_rows, num_files=num_files
         )
-        src = {"name": "profile-svc", "service_id": "svc-profile"}
+        now = datetime.now(UTC)
+        hs_service = HighScaleService(
+            service_id="svc-profile",
+            client=proxy_client,  # type: ignore[arg-type]
+            cursor_secret=b"profile-secret",
+            request_watermark=ServingWatermark(
+                service_id="svc-profile",
+                domain="request",
+                owner_epoch=1,
+                coverage_start=now - timedelta(hours=721),
+                coverage_end=now,
+                last_accepted_cursor=None,
+                last_archived_event_id=None,
+                last_visible_event_id=None,
+                exact=True,
+            ),
+        )
+        req = InsightsRequest(
+            window_size_hrs=int(max(1, round(window_hours))), baseline_hours=int(max(1, round(baseline_hours)))
+        )
         cold_wall_ms: list[float] = []
         cold_cpu_ms: list[float] = []
         warm_wall_ms: list[float] = []
@@ -629,37 +637,36 @@ def run_profile(
         per_op_cpu_runs: dict[str, list[float]] = {}
         mock_pop = {"IAD": (38.9531, -77.4565), "LAX": (33.9416, -118.4085), "JFK": (40.6413, -73.7781)}
 
+        _INSIGHTS_CACHE.clear()
         with (
             patch("backend.utils.pop_utils.get_pop_lat_lon_map", return_value=mock_pop),
-            patch("backend.core.duckdb.get_asn_names", return_value={}),
-            patch("backend.core.duckdb._get_dma_map", return_value={}),
+            patch("backend.core.fos_client.get_asn_names", return_value={}),
+            patch("backend.core.fos_client._get_dma_map", return_value={}),
         ):
             for _run_idx in range(runs):
                 sql_wall: dict[str, float] = {}
                 sql_cpu: dict[str, float] = {}
                 run_meta: dict[str, Any] = {}
-                proxy_con = _ProfilingConnProxy(con, sql_wall, sql_cpu)
+                proxy_client.bind_timings(sql_wall, sql_cpu)
 
                 with _instrument_insights_phases(run_meta) as (proc_wall, proc_cpu):
                     t0_w, t0_c = time.perf_counter(), time.process_time()
-                    insights_repo.get_insights(
-                        proxy_con,  # type: ignore[arg-type]
-                        src,
-                        window_hours=window_hours,
-                        baseline_hours=baseline_hours,
-                        service_id="svc-profile",
+                    insights_endpoint(
+                        hs_service,
+                        req,
+                        None,
+                        None,
                         force_refresh=True,
                     )
                     cold_wall_ms.append((time.perf_counter() - t0_w) * 1000.0)
                     cold_cpu_ms.append((time.process_time() - t0_c) * 1000.0)
 
                 t0_warm_w, t0_warm_c = time.perf_counter(), time.process_time()
-                insights_repo.get_insights(
-                    con,
-                    src,
-                    window_hours=window_hours,
-                    baseline_hours=baseline_hours,
-                    service_id="svc-profile",
+                insights_endpoint(
+                    hs_service,
+                    req,
+                    None,
+                    None,
                     force_refresh=False,
                 )
                 warm_wall_ms.append((time.perf_counter() - t0_warm_w) * 1000.0)

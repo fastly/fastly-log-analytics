@@ -1,4 +1,5 @@
 import { formatAbbreviatedCount } from '@/lib/utils'
+import { SERVICE_DEFAULTS } from '@/lib/serviceDefaults'
 import type { components } from '@/types/api.generated'
 
 export type PrefillResponse = components['schemas']['PrefillResponse']
@@ -16,9 +17,7 @@ export const BILLING_ZONE_DESCRIPTIONS: Record<BillingZone, string> = {
   Global: "All POPs throughout Fastly's entire global network ($0.18/GB).",
 }
 
-export type DeploymentMode = 'standard' | 'high_scale'
-
-// Measured on a dev High-Scale deployment (2026-10-27, 165k request and 90k RUM archive artifacts, R^2
+// Measured on a High-Scale deployment (2026-10-27, 165k request and 90k RUM archive artifacts, R^2
 // 0.92-0.97): a request artifact is about 32.8 KB fixed plus 419 bytes per row, a RUM artifact about 22.5 KB fixed
 // plus 350 bytes per row. The worker deletes artifacts one day after the service's retention window (data retention
 // for requests, RUM retention for RUM), so they are billed for that window plus the margin.
@@ -27,7 +26,7 @@ const ARCHIVE_BYTES_PER_ROW = 419
 const RUM_ARCHIVE_FIXED_BYTES = 22_500
 const RUM_ARCHIVE_BYTES_PER_ROW = 350
 const ARCHIVE_RETENTION_MARGIN_DAYS = 1
-const ARCHIVE_TICK_SECONDS = 20
+const ARCHIVE_DELETION_GRACE_MINUTES = 15
 // ZSTD compresses structured, repetitive NDJSON edge logs by ~15× (~33% smaller than gzip's ~10×).
 export const RAW_LOG_COMPRESSION_RATIO = 15
 // Batched RUM beacons share page/session metadata and compress to ~128 B per metric row in ZSTD Parquet (~512 B raw / 4).
@@ -45,9 +44,7 @@ export interface CalcState {
   edgeReqDay: number
   rumBeaconsDay: number
   logPeriod: number
-  commitMins: number
   bytesPerLine: number
-  parquetMB: number
   logNodes: number
   userEditedNodes: boolean
   logsChecksPerDay: number
@@ -55,8 +52,7 @@ export interface CalcState {
   retentionDays: number
   rumRetentionDays: number
   deleteLogs: boolean
-  compactionEnabled: boolean
-  deploymentMode: DeploymentMode
+  snapshotIntervalMinutes: number
   archiveBatchObjects: number
   rateA: number
   rateB: number
@@ -67,18 +63,20 @@ export interface CalcState {
 }
 
 export type CalcAction =
-  | { type: 'SET'; key: keyof CalcState; value: number | boolean | BillingZone | DeploymentMode }
+  | { type: 'SET'; key: keyof CalcState; value: number | boolean | BillingZone }
   | { type: 'SET_ZONE'; zone: BillingZone }
   | { type: 'PREFILL'; prefill: PrefillResponse }
   | { type: 'AUTO_NODES' }
 
 export const DEFAULTS: CalcState = {
-  reqDay: 1_000_000, sampleRate: 100, edgeOnly: true, edgeReqDay: 800_000, rumBeaconsDay: 0,
-  logPeriod: 60, commitMins: 5, bytesPerLine: 500, parquetMB: 20,
+  reqDay: 1_000_000, sampleRate: SERVICE_DEFAULTS.sampleRatePercent, edgeOnly: true, edgeReqDay: 800_000, rumBeaconsDay: 0,
+  logPeriod: SERVICE_DEFAULTS.logPeriodSeconds, bytesPerLine: 500,
   logNodes: 1, userEditedNodes: false,
   logsChecksPerDay: 2,
-  cdnEnabled: true, retentionDays: 90, rumRetentionDays: 90, deleteLogs: true,
-  compactionEnabled: true, deploymentMode: 'standard', archiveBatchObjects: 100,
+  cdnEnabled: true, retentionDays: SERVICE_DEFAULTS.logRetentionDays, rumRetentionDays: SERVICE_DEFAULTS.rumRetentionDays,
+  deleteLogs: true,
+  snapshotIntervalMinutes: SERVICE_DEFAULTS.snapshotIntervalMinutes,
+  archiveBatchObjects: 500,
   rateA: 0.005, rateB: 0.001, rateStorage: 0.02, rateEgress: 0.12, minDays: 30,
   billingZone: 'MBZ200',
 }
@@ -131,13 +129,11 @@ export function reducer(state: CalcState, action: CalcAction): CalcState {
         logPeriod: lp,
         bytesPerLine: Math.max(10, Math.round(bpl)),
         rumBeaconsDay: p.rum_beacons_per_day ?? state.rumBeaconsDay,
-        ...(p.commit_interval_mins != null && { commitMins: p.commit_interval_mins }),
         ...(p.edge_only != null && { edgeOnly: p.edge_only }),
         ...(p.delete_after != null && { deleteLogs: p.delete_after }),
+        ...(p.snapshot_interval_minutes != null && { snapshotIntervalMinutes: p.snapshot_interval_minutes }),
         ...(p.log_retention_days != null && { retentionDays: p.log_retention_days || KEEP_FOREVER_DAYS }),
         ...(p.rum_retention_days != null && { rumRetentionDays: p.rum_retention_days || KEEP_FOREVER_DAYS }),
-        ...(p.deployment_mode != null && { deploymentMode: p.deployment_mode === 'high_scale' ? 'high_scale' as const : 'standard' as const }),
-        ...(p.compaction_enabled != null && { compactionEnabled: p.compaction_enabled }),
         ...(p.class_a_rate_per_1k != null && { rateA: p.class_a_rate_per_1k }),
         ...(p.class_b_rate_per_10k != null && { rateB: p.class_b_rate_per_10k / 10 }),
         rateEgress: resolvedEgress,
@@ -167,6 +163,7 @@ export interface CalcResults {
   totalCost: number
   logFilesPerMonth: number
   parquetFilesPerMonth: number
+  drStateSnapshotsPerMonth: number
   syncsPerMonth: number
   logFilesPerSync: number
   reqDayEffective: number
@@ -179,6 +176,30 @@ export interface CalcResults {
   rumBeaconsMonth: number
   rumParquetGBMonths: number
   costRum: number
+}
+
+export interface MonthlyQuantities {
+  classAPerMonth: number
+  classBPerMonth: number
+  gbMonthsStored: number
+  cdnEgressGB: number
+}
+
+export interface PricedQuantities {
+  costA: number
+  costB: number
+  costStorage: number
+  costEgress: number
+  totalCost: number
+}
+
+// Single pricing step shared by calculate() and the shared load-testing tool (the load-test config's `estimator`).
+export function priceQuantities(s: CalcState, q: MonthlyQuantities): PricedQuantities {
+  const costA = (q.classAPerMonth / 1000) * s.rateA
+  const costB = (q.classBPerMonth / 1000) * s.rateB
+  const costStorage = q.gbMonthsStored * s.rateStorage
+  const costEgress = q.cdnEgressGB * s.rateEgress
+  return { costA, costB, costStorage, costEgress, totalCost: costA + costB + costStorage + costEgress }
 }
 
 export function calculate(s: CalcState): CalcResults {
@@ -194,101 +215,92 @@ export function calculate(s: CalcState): CalcResults {
   const totalGzBytesPerMonth = totalGzBytesPerDay * 30
   const logSizeKB = (totalGzBytesPerDay / logFilesPerDay) / 1024
 
-  const syncsPerDay = (24 * 60) / s.commitMins
-  const syncsPerMonth = syncsPerDay * 30
-  const syncHrs = s.commitMins / 60
-  const logFilesPerSync = logFilesPerDay * (syncHrs / 24)
-
-  const rawBytesPerSync = totalBytesPerDay / syncsPerDay
-  const parquetBytesPerSync = rawBytesPerSync / 4
-  const parquetFilesPerSync = Math.max(1, Math.floor(parquetBytesPerSync / (s.parquetMB * 1024 * 1024)))
-  const parquetFilesPerMonth = parquetFilesPerSync * syncsPerMonth
-  const actualParquetBytesPerFile = parquetBytesPerSync / parquetFilesPerSync
-  const parquetGBPerFile = actualParquetBytesPerFile / (1024 * 1024 * 1024)
-
-  // Committed DuckLake Parquet is pushed to FOS after each commit (the cloud copy used to rebuild local data).
-  const minChargeHours = s.minDays * 24
-  const rawPqFilesPerDay = parquetFilesPerSync * syncsPerDay
-  // High-Scale also archives each page of raw objects as one Parquet artifact plus a manifest and a commit marker.
-  const highScale = s.deploymentMode === 'high_scale'
-  // A page holds whatever the worker discovered in one tick (up to the page size), so quiet services archive one
-  // object per page. a dev High-Scale deployment measured 2.5 source objects per page on average.
-  const objectsPerTick = (logFilesPerDay * ARCHIVE_TICK_SECONDS) / 86400
-  const archivePagesPerDay = highScale ? Math.ceil(logFilesPerDay / Math.min(Math.max(1, s.archiveBatchObjects), Math.max(1, objectsPerTick))) : 0
-  const archiveObjectsPerDay = archivePagesPerDay * 3
-  // RUM archive: one artifact per page of RUM objects, and RUM objects follow the beacon volume, not the log cadence.
-  const rumObjectsPerDay = s.rumBeaconsDay * RUM_OBJECTS_PER_BEACON
-  const rumPagesPerDay = highScale && rumObjectsPerDay > 0
-    ? Math.ceil(rumObjectsPerDay / Math.min(Math.max(1, s.archiveBatchObjects), Math.max(1, (rumObjectsPerDay * ARCHIVE_TICK_SECONDS) / 86400)))
-    : 0
-  const objectsPerDay = logFilesPerDay + rawPqFilesPerDay + archiveObjectsPerDay
-
-  const logSteadyStateDays = s.deleteLogs ? syncHrs / 24 : s.retentionDays
-  const billedLogDays = Math.max(logSteadyStateDays, s.minDays)
-  const billedPqDays = Math.max(s.retentionDays, s.minDays)
-
-  const objectsBilled = (logFilesPerDay * billedLogDays) + (rawPqFilesPerDay * billedPqDays) + (archiveObjectsPerDay * billedPqDays)
-
   const ingestSeconds = Math.max(10, Math.floor(s.logPeriod / 2))
-  const ingestsPerMonth = ((24 * 60 * 60) / ingestSeconds) * 30
-  const rawFilesStored = s.deleteLogs ? logFilesPerDay / 24 : logFilesPerDay * s.retentionDays
-  const listOpsClassA = Math.max(1, Math.ceil(rawFilesStored / 1000)) * ingestsPerMonth
+  const syncsPerDay = (24 * 60 * 60) / ingestSeconds
+  const syncsPerMonth = syncsPerDay * 30
+  const logFilesPerSync = logFilesPerDay / syncsPerDay
+
+  const minChargeHours = s.minDays * 24
+  const snapshotMinutes = Math.max(1, s.snapshotIntervalMinutes)
+  const snapshotSeconds = snapshotMinutes * 60
+  // Ingest worker flushes one consolidated Parquet archive + manifest + commit marker per domain
+  // on snapshot_interval_minutes (or earlier if archiveBatchObjects is reached).
+  const objectsPerSnapshot = (logFilesPerDay * snapshotSeconds) / 86400
+  const archivePagesPerDay = Math.ceil(
+    logFilesPerDay / Math.min(Math.max(1, s.archiveBatchObjects), Math.max(1, objectsPerSnapshot)),
+  )
+  const archiveObjectsPerDay = archivePagesPerDay * 3
+  const parquetFilesPerMonth = archivePagesPerDay * 30
+  // RUM archive: one artifact per snapshot window of RUM objects, capped by archiveBatchObjects.
+  const rumObjectsPerDay = s.rumBeaconsDay * RUM_OBJECTS_PER_BEACON
+  const rumPagesPerDay = rumObjectsPerDay > 0
+    ? Math.ceil(
+        rumObjectsPerDay /
+          Math.min(Math.max(1, s.archiveBatchObjects), Math.max(1, (rumObjectsPerDay * snapshotSeconds) / 86400)),
+      )
+    : 0
+  const objectsPerDay = logFilesPerDay + archiveObjectsPerDay
+
+  const rawSteadyStateHours = (snapshotMinutes + ARCHIVE_DELETION_GRACE_MINUTES) / 60
+  const logSteadyStateDays = s.deleteLogs ? rawSteadyStateHours / 24 : s.retentionDays
+  const billedLogDays = Math.max(logSteadyStateDays, s.minDays)
+  const billedArchiveDays = Math.max(s.retentionDays + ARCHIVE_RETENTION_MARGIN_DAYS, s.minDays)
+
+  const objectsBilled = (logFilesPerDay * billedLogDays) + (archiveObjectsPerDay * billedArchiveDays)
+
+  const rawFilesStored = s.deleteLogs ? logFilesPerDay * (rawSteadyStateHours / 24) : logFilesPerDay * s.retentionDays
+  const listOpsClassA = Math.max(1, Math.ceil(rawFilesStored / 1000)) * syncsPerMonth
   const classALogsPage = s.logsChecksPerDay * 30
-  const stateSyncClassA = syncsPerDay * 30
+  const drStateSnapshotsPerMonth = ((24 * 60) / snapshotMinutes) * 30
+  const stateSyncClassA = drStateSnapshotsPerMonth
   const rumBeaconsMonth = s.rumBeaconsDay * 30
 
-  const duckLakeParquetClassA = parquetFilesPerMonth + (s.compactionEnabled ? 30 + parquetFilesPerMonth : 0)
   const classAPerMonth =
     logFilesPerMonth + listOpsClassA + classALogsPage +
-    stateSyncClassA + rumBeaconsMonth + duckLakeParquetClassA + (archivePagesPerDay + rumPagesPerDay) * 30 * 3
+    stateSyncClassA + rumBeaconsMonth + (archivePagesPerDay + rumPagesPerDay) * 30 * 3
 
-  // Queries read local data, so FOS reads are the raw .zst ingest only (restores are rare and not modelled).
-  // Each archive publish is read back to verify the artifact, manifest and commit marker.
+  // Queries read ClickHouse, so FOS reads are raw .zst ingest plus archive publish verification reads.
   const classBPerMonth = logFilesPerMonth + (archivePagesPerDay + rumPagesPerDay) * 30 * 3
 
   const logGBPerFile = logSizeKB / (1024 * 1024)
-  const logActualH = s.deleteLogs ? Math.max(1, syncHrs) : s.retentionDays * 24
+  const logActualH = s.deleteLogs ? rawSteadyStateHours : s.retentionDays * 24
   const logBilledH = Math.max(logActualH, minChargeHours)
   const rawLogGBMonths = (logFilesPerMonth * logGBPerFile * logBilledH) / 720
 
-  const pqActualH = s.retentionDays * 24
-  const pqBilledH = Math.max(pqActualH, minChargeHours)
-  const duckLakeDataGBMonths = (parquetFilesPerMonth * parquetGBPerFile * pqBilledH) / 720
   // RUM data follows its own retention (rum_retention_days), not the request retention.
   const rumBilledH = Math.max(s.rumRetentionDays * 24, minChargeHours)
   const rumParquetGBMonths = ((s.rumBeaconsDay * 30 * RUM_COMPRESSED_BYTES_PER_BEACON) / (1024 * 1024 * 1024)) * (rumBilledH / 720)
   const archiveBilledH = Math.max((s.retentionDays + ARCHIVE_RETENTION_MARGIN_DAYS) * 24, minChargeHours)
   const archiveBytesPerMonth = archivePagesPerDay * 30 * ARCHIVE_FIXED_BYTES + reqDayEffective * 30 * ARCHIVE_BYTES_PER_ROW
-  const archiveGBMonths = highScale ? (archiveBytesPerMonth / (1024 * 1024 * 1024)) * (archiveBilledH / 720) : 0
+  const archiveGBMonths = (archiveBytesPerMonth / (1024 * 1024 * 1024)) * (archiveBilledH / 720)
   const rumArchiveBilledH = Math.max((s.rumRetentionDays + ARCHIVE_RETENTION_MARGIN_DAYS) * 24, minChargeHours)
   const rumArchiveBytesPerMonth = rumPagesPerDay * 30 * RUM_ARCHIVE_FIXED_BYTES + s.rumBeaconsDay * 30 * RUM_ARCHIVE_BYTES_PER_ROW
-  const rumArchiveGBMonths = highScale ? (rumArchiveBytesPerMonth / (1024 * 1024 * 1024)) * (rumArchiveBilledH / 720) : 0
-  const totalGBStored = rawLogGBMonths + duckLakeDataGBMonths + rumParquetGBMonths + archiveGBMonths + rumArchiveGBMonths
+  const rumArchiveGBMonths = rumObjectsPerDay > 0 ? (rumArchiveBytesPerMonth / (1024 * 1024 * 1024)) * (rumArchiveBilledH / 720) : 0
+  const totalGBStored = rawLogGBMonths + rumParquetGBMonths + archiveGBMonths + rumArchiveGBMonths
 
   const storageTiers: CalcResults['storageTiers'] = []
   if (rawLogGBMonths > 0) storageTiers.push({ label: 'Raw logs', gbMonths: rawLogGBMonths, flagged: logBilledH > logActualH })
-  if (duckLakeDataGBMonths > 0) storageTiers.push({ label: 'DuckLake data', gbMonths: duckLakeDataGBMonths, flagged: pqBilledH > pqActualH })
+  if (archiveGBMonths > 0) storageTiers.push({ label: 'Archive Parquet', gbMonths: archiveGBMonths, flagged: archiveBilledH > (s.retentionDays + ARCHIVE_RETENTION_MARGIN_DAYS) * 24 })
   if (rumParquetGBMonths > 0) storageTiers.push({ label: 'RUM data', gbMonths: rumParquetGBMonths, flagged: false })
-  if (archiveGBMonths > 0) storageTiers.push({ label: 'High-Scale archive', gbMonths: archiveGBMonths, flagged: archiveBilledH > (s.retentionDays + ARCHIVE_RETENTION_MARGIN_DAYS) * 24 })
-  if (rumArchiveGBMonths > 0) storageTiers.push({ label: 'High-Scale RUM archive', gbMonths: rumArchiveGBMonths, flagged: rumArchiveBilledH > (s.rumRetentionDays + ARCHIVE_RETENTION_MARGIN_DAYS) * 24 })
+  if (rumArchiveGBMonths > 0) storageTiers.push({ label: 'RUM archive', gbMonths: rumArchiveGBMonths, flagged: rumArchiveBilledH > (s.rumRetentionDays + ARCHIVE_RETENTION_MARGIN_DAYS) * 24 })
 
   // With a CDN fronting FOS, the raw .zst objects read during ingest are the egress.
   const cdnEgressGB = s.cdnEnabled ? totalGzBytesPerMonth / (1024 * 1024 * 1024) : 0
 
-  const costA = (classAPerMonth / 1000) * s.rateA
-  const costB = (classBPerMonth / 1000) * s.rateB
-  const costStorage = totalGBStored * s.rateStorage
-  const costEgress = cdnEgressGB * s.rateEgress
-  const totalCost = costA + costB + costStorage + costEgress
+  const { costA, costB, costStorage, costEgress, totalCost } = priceQuantities(s, {
+    classAPerMonth, classBPerMonth, gbMonthsStored: totalGBStored, cdnEgressGB,
+  })
   const costRum = (rumBeaconsMonth / 1000) * s.rateA + ((rumParquetGBMonths + rumArchiveGBMonths) * s.rateStorage)
 
   return {
     classAPerMonth, classBPerMonth, totalGBStored, cdnEgressGB,
     costA, costB, costStorage, costEgress, totalCost,
-    logFilesPerMonth, parquetFilesPerMonth, syncsPerMonth, logFilesPerSync,
+    logFilesPerMonth, parquetFilesPerMonth, drStateSnapshotsPerMonth, syncsPerMonth, logFilesPerSync,
     reqDayEffective, objectsPerDay, objectsBilled, classALogsPage, storageTiers,
     totalBytesPerMonth, totalGzBytesPerMonth, rumBeaconsMonth, rumParquetGBMonths, costRum,
   }
 }
 
 export const fmtN = (n: number): string => formatAbbreviatedCount(n, 2)
+export { estimateMonthlyUsage } from '@/lib/cloud-engine/usage/estimate'
+export { evaluateCapacity } from '@/lib/cloud-engine/usage/capacity'

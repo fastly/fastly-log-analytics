@@ -177,13 +177,20 @@ def make_remote_access_app(*routers):
 
 
 @pytest.fixture(autouse=True)
-def isolate_share_db(tmp_path, monkeypatch):
+def isolate_share_db(tmp_path, monkeypatch, request):
     """Point the share DB at a per-test temp directory and isolate state."""
     from backend.core import share_db
+    from backend.utils import remote_access as ra
     from backend.utils import tunnel
 
     monkeypatch.setenv("REMOTE_SHARE_DB_DIR", str(tmp_path / "system"))
     tunnel.reset_for_tests()
+    ra._static_limiter.clear()
+    ra._analyst_api_limiter.clear()
+    if request.node.get_closest_marker("no_postgres") is not None:
+        yield
+        tunnel.reset_for_tests()
+        return
     con = share_db.get_global_share_con()
     try:
         con.execute("DELETE FROM remote_sessions")

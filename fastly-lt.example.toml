@@ -1,0 +1,27 @@
+# Copy this example outside the repository, replace every placeholder, and
+# pass its absolute path with LT_CONFIG. Keep the live file private: it may
+# name production services, buckets, and state directories.
+app = "flp"
+install = "replace-with-install-name"
+checkout = "/absolute/path/to/fastly-log-analytics"
+base_url = "https://replace-with-app-domain.example"
+destination = "replace-with-load-test-destination.example"
+estimator = "frontend/lib/cloud-engine/usage/estimate.ts"
+total_selector = '[data-testid="total-requests"]'
+scenarios_file = "/path/to/private/fdlt/scenarios.toml"
+
+[services]
+monitored = "replace-with-monitored-service-id"
+app = "replace-with-compute-app-service-id"
+worker = "replace-with-worker-service-id"
+front = "replace-with-front-service-id"
+
+[fastly_token]
+# Environment variable name only. Never put a token value in this file.
+env = "FASTLY_API_KEY"
+
+[settings]
+state_dir = "/private/state/replace-with-install-name"
+env_file = "/private/config/replace-with-install.env"
+log_endpoint_name = "Fastly Object Storage Logs"
+raw_bucket = "replace-with-private-bucket"

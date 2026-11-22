@@ -11,6 +11,16 @@ Source: [`frontend/app/admin/rum/page.tsx`](../../../frontend/app/admin/rum/page
 - Settings dialog: capture toggles `capture_vitals`, `capture_performance`, `capture_errors`, `capture_events`, and a custom VCL condition.
 - Faro SDK version card (current, latest, update available) with an upgrade action.
 
+### Cloud runtime
+
+Cloud uses the same enable, disable, settings and SDK upgrade dialogs, bridged to its native, generation-checked
+`POST /api/admin/services/{id}/reconcile` job with the updated RUM configuration.
+Progress comes from `/api/admin/jobs/{id}/step`; a failed job remains a failure, and settings are not
+reported as saved until the job completes. Existing endpoint names, log periods and sampling settings are preserved.
+
+Cloud disable preserves retained RUM data. The High-Scale log-file and bucket-deletion switches are not
+shown in Cloud, and Cloud rejects requests that ask this action to delete either.
+
 ## Roles
 
 Admin only. Enable, disable, settings, versions and upgrade are `require_admin` and are also blocked for analysts by `_ANALYST_BLOCKED_RUM_SUFFIXES` (`403 admin_only`). Analysts may call `GET /api/services/{id}/rum/status`, which returns only `{enabled, enabled_at}`.
@@ -24,7 +34,7 @@ Routes in [`backend/routers/rum/provisioning.py`](../../../backend/routers/rum/p
 - `POST .../rum/settings` (`RumSettingsUpdateRequest`: the four `capture_*` booleans, `custom_condition`, `token`): updates config and redeploys the tracker; returns `skipped` when nothing changed.
 - `GET .../rum/versions` (`RumVersionsResponse`: `available`, `current`, `latest`, `update_available`) and `POST .../rum/upgrade` (SSE, `version`, `token`): pin a different Faro SDK version; unknown versions are `400 unknown_faro_version`.
 
-RUM ingest is driven by the `rum_sync` / `rum_commit` crons in standard mode and by the high-scale worker in high-scale mode (see [docs/cron](../../cron/README.md)); the tables and read contract are described in [rum.md](../rum.md).
+RUM ingest is driven by `rum_discovery` and the stateless ingest worker (`python -m backend.high_scale.worker`), publishing into ClickHouse (`rum_vitals` and `rum_errors`) with `ledger_rum_sweep` as the crash-recovery sweep (see [docs/cron](../../cron/README.md)); the tables and read contract are described in [rum.md](../rum.md).
 
 ## Tests
 

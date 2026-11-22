@@ -3,17 +3,11 @@
 from __future__ import annotations
 
 import logging
-import sys as _sys
 import time
 
 from backend import config as svcconfig
-from backend.core.rum_ingest import ingest_rum_logs
-from backend.cron.jobs._common import _resolve_sync_hook
-from backend.cron.scheduler import cron_run, cron_task
 
 logger = logging.getLogger("backend.scheduler")
-
-_orig_ingest_rum_logs = ingest_rum_logs
 
 
 def _faro_purge_surrogate_key(logging_service_id: str, token: str) -> None:
@@ -199,92 +193,3 @@ def _reconcile_faro_bundle(service_id: str, run_id: int | None) -> bool:
 
 
 _orig_reconcile_faro_bundle = _reconcile_faro_bundle
-
-
-@cron_task("cron_rum_sync", job_name="rum_sync")
-def _run_rum_sync(service_id: str, **kwargs) -> None:
-    """Sync RUM beacon logs from FOS raw/rum/ into local DuckDB tables.
-
-    Calls ingest_rum_logs generator which handles orphan-row safety internally.
-    """
-    # No start-of-tick active-request gate here (mirroring 5a7541fd): a deferred
-    # tick waits a full interval, and dashboard/SSE polling kept it tripped.
-    logger.info(f"RUM sync starting for {service_id}")
-    is_manual = kwargs.get("is_manual", False) or kwargs.get("run_id") is not None
-    pass_max_seconds = 20 if not is_manual else 240
-
-    from backend.core import metadata
-    from backend.cron.scheduler import add_progress
-
-    ingest_fn = _resolve_sync_hook("ingest_rum_logs", ingest_rum_logs, _orig_ingest_rum_logs)
-    reconcile_fn = _resolve_sync_hook("_reconcile_faro_bundle", _reconcile_faro_bundle, _orig_reconcile_faro_bundle)
-
-    had_warning = False
-    with cron_run(
-        service_id,
-        "rum_sync",
-        run_id=kwargs.get("run_id"),
-        include_log_output=False,
-        finalize_running_backstop=True,
-    ) as run:
-        if not run.ok:
-            return
-        run_id = run.run_id
-        try:
-            for event in ingest_fn(service_id, max_seconds=pass_max_seconds, run_id=run_id):
-                kind = event[0]
-                if kind == "started":
-                    add_progress(run_id, {"type": "status", "message": f"RUM sync starting for {service_id}"})
-                    if not reconcile_fn(service_id, run_id):
-                        had_warning = True
-                elif kind == "file_done":
-                    msg = f"{event[1]}: {event[2]} rows"
-                    logger.debug(f"  {msg}")
-                    add_progress(run_id, {"type": "status", "message": msg})
-                elif kind == "error":
-                    err_msg = f"Error in {event[1]}: {event[2]}"
-                    logger.warning(f"  {err_msg}")
-                    add_progress(run_id, {"type": "error", "message": err_msg})
-                elif kind == "cleanup_done":
-                    msg = f"RUM cleanup deleted {event[1]} files, freed {event[2] / (1024 * 1024):.2f} MB"
-                    logger.info(msg)
-                    add_progress(run_id, {"type": "status", "message": msg})
-                elif kind == "done":
-                    total = event[1]
-                    msg = f"RUM sync complete: {total} total rows" + (" (with warnings)" if had_warning else "")
-                    logger.info(msg)
-                    add_progress(run_id, {"type": "status", "message": msg})
-                    if had_warning:
-                        try:
-                            con = metadata.get_con(service_id)
-                            con.execute(
-                                "UPDATE cron_runs SET status = 'warning' "
-                                "WHERE id = ? AND service_id = ? AND status = 'success'",
-                                (run_id, service_id),
-                            )
-                            con.commit()
-                        except Exception:
-                            logger.warning(
-                                "Could not mark RUM cron run as warning",
-                                extra={"service_id": service_id, "run_id": run_id},
-                                exc_info=True,
-                            )
-                    if total > 0:
-                        try:
-                            logger.info(
-                                "⚡ [rum_sync] %s: triggering post-sync RUM commit for %d new rows", service_id, total
-                            )
-                            from backend.cron.jobs import rum_commit as _rc_mod
-
-                            commit_fn = _rc_mod._run_rum_commit
-                            for mod_name in ("backend.cron.jobs.rum_sync", "backend.cron.jobs.sync"):
-                                mod = _sys.modules.get(mod_name)
-                                if mod is not None and "_run_rum_commit" in mod.__dict__:
-                                    commit_fn = mod.__dict__["_run_rum_commit"]
-                                    break
-                            commit_fn(service_id)
-                        except Exception as commit_err:
-                            logger.warning("RUM post-sync commit failed for %s: %s", service_id, commit_err)
-        except Exception as e:
-            logger.error(f"RUM sync failed: {e}", exc_info=True)
-            add_progress(run_id, {"type": "error", "message": f"RUM sync failed: {e}"})

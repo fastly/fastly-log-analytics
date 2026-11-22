@@ -18,7 +18,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Loader2, Plus, Edit, Trash2, Download, Upload } from 'lucide-react'
-import type { ColumnDef } from '@tanstack/react-table'
+import type { ColumnDef } from '@/lib/table'
 import { DataTableReadonly } from '@/components/DataTable'
 import {
   type FormState,
@@ -117,9 +117,9 @@ export function CustomFieldsManager({ serviceId }: { serviceId: string }) {
     {
       id: 'type',
       header: 'Type',
-      accessorFn: (f) => f.duckdb_type,
+      accessorFn: (f) => f.sql_type,
       size: 120,
-      cell: ({ row }) => <span className="text-xs font-mono">{row.original.duckdb_type}</span>,
+      cell: ({ row }) => <span className="text-xs font-mono">{row.original.sql_type}</span>,
     },
     {
       id: 'dashboard',

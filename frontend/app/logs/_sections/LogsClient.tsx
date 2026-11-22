@@ -8,13 +8,14 @@ import { PageHeader } from '@/components/ui/confirm-dialog'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Database, HardDrive, History, FileCode, Archive, ClipboardList } from 'lucide-react'
 import { NoServiceSelected } from '@/components/ReportLayout'
-import { useBootstrapResolved } from '@/hooks/useBootstrap'
+import { useBootstrap, useBootstrapResolved } from '@/hooks/useBootstrap'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { BackfillRangeModal } from '@/components/SyncStatusBadge/SyncStatusBadge'
 import { ingestedFilesColumns } from '@/components/DataTable'
 import Loading from '../loading'
 import { ControlledSSEModal as SSEModal } from '@/components/SSEModal'
-import { StorageStatus, StorageCalendar, MetadataStorageCard } from '@/components/SessionScoring/StoragePanels'
+import { MetadataStorageCard } from '@/components/SessionScoring/StoragePanels'
+import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
 import { useLogsPageState, type CronRun, type CatalogMaps } from './useLogsPageState'
 import {
   CRON_EXPLANATIONS,
@@ -52,15 +53,16 @@ const LOG_TABS = [
   { value: 'cron', label: 'Cron Runs', icon: History },
   { value: 'service_history', label: 'Service History', icon: ClipboardList },
   { value: 'ingestion', label: 'Ingestion History', icon: Database },
-  { value: 'storage', label: 'DuckLake Storage', icon: Archive },
+  { value: 'storage', label: 'Archive Storage', icon: Archive },
   { value: 'metadata_storage', label: 'Metadata Storage', icon: HardDrive },
   { value: 'raw', label: 'Available Logs', icon: FileCode },
-  { value: 'schema', label: 'DuckDB Schema', icon: FileCode },
+  { value: 'schema', label: IS_CLOUD_MODE ? 'Parquet Schema' : 'ClickHouse Schema', icon: FileCode },
 ] as const
 
 export default function LogsClient({ initialTab }: { initialTab?: string } = {}) {
   const s = useLogsPageState(initialTab)
   const queryClient = useQueryClient()
+  const { data: bootstrap } = useBootstrap()
   const bootstrapResolved = useBootstrapResolved()
   const auditColumns = useAuditColumns(s.catalogMaps)
   const cronColumns = useCronColumns()
@@ -74,6 +76,16 @@ export default function LogsClient({ initialTab }: { initialTab?: string } = {})
     )
   }
   if (!s.activeServiceId) return <Loading />
+
+  const archiveService = bootstrap?.services?.find(
+    service => service.service_id === s.activeServiceId
+  )
+  const archiveBucket = typeof archiveService?.fos_bucket === 'string'
+    ? archiveService.fos_bucket
+    : null
+  const archiveRegion = typeof archiveService?.fos_region === 'string'
+    ? archiveService.fos_region
+    : null
 
   return (
     <div className="space-y-6 min-h-[820px]">
@@ -148,20 +160,21 @@ export default function LogsClient({ initialTab }: { initialTab?: string } = {})
         </TabsContent>
         <TabsContent value="storage" className="mt-4 space-y-4">
           {s.activeTab === 'storage' && (
-            <>
-              <StorageStatus />
-              <StorageCalendar />
-              <div className="border rounded-lg overflow-hidden bg-card">
-                <div className="p-4 border-b">
-                  <h3 className="text-sm font-medium">DuckLake Data Layout</h3>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    Direct view of the DuckLake Parquet data files (the local data directory in Standard, Object Storage
-                    in High-Scale).
-                  </p>
-                </div>
-                <FileBrowser type="storage" />
+            <div className="border rounded-lg overflow-hidden bg-card">
+              <div className="p-4 border-b">
+                <h3 className="text-sm font-medium">Archive Parquet Layout</h3>
+                <p className="text-xs text-muted-foreground mt-1">
+                  Canonical Archive Parquet batches stored in Fastly Object Storage.
+                </p>
+                {(archiveBucket || archiveRegion) && (
+                  <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                    {archiveBucket && <span>FOS bucket: <code className="font-mono text-foreground">{archiveBucket}</code></span>}
+                    {archiveRegion && <span>Region: <code className="font-mono text-foreground">{archiveRegion}</code></span>}
+                  </div>
+                )}
               </div>
-            </>
+              <FileBrowser type="storage" />
+            </div>
           )}
         </TabsContent>
         <TabsContent value="metadata_storage" className="mt-4 space-y-4">

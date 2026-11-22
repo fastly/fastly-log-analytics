@@ -1,24 +1,22 @@
-# ADR-21 - High-Scale Ownership and Recovery Gate
+# ADR-21 - Unified ClickHouse Serving, Ownership, and Recovery Gate
 
-**Status:** Accepted. `high_scale` is a supported `DEPLOYMENT_MODE` alongside `standard`.
-**Date:** 2026-09-11 (Updated 2026-10-09)
+**Status:** Accepted (Unified as the single architecture in `v3.0.0-rc3`, superseding [ADR-01](01-storage-model.md), [ADR-06](06-view-warming.md), [ADR-14](14-ducklake-replacement.md), [ADR-18](18-serving-tier-single-pod.md), and [ADR-19](19-fos-native-v3-topology.md)).
+**Date:** 2026-09-11 (Updated 2026-10-09, Unified 2026-11-04)
 
 ## Decision
 
-The repository provides a separate, explicitly fenced `high_scale` data plane alongside `standard`.
-The two supported modes are `standard` and `high_scale`.
+The repository uses a single, unified ClickHouse + PostgreSQL 16 + Fastly Object Storage (FOS) data plane across all deployments (from a 1-worker laptop Docker Compose stack up to multi-node Kubernetes clusters).
 
-| Operation | standard | high_scale |
-|---|---|---|
-| Source discovery | synchronous ingest | high-scale ledger |
-| Durable event store | DuckLake | verified FOS archive |
-| Serving store | DuckDB/DuckLake | ClickHouse |
-| Source deletion | existing ingest path | archive deletion controller |
-| RUM ingest | existing mode path | high-scale RUM pipeline |
-| CMCD | request-row analytics | request-event projection |
-| DuckLake writers | allowed | prohibited |
+| Operation | Unified Architecture (`high_scale`) |
+|---|---|
+| Source discovery | PostgreSQL ingest ledger (`high_scale_source_cursors`, `high_scale_partition_cursors`) |
+| Durable event store | Verified FOS batch archive (`{prefix}/high-scale/archive/`) |
+| Serving store | ClickHouse (`request_facts`, `rum_vitals_facts`, `rum_error_facts`, `cmcd_projection_facts`, minute projections) |
+| Source deletion | Archive deletion controller (`HighScaleDeletionSweeper`, `HighScaleArchiveExpirer`) |
+| RUM ingest | Stateless worker RUM pipeline (`rum_vitals` + `rum_errors` sibling publication) |
+| CMCD | Request-event projection (`cmcd_projection_facts`) |
 
-The high-scale plane owns one owner epoch per service and, per the 2026-10-09 amendment below, one source cursor per key-range partition of that service.
+The data plane owns one owner epoch per service and, per the 2026-10-09 amendment below, one source cursor per key-range partition of that service.
 Cutover requires a drained old owner, a durable cursor handoff, and an
 atomic cutover record. Rollback is allowed only when the replacement archive
 is replayable and the prior owner has not lost source coverage.

@@ -84,7 +84,9 @@ The most subtle versioning rule we have. Encoded in middleware via `_ANALYST_BLO
 ### 2.5 The contract for the typed client
 
 - `frontend/openapi.json` and `frontend/types/api.generated.ts` are committed to git. They are the snapshot of the API at HEAD.
+- `frontend/lib/cloud-engine/cloud-openapi.json` and `cloud-api.generated.ts` form the same contract pair for Cloud Compute. Generate the latter with `cd frontend && npm run gen:cloud-types`; the checked-in lockfile pins `openapi-typescript`.
 - The pre-commit `regen-openapi` hook fires on every `backend/*.py` or `scripts/generate_openapi.py` change and regenerates both files. Drift = failed commit. Re-stage and re-commit.
+- `make openapi-drift` regenerates both typed clients and the Cloud CI job fails on any tracked diff.
 - `frontend/openapi.json` is excluded from end-of-file-fixer (the generator strips trailing newlines; the fixer added them; commit 2026-06-10 broke the cycle).
 - Clients NOT in this repo (curl scripts, integrations) consume `openapi.json` directly; they get versioned via git history.
 

@@ -1,7 +1,7 @@
 'use client'
 
 import React from 'react'
-import type { ColumnDef } from '@tanstack/react-table'
+import type { ColumnDef } from '@/lib/table'
 import { formatDate, formatBytes, formatCount, formatCountMaybe } from '@/lib/utils'
 import { FilterValueCell } from '@/components/DataTable'
 import {
@@ -18,6 +18,8 @@ import {
   Scale,
   Shield,
 } from 'lucide-react'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
+import { approxMark, boundMark, type NetworkRollupMeta } from '@/components/network/rollupLabels'
 import type { PlotlyTrace } from '@/types/api'
 import type { components } from '@/types/api.generated'
 
@@ -53,7 +55,7 @@ function InfoBullets({
   intro,
   items,
 }: {
-  intro: string
+  intro: React.ReactNode
   items: { icon: React.ReactNode; label: string; text: React.ReactNode }[]
 }) {
   return (
@@ -75,7 +77,7 @@ function InfoBullets({
 
 const makeInfo = (
   title: string,
-  intro: string,
+  intro: React.ReactNode,
   items: [React.ComponentType<{ className?: string }>, string, string, React.ReactNode][],
 ) => ({
   title,
@@ -91,10 +93,25 @@ const makeInfo = (
   ),
 })
 
+// Cloud has no rDNS cache, so its pending counts never resolve.
+const CLOUD_PENDING_TEXT = "Not verified: Cloud can't run reverse-DNS checks in the browser"
+
+function PendingVerificationText() {
+  return isCloudMode()
+    ? `${CLOUD_PENDING_TEXT}.`
+    : 'The reverse DNS lookup is still pending in the background. Check back soon.'
+}
+
+function WellknownBotsIntro() {
+  return isCloudMode()
+    ? "Detects bot traffic based on a bundled database of well-known User-Agent patterns. Cloud can't verify them: the browser can't run reverse-DNS checks and the database has no bot IP ranges."
+    : 'Detects bot traffic based on a continuously updated database of well-known User-Agent patterns and verifies them using FCrDNS and CIDR matches.'
+}
+
 export const SECURITY_INFO = {
   wellknown_bots: makeInfo(
     'Well-Known Bots',
-    'Detects bot traffic based on a continuously updated database of well-known User-Agent patterns and verifies them using FCrDNS and CIDR matches.',
+    <WellknownBotsIntro />,
     [
       [
         CheckCircle2,
@@ -118,7 +135,7 @@ export const SECURITY_INFO = {
         Clock,
         'text-yellow-500',
         'Pending',
-        'The reverse DNS lookup is still pending in the background. Check back soon.',
+        <PendingVerificationText key="pending" />,
       ],
     ],
   ),
@@ -324,7 +341,7 @@ export const botColumns: ColumnDef<WellknownBot>[] = [
     header: 'Pending',
     cell: ({ row }) =>
       row.original.pending_count > 0 ? (
-        <span className="flex items-center gap-1 text-yellow-500" title="Pending rDNS lookup">
+        <span className="flex items-center gap-1 text-yellow-500" title={isCloudMode() ? CLOUD_PENDING_TEXT : 'Pending rDNS lookup'}>
           <Clock className="h-3 w-3" />
           {formatCount(row.original.pending_count)}
         </span>
@@ -364,7 +381,8 @@ export const ngwafBotColumns: ColumnDef<NgwafVerifiedBot>[] = [
   },
 ]
 
-export const fingerprintColumns: ColumnDef<TlsFingerprint>[] = [
+/** Summary-served rows mark merged-sketch IP counts ≈ and top-K-cut request counts ≥. */
+export const fingerprintColumns = (rollup?: NetworkRollupMeta): ColumnDef<TlsFingerprint>[] => [
   {
     accessorKey: 'fingerprint',
     header: 'Cipher Fingerprint (SHA)',
@@ -379,14 +397,19 @@ export const fingerprintColumns: ColumnDef<TlsFingerprint>[] = [
   {
     accessorKey: 'ip_count',
     header: 'Unique IPs',
-    cell: ({ row }) => formatCountMaybe(row.original.ip_count) ?? '—',
+    cell: ({ row }) => markCount(approxMark(rollup, 'tls_fingerprints.ip_count'), row.original.ip_count),
   },
   {
     accessorKey: 'request_count',
     header: 'Requests',
-    cell: ({ row }) => formatCountMaybe(row.original.request_count) ?? '—',
+    cell: ({ row }) => markCount(boundMark(rollup, 'tls_fingerprints.request_count'), row.original.request_count),
   },
 ]
+
+function markCount(mark: string, n: number | null | undefined) {
+  const text = formatCountMaybe(n)
+  return text === undefined ? '—' : `${mark}${text}`
+}
 
 export const botEfficiencyColumns: ColumnDef<BotEfficiency>[] = [
   {

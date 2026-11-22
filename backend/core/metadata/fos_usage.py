@@ -81,7 +81,7 @@ _SCHEMA = [
     )""",
     "CREATE INDEX IF NOT EXISTS idx_telemetry_sections_page ON telemetry_sections (page_load_id)",
     "CREATE INDEX IF NOT EXISTS idx_telemetry_sections_ts ON telemetry_sections (timestamp)",
-    # Bytes the Standard-mode cloud copy deleted from FOS (compaction, retention). FOS bills a deleted object for 30
+    # Bytes the cloud copy deleted from FOS (compaction, retention). FOS bills a deleted object for 30
     # days, so the Usage page needs them; rows older than the billing window are pruned on insert.
     """CREATE TABLE IF NOT EXISTS cloud_copy_deletions (
         service_id TEXT NOT NULL,
@@ -121,8 +121,9 @@ def _upsert_hourly_summary(
 ) -> None:
     if not summary_map:
         return
+    # Every writer locks the shared rows in key order, so concurrent flushes queue instead of deadlocking.
     summary_rows = [
-        (sid, hr, oc, ot, counts[0], counts[1], now_iso) for (sid, hr, oc, ot), counts in summary_map.items()
+        (sid, hr, oc, ot, counts[0], counts[1], now_iso) for (sid, hr, oc, ot), counts in sorted(summary_map.items())
     ]
     con.executemany(
         "INSERT INTO usage_log_hourly_summary "
@@ -179,7 +180,7 @@ def log_usage_calls(service_id: str, calls: list[dict], process_context: str | N
         # Apply shield egress multiplier for CDN operations
         op_bytes = c.get("bytes")
         if op_class == "CDN" and op_bytes is not None:
-            # X-Cache values are stored at the beginning of details: "HIT, MISS · duckdb httpfs"
+            # X-Cache values are stored at the beginning of details: "HIT, MISS · boto3"
             # Fastly X-Cache order is: Shield POP first, Edge POP second.
             # If there's a comma (multiple POPs) AND the Edge POP (the last value)
             # is MISS or PASS, the Edge fetched the payload from the Shield.
@@ -317,7 +318,7 @@ def reconcile_fastly_stats(
     hourly_records: list[dict],
 ) -> int:
     """Upsert per-hour reconciliation rows to align local usage_log with Fastly's
-    authoritative /stats/aggregate counts.
+    authoritative account-level Platform Metrics counts.
 
     Each record in ``hourly_records`` is a dict with::
 
@@ -459,7 +460,7 @@ def reconcile_fastly_stats(
                             service_id,
                             op_class,
                             f"RECONCILE_{op_class}",
-                            f"fastly://stats/aggregate/{hour_start}",
+                            f"fastly://metrics/v2/platform/aggregate/hourly/{hour_start}",
                             "OK",
                             0.0,
                             "fastly.reconciliation",

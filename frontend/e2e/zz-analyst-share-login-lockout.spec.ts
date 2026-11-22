@@ -35,6 +35,12 @@ const SHARE_LOGIN_PATH = '/api/share/login'
 const MOCK_IDP = `http://127.0.0.1:${E2E_BACKEND_PORT}/mock-idp`
 const E2E_EMAIL = 'e2e-analyst@example.com'
 
+test.beforeEach(async ({ request }) => {
+  await request.post('/api/admin/share/start', {
+    data: { public_endpoint: 'https://share-e2e.example.com', forward_port: 13004 },
+  })
+})
+
 test.describe('analyst share-login', () => {
   test('brute-force lockout: 30 invalid passcodes return 429 + rate_limited shape', async ({ request }) => {
     test.skip(!!process.env.PLAYWRIGHT_BASE_URL, 'Lockout fault injection is isolated-backend only')
@@ -107,6 +113,13 @@ test.describe('Analyst Share Login Page Contract (/share-login)', () => {
       'Skipping destructive share state reset against non-local PLAYWRIGHT_BASE_URL',
     )
     await request.post('/api/admin/share/stop').catch(() => {})
+    const target = new URL(baseURL || process.env.PLAYWRIGHT_BASE_URL || 'http://127.0.0.1:13004')
+    await request.post('/api/admin/share/start', {
+      data: {
+        public_endpoint: `https://${target.host}`,
+        forward_port: Number(target.port) || 13004,
+      },
+    })
   })
 
   test('1. Route accessibility, card layout mounting & footer environment indicator', async ({ page }) => {

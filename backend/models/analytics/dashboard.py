@@ -128,17 +128,6 @@ class RdnsEnrichResponse(_OkWireSafeBase):
     summary: RdnsEnrichSummary
 
 
-class DuckdbRecycleResponse(_OkWireSafeBase):
-    status: str
-    reason: str | None = None
-    rss_mb: float | None = None
-    threshold_mb: float | None = None
-    detail: str | None = None
-    rss_before_mb: float | None = None
-    rss_after_mb: float | None = None
-    freed_mb: float | None = None
-
-
 class NgwafSyncResponse(_OkWireSafeBase):
     service_id: str
     workspace_id: str
@@ -315,6 +304,21 @@ class IOMetrics(_TotalRequestsMetricsBase):
     estimated_savings_bytes: int | None = None
 
 
+class FastlyReportedMetrics(WireSafeModel):
+    """Fastly Platform Metrics totals beside logs for the same closed UTC hours."""
+
+    window_start: str
+    window_end: str
+    requests: int
+    bandwidth_bytes: int
+    hit_requests: int
+    origin_offload_pct: float | None = None
+    sample_rate: int = 100
+    edge_only: bool = False
+    logged_requests: int
+    logged_bandwidth_bytes: int
+
+
 class ValueSummaryResponse(BaseResponse):
     overview: OverviewMetrics | None = None
     caching: CachingMetrics | None = None
@@ -323,6 +327,7 @@ class ValueSummaryResponse(BaseResponse):
     performance: PerformanceMetrics | None = None
     network: NetworkMetrics | None = None
     io: IOMetrics | None = None
+    fastly_reported: FastlyReportedMetrics | None = None
 
 
 ChartMetric = Literal[

@@ -119,12 +119,17 @@ export function InsightTabs<T extends SectionableInsight>({
   onTabChange,
   isLoading,
   renderCards,
+  emptyMessage,
+  isCounted = () => true,
 }: {
   groups: InsightSectionGroup<T>[]
   activeTab: string | null
   onTabChange: (key: string) => void
   isLoading?: boolean
   renderCards: (group: InsightSectionGroup<T>) => React.ReactNode
+  emptyMessage?: (group: InsightSectionGroup<T>) => { title: string; description: string }
+  // Cards excluded here (queued placeholders) still render but are not counted as findings.
+  isCounted?: (card: T) => boolean
 }) {
   const normalizedActive = normalizeTabKey(activeTab)
   const activeKey =
@@ -162,8 +167,8 @@ export function InsightTabs<T extends SectionableInsight>({
                 )}
               </span>
               <span className="inline-flex shrink-0 items-center gap-1">
-                <span className="text-xs tabular-nums">{cards.length}</span>
-                <TabSeverityBadges severities={summarizeSeverities(cards)} />
+                <span className="text-xs tabular-nums">{cards.filter(isCounted).length}</span>
+                <TabSeverityBadges severities={summarizeSeverities(cards.filter(isCounted))} />
               </span>
             </TabsTrigger>
           )
@@ -173,6 +178,7 @@ export function InsightTabs<T extends SectionableInsight>({
       {groups.map((group) => {
         const { section, cards } = group
         const Icon = section.icon
+        const empty = emptyMessage?.(group)
         return (
           <TabsContent
             key={section.key}
@@ -186,9 +192,9 @@ export function InsightTabs<T extends SectionableInsight>({
                 <Icon className="h-5 w-5 shrink-0 text-muted-foreground" aria-hidden="true" />
                 <span>{section.label}</span>
                 <span className="text-xs font-normal text-muted-foreground tabular-nums">
-                  ({cards.length})
+                  ({cards.filter(isCounted).length})
                 </span>
-                <SeverityChips severities={summarizeSeverities(cards)} />
+                <SeverityChips severities={summarizeSeverities(cards.filter(isCounted))} />
               </h2>
               <p className="mt-1 text-sm text-muted-foreground">{section.description}</p>
             </div>
@@ -206,14 +212,14 @@ export function InsightTabs<T extends SectionableInsight>({
                   className="py-16 text-center border rounded-xl border-dashed bg-muted/10 min-h-[300px] flex flex-col items-center justify-center [contain-intrinsic-size:300px] [content-visibility:auto]"
                   data-testid="insights-empty-pass"
                 >
-                  <CheckCircle className="h-10 w-10 text-emerald-500 mb-3" />
+                  {empty ? <Info className="h-10 w-10 text-muted-foreground mb-3" /> : <CheckCircle className="h-10 w-10 text-emerald-500 mb-3" />}
                   <h3 className="text-base font-semibold">
-                    {section.key === 'all'
+                    {empty ? empty.title : section.key === 'all'
                       ? 'No anomalies detected'
                       : `No anomalies detected in ${section.label}`}
                   </h3>
                   <p className="text-xs text-muted-foreground mt-1 max-w-sm">
-                    {section.key === 'all'
+                    {empty ? empty.description : section.key === 'all'
                       ? 'All monitored metrics across all categories are operating within normal baseline parameters.'
                       : 'All monitored metrics in this category are operating within normal baseline parameters.'}
                   </p>

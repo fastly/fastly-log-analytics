@@ -6,7 +6,7 @@ Source: [`frontend/app/sessions/`](../../frontend/app/sessions/) (`page.tsx` re-
 
 ## How sessions are formed
 
-[`backend/repositories/sessions/queries.py`](../../backend/repositories/sessions/queries.py) partitions requests by client IP (plus JA4 when the field is logged) and starts a new session after a gap of more than 30 minutes. Each row reports start/end, request count, unique URLs, 4xx/5xx counts, bytes, median RTT, edge/shield counts, `edge_sid` and, when CMCD fields exist, `is_streaming`. The page is limited to a 7-day window; a wider range shows a notice asking the user to narrow it. Single-request sessions are widened by one second each side before the analyst time clamp.
+[`backend/high_scale/sessions.py`](../../backend/high_scale/sessions.py) partitions requests in ClickHouse `request_facts` by client IP (plus JA4 when the field is logged) and starts a new session after a gap of more than 30 minutes. Each row reports start/end, request count, unique URLs, 4xx/5xx counts, bytes, median RTT, edge/shield counts, `edge_sid` and, when CMCD fields exist, `is_streaming`. The page is limited to a 7-day window; a wider range shows a notice asking the user to narrow it. Single-request sessions are widened by one second each side before the analyst time clamp.
 
 ## URL parameters
 
@@ -16,8 +16,16 @@ Shared range and filter parameters (see [dashboard.md](dashboard.md)) plus `flag
 
 - Controls: flagged-only, streaming-only, minimum requests, minimum 4xx %.
 - Sessions table (newest first): IP, country, started, requests, unique URLs, ASN, 4xx%, median RTT, JA4, edge/shield, user agent, a streaming icon, and a Flag action. Optional columns appear only if the underlying fields are logged (`has_rtt`, `has_ja4`, `has_edge`, `has_edge_sid`, `has_cmcd`).
-- Row click opens the session inspector dialog with summary fields and the session's individual request rows; streaming sessions link to `/sessions/stream?token=...` ([sessions-stream.md](sessions-stream.md)).
+- Row click opens the session inspector dialog. **Session Details** opens `/sessions/detail` for non-media sessions; **Stream Details** opens `/sessions/stream?token=...` for streaming sessions ([sessions-stream.md](sessions-stream.md)).
 - Flagging records a scoring label through `/api/services/{service_id}/scoring/labels` (see [admin/session-scoring.md](admin/session-scoring.md)); labelled sessions show their label.
+
+## Request trace
+
+The non-media detail page uses the same detail query as the inspector. High-Scale links carry a sealed session token. Cloud links use a tab-local reference so the URL does not expose client identifiers; reopen the page from Sessions if the link is unavailable in a different tab.
+
+The timeline separates edge, shield, and unspecified hops. Select a finding to filter the records to HTTP errors, the first failure and subsequent responses on its request target, or the slowest observed request. A later 2xx is ordered by request start time; it does not prove recovery or a client retry.
+
+Counts and timings describe the returned records, not necessarily the entire session. The page warns when the 500-request limit is reached and distinguishes missing HTTP status data from a trace with no observed HTTP errors.
 
 ## Opaque session tokens
 
@@ -37,10 +45,20 @@ Router: `sessions_router` (prefix `/api/sessions`) in [`backend/routers/session_
 - `POST /api/sessions` (`SessionsRequest`: range fields, `filters`, `page`, `limit` up to 500, `sort_by`, `sort_dir`, `flagged_only`, `streaming_only`, `min_reqs_flag`, `min_4xx_pct_flag`) returns `SessionsResponse`: `sessions[]`, `asn_names`, `total`, `page`, `limit` and the `has_*` flags.
 - `POST /api/sessions/detail` (`SessionDetailRequest`: `session_token`, or `ip`/`ja4`/`start_time`/`end_time` for admins) returns `SessionDetailResponse` (`columns`, `data`).
 
-Standard mode reads the sessions rollup where eligible (`rollup_reader.py`), otherwise the request view. High-scale mode ([`backend/high_scale/sessions.py`](../../backend/high_scale/sessions.py)) applies the shared filters, `sort_by`/`sort_dir`, real pagination and a real window `total`; `is_streaming` and `streaming_only` read the stored `cmcd` map.
+The ClickHouse reader ([`backend/high_scale/sessions.py`](../../backend/high_scale/sessions.py)) applies the shared filters, `sort_by`/`sort_dir`, real pagination and a real window `total`; `is_streaming` and `streaming_only` read the stored `cmcd` map.
+
+## Cloud
+
+Cloud sessionizes raw Parquet in local DuckDB ([`frontend/lib/cloud-engine/sessions.ts`](../../frontend/lib/cloud-engine/sessions.ts), [`sessions-window.ts`](../../frontend/lib/cloud-engine/sessions-window.ts)). The browser's DuckDB has 256 MB and can't spill, so the list never loads the whole range with every column.
+
+The default newest-first page loads only the files from the last 45 minutes: sessions that start in the last 15 minutes, plus the 30 minutes before them, because a session that starts at t follows 30 minutes of silence. If that slice holds fewer sessions than the page, the slice widens 4× (1 h, 4 h, …, then the whole range) and loads only the older files it needs, releasing the narrower read. Other sorts load the whole range. Either way the ranking pass skips `ua` and `url` (except `url` when sorting by unique URLs). A second pass then reads `ua` and `url` only from the files that the page's sessions overlap (at most 8 loads), and fills in the user agent and unique URLs for those sessions. Results equal a whole-range scan exactly. One client's sessions never overlap, so its rows inside a session's span are exactly that session's rows.
+
+On `session-scans.test.ts`'s day of 5-minute files (57,691 rows, 1.65 MiB of Parquet), page 1 reads 2,214 rows and 47 KiB instead of the whole day.
+
+A filter or `flagged_only` that matches few sessions can widen to the whole range. The 256-file and 64 MiB compressed scan limits still apply to every load, and going over them returns their 413 (`… choose a shorter time range`). `total` is the page's row count, not a window total.
 
 ## Tests
 
-- Frontend: [`frontend/__tests__/app/usage-sessions-streaming.test.tsx`](../../frontend/__tests__/app/usage-sessions-streaming.test.tsx)
-- Backend: [`tests/repositories/test_sessions.py`](../../tests/repositories/test_sessions.py), [`tests/core/test_session_token.py`](../../tests/core/test_session_token.py), [`tests/routers/test_session_scoring_router.py`](../../tests/routers/test_session_scoring_router.py)
+- Frontend: [`frontend/__tests__/app/usage-sessions-streaming.test.tsx`](../../frontend/__tests__/app/usage-sessions-streaming.test.tsx), Cloud: [`frontend/lib/cloud-engine/session-scans.test.ts`](../../frontend/lib/cloud-engine/session-scans.test.ts)
+- Backend: [`tests/core/test_session_token.py`](../../tests/core/test_session_token.py), [`tests/routers/test_session_scoring_router.py`](../../tests/routers/test_session_scoring_router.py)
 - E2E: `User Sessions Explorer Page Contract` in [`frontend/e2e/pages/core-analytics-pages.spec.ts`](../../frontend/e2e/pages/core-analytics-pages.spec.ts)

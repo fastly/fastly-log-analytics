@@ -16,6 +16,7 @@ from backend.core.metadata.pg_pool import (
     get_con,
     get_con_readonly,
 )
+from backend.core.retry import retry_call
 from backend.utils.date_utils import iso_z, iso_z_now, parse_iso_utc
 
 logger = logging.getLogger(__name__)
@@ -182,9 +183,22 @@ def start_cron_run(service_id: str, task: str) -> int:
             con.commit()
             raise CronLeaseHeldError(f"Task '{task}' is already running for this service.")
 
-        con.execute(
-            "DELETE FROM job_runs WHERE service_id = ? AND status != 'running' AND started_at < ?",
-            (service_id, now - _JOB_RUNS_RETENTION_S),
+        def _prune_expired_job_runs() -> None:
+            con.execute(
+                "DELETE FROM job_runs WHERE id IN ("
+                "SELECT id FROM job_runs WHERE service_id = ? AND status != 'running' AND started_at < ? "
+                "ORDER BY id LIMIT 500 FOR UPDATE SKIP LOCKED)",
+                (service_id, now - _JOB_RUNS_RETENTION_S),
+            )
+
+        retry_call(
+            _prune_expired_job_runs,
+            retry_on=lambda exc: isinstance(
+                exc, (psycopg.errors.DeadlockDetected, psycopg.errors.SerializationFailure)
+            ),
+            attempts=3,
+            base_delay=0.01,
+            jitter=0.02,
         )
 
         cur = con.execute(
@@ -230,7 +244,6 @@ def log_cron_run(
     rows_ingested: int = 0,
     corrupt_rows: int = 0,
     parquet_files_created: int = 0,
-    parquet_files_optimized: int = 0,
     parquet_keys: list | None = None,
     outcome_counters: dict[str, int] | None = None,
     summary: str | None = None,
@@ -301,7 +314,7 @@ def log_cron_run(
                     """UPDATE cron_runs SET
                         duration_s = ?, status = ?, error_message = COALESCE(error_message, ?),
                         files_downloaded = ?, files_deleted_fos = ?, rows_ingested = ?, corrupt_rows = ?,
-                        parquet_files_created = ?, parquet_files_optimized = ?,
+                        parquet_files_created = ?,
                         parquet_keys = ?, outcome_counters = ?, summary = ?, log_output = ?
                        WHERE id = ? AND service_id = ?""",
                     (
@@ -313,7 +326,6 @@ def log_cron_run(
                         final_rows_ingested,
                         final_corrupt_rows,
                         parquet_files_created,
-                        parquet_files_optimized,
                         keys_json,
                         json.dumps(persisted_counters or {}),
                         summary,
@@ -326,8 +338,8 @@ def log_cron_run(
                 con.execute(
                     """INSERT INTO cron_runs (service_id, task, started_at, duration_s, status, error_message,
                         files_downloaded, files_deleted_fos, rows_ingested, corrupt_rows,
-                        parquet_files_created, parquet_files_optimized, parquet_keys, outcome_counters, summary, log_output)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        parquet_files_created, parquet_keys, outcome_counters, summary, log_output)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         service_id,
                         task,
@@ -340,7 +352,6 @@ def log_cron_run(
                         final_rows_ingested,
                         final_corrupt_rows,
                         parquet_files_created,
-                        parquet_files_optimized,
                         keys_json,
                         json.dumps(outcome_counters or {}),
                         summary,
@@ -895,7 +906,7 @@ def get_cron_runs(
     rows = con.execute(
         f"""SELECT id, task, started_at, duration_s, status, error_message,
                    files_downloaded, files_deleted_fos, rows_ingested, corrupt_rows,
-                   parquet_files_created, parquet_files_optimized, parquet_keys, summary
+                   parquet_files_created, parquet_keys, summary
             FROM cron_runs {where_sql}
             ORDER BY {sort_col_safe} {sort_dir_safe}
             LIMIT ? OFFSET ?""",

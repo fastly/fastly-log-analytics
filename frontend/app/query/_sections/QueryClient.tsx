@@ -4,7 +4,8 @@ import React, { Suspense, useState, useEffect, useEffectEvent, useMemo, useCallb
 import { parseAsString, parseAsStringLiteral, useQueryStates } from 'nuqs'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import { useShallow } from 'zustand/react/shallow'
-import type { ColumnDef, SortingState } from '@tanstack/react-table'
+import type { SortingState } from '@tanstack/react-table'
+import type { ColumnDef } from '@/lib/table'
 import { client, unwrapClient, queryKeys } from '@/lib/api'
 import { useFilterStore } from '@/stores/filterStore'
 import {
@@ -22,7 +23,7 @@ import { NoServiceSelected } from '@/components/ReportLayout'
 import { PageHeader } from '@/components/ui/confirm-dialog'
 import { applyUrlFiltersJsonToStore, downloadAsCsv } from '@/lib/utils'
 import { Skeleton } from '@/components/ui/skeleton'
-import { buildStructuredSql } from '@/lib/sqlBuilder'
+import { buildQueryRequest, buildStructuredSql } from '@/lib/sqlBuilder'
 import { parseJsonAsync } from '@/lib/workers/parseJson'
 import type { components } from '@/types/api.generated'
 import {
@@ -43,6 +44,7 @@ import {
   SKELETON_ROWS,
   type QueryResponse,
 } from './QueryToolbarAndResults'
+import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
 
 export {
   buildStructuredSql,
@@ -150,7 +152,7 @@ function QueryPageInner() {
   const activeFieldTypes = useMemo<Record<string, string>>(() => {
     const out: Record<string, string> = {}
     if (dataset === 'logs') {
-      for (const f of catalog?.fields ?? []) if (f.id && f.duckdb_type) out[f.id] = f.duckdb_type
+      for (const f of catalog?.fields ?? []) if (f.id && f.sql_type) out[f.id] = f.sql_type
     } else {
       for (const f of RUM_SCHEMAS[dataset] || []) out[f.name] = f.type
     }
@@ -168,7 +170,7 @@ function QueryPageInner() {
     if (catalog?.fields?.length) {
       return catalog.fields
         .filter((f) => Boolean(f.id))
-        .map((f) => ({ name: f.id, type: f.duckdb_type || 'VARCHAR' }))
+        .map((f) => ({ name: f.id, type: f.sql_type || 'VARCHAR' }))
     }
     return DEFAULT_LOG_SCHEMA
   }, [dataset, schemaData, catalog])
@@ -197,15 +199,16 @@ function QueryPageInner() {
   const effectiveSql = mode === 'structured' ? structuredSql : rawSql
 
   const { data: presets } = useQuery({
-    queryKey: ['query', 'presets', activeServiceId],
+    queryKey: queryKeys.presets(activeServiceId),
     queryFn: async ({ signal }) => (await unwrapClient(client.GET('/api/presets', { signal }))) ?? [],
     enabled: !!activeServiceId,
     staleTime: 5 * 60_000,
   })
 
   const queryMutation = useMutation({
-    mutationFn: async (params: { sql: string; max_rows: number; explain: boolean; dataset?: Dataset }) => {
-      const { data, error } = await client.POST('/api/query', { body: { dataset: 'logs', ...params }, parseAs: 'text' })
+    mutationFn: async (params: Parameters<typeof buildQueryRequest>[0]) => {
+      const body = buildQueryRequest(params, activeServiceId, startTime, endTime)
+      const { data, error } = await client.POST('/api/query', { body, parseAs: 'text' })
       if (error) {
         if (typeof error === 'string') {
           let parsed: ErrorBody | null = null
@@ -332,7 +335,9 @@ function QueryPageInner() {
         description={
           isStructured
             ? 'Browse raw request logs using the global filter bar — column headers sort server-side.'
-            : 'Write custom SQL against your local DuckDB log cache. Header sorting is client-side only.'
+            : IS_CLOUD_MODE
+              ? 'Write custom SQL against the in-browser DuckDB engine (tables logs, requests, client_vitals, client_errors). Header sorting is client-side only.'
+              : 'Write custom SQL against ClickHouse (least-privilege fla_cv_* views such as fla_cv_request_facts). Header sorting is client-side only.'
         }
       >
         <Button

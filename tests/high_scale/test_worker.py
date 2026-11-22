@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from backend.core.clickhouse import maintain_clickhouse_system_tables
+from backend.core.metadata import pg_pool
 from backend.high_scale import worker
 from backend.high_scale.archive import HighScaleConfig, TopologyProfile, from_environment
 from backend.high_scale.ingest_controller import PageRun
@@ -18,6 +19,7 @@ from backend.high_scale.worker import (
     _MultiServiceWorkerLoop,
     _weights_from_env,
 )
+from tests._helpers.pg_pool_fakes import install_fake_pg_pool
 
 
 @dataclass
@@ -66,6 +68,36 @@ def test_worker_loop_stops_after_requested_iterations() -> None:
     loop.run(max_iterations=2)
 
     assert coordinator.calls == [("svc", "request"), ("svc", "request")]
+
+
+@dataclass
+class _RetryingCoordinator(_Coordinator):
+    retries: list[tuple[str, int]] = field(default_factory=list)
+    fail: bool = False
+
+    def retry_archived_publications(self, *, service_id: str, limit: int) -> None:
+        self.retries.append((service_id, limit))
+        if self.fail:
+            raise RuntimeError("archive unavailable")
+
+
+def test_publication_retries_run_for_every_service_at_most_once_per_interval(caplog: pytest.LogCaptureFixture) -> None:
+    failing, healthy = _RetryingCoordinator([], fail=True), _RetryingCoordinator([])
+    loop = HighScaleWorkerLoop(
+        coordinators=(("svc-a", failing), ("svc-b", healthy)),  # type: ignore[arg-type]
+        domains=("request",),
+        interval_seconds=0,
+        publication_retry_interval_seconds=60,
+        publication_retry_limit=3,
+    )
+
+    with caplog.at_level(logging.ERROR):
+        loop.run_once()
+        loop.run_once()
+
+    assert (failing.retries, healthy.retries) == ([("svc-a", 3)], [("svc-b", 3)])
+    assert healthy.calls == [("svc-b", "request")] * 2
+    assert "high-scale publication retry failed" in caplog.text
 
 
 class _BlockingSweeper:
@@ -144,7 +176,6 @@ def test_multi_service_worker_loop_with_interval_sleeps_and_stops() -> None:
 
 def _config(profile: str) -> HighScaleConfig:
     return HighScaleConfig(
-        enabled=True,
         clickhouse_url="http://clickhouse",
         fos_bucket="archive",
         archive_manifest_dsn="postgresql://manifest",
@@ -183,8 +214,7 @@ def test_validation_follows_the_topology_module_not_a_duplicated_name_list() -> 
 
 def test_from_environment_applies_the_profile_validation(monkeypatch: pytest.MonkeyPatch) -> None:
     for name, value in {
-        "HIGH_SCALE_ENABLED": "1",
-        "HIGH_SCALE_CLICKHOUSE_URL": "http://clickhouse",
+        "CLICKHOUSE_URL": "http://clickhouse",
         "HIGH_SCALE_FOS_BUCKET": "archive",
         "HIGH_SCALE_ARCHIVE_MANIFEST_DSN": "postgresql://manifest",
         "HIGH_SCALE_WORKER_QUEUE_URL": "redis://queue",
@@ -222,8 +252,7 @@ def test_worker_startup_rejects_an_unknown_profile_before_any_work(monkeypatch: 
 
 def test_health_snapshot_reports_the_configured_topology(client, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HIGH_SCALE_PROFILE", "portable-production")
-    with patch("backend.config.is_high_scale_mode", return_value=True):
-        body = client.get("/api/admin/health-snapshot").json()
+    body = client.get("/api/admin/health-snapshot").json()
 
     assert body["high_scale"]["topology"] == {
         "name": "portable-production",
@@ -239,8 +268,7 @@ def test_health_snapshot_degrades_to_no_topology_for_an_unknown_profile(
     client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("HIGH_SCALE_PROFILE", "bogus")
-    with patch("backend.config.is_high_scale_mode", return_value=True):
-        resp = client.get("/api/admin/health-snapshot")
+    resp = client.get("/api/admin/health-snapshot")
 
     assert resp.status_code == 200
     assert resp.json()["high_scale"]["topology"] is None
@@ -421,3 +449,58 @@ def test_weights_environment_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.delenv("HIGH_SCALE_SERVICE_WEIGHTS")
     assert _weights_from_env() == {}
+
+
+@pytest.mark.parametrize("run_fails", [False, True])
+def test_bounded_worker_run_closes_the_metadata_pool_it_opened(
+    monkeypatch: pytest.MonkeyPatch, run_fails: bool
+) -> None:
+    opened = install_fake_pg_pool(monkeypatch)
+
+    class _Loop:
+        def run(self, max_iterations: int | None = None) -> None:
+            pg_pool.get_pg_pool()
+            if run_fails:
+                raise RuntimeError("pg down")
+
+    monkeypatch.setattr(worker, "build_worker_from_environment", lambda **_: _Loop())
+    monkeypatch.setattr("sys.argv", ["worker", "--once"])
+
+    if run_fails:
+        with pytest.raises(RuntimeError, match="pg down"):
+            worker.main()
+    else:
+        assert worker.main() == 0
+    assert len(opened) == 1 and opened[0].closed
+    assert pg_pool._pool is None
+
+
+@pytest.mark.no_postgres
+def test_worker_loop_runs_archive_flushes_with_configured_interval_and_isolates_errors() -> None:
+    flush_calls: list[tuple[str, str, int]] = []
+
+    class _FlushingCoordinator:
+        def run_page(self, *, service_id: str, domain: str):
+            return MagicMock()
+
+        def flush_archive_snapshot(self, *, service_id: str, domain: str, snapshot_interval_minutes: int = 5):
+            flush_calls.append((service_id, domain, snapshot_interval_minutes))
+            if domain == "rum_vitals":
+                raise RuntimeError("transient flush failure")
+
+    loop = HighScaleWorkerLoop(
+        coordinator=_FlushingCoordinator(),  # type: ignore[arg-type]
+        service_ids=("svc-a",),
+        domains=("request", "rum_vitals", "rum_errors"),
+        interval_seconds=0.0,
+        snapshot_interval_loader=lambda sid: 60 if sid == "svc-a" else 5,
+        archive_flush_check_interval_seconds=0.0,
+    )
+    results = loop.run_once()
+    assert len(results) == 3
+    # All 3 domains attempted with configured interval=60 despite rum_vitals error
+    assert flush_calls == [
+        ("svc-a", "request", 60),
+        ("svc-a", "rum_vitals", 60),
+        ("svc-a", "rum_errors", 60),
+    ]

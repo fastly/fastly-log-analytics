@@ -16,15 +16,12 @@ source "$SCRIPT_DIR/lib/ratchet_common.sh"
 # to telemetry/log_flusher.py; relocate its existing one-loop allowance.
 BASELINE='
 backend/config.py 2
-backend/core/duckdb.py 1
-backend/core/storage/_core.py 1
 backend/core/request_telemetry/query_registry.py 1
 backend/provision/declarative/reconciler.py 1
 backend/provision/fos_setup.py 1
 backend/provision/orchestrator.py 2
 backend/routers/admin/events.py 3
 backend/routers/admin/high_scale.py 3
-backend/routers/admin/compaction.py 3
 backend/routers/control_room.py 1
 backend/routers/provision.py 1
 backend/routers/services/__init__.py 2

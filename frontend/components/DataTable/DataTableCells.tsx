@@ -2,8 +2,9 @@
 
 import * as React from 'react'
 import { usePathname } from 'next/navigation'
-import type { ColumnDef, Table as ReactTable, VisibilityState } from '@tanstack/react-table'
+import type { ColumnVisibilityState, RowData } from '@tanstack/react-table'
 import { ChevronDown, Copy, ExternalLink, Filter, Settings2 } from 'lucide-react'
+import type { ColumnDef, Table as ReactTable } from '@/lib/table'
 import { formatBytes, formatCount, formatCountMaybe, cn, copyToClipboard, isIpFamilyField } from '@/lib/utils'
 import {
   DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent,
@@ -170,13 +171,13 @@ interface BaseColumnVisibilityDropdownProps {
   className?: string; align?: 'start' | 'end'; size?: 'sm' | 'default' | 'icon'; compact?: boolean
 }
 
-type ColumnVisibilityDropdownProps<TData = unknown> = BaseColumnVisibilityDropdownProps &
+type ColumnVisibilityDropdownProps<TData extends RowData = RowData> = BaseColumnVisibilityDropdownProps &
   (
-    | { columns: { id: string; label: string }[]; visibility: VisibilityState; onChange: (id: string, visible: boolean) => void; table?: never }
+    | { columns: { id: string; label: string }[]; visibility: ColumnVisibilityState; onChange: (id: string, visible: boolean) => void; table?: never }
     | { table: ReactTable<TData>; columns?: never; visibility?: never; onChange?: never }
   )
 
-export function ColumnVisibilityDropdown<TData = unknown>(props: ColumnVisibilityDropdownProps<TData>) {
+export function ColumnVisibilityDropdown<TData extends RowData = RowData>(props: ColumnVisibilityDropdownProps<TData>) {
   const { className, align = 'end', compact = false } = props
   const size = props.size ?? (compact ? 'sm' : 'sm')
 

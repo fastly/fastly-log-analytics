@@ -1,0 +1,565 @@
+// @vitest-environment node
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { useTimeseriesToTraces } from "@/lib/chartUtils";
+import { getDuckDBEngine } from "./dashboard/test-fixtures";
+import {
+  ACTIVE_CLIENTS_LIMIT,
+  buildConnReuseBucketCaseSql,
+  buildReqHeaderBucketCaseSql,
+  buildSecurityConnReuseDistSql,
+  buildSecurityFingerprintCoverageSql,
+  buildSecurityIpv6AdoptionSql,
+  buildSecurityProxiesSql,
+  buildSecurityProxyDistSql,
+  buildSecurityReqSizeDistSql,
+  buildSecurityThreatIntelSql,
+  buildSecurityTlsFingerprintsSql,
+  buildSecurityTopIpsHeaderSql,
+  buildSecurityVerifiedBotsTsSql,
+  evaluateImpossibleDistance,
+  expandSecuritySections,
+  formatProxiesExportPayload,
+  handleSecurityRequest,
+  maskIpValue,
+  setSecurityEngineClient,
+  shapeSecurityProxiesFromRawRows,
+  shapeSecurityThreatIntelRows,
+  type SecurityAggregatesResponse,
+} from "./security";
+
+describe("security cloud-engine module (F20)", () => {
+  it("does not recapture a fresh empty backend after awaited request parsing", async () => {
+    setSecurityEngineClient(null);
+    const engine = getDuckDBEngine();
+    await engine.reset();
+    const request = new Request("http://localhost/api/security/aggregates", { method: "POST", body: "{}" });
+    const clone = request.clone();
+    let enter!: () => void, resume!: (body: object) => void;
+    const entered = new Promise<void>((resolve) => { enter = resolve; });
+    const body = new Promise<object>((resolve) => { resume = resolve; });
+    vi.spyOn(clone, "json").mockImplementation(() => { enter(); return body; });
+    vi.spyOn(request, "clone").mockReturnValue(clone);
+    const pending = handleSecurityRequest(request);
+    const rejected = expect(pending).rejects.toThrow(/generation|expired/i);
+    await entered;
+    await engine.reset();
+    resume({});
+    await rejected;
+    vi.restoreAllMocks();
+  });
+
+  beforeEach(() => {
+    setSecurityEngineClient(null);
+  });
+
+  it("executes mandatory page sections against populated short fields without alias collisions", async () => {
+    const engine = getDuckDBEngine();
+    try {
+      await engine.executeSql(`
+        INSERT INTO requests (
+          scoped_key, ts_ms, "timestamp", ip, ua, req_header_bytes, tls_ciphers_sha,
+          tcpi_min_rtt, tcpi_rtt, lat, lon, pop, asn, country, city
+        ) VALUES (
+          'security-test', 1700000000000, epoch_ms(1700000000000),
+          '192.0.2.1', 'Googlebot/2.1', 512, 'fingerprint',
+          5000, 20000, -33.8688, 151.2093, 'SJC', 15169, 'AU', 'Sydney'
+        )
+      `);
+      await engine.executeSql(`
+        INSERT INTO requests (
+          scoped_key, ts_ms, "timestamp", client_ip, ua, req_header_bytes, tls_ciphers_sha
+        ) VALUES (
+          'security-test', 1700000000000, epoch_ms(1700000000000),
+          '192.0.2.2', 'Googlebot/2.1', 256, 'fingerprint'
+        )
+      `);
+      const response = await handleSecurityRequest(
+        new Request("https://example.test/api/security/aggregates", {
+          method: "POST",
+          body: JSON.stringify({
+            start_time: "2023-11-14T22:00:00Z",
+            end_time: "2023-11-14T23:00:00Z",
+            sections: ["top_ips_header", "tls_fingerprints", "wellknown_bots", "proxies"],
+          }),
+        }),
+      );
+      const data = await response!.json();
+      expect(data.top_ips_header).toEqual([
+        { ip: "192.0.2.1", max_header: 512 }, { ip: "192.0.2.2", max_header: 256 },
+      ]);
+      expect(data.tls_fingerprints[0]).toMatchObject({ ip_count: 2, request_count: 2 });
+      expect(data.wellknown_bots[0]).toMatchObject({ id: "google-crawler", request_count: 2, pending_count: 2 });
+      expect(data.active_clients[0]).toMatchObject({ ip: "192.0.2.1", risk_level: "High" });
+    } finally {
+      await engine.reset();
+    }
+  });
+
+  it("classifies top bots from the filtered range's user agents like High-Scale", async () => {
+    const engine = getDuckDBEngine();
+    const rows: [string, string, number][] = [
+      ["Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)", "US", 3],
+      ["Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)", "US", 2],
+      ["Mozilla/5.0 (compatible; adidxbot/2.0; +http://www.bing.com/bingbot.htm)", "US", 1],
+      ["curl/8.4.0", "CA", 4],
+      ["Mozilla/5.0 (Macintosh) Chrome/130.0.0.0 Safari/537.36", "US", 5],
+      ["", "US", 2],
+    ];
+    try {
+      for (const [ua, country, n] of rows) {
+        for (let i = 0; i < n; i++) {
+          await engine.executeSql(`
+            INSERT INTO requests (scoped_key, ts_ms, "timestamp", ua, country)
+            VALUES ('security-bots', 1700000000000, epoch_ms(1700000000000), '${ua}', '${country}')
+          `);
+        }
+      }
+      await engine.executeSql(`
+        INSERT INTO requests (scoped_key, ts_ms, "timestamp", ua, country)
+        VALUES ('security-bots', 1690000000000, epoch_ms(1690000000000), 'curl/8.4.0', 'US')
+      `);
+      const topBots = async (filters?: object) => {
+        const response = await handleSecurityRequest(
+          new Request("https://example.test/api/security/top-bots", {
+            method: "POST",
+            body: JSON.stringify({ start_time: "2023-11-14T22:00:00Z", end_time: "2023-11-14T23:00:00Z", filters }),
+          }),
+        );
+        return response!.json();
+      };
+      expect(await topBots()).toEqual({
+        bots: [
+          { id: "curl", name: "Curl", category: "tool", request_count: 4 },
+          { id: "google-crawler", name: "Google Crawler", category: "google", request_count: 3 },
+          { id: "bing-crawler", name: "Bing Crawler", category: "microsoft", request_count: 3 },
+          { id: "bing-ads", name: "Bing Ads", category: "microsoft", request_count: 1 },
+        ],
+        ngwaf_bots: [],
+      });
+      expect((await topBots({ country: { mode: "include", values: ["CA"] } })).bots).toEqual([
+        { id: "curl", name: "Curl", category: "tool", request_count: 4 },
+      ]);
+    } finally {
+      await engine.reset();
+    }
+  });
+
+  const securitySections = async (sections: string[]) => {
+    const response = await handleSecurityRequest(
+      new Request("https://example.test/api/security/aggregates", {
+        method: "POST",
+        body: JSON.stringify({ start_time: "2023-11-14T22:00:00Z", end_time: "2023-11-14T23:00:00Z", sections }),
+      }),
+    );
+    return (await response!.json()) as SecurityAggregatesResponse;
+  };
+
+  // Expected rows come from backend summarize_wellknown_bot_rows and summarize_bot_efficiency_rows
+  // over the same requests, with no rDNS cache entries.
+  it("summarizes well-known bots and bot efficiency like High-Scale", async () => {
+    const engine = getDuckDBEngine();
+    const googlebot = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)";
+    const chrome = "Mozilla/5.0 (Macintosh) Chrome/130.0.0.0 Safari/537.36";
+    const rows: [string | null, string, string | null, number, number][] = [
+      [googlebot, "66.249.66.1", null, 1000, 3],
+      [googlebot, "66.249.66.2", null, 1000, 1],
+      ["CCBot/2.0 (https://commoncrawl.org/faq/)", "192.0.2.10", null, 500, 2],
+      ["curl/8.4.0", "192.0.2.20", null, 100, 4],
+      ["Mozilla/5.0 (compatible; ExampleSpider/1.0)", "192.0.2.30", null, 2000, 1],
+      [chrome, "198.51.100.1", "https://www.google.com/search?q=x", 300, 2],
+      [chrome, "198.51.100.2", "https://www.google.com/", 300, 1],
+      [chrome, "198.51.100.3", "https://example.org/page", 300, 1],
+      ["Mozilla/5.0 (compatible; ChatGPT-User/1.0)", "203.0.113.5", null, 50, 1],
+      [null, "198.51.100.9", null, 700, 1],
+    ];
+    const lit = (v: string | null) => (v === null ? "NULL" : `'${v}'`);
+    try {
+      for (const [ua, ip, referer, bytes, n] of rows) {
+        await engine.executeSql(`
+          INSERT INTO requests (scoped_key, ts_ms, "timestamp", ua, ip, referer, resp_bytes)
+          SELECT 'security-wellknown', 1700000000000, epoch_ms(1700000000000), ${lit(ua)}, '${ip}', ${lit(referer)}, ${bytes}
+          FROM range(${n})
+        `);
+      }
+      const data = await securitySections(["wellknown_bots", "bot_efficiency"]);
+      const pending = (id: string, name: string, category: string, n: number) => ({
+        id, name, category, request_count: n, verified_count: 0, impersonator_count: 0,
+        unverified_count: 0, pending_count: n, verification_coverage: 0,
+      });
+      const unverified = (id: string, name: string, category: string, n: number) => ({
+        ...pending(id, name, category, n), unverified_count: n, pending_count: 0,
+      });
+      expect(data.wellknown_bots).toEqual([
+        unverified("curl", "Curl", "tool", 4),
+        pending("google-crawler", "Google Crawler", "google", 4),
+        pending("commoncrawl-crawler", "Commoncrawl Crawler", "academic", 2),
+        pending("ccbot-crawler", "Ccbot Crawler", "archive", 2),
+        unverified("openai-crawler-user", "Openai Crawler User", "ai", 1),
+      ]);
+      const efficiency = (bot_name: string, category: string, request_count: number, resp_bytes: number,
+        bandwidth_pct: number, referrals: number) => ({
+        bot_name, category, request_count, resp_bytes, bandwidth_pct, referrals,
+        requests_per_referral: request_count / Math.max(referrals, 1),
+        bytes_per_referral: resp_bytes / Math.max(referrals, 1),
+      });
+      expect(data.bot_efficiency).toEqual([
+        efficiency("Google Crawler", "Google", 4, 4000, 42.78, 2),
+        efficiency("Examplespider", "General Bot", 1, 2000, 21.39, 1),
+        efficiency("Commoncrawl Crawler", "Academic", 2, 1000, 10.7, 0),
+        efficiency("Curl", "Tool", 4, 400, 4.28, 0),
+        efficiency("Openai Crawler User", "Ai", 1, 50, 0.53, 1),
+      ]);
+    } finally {
+      await engine.reset();
+    }
+  });
+
+  it("keeps the busiest 10,000 known-bot user agent and IP pairs", async () => {
+    const engine = getDuckDBEngine();
+    try {
+      await engine.executeSql(`
+        INSERT INTO requests (scoped_key, ts_ms, "timestamp", ua, ip)
+        SELECT 'security-wellknown', 1700000000000, epoch_ms(1700000000000), 'curl/8.4.0', '10.0.' || (i // 256) || '.' || (i % 256)
+        FROM range(10001) t(i)
+      `);
+      await engine.executeSql(`
+        INSERT INTO requests (scoped_key, ts_ms, "timestamp", ua, ip)
+        SELECT 'security-wellknown', 1700000000000, epoch_ms(1700000000000), 'Googlebot/2.1 (+http://www.google.com/bot.html)', '66.249.66.1'
+        FROM range(5)
+      `);
+      const data = await securitySections(["wellknown_bots"]);
+      expect(data.wellknown_bots?.map((b) => [b.id, b.request_count])).toEqual([
+        ["curl", 9999],
+        ["google-crawler", 5],
+      ]);
+    } finally {
+      await engine.reset();
+    }
+  });
+
+  it("returns empty bot sections when the user agent is not logged", async () => {
+    const query = vi.fn().mockResolvedValue([]);
+    setSecurityEngineClient({ getAvailableColumns: vi.fn().mockResolvedValue(new Set(["ts_ms", "timestamp", "ip"])), query });
+    const response = await handleSecurityRequest(
+      new Request("https://example.test/api/security/aggregates", {
+        method: "POST",
+        body: JSON.stringify({ sections: ["wellknown_bots", "bot_efficiency"] }),
+      }),
+    );
+    expect(await response!.json()).toEqual({ wellknown_bots: [], bot_efficiency: [] });
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it("returns no top bots when the user agent is not logged", async () => {
+    const query = vi.fn().mockResolvedValue([]);
+    setSecurityEngineClient({ getAvailableColumns: vi.fn().mockResolvedValue(new Set(["ts_ms", "timestamp"])), query });
+    const response = await handleSecurityRequest(
+      new Request("https://example.test/api/security/top-bots?start_time=2023-11-14T22:00:00Z&end_time=2023-11-14T23:00:00Z"),
+    );
+    expect(await response!.json()).toEqual({ bots: [], ngwaf_bots: [] });
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it("expands security sections including tls_fingerprints->fingerprint_coverage and ngwaf union", () => {
+    const s1 = expandSecuritySections(["tls_fingerprints"]);
+    expect(s1.has("tls_fingerprints")).toBe(true);
+    expect(s1.has("fingerprint_coverage")).toBe(true);
+
+    const s2 = expandSecuritySections(["ngwaf_verified_bots"]);
+    expect(s2.has("ngwaf_verified_bots")).toBe(true);
+    expect(s2.has("ngwaf_verified_bots_ts")).toBe(true);
+
+    expect(expandSecuritySections().size).toBe(14);
+  });
+
+  it("uses core UTC TIMESTAMP for hourly IPv6 and interval bot buckets", async () => {
+    const engine = getDuckDBEngine();
+    try {
+      await engine.executeSql(`
+        INSERT INTO requests (scoped_key, ts_ms, "timestamp", is_ipv6, waf_sig)
+        VALUES ('security-utc', 1700000000000, epoch_ms(1700000000000), TRUE, 'VERIFIED-BOT.search')
+      `);
+      const req = {
+        start_time: "2023-11-14T22:00:00Z", end_time: "2023-11-14T23:00:00Z", bucket_seconds: 120,
+      };
+      const cols = new Set(["ts_ms", "timestamp", "is_ipv6", "waf_sig"]);
+      for (const [built, expectedTime, metric, expectedValue] of [
+        [buildSecurityIpv6AdoptionSql(req, cols), "2023-11-14T22:00:00Z", "pct", 100],
+        [buildSecurityVerifiedBotsTsSql(req, cols), "2023-11-14T22:12:00Z", "count", 1],
+      ] as const) {
+        const rows = await engine.executeSql(`
+          WITH logs AS (SELECT * FROM requests)
+          SELECT typeof(bucket_ts) AS bucket_type, epoch_ms(bucket_ts) AS bucket_ms,
+            ${metric} AS value FROM (${built.sql})
+        `, built.params);
+        expect(rows).toEqual([{
+          bucket_type: "TIMESTAMP", bucket_ms: Date.parse(expectedTime), value: expectedValue,
+        }]);
+      }
+    } finally {
+      await engine.reset();
+    }
+  });
+
+  it("renders real IPv4-only DuckDB buckets through the Security chart consumer with valid UTC time and zero percent", async () => {
+    const engine = getDuckDBEngine();
+    try {
+      const timestamp = Date.parse("2026-01-01T00:00:00Z");
+      await engine.executeSql(`
+        INSERT INTO requests (scoped_key, ts_ms, "timestamp", is_ipv6, waf_sig)
+        SELECT 'security-wire', ${timestamp}, epoch_ms(${timestamp}), FALSE, 'VERIFIED-BOT.search'
+        FROM range(12)
+      `);
+      const response = await handleSecurityRequest(
+        new Request("https://example.test/api/security/aggregates", {
+          method: "POST",
+          body: JSON.stringify({
+            start_time: "2026-01-01T00:00:00Z", end_time: "2026-01-02T00:00:00Z",
+            sections: ["ipv6_adoption", "verified_bots_ts"],
+          }),
+        }),
+      );
+      const data = await response!.json() as SecurityAggregatesResponse;
+      function Ipv6ChartConsumer() {
+        const [trace] = useTimeseriesToTraces(
+          data.ipv6_adoption,
+          [{ key: "pct", name: "IPv6 %", color: "#8b5cf6", fill: "tozeroy" }],
+          "UTC",
+        );
+        return createElement("output", null, `${trace.x?.[0]} ${trace.y?.[0]}`);
+      }
+      expect(renderToStaticMarkup(createElement(Ipv6ChartConsumer))).toBe(
+        "<output>2026-01-01 00:00:00 0</output>",
+      );
+      expect(data.ipv6_adoption).toEqual([{ time: "2026-01-01T00:00:00.000Z", pct: 0 }]);
+      expect(data.verified_bots_ts).toEqual([{
+        time: "2026-01-01T00:00:00.000Z", bot_type: "search", count: 12,
+      }]);
+    } finally {
+      await engine.reset();
+    }
+  });
+
+  it("builds SQL for fingerprints, header size buckets (0-256B..>32KB), connection reuse, ipv6, proxies, and threat-intel", () => {
+    const req = {
+      start_time: "2026-06-15T00:00:00Z",
+      end_time: "2026-06-15T01:00:00Z",
+      bucket_seconds: 300,
+    };
+    const cols = new Set([
+      "timestamp",
+      "ip",
+      "tls_ciphers_sha",
+      "req_header_bytes",
+      "conn_requests",
+      "is_ipv6",
+      "p_type",
+      "waf_sig",
+      "rtt_min",
+      "tcp_rtt",
+      "lat",
+      "lon",
+      "pop",
+      "asn",
+      "country",
+      "city",
+      "ja3",
+      "ja4",
+      "is_bot",
+      "waf_logged_rules",
+      "waf_blocked_rules",
+    ]);
+
+    expect(buildReqHeaderBucketCaseSql("h")).toContain("0-256B");
+    expect(buildReqHeaderBucketCaseSql("h")).toContain(">32KB");
+    expect(buildConnReuseBucketCaseSql("c")).toContain("1 (New)");
+    expect(buildConnReuseBucketCaseSql("c")).toContain(">100");
+
+    expect(buildSecurityTlsFingerprintsSql(req, cols).sql).toContain("tls_ciphers_sha");
+    expect(buildSecurityFingerprintCoverageSql(req, cols).sql).toContain("populated");
+    expect(buildSecurityReqSizeDistSql(req, cols).sql).toContain("0-256B");
+    expect(buildSecurityTopIpsHeaderSql(req, cols).sql).toContain("max_header");
+    expect(buildSecurityConnReuseDistSql(req, cols).sql).toContain("conn_requests");
+    expect(buildSecurityIpv6AdoptionSql(req, cols).sql).toContain("is_ipv6");
+    expect(buildSecurityProxyDistSql(req, cols).sql).toContain("p_type");
+    expect(buildSecurityVerifiedBotsTsSql(req, cols).sql).toContain("VERIFIED-BOT.");
+    expect(buildSecurityProxiesSql(req, cols).sql).toContain("rtt_min");
+    expect(buildSecurityThreatIntelSql(req, cols).sql).toContain("tls_fingerprint");
+  });
+
+  it("evaluates impossible distance and shapes Watchdog proxies up to 100 active_clients", () => {
+    // SJC to SYD is ~11,950 km; with rttMinUs = 5,000 us (5 ms), max physical distance is 5 * 100 + 150 = 650 km => impossible!
+    const imp = evaluateImpossibleDistance({
+      rttMinUs: 5000,
+      tcpRttUs: 20000,
+      clientLat: -33.8688,
+      clientLon: 151.2093,
+      pop: "SJC-CA",
+    });
+    expect(imp.impossibleDist).toBe(true);
+    expect(imp.riskLevel).toBe("High");
+
+    const shaped = shapeSecurityProxiesFromRawRows(
+      [
+        {
+          ip: "198.51.100.42",
+          asn: 13335,
+          rtt_min: 4000,
+          tcp_rtt: 60000,
+          lat: -33.8688,
+          lon: 151.2093,
+          pop: "SJC",
+          country: "AU",
+          city: "Sydney",
+        },
+        {
+          ip: "203.0.113.9",
+          asn: 15169,
+          rtt_min: 15000,
+          tcp_rtt: 20000,
+          lat: 37.33,
+          lon: -121.89,
+          pop: "SJC",
+          country: "US",
+          city: "San Jose",
+        },
+      ],
+      false,
+    );
+    expect(shaped.active_proxies_count).toBe(1);
+    expect(shaped.distance_mismatches_count).toBe(1);
+    expect(shaped.active_clients[0]?.ip).toBe("198.51.100.42");
+    expect(shaped.active_clients[0]?.impossible_distance).toBe(true);
+    expect(shaped.active_clients[0]?.risk_level).toBe("High");
+    expect(shaped.suspicious_isps[0]?.asn).toBe(13335);
+    expect(ACTIVE_CLIENTS_LIMIT).toBe(100);
+  });
+
+  it("shapes Watchdog proxies to the High-Scale wire contract (label/value %, tunnel_requests_count, asn_name)", () => {
+    const direct = (ip: string) => ({ ip, asn: 15169, rtt_min: 20000, tcp_rtt: 20000, lat: 37.33, lon: -121.89, pop: "SJC" });
+    const shaped = shapeSecurityProxiesFromRawRows(
+      [
+        { ip: "198.51.100.42", asn: 13335, rtt_min: 4000, tcp_rtt: 60000, lat: -33.8688, lon: 151.2093, pop: "SJC" },
+        { ip: "198.51.100.43", rtt_min: 3000, tcp_rtt: 20000, lat: 37.33, lon: -121.89, pop: "SJC" },
+        { ip: "198.51.100.44", asn: 15169, rtt_min: 10000, tcp_rtt: 20000, lat: 37.33, lon: -121.89, pop: "SJC" },
+        direct("198.51.100.45"),
+        direct("198.51.100.46"),
+        direct("198.51.100.47"),
+      ],
+      false,
+    );
+
+    expect(shaped.traffic_quality).toEqual([
+      { label: "Direct Connection", value: 50 },
+      { label: "WiFi / Mobile", value: 33.3 },
+      { label: "Active Tunnel / Proxy", value: 16.7 },
+    ]);
+    expect(shaped.traffic_quality.reduce((sum, row) => sum + row.value, 0)).toBeCloseTo(100, 1);
+    expect(shaped).toMatchObject({ tunnel_requests_count: 1 });
+    expect(shaped).not.toHaveProperty("total_requests_count");
+
+    expect(shaped.active_clients.map((c) => [c.ip, c.asn_name])).toEqual([
+      ["198.51.100.42", "AS13335 (Cloudflare, Inc.)"],
+      ["198.51.100.43", "Unknown ISP"],
+    ]);
+    for (const client of shaped.active_clients) {
+      expect(client).not.toHaveProperty("isp");
+      expect(client).not.toHaveProperty("asn");
+    }
+    expect(shaped.suspicious_isps).toEqual([{ asn: 13335, isp: "AS13335 (Cloudflare, Inc.)", count: 1 }]);
+  });
+
+  it("formats fastly-acl CSV (ip,comment) and plain exports and masks IPs when requested", () => {
+    expect(maskIpValue("198.51.100.42", true)).toBe("198.51.100.xxx");
+    expect(maskIpValue("2001:db8:85a3::8a2e:370:7334", true)).toBe("2001:db8::xxxx");
+
+    const clients = [
+      { ip: "198.51.100.1", risk_level: "High" as const, impossible_distance: true },
+      { ip: "198.51.100.2", risk_level: "Medium" as const, impossible_distance: false },
+    ];
+
+    const aclHigh = formatProxiesExportPayload(clients, { threshold: "High", format: "fastly-acl" });
+    expect(aclHigh.mediaType).toBe("text/csv");
+    expect(aclHigh.body).toContain("ip,comment\n");
+    expect(aclHigh.body).toContain("198.51.100.1,Watchdog block: Impossible distance mismatch");
+    expect(aclHigh.body).not.toContain("198.51.100.2");
+
+    const plainMed = formatProxiesExportPayload(clients, { threshold: "Medium", format: "plain" });
+    expect(plainMed.mediaType).toBe("text/plain");
+    expect(plainMed.body).toBe("198.51.100.1\n198.51.100.2\n");
+  });
+
+  it("dispatches /api/security/aggregates, /bundle, /threat-intel, and /proxies/export", async () => {
+    setSecurityEngineClient({
+      getAvailableColumns: vi.fn().mockResolvedValue(
+        new Set(["timestamp", "ip", "tls_ciphers_sha", "req_header_bytes", "conn_requests", "is_ipv6", "p_type", "waf_sig", "ua", "rtt_min", "tcp_rtt", "lat", "lon", "pop", "asn", "country", "city", "ja3", "ja4"]),
+      ),
+      query: vi.fn().mockResolvedValue([
+        {
+          fingerprint: "sha-1",
+          ip_count: 4,
+          request_count: 20,
+          total_rows: 100,
+          populated: 80,
+          bucket: "0-256B",
+          count: 25,
+          ip: "198.51.100.77",
+          max_header: 4096,
+          bucket_ts: "2026-06-15T00:00:00Z",
+          pct: 62.5,
+          type: "vpn",
+          bot_type: "GOOGLEBOT",
+          ua: "Googlebot/2.1",
+          cnt: 10,
+          rtt_min: 4000,
+          tcp_rtt: 80000,
+          lat: -33.86,
+          lon: 151.2,
+          pop: "SJC",
+          asn: 13335,
+          country: "AU",
+          city: "Sydney",
+          tls_fingerprint: "ja4_abc",
+          requests: 30,
+          top_country: "US",
+          matched_waf_rules_count: 3,
+          bot_percentage: 50,
+          is_anonymized_proxy: 1,
+        },
+      ]),
+    });
+
+    const bundleRes = await handleSecurityRequest(
+      new Request("https://example.test/api/security/bundle?start_time=2026-06-15T00:00:00Z&end_time=2026-06-15T01:00:00Z"),
+    );
+    expect(bundleRes?.status).toBe(200);
+    const bundleJson = await bundleRes!.json();
+    expect(bundleJson.tls_fingerprints?.[0]?.fingerprint).toBe("sha-1");
+    expect(bundleJson.active_proxies_count).toBe(1);
+    expect(bundleJson.active_clients?.[0]?.ip).toBe("198.51.100.77");
+
+    const maskedBundleRes = await handleSecurityRequest(
+      new Request("https://example.test/api/security/bundle?start_time=2026-06-15T00:00:00Z&end_time=2026-06-15T01:00:00Z", {
+        headers: { "x-session-role": "analyst-no-pii" },
+      }),
+    );
+    const maskedBundleJson = await maskedBundleRes!.json();
+    expect(maskedBundleJson.active_clients?.[0]?.ip).toBe("198.51.100.xxx");
+
+    const tiRes = await handleSecurityRequest(
+      new Request("https://example.test/api/security/threat-intel?start_time=2026-06-15T00:00:00Z&end_time=2026-06-15T01:00:00Z"),
+    );
+    const tiJson = await tiRes!.json();
+    expect(tiJson.data[0]?.tls_fingerprint).toBe("ja4_abc");
+    expect(shapeSecurityThreatIntelRows([]).data).toEqual([]);
+
+    const exportRes = await handleSecurityRequest(
+      new Request("https://example.test/api/security/proxies/export?start_time=2026-06-15T00:00:00Z&end_time=2026-06-15T01:00:00Z&threshold=High&format=fastly-acl"),
+    );
+    const csvText = await exportRes!.text();
+    expect(csvText).toContain("ip,comment");
+    expect(csvText).toContain("198.51.100.77");
+  });
+});

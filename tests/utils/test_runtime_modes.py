@@ -60,15 +60,11 @@ def test_production_with_mock_modes_disabled_is_valid(monkeypatch: pytest.Monkey
     validate_mock_modes()
 
 
-def test_celery_and_high_scale_workers_validate_mock_modes(monkeypatch: pytest.MonkeyPatch) -> None:
-    from backend.celery_app import _worker_process_init
+def test_high_scale_worker_validates_mock_modes(monkeypatch: pytest.MonkeyPatch) -> None:
     from backend.high_scale.worker import build_worker_from_environment
 
     monkeypatch.setenv("FLA_PRODUCTION", "true")
     monkeypatch.setenv("FASTLY_API_MOCK", "true")
-
-    with pytest.raises(RuntimeError, match="FASTLY_API_MOCK must not be enabled in production"):
-        _worker_process_init()
 
     with pytest.raises(RuntimeError, match="FASTLY_API_MOCK must not be enabled in production"):
         build_worker_from_environment()

@@ -463,4 +463,137 @@ async function measurePaintedAction(page, options, action) {
   }
 }
 
-module.exports = { budgets, describeResponse, collectResponseMeasurements, measurePaintedAction };
+const WEB_VITALS_INIT_SCRIPT = `
+(() => {
+  if (window.__flpWebVitals) return;
+  const state = {
+    clsScore: 0,
+    clsSupported: false,
+    clsSessionValue: 0,
+    clsSessionEntries: [],
+    clsMaxSessionValue: 0,
+    clsEntries: [],
+    fcpMs: null,
+    lcpMs: null,
+    lcpElement: null,
+    longTaskCount: 0,
+    longTaskTotalMs: 0,
+    longTaskMaxMs: 0,
+    longTasks: [],
+  };
+  window.__flpWebVitals = state;
+  try {
+    let firstSessionTs = 0;
+    let prevSessionTs = 0;
+    const clsObserver = new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) {
+        if (entry.hadRecentInput) continue;
+        const val = Number(entry.value || 0);
+        if (
+          state.clsSessionValue > 0 &&
+          entry.startTime - prevSessionTs < 1000 &&
+          entry.startTime - firstSessionTs < 5000
+        ) {
+          state.clsSessionValue += val;
+        } else {
+          state.clsSessionValue = val;
+          firstSessionTs = entry.startTime;
+        }
+        prevSessionTs = entry.startTime;
+        if (state.clsSessionValue > state.clsMaxSessionValue) {
+          state.clsMaxSessionValue = state.clsSessionValue;
+        }
+        state.clsScore = Number(state.clsMaxSessionValue.toFixed(4));
+      }
+    });
+    clsObserver.observe({ type: "layout-shift", buffered: true });
+    state.clsSupported = true;
+  } catch {}
+  try {
+    const paintObserver = new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) {
+        if (entry.name === "first-contentful-paint" && state.fcpMs === null) {
+          state.fcpMs = Math.round(entry.startTime);
+        }
+      }
+    });
+    paintObserver.observe({ type: "paint", buffered: true });
+  } catch {}
+  try {
+    const lcpObserver = new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) {
+        state.lcpMs = Math.round(entry.startTime);
+      }
+    });
+    lcpObserver.observe({ type: "largest-contentful-paint", buffered: true });
+  } catch {}
+})();
+`;
+
+async function collectUiHealth(page) {
+  try {
+    return await page.evaluate(async () => {
+      const vitals = window.__flpWebVitals || null;
+      const clsScore = vitals?.clsSupported ? Number(vitals.clsScore.toFixed(4)) : null;
+      return {
+        webVitalsAvailable: Boolean(vitals),
+        clsSupported: vitals?.clsSupported === true,
+        clsScore,
+        fcpMs: vitals?.fcpMs ?? null,
+        lcpMs: vitals?.lcpMs ?? null,
+      };
+    });
+  } catch {
+    return null;
+  }
+}
+
+function attachApiWaterfallRecorder(page, t0 = Date.now()) {
+  const pendingByReq = new Map();
+  const completedCalls = [];
+  const onRequest = (req) => {
+    const url = req.url();
+    if (!url.includes('/api/') && !url.includes('/fos/')) return;
+    const headers = req.headers();
+    pendingByReq.set(req, {
+      url,
+      method: req.method(),
+      rangeHeader: headers['range'] || null,
+      isRangeProbe: headers['range'] === 'bytes=0-0',
+      startMs: Date.now() - t0,
+    });
+  };
+  const onResponse = async (res) => {
+    const req = res.request();
+    const meta = pendingByReq.get(req);
+    if (!meta) return;
+    const headers = res.headers();
+    completedCalls.push({
+      ...meta,
+      status: res.status(),
+      durationMs: Math.max(0, Date.now() - t0 - meta.startMs),
+      isRangeRead: res.status() === 206 && !meta.isRangeProbe,
+      vcpuMs: headers['x-flp-vcpu-ms'] !== undefined ? Number.parseFloat(headers['x-flp-vcpu-ms']) : null,
+      cdnHit: Boolean((headers['x-flp-cdn-cache'] || headers['x-cache'] || '').toUpperCase().includes('HIT')),
+    });
+  };
+  page.on('request', onRequest);
+  page.on('response', onResponse);
+  return {
+    getCalls: () => completedCalls.slice(),
+    detach: () => {
+      page.off('request', onRequest);
+      page.off('response', onResponse);
+    },
+  };
+}
+
+module.exports = {
+  budgets,
+  describeResponse,
+  collectResponseMeasurements,
+  measurePaintedAction,
+  WEB_VITALS_INIT_SCRIPT,
+  collectUiHealth,
+  attachApiWaterfallRecorder,
+};
