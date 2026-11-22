@@ -6,6 +6,7 @@ import {
   handleInsightAvailability,
   handleInsights,
   INSIGHT_DEFINITIONS,
+  IP_DETECTOR_MIN_HITS,
   resolveInsightWindow,
   type InsightsRequest,
 } from "./insights";
@@ -55,6 +56,21 @@ export function insightsDeferredDetectors(rollup: Rollup): ReadonlySet<string> {
   if (!rollupGroup(rollup, "ins_lat", "pop")) out.add("pop_latency_regression");
   if (!rollupGroup(rollup, "ins_asn", "asn")) out.add("asn_hosting_shift");
   return out;
+}
+
+/**
+ * Whether the window's `ins_ip` proves neither IP detector can fire, so the raw
+ * follow-up is unneeded: it must be uncut and list every IP with a 404 or an
+ * auth-path 401/403, each under `IP_DETECTOR_MIN_HITS` of both. A non-empty
+ * `ins_ip` and `ins_url` also show the `ip`, `status` and `url` columns exist.
+ */
+export function ipDetectorsRuledOut(window: Rollup): boolean {
+  const ips = rollupGroup(window, "ins_ip", "ip");
+  if (!ips?.size || window.truncated.has("ins_ip/ip") || !rollupGroup(window, "ins_url", "url")?.size) return false;
+  for (const agg of ips.values()) {
+    if (agg.errors >= IP_DETECTOR_MIN_HITS || agg.count >= IP_DETECTOR_MIN_HITS) return false;
+  }
+  return true;
 }
 
 /** Summaries merge a city's regions and count status 0 as an error. */
@@ -564,11 +580,12 @@ export async function insightsFromRollup(
     }
   }
 
+  const ipRuledOut = ipDetectorsRuledOut(wRollup);
   const deferred = new Set<string>([
     ...INS_IP_DETECTORS,
     ...insightsDeferredDetectors(wRollup),
     ...insightsDeferredDetectors(bRollup),
-  ]);
+  ].filter((id) => !(ipRuledOut && (INS_IP_DETECTORS as readonly string[]).includes(id))));
   const approximate = new Set(ALWAYS_APPROXIMATE);
   for (const id of ["latency_regression", "tail_latency", "city_latency_regressions", "pop_latency_regression"]) {
     if (!deferred.has(id)) approximate.add(id);

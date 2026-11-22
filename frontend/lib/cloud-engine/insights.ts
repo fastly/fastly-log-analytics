@@ -203,6 +203,16 @@ export function _coalesced_url_aggregates(
   `;
 }
 
+/** The window denials (credential_enumeration) or 404s (content_discovery) an IP needs to fire. */
+export const IP_DETECTOR_MIN_HITS = 20;
+
+/**
+ * Authentication-path tokens, matched ASCII case-insensitively like the summaries' `ins_ip`
+ * (RE2's `i` flag would also fold U+212A to `k` and U+017F to `s`).
+ */
+const AUTH_PATH_PATTERN = "login|signin|sign-in|log-in|auth|oauth|openid|token|sso|saml|session|account|password|passwd|passwrd|credential|xmlrpc|mfa|otp|2fa|verify"
+  .replace(/[a-z]/g, (c) => `[${c}${c.toUpperCase()}]`);
+
 export function _coalesced_ip_security_aggregates(
   tableName = "requests",
   windowStartIso = "1970-01-01T00:00:00Z",
@@ -212,7 +222,7 @@ export function _coalesced_ip_security_aggregates(
   return `
     WITH base AS (
       SELECT "ip", "url", status,
-        regexp_matches("url", 'login|signin|sign-in|log-in|auth|oauth|openid|token|sso|saml|session|account|password|passwd|passwrd|credential|xmlrpc|mfa|otp|2fa|verify', 'i') AS is_auth,
+        regexp_matches("url", '${AUTH_PATH_PATTERN}') AS is_auth,
         (timestamp < CAST('${wEsc}' AS TIMESTAMPTZ)) AS is_b,
         (timestamp >= CAST('${wEsc}' AS TIMESTAMPTZ)) AS is_w
       FROM ${tbl}
@@ -658,12 +668,12 @@ export async function handleInsights(
           const label = maskIps ? "0.0.0.0" : String(r.ip);
           if (d.id === "credential_enumeration") {
             const denied = n(r, "ce_w_denied"), attempts = n(r, "ce_w_attempts");
-            if (denied >= 20 && pct(denied, attempts) >= 50 && denied > scaled(n(r, "ce_b_denied")) * 3 + 5) {
+            if (denied >= IP_DETECTOR_MIN_HITS && pct(denied, attempts) >= 50 && denied > scaled(n(r, "ce_b_denied")) * 3 + 5) {
               add(label, denied, scaled(n(r, "ce_b_denied")), "denied requests",
                 { attempts, denied, fail_rate_pct: pct(denied, attempts), distinct_paths: n(r, "ce_w_paths"), filters: { ip: label } },
                 denied >= 100 ? "critical" : "warning");
             }
-          } else if (n(r, "cd_w_404") >= 20 && pct(n(r, "cd_w_404"), n(r, "w_total")) >= 70 && n(r, "cd_distinct_404") >= 15) {
+          } else if (n(r, "cd_w_404") >= IP_DETECTOR_MIN_HITS && pct(n(r, "cd_w_404"), n(r, "w_total")) >= 70 && n(r, "cd_distinct_404") >= 15) {
             add(label, n(r, "cd_w_404"), scaled(n(r, "cd_b_404")), "404 requests",
               { distinct_paths: n(r, "cd_distinct_404"), requests: n(r, "w_total"), filters: { ip: label } });
           }

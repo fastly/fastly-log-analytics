@@ -18,7 +18,10 @@ import {
   _coalesced_scalar_aggregates,
   handleInsights,
 } from "./insights";
-import { INSIGHTS_DEFERRED, insightsBaselineFromRollup, insightsBaselineRollup, insightsDeferredDetectors, insightsFromRollup, rollupInsightsBaseline } from "./insights-rollup";
+import { INSIGHTS_DEFERRED, insightsBaselineFromRollup, insightsBaselineRollup, insightsDeferredDetectors, insightsFromRollup, ipDetectorsRuledOut, rollupInsightsBaseline } from "./insights-rollup";
+import { parquetWriteBuffer } from "hyparquet-writer";
+import { _coalesced_ip_security_aggregates } from "./insights";
+import type { Rollup } from "./dashboard/rollup-query";
 
 const HOUR = 3_600_000;
 const T0 = FIXTURE_START * 1000;
@@ -516,6 +519,18 @@ describe("insights baseline from summaries vs raw DuckDB over the same rows", ()
     expect(fromCloned.rows.geo?.[0].b_p95).toBeGreaterThan(0);
   });
 
+  it("matches auth paths ASCII case-insensitively, as the summaries' ins_ip does", async () => {
+    const rows = await read.executeSql(`WITH t AS (SELECT * FROM (VALUES
+      ('9.9.9.9', '/TOKEN', 401, TIMESTAMPTZ '2030-01-01 00:00:00+00'),
+      ('9.9.9.9', '/to\u{212A}en', 401, TIMESTAMPTZ '2030-01-01 00:00:00+00'),
+      ('9.9.9.9', '/\u{17F}ession', 403, TIMESTAMPTZ '2030-01-01 00:00:00+00'),
+      ('9.9.9.9', '/Sign-In', 403, TIMESTAMPTZ '2030-01-01 00:00:00+00'),
+      ('9.9.9.9', '/x', 200, TIMESTAMPTZ '2030-01-01 00:00:00+00')
+    ) v(ip, url, status, timestamp))
+    SELECT * FROM (${_coalesced_ip_security_aggregates("t", "2029-12-31T00:00:00Z")})`, [], signal);
+    expect(rows.map((r) => Number(r.ce_w_denied))).toEqual([2]);
+  });
+
   it("answers window and baseline from v3 summaries without raw Parquet, deferring only IP detectors", async () => {
     vi.useFakeTimers({ toFake: ["Date"], now: T1 });
     try {
@@ -597,5 +612,83 @@ describe("insights baseline from summaries vs raw DuckDB over the same rows", ()
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("IP detectors from the window's ins_ip", () => {
+  const ipRollup = (ips: [string, number, number][], extra: Partial<Rollup> = {}): Rollup => ({
+    dims: new Map(),
+    series: new Map(),
+    seriesStepMs: 300_000,
+    fields: new Map(),
+    truncated: new Set(),
+    groups: new Map([
+      ["ins_ip", new Map([["ip", new Map(ips.map(([ip, errors, count]) => [ip, { ...emptyAgg(), requests: errors + count, errors, count }]))]])],
+      ["ins_url", new Map([["url", new Map([["/x", { ...emptyAgg(), requests: 1 }]])]])],
+    ]),
+    present: new Set(["ins_ip/ip", "ins_url/url"]),
+    ...extra,
+  });
+
+  it("rules both out only when every IP's denials and 404s are under the 20 either needs", () => {
+    expect(ipDetectorsRuledOut(ipRollup([["1.1.1.1", 19, 19], ["2.2.2.2", 0, 3]]))).toBe(true);
+    expect(ipDetectorsRuledOut(ipRollup([["1.1.1.1", 20, 0]]))).toBe(false);
+    expect(ipDetectorsRuledOut(ipRollup([["1.1.1.1", 0, 20]]))).toBe(false);
+  });
+
+  it("never rules out over cut, missing or empty ins_ip, which can't show the ip column exists", () => {
+    expect(ipDetectorsRuledOut(ipRollup([["1.1.1.1", 1, 1]], { truncated: new Set(["ins_ip/ip"]) }))).toBe(false);
+    expect(ipDetectorsRuledOut(ipRollup([["1.1.1.1", 1, 1]], { present: new Set(["ins_url/url"]) }))).toBe(false);
+    expect(ipDetectorsRuledOut(ipRollup([]))).toBe(false);
+    expect(ipDetectorsRuledOut(ipRollup([["1.1.1.1", 1, 1]], { groups: new Map([["ins_ip", new Map([["ip", new Map([["1.1.1.1", { ...emptyAgg(), requests: 2, errors: 1, count: 1 }]])]])]]) }))).toBe(false);
+  });
+
+  // One raw file per hour and no summaries, so both ranges come from the raw residual.
+  const END = Date.UTC(2030, 0, 1);
+  const rawFile = (fromMs: number, n404: number) => {
+    const rows = [
+      ...Array.from({ length: n404 }, (_, i) => ["7.7.7.7", 404, `/probe/${i}`] as const),
+      ...Array.from({ length: 30 }, () => ["8.8.8.8", 200, "/"] as const),
+    ];
+    return parquetWriteBuffer({
+      columnData: [
+        { name: "timestamp", type: "TIMESTAMP", data: rows.map((_, i) => new Date(fromMs + i * 1000)) },
+        { name: "ip", type: "STRING", data: rows.map((r) => r[0]) },
+        { name: "status", type: "INT64", data: rows.map((r) => BigInt(r[1])) },
+        { name: "url", type: "STRING", data: rows.map((r) => r[2]) },
+      ],
+    });
+  };
+  const answer = async (n404: number) => {
+    const files = [END - 2 * HOUR, END - HOUR].map((fromMs, i) => ({
+      key: `raw-${i}`,
+      start: new Date(fromMs).toISOString(),
+      end: new Date(fromMs + HOUR).toISOString(),
+      size: 1,
+      rows: 1,
+      bytes: rawFile(fromMs, i ? n404 : 0),
+    }));
+    const page = { files: files.map(({ bytes: _, ...f }) => f), next_cursor: null, complete: true };
+    const src = fixtureSource([page], Object.fromEntries(files.map((f) => [f.key, f.bytes])), { json: [], files: [] }, []);
+    vi.useFakeTimers({ toFake: ["Date"], now: END });
+    try {
+      return (await insightsFromRollup({ ...body, clamp_end: new Date(END).toISOString() }, [], src, signal))!;
+    } finally {
+      vi.useRealTimers();
+    }
+  };
+
+  it("evaluates them clean without the raw follow-up when no IP reaches 20", async () => {
+    const result = await answer(19);
+    expect(result.deferred_detectors).toEqual([]);
+    for (const id of ["credential_enumeration", "content_discovery"]) {
+      const card = result.insights.find((c) => c.id === id)!;
+      expect(card.placeholder, id).toBeFalsy();
+      expect(card.items, id).toEqual([]);
+    }
+  });
+
+  it("defers them to the raw follow-up once an IP reaches 20", async () => {
+    expect((await answer(20)).deferred_detectors).toEqual(["credential_enumeration", "content_discovery"]);
   });
 });
