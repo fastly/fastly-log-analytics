@@ -124,20 +124,24 @@ fn stream(
         response.send_to_client();
         output.status
     };
-    let mut fetched = match runtime.upstream(&upstream) {
+    let fos_started = std::time::Instant::now();
+    let fetched = runtime.upstream(&upstream);
+    let fos = [("fos", fos_started.elapsed())];
+    let mut fetched = match fetched {
         Ok(fetched) => fetched,
         Err(_) => {
-            let failure = upstream_failure(502).unwrap_or(output);
+            let failure = upstream_failure(502).unwrap_or(output).server_timing(&fos);
             let body = failure.body.clone().into();
             return send(failure, body);
         }
     };
     let status = fetched.get_status().as_u16();
     if let Some(failure) = upstream_failure(status) {
+        let failure = failure.server_timing(&fos);
         let body = failure.body.clone().into();
         return send(failure, body);
     }
-    let mut output = output;
+    let mut output = output.server_timing(&fos);
     output.status = status;
     for name in UPSTREAM_HEADERS {
         if let Some(value) = fetched.get_header_str(name) {

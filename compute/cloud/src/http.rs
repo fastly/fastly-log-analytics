@@ -128,6 +128,23 @@ impl Response {
         self
     }
 
+    /// Appends `name;dur=<ms>` entries to any existing `Server-Timing` value.
+    pub fn server_timing(mut self, phases: &[(&str, std::time::Duration)]) -> Self {
+        let added = phases
+            .iter()
+            .map(|(name, dur)| format!("{name};dur={:.1}", dur.as_secs_f64() * 1000.0))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if added.is_empty() {
+            return self;
+        }
+        let value = match self.headers.remove("server-timing") {
+            Some(existing) if !existing.is_empty() => format!("{existing}, {added}"),
+            _ => added,
+        };
+        self.header("server-timing", value)
+    }
+
     pub fn private(self) -> Self {
         self.header("cache-control", "private, no-store")
             .header("vary", "Cookie")
