@@ -234,8 +234,8 @@ def write_export(out: Path, pages: dict[str, int]) -> None:
 CSS = "</_next/static/chunks/a.css>; rel=preload; as=style"
 FONT = "</_next/static/media/f.woff2>; rel=preload; as=font; type=font/woff2; crossorigin"
 DUCKDB = [
-    "</duckdb/1.2.3/duckdb-browser-eh.worker.js>; rel=preload; as=script; fetchpriority=low",
-    "</duckdb/1.2.3/duckdb-eh.wasm>; rel=preload; as=fetch; crossorigin; fetchpriority=low",
+    "</duckdb/1.2.3/duckdb-browser-eh.worker.js>; rel=prefetch",
+    "</duckdb/1.2.3/duckdb-eh.wasm>; rel=prefetch",
 ]
 
 
@@ -267,6 +267,17 @@ def test_early_hints_skip_routes_with_too_little_to_hint(tmp_path: Path) -> None
     routes = extract_early_hints(out, ["/dashboard"])["routes"]
 
     assert routes == {"/dashboard": [CSS, FONT, *DUCKDB]}
+
+
+def test_duckdb_route_needs_two_103_preloads_besides_its_prefetches(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    write_export(out, {"dashboard.html": 0})
+    (out / "dashboard.html").write_text(
+        '<html><head><link rel="stylesheet" href="/_next/static/chunks/a.css"/></head><body></body></html>'
+    )
+
+    with pytest.raises(RuntimeError, match="no early hints for /dashboard"):
+        extract_early_hints(out, ["/dashboard"])
 
 
 @pytest.mark.parametrize("page", ["api/x.html", "bad route.html"])

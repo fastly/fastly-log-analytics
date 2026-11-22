@@ -503,10 +503,11 @@ def _hint_dispatch(routes: list[tuple[str, str]]) -> list[str]:
 def early_hints_vcl(hints: dict[str, Any]) -> str:
     """Render the hint subs; every value is allowlisted so nothing can escape its VCL string.
 
-    flp_early_hints (vcl_recv) passes each resource as its own early_hints() argument, one Link
+    flp_early_hints (vcl_recv) passes each preload as its own early_hints() argument, one Link
     line each as in Fastly's example; falco's linter rejects a single-argument call, so routes
-    need at least two links. flp_hint_links (vcl_deliver) repeats them as one Link header on the
-    final HTML for clients that ignore 103 preloads (Safari, HTTP/1.1).
+    need at least two preloads. flp_hint_links (vcl_deliver) repeats them as one Link header on
+    the final HTML for clients that ignore 103 preloads (Safari, HTTP/1.1), followed by the
+    route's rel=prefetch links, which Chrome ignores in a 103.
     """
     if not isinstance(hints, dict) or hints.get("version") != 1 or not isinstance(hints.get("routes"), dict):
         raise ValueError("Early hints must be a version 1 route map")
@@ -524,8 +525,11 @@ def early_hints_vcl(hints: dict[str, Any]) -> str:
             raise ValueError(f"Unsafe early hints link for {route}")
         if early_hints_size(links) > EARLY_HINTS_MAX_BYTES:
             raise ValueError(f"Early hints for {route} exceed {EARLY_HINTS_MAX_BYTES} bytes")
+        preloads = [link for link in links if "rel=prefetch" not in link.split("; ")]
+        if len(preloads) < 2:
+            raise ValueError(f"Early hints for {route} need at least two preloads")
         # early_hints() sends the name verbatim and HTTP/2 rejects uppercase field names.
-        args = ",\n      ".join(f'{{"link: {link}"}}' for link in links)
+        args = ",\n      ".join(f'{{"link: {link}"}}' for link in preloads)
         early.append((route, f"    early_hints(\n      {args}\n    );"))
         final.append((route, f'    set resp.http.Link = {{"{", ".join(links)}"}};'))
     return "\n".join(
