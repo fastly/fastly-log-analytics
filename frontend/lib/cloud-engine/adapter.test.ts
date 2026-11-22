@@ -1235,7 +1235,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       insights: [{ id: "error_spikes", title: "Error Spikes", description: "", category: "origin",
         severity: "clean", summary: "No issues", items: [] }],
       window_start: "2026-11-05T00:00:00.000Z",
-      window_end: "2026-11-06T00:00:00.000Z",
+      window_end: "2026-11-07T00:00:00.000Z",
       baseline_start: "2026-10-29T00:00:00.000Z",
       baseline_end: "2026-11-05T00:00:00.000Z",
       computed_at: "2026-11-06T00:00:00.000Z",
@@ -1270,11 +1270,15 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     const followUp = await handleCloudAnalyticalRequest(new Request("http://localhost/api/insights", {
       method: "POST", headers: { "content-type": "application/json", "x-service-id": "svc-1" },
       body: JSON.stringify({ window_size_hrs: 24, baseline_hours: 168, filters: {},
-        end_time: "2026-11-06T00:00:00Z", detectors: ["credential_enumeration"] }),
+        end_time: "2026-11-07T00:00:00Z", detectors: ["credential_enumeration"] }),
     }));
     expect(followUp?.status).toBe(200);
     expect(insightsFromRollup).not.toHaveBeenCalled();
     expect(ensureCloudRange).toHaveBeenCalledTimes(1);
+    // No raw pass loaded that window wide, so the follow-up reads only its own columns.
+    expect(vi.mocked(ensureCloudRange).mock.calls[0][4]?.projection).toEqual({
+      columns: insightScanColumns([], ["credential_enumeration"]),
+    });
   });
 
   it("reads only the Insights window raw when summaries answer its unfiltered baseline", async () => {

@@ -726,6 +726,14 @@ function networkBudgetError(error: CloudBudgetError, scans: readonly string[] | 
 }
 
 /**
+ * Windows (service and end) whose /insights answer came from summaries, so no
+ * raw pass loaded them with every insight column for a follow-up to reuse.
+ */
+const insightsSummaryWindows: string[] = [];
+const insightsWindowKey = (serviceId: unknown, end: unknown) =>
+  `${serviceId == null ? "" : decodeURIComponent(String(serviceId))}|${Date.parse(String(end))}`;
+
+/**
  * Serves an unfiltered /api/insights read (without explicit `detectors`) from
  * v3 summaries for both window and baseline, deferring only IP detectors to
  * the raw follow-up. Null (or a summary failure) falls back to the raw path.
@@ -776,7 +784,13 @@ async function cloudInsightsRollup(
       mask_ips: maskIps,
     }, serviceId, request.signal);
     assertAdapterEpoch(request, entryMetaEpoch);
-    return answer ? jsonResponse(answer, request) : null;
+    if (!answer) return null;
+    const windowEnd = (answer as { window_end?: string }).window_end;
+    if (windowEnd) {
+      insightsSummaryWindows.push(insightsWindowKey(serviceId, windowEnd));
+      if (insightsSummaryWindows.length > 8) insightsSummaryWindows.shift();
+    }
+    return jsonResponse(answer, request);
   } catch (error) {
     if (request.signal.aborted || entryMetaEpoch !== currentStoreMetaEpoch() || isAdapterAbortError(error)) {
       throw error;
@@ -948,6 +962,7 @@ async function prepareCloudScan(
   const sessionsFrom = url.pathname === "/api/sessions"
     ? sessionsLoadFrom(params, Date.parse(scanStart), Date.parse(end)) : Date.parse(scanStart);
   const followUp = Boolean(detectors) && url.pathname === "/api/insights";
+  const widenFollowUp = followUp && !insightsSummaryWindows.includes(insightsWindowKey(serviceId, end));
   const loadRange = (wider: boolean) => ensureCloudRange(
     sessionsFrom > Date.parse(scanStart) ? new Date(sessionsFrom).toISOString() : scanStart, scanEnd, request.signal, rum ? ["rum"] : ["request"], {
     serviceId: serviceId ? decodeURIComponent(String(serviceId)) : undefined, customFields,
@@ -962,9 +977,9 @@ async function prepareCloudScan(
       } } : {},
     } } : scanColumns ? { projection: { columns: scanColumns } } : {},
   });
-  const read = queryPlan ? await loadQuery(firstQueryWindow ?? scanStart) : await loadRange(followUp).catch((error: unknown) => {
+  const read = queryPlan ? await loadQuery(firstQueryWindow ?? scanStart) : await loadRange(widenFollowUp).catch((error: unknown) => {
     // When no earlier pass loaded the window wide, its every-column read can outgrow the budget alone.
-    if (followUp && error instanceof CloudBudgetError) return loadRange(false);
+    if (widenFollowUp && error instanceof CloudBudgetError) return loadRange(false);
     throw error;
   }).catch((error: unknown) => {
     throw network && error instanceof CloudBudgetError
