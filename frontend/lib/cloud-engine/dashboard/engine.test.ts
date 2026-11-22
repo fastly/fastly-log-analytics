@@ -118,8 +118,8 @@ describe("runDashboard", () => {
     });
   });
 
-  it("keeps 16 file fetches in flight by default", async () => {
-    const keys = Array.from({ length: 20 }, (_, i) => `pq/${i}.parquet`);
+  it("keeps 24 file fetches in flight by default", async () => {
+    const keys = Array.from({ length: 30 }, (_, i) => `pq/${i}.parquet`);
     const bytes = await parquetFixture([row(5)]);
     const source = fixtureSource(
       [
@@ -145,7 +145,76 @@ describe("runDashboard", () => {
       { ...source, fetchFile },
       { from: "2026-10-29T10:00:00Z", to: "2026-10-29T10:03:00Z" },
     );
-    expect(peak).toBe(16);
+    expect(peak).toBe(24);
+  });
+
+  it("probes browser caches for every file before network lanes bound it", async () => {
+    const keys = Array.from({ length: 40 }, (_, i) => `pq/${i}.parquet`);
+    const bytes = await parquetFixture([row(5)]);
+    const source = fixtureSource(
+      [
+        {
+          files: keys.map((k) =>
+            manifestEntry(k, "2026-10-29T10:00:00Z", "2026-10-29T10:05:00Z", 1),
+          ),
+          next_cursor: null,
+          complete: true,
+        },
+      ],
+      Object.fromEntries(keys.map((k) => [k, bytes])),
+    );
+    let inFlight = 0;
+    let peak = 0;
+    await runDashboard(
+      {
+        ...source,
+        hasFile: async () => {
+          peak = Math.max(peak, ++inFlight);
+          await new Promise((r) => setTimeout(r, 5));
+          inFlight--;
+          return false;
+        },
+      },
+      { from: "2026-10-29T10:00:00Z", to: "2026-10-29T10:03:00Z" },
+    );
+    expect(peak).toBe(40);
+  });
+
+  it("fetches network misses newest first at high priority", async () => {
+    const hours = ["07", "08", "09", "10"];
+    const keys = hours.map((h) => `pq/${h}.parquet`);
+    const bytes = await parquetFixture([row(5)]);
+    const source = fixtureSource(
+      [
+        {
+          files: hours.map((h, i) =>
+            manifestEntry(keys[i], `2026-10-29T${h}:00:00Z`, `2026-10-29T${h}:05:00Z`, 1),
+          ),
+          next_cursor: null,
+          complete: true,
+        },
+      ],
+      Object.fromEntries(keys.map((k) => [k, bytes])),
+    );
+    const order: string[] = [];
+    const priorities = new Set<unknown>();
+    await runDashboard(
+      {
+        ...source,
+        fetchFile: async (key, signal, mode) => {
+          order.push(key);
+          priorities.add(mode?.priority);
+          return source.fetchFile(key, signal, mode);
+        },
+      },
+      {
+        from: "2026-10-29T07:00:00Z",
+        to: "2026-10-29T10:03:00Z",
+        concurrency: 1,
+      },
+    );
+    expect(order).toEqual([...keys].reverse());
+    expect([...priorities]).toEqual(["high"]);
   });
 
   const cacheRaceSource = async (opfsKeys: readonly string[] = []) => {
@@ -379,7 +448,7 @@ describe("runDashboard", () => {
       cached: 0,
       rows: 3,
     });
-    expect(source.log.files).toEqual(["f1", "f2"]);
+    expect([...source.log.files].sort()).toEqual(["f1", "f2"]);
 
     pages[0] = {
       files: [
@@ -410,7 +479,7 @@ describe("runDashboard", () => {
       rows: 4,
     });
     // f1 and f2 were satisfied directly from per-file rollups without calling fetchFile again.
-    expect(source.log.files).toEqual(["f1", "f2", "f3"]);
+    expect([...source.log.files].sort()).toEqual(["f1", "f2", "f3"]);
 
     const coldSource = fixtureSource(pages, buffers);
     const cold = await runDashboard(coldSource, {
@@ -421,7 +490,22 @@ describe("runDashboard", () => {
     expect(second.totalRequests).toBe(cold.totalRequests);
     expect(second.hasBytes).toBe(cold.hasBytes);
     expect(second.buckets).toEqual(cold.buckets);
-    expect(second.cards).toEqual(cold.cards);
+    // `all` lists values in merge order, which differs between rollups and reads.
+    const unordered = (cards: typeof cold.cards) =>
+      Object.fromEntries(
+        Object.entries(cards).map(([field, card]) => [
+          field,
+          card.all
+            ? {
+                ...card,
+                all: [...card.all].sort((a, b) =>
+                  String(a.value).localeCompare(String(b.value)),
+                ),
+              }
+            : card,
+        ]),
+      );
+    expect(unordered(second.cards)).toEqual(unordered(cold.cards));
   });
 
   it("combines boundary-file DuckDB queries with interior-file rollups without re-fetching", async () => {
@@ -606,7 +690,7 @@ describe("runDashboard", () => {
       },
     );
     expect(warm.totalRequests).toBe(3);
-    expect(source.log.files).toEqual(["a", "b", "c"]);
+    expect([...source.log.files].sort()).toEqual(["a", "b", "c"]);
     for (const [progress] of warmProgress.mock.calls) {
       expect(progress.toFetch + progress.toDecode).toBe(0);
     }
@@ -1111,7 +1195,7 @@ describe("runDashboard", () => {
       ],
     });
     // Rollups cached without the custom field can't answer it, so files are read again.
-    expect(source.log.files).toEqual(["f1", "f2", "f1", "f2"]);
+    expect([...source.log.files].sort()).toEqual(["f1", "f1", "f2", "f2"]);
 
     const again = await runDashboard(source, { ...range, customFields });
     expect(again.cards.tenant).toEqual(custom.cards.tenant);
@@ -1831,7 +1915,9 @@ describe("dashboard filters", () => {
       concurrency: 1,
     });
     expect(unfiltered.totalRequests).toBe(6);
-    expect(source.log.files).toEqual([kNone, kAll, kPartial]);
+    expect([...source.log.files].sort()).toEqual(
+      [kNone, kAll, kPartial].sort(),
+    );
 
     // Filter where kNone has 0 matches ("none"), kAll has 100% matches ("all"),
     // and only kPartial has mixed rows ("partial").
@@ -1847,7 +1933,9 @@ describe("dashboard filters", () => {
       { value: "CA", count: 1 },
     ]);
     // Only kPartial needed to be read from source.fetchFile for DuckDB ingestion!
-    expect(source.log.files).toEqual([kNone, kAll, kPartial, kPartial]);
+    expect([...source.log.files].sort()).toEqual(
+      [kNone, kAll, kPartial, kPartial].sort(),
+    );
   });
 
   it("searchFieldValues filters case-insensitively and ignores its own column filter while honoring other filters", async () => {

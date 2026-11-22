@@ -2,6 +2,7 @@ import { fnv1a32, keyWindowMs } from "../parquet-key";
 import { fetchRetrying } from "../fetch-retry";
 import { CARD_FIELDS } from "./summaries";
 import { isCdnHit } from "./cdn-cache";
+import { parseServerTiming, type ServerTimingEntry } from "../../call-timeline";
 import type { FileRollup, FileSource } from "./engine";
 import {
   STORE_META_CACHE,
@@ -395,6 +396,9 @@ export type BrowserSourceCallEvent = {
   error?: string | null;
   endpoint: string;
   page_load_id?: string;
+  /** Epoch milliseconds, so page and worker calls share one timeline. */
+  start_ms?: number;
+  server_timing?: ServerTimingEntry[];
 };
 
 export type BrowserSourceOptions = {
@@ -405,6 +409,28 @@ export type BrowserSourceOptions = {
 };
 
 export type BrowserSourceTelemetry = BrowserSourceOptions;
+
+const epochNow = () =>
+  typeof performance !== "undefined"
+    ? performance.timeOrigin + performance.now()
+    : Date.now();
+
+/** Stamps each call with its start, taken as its report time less its duration. */
+function withCallStart(
+  options?: BrowserSourceOptions,
+): BrowserSourceOptions | undefined {
+  const onApiCall = options?.onApiCall;
+  if (!onApiCall) return options;
+  return {
+    ...options,
+    onApiCall: (call) =>
+      onApiCall(
+        call.start_ms === undefined
+          ? { ...call, start_ms: epochNow() - call.duration_ms }
+          : call,
+      ),
+  };
+}
 
 export function emitDebugSubCalls(
   response: Response | undefined,
@@ -1030,7 +1056,10 @@ export function browserSource(
     const decoded = JSON.parse(stored) as [unknown, unknown];
     return decoded[0] === (fileOwnerScope(options) ?? null);
   };
-  const sourceWith = (options?: BrowserSourceOptions): BrowserFileSource => {
+  const sourceWith = (
+    sourceOptions?: BrowserSourceOptions,
+  ): BrowserFileSource => {
+    const options = withCallStart(sourceOptions);
     const instance: BrowserFileSource = {
     async readDerivedFile(key, identity) {
       const callEpoch = cacheEpoch;
@@ -1240,6 +1269,7 @@ export function browserSource(
             vcpu_ms: vcpuMs,
             cache: cdnHit ? "cdn" : "miss",
             endpoint: "GET /api/file",
+            server_timing: parseServerTiming(response.headers.get("server-timing")),
             page_load_id: options?.getPageLoadId?.(),
           });
           return { kind: "http" as const, url: url.href, cached: false };
@@ -1369,6 +1399,7 @@ export function browserSource(
               cache: cdnHit ? "cdn" : "miss",
               error: failure ? describeError(failure) : null,
               endpoint: "GET /api/file",
+              server_timing: parseServerTiming(response.headers.get("server-timing")),
               page_load_id: pageLoadId,
             });
             emitDebugSubCalls(
@@ -1419,6 +1450,9 @@ export function browserSource(
           duration_ms: durationMs,
           vcpu_ms: vcpuMs,
           endpoint,
+          server_timing: parseServerTiming(
+            response?.headers?.get?.("server-timing"),
+          ),
           page_load_id: pageLoadId,
         });
         emitDebugSubCalls(response, endpoint, pageLoadId, options?.onApiCall);
@@ -1528,6 +1562,7 @@ export function browserSource(
               bytes: bytes.byteLength,
               cache: cdnHit ? "cdn" : "miss",
               endpoint: "GET /api/file",
+              server_timing: parseServerTiming(response.headers.get("server-timing")),
               page_load_id: options?.getPageLoadId?.(),
             });
             return bytes;
@@ -1655,6 +1690,7 @@ export function browserSource(
               credentials: "same-origin",
               cache: "no-store",
               ...(headers ? { headers } : {}),
+              ...(mode?.priority ? { priority: mode.priority } : {}),
               signal: controller.signal,
             });
             if (!response.ok) {
@@ -1669,6 +1705,7 @@ export function browserSource(
                 status: response.status,
                 duration_ms: Math.max(0, Math.round(end - start)),
                 endpoint: "GET /api/file",
+                server_timing: parseServerTiming(response.headers.get("server-timing")),
                 page_load_id: pageLoadId,
               });
               throw new Error(`File ${key} failed (${response.status})`);
@@ -1703,6 +1740,7 @@ export function browserSource(
               bytes: bytes.byteLength,
               cache: cdnHit ? "cdn" : "miss",
               endpoint: "GET /api/file",
+              server_timing: parseServerTiming(response.headers.get("server-timing")),
               page_load_id: pageLoadId,
             });
             emitDebugSubCalls(

@@ -192,7 +192,11 @@ export type FileSource = {
   fetchFile: (
     key: string,
     signal?: AbortSignal,
-    mode?: { transfer?: boolean; identity?: string },
+    mode?: {
+      transfer?: boolean;
+      identity?: string;
+      priority?: RequestPriority;
+    },
   ) => Promise<{ bytes: ArrayBuffer; cached: boolean; cdn?: string | null }>;
   /**
    * Bytes `[start, end)` of an immutable file, uncached. `priority` hints the
@@ -281,8 +285,11 @@ function columnFields(options: EngineOptions): CustomField[] {
 }
 
 // /api/file is latency-bound (~0.55 s per file whatever the width); live
-// probes halved wall time from 8 to 16 lanes, and 32 added little.
-const FETCH_CONCURRENCY = 16;
+// probes halved wall time from 8 to 16 lanes, and 32 added little. The edge
+// allows 100 HTTP/2 streams, so this is a tuning choice, not a browser cap.
+const FETCH_CONCURRENCY = 24;
+// Cache probes read local storage only, so they run wider than network lanes.
+const CACHE_PROBE_CONCURRENCY = 64;
 // One coalesced selective query registers every file it reads in DuckDB memory.
 const SELECTIVE_BATCH_FILES = 16;
 const SELECTIVE_BATCH_BYTES = 16 * 1024 * 1024;
@@ -1569,6 +1576,7 @@ async function collectAggregator(
   const runPool = async <T>(
     items: readonly T[],
     handle: (item: T) => Promise<void>,
+    lanes = options.concurrency ?? FETCH_CONCURRENCY,
   ) => {
     let next = 0;
     const worker = async () => {
@@ -1580,10 +1588,7 @@ async function collectAggregator(
     await Promise.all(
       Array.from(
         {
-          length: Math.min(
-            options.concurrency ?? FETCH_CONCURRENCY,
-            items.length,
-          ),
+          length: Math.min(lanes, items.length),
         },
         worker,
       ),
@@ -1737,15 +1742,19 @@ async function collectAggregator(
       clipOnly,
     });
   };
-  await runPool(summaryUses, (summary) =>
-    addPending({
-      file: summary.file,
-      scopedKey: scopedKeyOf(summary.file.key),
-      hadRollup: false,
-      summary,
-    }),
+  const probeLanes = options.concurrency ?? CACHE_PROBE_CONCURRENCY;
+  await runPool(
+    summaryUses,
+    (summary) =>
+      addPending({
+        file: summary.file,
+        scopedKey: scopedKeyOf(summary.file.key),
+        hadRollup: false,
+        summary,
+      }),
+    probeLanes,
   );
-  await runPool(files, classify);
+  await runPool(files, classify, probeLanes);
 
   progress.toFetch = toFetch;
   progress.toDecode = toDecode;
@@ -2058,7 +2067,10 @@ async function collectAggregator(
           assertActive();
           whole = projected
             ? await projected.read()
-            : await source.fetchFile(file.key, signal, { transfer: true });
+            : await source.fetchFile(file.key, signal, {
+                transfer: true,
+                priority: "high",
+              });
           assertActive();
         } catch (error) {
           releaseWhole(wholeBytes);
@@ -2174,6 +2186,7 @@ async function collectAggregator(
       assertActive();
       const { bytes, cached, cdn } = await source.fetchFile(file.key, signal, {
         transfer: true,
+        priority: "high",
       });
       assertActive();
       const meta = await lease.ingestFile(
@@ -2201,7 +2214,9 @@ async function collectAggregator(
       ? ((await source.readRollup?.(file.key, variant)) ?? null)
       : null;
     assertActive();
-    const { bytes, cached, cdn } = await source.fetchFile(file.key, signal);
+    const { bytes, cached, cdn } = await source.fetchFile(file.key, signal, {
+      priority: "high",
+    });
     assertActive();
     const decoded = await readColumns(bytes, wanted);
     assertActive();
@@ -2284,10 +2299,13 @@ async function collectAggregator(
     if (isCdnHit(cdn)) stats.cdnHits++;
     finishFile();
   };
+  // The open hour changes most and is read first; older hours then fill in.
+  const newestFirst = (a: PendingFile, b: PendingFile) =>
+    Date.parse(b.file.end) - Date.parse(a.file.end);
   await Promise.all([
     runPool(pending.filter(cacheReady), readPending),
     runPool(
-      pending.filter((entry) => !cacheReady(entry)),
+      pending.filter((entry) => !cacheReady(entry)).sort(newestFirst),
       readPending,
     ),
   ]);
