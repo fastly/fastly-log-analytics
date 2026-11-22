@@ -236,6 +236,21 @@ describe("planRollup", () => {
       expect(planRollup(RAW, all, fromMs, T0 + 2 * HOUR, { residualBytes: RAW[0].size })).not.toBeNull();
       expect(planRollup(RAW, all, fromMs, T0 + 2 * HOUR, { residualBytes: RAW[0].size - 1 })).toBeNull();
     });
+
+    it("admits an accumulated Insights residual above the old 160 MiB cap", () => {
+      const accumulated = RAW.map((file, i) =>
+        i === 0 ? { ...file, size: 200 * 1024 * 1024 } : file,
+      );
+      const plan = planRollup(
+        accumulated,
+        all,
+        T0 + 5 * 60_000,
+        T0 + 2 * HOUR,
+        { residualBytes: INSIGHTS_RESIDUAL.maxBytes },
+      );
+      expect(plan?.residual).toHaveLength(1);
+      expect(plan?.residual?.[0].key).toBe(accumulated[0].key);
+    });
   });
 
   it("falls back to raw when the omitted tail is longer than one raw window", () => {
