@@ -919,6 +919,9 @@ pub(super) fn recover(
     let svc_key = format!("svc:{}", input.service_id);
     let existing_svc = context.get(&svc_key)?;
     if let Some(ref rec) = existing_svc {
+        if rec.value.get("data_reset").is_some_and(|v| !v.is_null()) {
+            return Err(Error::new(409, "data_reset_in_progress"));
+        }
         let install_owns_sid = install_val.service_id.as_deref() == Some(input.service_id.as_str());
         let has_pending_job = rec.value["pending_job_id"]
             .as_str()

@@ -117,7 +117,7 @@ fn transient_inventory_http_error_retries_without_manual_resume() {
         json!({}),
     );
     assert_eq!(result["job"]["status"], "pending", "{result}");
-    assert_eq!(result["job"]["step"], "bucket");
+    assert_eq!(result["job"]["step"], "bucket_probe");
     assert_eq!(platform.adapter.key_count(), 1);
     platform.drain(result["job"].clone());
     assert_eq!(platform.service()["service"]["status"], "active");

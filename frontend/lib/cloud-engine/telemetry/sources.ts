@@ -19,6 +19,7 @@ export const opsCacheName = (user: string, role: string) =>
 export type OpsIdentity = { user: string; role: string };
 
 let activeUserId: string | null = null;
+let activeUserRole: string | null = null;
 let opsCacheEpoch = 0;
 let volatileOpsScopeCounter = 0;
 let volatileOpsScope = `volatile-ops-${++volatileOpsScopeCounter}`;
@@ -100,6 +101,7 @@ export async function clearOpsCaches(
 ): Promise<void> {
   if (!options.user) {
     activeUserId = null;
+    activeUserRole = null;
   }
   opsCacheEpoch += 1;
   volatileOpsScope = `volatile-ops-${++volatileOpsScopeCounter}`;
@@ -130,17 +132,44 @@ export async function clearOpsCaches(
   }
 }
 
+function dashboardRoleForUser(userId: string): string | null {
+  const dashId = dashboardCacheIdentity();
+  if (!dashId || dashId === "anonymous") return null;
+  const sep = dashId.lastIndexOf(":");
+  if (sep <= 0) return null;
+  return dashId.slice(0, sep) === userId ? dashId.slice(sep + 1) || null : null;
+}
+
 export async function syncOpsCacheForSession(session: {
   userId?: string | null;
+  role?: string | null;
+  maskIps?: boolean;
   needsLogin?: boolean;
 }): Promise<void> {
   const nextUser = session.needsLogin ? null : (session.userId ?? null);
-  if (activeUserId !== null && activeUserId !== nextUser) {
-    await clearOpsCaches();
-  } else if (session.needsLogin) {
+  const rawRole = session.needsLogin
+    ? null
+    : session.role && session.role.trim().length > 0
+      ? session.role.trim()
+      : null;
+  const nextRole =
+    nextUser === null
+      ? null
+      : session.maskIps && (!rawRole || rawRole === "analyst")
+        ? "analyst-no-pii"
+        : (rawRole ?? dashboardRoleForUser(nextUser));
+  const userChanged = activeUserId !== null && activeUserId !== nextUser;
+  const roleChanged =
+    activeUserId !== null &&
+    nextUser !== null &&
+    activeUserRole !== null &&
+    nextRole !== null &&
+    activeUserRole !== nextRole;
+  if (userChanged || roleChanged || session.needsLogin) {
     await clearOpsCaches();
   }
   activeUserId = nextUser;
+  activeUserRole = nextRole;
 }
 
 export function browserOpsSource(

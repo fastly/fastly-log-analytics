@@ -1,4 +1,4 @@
-import { quoteIdent, sqlEscape } from "@/lib/sqlBuilder";
+import { sqlEscape } from "@/lib/sqlBuilder";
 import type {
   Aggregator,
   FieldAggregate,
@@ -283,7 +283,8 @@ function sqlString(value: string): string {
   return `'${sqlEscape(value)}'`;
 }
 
-const sqlIdent = quoteIdent;
+const quoteDuckIdent = (s: string): string => `"${s.replace(/"/g, '""')}"`;
+const sqlIdent = quoteDuckIdent;
 
 function escapeRegex(value: string): string {
   return value.replace(/[.+?^${}()|[\]\\]/g, "\\$&");

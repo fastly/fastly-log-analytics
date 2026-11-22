@@ -2757,4 +2757,266 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     expect(names.some((k) => k.includes("anonymous"))).toBe(false);
     expect(names.some((k) => /^flp-ops-parquet-v1:volatile-ops-\d+:admin$/.test(k))).toBe(true);
   });
+
+  it("enforces per-tab identity isolation on cross-tab localStorage demotion/switch/logout, serializes concurrent setDashboardCacheIdentity calls, and scopes current-storage deletion reads by currentOpsIdentity + epoch (SEC-T5-ITER23-01, SEC-T5-ITER23-02, COEX-ITER24-01)", async () => {
+    const { clearDashboardData, setDashboardCacheIdentity } = await import("./dashboard/client");
+    const { getDuckDBEngine } = await import("./dashboard/duckdb");
+    const { currentStoreMetaEpoch } = await import("./dashboard/file-store");
+    const { currentOpsCacheEpoch, syncOpsCacheForSession } = await import("./telemetry/sources");
+    const sessionRefMod = await import("./session-reference");
+
+    const ls = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (k: string) => ls.get(k) ?? null,
+      setItem: (k: string, v: string) => {
+        ls.set(k, v);
+      },
+      removeItem: (k: string) => {
+        ls.delete(k);
+      },
+      clear: () => {
+        ls.clear();
+      },
+    });
+    const ss = new Map<string, string>();
+    vi.stubGlobal("sessionStorage", {
+      getItem: (k: string) => ss.get(k) ?? null,
+      setItem: (k: string, v: string) => {
+        ss.set(k, v);
+      },
+      removeItem: (k: string) => {
+        ss.delete(k);
+      },
+      clear: () => {
+        ss.clear();
+      },
+    });
+
+    let holdCacheDelete = false;
+    let releaseCacheDelete = null as (() => void) | null;
+    const cacheBuckets = new Map<string, Map<string, Response>>();
+    vi.stubGlobal("caches", {
+      async open(name: string) {
+        let b = cacheBuckets.get(name);
+        if (!b) {
+          b = new Map();
+          cacheBuckets.set(name, b);
+        }
+        return {
+          async match(k: RequestInfo | URL) {
+            return b!.get(String(k))?.clone();
+          },
+          async put(k: RequestInfo | URL, v: Response) {
+            b!.set(String(k), v.clone());
+          },
+          async delete(k: RequestInfo | URL) {
+            return b!.delete(String(k));
+          },
+          async keys() {
+            return [...b!.keys()].map((u) => new Request(u));
+          },
+        };
+      },
+      async keys() {
+        return [...cacheBuckets.keys()];
+      },
+      async delete(name: string) {
+        if (holdCacheDelete) {
+          await new Promise<void>((r) => {
+            releaseCacheDelete = r;
+          });
+        }
+        return cacheBuckets.delete(name);
+      },
+    });
+
+    await clearDashboardData();
+
+    // 1. SEC-T5-ITER23-01: Tab 1 initializes as alice:admin, populates DuckDB raw IP rows, sessionStorage ref,
+    // ops cache for alice:admin, and starts an in-flight admin metadata fetch.
+    await setDashboardCacheIdentity("alice:admin");
+    await syncOpsCacheForSession({ userId: "alice", role: "admin", needsLogin: false });
+    const aliceOpsCache = await caches.open("flp-ops-parquet-v1:alice:admin");
+    await aliceOpsCache.put("http://localhost/fos/pq/ops.parquet", new Response(new Uint8Array([1, 2, 3, 4])));
+    expect(cacheBuckets.has("flp-ops-parquet-v1:alice:admin")).toBe(true);
+
+    const engine = getDuckDBEngine();
+    engine.setPresentColumnsOverride(["ip", "status"]);
+    const duckdbResetSpy = vi.spyOn(engine, "reset");
+
+    const refUuid = "22222222-3333-4444-8555-666666666666";
+    sessionRefMod.saveCloudSessionReference(refUuid, "raw-alice-session-token");
+    expect(sessionRefMod.readCloudSessionReference(refUuid)).toBe("raw-alice-session-token");
+
+    let releaseExtentsFetch = null as (() => void) | null;
+    const currentBootstrapRole = "analyst-no-pii";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = input instanceof Request ? input.url : String(input);
+        const sig = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+        if (url.includes("/api/log-extents")) {
+          await new Promise<void>((resolve, reject) => {
+            releaseExtentsFetch = resolve;
+            sig?.addEventListener("abort", () => reject(sig.reason ?? new DOMException("Aborted", "AbortError")), {
+              once: true,
+            });
+          });
+          return Response.json({ earliest_log_at: "2026-11-10T00:00:00Z", latest_log_at: "2026-11-10T01:00:00Z" });
+        }
+        if (url.includes("/api/bootstrap")) {
+          return Response.json({
+            runtime_mode: "cloud",
+            user: { id: "alice", role: currentBootstrapRole },
+            services: [{ service_id: "svc-1", name: "Svc" }],
+            active_service_id: "svc-1",
+            active_log_field_ids: [],
+            log_fields_catalog: { fields: [] },
+            views: [],
+            build_sha: "5c0f4ebbd",
+            ngwaf_configured: false,
+            fastly_bots_available: false,
+            settings: {
+              needs_login: false,
+              is_remote_analyst: true,
+              mask_ips: currentBootstrapRole === "analyst-no-pii",
+            },
+            debug_state: {},
+          });
+        }
+        return Response.json({ services: [{ service_id: "svc-1", name: "Svc" }], fields: [] });
+      }),
+    );
+
+    const inFlightBundle = handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/network/bundle?service_id=svc-1"),
+    ).then(
+      (r) => `STATUS:${r?.status}`,
+      (e: unknown) => `ERR:${(e as Error)?.name ?? String(e)}`,
+    );
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Tab 2 mutates shared localStorage BEFORE Tab 1 refetches /api/bootstrap!
+    ls.set("flp-dashboard-cache-identity", "alice:analyst-no-pii");
+    const metaEpochBefore = currentStoreMetaEpoch();
+    const opsEpochBefore = currentOpsCacheEpoch();
+
+    const bootDemoted = await handleCloudAnalyticalRequest(new Request("http://localhost/api/bootstrap"));
+    expect(bootDemoted?.status).toBe(200);
+    const fnExtents: (() => void) | null = releaseExtentsFetch;
+    fnExtents?.();
+
+    expect(currentStoreMetaEpoch()).toBeGreaterThan(metaEpochBefore);
+    expect(currentOpsCacheEpoch()).toBeGreaterThan(opsEpochBefore);
+    expect(cacheBuckets.has("flp-ops-parquet-v1:alice:admin")).toBe(false);
+    expect(sessionRefMod.readCloudSessionReference(refUuid)).toBeNull();
+    expect(duckdbResetSpy).toHaveBeenCalledTimes(1);
+    expect(await inFlightBundle).toBe("ERR:AbortError");
+
+    // 1b. Cross-tab window "storage" event listener also purges Tab 1 immediately on logout in Tab 2:
+    if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
+      sessionRefMod.saveCloudSessionReference(refUuid, "second-tab-secret");
+      const epochBeforeStorage = currentStoreMetaEpoch();
+      ls.delete("flp-dashboard-cache-identity");
+      const storageEvt = Object.assign(new Event("storage"), {
+        key: "flp-dashboard-cache-identity",
+        oldValue: "alice:analyst-no-pii",
+        newValue: null,
+      });
+      window.dispatchEvent(storageEvt);
+      await new Promise((r) => setTimeout(r, 25));
+      expect(currentStoreMetaEpoch()).toBeGreaterThan(epochBeforeStorage);
+      expect(sessionRefMod.readCloudSessionReference(refUuid)).toBeNull();
+    }
+
+    // 2. SEC-T5-ITER23-02: Concurrent setDashboardCacheIdentity("bob:admin") calls MUST coalesce & wait for full cleanup!
+    const preBobCache = await caches.open("flp-parquet-v1");
+    await preBobCache.put("http://localhost/__pre_bob", new Response("stale"));
+    holdCacheDelete = true;
+    let call1Settled = false;
+    let call2ResolvedWhileCall1Pending = false;
+    const p1 = setDashboardCacheIdentity("bob:admin").then(() => {
+      call1Settled = true;
+    });
+    const p2 = setDashboardCacheIdentity("bob:admin").then(() => {
+      if (!call1Settled) call2ResolvedWhileCall1Pending = true;
+    });
+    await new Promise((r) => setTimeout(r, 15));
+    expect(call1Settled).toBe(false);
+    expect(call2ResolvedWhileCall1Pending).toBe(false);
+    holdCacheDelete = false;
+    const fnCacheDel: (() => void) | null = releaseCacheDelete;
+    fnCacheDel?.();
+    await Promise.all([p1, p2]);
+    expect(call2ResolvedWhileCall1Pending).toBe(false);
+
+    // Post-switch query launched immediately after Call 2 resolves MUST succeed (200 OK, NEVER aborted by Call 1!):
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json({
+          earliest_log_at: null,
+          latest_log_at: null,
+          services: [{ service_id: "svc-1", name: "Svc" }],
+          fields: [],
+        }),
+      ),
+    );
+    const postSwitchRes = await handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/network/bundle?service_id=svc-1"),
+    );
+    expect(postSwitchRes?.status).toBe(200);
+
+    // 3. COEX-ITER24-01: /api/usage/current-storage passes currentOpsIdentity() (bob:admin, NOT default:admin)
+    // and enforces checkUsageEpoch() after awaiting fetchIngestDeletedBytes!
+    await syncOpsCacheForSession({ userId: "bob", role: "admin", needsLogin: false });
+    vi.spyOn(usage, "fetchUsageSettings").mockResolvedValue({
+      ...fixtureUsageInput.settings,
+      enabled: true,
+    });
+    const mockSummary = usage.summarizeUsage(fixtureUsageInput);
+    vi.spyOn(usage, "fetchUsageSummary").mockResolvedValue({
+      ...mockSummary,
+      input: {
+        ...fixtureUsageInput,
+        settings: { ...fixtureUsageInput.settings, enabled: true },
+        rows: { ...fixtureUsageInput.rows, fos_usage: [] },
+        telemetryCoverage: { fos_usage: false },
+      },
+      summary: mockSummary,
+      lines: [],
+      totalUsd: 0,
+    });
+    vi.spyOn(usage, "fetchUsageKindWithCoverage").mockResolvedValue({ rows: [], complete: false });
+    let seenIngestIdentity: { user: string; role: string } | null = null;
+    vi.spyOn(usage, "fetchIngestDeletedBytes").mockImplementation(async (_range, identity) => {
+      seenIngestIdentity = identity;
+      return { bytes: 1234, complete: true, provenance: "ingest_files_exact" };
+    });
+    const storageRes = await handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/usage/current-storage"),
+    );
+    expect(storageRes?.status).toBe(200);
+    expect(seenIngestIdentity).toEqual({ user: "bob", role: "admin" });
+
+    // Also verify checkUsageEpoch() aborts /api/usage/current-storage if opsCacheEpoch bumps mid-fetchIngestDeletedBytes:
+    let releaseIngestDel = null as (() => void) | null;
+    vi.spyOn(usage, "fetchIngestDeletedBytes").mockImplementation(async () => {
+      await new Promise<void>((r) => {
+        releaseIngestDel = r;
+      });
+      return { bytes: 9999, complete: true, provenance: "ingest_files_exact" };
+    });
+    const inFlightStorage = handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/usage/current-storage"),
+    ).then(
+      (r) => `STATUS:${r?.status}`,
+      (e: unknown) => `ERR:${(e as Error)?.name ?? String(e)}`,
+    );
+    await new Promise((r) => setTimeout(r, 10));
+    await clearDashboardData();
+    const fnIngestDel: (() => void) | null = releaseIngestDel;
+    fnIngestDel?.();
+    expect(await inFlightStorage).toBe("ERR:AbortError");
+  });
 });

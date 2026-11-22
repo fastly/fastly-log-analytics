@@ -262,6 +262,7 @@ struct ProbeRt {
     rich_fos: std::cell::Cell<bool>,
     mtimes: std::cell::RefCell<BTreeMap<String, String>>,
     budget: std::cell::Cell<Option<u32>>,
+    fail_svc_cas: std::cell::Cell<bool>,
 }
 
 impl ProbeRt {
@@ -298,6 +299,7 @@ impl ProbeRt {
             rich_fos: std::cell::Cell::new(false),
             mtimes: std::cell::RefCell::new(BTreeMap::new()),
             budget: std::cell::Cell::new(None),
+            fail_svc_cas: std::cell::Cell::new(false),
         }
     }
     fn spend_budget(&self) -> Result<(), String> {
@@ -370,6 +372,9 @@ impl Runtime for ProbeRt {
             self.admin.cache_invalidate(key);
         }
         self.spend_budget()?;
+        if key == "svc:fixtureService" && self.fail_svc_cas.get() {
+            return Err("kv_write_injected_failure".into());
+        }
         self.admin.cas(key, generation, value)
     }
     fn admin_api(&self, req: ApiRequest<'_>) -> Result<ApiResponse, String> {
@@ -1861,6 +1866,97 @@ fn main() {
     let dr20c_error = jb_20c["error"].as_str().unwrap_or("").to_owned();
     let dr20c_enabled = rt_dr20c.admin.get("svc:fixtureService").unwrap().unwrap().value["scoring"]["enabled"] == json!(true);
 
+    // 21A..21C (Iter 24):
+    // 21A: post-DR reconcile under stale svc:fixtureService KV + 29/32 budget AND tight 16/32 clone budget!
+    let rt_dr21a = ProbeRt::new();
+    let (_, prov21a) = rt_dr21a.call_budgeted("POST", "/api/admin/provision/execute", json!({
+        "token": "fixture-token", "service_id": "fixtureService", "fos_bucket": "fos-fixture-logs", "fos_region": "us-east-1"
+    }));
+    assert_eq!(drain_job(&rt_dr21a, prov21a["job"].clone())["status"], "complete");
+    let (_, en21a) = rt_dr21a.call_budgeted("POST", "/api/services/fixtureService/scoring/enable", json!({}));
+    assert_eq!(drain_job(&rt_dr21a, en21a["job"].clone())["status"], "complete");
+    for k in rt_dr21a.admin.records().into_keys() {
+        rt_dr21a.admin.cache_invalidate(&k);
+        rt_dr21a.admin.delete(&k).unwrap();
+    }
+    for sec in ["fastly_token.fixtureService", "fos_ak.fixtureService", "fos_sk.fixtureService", "scoring_request_secret.fixtureService"] {
+        let _ = rt_dr21a.admin.api(ApiRequest {
+            method: "DELETE", path: &format!("/resources/stores/secret/fixtureSecrets/secrets/{sec}"),
+            token: "fixture-token", body: None, timeout: std::time::Duration::from_secs(5), query: "",
+        }).unwrap();
+    }
+    rt_dr21a.budget.set(Some(3));
+    let (recov21a_st, _) = rt_dr21a.call("POST", "/api/admin/provision/recover", json!({
+        "token": "fixture-token", "service_id": "fixtureService", "fos_bucket": "fos-fixture-logs", "fos_region": "us-east-1"
+    }));
+    rt_dr21a.budget.set(None);
+    assert_eq!(recov21a_st, 200);
+    let stale21a = rt_dr21a.admin.record_snapshot("svc:fixtureService");
+    let gen21a = stale21a.as_ref().unwrap().generation.clone();
+    let (_, rec21a) = rt_dr21a.call_budgeted("POST", "/api/admin/services/fixtureService/reconcile", json!({"generation": gen21a}));
+    let id_21a = rec21a["job"]["id"].as_str().unwrap().to_owned();
+    let mut jb_21a = rec21a["job"].clone();
+    for tick in 0..20u32 {
+        rt_dr21a.admin.cache_stale("svc:fixtureService", stale21a.clone());
+        rt_dr21a.budget.set(Some(if tick < 4 { 16 } else { 3 }));
+        let (_, r21a) = rt_dr21a.call("POST", &format!("/api/admin/jobs/{id_21a}/step"), json!({}));
+        rt_dr21a.budget.set(None);
+        jb_21a = r21a["job"].clone();
+        if let Some(at) = jb_21a["retry_at"].as_u64() {
+            rt_dr21a.now_s.fetch_max(at + 1, Ordering::SeqCst);
+        }
+        if jb_21a["status"] == "complete" || jb_21a["status"] == "failed" { break; }
+    }
+    let dr21a_status = jb_21a["status"].as_str().unwrap_or("").to_owned();
+    let dr21a_secret = rt_dr21a.admin.secret("scoring_request_secret.fixtureService").unwrap().is_some();
+
+    // 21B: _audit_outbox == 4095 scoring_disable completes + post-activate KV failure preserves v4 without duplicate v5!
+    let snap21b = rt_dr21a.admin.record_snapshot("svc:fixtureService").unwrap();
+    let mut seeded21b = snap21b.value.clone();
+    seeded21b["_audit_outbox"] = Value::Array((0..4095).map(|i| json!({"actor": "a", "at": 1800000000u64 + i, "event": "s", "config_version": 1})).collect());
+    rt_dr21a.admin.cache_invalidate("svc:fixtureService");
+    rt_dr21a.admin.cas("svc:fixtureService", Some(&snap21b.generation), &seeded21b).unwrap();
+    let (dis21b_st, dis21b) = rt_dr21a.call_budgeted("POST", "/api/services/fixtureService/scoring/disable", json!({}));
+    assert_eq!(dis21b_st, 200);
+    let mut jb_21b = dis21b["job"].clone();
+    let id_21b = jb_21b["id"].as_str().unwrap().to_owned();
+    for _ in 0..20 {
+        if jb_21b["step"] == "scoring_strip_activate" { break; }
+        jb_21b = rt_dr21a.call_budgeted("POST", &format!("/api/admin/jobs/{id_21b}/step"), json!({})).1["job"].clone();
+    }
+    rt_dr21a.fail_svc_cas.set(true);
+    let (_, fail21b) = rt_dr21a.call_budgeted("POST", &format!("/api/admin/jobs/{id_21b}/step"), json!({}));
+    rt_dr21a.fail_svc_cas.set(false);
+    let dr21b_fail_step = fail21b["job"]["step"].as_str().unwrap_or("").to_owned();
+    let done21b = drain_job(
+        &rt_dr21a,
+        rt_dr21a.call_budgeted("POST", &format!("/api/admin/jobs/{id_21b}/retry"), json!({})).1["job"].clone(),
+    );
+    let dr21b_status = done21b["status"].as_str().unwrap_or("").to_owned();
+    let dr21b_max_ver = rt_dr21a.admin.api(ApiRequest {
+        method: "GET", path: "/service/fixtureService/version", token: "fixture-token",
+        body: None, timeout: std::time::Duration::from_secs(5), query: "",
+    }).unwrap().1.as_array().unwrap().iter().filter_map(|v| v["number"].as_u64()).max().unwrap_or(0);
+
+    // 21C: active delete-data blocks PATCH /services/{sid}, POST /reconcile, and POST /provision/teardown with 409!
+    let rt_dr21c = ProbeRt::new();
+    let (_, prov21c) = rt_dr21c.call_budgeted("POST", "/api/admin/provision/execute", json!({
+        "token": "fixture-token", "service_id": "fixtureService", "fos_bucket": "fos-fixture-logs", "fos_region": "us-east-1"
+    }));
+    assert_eq!(drain_job(&rt_dr21c, prov21c["job"].clone())["status"], "complete");
+    let pre_dd21c = rt_dr21c.admin.record_snapshot("svc:fixtureService").unwrap().generation;
+    assert_eq!(rt_dr21c.call_budgeted("POST", "/api/admin/services/fixtureService/delete-data", json!({"confirm_service_id": "fixtureService", "generation": pre_dd21c})).0, 200);
+    let gen21c = rt_dr21c.admin.record_snapshot("svc:fixtureService").unwrap().generation;
+    let dr21c_statuses = vec![
+        rt_dr21c.call_budgeted("PATCH", "/api/admin/services/fixtureService", json!({"generation": gen21c, "fos_prefix": "team_b/"})).0,
+        rt_dr21c.call_budgeted("POST", "/api/admin/services/fixtureService/reconcile", json!({"generation": gen21c})).0,
+        rt_dr21c.call_budgeted("POST", "/api/admin/provision/teardown", json!({
+            "service_id": "fixtureService", "confirm_service_id": "fixtureService", "generation": gen21c,
+            "remove_logging": true, "remove_snippets": true
+        })).0,
+    ];
+    let dr21c_prefix_unchanged = rt_dr21c.admin.record_snapshot("svc:fixtureService").unwrap().value["fos_prefix"] == json!("");
+
     println!("{}", json!({
         "st_trav": st_trav,
         "st_own_svc": st_own_svc,
@@ -1939,6 +2035,13 @@ fn main() {
         "dr20d_refused_error": dr20d_refused_error,
         "dr20d_retry_status": dr20d_retry_status,
         "dr20d_customer_preserved": dr20d_customer_preserved,
+        "dr21a_status": dr21a_status,
+        "dr21a_secret": dr21a_secret,
+        "dr21b_fail_step": dr21b_fail_step,
+        "dr21b_status": dr21b_status,
+        "dr21b_max_ver": dr21b_max_ver,
+        "dr21c_statuses": dr21c_statuses,
+        "dr21c_prefix_unchanged": dr21c_prefix_unchanged,
     }));
 }
 """,
@@ -2039,6 +2142,13 @@ fn main() {
     assert dr14["dr20d_refused_error"] == "active_version_changed"
     assert dr14["dr20d_retry_status"] == "complete"
     assert dr14["dr20d_customer_preserved"] is True
+    assert dr14["dr21a_status"] == "complete"
+    assert dr14["dr21a_secret"] is True
+    assert dr14["dr21b_fail_step"] == "scoring_strip_activate"
+    assert dr14["dr21b_status"] == "complete"
+    assert dr14["dr21b_max_ver"] == 5
+    assert dr14["dr21c_statuses"] == [409, 409, 409]
+    assert dr14["dr21c_prefix_unchanged"] is True
 
 
 def test_t5_c04_c12_cloud_disabled_rum_faro_cdn_shield_reconcile_cookie_and_fos_guards(
@@ -5870,9 +5980,10 @@ console.log('NODE_PROXY_AND_CSV_PARITY_OK');
             "lib/cloud-engine/value-stats.test.ts",
             "lib/cloud-engine/security-rollup.test.ts",
             "lib/cloud-engine/telemetry/client.test.ts",
+            "lib/cloud-engine/dashboard/duckdb.test.ts",
             "lib/cloud-engine/adapter.test.ts",
             "-t",
-            "wipes range-loader singleton|aborts in-flight|blocks post-logout OPFS persistFile|blocks multi-step runDashboard|aborts in-flight queryRollup|suppresses pending write|skips CacheStorage and error telemetry|isolates cached service stats|clears decoded SecuritySummary|fences in-flight ops CacheStorage|resets activeOpsUser to null|uses volatile-ops scope|aborts multi-step handleCloudAnalyticalRequest|allows concurrent Compare Mode|allows concurrent same-session writes|fences POST /api/dashboard/bundle|scopes /api/usage/",
+            "wipes range-loader singleton|aborts in-flight|blocks post-logout OPFS persistFile|blocks multi-step runDashboard|aborts in-flight queryRollup|suppresses pending write|skips CacheStorage and error telemetry|isolates cached service stats|clears decoded SecuritySummary|fences in-flight ops CacheStorage|resets activeOpsUser to null|uses volatile-ops scope|aborts multi-step handleCloudAnalyticalRequest|allows concurrent Compare Mode|allows concurrent same-session writes|fences POST /api/dashboard/bundle|scopes /api/usage/|SEC-T5-ITER23-01|SEC-T5-ITER23-03",
         ],
         cwd=str(REPO_ROOT / "frontend"),
         env=cloud_vitest_env,

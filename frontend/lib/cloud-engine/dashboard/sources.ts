@@ -37,8 +37,8 @@ import {
 
 export { getStoreStats, keyWindowMs };
 
-const SESSION_CACHE_KEY = "flp-dashboard-cache-session";
-const IDENTITY_CACHE_KEY = "flp-dashboard-cache-identity";
+export const SESSION_CACHE_KEY = "flp-dashboard-cache-session";
+export const IDENTITY_CACHE_KEY = "flp-dashboard-cache-identity";
 let volatileCacheScope: string | undefined;
 let volatileCacheIdentity: string | null = null;
 
@@ -128,10 +128,14 @@ async function drainBrowserSourceStoreQueues(): Promise<void> {
   }
 }
 
-export function updateDashboardCacheIdentity(identity: string | null): void {
+export function updateDashboardCacheIdentity(
+  identity: string | null,
+  options: { syncStorage?: boolean } = {},
+): void {
   volatileCacheIdentity = identity;
   volatileCacheScope = undefined;
   clearBrowserSourceMemoryCaches();
+  if (options.syncStorage === false) return;
   try {
     if (typeof localStorage !== "undefined") {
       localStorage.removeItem(SESSION_CACHE_KEY);

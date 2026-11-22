@@ -563,6 +563,9 @@ fn discover(
         advance(job, "remove_front");
         return Ok(());
     }
+    if context.remaining_calls() < 9 {
+        return Err(Error::new(503, "backend_budget"));
+    }
     let version = active_version(context, &service.service_id, token)?;
     let mut target = desired(context, service)?;
     let desired_fos_endpoints = target.get("logging/fos").cloned().unwrap_or_default();
@@ -1011,6 +1014,9 @@ fn discover(
         }
     }
     if job.kind != "teardown" && !job.dry_run && !missing_endpoints.is_empty() {
+        if context.remaining_calls() < 5 {
+            return Err(Error::new(503, "backend_budget"));
+        }
         let record = context
             .get(&format!("svc:{}", service.service_id))?
             .ok_or_else(|| Error::new(503, "state_unavailable"))?;
@@ -1090,6 +1096,9 @@ fn clone(
         }
         if active_version(context, &service.service_id, token)? != source {
             return Err(Error::new(409, "active_version_changed"));
+        }
+        if context.remaining_calls() < 8 {
+            return Err(Error::new(503, "backend_budget"));
         }
         let draft = context.api(
             "PUT",

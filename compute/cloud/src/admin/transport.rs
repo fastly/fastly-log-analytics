@@ -33,6 +33,9 @@ const SECRET_PROPAGATION_ATTEMPTS: u8 = 24;
 const STATE_READ: &str = "state_read";
 const STATE_READ_DELAY: Duration = Duration::from_secs(5);
 const STATE_READ_ATTEMPTS: u8 = 6;
+const BACKEND_BUDGET_WAIT: &str = "backend_budget";
+const BACKEND_BUDGET_DELAY: Duration = Duration::from_secs(1);
+const BACKEND_BUDGET_ATTEMPTS: u8 = 24;
 
 pub fn request_timeout(ceiling: Duration, elapsed: Duration) -> Duration {
     STEP_WALL_BUDGET
@@ -190,6 +193,7 @@ pub struct Context<'a, R: Runtime> {
     started: Instant,
     calls: Cell<u32>,
     writes: RefCell<BTreeMap<String, WrittenRecord>>,
+    secrets: RefCell<BTreeMap<String, Option<String>>>,
     confirmation: RefCell<Option<Confirmation>>,
     retry: RefCell<Option<RetryState>>,
     retry_attempts: RefCell<BTreeMap<String, u8>>,
@@ -216,6 +220,7 @@ impl<'a, R: Runtime> Context<'a, R> {
             started: Instant::now(),
             calls: Cell::new(0),
             writes: RefCell::new(BTreeMap::new()),
+            secrets: RefCell::new(BTreeMap::new()),
             confirmation: RefCell::new(None),
             retry: RefCell::new(None),
             retry_attempts: RefCell::new(BTreeMap::new()),
@@ -228,8 +233,12 @@ impl<'a, R: Runtime> Context<'a, R> {
     }
     pub fn set_retry(&self, retry: Option<RetryState>) {
         // These waits end when their delay elapses; the next run reads again rather than replaying.
-        *self.retry.borrow_mut() = retry
-            .filter(|retry| retry.operation != SECRET_PROPAGATION && retry.operation != STATE_READ);
+        *self.retry.borrow_mut() = retry.filter(|retry| {
+            !matches!(
+                retry.operation.as_str(),
+                SECRET_PROPAGATION | STATE_READ | BACKEND_BUDGET_WAIT
+            )
+        });
     }
     fn wait_retry(
         &self,
@@ -270,10 +279,19 @@ impl<'a, R: Runtime> Context<'a, R> {
     pub fn state_read_retry(&self, reason: &str) -> RetryState {
         self.wait_retry(STATE_READ, STATE_READ_DELAY, STATE_READ_ATTEMPTS, reason)
     }
+    pub fn backend_budget_retry(&self) -> RetryState {
+        self.wait_retry(
+            BACKEND_BUDGET_WAIT,
+            BACKEND_BUDGET_DELAY,
+            BACKEND_BUDGET_ATTEMPTS,
+            "backend_budget",
+        )
+    }
     pub fn settle_waits(&self) {
         let mut attempts = self.retry_attempts.borrow_mut();
         attempts.remove(SECRET_PROPAGATION);
         attempts.remove(STATE_READ);
+        attempts.remove(BACKEND_BUDGET_WAIT);
     }
     pub fn retry(&self) -> Option<RetryState> {
         self.retry.borrow().clone()
@@ -508,12 +526,28 @@ impl<'a, R: Runtime> Context<'a, R> {
         }
     }
     pub fn secret(&self, name: &str) -> Result<String, Error> {
+        if let Some(cached) = self.secrets.borrow().get(name).cloned() {
+            return cached.ok_or_else(|| Error::new(409, "credentials_pending"));
+        }
         self.charge()?;
-        self.runtime
+        let found = self
+            .runtime
             .secret(name)
             .map_err(|_| Error::new(503, "secret_unavailable"))?
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| Error::new(409, "credentials_pending"))
+            .filter(|value| !value.is_empty());
+        self.secrets
+            .borrow_mut()
+            .insert(name.to_owned(), found.clone());
+        found.ok_or_else(|| Error::new(409, "credentials_pending"))
+    }
+    pub fn cache_secret(&self, name: &str, value: &str) {
+        let normalized = (!value.is_empty()).then(|| value.to_owned());
+        self.secrets
+            .borrow_mut()
+            .insert(name.to_owned(), normalized);
+    }
+    pub fn invalidate_secret(&self, name: &str) {
+        self.secrets.borrow_mut().remove(name);
     }
     pub fn api(
         &self,

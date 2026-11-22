@@ -791,8 +791,8 @@ pub(super) fn load_or_recover_request_secret(
         .as_ref()
         .filter(|sc| !sc.scoring_keys_store_id.is_empty())
         .ok_or_else(|| Error::new(409, "credentials_pending"))?;
-    if context.remaining_calls() < 14 {
-        return Ok(None);
+    if context.remaining_calls() < 10 {
+        return Err(Error::new(503, "backend_budget"));
     }
     verify_scoring_resources(context, &service.service_id, sc, token)?;
     let recovered = config_store_get_item(
@@ -806,7 +806,7 @@ pub(super) fn load_or_recover_request_secret(
     }
     validate_vcl_literal(&recovered, false)?;
     put_secret(context, token, &secret_ref, &recovered)?;
-    Ok(Some(recovered))
+    Ok(None)
 }
 
 fn resolve_brokered_token(
@@ -2108,6 +2108,16 @@ fn strip_logging_vcl_step(
     )?;
     let versions = list(&versions)?;
     let tag = format!("flp-job:{}", job.id);
+    if versions
+        .iter()
+        .any(|v| v["comment"] == tag && v["active"] == true && v["number"].as_u64() == Some(active))
+    {
+        job.source_version = Some(active);
+        job.draft_version = Some(active);
+        job.clone_intent = None;
+        advance(job, "scoring_strip_activate");
+        return Ok(());
+    }
     if let Some(draft) = versions
         .iter()
         .filter(|v| v["comment"] == tag && v["active"] != true && v["locked"] != true)
@@ -2131,8 +2141,8 @@ fn strip_logging_vcl_step(
         if Some(active) != job.source_version {
             return Err(Error::new(409, "active_version_changed"));
         }
-        if context.remaining_calls() < 6 {
-            return Ok(());
+        if context.remaining_calls() < 8 {
+            return Err(Error::new(503, "backend_budget"));
         }
         let cloned = context.api(
             "PUT",
@@ -2259,6 +2269,7 @@ fn strip_logging_activate_step(
             None,
         )?;
     }
+    job.source_version = Some(draft);
     if let Some(sc) = service.scoring.as_mut() {
         sc.enabled = false;
     }
@@ -2489,6 +2500,7 @@ fn cleanup_scoring_state_step(
                 token,
                 None,
             );
+            context.invalidate_secret(&req_secret_ref);
         }
     }
 
@@ -2683,17 +2695,22 @@ pub fn needs_failed_enable_rollback(job: &Job, failed_step: &str) -> bool {
             ))
 }
 
-pub fn needs_failed_strip_rewind(job: &Job, failed_step: &str) -> bool {
+pub fn needs_failed_strip_rewind(job: &Job, failed_step: &str, failure_code: &str) -> bool {
+    let draft_already_activated = failed_step == "scoring_strip_activate"
+        && failure_code != "active_version_changed"
+        && job.draft_version.is_some()
+        && job.source_version == job.draft_version;
     matches!(
         job.kind.as_str(),
         "scoring_disable" | "scoring_teardown" | "teardown"
     ) && matches!(
         failed_step,
         "scoring_strip_logging_vcl" | "scoring_strip_apply" | "scoring_strip_activate"
-    ) && !job
-        .completed_steps
-        .iter()
-        .any(|s| s == "scoring_strip_activate")
+    ) && !draft_already_activated
+        && !job
+            .completed_steps
+            .iter()
+            .any(|s| s == "scoring_strip_activate")
 }
 
 pub fn rewind_failed_strip_vcl(job: &mut Job) {

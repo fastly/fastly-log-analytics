@@ -226,6 +226,9 @@ fn route(
             if service.status == "torn_down" {
                 return Err(Error::new(409, "service_torn_down"));
             }
+            if service.data_reset.is_some() {
+                return Err(Error::new(409, "data_reset_in_progress"));
+            }
             if input.get("cmcd").is_some() || input.get("rum").is_some() {
                 let previous = service.clone();
                 if let Some(cmcd) = input.get("cmcd") {
@@ -930,8 +933,14 @@ fn patch_service(
 ) -> Result<Value, Error> {
     let (record, previous) = load_service(context, sid)?;
     check_generation(&record, &input)?;
+    if previous.status == "torn_down" {
+        return Err(Error::new(409, "service_torn_down"));
+    }
     reject_blocking_job(context, &previous)?;
     check_unlocked(context, sid)?;
+    if previous.data_reset.is_some() {
+        return Err(Error::new(409, "data_reset_in_progress"));
+    }
     let mut value = serialize(&previous)?;
     let allowed = [
         "logging_enabled",
@@ -1129,6 +1138,14 @@ fn reject_blocking_job(
     }
     Ok(())
 }
+const AUDIT_OUTBOX_LIMIT: usize = 4096;
+const JOB_CHECKPOINT_OUTBOX_LIMIT: usize = 4112;
+const JOB_RECOVERY_OUTBOX_LIMIT: usize = 4120;
+
+fn audit_outbox_len(record: &Record) -> usize {
+    record.value["_audit_outbox"].as_array().map_or(0, Vec::len)
+}
+
 fn start_job(
     context: &Context<'_, impl Runtime>,
     record: &Record,
@@ -1138,10 +1155,24 @@ fn start_job(
     context.confirm_with_secret(&service.fastly_token_ref);
     reject_blocking_job(context, service)?;
     check_unlocked(context, &service.service_id)?;
+    if service.data_reset.is_some() {
+        return Err(Error::new(409, "data_reset_in_progress"));
+    }
+    if audit_outbox_len(record) >= AUDIT_OUTBOX_LIMIT {
+        return Err(Error::new(409, "audit_archive_required"));
+    }
     service.pending_job_id = Some(job.id.clone());
     job.expected_generation = record.generation.clone();
     context.cas(&format!("job:{}", job.id), None, &serialize(&job)?)?;
-    save_job_service(context, record, service, &job, "job.started", &job.step)?;
+    save_job_service_with_limit(
+        context,
+        record,
+        service,
+        &job,
+        "job.started",
+        &job.step,
+        AUDIT_OUTBOX_LIMIT,
+    )?;
     let current = context
         .get(&format!("svc:{}", service.service_id))?
         .ok_or_else(|| Error::new(503, "state_unavailable"))?;
@@ -1164,7 +1195,7 @@ fn save_service(
         .as_array()
         .cloned()
         .unwrap_or_default();
-    if audit.len() >= 4096 {
+    if audit.len() >= AUDIT_OUTBOX_LIMIT {
         return Err(Error::new(409, "audit_archive_required"));
     }
     audit.push(value["_audit"].clone());
@@ -1188,7 +1219,15 @@ fn save_job_service(
     event: &str,
     next: &str,
 ) -> Result<(), Error> {
-    save_job_service_with_limit(context, record, service, job, event, next, 4096)
+    save_job_service_with_limit(
+        context,
+        record,
+        service,
+        job,
+        event,
+        next,
+        JOB_CHECKPOINT_OUTBOX_LIMIT,
+    )
 }
 fn save_job_service_recovery(
     context: &Context<'_, impl Runtime>,
@@ -1198,7 +1237,15 @@ fn save_job_service_recovery(
     event: &str,
     next: &str,
 ) -> Result<(), Error> {
-    save_job_service_with_limit(context, record, service, job, event, next, 4104)
+    save_job_service_with_limit(
+        context,
+        record,
+        service,
+        job,
+        event,
+        next,
+        JOB_RECOVERY_OUTBOX_LIMIT,
+    )
 }
 fn save_job_service_with_limit(
     context: &Context<'_, impl Runtime>,
@@ -1372,6 +1419,9 @@ fn provision(
     }
     if let Some(record) = context.get(&format!("svc:{}", input.service_id))? {
         let existing: Service = decode(record.value)?;
+        if existing.data_reset.is_some() {
+            return Err(Error::new(409, "data_reset_in_progress"));
+        }
         if existing.status != "torn_down" {
             return Err(Error::new(409, "service_already_configured"));
         }
@@ -1443,6 +1493,12 @@ fn teardown(
     if service.status == "torn_down" {
         return Err(Error::new(409, "service_torn_down"));
     }
+    if service.data_reset.is_some() {
+        return Err(Error::new(409, "data_reset_in_progress"));
+    }
+    if audit_outbox_len(&record) >= AUDIT_OUTBOX_LIMIT {
+        return Err(Error::new(409, "audit_archive_required"));
+    }
     let object = input
         .as_object_mut()
         .ok_or_else(|| Error::new(400, "invalid_input"))?;
@@ -1512,13 +1568,16 @@ fn put_secret(
     let path = format!("/resources/stores/secret/{store}/secrets");
     let body = json!({"name":name,"secret":base64::engine::general_purpose::STANDARD.encode(value.as_bytes())});
     if context.api_uncertain("PUT", &path, Some(&body)) {
+        context.invalidate_secret(name);
         if context.secret(name)? != value {
             return Err(Error::new(409, "mutation_outcome_unknown"));
         }
         context.confirm_api_effect("PUT", &path, Some(&body));
+        context.cache_secret(name, value);
         return Ok(());
     }
     context.api("PUT", &path, token, Some(body))?;
+    context.cache_secret(name, value);
     Ok(())
 }
 fn load_job(context: &Context<'_, impl Runtime>, id: &str) -> Result<(Record, Job), Error> {
@@ -1650,6 +1709,7 @@ fn step(context: &Context<'_, impl Runtime>, id: &str, retry: bool) -> Result<Va
                 "state_unavailable" | "state_propagating" => {
                     Some(context.state_read_retry(failure.code))
                 }
+                "backend_budget" => Some(context.backend_budget_retry()),
                 _ => None,
             };
         }
@@ -1699,7 +1759,7 @@ fn step(context: &Context<'_, impl Runtime>, id: &str, retry: bool) -> Result<Va
                 job.error = None;
             }
         } else {
-            if scoring::needs_failed_strip_rewind(&job, &previous_step) {
+            if scoring::needs_failed_strip_rewind(&job, &previous_step, failure.code) {
                 scoring::rewind_failed_strip_vcl(&mut job);
             }
             let orig_error = job
