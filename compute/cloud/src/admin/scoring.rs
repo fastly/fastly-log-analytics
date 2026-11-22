@@ -2555,8 +2555,65 @@ pub fn run_step(
             cleanup_scoring_state_step(context, job, record, service, token)?;
             Ok(true)
         }
+        "scoring_rollback" => {
+            rollback_failed_enable_step(context, job, record, service)?;
+            Ok(true)
+        }
         _ => Ok(false),
     }
+}
+
+pub fn needs_failed_enable_rollback(job: &Job, failed_step: &str) -> bool {
+    job.kind == "scoring_enable"
+        && !job.completed_steps.iter().any(|s| s == "activate")
+        && (job.completed_steps.iter().any(|s| s == "logging_reconcile")
+            || matches!(
+                failed_step,
+                "discover" | "clone" | "apply" | "validate" | "activate" | "scoring_rollback"
+            ))
+}
+
+fn has_scoring_custom_fields(log_fields: &Value) -> bool {
+    log_fields["custom_fields"].as_array().is_some_and(|arr| {
+        arr.iter().any(|cf| {
+            cf.get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|n| SCORING_FIELD_NAMES.contains(&n))
+        })
+    })
+}
+
+fn rollback_failed_enable_step(
+    context: &Context<'_, impl Runtime>,
+    job: &mut Job,
+    record: &Record,
+    service: &mut Service,
+) -> Result<(), Error> {
+    if service.scoring.as_ref().is_some_and(|sc| sc.enabled)
+        || has_scoring_custom_fields(&service.log_fields)
+    {
+        if let Some(sc) = service.scoring.as_mut() {
+            sc.enabled = false;
+        }
+        remove_scoring_custom_fields(&mut service.log_fields);
+        checkpoint_scoring_job_service(
+            context,
+            record,
+            service,
+            job,
+            "scoring.enable_rolled_back",
+            "logging_reconcile",
+        )?;
+    }
+    rewind_scoring_enable_to_logging_reconcile(job);
+    let code = job
+        .pending_failure
+        .take()
+        .unwrap_or_else(|| "scoring_rollback_failed".into());
+    job.status = "failed".into();
+    job.error = Some(code);
+    job.retry = None;
+    Ok(())
 }
 
 pub fn rollback_failed_enable(
@@ -2564,40 +2621,49 @@ pub fn rollback_failed_enable(
     service: &mut Service,
     record: &Record,
     job: &mut Job,
-) {
+) -> bool {
     let fresh_rec;
-    let rec: &Record = if record.generation != job.expected_generation
-        && context.remaining_calls() >= 7
-    {
+    let rec: &Record = if record.generation != job.expected_generation {
+        if context.remaining_calls() < 7 {
+            return false;
+        }
         if let Ok((loaded_rec, loaded_svc)) = load_service_from(context, &job.service_id, true) {
             *service = loaded_svc;
             fresh_rec = loaded_rec;
             &fresh_rec
         } else {
-            record
+            return false;
         }
     } else {
+        if context.remaining_calls() < 6 {
+            return false;
+        }
         record
     };
     let passed_logging_reconcile = job.kind == "scoring_enable"
         && (job.completed_steps.iter().any(|s| s == "logging_reconcile")
             || matches!(
                 job.step.as_str(),
-                "discover" | "clone" | "apply" | "validate" | "activate" | "sync_rum" | "finalize"
+                "discover"
+                    | "clone"
+                    | "apply"
+                    | "validate"
+                    | "activate"
+                    | "sync_rum"
+                    | "finalize"
+                    | "scoring_rollback"
             ));
     let next_step = if passed_logging_reconcile {
         "logging_reconcile".to_owned()
     } else {
         job.step.clone()
     };
-    let mut rolled_back_state = false;
-    if let Some(sc) = service.scoring.as_mut() {
-        if sc.enabled {
+    let needs_state_revert = service.scoring.as_ref().is_some_and(|sc| sc.enabled)
+        || has_scoring_custom_fields(&service.log_fields);
+    if needs_state_revert {
+        if let Some(sc) = service.scoring.as_mut() {
             sc.enabled = false;
-            rolled_back_state = true;
         }
-    }
-    if rolled_back_state {
         remove_scoring_custom_fields(&mut service.log_fields);
         if checkpoint_scoring_job_service(
             context,
@@ -2607,13 +2673,19 @@ pub fn rollback_failed_enable(
             "scoring.enable_rolled_back",
             &next_step,
         )
-        .is_ok()
-            && passed_logging_reconcile
+        .is_err()
         {
+            return false;
+        }
+        if passed_logging_reconcile {
             rewind_scoring_enable_to_logging_reconcile(job);
         }
-    } else if passed_logging_reconcile {
-        rewind_scoring_enable_to_logging_reconcile(job);
+        true
+    } else {
+        if passed_logging_reconcile {
+            rewind_scoring_enable_to_logging_reconcile(job);
+        }
+        true
     }
 }
 

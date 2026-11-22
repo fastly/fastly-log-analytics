@@ -495,7 +495,13 @@ function isReadOnlyCloudPost(path: string): boolean {
     path === "/api/dashboard/field-values" ||
     path === "/api/field-values" ||
     path === "/api/web-vitals" ||
-    path === "/api/ux-events"
+    path === "/api/ux-events" ||
+    path === "/api/telemetry/query" ||
+    path === "/api/provision/validate" ||
+    path === "/api/admin/log-fields/preview" ||
+    path === "/api/admin/log-fields/custom/validate" ||
+    /^\/api\/services\/[^/]+\/scoring\/exclude-regex\/validate$/.test(path) ||
+    /^\/api\/services\/[^/]+\/custom-fields\/validate-vcl$/.test(path)
   );
 }
 

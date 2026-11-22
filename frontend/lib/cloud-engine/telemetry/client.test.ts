@@ -284,4 +284,68 @@ describe("readLogs request sharing", () => {
     await sourcesMod.clearOpsCaches();
     expect(sourcesMod.activeOpsUser()).toBeNull();
   });
+
+  it("uses volatile-ops scope when dashboardCacheIdentity is anonymous and normalizes user:role in Worker context when dashId is null", async () => {
+    const bucketEntries = new Map<string, Map<string, Response>>();
+    vi.stubGlobal("caches", {
+      async open(name: string) {
+        let store = bucketEntries.get(name);
+        if (!store) {
+          store = new Map();
+          bucketEntries.set(name, store);
+        }
+        return {
+          async match(req: RequestInfo | URL) { return store!.get(String(req))?.clone(); },
+          async put(req: RequestInfo | URL, res: Response) { store!.set(String(req), res.clone()); },
+          async delete(req: RequestInfo | URL) { return store!.delete(String(req)); },
+          async keys() { return [...store!.keys()].map((u) => new Request(u)); },
+        };
+      },
+      async keys() { return [...bucketEntries.keys()]; },
+      async delete(name: string) { return bucketEntries.delete(name); },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(new Uint8Array([1, 2, 3, 4]), { status: 200 })),
+    );
+
+    const clientMod = await load();
+    const { clearDashboardData, setDashboardCacheIdentity } = await import("../dashboard/client");
+
+    // 1. After unauthenticated bootstrap, dashboardCacheIdentity() === "anonymous" and activeOpsUser() === null:
+    await setDashboardCacheIdentity("anonymous");
+    await clientMod.clearOpsCaches();
+
+    const pendingAnonRead = clientMod.readLogs("cron_runs", range);
+    const worker = MockWorker.instances[0];
+    const anonJob = worker.jobs()[0] as Job & { identity?: { user: string; role: string } };
+    expect(anonJob.identity?.user).toMatch(/^volatile-ops-\d+$/);
+    expect(anonJob.identity?.user).not.toBe("anonymous");
+    worker.emit({ id: anonJob.id, type: "result", result: result("cron_runs") });
+    await pendingAnonRead;
+
+    // 2. Explicit "anonymous" is treated as unauthenticated and falls back to volatile-ops:
+    expect(clientMod.currentOpsIdentity({ user: "anonymous", role: "admin" }).user).toMatch(
+      /^volatile-ops-\d+$/,
+    );
+
+    // 3. Inside Web Worker (where localStorage / dashId is null and activeOpsUser is null),
+    // currentOpsIdentity and browserOpsSource split "alice:admin" cleanly without creating ":alice:admin:admin":
+    await clearDashboardData();
+    await clientMod.clearOpsCaches();
+    expect(clientMod.currentOpsIdentity({ user: "alice:admin", role: "admin" })).toEqual({
+      user: "alice",
+      role: "admin",
+    });
+    expect(clientMod.currentOpsIdentity({ user: "alice:analyst-no-pii" })).toEqual({
+      user: "alice",
+      role: "analyst-no-pii",
+    });
+    const workerSrc = clientMod.browserOpsSource("http://localhost", {
+      user: "alice:admin",
+      role: "admin",
+    });
+    await workerSrc.fetchFile("processed/ops/audit_log/part-worker.parquet");
+    expect([...bucketEntries.keys()]).toEqual(["flp-ops-parquet-v1:alice:admin"]);
+  });
 });

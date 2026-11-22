@@ -16,6 +16,7 @@ type MetadataEntry = {
   value: Promise<MetadataSnapshot>;
 };
 let metadataEpoch = 0;
+let metadataAbortEpoch = 0;
 const activeMetadataControllers = new Set<AbortController>();
 const metadataCache = new Map<string, MetadataEntry>();
 const metadataInvalidationListeners = new Set<() => void>();
@@ -30,6 +31,7 @@ export function resetCloudMetadataCache(
   const abortActive = options.abortActive ?? true;
   metadataEpoch += 1;
   if (abortActive) {
+    metadataAbortEpoch += 1;
     for (const controller of activeMetadataControllers) {
       controller.abort(metadataAbortError());
     }
@@ -58,14 +60,15 @@ export function invalidateCloudConfigMetadata(): void {
 
 export async function fetchCloudMetadata(path: string, signal: AbortSignal): Promise<Response> {
   signal.throwIfAborted();
-  const callEpoch = metadataEpoch;
+  const callCacheEpoch = metadataEpoch;
+  const callAbortEpoch = metadataAbortEpoch;
   const now = Date.now();
   // Another tab signing in as someone else changes the shared identity; never hand them this one's answer.
   const identity = dashboardCacheIdentity();
   let entry = metadataCache.get(path);
   if (
     entry &&
-    entry.epoch === callEpoch &&
+    entry.epoch === callCacheEpoch &&
     !entry.controller.signal.aborted &&
     entry.identity === identity &&
     now - entry.usedAt <= METADATA_TTL_MS &&
@@ -79,7 +82,7 @@ export async function fetchCloudMetadata(path: string, signal: AbortSignal): Pro
       at: now,
       usedAt: now,
       identity,
-      epoch: callEpoch,
+      epoch: callCacheEpoch,
       controller,
       value: undefined as unknown as Promise<MetadataSnapshot>,
     };
@@ -96,12 +99,12 @@ export async function fetchCloudMetadata(path: string, signal: AbortSignal): Pro
         activeMetadataControllers.delete(controller);
       });
     created.value = value;
-    if (callEpoch === metadataEpoch && !controller.signal.aborted) {
+    if (callCacheEpoch === metadataEpoch && !controller.signal.aborted) {
       metadataCache.set(path, created);
     }
     value.then(
       (snapshot) => {
-        if (callEpoch !== metadataEpoch || snapshot.status < 200 || snapshot.status > 299) {
+        if (callCacheEpoch !== metadataEpoch || snapshot.status < 200 || snapshot.status > 299) {
           evict();
         }
       },
@@ -132,7 +135,7 @@ export async function fetchCloudMetadata(path: string, signal: AbortSignal): Pro
   try {
     const snapshot = await Promise.race([activeEntry.value, aborted]);
     signal.throwIfAborted();
-    if (callEpoch !== metadataEpoch || activeEntry.controller.signal.aborted) {
+    if (callAbortEpoch !== metadataAbortEpoch || activeEntry.controller.signal.aborted) {
       throw metadataAbortError();
     }
     return new Response(snapshot.body, {

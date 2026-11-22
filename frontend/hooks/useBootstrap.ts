@@ -207,13 +207,19 @@ export function useBootstrapSyncEffects(
     _lastSyncedBootstrapData = data
     applyBootstrapRuntimeMode(data)
     if (IS_CLOUD_MODE || isCloudMode() || data.runtime_mode === 'cloud') {
-      void syncOpsCacheForSession({
-        userId: data.user?.id ?? null,
-        needsLogin: Boolean(data.settings?.needs_login),
-      })
-      void import('@/lib/cloud-engine/dashboard/client').then(({ setDashboardCacheIdentity }) =>
-        setDashboardCacheIdentity(cloudCacheIdentity(data)),
-      )
+      const needsLogin = Boolean(data.settings?.needs_login)
+      const userId = needsLogin ? null : (data.user?.id ?? null)
+      const nextIdentity = cloudCacheIdentity(data)
+      void import('@/lib/cloud-engine/dashboard/client')
+        .then(async ({ setDashboardCacheIdentity }) => {
+          if (_lastSyncedBootstrapData !== data) return
+          await setDashboardCacheIdentity(nextIdentity)
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (_lastSyncedBootstrapData !== data) return
+          void syncOpsCacheForSession({ userId, needsLogin })
+        })
     }
     const { setServices, setInitialized } = useServiceStore.getState()
     setServices((data.services ?? []).map(toService))

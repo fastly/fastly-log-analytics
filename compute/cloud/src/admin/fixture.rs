@@ -862,7 +862,37 @@ fn api(state: &mut State, request: &ApiRequest<'_>) -> Result<(u16, Value), Stri
             version.comment=body["comment"].as_str().unwrap_or("").into();
             Ok((200,json!({"number":version.number})))
         }
-        ("GET",["service",_,"version",_,"validate"])=>Ok((200,json!({"status":if state.invalid_draft {"error"} else {"ok"},"errors":if state.invalid_draft {"fixture validation error"} else {""}}))),
+        ("GET",["service",sid,"version",number,"validate"])=>{
+            if state.invalid_draft {
+                return Ok((200,json!({"status":"error","errors":"fixture validation error"})));
+            }
+            if state.services.get(*sid).and_then(|s|s["type"].as_str())==Some("vcl") {
+                let version=version_mut(state,sid,number)?;
+                let backends=version.resources.get("backend");
+                let conditions=version.resources.get("condition");
+                if let Some(snippets)=version.resources.get("snippet") {
+                    for snippet in snippets.values() {
+                        let body=snippet["content"].as_str().or_else(||snippet["body"].as_str()).unwrap_or("");
+                        if body.contains("F_session_scorer") && backends.is_none_or(|b|!b.contains_key("session_scorer")) {
+                            return Ok((200,json!({"status":"error","errors":"undefined variable \"F_session_scorer\""})));
+                        }
+                        if body.contains("F_fos_origin") && backends.is_none_or(|b|!b.contains_key("fos_origin")) {
+                            return Ok((200,json!({"status":"error","errors":"undefined variable \"F_fos_origin\""})));
+                        }
+                    }
+                }
+                if let Some(bmap)=backends {
+                    for b in bmap.values() {
+                        if let Some(cond)=b["request_condition"].as_str().filter(|s|!s.is_empty()) {
+                            if conditions.is_none_or(|c|!c.contains_key(cond)) {
+                                return Ok((200,json!({"status":"error","errors":format!("undefined request_condition \"{cond}\"")})));
+                            }
+                        }
+                    }
+                }
+            }
+            Ok((200,json!({"status":"ok","errors":""})))
+        }
         ("PUT",["service",sid,"version",number,"activate"])=>{
             if state.invalid_draft {return Ok((400,json!({})));}
             let versions=state.versions.get_mut(*sid).ok_or("fixture_service_missing")?;
@@ -915,6 +945,36 @@ fn api(state: &mut State, request: &ApiRequest<'_>) -> Result<(u16, Value), Stri
             let minted=if resource=="logging/fos" && method=="POST" {state.sequence+=1;Some(format!("fixture-fos-endpoint-key-{}",state.sequence))} else {None};
             let minted_rl_id=if resource=="resource" && method=="POST" {state.sequence+=1;Some(format!("rl-{number}-{}",state.sequence))} else {None};
             let version=version_mut(state,sid,number)?;
+            if !version.locked && !version.active && matches!(method,"POST"|"PUT") {
+                if resource=="backend" {
+                    if let Some(cond)=body["request_condition"].as_str().filter(|s|!s.is_empty()) {
+                        if version.resources.get("condition").is_none_or(|c|!c.contains_key(cond)) {
+                            return Ok((400,json!({"msg":"Bad request","detail":format!("Condition '{cond}' does not exist")})));
+                        }
+                    }
+                } else if matches!(resource,"logging/fos"|"logging/s3") {
+                    if let Some(cond)=body["response_condition"].as_str().filter(|s|!s.is_empty()) {
+                        if version.resources.get("condition").is_none_or(|c|!c.contains_key(cond)) {
+                            return Ok((400,json!({"msg":"Bad request","detail":format!("Condition '{cond}' does not exist")})));
+                        }
+                    }
+                }
+            }
+            if !version.locked && !version.active && method=="DELETE" && resource=="condition" {
+                if let Some(cond_name)=name {
+                    let referenced_by_backend=version.resources.get("backend").is_some_and(|bmap|{
+                        bmap.values().any(|b|b["request_condition"].as_str()==Some(cond_name))
+                    });
+                    let referenced_by_logging=["logging/fos","logging/s3"].iter().any(|lkind|{
+                        version.resources.get(*lkind).is_some_and(|lmap|{
+                            lmap.values().any(|ep|ep["response_condition"].as_str()==Some(cond_name))
+                        })
+                    });
+                    if referenced_by_backend || referenced_by_logging {
+                        return Ok((409,json!({"msg":"Conflict","detail":format!("Condition '{cond_name}' is still referenced")})));
+                    }
+                }
+            }
             let values=version.resources.entry(resource.into()).or_default();
             if method=="GET" {
                 if resource=="resource" {

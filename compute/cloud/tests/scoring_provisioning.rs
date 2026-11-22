@@ -46,7 +46,17 @@ impl Platform {
     }
 
     fn call(&self, method: &str, path: &str, body: Value) -> (u16, Value) {
-        REQ_CALLS.with(|c| c.set(0));
+        self.call_with_initial_used(0, method, path, body)
+    }
+
+    fn call_with_initial_used(
+        &self,
+        initial_used: u32,
+        method: &str,
+        path: &str,
+        body: Value,
+    ) -> (u16, Value) {
+        REQ_CALLS.with(|c| c.set(initial_used));
         REQ_SECRETS.with(|s| s.borrow_mut().clear());
         let resp = admin::handle(
             self,
@@ -1775,5 +1785,427 @@ fn scoring_cleanup_state_deletes_multi_batch_matrices_without_livelock() {
             .iter()
             .any(|k| k.starts_with("processed/scoring/")),
         "full provision/teardown must delete all processed/scoring/*: {keys_after_full:?}"
+    );
+}
+
+#[test]
+fn bug_cloud_dr_19a_scoring_enable_without_rum_creates_backend_and_reconcile_cleans_orphans() {
+    let p = Platform::new();
+    // Provision with default rum.enabled == false:
+    p.provision_logging_service();
+
+    let en = p.ok(
+        "POST",
+        "/api/services/fixtureService/scoring/enable",
+        json!({}),
+    );
+    let done = p.run_job(en["job"].clone());
+    assert_eq!(done["status"], "complete", "{done}");
+
+    let backends = p.adapter.resources("fixtureService", "backend");
+    assert_eq!(
+        backends.len(),
+        1,
+        "scoring/enable without RUM must create session_scorer backend: {backends:?}"
+    );
+    assert_eq!(backends[0]["name"], "session_scorer");
+    assert_eq!(
+        backends[0]["request_condition"],
+        "fastly_log_analytics_false"
+    );
+
+    // Subsequent reconcile on non-RUM scoring service must keep session_scorer and emit zero rum_assets S3 deletes:
+    let calls_before = p.adapter.calls().len();
+    let cur = p.ok("GET", "/api/admin/services/fixtureService", json!({}));
+    let patched = p.ok(
+        "PATCH",
+        "/api/admin/services/fixtureService",
+        json!({"generation": cur["generation"], "sample_rate": 50}),
+    );
+    let rec = p.ok(
+        "POST",
+        "/api/admin/services/fixtureService/reconcile",
+        json!({"generation": patched["generation"]}),
+    );
+    let rec_done = p.run_job(rec["job"].clone());
+    assert_eq!(rec_done["status"], "complete", "{rec_done}");
+    assert!(
+        !rec_done["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["resource"] == "fos_object"),
+        "non-RUM reconcile must not emit spurious rum_assets fos_object changes: {rec_done}"
+    );
+    let new_calls = &p.adapter.calls()[calls_before..];
+    assert!(
+        !new_calls.iter().any(
+            |(m, path)| m == "DELETE" && (path.contains("rum.js") || path.contains("faro-sdk"))
+        ),
+        "non-RUM reconcile must not issue S3 DELETE on rum_assets: {new_calls:?}"
+    );
+    assert_eq!(
+        p.adapter
+            .resources("fixtureService", "backend")
+            .iter()
+            .filter(|b| b["name"] == "session_scorer")
+            .count(),
+        1
+    );
+
+    // Orphan cleanup: seed orphaned scoring snippet + session_scorer backend + fastly_log_analytics_false
+    // on a non-scoring, non-RUM service and verify reconcile deletes them in dependency-safe order.
+    let p_orphan = Platform::new();
+    p_orphan.provision_logging_service();
+    p_orphan.adapter.seed_resource(
+        "fixtureService",
+        "condition",
+        json!({
+            "name": "fastly_log_analytics_false",
+            "type": "REQUEST",
+            "priority": "10",
+            "statement": "false"
+        }),
+    );
+    p_orphan.adapter.seed_resource(
+        "fixtureService",
+        "backend",
+        json!({
+            "name": "session_scorer",
+            "address": "orphan-scorer.edgecompute.app",
+            "port": 443,
+            "use_ssl": true,
+            "ssl_check_cert": true,
+            "request_condition": "fastly_log_analytics_false"
+        }),
+    );
+    p_orphan.adapter.seed_resource(
+        "fixtureService",
+        "snippet",
+        json!({
+            "name": "Session Scoring - Recv",
+            "type": "recv",
+            "priority": 5,
+            "content": "set req.backend = F_session_scorer;"
+        }),
+    );
+    let orphan_gen =
+        p_orphan.ok("GET", "/api/admin/services/fixtureService", json!({}))["generation"].clone();
+    let orphan_rec = p_orphan.ok(
+        "POST",
+        "/api/admin/services/fixtureService/reconcile",
+        json!({"generation": orphan_gen}),
+    );
+    let orphan_done = p_orphan.run_job(orphan_rec["job"].clone());
+    assert_eq!(orphan_done["status"], "complete", "{orphan_done}");
+    assert!(
+        p_orphan
+            .adapter
+            .resources("fixtureService", "backend")
+            .is_empty(),
+        "orphan session_scorer backend must be deleted by reconcile"
+    );
+    assert!(
+        !p_orphan
+            .adapter
+            .resources("fixtureService", "condition")
+            .iter()
+            .any(|c| c["name"] == "fastly_log_analytics_false"),
+        "orphan fastly_log_analytics_false condition must be deleted after backend"
+    );
+    assert!(
+        !p_orphan
+            .adapter
+            .resources("fixtureService", "snippet")
+            .iter()
+            .any(|s| s["name"] == "Session Scoring - Recv"),
+        "orphan scoring snippet must be deleted"
+    );
+
+    // Bare orphan session_scorer backend (without snippets or condition) is also cleaned by reconcile:
+    p_orphan.adapter.seed_resource(
+        "fixtureService",
+        "backend",
+        json!({
+            "name": "session_scorer",
+            "address": "bare-orphan-scorer.edgecompute.app",
+            "port": 443,
+            "use_ssl": true,
+            "ssl_check_cert": true
+        }),
+    );
+    let bare_gen =
+        p_orphan.ok("GET", "/api/admin/services/fixtureService", json!({}))["generation"].clone();
+    let bare_rec = p_orphan.ok(
+        "POST",
+        "/api/admin/services/fixtureService/reconcile",
+        json!({"generation": bare_gen}),
+    );
+    assert_eq!(
+        p_orphan.run_job(bare_rec["job"].clone())["status"],
+        "complete"
+    );
+    assert!(
+        p_orphan
+            .adapter
+            .resources("fixtureService", "backend")
+            .is_empty(),
+        "bare orphan session_scorer backend must be deleted by reconcile"
+    );
+}
+
+#[test]
+fn bug_cloud_dr_19b_retry_ignores_stale_job_tagged_draft_after_customer_activates_newer_version() {
+    let p = Platform::new();
+    p.provision_logging_service();
+    let en = p.ok(
+        "POST",
+        "/api/services/fixtureService/scoring/enable",
+        json!({}),
+    );
+    let mut job = en["job"].clone();
+    let job_id = job["id"].as_str().unwrap().to_owned();
+    let mut injected = false;
+    for _ in 0..80 {
+        if job["status"] == "complete" || job["status"] == "failed" {
+            break;
+        }
+        if job["step"] == "validate" && !injected {
+            p.adapter.invalid_draft(true);
+            injected = true;
+        }
+        let (st, res) = p.call("POST", &format!("/api/admin/jobs/{job_id}/step"), json!({}));
+        assert_eq!(st, 200, "{res}");
+        job = res["job"].clone();
+    }
+    p.adapter.invalid_draft(false);
+    assert_eq!(job["status"], "failed", "{job}");
+    assert_eq!(job["error"], "draft_validation_failed", "{job}");
+
+    // Customer clones active v2 -> v4, adds a critical snippet, and activates v4 while v3 stays unlocked with flp-job:{job_id}:
+    let (_, cloned_v4) = p
+        .adapter
+        .api(ApiRequest {
+            method: "PUT",
+            path: "/service/fixtureService/version/2/clone",
+            query: "",
+            token: "fixture-token",
+            body: None,
+            timeout: std::time::Duration::from_secs(5),
+        })
+        .unwrap();
+    let v4_num = cloned_v4["number"].as_u64().unwrap();
+    assert_eq!(v4_num, 4);
+    let (snip_st, _) = p
+        .adapter
+        .api(ApiRequest {
+            method: "POST",
+            path: "/service/fixtureService/version/4/snippet",
+            query: "",
+            token: "fixture-token",
+            body: Some(json!({
+                "name": "Customer Critical Auth v4",
+                "type": "recv",
+                "priority": 1,
+                "content": "set req.http.X-Customer-Auth = \"v4-live\";"
+            })),
+            timeout: std::time::Duration::from_secs(5),
+        })
+        .unwrap();
+    assert_eq!(snip_st, 200);
+    let (act_st, _) = p
+        .adapter
+        .api(ApiRequest {
+            method: "PUT",
+            path: "/service/fixtureService/version/4/activate",
+            query: "",
+            token: "fixture-token",
+            body: None,
+            timeout: std::time::Duration::from_secs(5),
+        })
+        .unwrap();
+    assert_eq!(act_st, 200);
+
+    // Retry must ignore stale unlocked v3 (3 < 4), clone v5 from v4, and activate v5 preserving Customer Critical Auth v4!
+    p.clock.fetch_add(65, Ordering::SeqCst);
+    let retried = p.ok(
+        "POST",
+        &format!("/api/admin/jobs/{job_id}/retry"),
+        json!({}),
+    )["job"]
+        .clone();
+    let done = p.run_job(retried);
+    assert_eq!(done["status"], "complete", "{done}");
+
+    let (_, versions) = p
+        .adapter
+        .api(ApiRequest {
+            method: "GET",
+            path: "/service/fixtureService/version",
+            query: "",
+            token: "fixture-token",
+            body: None,
+            timeout: std::time::Duration::from_secs(5),
+        })
+        .unwrap();
+    let active_num = versions
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["active"] == true)
+        .and_then(|v| v["number"].as_u64())
+        .unwrap();
+    assert_eq!(
+        active_num, 5,
+        "retry must clone and activate v5 (> v4), not stale v3: {versions}"
+    );
+    let active_snippets = p.adapter.resources("fixtureService", "snippet");
+    assert!(
+        active_snippets
+            .iter()
+            .any(|s| s["name"] == "Customer Critical Auth v4"),
+        "Customer Critical Auth v4 snippet must be preserved on live v5: {active_snippets:?}"
+    );
+    assert!(
+        active_snippets
+            .iter()
+            .any(|s| s["name"] == "Session Scoring - Recv"),
+        "Session Scoring snippets must also be active on v5"
+    );
+}
+
+#[test]
+fn bug_cloud_dr_19c_low_budget_post_logging_reconcile_failure_defers_rollback_and_retries_cleanly()
+{
+    let p = Platform::new();
+    let prov = p.ok(
+        "POST",
+        "/api/admin/provision/execute",
+        json!({
+            "token": "fixture-token",
+            "service_id": "fixtureService",
+            "fos_bucket": "fos-fixture-logs",
+            "fos_region": "us-east-1",
+            "rum_enabled": true,
+            "log_fields": {"groups":["A","C"],"custom_fields":[],"field_overrides":{},"field_limits":{}}
+        }),
+    )["job"]
+        .clone();
+    assert_eq!(p.run_job(prov)["status"], "complete");
+
+    let pre_enable_svc = p.adapter.record_snapshot("svc:fixtureService");
+    let en = p.ok(
+        "POST",
+        "/api/services/fixtureService/scoring/enable",
+        json!({}),
+    );
+    let mut job = en["job"].clone();
+    let job_id = job["id"].as_str().unwrap().to_owned();
+
+    // Advance until job reaches customer VCL "discover" (immediately after logging_reconcile):
+    for _ in 0..40 {
+        if job["step"] == "discover" {
+            break;
+        }
+        let (st, res) = p.call("POST", &format!("/api/admin/jobs/{job_id}/step"), json!({}));
+        assert_eq!(st, 200, "{res}");
+        job = res["job"].clone();
+    }
+    assert_eq!(job["step"], "discover", "{job}");
+
+    // At "discover", svc:fixtureService currently has scoring.enabled == true + 9 scoring fields.
+    // Inject foreign primary endpoint so "discover" fails terminally (409 managed_resources_not_owned),
+    // AND simulate stale POP KV + Shell preamble + transient GET retries leaving < 6 remaining calls (5 left):
+    p.adapter.seed_resource(
+        "fixtureService",
+        "logging/fos",
+        json!({
+            "name": "Fastly Object Storage Logs",
+            "bucket_name": "fos-other-gce-bucket",
+            "region": "us-east-1",
+            "path": "raw/",
+            "response_condition": "log_analytics_condition"
+        }),
+    );
+    p.adapter
+        .cache_stale("svc:fixtureService", pre_enable_svc.clone());
+    // With initial_used = 13: step preamble + stale svc confirm + secret + fence = 8 calls (used = 21),
+    // discover GET version + 4 base + 2 rum = 7 calls (used = 28 -> remaining_calls() == 4 < 6),
+    // leaving 4 calls (>= 3 needed for job CAS + lock GET + lock CAS) so step returns 200 without 503!
+    let (low_st, low_res) = p.call_with_initial_used(
+        13,
+        "POST",
+        &format!("/api/admin/jobs/{job_id}/step"),
+        json!({}),
+    );
+    assert_eq!(
+        low_st, 200,
+        "low-budget discover failure must checkpoint cleanly without 503: {low_res}"
+    );
+    job = low_res["job"].clone();
+    assert_eq!(
+        job["step"], "scoring_rollback",
+        "when remaining_calls() < 6 prevents in-tick svc rollback, job must defer to scoring_rollback: {job}"
+    );
+    assert_ne!(
+        job["status"], "failed",
+        "job must not enter terminal failed while svc.scoring.enabled is still true: {job}"
+    );
+
+    // Next tick (even with stale KV!) executes scoring_rollback, reverts svc.scoring.enabled = false + strips custom_fields,
+    // rewinds step = "logging_reconcile", and marks terminal status = "failed" with original error code:
+    p.adapter.cache_stale("svc:fixtureService", pre_enable_svc);
+    let (rb_st, rb_res) = p.call("POST", &format!("/api/admin/jobs/{job_id}/step"), json!({}));
+    assert_eq!(rb_st, 200, "{rb_res}");
+    job = rb_res["job"].clone();
+    assert_eq!(job["status"], "failed", "{job}");
+    assert_eq!(job["error"], "managed_resources_not_owned", "{job}");
+    assert_eq!(job["step"], "logging_reconcile", "{job}");
+
+    let svc_failed = p.adapter.record_snapshot("svc:fixtureService").unwrap();
+    assert_eq!(
+        svc_failed.value["scoring"]["enabled"], false,
+        "svc.scoring.enabled must be rolled back to false before terminal failed: {}",
+        svc_failed.value
+    );
+    assert_eq!(
+        svc_failed.value["log_fields"]["custom_fields"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0,
+        "all 9 scoring custom fields must be stripped on rollback"
+    );
+
+    // Remove the foreign endpoint collision and verify POST /retry succeeds cleanly to complete!
+    // Restore Cloud's owned Fastly Object Storage Logs endpoint first so Managed service has its endpoint:
+    p.adapter.seed_resource(
+        "fixtureService",
+        "logging/fos",
+        json!({
+            "name": "Fastly Object Storage Logs",
+            "bucket_name": "fos-fixture-logs",
+            "region": "us-east-1",
+            "path": "raw/request/year=%Y/month=%m/day=%d/hour=%H/minute=%M/",
+            "response_condition": "log_analytics_condition"
+        }),
+    );
+    p.clock.fetch_add(65, Ordering::SeqCst);
+    let retried = p.ok(
+        "POST",
+        &format!("/api/admin/jobs/{job_id}/retry"),
+        json!({}),
+    )["job"]
+        .clone();
+    let done = p.run_job(retried);
+    assert_eq!(done["status"], "complete", "{done}");
+    let svc_done = p.adapter.record_snapshot("svc:fixtureService").unwrap();
+    assert_eq!(svc_done.value["scoring"]["enabled"], true);
+    assert_eq!(
+        svc_done.value["log_fields"]["custom_fields"]
+            .as_array()
+            .unwrap()
+            .len(),
+        9
     );
 }

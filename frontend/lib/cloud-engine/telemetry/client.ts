@@ -15,7 +15,7 @@ import {
 import {
   activeOpsUser,
   browserOpsSource,
-  currentVolatileOpsScope,
+  currentOpsIdentity,
   type OpsIdentity,
 } from "./sources";
 
@@ -136,14 +136,7 @@ function sharedRead(
   { kind, from, to, signal, onProgress }: ReadLogsOptions,
   scope: { user?: string; role?: string } = {},
 ): Promise<LogsResult> {
-  const identity: OpsIdentity = {
-    user:
-      (scope.user && scope.user.trim().length > 0 ? scope.user : null) ??
-      activeOpsUser() ??
-      dashboardCacheIdentity() ??
-      currentVolatileOpsScope(),
-    role: scope.role && scope.role.trim().length > 0 ? scope.role : "admin",
-  };
+  const identity = currentOpsIdentity(scope);
   const key = JSON.stringify([
     kind,
     from,

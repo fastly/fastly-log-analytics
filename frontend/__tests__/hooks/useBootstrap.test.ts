@@ -241,6 +241,38 @@ describe('useBootstrap (MSW)', () => {
     }
   })
 
+  it('hydrates Cloud dashboardCacheIdentity before syncOpsCacheForSession so activeOpsUser stays populated', async () => {
+    const { activeOpsUser, clearOpsCaches } = await import('@/lib/cloud-engine/telemetry/sources')
+    const { clearDashboardData } = await import('@/lib/cloud-engine/dashboard/client')
+    const { dashboardCacheIdentity } = await import('@/lib/cloud-engine/dashboard/sources')
+    await clearDashboardData()
+    await clearOpsCaches()
+
+    server.use(
+      http.get(`${API_BASE}/api/bootstrap`, () =>
+        HttpResponse.json({
+          runtime_mode: 'cloud',
+          user: { id: 'alice', role: 'admin' },
+          settings: { needs_login: false, is_remote_analyst: false },
+          services: [{ service_id: 'svc-1', name: 'My CDN' }],
+          active_service_id: 'svc-1',
+        }),
+      ),
+    )
+
+    try {
+      const { result } = renderHook(() => useBootstrap(), { wrapper: wrapper() })
+      await waitFor(() => expect(result.current.isSuccess).toBe(true))
+      await waitFor(() => expect(dashboardCacheIdentity()).toBe('alice:admin'))
+      await new Promise((r) => setTimeout(r, 30))
+      expect(activeOpsUser()).toBe('alice')
+    } finally {
+      await clearDashboardData()
+      await clearOpsCaches()
+      setCloudModeRuntime(false)
+    }
+  })
+
   it('handles empty services array gracefully and surfaces 500 fetch errors', async () => {
     server.use(
       http.get(`${API_BASE}/api/bootstrap`, () =>

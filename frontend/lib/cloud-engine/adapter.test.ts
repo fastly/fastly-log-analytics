@@ -2251,5 +2251,316 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     await expect(cronPending).rejects.toMatchObject({ name: "AbortError" });
     await expect(prefillPending).rejects.toMatchObject({ name: "AbortError" });
     expect([...cacheBuckets.keys()]).toEqual([]);
+
+    // 3. Challenge 1 polish: calling clearOpsCaches() + resetUsageSettingsCache() ALONE (without clearDashboardData())
+    // must still abort in-flight GET /api/usage/prefill via the inner opsCacheEpoch / activeSettingsControllers layer:
+    let notifyInnerPrefillStarted!: () => void;
+    let releaseInnerPrefill!: (res: Response) => void;
+    const innerPrefillStarted = new Promise<void>((r) => { notifyInnerPrefillStarted = r; });
+    usage.resetUsageSettingsCache();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url.includes("/api/admin/usage-logging")) {
+          notifyInnerPrefillStarted();
+          return new Promise<Response>((r) => { releaseInnerPrefill = r; });
+        }
+        return Promise.resolve(Response.json({ days: [], services: [] }));
+      }),
+    );
+    const innerPrefillPending = handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/usage/prefill"),
+    );
+    await innerPrefillStarted;
+    await clearOpsCaches();
+    usage.resetUsageSettingsCache();
+    releaseInnerPrefill?.(Response.json(fixtureUsageInput.settings));
+    await expect(innerPrefillPending).rejects.toMatchObject({ name: "AbortError" });
+    expect([...cacheBuckets.keys()]).toEqual([]);
+  });
+
+  it("allows concurrent same-session writes and validation POSTs without aborting active metadata readers while evicting metadataCache on writes and still aborting on clearDashboardData", async () => {
+    const { clearDashboardData, setDashboardCacheIdentity } = await import("./dashboard/client");
+    const { resetCloudMetadataCache } = await import("./metadata-cache");
+    const dashboardClient = await import("./dashboard/client");
+    await setDashboardCacheIdentity("alice:admin");
+    resetCloudMetadataCache();
+
+    vi.spyOn(dashboardClient, "runInWorker").mockResolvedValue({
+      totalRequests: 5,
+      buckets: [],
+      cards: {},
+      stats: { rows: 5, bytes: 256, listed: 1, fetched: 0, cached: 1, cdnHits: 1 },
+    } as never);
+
+    let resolveCatalog!: (res: Response) => void;
+    let resolveExtents!: (res: Response) => void;
+    let notifyCatalogStarted!: () => void;
+    let notifyExtentsStarted!: () => void;
+    let catalogFetches = 0;
+    let extentsFetches = 0;
+    let catalogStarted = new Promise<void>((r) => { notifyCatalogStarted = r; });
+    let extentsStarted = new Promise<void>((r) => { notifyExtentsStarted = r; });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url.includes("/api/log-fields/catalog")) {
+          catalogFetches += 1;
+          notifyCatalogStarted();
+          return new Promise<Response>((r) => { resolveCatalog = r; });
+        }
+        if (url.includes("/api/log-extents")) {
+          extentsFetches += 1;
+          notifyExtentsStarted();
+          return new Promise<Response>((r) => { resolveExtents = r; });
+        }
+        if (url.includes("/api/services") && !url.includes("/validate")) {
+          return Promise.resolve(
+            Response.json({
+              services: [
+                {
+                  service_id: "svc-alice",
+                  log_fields: {
+                    custom_fields: [{ name: "x_tenant", sql_type: "VARCHAR" }],
+                  },
+                },
+              ],
+            }),
+          );
+        }
+        return Promise.resolve(Response.json({ ok: true }));
+      }),
+    );
+
+    // Phase A: Read-only validation & telemetry POST routes neither abort active readers nor evict metadataCache:
+    const bundleReq1 = handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/dashboard/bundle?service_id=svc-alice", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          start_time: "2026-11-10T00:00:00Z",
+          end_time: "2026-11-10T01:00:00Z",
+          custom_filters: { x_tenant: { mode: "include", values: ["acme"] } },
+        }),
+      }),
+    );
+    const extentsReq1 = handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/log-extents"),
+    );
+    await Promise.all([catalogStarted, extentsStarted]);
+
+    for (const roPath of [
+      "/api/telemetry/query",
+      "/api/provision/validate",
+      "/api/admin/log-fields/preview",
+      "/api/admin/log-fields/custom/validate",
+      "/api/services/svc-alice/scoring/exclude-regex/validate",
+      "/api/services/svc-alice/custom-fields/validate-vcl",
+    ]) {
+      const roRes = await handleCloudAnalyticalRequest(
+        new Request(`http://localhost${roPath}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({}),
+        }),
+      );
+      expect(roRes === null || roRes.status <= 501).toBe(true);
+    }
+
+    resolveCatalog(Response.json({ groups: [], fields: [] }));
+    resolveExtents(
+      Response.json({
+        earliest_log_at: "2026-11-10T00:00:00Z",
+        latest_log_at: "2026-11-10T01:00:00Z",
+      }),
+    );
+    const [bundleOut1, extentsOut1] = await Promise.allSettled([bundleReq1, extentsReq1]);
+    expect(bundleOut1).toMatchObject({ status: "fulfilled", value: expect.objectContaining({ status: 200 }) });
+    expect(extentsOut1).toMatchObject({ status: "fulfilled", value: expect.objectContaining({ status: 200 }) });
+    expect(extentsFetches).toBe(1);
+
+    // Cached follow-up read hits metadataCache without re-fetching because validation POSTs did not evict it:
+    const cachedExtentsRes = await handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/log-extents"),
+    );
+    expect(cachedExtentsRes?.status).toBe(200);
+    expect(extentsFetches).toBe(1);
+
+    // Phase B: Concurrent same-session writes (POST /api/views/, PATCH /api/admin/debug-settings)
+    // evict metadataCache WITHOUT throwing AbortError on active same-session readers!
+    resetCloudMetadataCache();
+    catalogStarted = new Promise<void>((r) => { notifyCatalogStarted = r; });
+    extentsStarted = new Promise<void>((r) => { notifyExtentsStarted = r; });
+
+    const bundleReq2 = handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/dashboard/bundle?service_id=svc-alice", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          start_time: "2026-11-10T00:00:00Z",
+          end_time: "2026-11-10T01:00:00Z",
+          custom_filters: { x_tenant: { mode: "include", values: ["acme"] } },
+        }),
+      }),
+    );
+    const extentsReq2 = handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/log-extents"),
+    );
+    await Promise.all([catalogStarted, extentsStarted]);
+
+    const saveViewRes = await handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/views/", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "Saved", service_id: "svc-alice", filters_json: "{}" }),
+      }),
+    );
+    const patchDebugRes = await handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/admin/debug-settings", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      }),
+    );
+    expect(saveViewRes === null || saveViewRes.status <= 501).toBe(true);
+    expect(patchDebugRes === null || patchDebugRes.status <= 501).toBe(true);
+
+    resolveCatalog(Response.json({ groups: [], fields: [] }));
+    resolveExtents(
+      Response.json({
+        earliest_log_at: "2026-11-10T00:00:00Z",
+        latest_log_at: "2026-11-10T01:05:00Z",
+      }),
+    );
+    const [bundleOut2, extentsOut2] = await Promise.allSettled([bundleReq2, extentsReq2]);
+    expect(bundleOut2).toMatchObject({ status: "fulfilled", value: expect.objectContaining({ status: 200 }) });
+    expect(extentsOut2).toMatchObject({ status: "fulfilled", value: expect.objectContaining({ status: 200 }) });
+    expect(catalogFetches).toBe(2);
+    expect(extentsFetches).toBe(2);
+
+    // Subsequent GET /api/log-extents must re-fetch because the concurrent writes invalidated metadataCache:
+    extentsStarted = new Promise<void>((r) => { notifyExtentsStarted = r; });
+    const extentsReq3 = handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/log-extents"),
+    );
+    await extentsStarted;
+    resolveExtents(
+      Response.json({
+        earliest_log_at: "2026-11-10T00:00:00Z",
+        latest_log_at: "2026-11-10T01:10:00Z",
+      }),
+    );
+    const extentsRes3 = await extentsReq3;
+    expect(extentsRes3?.status).toBe(200);
+    expect(extentsFetches).toBe(3);
+
+    // Phase C: Hard reset via clearDashboardData() (abortActive: true) STILL immediately rejects in-flight readers with AbortError:
+    resetCloudMetadataCache();
+    extentsStarted = new Promise<void>((r) => { notifyExtentsStarted = r; });
+    const abortedExtentsReq = handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/log-extents"),
+    );
+    await extentsStarted;
+    await clearDashboardData();
+    await expect(abortedExtentsReq).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("uses volatile-ops scope after unauthenticated /api/bootstrap and never creates shared flp-ops-parquet-v1:anonymous:admin", async () => {
+    vi.restoreAllMocks();
+    const { dashboardCacheIdentity } = await import("./dashboard/sources");
+    const { activeOpsUser } = await import("./telemetry/sources");
+
+    vi.stubGlobal("Worker", undefined);
+    ops.resetOpsLogsClient();
+    const cacheBuckets = new Map<string, Map<string, Response>>();
+    vi.stubGlobal("caches", {
+      async open(name: string) {
+        let b = cacheBuckets.get(name);
+        if (!b) {
+          b = new Map();
+          cacheBuckets.set(name, b);
+        }
+        return {
+          async match(k: RequestInfo | URL) { return b!.get(String(k))?.clone(); },
+          async put(k: RequestInfo | URL, v: Response) { b!.set(String(k), v.clone()); },
+          async delete(k: RequestInfo | URL) { return b!.delete(String(k)); },
+          async keys() { return [...b!.keys()].map((u) => new Request(u)); },
+        };
+      },
+      async keys() { return [...cacheBuckets.keys()]; },
+      async delete(name: string) { return cacheBuckets.delete(name); },
+    });
+
+    const startSec = Math.floor(Date.parse("2026-11-10T00:00:00Z") / 1000);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url.includes("/api/bootstrap")) {
+          return Response.json({
+            runtime_mode: "cloud",
+            user: null,
+            services: [],
+            active_service_id: null,
+            active_log_field_ids: [],
+            log_fields_catalog: { fields: [] },
+            views: [],
+            build_sha: "f021210b7",
+            ngwaf_configured: false,
+            fastly_bots_available: false,
+            settings: { needs_login: true, is_remote_analyst: false },
+            debug_state: {},
+          });
+        }
+        if (url.includes("/api/admin/logs/")) {
+          return Response.json({
+            live_rows: [],
+            live_truncated: false,
+            files: [`processed/ops/audit_log/year=2026/month=11/day=10/hour=00/window=${startSec}-${startSec + 600}-s1-n1.parquet`],
+          });
+        }
+        if (url.includes("/api/files")) {
+          return Response.json({
+            files: [
+              {
+                key: `processed/ops/fos_usage/year=2026/month=11/day=10/hour=00/window=${startSec}-${startSec + 600}-s1-n1.parquet`,
+                start: "2026-11-10T00:00:00Z",
+                end: "2026-11-10T00:10:00Z",
+                size: 4,
+                rows: 1,
+              },
+            ],
+            next_cursor: null,
+            complete: true,
+          });
+        }
+        if (url.includes("/fos/pq/") || url.includes("/api/file")) {
+          return new Response(new Uint8Array([80, 65, 82, 49]), {
+            status: 200,
+            headers: { etag: '"anon-e1"' },
+          });
+        }
+        return Response.json({ rows: [], next_cursor: null });
+      }),
+    );
+
+    const boot = await handleCloudAnalyticalRequest(new Request("http://localhost/api/bootstrap"));
+    expect(boot?.status).toBe(200);
+    expect(dashboardCacheIdentity()).toBe("anonymous");
+    expect(activeOpsUser()).toBeNull();
+
+    await ops
+      .readLogs("fos_usage", {
+        from: "2026-11-10T00:00:00Z",
+        to: "2026-11-10T01:00:00Z",
+      })
+      .catch(() => null);
+
+    const names = [...cacheBuckets.keys()];
+    expect(names.some((k) => k.includes("anonymous"))).toBe(false);
+    expect(names.some((k) => /^flp-ops-parquet-v1:volatile-ops-\d+:admin$/.test(k))).toBe(true);
   });
 });

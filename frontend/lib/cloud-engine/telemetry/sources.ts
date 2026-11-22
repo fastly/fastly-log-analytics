@@ -61,17 +61,30 @@ export function currentOpsIdentity(
       dashUser = dashId;
     }
   }
-  let explicitUser =
+  const rawExplicitUser =
     explicit?.user && explicit.user.trim().length > 0
       ? explicit.user.trim()
+      : null;
+  let explicitUser =
+    rawExplicitUser && rawExplicitUser !== "anonymous"
+      ? rawExplicitUser
       : null;
   let explicitRole =
     explicit?.role && explicit.role.trim().length > 0
       ? explicit.role.trim()
       : null;
-  if (explicitUser && dashId && explicitUser === dashId && dashUser) {
-    explicitUser = dashUser;
-    explicitRole ??= dashRole;
+  if (explicitUser) {
+    const sep = explicitUser.lastIndexOf(":");
+    if (sep > 0) {
+      const parsedUser = explicitUser.slice(0, sep);
+      const parsedRole = explicitUser.slice(sep + 1) || null;
+      if (parsedUser === "anonymous") {
+        explicitUser = null;
+      } else {
+        explicitUser = parsedUser;
+        explicitRole ??= parsedRole;
+      }
+    }
   }
   const user = explicitUser ?? activeUserId ?? dashUser ?? volatileOpsScope;
   const role =

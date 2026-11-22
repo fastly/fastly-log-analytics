@@ -1650,6 +1650,109 @@ fn main() {
     let dr18b_retry_status = jb_dr18_rt["status"].as_str().unwrap_or("").to_owned();
     let dr18b_enabled_after = rt_dr17.call("GET", "/api/services/fixtureService/scoring/status", json!({})).1["scoring"]["enabled"] == json!(true);
 
+    // Iteration-22 WS1 (BUG-CLOUD-DR-19A, 19B, 19C):
+    // 19A: customer VCL backend "session_scorer" created even when rum.enabled == false!
+    let dr19a_customer_backends: Vec<String> = rt_dr17
+        .admin
+        .resources("fixtureService", "backend")
+        .into_iter()
+        .filter_map(|b| b["name"].as_str().map(str::to_owned))
+        .collect();
+
+    // 19B: fail scoring_enable at validate, customer clones & activates newer v_cust with custom snippet,
+    // retry ignores stale job-tagged draft (< v_cust) and clones fresh preserving customer snippet!
+    let drain_job = |rt: &ProbeRt, mut jb: Value| -> Value {
+        for _ in 0..120 {
+            if jb["status"] == "complete" || jb["status"] == "failed" { break; }
+            if let Some(at) = jb["retry_at"].as_u64() {
+                rt.now_s.fetch_max(at, Ordering::SeqCst);
+            }
+            jb = rt.call_budgeted("POST", &format!("/api/admin/jobs/{}/step", jb["id"].as_str().unwrap()), json!({})).1["job"].clone();
+        }
+        jb
+    };
+    let rt_dr19b = ProbeRt::new();
+    let (_, prov19b) = rt_dr19b.call_budgeted("POST", "/api/admin/provision/execute", json!({
+        "token": "fixture-token", "service_id": "fixtureService", "fos_bucket": "fos-fixture-logs", "fos_region": "us-east-1"
+    }));
+    assert_eq!(drain_job(&rt_dr19b, prov19b["job"].clone())["status"], "complete");
+    let (_, en19b) = rt_dr19b.call_budgeted("POST", "/api/services/fixtureService/scoring/enable", json!({}));
+    let mut jb_19b = en19b["job"].clone();
+    let id_19b = jb_19b["id"].as_str().unwrap().to_owned();
+    let mut inj_19b = false;
+    for _ in 0..80 {
+        if jb_19b["status"] == "complete" || jb_19b["status"] == "failed" { break; }
+        if jb_19b["step"] == "validate" && !inj_19b {
+            rt_dr19b.admin.invalid_draft(true);
+            inj_19b = true;
+        }
+        jb_19b = rt_dr19b.call_budgeted("POST", &format!("/api/admin/jobs/{id_19b}/step"), json!({})).1["job"].clone();
+    }
+    rt_dr19b.admin.invalid_draft(false);
+    let _ = rt_dr19b.admin.api(ApiRequest {
+        method: "PUT", path: "/service/fixtureService/version/2/clone", token: "fixture-token",
+        body: None, timeout: std::time::Duration::from_secs(5), query: "",
+    }).unwrap();
+    let _ = rt_dr19b.admin.api(ApiRequest {
+        method: "POST", path: "/service/fixtureService/version/4/snippet", token: "fixture-token",
+        body: Some(json!({"name": "Customer Critical Auth v4", "type": "recv", "priority": 1, "content": "set req.http.X-Cust = \"v4\";"})),
+        timeout: std::time::Duration::from_secs(5), query: "",
+    }).unwrap();
+    let _ = rt_dr19b.admin.api(ApiRequest {
+        method: "PUT", path: "/service/fixtureService/version/4/activate", token: "fixture-token",
+        body: None, timeout: std::time::Duration::from_secs(5), query: "",
+    }).unwrap();
+    rt_dr19b.now_s.fetch_add(65, Ordering::SeqCst);
+    let jb_19b_rt = drain_job(
+        &rt_dr19b,
+        rt_dr19b.call_budgeted("POST", &format!("/api/admin/jobs/{id_19b}/retry"), json!({})).1["job"].clone(),
+    );
+    assert_eq!(jb_19b_rt["status"], "complete");
+    let dr19b_active_ver = rt_dr19b.admin.api(ApiRequest {
+        method: "GET", path: "/service/fixtureService/version", token: "fixture-token",
+        body: None, timeout: std::time::Duration::from_secs(5), query: "",
+    }).unwrap().1.as_array().unwrap().iter().find(|v| v["active"] == true).and_then(|v| v["number"].as_u64()).unwrap_or(0);
+    let dr19b_customer_v4_preserved = rt_dr19b
+        .admin
+        .resources("fixtureService", "snippet")
+        .iter()
+        .any(|s| s["name"] == "Customer Critical Auth v4");
+
+    // 19C: low-budget post-logging_reconcile failure defers to scoring_rollback, rolls back svc, and retries cleanly!
+    let rt_dr19c = ProbeRt::new();
+    let (_, prov19c) = rt_dr19c.call_budgeted("POST", "/api/admin/provision/execute", json!({
+        "token": "fixture-token", "service_id": "fixtureService", "fos_bucket": "fos-fixture-logs", "fos_region": "us-east-1", "rum_enabled": true
+    }));
+    assert_eq!(drain_job(&rt_dr19c, prov19c["job"].clone())["status"], "complete");
+    let (_, en19c) = rt_dr19c.call_budgeted("POST", "/api/services/fixtureService/scoring/enable", json!({}));
+    let mut jb_19c = en19c["job"].clone();
+    let id_19c = jb_19c["id"].as_str().unwrap().to_owned();
+    for _ in 0..40 {
+        if jb_19c["step"] == "discover" { break; }
+        jb_19c = rt_dr19c.call_budgeted("POST", &format!("/api/admin/jobs/{id_19c}/step"), json!({})).1["job"].clone();
+    }
+    rt_dr19c.admin.seed_resource("fixtureService", "logging/fos", json!({
+        "name": "Fastly Object Storage Logs", "bucket_name": "fos-other-bucket", "region": "us-east-1", "path": "raw/", "response_condition": "log_analytics_condition"
+    }));
+    rt_dr19c.admin.cache_invalidate("svc:fixtureService");
+    rt_dr19c.budget.set(Some(14));
+    let (_, low_19c_res) = rt_dr19c.call("POST", &format!("/api/admin/jobs/{id_19c}/step"), json!({}));
+    rt_dr19c.budget.set(None);
+    let dr19c_deferred_step = low_19c_res["job"]["step"].as_str().unwrap_or("").to_owned();
+    let (_, rb_19c_res) = rt_dr19c.call_budgeted("POST", &format!("/api/admin/jobs/{id_19c}/step"), json!({}));
+    let dr19c_failed_status = rb_19c_res["job"]["status"].as_str().unwrap_or("").to_owned();
+    let dr19c_failed_enabled = rt_dr19c.admin.get("svc:fixtureService").unwrap().unwrap().value["scoring"]["enabled"] == json!(true);
+    rt_dr19c.admin.seed_resource("fixtureService", "logging/fos", json!({
+        "name": "Fastly Object Storage Logs", "bucket_name": "fos-fixture-logs", "region": "us-east-1",
+        "path": "raw/request/year=%Y/month=%m/day=%d/hour=%H/minute=%M/", "response_condition": "log_analytics_condition"
+    }));
+    rt_dr19c.now_s.fetch_add(65, Ordering::SeqCst);
+    let jb_19c_rt = drain_job(
+        &rt_dr19c,
+        rt_dr19c.call_budgeted("POST", &format!("/api/admin/jobs/{id_19c}/retry"), json!({})).1["job"].clone(),
+    );
+    let dr19c_retry_status = jb_19c_rt["status"].as_str().unwrap_or("").to_owned();
+
     println!("{}", json!({
         "st_trav": st_trav,
         "st_own_svc": st_own_svc,
@@ -1712,6 +1815,13 @@ fn main() {
         "dr18c_matrices_gone": dr18c_matrices_gone,
         "dr18b_retry_status": dr18b_retry_status,
         "dr18b_enabled_after": dr18b_enabled_after,
+        "dr19a_customer_backends": dr19a_customer_backends,
+        "dr19b_active_ver": dr19b_active_ver,
+        "dr19b_customer_v4_preserved": dr19b_customer_v4_preserved,
+        "dr19c_deferred_step": dr19c_deferred_step,
+        "dr19c_failed_status": dr19c_failed_status,
+        "dr19c_failed_enabled": dr19c_failed_enabled,
+        "dr19c_retry_status": dr19c_retry_status,
     }));
 }
 """,
@@ -1796,6 +1906,13 @@ fn main() {
     assert dr14["dr18c_matrices_gone"] is True
     assert dr14["dr18b_retry_status"] == "complete"
     assert dr14["dr18b_enabled_after"] is True
+    assert dr14["dr19a_customer_backends"] == ["session_scorer"]
+    assert dr14["dr19b_active_ver"] == 5
+    assert dr14["dr19b_customer_v4_preserved"] is True
+    assert dr14["dr19c_deferred_step"] == "scoring_rollback"
+    assert dr14["dr19c_failed_status"] == "failed"
+    assert dr14["dr19c_failed_enabled"] is False
+    assert dr14["dr19c_retry_status"] == "complete"
 
 
 def test_t5_c04_c12_cloud_disabled_rum_faro_cdn_shield_reconcile_cookie_and_fos_guards(
@@ -5629,7 +5746,7 @@ console.log('NODE_PROXY_AND_CSV_PARITY_OK');
             "lib/cloud-engine/telemetry/client.test.ts",
             "lib/cloud-engine/adapter.test.ts",
             "-t",
-            "wipes range-loader singleton|aborts in-flight|blocks post-logout OPFS persistFile|blocks multi-step runDashboard|aborts in-flight queryRollup|suppresses pending write|skips CacheStorage and error telemetry|isolates cached service stats|clears decoded SecuritySummary|fences in-flight ops CacheStorage|resets activeOpsUser to null|aborts multi-step handleCloudAnalyticalRequest|allows concurrent Compare Mode|fences POST /api/dashboard/bundle|scopes /api/usage/",
+            "wipes range-loader singleton|aborts in-flight|blocks post-logout OPFS persistFile|blocks multi-step runDashboard|aborts in-flight queryRollup|suppresses pending write|skips CacheStorage and error telemetry|isolates cached service stats|clears decoded SecuritySummary|fences in-flight ops CacheStorage|resets activeOpsUser to null|uses volatile-ops scope|aborts multi-step handleCloudAnalyticalRequest|allows concurrent Compare Mode|allows concurrent same-session writes|fences POST /api/dashboard/bundle|scopes /api/usage/",
         ],
         cwd=str(REPO_ROOT / "frontend"),
         env=cloud_vitest_env,
@@ -5647,7 +5764,7 @@ console.log('NODE_PROXY_AND_CSV_PARITY_OK');
             "--no-cache",
             "__tests__/hooks/useBootstrap.test.ts",
             "-t",
-            "wipes Cloud dashboard and ops caches",
+            "wipes Cloud dashboard and ops caches|hydrates Cloud dashboardCacheIdentity before syncOpsCacheForSession",
         ],
         cwd=str(REPO_ROOT / "frontend"),
         capture_output=True,
