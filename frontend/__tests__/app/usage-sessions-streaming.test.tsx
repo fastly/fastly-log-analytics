@@ -354,6 +354,24 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     expect(errorSpy).not.toHaveBeenCalled()
   })
 
+  test('RUM failure keeps an unavailable section visible when RUM is enabled', async () => {
+    useServiceStore.setState({
+      activeServiceId: 'test-svc',
+      isInitialized: true,
+      services: [{ id: 'test-svc', name: 'Test', rum_enabled: true }],
+    })
+    mockGet.mockImplementation(async (path: string) => {
+      if (path === '/api/usage/rum-breakdown') throw new Error('rum unavailable')
+      return { data: undefined }
+    })
+
+    renderWithQuery(<UsagePage />, { queryClient })
+
+    expect(await screen.findByText('Real User Monitoring (RUM) Operations')).toBeInTheDocument()
+    expect(await screen.findByText('Something went wrong')).toBeInTheDocument()
+    expect(screen.getByText('rum unavailable')).toBeInTheDocument()
+  })
+
   test('Cloud usage renders Compute, KV, secrets and CDN requests from measured prefill', async () => {
     setCloudModeRuntime(true)
     mockGet.mockImplementation(async (path: string) => {
@@ -465,7 +483,7 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     renderWithQuery(<UsagePage />, { queryClient })
     await waitFor(() => expect(screen.getByText('Failed to load storage usage.')).toBeInTheDocument())
     expect(screen.queryByText(/GB-hrs/)).toBeNull()
-    expect(screen.getByText(/Partial estimate — storage cost excluded\./)).toBeInTheDocument()
+    expect(await screen.findByText(/Partial estimate — storage.*cost excluded\./)).toBeInTheDocument()
   })
 
   test('storage breakdown itemizes cloud-copy deletions and expired archive inside Deleted (Still Billed)', async () => {

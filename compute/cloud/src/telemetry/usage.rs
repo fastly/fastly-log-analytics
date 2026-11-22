@@ -960,7 +960,12 @@ pub fn platform_geography(
     }))
 }
 
-pub(crate) fn platform_usage(runtime: &impl Runtime, from: u64, to: u64) -> Value {
+pub(crate) fn platform_usage(
+    runtime: &impl Runtime,
+    from: u64,
+    to: u64,
+    include_billing: bool,
+) -> Value {
     let token = runtime
         .secret("fastly_token")
         .ok()
@@ -989,7 +994,7 @@ pub(crate) fn platform_usage(runtime: &impl Runtime, from: u64, to: u64) -> Valu
         .ok()
     });
 
-    let compute = token.as_deref().and_then(|token| {
+    let compute_services = token.as_deref().and_then(|token| {
         let ids = ["flp_service_id", "worker_service_id"]
             .into_iter()
             .map(|name| {
@@ -1000,6 +1005,17 @@ pub(crate) fn platform_usage(runtime: &impl Runtime, from: u64, to: u64) -> Valu
             })
             .collect::<Result<Vec<_>, String>>()
             .ok()?;
+        let fields = if include_billing {
+            PLATFORM_COMPUTE_FIELDS
+                .iter()
+                .chain(BILLING_FIELDS.iter())
+                .copied()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+        } else {
+            PLATFORM_COMPUTE_FIELDS.to_vec()
+        };
         let bodies = ids
             .iter()
             .map(|id| {
@@ -1008,15 +1024,18 @@ pub(crate) fn platform_usage(runtime: &impl Runtime, from: u64, to: u64) -> Valu
                     "hourly",
                     from,
                     to,
-                    &PLATFORM_COMPUTE_FIELDS,
+                    &fields,
                     None,
                     |path, query| fetch(path, query, token),
                 )
             })
             .collect::<Result<Vec<_>, _>>()
             .ok()?;
-        platform_compute(&bodies, from, to).ok()
+        Some((ids, bodies))
     });
+    let compute = compute_services
+        .as_ref()
+        .and_then(|(_, bodies)| platform_compute(bodies, from, to).ok());
 
     let ngwaf = match runtime.config("ngwaf_workspace_id") {
         Ok(Some(workspace)) if !workspace.is_empty() => token.as_deref().and_then(|token| {
@@ -1036,7 +1055,26 @@ pub(crate) fn platform_usage(runtime: &impl Runtime, from: u64, to: u64) -> Valu
         Err(_) => None,
     };
 
-    build_platform_usage_response(storage, compute, ngwaf)
+    let platform = build_platform_usage_response(storage, compute, ngwaf);
+    if !include_billing {
+        return platform;
+    }
+    let compute_billing = compute_services.and_then(|(ids, bodies)| {
+        let services = ["app", "worker"]
+            .iter()
+            .zip(ids)
+            .zip(bodies)
+            .map(|((role, id), body)| {
+                let mut service = json!({"role": role, "service_id": id});
+                for field in BILLING_FIELDS {
+                    record_billing_field(&mut service, field, &body).ok()?;
+                }
+                Some(service)
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(json!({"services": services}))
+    });
+    json!({"platform": platform, "compute_billing": compute_billing})
 }
 
 pub(crate) fn platform_geography_usage(

@@ -306,7 +306,9 @@ export function UsagePageContent({
         loadingStorage={loadingStorage}
         errorStorage={errorStorage}
         loadingOps={loadingOps}
+        errorOps={errorOps}
         loadingBw={loadingBw}
+        errorBw={errorBw}
         isFetchingAny={isFetchingAny}
         isLoadingInitial={isLoadingInitial}
         totalClassA={totalClassA}

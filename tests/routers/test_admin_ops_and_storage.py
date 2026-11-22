@@ -1487,6 +1487,7 @@ def test_prefill_rates_follow_the_services_own_retention_and_mode(tmp_path, monk
     assert (result["log_retention_days"], result["rum_retention_days"]) == (30, 30)
 
 
+@pytest.mark.no_postgres
 def test_current_storage_counts_the_high_scale_archive_and_recently_expired_artifacts(client):
     from backend.routers.usage import _STORAGE_INSPECTION_CACHE
 
@@ -1498,11 +1499,12 @@ def test_current_storage_counts_the_high_scale_archive_and_recently_expired_arti
         with (
             patch("backend.routers.usage._get_storage_stats", return_value={"total_files": 0, "total_bytes": 0}),
             patch("backend.config.load_config", return_value={}),
+            patch("backend.routers.usage.get_high_scale_service_registry") as registry,
             patch("backend.core.metadata.usage_log.cloud_copy_deleted_bytes_in_billing_window", return_value=3_000),
-            patch(
-                "backend.high_scale.postgres_control.PostgresControlPlane.archive_storage_summary", return_value=summary
-            ) as mock_summary,
+            patch("backend.high_scale.postgres_control.PostgresControlPlane") as control_plane,
         ):
+            registry.return_value.resolve.return_value = object()
+            control_plane.return_value.archive_storage_summary.return_value = summary
             r = client.get("/api/usage/current-storage", headers={"x-fastly-service-id": "svc-archive-usage"})
         assert r.status_code == 200
         body = r.json()
@@ -1514,7 +1516,7 @@ def test_current_storage_counts_the_high_scale_archive_and_recently_expired_arti
         assert body["live_bytes"] == 1000 + 5_000_000 and body["live_files"] == 2 + 30
         assert body["deleted_bytes"] == 2_000_000 + 3_000, "expired artifacts stay billed for the FOS 30-day minimum"
         assert body["total_billed_bytes"] == 1000 + 5_000_000 + 2_000_000 + 3_000
-        mock_summary.assert_called_once()
+        control_plane.return_value.archive_storage_summary.assert_called_once()
         assert body["cloud_copy_deleted_bytes"] == 3_000, "cloud-copy deletions stay billed for 30 days"
         assert body["deleted_bytes_complete"] is True
         assert body["deleted_bytes_provenance"] == "metadata_ledgers"
@@ -1556,6 +1558,36 @@ def test_current_storage_marks_missing_cloud_copy_deletion_ledger_incomplete(cli
 
 
 @pytest.mark.no_postgres
+def test_current_storage_treats_archive_as_not_applicable_for_standard_install(client):
+    from backend.routers.usage import _STORAGE_INSPECTION_CACHE
+
+    svc = "svc-standard-no-archive"
+    src = {"name": svc, "service_id": svc, "bucket": "b", "prefix": ""}
+    _STORAGE_INSPECTION_CACHE[(svc, "b", "")] = (1000, 1, 0, 0)
+    app.dependency_overrides[get_source] = lambda: src
+    try:
+        with (
+            patch("backend.routers.usage._get_storage_stats", return_value={"total_files": 0, "total_bytes": 0}),
+            patch("backend.config.load_config", return_value={}),
+            patch("backend.core.metadata.usage_log.cloud_copy_deleted_bytes_in_billing_window", return_value=125),
+            patch("backend.routers.usage.get_high_scale_service_registry") as registry,
+            patch("backend.high_scale.postgres_control.PostgresControlPlane") as control_plane,
+        ):
+            registry.return_value.resolve.return_value = None
+            r = client.get("/api/usage/current-storage", headers={"x-fastly-service-id": svc})
+
+        body = r.json()
+        assert r.status_code == 200
+        assert body["deleted_bytes"] == 125
+        assert body["deleted_bytes_complete"] is True
+        assert body["deleted_bytes_provenance"] == "metadata_ledgers"
+        control_plane.assert_not_called()
+    finally:
+        app.dependency_overrides.pop(get_source, None)
+        _STORAGE_INSPECTION_CACHE.pop((svc, "b", ""), None)
+
+
+@pytest.mark.no_postgres
 def test_current_storage_marks_archive_summary_failure_incomplete(client):
     from backend.routers.usage import _STORAGE_INSPECTION_CACHE
 
@@ -1571,8 +1603,10 @@ def test_current_storage_marks_archive_summary_failure_incomplete(client):
                 "backend.core.metadata.usage_log.cloud_copy_deleted_bytes_in_billing_window",
                 return_value=0,
             ),
+            patch("backend.routers.usage.get_high_scale_service_registry") as registry,
             patch("backend.high_scale.postgres_control.PostgresControlPlane") as control_plane,
         ):
+            registry.return_value.resolve.return_value = object()
             control_plane.return_value.archive_storage_summary.side_effect = RuntimeError("archive ledger unavailable")
             r = client.get("/api/usage/current-storage", headers={"x-fastly-service-id": svc})
         assert r.status_code == 200

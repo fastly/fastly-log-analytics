@@ -1094,6 +1094,66 @@ fn platform_usage_reports_not_configured_ngwaf_without_fetching_it() {
 }
 
 #[test]
+fn platform_usage_include_billing_reuses_compute_metric_reads() {
+    let fake = Fake::new(BASE);
+    fake.config_overrides
+        .borrow_mut()
+        .insert("ngwaf_workspace_id".into(), None);
+    fake.api_responses.borrow_mut().extend([
+        (
+            200,
+            json!({"data": [{
+                "timestamp": "1970-01-01T00:00:00Z",
+                "object_storage_bytes_count": 1
+            }]}),
+        ),
+        (
+            200,
+            json!({"data": [{
+                "timestamp": "1970-01-01T00:00:00Z",
+                "compute_requests": 2,
+                "compute_execution_time_ms": 20,
+                "compute_request_time_billed_ms": 50
+            }]}),
+        ),
+        (
+            200,
+            json!({"data": [{
+                "timestamp": "1970-01-01T00:00:00Z",
+                "compute_requests": 3,
+                "compute_execution_time_ms": 30,
+                "compute_request_time_billed_ms": 100
+            }]}),
+        ),
+    ]);
+
+    let (status, body, _) = logs_call(
+        &fake,
+        "GET",
+        "/api/admin/usage/platform?from=0&to=3600000&include_billing=1",
+        Value::Null,
+    );
+
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["platform"]["compute"]["requests"], 5);
+    assert_eq!(
+        body["compute_billing"]["services"][0]["compute_requests"],
+        2.0
+    );
+    assert_eq!(
+        body["compute_billing"]["services"][1]["compute_execution_time_ms"],
+        30.0
+    );
+    let queries = fake.api_queries.borrow();
+    assert_eq!(queries.len(), 3);
+    for (_, query) in queries.iter().skip(1) {
+        assert!(query.contains("compute_requests"));
+        assert!(query.contains("compute_execution_time_ms"));
+        assert!(query.contains("compute_service_bereq_error"));
+    }
+}
+
+#[test]
 fn platform_usage_keeps_compute_after_a_storage_source_failure() {
     let fake = Fake::new(BASE);
     fake.config_overrides

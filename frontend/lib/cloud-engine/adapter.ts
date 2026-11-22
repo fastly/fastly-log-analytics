@@ -107,8 +107,10 @@ import {
   fetchUsageSettings,
   resetUsageSettingsCache,
   fetchUsageSummary,
+  parseComputeBilling,
   reconcileSnapshot,
 } from "./usage/summary";
+import { createSharedRequests } from "./shared-request";
 import { handleValueRequest, valueScanColumns, type ValueQueryParams } from "./value";
 import { valueRollupEligible } from "./value-rollup";
 import {
@@ -123,6 +125,62 @@ export { IS_CLOUD_MODE, isCloudMode, setCloudModeRuntime } from "./mode";
 type BucketInterval = "1s" | "1m" | "5m" | "1h" | "1d";
 
 const DASHBOARD_PATH = /^\/api\/(?:dashboard\/(?:bundle|aggregates)|aggregates|timeseries)$/;
+type PlatformBundle = {
+  status: number;
+  platform: unknown;
+  computeBilling: unknown;
+};
+const sharedPlatformBundle = createSharedRequests<PlatformBundle>();
+const settledPlatformBundles = new Map<string, { at: number; value: PlatformBundle }>();
+const PLATFORM_BUNDLE_TTL_MS = 15_000;
+
+export function resetCloudPlatformBundleCache(): void {
+  settledPlatformBundles.clear();
+}
+
+async function cloudPlatformBundle(
+  from: number,
+  to: number,
+  request: Request,
+  signal: AbortSignal = request.signal,
+): Promise<PlatformBundle> {
+  const key = JSON.stringify([
+    request.headers.get("x-fastly-service-id") ?? request.headers.get("x-service-id"),
+    from,
+    to,
+  ]);
+  const now = Date.now();
+  for (const [entryKey, entry] of settledPlatformBundles) {
+    if (now - entry.at >= PLATFORM_BUNDLE_TTL_MS) settledPlatformBundles.delete(entryKey);
+  }
+  const cached = settledPlatformBundles.get(key);
+  if (cached) return cached.value;
+  const value = await sharedPlatformBundle(
+    key,
+    async (signal) => {
+      const response = await fetch(
+        `/api/admin/usage/platform?from=${from}&to=${to}&include_billing=1`,
+        {
+          headers: request.headers,
+          signal,
+          credentials: "include",
+        },
+      );
+      const body = await response.json();
+      const record = body && typeof body === "object" && !Array.isArray(body)
+        ? body as Record<string, unknown>
+        : null;
+      return {
+        status: response.status,
+        platform: record && "platform" in record ? record.platform : body,
+        computeBilling: record?.compute_billing,
+      };
+    },
+    { signal },
+  );
+  if (value.status === 200) settledPlatformBundles.set(key, { at: Date.now(), value });
+  return value;
+}
 const ROLLUP_CHART_METRICS = new Map([
   ["requests", "COUNT(*)"],
   ["5xx", "COUNT(*) FILTER (WHERE status >= 500 AND status < 600)"],
@@ -1031,20 +1089,15 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
   }
 
   if (pathname === "/api/usage/platform" && method === "GET") {
-    const adminUrl = new URL("/api/admin/usage/platform", url);
     const from = searchParams.get("from") ?? searchParams.get("start");
     const to = searchParams.get("to") ?? searchParams.get("end");
     const fromMs = from !== null && /^\d+$/.test(from) ? from : Date.parse(from ?? "");
     const toMs = to !== null && /^\d+$/.test(to) ? to : Date.parse(to ?? "");
     if (Number.isFinite(Number(fromMs)) && Number.isFinite(Number(toMs))) {
-      adminUrl.searchParams.set("from", String(fromMs));
-      adminUrl.searchParams.set("to", String(toMs));
+      const bundle = await cloudPlatformBundle(Number(fromMs), Number(toMs), request);
+      return jsonResponse(bundle.platform, request, undefined, bundle.status);
     }
-    return fetch(adminUrl.pathname + adminUrl.search, {
-      headers: request.headers,
-      signal: request.signal,
-      credentials: "include",
-    });
+    return jsonResponse({ detail: { error: "invalid_range" } }, request, undefined, 400);
   }
 
   // Fold per-file Compute telemetry into the query beacon
@@ -1665,7 +1718,14 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
       return jsonResponse(prefill ?? { rates: LIST_RATES }, request);
     }
     if (pathname === "/api/usage/compute") {
-      return jsonResponse(await computeUsage({ from: fromMs, to: toMs }, request.signal), request);
+      return jsonResponse(await computeUsage(
+        { from: fromMs, to: toMs },
+        request.signal,
+        async (range, signal) => {
+          const bundle = await cloudPlatformBundle(range.from, range.to, request, signal);
+          return parseComputeBilling(bundle.computeBilling);
+        },
+      ), request);
     }
 
     // Shares the Compute charts' Platform Metrics read; resolves to null (logged lines) on failure.

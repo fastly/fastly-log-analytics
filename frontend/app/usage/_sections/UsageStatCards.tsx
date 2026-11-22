@@ -74,7 +74,9 @@ export function UsageStatCards({
   loadingStorage,
   errorStorage,
   loadingOps,
+  errorOps,
   loadingBw,
+  errorBw,
   isFetchingAny,
   isLoadingInitial,
   totalClassA,
@@ -94,7 +96,9 @@ export function UsageStatCards({
   loadingStorage: boolean
   errorStorage: Error | null | undefined | boolean
   loadingOps: boolean
+  errorOps: Error | null | undefined | boolean
   loadingBw: boolean
+  errorBw: Error | null | undefined | boolean
   isFetchingAny: boolean
   isLoadingInitial: boolean
   totalClassA: number
@@ -117,11 +121,17 @@ export function UsageStatCards({
   const deletedBytesProvenance = storage?.deleted_bytes_provenance
   const billedGbHours = observedStorageGbHours ?? storage?.total_billed_gb_hours ?? 0
   const loadingLocalStorage = loadingStorage && observedStorageGbHours == null
-  const roughCostA = (totalClassA / 1000) * rateA
-  const roughCostB = (totalClassB / 1000) * rateB
+  const roughCostA = errorOps ? 0 : (totalClassA / 1000) * rateA
+  const roughCostB = errorOps ? 0 : (totalClassB / 1000) * rateB
   const roughStorage = (billedGbHours / 720) * rateStorage
-  const roughBandwidth = totalBwGB * rateEgress
+  const roughBandwidth = errorBw ? 0 : totalBwGB * rateEgress
   const roughTotal = roughCostA + roughCostB + roughStorage + roughBandwidth
+  const excludedCosts = [
+    errorStorage && observedStorageGbHours == null ? 'storage' : null,
+    errorOps ? 'operations' : null,
+    errorBw ? 'CDN egress' : null,
+  ].filter((cost): cost is string => Boolean(cost))
+  const hasPartialCost = excludedCosts.length > 0
   const fmtUSD = (n: number) => formatUSD(n, { subDollarDigits: 2 })
 
   const loggedRequests = ((storage as Record<string, unknown> | undefined)?.compute_requests as number | undefined) ?? 0
@@ -287,7 +297,11 @@ export function UsageStatCards({
         label: <span>Operations:</span>,
         value: (
           <div className="flex flex-col items-end">
-            <strong className="text-foreground">{fmtUSD(roughCostA + roughCostB)}</strong>
+            {errorOps ? (
+              <strong className="text-destructive">n/a</strong>
+            ) : (
+              <strong className="text-foreground">{fmtUSD(roughCostA + roughCostB)}</strong>
+            )}
             <span className="text-[9px] uppercase tracking-tighter text-muted-foreground">
               A: ${rateA}/1K · B: ${rateBPer10k}/10K
             </span>
@@ -299,7 +313,11 @@ export function UsageStatCards({
         label: <span>CDN Egress:</span>,
         value: (
           <div className="flex flex-col items-end">
-            <strong className="text-foreground">{fmtUSD(roughBandwidth)}</strong>
+            {errorBw ? (
+              <strong className="text-destructive">n/a</strong>
+            ) : (
+              <strong className="text-foreground">{fmtUSD(roughBandwidth)}</strong>
+            )}
             <span className="text-[9px] uppercase tracking-tighter text-muted-foreground">
               Rate: ${rateEgress}/GB
             </span>
@@ -340,9 +358,11 @@ export function UsageStatCards({
       rateStorage,
       roughCostA,
       roughCostB,
+      errorOps,
       rateA,
       rateBPer10k,
       roughBandwidth,
+      errorBw,
       rateEgress,
       storage,
       computeRow,
@@ -389,7 +409,7 @@ export function UsageStatCards({
       />
       <StatCard
         title="Class A Ops (period)"
-        value={formatAbbreviatedCount(totalClassA)}
+        value={errorOps ? 'Unavailable' : formatAbbreviatedCount(totalClassA)}
         sub={
           <div className="min-h-[96px] space-y-1">
             <div>Writes, lists, deletes</div>
@@ -414,7 +434,7 @@ export function UsageStatCards({
       />
       <StatCard
         title="Class B Ops (period)"
-        value={formatAbbreviatedCount(totalClassB)}
+        value={errorOps ? 'Unavailable' : formatAbbreviatedCount(totalClassB)}
         sub={
           <div className="min-h-[96px] space-y-1">
             <div>Reads / downloads</div>
@@ -451,9 +471,9 @@ export function UsageStatCards({
             ) : (
               <div>
                 <BreakdownTable rows={costBreakdownRows} />
-                {errorStorage && observedStorageGbHours == null && (
+                {hasPartialCost && (
                   <div role="alert" className="text-[10px] text-destructive mt-0.5">
-                    Partial estimate — storage cost excluded.
+                    Partial estimate — {excludedCosts.join(excludedCosts.length > 2 ? ', ' : ' and ')} cost excluded.
                   </div>
                 )}
               </div>

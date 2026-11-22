@@ -73,7 +73,9 @@ const statProps = {
   loadingStorage: false,
   errorStorage: null,
   loadingOps: false,
+  errorOps: null,
   loadingBw: false,
+  errorBw: null,
   isFetchingAny: false,
   isLoadingInitial: false,
   totalClassA: 0,
@@ -111,6 +113,23 @@ describe('observed Platform usage', () => {
 
     expect(screen.getByText('0 B')).toBeInTheDocument()
     expect(screen.queryByText('Incomplete')).not.toBeInTheDocument()
+  })
+
+  it('does not guess zero usage or a full cost when operations or bandwidth reads fail', () => {
+    render(
+      <UsageStatCards
+        {...statProps}
+        errorOps={new Error('operations unavailable')}
+        errorBw={new Error('bandwidth unavailable')}
+        totalClassA={0}
+        totalClassB={0}
+        totalBwGB={0}
+      />,
+    )
+
+    expect(screen.getAllByText('Unavailable')).toHaveLength(2)
+    expect(screen.getAllByText('n/a').length).toBeGreaterThanOrEqual(2)
+    expect(screen.getByText(/Partial estimate.*operations and CDN egress.*excluded/)).toBeInTheDocument()
   })
 
   it('labels account-wide storage and summarizes counters without adding snapshots', () => {

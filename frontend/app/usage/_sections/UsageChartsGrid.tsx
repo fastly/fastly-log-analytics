@@ -508,7 +508,7 @@ export function UsageChartsGrid({
           </AnalyticsCard>
         </>
       )}
-      {isRumEnabled && rumBreakdown && (
+      {isRumEnabled && Boolean(rumBreakdown || loadingRumBreakdown || errorRumBreakdown) && (
         <AnalyticsCard
           title="Real User Monitoring (RUM) Operations"
           description="RUM beacon volume and estimated FOS Class A operation cost"
@@ -518,7 +518,7 @@ export function UsageChartsGrid({
           isEmpty={!rumBreakdown?.data || rumBreakdown.data.length === 0}
         >
           <div className="space-y-4 p-4">
-            {rumBreakdown.total_beacons === 0 ? (
+            {!rumBreakdown ? null : rumBreakdown.total_beacons === 0 ? (
               <div className="text-center py-8 text-muted-foreground">
                 <p className="text-sm mb-2">No RUM beacons collected yet</p>
                 <p className="text-xs">
@@ -558,7 +558,7 @@ export function UsageChartsGrid({
                 </div>
               </div>
             )}
-            {rumBreakdown.note && (
+            {rumBreakdown?.note && (
               <div className="p-3 bg-muted/50 border rounded text-xs text-muted-foreground">
                 {rumBreakdown.note}
               </div>

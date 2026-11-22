@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { handleCloudAnalyticalRequest } from "./adapter";
+import { handleCloudAnalyticalRequest, resetCloudPlatformBundleCache } from "./adapter";
 import { ORIGIN_SCAN_COLUMNS, setOriginSqlExecutor } from "./origin";
 import { PERFORMANCE_SCAN_COLUMNS, setPerformanceEngineClient } from "./performance";
 import { securityScanColumns, setSecurityEngineClient } from "./security";
 import { getDuckDBEngine, type DuckDBReadContext } from "./dashboard/duckdb";
 import * as usage from "./usage/summary";
+import { parseComputeBilling } from "./usage/summary";
 import { fixtureUsageInput } from "./usage/fixtures";
 import { resetComputeBillingCache } from "./usage/computeUsage";
 import * as ops from "./telemetry/client";
@@ -77,24 +78,61 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     );
   });
 
-  it("answers /api/usage/platform from the Cloud admin route unchanged", async () => {
+  it("shares one Cloud Platform Metrics read with /api/usage/compute", async () => {
     const payload = {
       source: "partial",
       storage: { status: "ok", scope: "account", bytes: 2048 },
       compute: { status: "ok", scope: "app_and_worker", requests: 7 },
       ngwaf: { status: "not_configured" },
     };
-    const fetchMock = vi.fn().mockResolvedValue(Response.json(payload));
+    const billing = {
+      services: [
+        {
+          role: "app",
+          compute_requests: 7,
+          compute_requests_buckets: [{ start_time: 1763424000, compute_requests: 7 }],
+          compute_execution_time_ms: 70,
+          compute_execution_time_ms_buckets: [{ start_time: 1763424000, compute_execution_time_ms: 70 }],
+          compute_request_time_billed_ms: 700,
+          compute_request_time_billed_ms_buckets: [
+            { start_time: 1763424000, compute_request_time_billed_ms: 700 },
+          ],
+          bandwidth: 0,
+          kv_store_class_a_operations: 0,
+          kv_store_class_b_operations: 0,
+          covered_from: 1763424000,
+          covered_to: 1763510400,
+        },
+        {
+          role: "worker",
+          compute_requests: 0,
+          compute_execution_time_ms: 0,
+          compute_request_time_billed_ms: 0,
+          bandwidth: 0,
+          kv_store_class_a_operations: 0,
+          kv_store_class_b_operations: 0,
+        },
+      ],
+    };
+    const fetchMock = vi.fn().mockResolvedValue(Response.json({ platform: payload, compute_billing: billing }));
+    expect(parseComputeBilling(billing)).toMatchObject({ requests: 7, executionTimeMs: 70 });
     vi.stubGlobal("fetch", fetchMock);
 
-    const response = await handleCloudAnalyticalRequest(new Request(
+    const platformResponse = await handleCloudAnalyticalRequest(new Request(
       "http://localhost/api/usage/platform?from=1763424000000&to=1763510400000",
     ));
+    const computeResponse = await handleCloudAnalyticalRequest(new Request(
+      "http://localhost/api/usage/compute?start_time=2025-11-18T00%3A00%3A00.000Z&end_time=2025-11-19T00%3A00%3A00.000Z",
+    ));
 
-    expect(response?.status).toBe(200);
-    expect(await response?.json()).toEqual(payload);
+    expect(platformResponse?.status).toBe(200);
+    expect(await platformResponse?.json()).toEqual(payload);
+    expect(await computeResponse?.json()).toMatchObject({ source: "fastly", requests: 7, vcpu_ms: 70 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledWith(
-      expect.stringContaining("/api/admin/usage/platform?from=1763424000000&to=1763510400000"),
+      expect.stringContaining(
+        "/api/admin/usage/platform?from=1763424000000&to=1763510400000&include_billing=1",
+      ),
       expect.objectContaining({ signal: expect.anything() }),
     );
   });
@@ -140,6 +178,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     setPerformanceEngineClient(null);
     setSecurityEngineClient(null);
     resetComputeBillingCache();
+    resetCloudPlatformBundleCache();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
@@ -191,12 +230,41 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     const from = Date.parse("2026-11-10T00:00:00Z");
     const to = from + 2 * 3_600_000;
     const fetchSummary = vi.spyOn(usage, "fetchUsageSummary");
-    const fetchBilling = vi.spyOn(usage, "fetchComputeBilling").mockResolvedValue({
-      requests: 5, executionTimeMs: 50, billedTimeMs: 500, coveredFrom: from, coveredTo: from + 3_600_000,
-      computeBandwidthBytes: 0, cdnRequests: null, kvClassA: 0, kvClassB: 0, secrets: null,
-      byRole: { app: { requests: 3, vcpuMs: 30 }, worker: { requests: 2, vcpuMs: 20 } },
-      computeByHour: [{ t: from, appRequests: 3, workerRequests: 2, appVcpuMs: 30, workerVcpuMs: 20, billedMs: 500 }],
-    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({
+      platform: { source: "unavailable", storage: {}, compute: {}, ngwaf: {} },
+      compute_billing: {
+        services: [
+          {
+            role: "app",
+            compute_requests: 3,
+            compute_requests_buckets: [{ start_time: from / 1000, compute_requests: 3 }],
+            compute_execution_time_ms: 30,
+            compute_execution_time_ms_buckets: [{ start_time: from / 1000, compute_execution_time_ms: 30 }],
+            compute_request_time_billed_ms: 300,
+            compute_request_time_billed_ms_buckets: [
+              { start_time: from / 1000, compute_request_time_billed_ms: 300 },
+            ],
+            bandwidth: 0,
+            kv_store_class_a_operations: 0,
+            kv_store_class_b_operations: 0,
+          },
+          {
+            role: "worker",
+            compute_requests: 2,
+            compute_requests_buckets: [{ start_time: from / 1000, compute_requests: 2 }],
+            compute_execution_time_ms: 20,
+            compute_execution_time_ms_buckets: [{ start_time: from / 1000, compute_execution_time_ms: 20 }],
+            compute_request_time_billed_ms: 200,
+            compute_request_time_billed_ms_buckets: [
+              { start_time: from / 1000, compute_request_time_billed_ms: 200 },
+            ],
+            bandwidth: 0,
+            kv_store_class_a_operations: 0,
+            kv_store_class_b_operations: 0,
+          },
+        ],
+      },
+    })));
     const params = new URLSearchParams({
       start_time: new Date(from).toISOString(),
       end_time: new Date(to).toISOString(),
@@ -206,7 +274,6 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       new Request(`http://localhost/api/usage/compute?${params}`),
     );
 
-    expect(fetchBilling).toHaveBeenCalledWith({ from, to }, expect.anything());
     expect(fetchSummary).not.toHaveBeenCalled();
     expect(await response!.json()).toMatchObject({
       source: "fastly",

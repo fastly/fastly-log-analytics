@@ -632,16 +632,24 @@ def usage_current_storage(
             )
 
         archive_bytes = archive_objects = archive_expired_bytes = 0
-        archive_storage_complete = False
+        service_id = str(src.get("service_id") or src["name"])
         try:
-            from backend.high_scale.postgres_control import PostgresControlPlane
-
-            summary = PostgresControlPlane().archive_storage_summary(str(src.get("service_id") or src["name"]))
-            archive_bytes, archive_objects = summary["live_bytes"], summary["live_objects"]
-            archive_expired_bytes = summary["expired_30d_bytes"]
-            archive_storage_complete = True
+            high_scale_service = get_high_scale_service_registry().resolve(service_id)
+            archive_storage_complete = high_scale_service is None
         except Exception:
-            logger.debug("usage_current_storage: archive summary failed (ignored)", exc_info=True)
+            high_scale_service = None
+            archive_storage_complete = False
+            logger.debug("usage_current_storage: archive applicability failed (ignored)", exc_info=True)
+        if high_scale_service is not None:
+            try:
+                from backend.high_scale.postgres_control import PostgresControlPlane
+
+                summary = PostgresControlPlane().archive_storage_summary(service_id)
+                archive_bytes, archive_objects = summary["live_bytes"], summary["live_objects"]
+                archive_expired_bytes = summary["expired_30d_bytes"]
+                archive_storage_complete = True
+            except Exception:
+                logger.debug("usage_current_storage: archive summary failed (ignored)", exc_info=True)
 
         # Standard's cloud copy deletes superseded and expired files; FOS bills each for 30 days after deletion.
         cloud_copy_deleted_bytes = 0

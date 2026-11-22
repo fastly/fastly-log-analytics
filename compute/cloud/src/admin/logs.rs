@@ -535,8 +535,11 @@ fn platform_usage(runtime: &impl Runtime, query: &str) -> Outcome {
     if from >= to || to - from > BILLING_MAX_SPAN_S {
         return fail(400, "invalid_range");
     }
+    let include_billing = url::form_urlencoded::parse(query.as_bytes())
+        .find(|(key, _)| key == "include_billing")
+        .is_some_and(|(_, value)| value == "1");
     done(
-        crate::telemetry::usage::platform_usage(runtime, from, to),
+        crate::telemetry::usage::platform_usage(runtime, from, to, include_billing),
         None,
     )
 }
