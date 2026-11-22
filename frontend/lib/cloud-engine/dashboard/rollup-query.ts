@@ -890,6 +890,7 @@ export type RollupResidual = {
 };
 
 const DECODED_LIMIT = 64;
+const RESIDUAL_READ_CONCURRENCY = 4;
 let rollupEpoch = 0;
 type SharedRollup = {
   controller: AbortController;
@@ -1182,8 +1183,11 @@ async function readResidual(
     : null;
   const into = residual.accumulate(fromMs, toMs);
   let added = Promise.resolve();
-  await Promise.all(
-    files.map(async (file) => {
+  let next = 0;
+  const worker = async () => {
+    while (next < files.length) {
+      const file = files[next++];
+      assertActive();
       const bytes = project && file.size > 0
         ? (await (await project(file)).read()).bytes
         : (await source.fetchFile(file.key, signal)).bytes;
@@ -1196,7 +1200,13 @@ async function readResidual(
       added = add;
       await add;
       assertActive();
-    }),
+    }
+  };
+  await Promise.all(
+    Array.from(
+      { length: Math.min(RESIDUAL_READ_CONCURRENCY, files.length) },
+      worker,
+    ),
   );
   assertActive();
   return into.finish();

@@ -121,8 +121,7 @@ function addElapsed(agg: RollupAgg, elapsed: number | null) {
 export const INSIGHTS_RESIDUAL: RollupResidual = {
   id: "insights-residual-v2",
   columns: COLUMNS,
-  // A few edge-straddling hour compacts and an open tail; more reads raw.
-  maxBytes: 160 * 1024 * 1024,
+  maxBytes: 256 * 1024 * 1024,
   keys: KEYS,
   accumulate(fromMs, toMs) {
     const cities = new Map<string, RollupAgg>();
