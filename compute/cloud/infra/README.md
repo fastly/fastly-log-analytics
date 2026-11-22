@@ -118,6 +118,21 @@ This verifies the front's identity and deployed SHA before using the documented
 `POST /service/{service_id}/purge/flp-html` endpoint. A purge error remains an
 error; it never becomes a successful release or an implicit full redeploy.
 
+## Early Hints
+
+`make cloud-build` reads each exported route's `<head>` and writes
+`pkg/early-hints.json`. It records that file's digest as `early_hints_sha256` in
+`provenance.json`. Each route gets at most 10 links, in this order: stylesheets,
+up to six boot scripts, then font preloads. Routes listed in
+`frontend/static-export-policy.json` `earlyHintsDuckdbRoutes` also get the DuckDB
+worker and wasm, both at low priority. Keep that list in step with the pages that
+start the DuckDB engine on load. Deploy rejects a hints file whose digest does
+not match. It writes the hints into the front VCL's `#EARLYHINTS` block: a 103 on
+first-hop HTTP/2 and HTTP/3 GET document navigations, and the same `Link` header
+on the final 200 HTML response. API, auth, FOS, `_next`, `/duckdb`, `/geo`
+and parquet paths are never hinted. Without a hints file, the block stays empty
+and the VCL behaves as before.
+
 ## Verify
 
 ```sh

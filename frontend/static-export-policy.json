@@ -25,5 +25,20 @@
   "authenticationRoutes": [
     "/share-login",
     "/share-login/acknowledge"
+  ],
+  "earlyHintsDuckdbRoutes": [
+    "/assets-shield",
+    "/dashboard",
+    "/fastly-value",
+    "/insights",
+    "/network",
+    "/origin",
+    "/performance",
+    "/rum",
+    "/security",
+    "/sessions",
+    "/sessions/detail",
+    "/sessions/stream",
+    "/streaming"
   ]
 }

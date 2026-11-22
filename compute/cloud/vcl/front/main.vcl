@@ -10,6 +10,15 @@ ratecounter auth_challenge_rc {}
 
 #RATELIMIT_END
 
+#EARLYHINTS_BEGIN
+# Release deploys replace this block with per-route Link hints from the frozen static export.
+sub flp_early_hints {
+}
+
+sub flp_hint_links {
+}
+#EARLYHINTS_END
+
 sub vcl_recv {
   if (!req.is_ssl && req.url.path !~ "^/_tick$|^/_flush$") {
     unset req.http.x-flp-fos-service;
@@ -17,6 +26,7 @@ sub vcl_recv {
     error 801 "Force TLS";
   }
   if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {
+    h3.alt_svc();
     set req.http.Fastly-Client-IP = client.ip;
     if (req.url ~ "^//") {
       set req.url = regsub(req.url, "^/+", "/");
@@ -62,6 +72,16 @@ sub vcl_recv {
       }
     }
     #RATELIMIT_END
+    # 103 hints only help h2/h3 top-level navigations while the browser waits on Compute.
+    if (
+      req.method == "GET" &&
+      (fastly_info.is_h2 || fastly_info.is_h3) &&
+      (req.http.Sec-Fetch-Dest == "document" || (!req.http.Sec-Fetch-Dest && req.http.Accept ~ "text/html")) &&
+      req.url.path !~ "^/+(api|auth|fos|_tick|_flush|_next|duckdb|geo)(/|$)" &&
+      req.url.ext != "parquet"
+    ) {
+      call flp_early_hints;
+    }
     declare local var.cdn_cookie STRING;
     if (req.http.Cookie:__Host-flp_cdn && req.http.Cookie:__Host-flp_cdn != "") {
       set var.cdn_cookie = req.http.Cookie:__Host-flp_cdn;
@@ -404,6 +424,15 @@ sub vcl_fetch {
     set beresp.http.Surrogate-Key = "flp-static";
     return(deliver);
   }
+  # DuckDB's worker and wasm live under the npm package version, so their bytes never change.
+  if (req.url.path ~ "^/duckdb/[^/]+/duckdb-[^/]+$" && beresp.status == 200) {
+    unset beresp.http.Set-Cookie;
+    set beresp.cacheable = true;
+    set beresp.ttl = 31536000s;
+    set beresp.http.Cache-Control = "public, max-age=31536000, immutable";
+    set beresp.http.Surrogate-Key = "flp-static";
+    return(deliver);
+  }
   if ((req.url.path ~ "^/(duckdb|geo)/" || req.url.path ~ "^/maplibre-gl-") && beresp.status == 200) {
     unset beresp.http.Set-Cookie;
     set beresp.cacheable = true;
@@ -460,6 +489,10 @@ sub vcl_deliver {
   #RATELIMIT_END
   if (fastly.ff.visits_this_service == 0) {
     unset resp.http.x-flp-auth-fail;
+    # Same preloads as the 103, for clients that ignore Early Hints (Safari, HTTP/1.1).
+    if (req.method == "GET" && resp.status == 200 && resp.http.Content-Type ~ "^text/html" && !req.http.x-flp-fos-service) {
+      call flp_hint_links;
+    }
   }
   unset resp.http.x-flp-front-key;
   unset resp.http.x-flp-front-rl;
