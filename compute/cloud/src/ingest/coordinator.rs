@@ -277,9 +277,50 @@ fn estimated_windows(keys: &[&str], raw_prefix: &str, window_s: i64, period_s: i
     windows.len() + unknown + 1
 }
 
-/// Greedy, key-ordered packing of `objects` into at most `width` shards. Each shard holds at
-/// most `SHARD_MAX_OBJECTS >> replans` objects and `SHARD_MAX_ZSTD_BYTES`, and its objects plus
-/// expected windows fit one worker budget. Returns the shards; objects past them are left over.
+/// The grid window of a raw key's minute directory: the window most of its rows land in.
+fn primary_window(key: &str, raw_prefix: &str, window_s: i64) -> Option<i64> {
+    raw_key_minute(key, raw_prefix).map(|minute| minute.div_euclid(window_s.max(1)))
+}
+
+/// Largest `n' <= n` that does not split a primary window between `objects[..n']` and the
+/// objects after it (`more`: the listing goes on past `objects`), or `n` when every boundary at
+/// or below it would split one.
+fn window_cut(
+    objects: &[(String, u64)],
+    n: usize,
+    more: bool,
+    raw_prefix: &str,
+    window_s: i64,
+) -> usize {
+    let len = objects.len();
+    let window = |i: usize| {
+        if i < len {
+            primary_window(&objects[i].0, raw_prefix, window_s)
+        } else if more && len > 0 {
+            primary_window(&objects[len - 1].0, raw_prefix, window_s)
+        } else {
+            None
+        }
+    };
+    if n == 0 || n > len {
+        return n;
+    }
+    let mut cut = n;
+    while cut > 0 && window(cut).is_some() && window(cut - 1) == window(cut) {
+        cut -= 1;
+    }
+    if cut == 0 {
+        n
+    } else {
+        cut
+    }
+}
+
+/// Window-affine, key-ordered packing of `objects` into at most `width` shards. Each shard holds
+/// at most `SHARD_MAX_OBJECTS >> replans` objects and `SHARD_MAX_ZSTD_BYTES`, and its objects plus
+/// expected windows fit one worker budget. Objects of one primary window stay in one shard when
+/// they fit one, so each shard writes a window's summary only once per run instead of every
+/// shard its keys straddle. Returns the shards; objects past them are left over.
 #[allow(clippy::too_many_arguments)]
 fn pack(
     objects: &[(String, u64)],
@@ -302,25 +343,55 @@ fn pack(
     } else {
         cap
     };
+    let fits = |shard: &[(String, u64)], extra: &[(String, u64)], limit: usize| {
+        let zstd_bytes: u64 = shard.iter().chain(extra).map(|o| o.1).sum();
+        let keys: Vec<&str> = shard.iter().chain(extra).map(|o| o.0.as_str()).collect();
+        keys.len() <= limit
+            && zstd_bytes <= SHARD_MAX_ZSTD_BYTES
+            && estimated_windows(&keys, raw_prefix, window_s, period_s)
+                <= worker::window_room(keys.len())
+    };
     let mut shards: Vec<Vec<(String, u64)>> = Vec::new();
     let mut current: Vec<(String, u64)> = Vec::new();
-    for object in objects {
-        let fits = current.is_empty() || {
-            let zstd_bytes: u64 = current.iter().map(|o| o.1).sum::<u64>() + object.1;
-            let mut keys: Vec<&str> = current.iter().map(|o| o.0.as_str()).collect();
-            keys.push(&object.0);
-            current.len() < per
-                && zstd_bytes <= SHARD_MAX_ZSTD_BYTES
-                && estimated_windows(&keys, raw_prefix, window_s, period_s)
-                    <= worker::window_room(keys.len())
+    let mut start = 0;
+    while start < objects.len() {
+        let window = primary_window(&objects[start].0, raw_prefix, window_s);
+        let end = if window.is_some() {
+            start
+                + objects[start..]
+                    .iter()
+                    .take_while(|o| primary_window(&o.0, raw_prefix, window_s) == window)
+                    .count()
+        } else {
+            start + 1
         };
-        if !fits {
-            shards.push(std::mem::take(&mut current));
-            if shards.len() >= width {
-                return shards;
-            }
+        let group = &objects[start..end];
+        start = end;
+        // A whole window joins a shard that is below its balanced share and can hold it, or opens
+        // a fresh shard; only a window larger than one shard is dealt object by object.
+        if current.len() < per && fits(&current, group, cap) {
+            current.extend_from_slice(group);
+            continue;
         }
-        current.push(object.clone());
+        if fits(&[], group, cap) {
+            if !current.is_empty() {
+                shards.push(std::mem::take(&mut current));
+                if shards.len() >= width {
+                    return shards;
+                }
+            }
+            current.extend_from_slice(group);
+            continue;
+        }
+        for object in group {
+            if !current.is_empty() && !fits(&current, std::slice::from_ref(object), per) {
+                shards.push(std::mem::take(&mut current));
+                if shards.len() >= width {
+                    return shards;
+                }
+            }
+            current.push(object.clone());
+        }
     }
     if !current.is_empty() {
         shards.push(current);
@@ -910,16 +981,27 @@ fn plan_new<R: Runtime>(
         0 => 0,
         bytes => capped_segment_bytes(bytes, largest),
     };
-    let laid = layout(
-        &objects,
-        width,
-        0,
-        &raw_prefix,
-        window_s,
-        ctx.period_s(),
-        true,
-        segment_bytes,
-    );
+    let lay = |objects: &[(String, u64)]| {
+        layout(
+            objects,
+            width,
+            0,
+            &raw_prefix,
+            window_s,
+            ctx.period_s(),
+            true,
+            segment_bytes,
+        )
+    };
+    // A run that cannot take every listed object stops at a window boundary, so the next run
+    // converts the rest of that window instead of both writing a summary for it.
+    let more = ctx.report.backlog_listing;
+    let listed = window_cut(&objects, objects.len(), more, &raw_prefix, window_s);
+    let mut laid = lay(&objects[..listed]);
+    let cut = window_cut(&objects, laid.taken, more, &raw_prefix, window_s);
+    if cut < laid.taken {
+        laid = lay(&objects[..cut]);
+    }
     let chosen = &objects[..laid.taken];
     let nonce = new_nonce(runtime)?;
     let schema = ctx.schema_hash.clone();
@@ -2706,4 +2788,78 @@ fn cleanup_and_replan<R: Runtime>(
     }
     ctx.report.more_pending = true;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PREFIX: &str = "raw/request/";
+
+    fn objects(minutes: &[(u32, usize)]) -> Vec<(String, u64)> {
+        minutes
+            .iter()
+            .flat_map(|&(minute, count)| {
+                (0..count).map(move |i| {
+                    (
+                        format!("{PREFIX}year=2027/month=01/day=15/hour=08/minute={minute:02}/f{i:02}.zst"),
+                        1000,
+                    )
+                })
+            })
+            .collect()
+    }
+
+    fn windows(shard: &[(String, u64)]) -> BTreeSet<i64> {
+        shard
+            .iter()
+            .filter_map(|o| primary_window(&o.0, PREFIX, 60))
+            .collect()
+    }
+
+    #[test]
+    fn pack_keeps_each_window_in_one_shard() {
+        let objects = objects(&[(0, 8), (1, 8), (2, 8)]);
+        let shards = pack(&objects, 8, 0, PREFIX, 60, 60, true);
+        assert_eq!(shards.iter().map(Vec::len).sum::<usize>(), 24);
+        for shard in &shards {
+            assert!(shard.len() <= SHARD_MAX_OBJECTS);
+        }
+        let mut seen = BTreeSet::new();
+        for shard in &shards {
+            for window in windows(shard) {
+                assert!(
+                    seen.insert(window),
+                    "window {window} in two shards: {shards:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pack_deals_a_window_larger_than_a_shard_object_by_object() {
+        let objects = objects(&[(0, 30)]);
+        let shards = pack(&objects, 8, 0, PREFIX, 60, 60, true);
+        assert_eq!(
+            shards.iter().map(Vec::len).collect::<Vec<_>>(),
+            [15, 15],
+            "balanced split of one oversized window"
+        );
+    }
+
+    #[test]
+    fn window_cut_backs_off_to_a_window_boundary() {
+        let three = objects(&[(0, 3), (1, 3), (2, 3)]);
+        assert_eq!(window_cut(&three, 5, false, PREFIX, 60), 3);
+        assert_eq!(window_cut(&three, 6, false, PREFIX, 60), 6);
+        assert_eq!(window_cut(&three, 9, false, PREFIX, 60), 9);
+        assert_eq!(window_cut(&three, 9, true, PREFIX, 60), 6);
+        assert_eq!(
+            window_cut(&three, 2, false, PREFIX, 60),
+            2,
+            "one window: no cut"
+        );
+        let single = objects(&[(0, 4)]);
+        assert_eq!(window_cut(&single, 4, true, PREFIX, 60), 4);
+    }
 }
