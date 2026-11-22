@@ -1183,6 +1183,143 @@ def test_deploy_uploads_identical_artifact_before_paired_activation_and_html_pur
     assert "# frozen-test-source" in front_vcl
 
 
+EARLY_HINTS = {
+    "version": 1,
+    "routes": {
+        "/": [
+            "</_next/static/chunks/a.css>; rel=preload; as=style",
+            "</_next/static/chunks/b.js>; rel=preload; as=script",
+        ],
+        "/admin/rum": [
+            "</_next/static/chunks/a.css>; rel=preload; as=style",
+            "</duckdb/1.2.3/duckdb-eh.wasm>; rel=preload; as=fetch; crossorigin; fetchpriority=low",
+        ],
+    },
+}
+
+
+def add_early_hints(package: Path, hints: dict = EARLY_HINTS) -> bytes:
+    data = json.dumps(hints).encode()
+    (package.parent / "early-hints.json").write_bytes(data)
+    provenance_path = package.parent / "provenance.json"
+    provenance = json.loads(provenance_path.read_text())
+    provenance["early_hints_sha256"] = hashlib.sha256(data).hexdigest()
+    provenance_path.write_text(json.dumps(provenance))
+    return data
+
+
+def test_early_hints_render_one_link_per_argument_on_normalized_routes() -> None:
+    block = provision.early_hints_vcl(EARLY_HINTS)
+    early, final = block.split("sub flp_hint_links {")
+
+    assert early.count('set var.flp_hint_route = regsub(req.url.path, "(\\.html|/)$", "");') == 1
+    assert (
+        '  if (var.flp_hint_route == "/") {\n'
+        "    early_hints(\n"
+        '      {"Link: </_next/static/chunks/a.css>; rel=preload; as=style"},\n'
+        '      {"Link: </_next/static/chunks/b.js>; rel=preload; as=script"}\n'
+        "    );\n"
+        '  } else if (var.flp_hint_route == "/admin/rum") {\n'
+        "    early_hints(\n"
+    ) in early
+    assert "Cookie" not in block
+    assert (
+        '  } else if (var.flp_hint_route == "/admin/rum") {\n'
+        '    set resp.http.Link = {"</_next/static/chunks/a.css>; rel=preload; as=style, '
+        '</duckdb/1.2.3/duckdb-eh.wasm>; rel=preload; as=fetch; crossorigin; fetchpriority=low"};\n'
+    ) in final
+
+
+def test_front_vcl_without_hints_keeps_an_empty_hint_sub() -> None:
+    plain = provision.load_vcl(True)
+    hinted = provision.load_vcl(True, early_hints=EARLY_HINTS)
+
+    assert "sub flp_early_hints {\n}\n" in plain
+    assert "sub flp_hint_links {\n}\n" in plain
+    assert "early_hints(" not in plain
+    assert provision._EARLY_HINTS_BLOCK.sub("", hinted) == provision._EARLY_HINTS_BLOCK.sub("", plain)
+    with pytest.raises(ValueError, match="no early hints block"):
+        provision.load_vcl(True, source="sub vcl_recv {\n}\n", early_hints=EARLY_HINTS)
+
+
+def test_front_vcl_keys_app_shells_by_the_release_build() -> None:
+    sha = "0123456789abcdef0123456789abcdef01234567"
+    plain = provision.load_vcl(True)
+    keyed = provision.load_vcl(True, build_sha=sha)
+
+    assert "sub flp_build_hash {\n}\n" in plain
+    assert keyed.count(f'set req.hash += "build:{sha}";') == 1
+    assert provision._BUILD_KEY_BLOCK.sub("", keyed) == provision._BUILD_KEY_BLOCK.sub("", plain)
+    legacy = "sub vcl_recv {\n}\n"
+    assert provision.load_vcl(True, source=legacy, build_sha=sha) == legacy
+    for bad in ("A" * 40, "a" * 39, 'a" ; error 600; "'):
+        with pytest.raises(ValueError, match="build SHA"):
+            provision.load_vcl(True, build_sha=bad)
+
+
+def test_front_vcl_advertises_http3_on_the_first_tls_hop() -> None:
+    recv = provision.load_vcl(False).split("sub vcl_recv {", 1)[1]
+    tls_redirect = recv.index('error 801 "Force TLS";')
+    first_hop = recv.index("if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {\n    h3.alt_svc();\n")
+
+    assert recv.count("h3.alt_svc();") == 1
+    assert tls_redirect < first_hop
+
+
+SAFE_LINK = "</a.css>; rel=preload; as=style"
+
+
+@pytest.mark.parametrize(
+    "routes",
+    [
+        {"/api/files": [SAFE_LINK, SAFE_LINK]},
+        {'/x") { error 600; } if ("': [SAFE_LINK, SAFE_LINK]},
+        {"/dashboard\n": [SAFE_LINK, SAFE_LINK]},
+        {"/dashboard": [SAFE_LINK, '</a.js>; rel=preload"}; error 600; {"']},
+        {"/dashboard": [SAFE_LINK, "</a.js>\r\nSet-Cookie: x=1"]},
+        {"/dashboard": [SAFE_LINK, "<//evil.example/a.js>; rel=preload"]},
+        {"/dashboard": [SAFE_LINK]},
+        {"/dashboard": {"links": [SAFE_LINK, SAFE_LINK]}},
+        {"/dashboard": [f"</{'a' * 200}.js>; rel=preload; as=script"] * 20},
+    ],
+)
+def test_early_hints_reject_values_that_could_escape_or_overflow(routes) -> None:
+    with pytest.raises(ValueError):
+        provision.load_vcl(True, early_hints={"version": 1, "routes": routes})
+
+
+@pytest.mark.parametrize("rate_limiting", [True, False])
+def test_falco_lints_front_with_injected_early_hints(rate_limiting) -> None:
+    provision.lint_front(rate_limiting, early_hints=EARLY_HINTS, build_sha="a" * 40)
+
+
+def test_deploy_provenance_binds_early_hints_to_the_build(package) -> None:
+    data = add_early_hints(package)
+    verified = provision.verify_provenance(Path.cwd(), package)
+    assert verified["early_hints_sha256"] == hashlib.sha256(data).hexdigest()
+    assert provision._wasm_deploy.load_early_hints(package, verified) == EARLY_HINTS
+
+    (package.parent / "early-hints.json").write_bytes(data.replace(b"b.js", b"c.js"))
+    with pytest.raises(ValueError, match="Early hints changed"):
+        provision.verify_provenance(Path.cwd(), package)
+    (package.parent / "early-hints.json").unlink()
+    with pytest.raises(ValueError, match="Early hints changed"):
+        provision.verify_provenance(Path.cwd(), package)
+
+
+def test_deploy_uploads_front_vcl_with_the_builds_early_hints(package, inventory_path) -> None:
+    add_early_hints(package)
+    _deploy_inventory(inventory_path)
+    api = SyntheticDeployAPI()
+
+    provision.deploy(api, inventory_path, package, "team-a")
+
+    front_vcl = next(fields["content"] for _, path, fields, _ in api.calls if path.endswith("/vcl/main"))
+    assert "# frozen-test-source" in front_vcl
+    assert '{"Link: </_next/static/chunks/b.js>; rel=preload; as=script"}' in front_vcl
+    assert f'set req.hash += "build:{"a" * 40}";' in front_vcl
+
+
 def test_deploy_retries_an_activation_that_returned_200_but_did_not_take(package, inventory_path) -> None:
     _deploy_inventory(inventory_path)
     api = SyntheticDeployAPI(drop_activations=1)

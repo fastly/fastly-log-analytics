@@ -611,8 +611,40 @@ sub fos_reads_keep_the_platform_accept_encoding {
 
 
 // @scope: fetch
-sub duckdb_has_day_ttl_and_revalidates {
+sub duckdb_versioned_core_is_immutable_for_a_year {
   set req.url = "/duckdb/1.33.1-dev57.0/duckdb-eh.wasm";
+  set beresp.status = 200;
+  set beresp.http.Content-Type = "application/wasm";
+  set beresp.http.Set-Cookie = "must-not-cache=1";
+  testing.call_subroutine("vcl_fetch");
+  assert.true(beresp.cacheable);
+  assert.equal(beresp.ttl, 31536000s);
+  assert.equal(beresp.http.Cache-Control, "public, max-age=31536000, immutable");
+  assert.equal(beresp.http.Content-Type, "application/wasm");
+  assert.is_notset(beresp.http.Set-Cookie);
+  assert.equal(beresp.http.Surrogate-Key, "flp-static");
+  assert.state(deliver);
+
+  set req.url = "/duckdb/1.33.1-dev57.0/duckdb-browser-eh.worker.js";
+  testing.call_subroutine("vcl_fetch");
+  assert.equal(beresp.http.Cache-Control, "public, max-age=31536000, immutable");
+}
+
+
+// @scope: recv
+sub duckdb_wasm_requests_prefer_brotli {
+  testing.inject_variable("req.is_ssl", true);
+  set req.url = "/duckdb/1.33.1-dev57.0/duckdb-eh.wasm";
+  set req.http.Fastly-Orig-Accept-Encoding = "gzip, deflate, br, zstd";
+  set req.http.Accept-Encoding = "gzip";
+  testing.call_subroutine("vcl_recv");
+  assert.equal(req.http.Accept-Encoding, "br, gzip");
+}
+
+
+// @scope: fetch
+sub duckdb_has_day_ttl_and_revalidates {
+  set req.url = "/duckdb/1.33.1-dev57.0/extensions/v1.5.4/wasm_eh/parquet.duckdb_extension.wasm";
   set beresp.status = 200;
   set beresp.http.Set-Cookie = "must-not-cache=1";
   testing.call_subroutine("vcl_fetch");
