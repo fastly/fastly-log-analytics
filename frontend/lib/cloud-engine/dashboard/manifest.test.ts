@@ -959,4 +959,72 @@ describe("closed-hour manifest cache", () => {
     const userBKey = JSON.stringify([activeScope, "request", "raw", false]);
     expect(entries.has(manifestSnapshotUrl(userBKey))).toBe(false);
   });
+
+  it("skips doomed delta calls when observed catalog generation is more than 32 commits ahead of persisted snapshot", async () => {
+    const { entries } = fakeManifestCacheStorage();
+    const scope = '["https://origin","user-stale","svc-a"]';
+    const key = JSON.stringify([scope, "request", "raw", false]);
+    await persistManifestSnapshot(key, {
+      from: iso(T0),
+      to: iso(T0 + H),
+      generation: 10,
+      manifest: {
+        files: [file(T0)],
+        complete: true,
+        catalogGeneration: 10,
+      },
+    });
+    expect(entries.has(manifestSnapshotUrl(key))).toBe(true);
+
+    const calls: URLSearchParams[] = [];
+    const fetchJson = Object.assign(
+      vi.fn(async (input: string) => {
+        const params = new URL(input, "http://x").searchParams;
+        calls.push(params);
+        return {
+          files: [file(T0 + H)],
+          next_cursor: null,
+          complete: true,
+          catalog_generation: 80,
+        };
+      }),
+      { manifestCacheScope: () => scope },
+    );
+
+    observeManifestCommit(fetchJson, { type: "ready", generation: 80 });
+    const manifest = await fetchManifest(fetchJson, iso(T0), iso(T0 + 2 * H));
+    expect(manifest.catalogGeneration).toBe(80);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].has("since_generation")).toBe(false);
+  });
+
+  it("restarts paginated full discovery once when a pagination cursor expires with 409", async () => {
+    let attempts = 0;
+    const fetchJson = vi.fn(async (input: string) => {
+      const params = new URL(input, "http://x").searchParams;
+      attempts++;
+      if (attempts === 1) {
+        return {
+          files: [file(T0)],
+          next_cursor: "expired-cursor",
+          complete: false,
+          catalog_generation: 11,
+        };
+      }
+      if (params.get("cursor") === "expired-cursor") {
+        throw new ManifestRequestError(409, "Catalog snapshot expired; restart discovery");
+      }
+      return {
+        files: [file(T0), file(T0 + H)],
+        next_cursor: null,
+        complete: true,
+        catalog_generation: 12,
+      };
+    });
+
+    const manifest = await fetchManifest(fetchJson, iso(T0), iso(T0 + 2 * H));
+    expect(manifest.catalogGeneration).toBe(12);
+    expect(keys(manifest.files)).toEqual(keys([file(T0), file(T0 + H)]));
+    expect(attempts).toBe(3);
+  });
 });

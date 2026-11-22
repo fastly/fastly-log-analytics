@@ -639,6 +639,18 @@ async function fetchCatalogManifestUncached(
       };
     }
   }
+  const requiredGeneration = requirements.get(identity)?.generation;
+  if (
+    base &&
+    requiredGeneration !== undefined &&
+    requiredGeneration - base.generation > MAX_REPLAY
+  ) {
+    snapshots.delete(key);
+    if (persisted) {
+      queueStoreInvalidation(key, () => deleteManifestSnapshot(key));
+    }
+    base = undefined;
+  }
   const budget: ManifestBudget = { bytes: 0, identities: new Set() };
   let resynced = false;
   let result: Manifest;
@@ -669,6 +681,10 @@ async function fetchCatalogManifestUncached(
       )
     )
       throw error;
+    snapshots.delete(key);
+    if (persisted) {
+      queueStoreInvalidation(key, () => deleteManifestSnapshot(key));
+    }
     signal?.throwIfAborted();
     result = await loadSnapshot(budget, true, signal);
     if (!result.complete || result.catalogGeneration === undefined)

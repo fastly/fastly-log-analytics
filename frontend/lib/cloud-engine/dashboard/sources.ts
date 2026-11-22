@@ -1352,13 +1352,19 @@ export function browserSource(
         emitDebugSubCalls(response, endpoint, pageLoadId, options?.onApiCall);
         if (!response.ok) {
           let code: string | undefined;
-          if (response.status === 409) {
-            const body = (await manifestJson(response)) as {
-              code?: unknown;
-              error?: unknown;
-            };
-            if (typeof body.code === "string") code = body.code;
-            else if (typeof body.error === "string") code = body.error;
+          if (response.status === 409 || response.status === 503) {
+            try {
+              const body = (await manifestJson(response)) as {
+                code?: unknown;
+                error?: unknown;
+                detail?: unknown;
+              };
+              if (typeof body.code === "string") code = body.code;
+              else if (typeof body.error === "string") code = body.error;
+              else if (typeof body.detail === "string") code = body.detail;
+            } catch {
+              // Non-JSON error response; preserve HTTP status without a code.
+            }
           }
           throw new ManifestRequestError(response.status, code);
         }

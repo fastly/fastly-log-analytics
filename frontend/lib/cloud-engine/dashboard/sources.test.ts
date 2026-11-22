@@ -2018,6 +2018,74 @@ describe("persistent Parquet store", () => {
     expect([...stores.keys()]).toEqual([]);
     expect([...opfsRootTree.keys()]).toEqual([]);
   });
+
+  it("parses Compute 409 { detail: 'catalog_resync_required' } and transparently resyncs stale persisted manifests", async () => {
+    fakeCacheStorage({});
+    const { clearManifestCache, fetchManifest } = await import("./manifest");
+    const { persistManifestSnapshot } = await import("./manifest-store");
+    const { manifestCacheKey } = await import("./catalog-manifest");
+    clearManifestCache();
+
+    const fromIso = "2026-11-21T00:00:00.000Z";
+    const toIso = "2026-11-21T06:00:00.000Z";
+    const source = browserSource("http://localhost", { serviceId: "svc-resync" });
+    const staleKey = manifestCacheKey(source.fetchJson, undefined, undefined, false);
+    await persistManifestSnapshot(staleKey, {
+      from: fromIso,
+      to: toIso,
+      generation: 10,
+      manifest: {
+        files: [
+          {
+            key: "svc-resync/raw/stale.parquet",
+            start: fromIso,
+            end: "2026-11-21T01:00:00.000Z",
+            size: 128,
+            rows: 5,
+          },
+        ],
+        complete: true,
+        catalogGeneration: 10,
+      },
+    });
+
+    const seenUrls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = new URL(String(input), "http://localhost");
+        seenUrls.push(`${url.pathname}${url.search}`);
+        if (url.searchParams.has("since_generation")) {
+          // Exact wire format emitted by compute/cloud/src/shell.rs error(409, "catalog_resync_required")
+          return new Response(JSON.stringify({ detail: "catalog_resync_required" }), {
+            status: 409,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return Response.json({
+          files: [
+            {
+              key: "svc-resync/raw/fresh.parquet",
+              start: fromIso,
+              end: "2026-11-21T02:00:00.000Z",
+              size: 256,
+              rows: 10,
+            },
+          ],
+          next_cursor: null,
+          complete: true,
+          catalog_generation: 85,
+        });
+      }),
+    );
+
+    const manifest = await fetchManifest(source.fetchJson, fromIso, toIso);
+    expect(manifest.catalogGeneration).toBe(85);
+    expect(manifest.files.map((f) => f.key)).toEqual(["svc-resync/raw/fresh.parquet"]);
+    expect(seenUrls).toHaveLength(2);
+    expect(seenUrls[0]).toContain("since_generation=10");
+    expect(seenUrls[1]).not.toContain("since_generation=");
+  });
 });
 
 const flushStore = () => new Promise((resolve) => setTimeout(resolve, 0));

@@ -103,16 +103,41 @@ async function listPages(
   let summariesIncluded = false;
   let catalogGeneration: number | string | undefined;
   const seen = new Set<string>();
+  let restarted = false;
   for (let page = 0; page < MAX_PAGES; page++) {
     const params = new URLSearchParams({ from, to });
     if (dataset) params.set("dataset", dataset);
     if (view) params.set("view", view);
     if (includeSummaries) params.set("summaries", "1");
     if (cursor) params.set("cursor", cursor);
-    const body = (await fetchJson(
-      `/api/files?${params}`,
-      signal,
-    )) as ManifestPage;
+    let body: ManifestPage;
+    try {
+      body = (await fetchJson(
+        `/api/files?${params}`,
+        signal,
+      )) as ManifestPage;
+    } catch (error) {
+      if (
+        cursor &&
+        !restarted &&
+        error &&
+        typeof error === "object" &&
+        "status" in error &&
+        error.status === 409
+      ) {
+        restarted = true;
+        files.clear();
+        summaryFiles.clear();
+        summariesIncluded = false;
+        catalogGeneration = undefined;
+        hint = undefined;
+        cursor = null;
+        seen.clear();
+        page = -1;
+        continue;
+      }
+      throw error;
+    }
     signal?.throwIfAborted();
     if (budget) accountManifestPage(body, budget);
     if (page === 0) catalogGeneration = body.catalog_generation;
