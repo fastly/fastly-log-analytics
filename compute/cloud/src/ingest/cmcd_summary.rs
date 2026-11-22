@@ -1085,10 +1085,7 @@ pub struct BundleAcc {
     totals: BTreeMap<String, (bool, i64)>,
 }
 
-fn add<T: std::ops::Add<Output = T>>(into: &mut Option<T>, v: Option<T>)
-where
-    T: Copy,
-{
+fn add<T: std::ops::Add<Output = T> + Copy>(into: &mut Option<T>, v: Option<T>) {
     if let Some(v) = v {
         *into = Some(into.map_or(v, |a| a + v));
     }
@@ -1100,7 +1097,10 @@ struct Read<'a> {
 
 impl<'a> Read<'a> {
     fn col<T: 'static>(&self, name: &str) -> Option<&'a T> {
-        self.batch.column_by_name(name)?.as_any().downcast_ref::<T>()
+        self.batch
+            .column_by_name(name)?
+            .as_any()
+            .downcast_ref::<T>()
     }
     fn i(&self, name: &str) -> Option<&'a Int64Array> {
         self.col(name)

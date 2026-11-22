@@ -566,9 +566,12 @@ fn fence<R: Runtime>(store: &Store<'_, R>, job: &mut ResetJob) -> Result<bool, S
 /// it before its watermark CAS, while nothing writes it: once ingest resumes, these stages write
 /// new state, and a pre-reset bundle publication resumed after the CAS would put deleted rows in
 /// the new head.
-const STATE_KEYS: [&str; 6] = [
+/// `retention:summary_bundle:cmcd_summary` is left out: it is only a listing resume point, the
+/// reset deletes that folder anyway, and one more delete would push the purge to a second tick.
+const STATE_KEYS: [&str; 7] = [
     compaction::STATE_KEY,
     bundle::STATE_KEY,
+    bundle::CMCD_STATE_KEY,
     "retention:request",
     "retention:rum",
     "retention:summary:request",
@@ -902,13 +905,14 @@ fn adopt(job: &mut ResetJob, watermark: &Value, now: u64) {
 }
 
 /// The folders cleanup empties, each under `scope(service)`. `processed/ops/` is never listed.
-pub const CLEANUP_PREFIXES: [&str; 10] = [
+pub const CLEANUP_PREFIXES: [&str; 11] = [
     "raw/request/",
     "raw/rum/",
     "processed/request/",
     "processed/rum/",
     "processed/summary/request/",
     "processed/summary_bundle/request/",
+    "processed/summary_bundle/cmcd_summary/",
     "processed/_catalog/",
     "processed/_sources/",
     "processed/_inflight/",

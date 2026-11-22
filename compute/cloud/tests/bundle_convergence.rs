@@ -934,3 +934,202 @@ fn the_open_hour_stays_a_handful_of_files_while_late_runs_keep_arriving() {
         busy / runs as u64
     );
 }
+
+const CMCD_WINDOWS: &str = "processed/request/cmcd_summary/";
+const CMCD_BUNDLES: &str = "processed/summary_bundle/cmcd_summary/";
+
+/// A small CMCD window summary; `seed` varies its sessions, bitrates and countries.
+fn cmcd_body(start: i64, seed: u32) -> Vec<u8> {
+    use arrow_array::{Int64Array, StringArray, TimestampMillisecondArray};
+    use arrow_schema::{DataType, Field, Schema, TimeUnit};
+    use std::sync::Arc;
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            "timestamp",
+            DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
+            false,
+        ),
+        Field::new("geo_country", DataType::Utf8, true),
+        Field::new("client_asn", DataType::Int64, true),
+        Field::new("cmcd_sid", DataType::Utf8, true),
+        Field::new("cmcd_br", DataType::Int64, true),
+    ]));
+    let n = 4i64;
+    let batch = arrow_array::RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(
+                TimestampMillisecondArray::from(
+                    (0..n).map(|i| start * 1000 + i * 7000).collect::<Vec<_>>(),
+                )
+                .with_timezone("UTC"),
+            ),
+            Arc::new(StringArray::from(
+                (0..n)
+                    .map(|i| Some(["US", "GB", "DE"][(i as usize + seed as usize) % 3]))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(Int64Array::from(
+                (0..n)
+                    .map(|i| Some(64_500 + (seed as i64 + i) % 5))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                (0..n)
+                    .map(|i| Some(format!("s{}", (seed as i64 * 3 + i) % 11)))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(Int64Array::from(
+                (0..n)
+                    .map(|i| Some(1000 + 500 * ((seed as i64 + i) % 4)))
+                    .collect::<Vec<_>>(),
+            )),
+        ],
+    )
+    .unwrap();
+    ingest::cmcd_summary::write_cmcd_summary(&[&batch], start).unwrap()
+}
+
+/// Writes two shards' CMCD window summaries for each minute of the hour at `hour`.
+fn cmcd_hour(fake: &Fake, hour: i64, minutes: i64) -> Vec<String> {
+    let mut keys = Vec::new();
+    for m in 0..minutes {
+        for shard in 0..2 {
+            let start = hour + m * 60;
+            let key = ingest::cmcd_summary::cmcd_summary_key(
+                CMCD_WINDOWS,
+                start,
+                start + 60,
+                &format!("p{m}s{shard}"),
+                4,
+            );
+            let body = cmcd_body(start, (m * 2 + shard) as u32 % 8);
+            fake.bucket.borrow_mut().insert(key.clone(), body);
+            keys.push(key);
+        }
+    }
+    keys
+}
+
+fn run_cmcd(fake: &Fake, svc: &Service) -> bundle::BundleReport {
+    fake.new_execution();
+    let report = bundle::cmcd_summary_bundle(&store(fake, svc), "ck", RESERVE).unwrap();
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert!(
+        fake.calls.get() + RESERVE <= BUDGET,
+        "{} calls",
+        fake.calls.get()
+    );
+    assert!(fake.vcpu.get() <= 1000, "{} ms total CPU", fake.vcpu.get());
+    report
+}
+
+/// The CMCD merge of `keys`' bodies in file-name order, as the stage folds them.
+fn cmcd_expected(fake: &Fake, keys: &[String]) -> Vec<u8> {
+    let mut sorted: Vec<&String> = keys.iter().collect();
+    sorted.sort_by_key(|k| k.rsplit('/').next().unwrap().to_owned());
+    let bucket = fake.bucket.borrow();
+    let bodies: Vec<&[u8]> = sorted.iter().map(|k| bucket[*k].as_slice()).collect();
+    ingest::cmcd_summary::merge_windows(&bodies).unwrap()
+}
+
+#[test]
+fn cmcd_summaries_bundle_into_exact_hour_and_open_bundles_in_bounded_executions() {
+    let fake = Fake::default();
+    let svc = service();
+    let closed = cmcd_hour(&fake, BASE, 60);
+    let open = cmcd_hour(&fake, BASE + HOUR, 20);
+    fake.now.set(BASE + HOUR + 30 * 60);
+    watermark(&fake, fake.now.get());
+    let request_state = fake.kv.borrow().get(bundle::STATE_KEY).cloned();
+    let mut runs = 0;
+    while runs < 40 {
+        runs += 1;
+        run_cmcd(&fake, &svc);
+        let cmcd = |marker: &str| {
+            fake.keys(marker)
+                .iter()
+                .any(|k| k.starts_with(CMCD_BUNDLES))
+        };
+        // The open hour waits for an execution that wrote nothing else.
+        if cmcd("hour_bundle=08-") && cmcd("open_bundle=09-") {
+            break;
+        }
+    }
+    let hour_key = fake
+        .keys("hour_bundle=08-")
+        .into_iter()
+        .find(|k| k.starts_with(CMCD_BUNDLES))
+        .expect("the closed CMCD hour is bundled");
+    assert!(hour_key.contains("hour_bundle=08-c120-n480-"), "{hour_key}");
+    assert_eq!(
+        fake.bucket.borrow()[&hour_key],
+        cmcd_expected(&fake, &closed)
+    );
+    assert!(fake
+        .keys("hour_bundle=")
+        .iter()
+        .all(|k| k.starts_with(CMCD_BUNDLES)));
+    assert!(fake
+        .keys("partial=")
+        .iter()
+        .all(|k| !k.contains("hour=08/")));
+    // The open hour's snapshot covers exactly the name-order prefix it names.
+    let open_key = fake
+        .keys("open_bundle=09-")
+        .into_iter()
+        .find(|k| k.starts_with(CMCD_BUNDLES))
+        .expect("the open CMCD hour gets a snapshot");
+    let name = bundle::parse_name(&open_key).unwrap();
+    let mut sorted = open.clone();
+    sorted.sort_by_key(|k| k.rsplit('/').next().unwrap().to_owned());
+    assert_eq!(
+        fake.bucket.borrow()[&open_key],
+        cmcd_expected(&fake, &sorted[..name.count])
+    );
+    assert!(name.count >= 6, "{open_key}");
+    assert!(runs < 40, "converges");
+    // The request bundler's state is untouched.
+    assert_eq!(
+        fake.kv.borrow().get(bundle::STATE_KEY).cloned(),
+        request_state
+    );
+    assert!(fake.kv.borrow().contains_key(bundle::CMCD_STATE_KEY));
+}
+
+/// CMCD windows are listed from the bucket, not a catalog head: a bundle of pre-reset windows
+/// written during Delete Data cleanup would postdate the reset and outlive it.
+#[test]
+fn cmcd_bundling_waits_for_a_delete_data_job_to_finish() {
+    use fastly_log_analytics::admin::{DataReset, ResetPhase};
+    let fake = Fake::default();
+    let mut svc = service();
+    cmcd_hour(&fake, BASE, 12);
+    fake.now.set(BASE + 2 * HOUR);
+    watermark(&fake, fake.now.get());
+    svc.data_reset = Some(DataReset {
+        job_id: "job1".into(),
+        reset_at: (BASE + HOUR) as u64,
+        phase: ResetPhase::Cleanup,
+        started_at: (BASE + HOUR) as u64,
+        actor: "tester".into(),
+        rum_held: false,
+    });
+    for _ in 0..4 {
+        run_cmcd(&fake, &svc);
+    }
+    assert!(
+        fake.keys(CMCD_BUNDLES).is_empty(),
+        "{:?}",
+        fake.keys(CMCD_BUNDLES)
+    );
+    assert!(!fake.kv.borrow().contains_key(bundle::CMCD_STATE_KEY));
+    svc.data_reset = None;
+    for _ in 0..8 {
+        run_cmcd(&fake, &svc);
+    }
+    assert!(fake
+        .keys("hour_bundle=08-")
+        .iter()
+        .any(|k| k.starts_with(CMCD_BUNDLES)));
+}

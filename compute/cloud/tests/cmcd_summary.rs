@@ -415,7 +415,10 @@ fn bundle_merge_is_the_lossless_union_of_its_windows() {
     let google = find(&rows, "asn", "15169");
     assert_eq!(google["reqs"], 4);
     assert_eq!(google["label"], "Alphabet");
-    assert_eq!(find(&rows, "ot", "v")["reqs"], 5 + cmcd_summary::SESSION_K as i64 + 1);
+    assert_eq!(
+        find(&rows, "ot", "v")["reqs"],
+        5 + cmcd_summary::SESSION_K as i64 + 1
+    );
     // The wide window kept SESSION_K of its sessions; the bundle keeps them and its flag.
     assert_eq!(
         rows.iter().filter(|r| r["kind"] == "session").count(),
