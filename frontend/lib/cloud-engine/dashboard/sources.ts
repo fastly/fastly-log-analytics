@@ -1,5 +1,6 @@
 import { fnv1a32, keyWindowMs } from "../parquet-key";
 import { fetchRetrying } from "../fetch-retry";
+import { MissingCloudFileError } from "./file-errors";
 import { CARD_FIELDS } from "./summaries";
 import { isCdnHit } from "./cdn-cache";
 import { parseServerTiming, type ServerTimingEntry } from "../../call-timeline";
@@ -1533,6 +1534,7 @@ export function browserSource(
             ...(headers ? { headers } : {}),
           });
           try {
+            if (response.status === 404) throw new MissingCloudFileError(file.key);
             const range = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(
               response.headers.get("content-range") ?? "",
             );
@@ -1716,6 +1718,7 @@ export function browserSource(
                 server_timing: parseServerTiming(response.headers.get("server-timing")),
                 page_load_id: pageLoadId,
               });
+              if (response.status === 404) throw new MissingCloudFileError(key);
               throw new Error(`File ${key} failed (${response.status})`);
             }
             const bytes = await response.arrayBuffer();
