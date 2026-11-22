@@ -819,14 +819,45 @@ export type RollupResult = {
 type RollupSource = Pick<FileSource, "fetchJson"> & SummaryProjectionSource;
 
 const DECODED_LIMIT = 64;
+let rollupEpoch = 0;
+type SharedRollup = {
+  controller: AbortController;
+  waiters: number;
+  settled: boolean;
+  promise: Promise<RollupResult | null>;
+};
 const decoded = new Map<string, Promise<Rollup | null>>();
-const inflight = new Map<string, Promise<RollupResult | null>>();
+const inflight = new Map<string, SharedRollup>();
+const activeRollupControllers = new Set<AbortController>();
+
+export function clearRollupQueryCache(): void {
+  rollupEpoch += 1;
+  for (const controller of activeRollupControllers) {
+    controller.abort(new DOMException("The operation was aborted.", "AbortError"));
+  }
+  activeRollupControllers.clear();
+  for (const shared of inflight.values()) {
+    shared.controller.abort(
+      new DOMException("The operation was aborted.", "AbortError"),
+    );
+  }
+  inflight.clear();
+  decoded.clear();
+}
 
 function decodeCached(
   source: RollupSource,
   file: ManifestFile,
   spec: SummarySpec | undefined,
+  signal: AbortSignal,
+  callRollupEpoch: number,
 ): Promise<Rollup | null> {
+  signal.throwIfAborted();
+  if (callRollupEpoch !== rollupEpoch) {
+    return Promise.reject(
+      new DOMException("The operation was aborted.", "AbortError"),
+    );
+  }
   const key = `${source.cacheScope ?? "default"}|${file.key}|${spec?.id ?? "whole"}`;
   const hit = decoded.get(key);
   if (hit) {
@@ -835,13 +866,40 @@ function decodeCached(
     return hit;
   }
   const step = file.key.includes("/day_bundle=") ? HOUR_MS : FIVE_MINUTES_MS;
-  const pending = spec
-    ? readSummaryProjection(source, file, spec).then(({ parts }) => decodeRollup(parts, step, spec))
-    : source.fetchFile(file.key).then(({ bytes }) => decodeRollup(bytes, step));
-  pending.catch(() => decoded.delete(key));
-  decoded.set(key, pending);
-  while (decoded.size > DECODED_LIMIT) {
-    decoded.delete(decoded.keys().next().value!);
+  const pending = (
+    spec
+      ? readSummaryProjection(source, file, spec, signal).then(({ parts }) => {
+          signal.throwIfAborted();
+          if (callRollupEpoch !== rollupEpoch) {
+            throw new DOMException("The operation was aborted.", "AbortError");
+          }
+          return decodeRollup(parts, step, spec);
+        })
+      : source.fetchFile(file.key, signal).then(({ bytes }) => {
+          signal.throwIfAborted();
+          if (callRollupEpoch !== rollupEpoch) {
+            throw new DOMException("The operation was aborted.", "AbortError");
+          }
+          return decodeRollup(bytes, step);
+        })
+  ).then((rollup) => {
+    if (callRollupEpoch !== rollupEpoch || signal.aborted) {
+      if (decoded.get(key) === pending) decoded.delete(key);
+      throw (
+        signal.reason ??
+        new DOMException("The operation was aborted.", "AbortError")
+      );
+    }
+    return rollup;
+  });
+  pending.catch(() => {
+    if (decoded.get(key) === pending) decoded.delete(key);
+  });
+  if (callRollupEpoch === rollupEpoch && !signal.aborted) {
+    decoded.set(key, pending);
+    while (decoded.size > DECODED_LIMIT) {
+      decoded.delete(decoded.keys().next().value!);
+    }
   }
   return pending;
 }
@@ -857,23 +915,73 @@ export function queryRollup(
   source: RollupSource,
   range: { fromMs: number; toMs: number; signal?: AbortSignal; spec?: SummarySpec },
 ): Promise<RollupResult | null> {
+  const { signal } = range;
+  signal?.throwIfAborted();
   const key = `${source.cacheScope ?? "default"}|${range.fromMs}|${range.toMs}|${range.spec?.id ?? "whole"}`;
   let shared = inflight.get(key);
-  if (!shared) {
-    // Unsignalled: one caller leaving must not fail the others sharing the read.
-    shared = runRollup(source, range.fromMs, range.toMs, range.spec).finally(() =>
-      inflight.delete(key),
-    );
-    inflight.set(key, shared);
+  if (!shared || shared.settled || shared.controller.signal.aborted) {
+    const controller = new AbortController();
+    const callRollupEpoch = rollupEpoch;
+    activeRollupControllers.add(controller);
+    const created: SharedRollup = {
+      controller,
+      waiters: 0,
+      settled: false,
+      promise: undefined as unknown as Promise<RollupResult | null>,
+    };
+    created.promise = runRollup(
+      source,
+      range.fromMs,
+      range.toMs,
+      range.spec,
+      controller.signal,
+      callRollupEpoch,
+    ).finally(() => {
+      created.settled = true;
+      activeRollupControllers.delete(controller);
+      if (inflight.get(key) === created) inflight.delete(key);
+    });
+    inflight.set(key, created);
+    shared = created;
   }
-  const { signal } = range;
-  if (!signal) return shared;
-  signal.throwIfAborted();
+  const active = shared;
+  active.waiters += 1;
+  let left = false;
+  const leave = (abortReason?: unknown) => {
+    if (left) return;
+    left = true;
+    active.waiters -= 1;
+    if (active.waiters === 0 && !active.settled) {
+      active.controller.abort(
+        abortReason ??
+          new DOMException("The operation was aborted.", "AbortError"),
+      );
+    }
+  };
+  if (!signal) {
+    return active.promise.finally(() => leave());
+  }
   return new Promise((resolve, reject) => {
-    const abort = () => reject(signal.reason);
-    signal.addEventListener("abort", abort, { once: true });
-    shared.then(resolve, reject).finally(() =>
-      signal.removeEventListener("abort", abort),
+    const onAbort = () => {
+      leave(signal.reason);
+      reject(signal.reason);
+    };
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+    active.promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        leave();
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        leave();
+        reject(error);
+      },
     );
   });
 }
@@ -883,19 +991,32 @@ async function runRollup(
   fromMs: number,
   toMs: number,
   spec: SummarySpec | undefined,
+  signal: AbortSignal,
+  callRollupEpoch: number,
 ): Promise<RollupResult | null> {
+  const assertRollupActive = () => {
+    signal.throwIfAborted();
+    if (callRollupEpoch !== rollupEpoch) {
+      throw new DOMException("The operation was aborted.", "AbortError");
+    }
+  };
+  assertRollupActive();
   const from = new Date(fromMs).toISOString();
   const to = new Date(toMs).toISOString();
   const [raw, summaries] = await Promise.all([
-    fetchManifest(source.fetchJson, from, to),
-    fetchManifest(source.fetchJson, from, to, undefined, undefined, "summary"),
+    fetchManifest(source.fetchJson, from, to, signal),
+    fetchManifest(source.fetchJson, from, to, signal, undefined, "summary"),
   ]);
+  assertRollupActive();
   if (!raw.complete || !summaries.complete) return null;
   const plan = planRollup(raw.files, summaries.files, fromMs, toMs);
   if (!plan) return null;
   const parts = await Promise.all(
-    plan.files.map((use) => decodeCached(source, use.file, spec)),
+    plan.files.map((use) =>
+      decodeCached(source, use.file, spec, signal, callRollupEpoch),
+    ),
   );
+  assertRollupActive();
   if (parts.some((part) => part === null)) return null;
   const merged = mergeRollups(parts as Rollup[]);
   const seenKeys = new Set<string>();

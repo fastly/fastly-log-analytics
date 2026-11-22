@@ -7,6 +7,7 @@ import {
   STORE_META_CACHE,
   StoreIndex,
   bumpStoreMetaEpoch,
+  currentStoreMetaEpoch,
   describeError,
   getStoreStats,
   recordStoreError,
@@ -16,7 +17,11 @@ import {
 import { FILTERED_CACHE_NAME, FilteredResultCache } from "./filtered-cache";
 import type { Manifest } from "./manifest";
 import { MANIFEST_SNAPSHOT_CACHE } from "./manifest-store";
-import { MAX_MANIFEST_BYTES, ManifestRequestError } from "./catalog-manifest";
+import {
+  MAX_MANIFEST_BYTES,
+  ManifestRequestError,
+  drainCatalogManifestStore,
+} from "./catalog-manifest";
 import {
   decodeRollup,
   encodeRollup,
@@ -34,6 +39,7 @@ export { getStoreStats, keyWindowMs };
 const SESSION_CACHE_KEY = "flp-dashboard-cache-session";
 const IDENTITY_CACHE_KEY = "flp-dashboard-cache-identity";
 let volatileCacheScope: string | undefined;
+let volatileCacheIdentity: string | null = null;
 
 // Shared by every tab of the origin so a new tab of the same signed-in identity reuses persisted
 // files; an identity change or sign-out rotates the scope and clears the caches.
@@ -49,7 +55,8 @@ export function dashboardCacheScope(): string {
       localStorage.getItem(IDENTITY_CACHE_KEY) ?? "",
     ]);
   } catch {
-    return (volatileCacheScope ??= crypto.randomUUID());
+    const session = (volatileCacheScope ??= crypto.randomUUID());
+    return JSON.stringify([session, volatileCacheIdentity ?? ""]);
   }
 }
 
@@ -74,9 +81,12 @@ export function dashboardManifestCacheScope(
 
 export function dashboardCacheIdentity(): string | null {
   try {
-    return localStorage.getItem(IDENTITY_CACHE_KEY);
+    if (typeof localStorage === "undefined") return volatileCacheIdentity;
+    const stored = localStorage.getItem(IDENTITY_CACHE_KEY);
+    volatileCacheIdentity = stored;
+    return stored;
   } catch {
-    return null;
+    return volatileCacheIdentity;
   }
 }
 
@@ -118,13 +128,17 @@ async function drainBrowserSourceStoreQueues(): Promise<void> {
 }
 
 export function updateDashboardCacheIdentity(identity: string | null): void {
+  volatileCacheIdentity = identity;
   volatileCacheScope = undefined;
   clearBrowserSourceMemoryCaches();
   try {
-    localStorage.removeItem(SESSION_CACHE_KEY);
-    if (identity === null) localStorage.removeItem(IDENTITY_CACHE_KEY);
-    else localStorage.setItem(IDENTITY_CACHE_KEY, identity);
+    if (typeof localStorage !== "undefined") {
+      localStorage.removeItem(SESSION_CACHE_KEY);
+      if (identity === null) localStorage.removeItem(IDENTITY_CACHE_KEY);
+      else localStorage.setItem(IDENTITY_CACHE_KEY, identity);
+    }
   } catch {
+    volatileCacheIdentity = identity;
     /* A fresh in-memory scope still isolates this session. */
   }
 }
@@ -293,6 +307,7 @@ export async function deleteCaches(
 export async function clearRequestLogCaches(): Promise<void> {
   clearBrowserSourceMemoryCaches();
   await drainBrowserSourceStoreQueues();
+  await drainCatalogManifestStore();
   await resetAndDrainStoreMeta();
   await clearOPFSParquetStore();
   await deleteCaches(
@@ -583,6 +598,7 @@ export function browserSource(
     signal?: AbortSignal,
   ): Promise<ArrayBuffer> => {
     signal?.throwIfAborted();
+    entry.controller.signal.throwIfAborted();
     entry.waiters += 1;
     let released = false;
     const release = () => {
@@ -593,23 +609,34 @@ export function browserSource(
         entry.controller.abort(signal?.reason);
       }
     };
-    if (!signal) {
-      return entry.promise.finally(release);
-    }
     return new Promise<ArrayBuffer>((resolve, reject) => {
-      const onAbort = () => {
+      const onCallerAbort = () => {
+        cleanup();
         release();
-        reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+        reject(signal?.reason ?? new DOMException("Aborted", "AbortError"));
       };
-      signal.addEventListener("abort", onAbort, { once: true });
+      const onSharedAbort = () => {
+        cleanup();
+        release();
+        reject(
+          entry.controller.signal.reason ??
+            new DOMException("The operation was aborted.", "AbortError"),
+        );
+      };
+      const cleanup = () => {
+        if (signal) signal.removeEventListener("abort", onCallerAbort);
+        entry.controller.signal.removeEventListener("abort", onSharedAbort);
+      };
+      if (signal) signal.addEventListener("abort", onCallerAbort, { once: true });
+      entry.controller.signal.addEventListener("abort", onSharedAbort, { once: true });
       entry.promise.then(
         (bytes) => {
-          signal.removeEventListener("abort", onAbort);
+          cleanup();
           release();
           resolve(bytes);
         },
         (error) => {
-          signal.removeEventListener("abort", onAbort);
+          cleanup();
           release();
           reject(error);
         },
@@ -667,6 +694,7 @@ export function browserSource(
   // One write at a time, so each quota check sees the previous write's usage.
   let storeQueue: Promise<void> = Promise.resolve();
   const activeOpfsWrites = new Set<Promise<unknown>>();
+  let drainingFilteredCaches: Promise<void>[] = [];
   let pendingStoreWrites = 0;
   let storeIndexFlushPinTimer: ReturnType<typeof setTimeout> | null = null;
   const clearClosureMemory = () => {
@@ -688,21 +716,29 @@ export function browserSource(
     memoryFileBytes = 0;
     fileCachePromise = null;
     rollupCachePromise = null;
+    opfsStores.clear();
     storeIndex.reset();
     if (storeIndexFlushPinTimer !== null) {
       clearTimeout(storeIndexFlushPinTimer);
       storeIndexFlushPinTimer = null;
     }
+    const draining = [...filteredCaches.values()].map((c) => c.drain());
     for (const cache of filteredCaches.values()) cache.clearMemory();
     filteredCaches.clear();
+    if (draining.length > 0) {
+      drainingFilteredCaches = [...drainingFilteredCaches, ...draining];
+    }
     syncClosurePin();
   };
   const closureHandle: ActiveSourceClosure = {
     clearMemoryCache: clearClosureMemory,
     drainStoreQueue: async () => {
+      const snap = drainingFilteredCaches;
+      drainingFilteredCaches = [];
       await Promise.allSettled([
         storeQueue,
         ...activeOpfsWrites,
+        ...snap,
         ...[...filteredCaches.values()].map((c) => c.drain()),
       ]);
     },
@@ -714,7 +750,8 @@ export function browserSource(
       activeOpfsWrites.size > 0 ||
       storeIndexFlushPinTimer !== null ||
       inFlightFiles.size > 0 ||
-      inFlightRanges.size > 0
+      inFlightRanges.size > 0 ||
+      activeRangeControllers.size > 0
     ) {
       pendingSourceClosures.add(closureHandle);
     } else {
@@ -885,11 +922,16 @@ export function browserSource(
     tracked: boolean,
     callEpoch: number,
   ): Promise<void> => {
-    if (callEpoch !== cacheEpoch) return Promise.resolve();
+    const callMetaEpoch = currentStoreMetaEpoch();
+    if (callEpoch !== cacheEpoch || callMetaEpoch !== currentStoreMetaEpoch()) {
+      return Promise.resolve();
+    }
     pendingStoreWrites += 1;
     syncClosurePin();
     storeQueue = storeQueue.then(async () => {
-      if (callEpoch !== cacheEpoch) return;
+      if (callEpoch !== cacheEpoch || callMetaEpoch !== currentStoreMetaEpoch()) {
+        return;
+      }
       let size = 0;
       let room: { usage: number | null; quota: number | null } = {
         usage: null,
@@ -897,42 +939,56 @@ export function browserSource(
       };
       try {
         const { data, bytes, headers } = await body();
-        if (callEpoch !== cacheEpoch) return;
+        if (callEpoch !== cacheEpoch || callMetaEpoch !== currentStoreMetaEpoch()) {
+          return;
+        }
         size = bytes;
         const made = await storeIndex.makeRoom(
           () => (callEpoch === cacheEpoch ? getFileCache() : Promise.resolve(null)),
           bytes,
           forgetFile,
         );
-        if (callEpoch !== cacheEpoch) return;
-        room = made;
-        if (!made.ok) {
-          await recordStoreError({
-            at: Date.now(),
-            cache: cacheName,
-            key,
-            bytes,
-            message:
-              "Not enough browser storage: every cached file is in use by the current range.",
-            usage: made.usage,
-            quota: made.quota,
-          });
+        if (callEpoch !== cacheEpoch || callMetaEpoch !== currentStoreMetaEpoch()) {
           return;
         }
-        if (callEpoch !== cacheEpoch) return;
+        room = made;
+        if (!made.ok) {
+          await recordStoreError(
+            {
+              at: Date.now(),
+              cache: cacheName,
+              key,
+              bytes,
+              message:
+                "Not enough browser storage: every cached file is in use by the current range.",
+              usage: made.usage,
+              quota: made.quota,
+            },
+            callMetaEpoch,
+          );
+          return;
+        }
+        if (callEpoch !== cacheEpoch || callMetaEpoch !== currentStoreMetaEpoch()) {
+          return;
+        }
         await cache.put(url, new Response(data, { headers }));
         if (tracked && callEpoch === cacheEpoch) touchStoreIndex(key, bytes);
       } catch (error) {
-        if (callEpoch !== cacheEpoch) return;
-        await recordStoreError({
-          at: Date.now(),
-          cache: cacheName,
-          key,
-          bytes: size,
-          message: describeError(error),
-          usage: room.usage,
-          quota: room.quota,
-        });
+        if (callEpoch !== cacheEpoch || callMetaEpoch !== currentStoreMetaEpoch()) {
+          return;
+        }
+        await recordStoreError(
+          {
+            at: Date.now(),
+            cache: cacheName,
+            key,
+            bytes: size,
+            message: describeError(error),
+            usage: room.usage,
+            quota: room.quota,
+          },
+          callMetaEpoch,
+        );
       } finally {
         pendingStoreWrites = Math.max(0, pendingStoreWrites - 1);
         syncClosurePin();
@@ -1061,8 +1117,9 @@ export function browserSource(
     withOptions: (next) => sourceWith(next),
     async openParquet(file, signal, variant) {
       const callEpoch = cacheEpoch;
+      const openMetaEpoch = currentStoreMetaEpoch();
       signal?.throwIfAborted();
-      if (callEpoch !== cacheEpoch) {
+      if (callEpoch !== cacheEpoch || openMetaEpoch !== currentStoreMetaEpoch()) {
         throw new DOMException("The operation was aborted.", "AbortError");
       }
       const origin = globalThis.location?.origin;
@@ -1107,15 +1164,30 @@ export function browserSource(
             cached: true,
             fallbackUrl: url.href,
             onPersistenceError: async (error: unknown) => {
-              if (callEpoch !== cacheEpoch) return;
-              await recordStoreError({
-                at: Date.now(),
-                cache: OPFS_DIRECTORY,
-                key: file.key,
-                bytes: file.size,
-                message: `OPFS read unavailable; using nonpersistent selective HTTP reads: ${describeError(error)}`,
-                ...(await storageEstimate()),
-              });
+              if (
+                callEpoch !== cacheEpoch ||
+                openMetaEpoch !== currentStoreMetaEpoch()
+              ) {
+                return;
+              }
+              const estimate = await storageEstimate();
+              if (
+                callEpoch !== cacheEpoch ||
+                openMetaEpoch !== currentStoreMetaEpoch()
+              ) {
+                return;
+              }
+              await recordStoreError(
+                {
+                  at: Date.now(),
+                  cache: OPFS_DIRECTORY,
+                  key: file.key,
+                  bytes: file.size,
+                  message: `OPFS read unavailable; using nonpersistent selective HTTP reads: ${describeError(error)}`,
+                  ...estimate,
+                },
+                openMetaEpoch,
+              );
             },
           };
         const start = performance.now();
@@ -1467,9 +1539,12 @@ export function browserSource(
           if (inFlightRanges.get(rangeKey) === entry) {
             inFlightRanges.delete(rangeKey);
           }
+          syncClosurePin();
         }),
       };
+      entry.promise.catch(() => {});
       inFlightRanges.set(rangeKey, entry);
+      syncClosurePin();
       const bytes = await waitSharedRange(entry, signal);
       return bytes.slice(0);
     },

@@ -1,4 +1,9 @@
-import { describeError, recordStoreError, storageEstimate } from "./file-store";
+import {
+  currentStoreMetaEpoch,
+  describeError,
+  recordStoreError,
+  storageEstimate,
+} from "./file-store";
 
 export const OPFS_DIRECTORY = "flp-parquet-opfs-v1";
 const LOCK = "flp-parquet-opfs-v1";
@@ -200,21 +205,51 @@ export class OPFSParquetStore {
     );
   }
 
-  private async report(key: string, bytes: number, error: unknown) {
-    const estimate = await storageEstimate();
-    await recordStoreError({
-      at: Date.now(),
-      cache: OPFS_DIRECTORY,
-      key,
-      bytes,
-      message: describeError(error),
-      ...estimate,
-    });
+  private async report(
+    key: string,
+    bytes: number,
+    error: unknown,
+    callOpfsEpoch = opfsEpoch,
+    callMetaEpoch = currentStoreMetaEpoch(),
+  ) {
+    if (callOpfsEpoch !== opfsEpoch || callMetaEpoch !== currentStoreMetaEpoch()) {
+      return;
+    }
+    const op = (async () => {
+      const estimate = await storageEstimate();
+      if (callOpfsEpoch !== opfsEpoch || callMetaEpoch !== currentStoreMetaEpoch()) {
+        return;
+      }
+      await recordStoreError(
+        {
+          at: Date.now(),
+          cache: OPFS_DIRECTORY,
+          key,
+          bytes,
+          message: describeError(error),
+          ...estimate,
+        },
+        callMetaEpoch,
+      );
+    })();
+    activeOpfsDiskWrites.add(op);
+    try {
+      await op;
+    } finally {
+      activeOpfsDiskWrites.delete(op);
+    }
   }
 
-  private async available(callOpfsEpoch = opfsEpoch): Promise<boolean> {
+  private async available(
+    callOpfsEpoch = opfsEpoch,
+    callMetaEpoch = currentStoreMetaEpoch(),
+  ): Promise<boolean> {
     if (this.root && this.locks) return true;
-    if (!this.reportedUnavailable && callOpfsEpoch === opfsEpoch) {
+    if (
+      !this.reportedUnavailable &&
+      callOpfsEpoch === opfsEpoch &&
+      callMetaEpoch === currentStoreMetaEpoch()
+    ) {
       this.reportedUnavailable = true;
       await this.report(
         "",
@@ -222,6 +257,8 @@ export class OPFSParquetStore {
         new Error(
           "OPFS persistence unavailable; using nonpersistent selective HTTP reads.",
         ),
+        callOpfsEpoch,
+        callMetaEpoch,
       );
     }
     return false;
@@ -351,18 +388,25 @@ export class OPFSParquetStore {
     signal?: AbortSignal,
   ): Promise<void> {
     const callOpfsEpoch = opfsEpoch;
+    const callMetaEpoch = currentStoreMetaEpoch();
     const ensureCurrent = () => {
       signal?.throwIfAborted();
-      if (callOpfsEpoch !== opfsEpoch) throw abortError();
+      if (callOpfsEpoch !== opfsEpoch || callMetaEpoch !== currentStoreMetaEpoch()) {
+        throw abortError();
+      }
     };
     ensureCurrent();
-    if (!(await this.available(callOpfsEpoch)))
+    if (!(await this.available(callOpfsEpoch, callMetaEpoch)))
       throw new Error("OPFS persistence unavailable");
     ensureCurrent();
     if (!Number.isSafeInteger(bytes) || bytes <= 0 || bytes > this.fileBudget) {
       const error = new Error("Selected file exceeds the OPFS file budget");
-      if (callOpfsEpoch === opfsEpoch && !signal?.aborted) {
-        await this.report(key, bytes, error);
+      if (
+        callOpfsEpoch === opfsEpoch &&
+        callMetaEpoch === currentStoreMetaEpoch() &&
+        !signal?.aborted
+      ) {
+        await this.report(key, bytes, error, callOpfsEpoch, callMetaEpoch);
       }
       throw error;
     }
@@ -536,9 +580,10 @@ export class OPFSParquetStore {
       if (
         !signal?.aborted &&
         callOpfsEpoch === opfsEpoch &&
+        callMetaEpoch === currentStoreMetaEpoch() &&
         !isCancellationError(error)
       ) {
-        await this.report(key, bytes, error);
+        await this.report(key, bytes, error, callOpfsEpoch, callMetaEpoch);
       }
       throw error;
     }

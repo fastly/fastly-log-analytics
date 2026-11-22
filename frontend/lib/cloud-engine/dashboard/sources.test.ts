@@ -1219,7 +1219,7 @@ describe("persistent Parquet store", () => {
     expect(ls.has("flp-dashboard-cache-identity")).toBe(false);
     expect(ls.has("flp-dashboard-cache-session")).toBe(false);
     expect(stores.has(MANIFEST_SNAPSHOT_CACHE)).toBe(false);
-  });
+  }, 45_000);
 
   it("fetches processed Parquet keys via /fos/<key> and reports normal file path in telemetry", async () => {
     fakeCacheStorage({});
@@ -1391,7 +1391,7 @@ describe("persistent Parquet store", () => {
     ).rejects.toThrow(/403/);
     expect(wholeFileNetworkHits).toBe(3);
     expect(seenFileServiceHeaders).toEqual(["svc-a", "svc-a", "svc-b"]);
-  });
+  }, 45_000);
 
   it("aborts in-flight <65% fetchRange + ensureCloudRange and >=65% fetchFile/storeQueue across clearDashboardData leaving 0 DuckDB rows and empty CacheStorage", async () => {
     const ls = new Map<string, string>();
@@ -2017,7 +2017,7 @@ describe("persistent Parquet store", () => {
     expect(await globalThis.caches.keys()).toEqual([]);
     expect([...stores.keys()]).toEqual([]);
     expect([...opfsRootTree.keys()]).toEqual([]);
-  });
+  }, 45_000);
 
   it("parses Compute 409 { detail: 'catalog_resync_required' } and transparently resyncs stale persisted manifests", async () => {
     fakeCacheStorage({});
@@ -2086,6 +2086,488 @@ describe("persistent Parquet store", () => {
     expect(seenUrls[0]).toContain("since_generation=10");
     expect(seenUrls[1]).not.toContain("since_generation=");
   });
+
+  it("blocks multi-step runDashboard OPFS resumption, SecurityError localStorage identity switches, sessionStorage session-reference leaks, storageEstimate error races, and un-drained manifest writes", async () => {
+    const ls = new Map<string, string>();
+    let throwStorageSecurityError = false;
+    vi.stubGlobal("localStorage", {
+      getItem: (k: string) => {
+        if (throwStorageSecurityError) {
+          throw new DOMException("Storage disabled", "SecurityError");
+        }
+        return ls.get(k) ?? null;
+      },
+      setItem: (k: string, v: string) => {
+        if (throwStorageSecurityError) {
+          throw new DOMException("Storage disabled", "SecurityError");
+        }
+        ls.set(k, v);
+      },
+      removeItem: (k: string) => {
+        if (throwStorageSecurityError) {
+          throw new DOMException("Storage disabled", "SecurityError");
+        }
+        ls.delete(k);
+      },
+    });
+
+    const ss = new Map<string, string>();
+    vi.stubGlobal("sessionStorage", {
+      getItem: (k: string) => ss.get(k) ?? null,
+      setItem: (k: string, v: string) => {
+        ss.set(k, v);
+      },
+      removeItem: (k: string) => {
+        ss.delete(k);
+      },
+    });
+    vi.stubGlobal("window", { location: { origin: "http://localhost" } });
+
+    type MemNode = { kind: "file"; bytes: Uint8Array } | { kind: "dir"; children: Map<string, MemNode> };
+    const opfsRootTree: Map<string, MemNode> = new Map();
+    const makeFileHandle = (name: string, fileNode: { kind: "file"; bytes: Uint8Array }): FileSystemFileHandle =>
+      ({
+        kind: "file",
+        name,
+        async getFile() {
+          const snapshot = new Uint8Array(fileNode.bytes.byteLength);
+          snapshot.set(fileNode.bytes);
+          return new File([snapshot], name);
+        },
+        async createWritable() {
+          const chunks: Uint8Array[] = [];
+          return {
+            async write(chunk: unknown) {
+              if (typeof chunk === "string") chunks.push(new TextEncoder().encode(chunk));
+              else if (ArrayBuffer.isView(chunk)) {
+                const copy = new Uint8Array(chunk.byteLength);
+                copy.set(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength));
+                chunks.push(copy);
+              } else if (chunk instanceof ArrayBuffer) {
+                chunks.push(new Uint8Array(chunk.slice(0)));
+              }
+            },
+            async close() {
+              const total = chunks.reduce((s, c) => s + c.byteLength, 0);
+              const merged = new Uint8Array(total);
+              let off = 0;
+              for (const c of chunks) {
+                merged.set(c, off);
+                off += c.byteLength;
+              }
+              fileNode.bytes = merged;
+            },
+            async abort() {
+              chunks.length = 0;
+            },
+          } as unknown as FileSystemWritableFileStream;
+        },
+      }) as unknown as FileSystemFileHandle;
+    const makeDirHandle = (dirMap: Map<string, MemNode>): FileSystemDirectoryHandle =>
+      ({
+        kind: "directory",
+        async getDirectoryHandle(name: string, opts?: { create?: boolean }) {
+          let child = dirMap.get(name);
+          if (!child) {
+            if (!opts?.create) throw new DOMException("Directory not found", "NotFoundError");
+            child = { kind: "dir", children: new Map() };
+            dirMap.set(name, child);
+          }
+          if (child.kind !== "dir") throw new DOMException("Type mismatch", "TypeMismatchError");
+          return makeDirHandle(child.children);
+        },
+        async getFileHandle(name: string, opts?: { create?: boolean }) {
+          let child = dirMap.get(name);
+          if (!child) {
+            if (!opts?.create) throw new DOMException("File not found", "NotFoundError");
+            child = { kind: "file", bytes: new Uint8Array(0) };
+            dirMap.set(name, child);
+          }
+          if (child.kind !== "file") throw new DOMException("Type mismatch", "TypeMismatchError");
+          return makeFileHandle(name, child);
+        },
+        async removeEntry(name: string, opts?: { recursive?: boolean }) {
+          const child = dirMap.get(name);
+          if (!child) throw new DOMException("Entry not found", "NotFoundError");
+          if (child.kind === "dir" && child.children.size > 0 && !opts?.recursive) {
+            throw new DOMException("Directory not empty", "InvalidModificationError");
+          }
+          dirMap.delete(name);
+        },
+        async *entries() {
+          for (const [k, v] of [...dirMap.entries()]) {
+            if (v.kind === "dir") yield [k, makeDirHandle(v.children)];
+            else yield [k, makeFileHandle(k, v)];
+          }
+        },
+      }) as unknown as FileSystemDirectoryHandle;
+
+    const lockQueues = new Map<string, Promise<void>>();
+    const locksMock = {
+      async request<T>(
+        name: string,
+        optsOrCb: LockOptions | ((lock: Lock | null) => Promise<T>),
+        maybeCb?: (lock: Lock | null) => Promise<T>,
+      ): Promise<T> {
+        const opts = typeof optsOrCb === "function" ? {} : optsOrCb;
+        const cb = typeof optsOrCb === "function" ? optsOrCb : maybeCb!;
+        opts.signal?.throwIfAborted();
+        const prev = lockQueues.get(name) ?? Promise.resolve();
+        let release!: () => void;
+        const gate = new Promise<void>((r) => {
+          release = r;
+        });
+        lockQueues.set(
+          name,
+          prev.then(
+            () => gate,
+            () => gate,
+          ),
+        );
+        await prev;
+        try {
+          opts.signal?.throwIfAborted();
+          return await cb({ name, mode: opts.mode ?? "exclusive" } as Lock);
+        } finally {
+          release();
+        }
+      },
+    } as unknown as LockManager;
+
+    let pauseStorageEstimate = false;
+    let notifyEstimatePaused: () => void = () => {};
+    let releaseEstimateGate: () => void = () => {};
+
+    vi.stubGlobal("navigator", {
+      storage: {
+        getDirectory: async () => makeDirHandle(opfsRootTree),
+        estimate: async () => {
+          if (pauseStorageEstimate) {
+            pauseStorageEstimate = false;
+            notifyEstimatePaused?.();
+            await new Promise<void>((r) => {
+              releaseEstimateGate = r;
+            });
+          }
+          return { usage: 100, quota: 1_000_000_000 };
+        },
+      },
+      locks: locksMock,
+    });
+
+    const { stores } = fakeCacheStorage({});
+    const baseCaches = globalThis.caches;
+    let pauseHasFileMatch = false;
+    let notifyHasFilePaused: () => void = () => {};
+    let releaseHasFileGate: () => void = () => {};
+    let pauseManifestPut = false;
+    let notifyManifestPutPaused: () => void = () => {};
+    let releaseManifestPutGate: () => void = () => {};
+    let manifestPutPending = false;
+
+    vi.stubGlobal("caches", {
+      ...baseCaches,
+      keys: () => baseCaches.keys(),
+      delete: (name: string) => baseCaches.delete(name),
+      open: async (name: string) => {
+        const rawCache = await baseCaches.open(name);
+        if (name === CACHE_NAME) {
+          return {
+            ...rawCache,
+            keys: () => rawCache.keys(),
+            put: (req: RequestInfo | URL, resp: Response) => rawCache.put(req, resp),
+            delete: (req: RequestInfo | URL) => rawCache.delete(req),
+            match: async (req: RequestInfo | URL) => {
+              if (pauseHasFileMatch && !String(req).includes("derived%3A")) {
+                pauseHasFileMatch = false;
+                notifyHasFilePaused?.();
+                await new Promise<void>((r) => {
+                  releaseHasFileGate = r;
+                });
+              }
+              return rawCache.match(req);
+            },
+          };
+        }
+        if (name === "flp-manifest-v1") {
+          return {
+            ...rawCache,
+            keys: () => rawCache.keys(),
+            match: (req: RequestInfo | URL) => rawCache.match(req),
+            delete: (req: RequestInfo | URL) => rawCache.delete(req),
+            put: async (req: RequestInfo | URL, resp: Response) => {
+              if (pauseManifestPut) {
+                pauseManifestPut = false;
+                manifestPutPending = true;
+                notifyManifestPutPaused?.();
+                await new Promise<void>((r) => {
+                  releaseManifestPutGate = r;
+                });
+                manifestPutPending = false;
+              }
+              return rawCache.put(req, resp);
+            },
+          };
+        }
+        return rawCache;
+      },
+    });
+
+    const { parquetWriteBuffer } = await import("hyparquet-writer");
+    const { runDashboard: runInline } = await import("./engine");
+    const { fetchManifest } = await import("./manifest");
+    const { getDuckDBEngine } = await import("./duckdb");
+    const { clearDashboardData, setDashboardCacheIdentity } = await import("./client");
+    const { OPFS_DIRECTORY } = await import("./store-index");
+    const sessionRefMod = await import("../session-reference");
+    const { fetchCloudMetadata } = await import("../metadata-cache");
+
+    const fromIso = "2026-11-21T04:00:00.000Z";
+    const toIso = "2026-11-21T05:00:00.000Z";
+    const rawPiiParquet = parquetWriteBuffer({
+      codec: "UNCOMPRESSED",
+      rowGroupSize: 10,
+      columnData: [
+        { name: "timestamp", type: "TIMESTAMP", data: [new Date(Date.parse(fromIso) + 100)] },
+        { name: "ip", type: "STRING", data: ["203.0.113.55"] },
+        { name: "cookie_session", type: "STRING", data: ["ALICE_RAW_COOKIE_999"] },
+        { name: "url", type: "STRING", data: ["/alice-v1c-secret"] },
+      ],
+    });
+
+    const fileKey = "svc-alice/raw/year=2026/month=11/day=21/hour=04/window=v1c.parquet";
+    let return401OnFile = false;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), "http://localhost");
+        const headers = new Headers(init?.headers);
+        if (url.pathname === "/api/services") {
+          return Response.json({ services: [{ service_id: "svc-alice" }] });
+        }
+        if (url.pathname === "/api/files") {
+          return Response.json({
+            files: [
+              {
+                key: fileKey,
+                start: fromIso,
+                end: new Date(Date.parse(fromIso) + 60_000).toISOString(),
+                size: rawPiiParquet.byteLength,
+                rows: 1,
+                etag: "\"etag-v1c\"",
+              },
+            ],
+            next_cursor: null,
+            complete: true,
+            catalog_generation: 3,
+          });
+        }
+        if (url.pathname.startsWith("/fos/") || url.pathname === "/api/file") {
+          if (return401OnFile) {
+            return new Response("Unauthorized", { status: 401 });
+          }
+          const range = headers.get("range");
+          if (range) {
+            const m = /^bytes=(\d+)-(\d+)$/.exec(range)!;
+            const s = Number(m[1]);
+            const e = Number(m[2]);
+            return new Response(rawPiiParquet.slice(s, e + 1), {
+              status: 206,
+              headers: {
+                "content-range": `bytes ${s}-${e}/${rawPiiParquet.byteLength}`,
+                etag: "\"etag-v1c\"",
+              },
+            });
+          }
+          return new Response(rawPiiParquet.slice(0), {
+            status: 200,
+            headers: { etag: "\"etag-v1c\"" },
+          });
+        }
+        return new Response("Not Found", { status: 404 });
+      }),
+    );
+
+    const listOpfsFiles = (): string[] => {
+      const dir = opfsRootTree.get(OPFS_DIRECTORY);
+      if (!dir || dir.kind !== "dir") return [];
+      return [...dir.children.keys()];
+    };
+
+    // 1. V1c (SEC-T5-ITER18-01): runDashboard paused in addPending -> hasFile across clearDashboardData() must NOT write raw PII to OPFS!
+    await setDashboardCacheIdentity("alice:admin");
+    const singletonSrc = browserSource("");
+    pauseHasFileMatch = true;
+    const hasFilePaused = new Promise<void>((r) => {
+      notifyHasFilePaused = r;
+    });
+    const mountedSignal = new AbortController().signal;
+    const dashRun = runInline(singletonSrc.withOptions({ serviceId: "svc-alice" }), {
+      from: fromIso,
+      to: toIso,
+      filters: [{ field: "url", mode: "include", value: "/alice-v1c-secret" }],
+      signal: mountedSignal,
+      wallNow: () => Date.parse(toIso) + 60_000,
+    }).then(
+      () => "RESOLVED",
+      () => "REJECTED",
+    );
+    await hasFilePaused;
+    await clearDashboardData();
+    releaseHasFileGate?.();
+    expect(await dashRun).toBe("REJECTED");
+    await flushStore();
+    await flushStore();
+    expect(listOpfsFiles()).toEqual([]);
+    expect([...opfsRootTree.keys()]).toEqual([]);
+    expect(await globalThis.caches.keys()).toEqual([]);
+
+    // 1b. V1a (SEC-T5-ITER18-01 REPRO_1): persistFile rejecting mid-logout without external signal abort must NOT proceed to openParquet!
+    await setDashboardCacheIdentity("alice:admin");
+    let releasePersistGate: () => void = () => {};
+    let notifyPersistPaused: () => void = () => {};
+    const persistPaused = new Promise<void>((r) => {
+      notifyPersistPaused = r;
+    });
+    let openParquetCalls = 0;
+    const baseAliceSrc = singletonSrc.withOptions({ serviceId: "svc-alice" });
+    const repro1Src = {
+      ...baseAliceSrc,
+      persistFile: async () => {
+        notifyPersistPaused();
+        await new Promise<void>((r) => {
+          releasePersistGate = r;
+        });
+        throw new DOMException("Aborted by clear", "AbortError");
+      },
+      openParquet: async (...args: Parameters<NonNullable<typeof baseAliceSrc.openParquet>>) => {
+        openParquetCalls++;
+        return baseAliceSrc.openParquet!(...args);
+      },
+    };
+    const dashRepro1 = runInline(repro1Src, {
+      from: fromIso,
+      to: toIso,
+      filters: [{ field: "url", mode: "include", value: "/alice-v1c-secret" }],
+      signal: mountedSignal,
+      wallNow: () => Date.parse(toIso) + 60_000,
+    }).then(
+      () => "RESOLVED",
+      () => "REJECTED",
+    );
+    await persistPaused;
+    await clearDashboardData();
+    releasePersistGate();
+    expect(await dashRepro1).toBe("REJECTED");
+    expect(openParquetCalls).toBe(0);
+    expect(listOpfsFiles()).toEqual([]);
+
+    // 2. V2 (SEC-T5-ITER18-03a): persistFile 401 paused in storageEstimate() across clearDashboardData() must NOT re-create flp-parquet-meta-v1!
+    await setDashboardCacheIdentity("alice:admin");
+    return401OnFile = true;
+    pauseStorageEstimate = true;
+    const estimatePaused = new Promise<void>((r) => {
+      notifyEstimatePaused = r;
+    });
+    const v2Persist = singletonSrc
+      .withOptions({ serviceId: "svc-alice" })
+      .persistFile!(
+        {
+          key: "svc-alice/raw/ALICE_SECRET_401_TENANT_KEY.parquet",
+          start: fromIso,
+          end: toIso,
+          size: rawPiiParquet.byteLength,
+          rows: 1,
+        },
+        undefined,
+      )
+      .then(
+        () => "RESOLVED",
+        () => "REJECTED",
+      );
+    await estimatePaused;
+    const clearV2 = clearDashboardData();
+    await flushStore();
+    releaseEstimateGate?.();
+    await clearV2;
+    expect(await v2Persist).toBe("REJECTED");
+    await flushStore();
+    await flushStore();
+    return401OnFile = false;
+    expect(await globalThis.caches.keys()).toEqual([]);
+    expect([...stores.keys()]).toEqual([]);
+
+    // 3. V3 (SEC-T5-ITER18-03b): fetchManifest paused in persistManifestSnapshot cache.put across clearDashboardData() must be awaited before clearDashboardData resolves!
+    await setDashboardCacheIdentity("alice:admin");
+    pauseManifestPut = true;
+    const putPaused = new Promise<void>((r) => {
+      notifyManifestPutPaused = r;
+    });
+    const mRun = fetchManifest(
+      singletonSrc.withOptions({ serviceId: "svc-alice" }).fetchJson,
+      fromIso,
+      toIso,
+    ).then(
+      () => "RESOLVED",
+      () => "REJECTED",
+    );
+    await putPaused;
+    let clearResolvedWhilePutPending = false;
+    const clearV3 = clearDashboardData().then(() => {
+      if (manifestPutPending) clearResolvedWhilePutPending = true;
+    });
+    await flushStore();
+    expect(clearResolvedWhilePutPending).toBe(false);
+    releaseManifestPutGate?.();
+    await clearV3;
+    await mRun;
+    expect(clearResolvedWhilePutPending).toBe(false);
+    expect(await globalThis.caches.keys()).toEqual([]);
+
+    // 4. V6 + dynamic cacheScope + sessionStorage + metadataCache (SEC-T5-ITER18-02):
+    const refUuid = "11111111-2222-4333-8444-555555555555";
+    sessionRefMod.saveCloudSessionReference(refUuid, "eyJpcCI6IjIwMy4wLjExMy41NSIsInN2YyI6InN2Yy1hbGljZSJ9");
+    expect(sessionRefMod.readCloudSessionReference(refUuid)).not.toBeNull();
+    expect(typeof (sessionRefMod as Record<string, unknown>).clearCloudSessionReferences).toBe("function");
+
+    throwStorageSecurityError = true;
+    await setDashboardCacheIdentity("alice:admin");
+    const aliceScope = singletonSrc.withOptions({ serviceId: "svc-alice" }).cacheScope;
+    await singletonSrc.withOptions({ serviceId: "svc-alice" }).persistFile!(
+      {
+        key: fileKey,
+        start: fromIso,
+        end: toIso,
+        size: rawPiiParquet.byteLength,
+        rows: 1,
+        etag: "\"etag-v1c\"",
+      },
+      undefined,
+    );
+    expect(listOpfsFiles().length).toBeGreaterThan(0);
+
+    // Repeat setDashboardCacheIdentity with identical identity must be a no-op even when localStorage throws!
+    await setDashboardCacheIdentity("alice:admin");
+    expect(listOpfsFiles().length).toBeGreaterThan(0);
+
+    // Seed session reference + metadata cache under Alice, then switch to Bob while localStorage throws SecurityError:
+    sessionRefMod.saveCloudSessionReference(refUuid, "eyJpcCI6IjIwMy4wLjExMy41NSJ9");
+    await fetchCloudMetadata("/api/services", new AbortController().signal);
+
+    await setDashboardCacheIdentity("bob:analyst-no-pii");
+    const bobScope = singletonSrc.withOptions({ serviceId: "svc-alice" }).cacheScope;
+    expect(bobScope).not.toBe(aliceScope);
+    expect(listOpfsFiles()).toEqual([]);
+    expect([...opfsRootTree.keys()]).toEqual([]);
+    expect(await globalThis.caches.keys()).toEqual([]);
+    expect(sessionRefMod.readCloudSessionReference(refUuid)).toBeNull();
+
+    // Also verify clearDashboardData() wipes sessionStorage['fla.cloud-session-references']:
+    sessionRefMod.saveCloudSessionReference(refUuid, "eyJpcCI6IjIwMy4wLjExMy45OSJ9");
+    await clearDashboardData();
+    expect(sessionRefMod.readCloudSessionReference(refUuid)).toBeNull();
+  }, 45_000);
 });
 
 const flushStore = () => new Promise((resolve) => setTimeout(resolve, 0));

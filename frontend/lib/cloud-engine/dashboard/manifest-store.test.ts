@@ -458,4 +458,42 @@ describe("manifest snapshots", () => {
 
     expect(deleted).toHaveBeenCalledWith(MANIFEST_SNAPSHOT_CACHE);
   });
+
+  it("skips CacheStorage and error telemetry writes when bumpStoreMetaEpoch runs during persistManifestSnapshot or storageEstimate", async () => {
+    const { bumpStoreMetaEpoch } = await import("./file-store");
+    const { entries, open } = fakeCaches();
+
+    let releaseEstimate: () => void = () => {};
+    let notifyEstimateStarted: () => void = () => {};
+    vi.stubGlobal("navigator", {
+      storage: {
+        estimate: async () => {
+          notifyEstimateStarted?.();
+          await new Promise<void>((r) => {
+            releaseEstimate = r;
+          });
+          return { usage: 50, quota: 1_000_000 };
+        },
+      },
+    });
+
+    open.mockImplementationOnce(async (name: string) => {
+      if (name === MANIFEST_SNAPSHOT_CACHE) {
+        throw new Error("401 unauthorized manifest write");
+      }
+      return { match: vi.fn(), put: vi.fn(), delete: vi.fn() } as unknown as Cache;
+    });
+
+    const estimateStarted = new Promise<void>((r) => {
+      notifyEstimateStarted = r;
+    });
+    const pendingPersist = persistManifestSnapshot(cacheKey, snapshot());
+    await estimateStarted;
+    bumpStoreMetaEpoch();
+    releaseEstimate?.();
+    await pendingPersist;
+
+    expect(entries.size).toBe(0);
+    expect(await readStoreError()).toBeNull();
+  });
 });

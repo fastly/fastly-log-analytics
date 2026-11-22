@@ -752,27 +752,6 @@ fn inspect_active_version_for_dr(
     let mut coexist = super::reconcile::has_attach_endpoint_marker(s3_items, fos_items);
     if !coexist
         && (minimal_fallback || service.capture == Capture::Managed)
-        && context.remaining_calls() > reserve_after
-    {
-        let (cond_st, cond_val) = context.api_status(
-            "GET",
-            &format!("/service/{encoded_sid}/version/{ver}/condition"),
-            token,
-            None,
-        )?;
-        if cond_st == 401 || cond_st == 403 {
-            return Err(Error::new(403, "fastly_token_scope_insufficient"));
-        }
-        if (200..300).contains(&cond_st) {
-            if let Ok(cond_items) = list(&cond_val) {
-                if super::reconcile::has_attach_condition_marker(cond_items) {
-                    coexist = true;
-                }
-            }
-        }
-    }
-    if !coexist
-        && (minimal_fallback || service.capture == Capture::Managed)
         && super::reconcile::has_foreign_primary_endpoint(
             service, &scope, s3_items, fos_items, false,
         )
@@ -790,6 +769,27 @@ fn inspect_active_version_for_dr(
         if (200..300).contains(&snip_st) {
             if let Ok(snip_items) = list(&snip_val) {
                 if super::reconcile::capture_present(snip_items) {
+                    coexist = true;
+                }
+            }
+        }
+    }
+    if !coexist
+        && (minimal_fallback || service.capture == Capture::Managed)
+        && context.remaining_calls() > reserve_after
+    {
+        let (cond_st, cond_val) = context.api_status(
+            "GET",
+            &format!("/service/{encoded_sid}/version/{ver}/condition"),
+            token,
+            None,
+        )?;
+        if cond_st == 401 || cond_st == 403 {
+            return Err(Error::new(403, "fastly_token_scope_insufficient"));
+        }
+        if (200..300).contains(&cond_st) {
+            if let Ok(cond_items) = list(&cond_val) {
+                if super::reconcile::has_attach_condition_marker(cond_items) {
                     coexist = true;
                 }
             }
@@ -1079,7 +1079,11 @@ pub(super) fn recover(
         if rum_stats.is_some() {
             reserve += PER_UPSERT;
         }
-        reserve += 3; // inline Front dictionary sync (or post-upsert active-version inspection)
+        reserve += if !inspected_active && source != "dr_state" {
+            4
+        } else {
+            3
+        }; // post-upsert active-version inspection (4 calls on fallback DR) or inline Front dictionary sync
         if let Some(scanned) =
             scan_catalog_head(context, &service, &creds, reserve, foreign_dr_state)?
         {
@@ -1093,8 +1097,9 @@ pub(super) fn recover(
     let mut remaining_upserts = u32::from(!views.is_empty())
         + u32::from(catalog_head.is_some() || floor_key.is_some())
         + u32::from(rum_stats.is_some());
+    let needed_after_upserts = if source != "dr_state" { 6 } else { 5 };
     let initial_try_insert_first =
-        cold_start && context.remaining_calls() < 5 + 2 * remaining_upserts;
+        cold_start && context.remaining_calls() < needed_after_upserts + 2 * remaining_upserts;
     let mut try_insert_first = initial_try_insert_first
         && context.remaining_calls() > 2 + 2 * remaining_upserts.saturating_sub(1);
 

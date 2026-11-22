@@ -5,6 +5,7 @@ import {
   type ManifestBudget,
 } from "./catalog-manifest";
 import {
+  currentStoreMetaEpoch,
   describeError,
   recordStoreError,
   storageEstimate,
@@ -189,8 +190,11 @@ async function report(
   cacheKey: string,
   bytes: number,
   error: unknown,
+  callMetaEpoch = currentStoreMetaEpoch(),
 ): Promise<void> {
+  if (callMetaEpoch !== currentStoreMetaEpoch()) return;
   const estimate = await storageEstimate();
+  if (callMetaEpoch !== currentStoreMetaEpoch()) return;
   const detail = {
     at: Date.now(),
     cache: MANIFEST_SNAPSHOT_CACHE,
@@ -201,7 +205,7 @@ async function report(
     quota: estimate.quota,
   } satisfies StoreError;
   try {
-    await recordStoreError(detail);
+    await recordStoreError(detail, callMetaEpoch);
   } catch (telemetryError) {
     console.warn(
       "flp: browser cache error telemetry failed",
@@ -214,14 +218,23 @@ export async function readManifestSnapshot(
   cacheKey: string,
   now = Date.now(),
 ): Promise<ManifestSnapshot | null> {
+  const callMetaEpoch = currentStoreMetaEpoch();
   let bytes = 0;
   try {
-    if (typeof caches === "undefined") return null;
+    if (typeof caches === "undefined" || callMetaEpoch !== currentStoreMetaEpoch()) {
+      return null;
+    }
     const cache = await caches.open(MANIFEST_SNAPSHOT_CACHE);
+    if (callMetaEpoch !== currentStoreMetaEpoch()) return null;
     const url = manifestSnapshotUrl(cacheKey);
     const response = await cache.match(url);
     if (!response) return null;
+    if (callMetaEpoch !== currentStoreMetaEpoch()) {
+      await response.body?.cancel();
+      return null;
+    }
     const raw = await boundedBody(response, MAX_MANIFEST_BYTES);
+    if (callMetaEpoch !== currentStoreMetaEpoch()) return null;
     if (!raw) {
       await cache.delete(url);
       return null;
@@ -231,14 +244,16 @@ export async function readManifestSnapshot(
     try {
       body = JSON.parse(new TextDecoder().decode(raw));
     } catch {
-      await cache.delete(url);
+      if (callMetaEpoch === currentStoreMetaEpoch()) await cache.delete(url);
       return null;
     }
     const snapshot = parseSnapshot(body, cacheKey, now);
-    if (!snapshot) await cache.delete(url);
-    return snapshot;
+    if (!snapshot && callMetaEpoch === currentStoreMetaEpoch()) {
+      await cache.delete(url);
+    }
+    return callMetaEpoch === currentStoreMetaEpoch() ? snapshot : null;
   } catch (error) {
-    await report("read", cacheKey, bytes, error);
+    await report("read", cacheKey, bytes, error, callMetaEpoch);
     return null;
   }
 }
@@ -247,9 +262,12 @@ export async function persistManifestSnapshot(
   cacheKey: string,
   snapshot: ManifestSnapshot,
 ): Promise<void> {
+  const callMetaEpoch = currentStoreMetaEpoch();
   let bytes = 0;
   try {
-    if (typeof caches === "undefined") return;
+    if (typeof caches === "undefined" || callMetaEpoch !== currentStoreMetaEpoch()) {
+      return;
+    }
     const now = Date.now();
     const record = {
       formatVersion: FORMAT_VERSION,
@@ -263,34 +281,38 @@ export async function persistManifestSnapshot(
     bytes = (await response.clone().arrayBuffer()).byteLength;
     if (bytes > MAX_MANIFEST_BYTES)
       throw new Error("File manifest exceeded the metadata byte limit");
+    if (callMetaEpoch !== currentStoreMetaEpoch()) return;
     const cache = await caches.open(MANIFEST_SNAPSHOT_CACHE);
+    if (callMetaEpoch !== currentStoreMetaEpoch()) return;
     await cache.put(manifestSnapshotUrl(cacheKey), response);
   } catch (error) {
-    await report("write", cacheKey, bytes, error);
+    await report("write", cacheKey, bytes, error, callMetaEpoch);
   }
 }
 
 export async function deleteManifestSnapshot(
   cacheKey: string,
 ): Promise<boolean> {
+  const callMetaEpoch = currentStoreMetaEpoch();
   try {
     if (typeof caches === "undefined") return true;
     const cache = await caches.open(MANIFEST_SNAPSHOT_CACHE);
     await cache.delete(manifestSnapshotUrl(cacheKey));
     return true;
   } catch (error) {
-    await report("delete", cacheKey, 0, error);
+    await report("delete", cacheKey, 0, error, callMetaEpoch);
     return false;
   }
 }
 
 export async function deleteManifestSnapshots(): Promise<boolean> {
+  const callMetaEpoch = currentStoreMetaEpoch();
   try {
     if (typeof caches === "undefined") return true;
     await caches.delete(MANIFEST_SNAPSHOT_CACHE);
     return true;
   } catch (error) {
-    await report("clear", "*", 0, error);
+    await report("clear", "*", 0, error, callMetaEpoch);
     return false;
   }
 }

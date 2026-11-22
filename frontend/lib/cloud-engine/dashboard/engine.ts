@@ -1146,7 +1146,7 @@ async function reuseMemo(
   summaryUses: readonly SummaryUse[],
   fromMs: number,
   toMs: number,
-  signal: AbortSignal | undefined,
+  assertActive: () => void,
 ): Promise<Memo | null> {
   const next: Memo = {
     aggregator: prev.aggregator,
@@ -1181,10 +1181,11 @@ async function reuseMemo(
     (key) => !next.interior.has(key),
   );
   if (leaving.length > next.interior.size + next.summaries.size) return null;
+  assertActive();
   const rollups = await Promise.all(
     leaving.map((key) => source.readRollup!(key, prev.variant)),
   );
-  signal?.throwIfAborted();
+  assertActive();
   if (rollups.some((rollup) => !rollup)) return null;
   const aggregator = next.aggregator;
   for (const rollup of rollups) aggregator.subtractRollup(rollup!);
@@ -1237,6 +1238,10 @@ async function collectAggregator(
   const hasFilters = Boolean(options.filters && options.filters.length > 0);
   const customFields = options.customFields ?? [];
   const generation = lease.readContext();
+  const assertActive = () => {
+    generation.assertCurrent();
+    signal?.throwIfAborted();
+  };
   const cardFields = [...CARD_FIELDS, ...customFields.map((field) => field.id)];
   const variant = customFieldsKey(customFields);
   const readFields = columnFields(options);
@@ -1320,13 +1325,14 @@ async function collectAggregator(
         "summary",
       ).catch((error: unknown) => {
         // Summaries only save work; without them every window reads raw.
-        if (signal?.aborted) throw error;
+        assertActive();
         if (error instanceof IncompleteManifestError) {
           return { files: [], complete: false };
         }
         console.warn("flp: summary listing failed; reading raw Parquet", error);
         return null;
       }));
+    assertActive();
     summaryListing = !listing
       ? "failed"
       : !listing.complete
@@ -1369,7 +1375,7 @@ async function collectAggregator(
           summaryUses,
           fromMs,
           toMs,
-          signal,
+          assertActive,
         ))) ||
       null;
   }
@@ -1391,8 +1397,7 @@ async function collectAggregator(
   const keptRows = { cached: 0, rows: 0, bytes: 0 };
   const scopeListings = summaryListings.get(scope);
   const scopeDecoded = decodedSummaries.get(scope);
-  generation.assertCurrent();
-  signal?.throwIfAborted();
+  assertActive();
   if (next) {
     for (const meta of [...next.interior.values(), ...next.boundary.values()]) {
       keptRows.cached++;
@@ -1419,6 +1424,7 @@ async function collectAggregator(
   ) {
     const cachedSummaryFiles: ManifestFile[] = [];
     for (const file of scopeListings.values()) {
+      assertActive();
       if (
         scopeDecoded?.get(file.key)?.variant === variant ||
         (await hasSummaryProjection(source, file, DASHBOARD_SUMMARY_SPEC))
@@ -1426,7 +1432,7 @@ async function collectAggregator(
         cachedSummaryFiles.push(file);
       }
     }
-    signal?.throwIfAborted();
+    assertActive();
     if (cachedSummaryFiles.length > 0) {
       const initialPlan = planCoarsestFirst(
         files,
@@ -1441,7 +1447,7 @@ async function collectAggregator(
       const filterList = options.filters ?? [];
 
       while (queue.length > 0) {
-        signal?.throwIfAborted();
+        assertActive();
         const use = queue.shift()!;
         triedSummaries.add(use.file.key);
         let decoded: DecodedSummary | null = null;
@@ -1459,6 +1465,7 @@ async function collectAggregator(
         } else {
           try {
             const read = await readDashboardSummary(source, use.file, signal);
+            assertActive();
             summaryBytes = read.byteLength;
             decoded = await decodeSummary(
               read.parts,
@@ -1466,6 +1473,7 @@ async function collectAggregator(
               toMs,
               customFields,
             );
+            assertActive();
             if (decoded) {
               setScopeEntry(decodedSummaries, scope, use.file.key, {
                 variant,
@@ -1473,11 +1481,11 @@ async function collectAggregator(
                 byteLength: summaryBytes,
               });
             }
-          } catch (error) {
-            if (signal?.aborted) throw error;
+          } catch {
+            assertActive();
           }
         }
-        signal?.throwIfAborted();
+        assertActive();
         const matchClass = decoded
           ? classifySummaryAgainstFilters(decoded, filterList, edgeOnly)
           : "partial";
@@ -1565,7 +1573,7 @@ async function collectAggregator(
     let next = 0;
     const worker = async () => {
       while (next < items.length) {
-        signal?.throwIfAborted();
+        assertActive();
         await handle(items[next++]);
       }
     };
@@ -1580,6 +1588,7 @@ async function collectAggregator(
         worker,
       ),
     );
+    assertActive();
   };
   const countCached = (rawRows: number, byteLength: number) => {
     stats.cached++;
@@ -1610,8 +1619,9 @@ async function collectAggregator(
   let toFetch = 0;
   let toDecode = 0;
   const addPending = async (entry: Omit<PendingFile, "local">) => {
+    assertActive();
     const local = Boolean(await source.hasFile?.(entry.file.key));
-    signal?.throwIfAborted();
+    assertActive();
     if (local) toDecode++;
     else toFetch++;
     pending.push({ ...entry, local });
@@ -1621,12 +1631,12 @@ async function collectAggregator(
     let clipOnly = false;
     if (filteredCaching) {
       const cached = await source.readFilteredResult!(filteredId(file)).catch(
-        (error: unknown) => {
-          if (signal?.aborted) throw error;
+        () => {
+          assertActive();
           return null;
         },
       );
-      signal?.throwIfAborted();
+      assertActive();
       if (cached && isInteriorRollup(cached.data, fromMs, toMs)) {
         aggregator.mergeSummary({
           rollup: cached.data,
@@ -1640,7 +1650,7 @@ async function collectAggregator(
       clipOnly = cached !== null;
     }
     const cachedRollup = (await source.readRollup?.(file.key, variant)) ?? null;
-    signal?.throwIfAborted();
+    assertActive();
     const activeRollup = cachedRollup
       ? getEffectiveRollup(cachedRollup, edgeOnly)
       : null;
@@ -1760,6 +1770,7 @@ async function collectAggregator(
       index < candidates.length && microFiles.size < 128;
       index += FETCH_CONCURRENCY
     ) {
+      assertActive();
       const chunk = candidates.slice(index, index + FETCH_CONCURRENCY);
       // Hits need no prefetch reservation; openParquet revalidates them before use.
       const hits = await Promise.all(
@@ -1769,6 +1780,7 @@ async function collectAggregator(
             : source.hasPersistentFile?.(file, signal, variant),
         ),
       );
+      assertActive();
       chunk.forEach((file, i) => {
         if (microFiles.size >= 128 || hits[i]) return;
         if (
@@ -1783,11 +1795,13 @@ async function collectAggregator(
   };
 
   const readSummary = async (summary: SummaryUse) => {
+    assertActive();
     let decoded: DecodedSummary | null = null;
     let summaryBytes = 0;
     try {
       const { parts, byteLength, cached, downloadedBytes, cdn } =
         await readDashboardSummary(source, summary.file, signal);
+      assertActive();
       stats.bytes += byteLength;
       summaryBytes = byteLength;
       countRead(cached, cached ? byteLength : downloadedBytes);
@@ -1806,11 +1820,12 @@ async function collectAggregator(
         decoded = mem.decoded;
       } else {
         decoded = await decodeSummary(parts, fromMs, toMs, customFields);
+        assertActive();
       }
-    } catch (error) {
-      if (signal?.aborted) throw error;
+    } catch {
+      assertActive();
     }
-    signal?.throwIfAborted();
+    assertActive();
     if (decoded) {
       setScopeEntry(decodedSummaries, scope, summary.file.key, {
         variant,
@@ -1939,7 +1954,7 @@ async function collectAggregator(
   const acquireWhole = async (size: number) => {
     while (wholeHeld > 0 && wholeHeld + size > WHOLE_READ_INFLIGHT_BYTES) {
       await new Promise<void>((resolve) => wholeWaiters.push(resolve));
-      signal?.throwIfAborted();
+      assertActive();
     }
     wholeHeld += size;
   };
@@ -1963,6 +1978,7 @@ async function collectAggregator(
     : null;
 
   await runPool(pending, async (entry) => {
+    assertActive();
     const { file, scopedKey, hadRollup, rollupMeta } = entry;
     if (entry.summary) {
       await readSummary(entry.summary);
@@ -1973,18 +1989,27 @@ async function collectAggregator(
       let downloaded = false;
       if (microFiles.has(file.key)) {
         try {
+          assertActive();
           const persisted = await source.persistFile?.(file, signal, variant);
+          assertActive();
           downloaded = Boolean(persisted?.downloaded);
           if (downloaded) {
             stats.bytes += file.size;
             progress.downloadedBytes += file.size;
           }
         } catch {
-          signal?.throwIfAborted();
+          assertActive();
           // Persistence failures are reported by the source; native ranges remain usable.
         }
       }
+      assertActive();
       let access = await source.openParquet(file, signal, variant);
+      try {
+        assertActive();
+      } catch (error) {
+        access.release?.();
+        throw error;
+      }
       let wholeBytes = 0;
       // DuckDB-wasm reads HTTP ranges with serial synchronous XHRs, about two
       // round trips per 32 KiB for a full-card scan; one whole fetch per file
@@ -2000,14 +2025,17 @@ async function collectAggregator(
         // A whole file the browser already holds costs no transfer.
         const projected =
           readProjected && !entry.local ? await readProjected(file) : null;
+        assertActive();
         const held = projected ? projected.bytes : file.size;
         await acquireWhole(held);
         wholeBytes = held;
         let whole: { bytes: ArrayBuffer; cached: boolean; downloaded?: number };
         try {
+          assertActive();
           whole = projected
             ? await projected.read()
             : await source.fetchFile(file.key, signal, { transfer: true });
+          assertActive();
         } catch (error) {
           releaseWhole(wholeBytes);
           throw error;
@@ -2038,6 +2066,7 @@ async function collectAggregator(
         let filtered: FilteredFileResult | null = null;
         if (whole) {
           await queueSelective(access, file.size, whole);
+          assertActive();
           filtered = {
             data: whole.toRollupData(),
             truncated: whole.truncatedFields(),
@@ -2052,9 +2081,14 @@ async function collectAggregator(
             ipSketch: null,
           });
           aggregator.boundRankings();
-        } else if (completeRollup) await querySelective([access], target);
-        // Rows logged outside the file's window still need clipping.
-        else await queueSelective(access, file.size);
+        } else if (completeRollup) {
+          await querySelective([access], target);
+          assertActive();
+        } else {
+          // Rows logged outside the file's window still need clipping.
+          await queueSelective(access, file.size);
+          assertActive();
+        }
         released = true;
         access.release?.();
         releaseWhole(wholeBytes);
@@ -2067,16 +2101,21 @@ async function collectAggregator(
           aggregator.mergeSummary({ rollup, truncated, ipSketch: null });
           aggregator.boundRankings();
           if (truncated.length === 0 && rollup.totalRequests === file.rows) {
+            assertActive();
             await source.writeRollup?.(file.key, rollup, variant);
+            assertActive();
           }
         }
         if (filtered) {
+          assertActive();
           await source.writeFilteredResult!(filteredId(file), filtered).catch(
             (error: unknown) => {
+              assertActive();
               // The cache only saves work; the merged result is already exact.
               console.warn("flp: filtered result cache write failed", error);
             },
           );
+          assertActive();
         }
         let aggregateEntries = aggregator.buckets.size;
         let aggregateBytes = aggregator.buckets.size * 96;
@@ -2108,9 +2147,11 @@ async function collectAggregator(
     }
     if (hasFilters) {
       // DuckDB keeps the rows, so hand it the only copy of the bytes.
+      assertActive();
       const { bytes, cached, cdn } = await source.fetchFile(file.key, signal, {
         transfer: true,
       });
+      assertActive();
       const meta = await lease.ingestFile(
         scopedKey,
         file.key,
@@ -2118,6 +2159,7 @@ async function collectAggregator(
         rollupMeta,
         signal,
       );
+      assertActive();
       duckdbScopedKeys.push(scopedKey);
       stats.rows += meta.rawRows;
       stats.bytes += meta.byteLength;
@@ -2130,13 +2172,15 @@ async function collectAggregator(
     }
 
     // Re-read rather than hold every boundary rollup through pass 1.
+    assertActive();
     const cachedRollup = hadRollup
       ? ((await source.readRollup?.(file.key, variant)) ?? null)
       : null;
-    signal?.throwIfAborted();
+    assertActive();
     const { bytes, cached, cdn } = await source.fetchFile(file.key, signal);
+    assertActive();
     const decoded = await readColumns(bytes, wanted);
-    signal?.throwIfAborted();
+    assertActive();
     if (!decoded.columns.has("timestamp")) {
       throw new Error(`${file.key} has no timestamp column`);
     }
@@ -2200,6 +2244,7 @@ async function collectAggregator(
         aggregator.add(decoded.rows, decoded.columns);
       }
       if (rollupToWrite && source.writeRollup) {
+        assertActive();
         void Promise.resolve(
           source.writeRollup(file.key, rollupToWrite, variant),
         ).catch(() => {});
@@ -2334,6 +2379,12 @@ export async function searchFieldSummaries(
   if (otherFilters.length > 0 || options.edgeOnly) {
     return { entries: [], partial: true };
   }
+  const generation = await getDuckDBEngine().beginRequest();
+  const assertActive = () => {
+    generation.assertCurrent();
+    signal?.throwIfAborted();
+  };
+  assertActive();
   const fromMs = Date.parse(from);
   const toMs = Date.parse(to);
   const customFields = options.customFields ?? [];
@@ -2342,6 +2393,7 @@ export async function searchFieldSummaries(
   const manifest =
     options.manifest ??
     (await fetchManifest(source.fetchJson, from, to, signal));
+  assertActive();
   if (!manifest.complete) return { entries: [], partial: true };
   let files = filesOverlapping(manifest.files, fromMs, toMs);
   let summaryUses: SummaryUse[] = [];
@@ -2359,10 +2411,11 @@ export async function searchFieldSummaries(
             signal,
             undefined,
             "summary",
-          ).catch((error: unknown) => {
-            if (signal?.aborted) throw error;
+          ).catch(() => {
+            assertActive();
             return null;
           });
+    assertActive();
     if (listing?.complete) {
       const plan = planSummaries(files, listing.files, fromMs, toMs);
       files = plan.raw;
@@ -2372,7 +2425,7 @@ export async function searchFieldSummaries(
   const aggregator = new Aggregator(from, to, [column]);
   let partial = false;
   for (const use of summaryUses) {
-    signal?.throwIfAborted();
+    assertActive();
     const mem = decodedSummaries.get(scope)?.get(use.file.key);
     let decoded =
       mem &&
@@ -2385,7 +2438,9 @@ export async function searchFieldSummaries(
     if (!decoded) {
       try {
         const read = await readDashboardSummary(source, use.file, signal);
+        assertActive();
         decoded = await decodeSummary(read.parts, fromMs, toMs, customFields);
+        assertActive();
         if (decoded) {
           setScopeEntry(decodedSummaries, scope, use.file.key, {
             variant,
@@ -2393,16 +2448,17 @@ export async function searchFieldSummaries(
             byteLength: read.byteLength,
           });
         }
-      } catch (error) {
-        if (signal?.aborted) throw error;
+      } catch {
+        assertActive();
       }
     }
     if (decoded) aggregator.mergeSummary(decoded);
     else partial = true;
   }
   for (const file of files) {
+    assertActive();
     const rollup = (await source.readRollup?.(file.key, variant)) ?? null;
-    signal?.throwIfAborted();
+    assertActive();
     if (rollup && isInteriorRollup(rollup, fromMs, toMs)) {
       aggregator.mergeRollup(rollup);
     } else {

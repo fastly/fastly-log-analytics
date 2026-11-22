@@ -1,3 +1,4 @@
+import { dashboardCacheIdentity } from "../dashboard/sources";
 import { createSharedRequests } from "../shared-request";
 import { activeOpsUser } from "../telemetry/sources";
 import type { ComputeUsageResponse } from "./computeSeries";
@@ -12,14 +13,22 @@ const sharedBilling = createSharedRequests<ComputeBilling>();
 // Incurred Cost lines; reuse a settled answer briefly so the page makes one Stats fan-out.
 const BILLING_TTL_MS = 15_000;
 const settledBilling = new Map<string, { at: number; value: ComputeBilling }>();
+let billingCacheEpoch = 0;
+
+export function currentBillingCacheEpoch(): number {
+  return billingCacheEpoch;
+}
 
 export function resetComputeBillingCache(): void {
+  billingCacheEpoch += 1;
   settledBilling.clear();
 }
 
 /** Ranges ending at "now" differ by milliseconds between the page's requests. */
 const billingKey = (range: { from: number; to: number }, scope: "full" | "compute") =>
   JSON.stringify([
+    billingCacheEpoch,
+    dashboardCacheIdentity(),
     activeOpsUser(),
     scope,
     Math.floor(range.from / 60_000),
@@ -40,6 +49,7 @@ async function readBilling(
   if (range.to - range.from > MAX_SPAN_MS) {
     return { billing: null, reason: "range_over_31_days" };
   }
+  const startEpoch = billingCacheEpoch;
   const key = billingKey(range, scope);
   const now = Date.now();
   for (const [k, entry] of settledBilling) {
@@ -53,7 +63,9 @@ async function readBilling(
       (shared) => fetchBilling(range, shared),
       { signal },
     );
-    settledBilling.set(key, { at: Date.now(), value: billing });
+    if (startEpoch === billingCacheEpoch) {
+      settledBilling.set(key, { at: Date.now(), value: billing });
+    }
     return { billing };
   } catch {
     return { billing: null, reason: "stats_unavailable" };

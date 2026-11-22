@@ -1611,4 +1611,81 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       vi.useRealTimers();
     }
   });
+
+  it("clears settled platform bundle and compute billing caches on clearDashboardData and setDashboardCacheIdentity", async () => {
+    const { clearDashboardData, setDashboardCacheIdentity } = await import("./dashboard/client");
+    const from = Date.parse("2026-11-10T00:00:00Z");
+    const to = from + 3_600_000;
+    const params = new URLSearchParams({
+      start_time: new Date(from).toISOString(),
+      end_time: new Date(to).toISOString(),
+    });
+    let allowAdmin = true;
+    let platformFetches = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/admin/usage/platform")) {
+          platformFetches += 1;
+          if (!allowAdmin) {
+            return Response.json({ detail: "forbidden" }, { status: 403 });
+          }
+          return Response.json({
+            platform: { source: "fastly", storage: {}, compute: {}, ngwaf: {} },
+            compute_billing: {
+              services: [
+                {
+                  role: "app",
+                  compute_requests: 42,
+                  compute_requests_buckets: [{ start_time: from / 1000, compute_requests: 42 }],
+                  compute_execution_time_ms: 420,
+                  compute_execution_time_ms_buckets: [{ start_time: from / 1000, compute_execution_time_ms: 420 }],
+                  compute_request_time_billed_ms: 840,
+                  compute_request_time_billed_ms_buckets: [
+                    { start_time: from / 1000, compute_request_time_billed_ms: 840 },
+                  ],
+                  bandwidth: 0,
+                  kv_store_class_a_operations: 0,
+                  kv_store_class_b_operations: 0,
+                },
+              ],
+            },
+          });
+        }
+        return new Response("not found", { status: 404 });
+      }),
+    );
+
+    await setDashboardCacheIdentity("alice:admin");
+    const adminRes = await handleCloudAnalyticalRequest(
+      new Request(`http://localhost/api/usage/compute?${params}`),
+    );
+    expect(await adminRes!.json()).toMatchObject({ source: "fastly", requests: 42 });
+    expect(platformFetches).toBe(1);
+
+    // Switch identity to non-admin Bob within the 15s TTL: must NOT serve Alice's settled bundle!
+    allowAdmin = false;
+    await setDashboardCacheIdentity("bob:analyst");
+    const bobRes = await handleCloudAnalyticalRequest(
+      new Request(`http://localhost/api/usage/compute?${params}`),
+    );
+    expect(await bobRes!.json()).toMatchObject({ source: "unavailable" });
+    expect(platformFetches).toBe(2);
+
+    // Re-seed as Admin, then logout via clearDashboardData(): must also invalidate settled caches!
+    allowAdmin = true;
+    await setDashboardCacheIdentity("alice:admin");
+    const adminRes2 = await handleCloudAnalyticalRequest(
+      new Request(`http://localhost/api/usage/compute?${params}`),
+    );
+    expect(await adminRes2!.json()).toMatchObject({ source: "fastly", requests: 42 });
+
+    allowAdmin = false;
+    await clearDashboardData();
+    const loggedOutRes = await handleCloudAnalyticalRequest(
+      new Request(`http://localhost/api/usage/compute?${params}`),
+    );
+    expect(await loggedOutRes!.json()).toMatchObject({ source: "unavailable" });
+  });
 });

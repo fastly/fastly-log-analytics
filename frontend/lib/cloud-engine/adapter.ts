@@ -15,7 +15,7 @@ import { classifyUserAgentCounts } from "./bots/classify";
 import { cmcdScanColumns, handleCmcdRequest, type CmcdQueryParams } from "./cmcd";
 import { cmcdRollupEligible } from "./cmcd-rollup";
 import type { MinuteBucket } from "./dashboard/engine";
-import { parseVcpuMsHeader } from "./dashboard/sources";
+import { dashboardCacheIdentity, parseVcpuMsHeader } from "./dashboard/sources";
 import { customCards, type CardField, type CustomField } from "./dashboard/summaries";
 import {
   handleInsightAvailability,
@@ -94,8 +94,13 @@ import {
 } from "./telemetry/admin";
 import { queryOpsLogs } from "./telemetry/client";
 import type { OpsKind } from "./telemetry/kinds";
+import { activeOpsUser } from "./telemetry/sources";
 import { evaluateCapacity } from "./usage/capacity";
-import { computeUsage, usageComputeBilling } from "./usage/computeUsage";
+import {
+  computeUsage,
+  currentBillingCacheEpoch,
+  usageComputeBilling,
+} from "./usage/computeUsage";
 import { estimateMonthlyUsage } from "./usage/estimate";
 import { fetchEstimatePrefill } from "./usage/estimatePrefill";
 import { LIST_RATES } from "./usage/rates";
@@ -133,6 +138,7 @@ type PlatformBundle = {
 const sharedPlatformBundle = createSharedRequests<PlatformBundle>();
 const settledPlatformBundles = new Map<string, { at: number; value: PlatformBundle }>();
 const PLATFORM_BUNDLE_TTL_MS = 15_000;
+let lastPlatformBundleEpoch = 0;
 
 export function resetCloudPlatformBundleCache(): void {
   settledPlatformBundles.clear();
@@ -144,7 +150,15 @@ async function cloudPlatformBundle(
   request: Request,
   signal: AbortSignal = request.signal,
 ): Promise<PlatformBundle> {
+  const startEpoch = currentBillingCacheEpoch();
+  if (lastPlatformBundleEpoch !== startEpoch) {
+    settledPlatformBundles.clear();
+    lastPlatformBundleEpoch = startEpoch;
+  }
   const key = JSON.stringify([
+    startEpoch,
+    dashboardCacheIdentity(),
+    activeOpsUser(),
     request.headers.get("x-fastly-service-id") ?? request.headers.get("x-service-id"),
     from,
     to,
@@ -178,7 +192,9 @@ async function cloudPlatformBundle(
     },
     { signal },
   );
-  if (value.status === 200) settledPlatformBundles.set(key, { at: Date.now(), value });
+  if (value.status === 200 && startEpoch === currentBillingCacheEpoch()) {
+    settledPlatformBundles.set(key, { at: Date.now(), value });
+  }
   return value;
 }
 const ROLLUP_CHART_METRICS = new Map([

@@ -830,6 +830,15 @@ pub fn service_has_scoring_pragmas(
     token: &str,
 ) -> Option<bool> {
     let ver = reconcile::active_version(context, sid, token).ok()?;
+    service_has_scoring_pragmas_at_version(context, sid, ver, token)
+}
+
+fn service_has_scoring_pragmas_at_version(
+    context: &Context<'_, impl Runtime>,
+    sid: &str,
+    ver: u64,
+    token: &str,
+) -> Option<bool> {
     let (status, body) = context
         .api_status(
             "GET",
@@ -1163,18 +1172,38 @@ fn config_store_upsert_item(
     Ok(())
 }
 
+fn fos_json_get_with_creds(
+    context: &Context<'_, impl Runtime>,
+    service: &Service,
+    creds: &(String, String),
+    key: &str,
+) -> Result<Option<Value>, Error> {
+    let Some(bytes) = fos::get_object(context, service, creds, key)? else {
+        return Ok(None);
+    };
+    let parsed: Value =
+        serde_json::from_slice(&bytes).map_err(|_| Error::new(502, "fos_json_invalid"))?;
+    Ok(Some(parsed))
+}
+
 fn fos_json_get(
     context: &Context<'_, impl Runtime>,
     service: &Service,
     key: &str,
 ) -> Result<Option<Value>, Error> {
     let creds = fos::credentials(context, service)?;
-    let Some(bytes) = fos::get_object(context, service, &creds, key)? else {
-        return Ok(None);
-    };
-    let parsed: Value =
-        serde_json::from_slice(&bytes).map_err(|_| Error::new(502, "fos_json_invalid"))?;
-    Ok(Some(parsed))
+    fos_json_get_with_creds(context, service, &creds, key)
+}
+
+fn fos_json_put_with_creds(
+    context: &Context<'_, impl Runtime>,
+    service: &Service,
+    creds: &(String, String),
+    key: &str,
+    value: &Value,
+) -> Result<(), Error> {
+    let bytes = serde_json::to_vec(value).map_err(|_| Error::new(500, "state_encoding_failed"))?;
+    fos::put_object(context, service, creds, key, bytes)
 }
 
 fn fos_json_put(
@@ -1184,8 +1213,7 @@ fn fos_json_put(
     value: &Value,
 ) -> Result<(), Error> {
     let creds = fos::credentials(context, service)?;
-    let bytes = serde_json::to_vec(value).map_err(|_| Error::new(500, "state_encoding_failed"))?;
-    fos::put_object(context, service, &creds, key, bytes)
+    fos_json_put_with_creds(context, service, &creds, key, value)
 }
 
 fn scoring_fos_prefix(service: &Service) -> String {
@@ -1213,6 +1241,7 @@ fn ensure_scorer_service_step(
     service: &mut Service,
     token: &str,
 ) -> Result<(), Error> {
+    reconcile::verify_managed_customer_vcl_ownership(context, service, token)?;
     check_entitlement(context, token, "kv_store", "kv_store_not_enabled")?;
     let name = scoring_service_name(&service.service_id);
     let domain = scoring_domain(&service.service_id);
@@ -1477,6 +1506,7 @@ fn ensure_scorer_store_config_step(
         }
     }
 
+    job.scorer_ownership_verified = false;
     advance(job, "scorer_deploy");
     Ok(())
 }
@@ -1488,13 +1518,20 @@ fn deploy_scorer_step(
     service: &mut Service,
     token: &str,
 ) -> Result<(), Error> {
+    if service.capture == Capture::Attached {
+        return Err(Error::new(409, "managed_resources_not_owned"));
+    }
     let mut sc = service
         .scoring
         .clone()
         .ok_or_else(|| Error::new(409, "scoring_config_missing"))?;
     if !job.scorer_ownership_verified {
+        reconcile::verify_managed_customer_vcl_ownership(context, service, token)?;
         verify_scoring_resources(context, &service.service_id, &sc, token)?;
         job.scorer_ownership_verified = true;
+        if context.remaining_calls() < 16 {
+            return Ok(());
+        }
     }
     let pkg_bytes = context
         .runtime
@@ -1503,7 +1540,17 @@ fn deploy_scorer_step(
     let pkg_sha = hex::encode(Sha256::digest(&pkg_bytes));
     let scorer_sid = encode(&sc.scoring_service_id);
 
-    let active_ver = reconcile::active_version(context, &sc.scoring_service_id, token).ok();
+    let versions = context.api(
+        "GET",
+        &format!("/service/{scorer_sid}/version"),
+        token,
+        None,
+    )?;
+    let version_list = list(&versions)?;
+    let active_ver = version_list
+        .iter()
+        .find(|v| v["active"].as_bool() == Some(true))
+        .and_then(|v| v["number"].as_u64());
     let mut skip_upload = false;
     let mut files_hash = String::new();
     if let Some(ver) = active_ver {
@@ -1528,18 +1575,12 @@ fn deploy_scorer_step(
     }
 
     if !skip_upload {
-        let versions = context.api(
-            "GET",
-            &format!("/service/{scorer_sid}/version"),
-            token,
-            None,
-        )?;
-        let base_ver = list(&versions)?
+        let base_ver = version_list
             .iter()
             .filter_map(|v| v["number"].as_u64())
             .max()
             .unwrap_or(1);
-        let base_is_locked = list(&versions)?
+        let base_is_locked = version_list
             .iter()
             .find(|v| v["number"].as_u64() == Some(base_ver))
             .is_some_and(|v| {
@@ -1645,7 +1686,9 @@ fn logging_reconcile_step(
     job: &mut Job,
     record: &Record,
     service: &mut Service,
+    token: &str,
 ) -> Result<(), Error> {
+    reconcile::verify_managed_customer_vcl_ownership(context, service, token)?;
     let mut sc = service
         .scoring
         .clone()
@@ -2117,7 +2160,7 @@ pub fn run_step(
             Ok(true)
         }
         "logging_reconcile" => {
-            logging_reconcile_step(context, job, record, service)?;
+            logging_reconcile_step(context, job, record, service, token)?;
             Ok(true)
         }
         "scoring_strip_logging_vcl" => {
@@ -2353,7 +2396,9 @@ pub fn route(
             reject_blocking_job(context, &service)?;
             check_unlocked(context, sid)?;
             let token = resolve_brokered_token(context, &service, input["token"].as_str())?;
-            if service_has_scoring_pragmas(context, sid, &token) == Some(false) {
+            let active =
+                reconcile::verify_managed_customer_vcl_ownership(context, &service, &token)?;
+            if service_has_scoring_pragmas_at_version(context, sid, active, &token) == Some(false) {
                 return Err(Error::new(409, "missing_scoring_pragmas"));
             }
             let mut job = new_job(context, actor, &service, "scoring_enable", false, true)?;
@@ -2458,6 +2503,7 @@ pub fn route(
             let (_, service) = load_service(context, sid)?;
             let sc = require_scoring_enabled(&service)?;
             let token = resolve_brokered_token(context, &service, None)?;
+            reconcile::verify_managed_customer_vcl_ownership(context, &service, &token)?;
             verify_scoring_resources(context, &service.service_id, sc, &token)?;
             config_store_upsert_item(
                 context,
@@ -2514,6 +2560,7 @@ pub fn route(
             let (_, service) = load_service(context, sid)?;
             let sc = require_scoring_enabled(&service)?;
             let token = resolve_brokered_token(context, &service, None)?;
+            reconcile::verify_managed_customer_vcl_ownership(context, &service, &token)?;
             verify_scoring_resources(context, &service.service_id, sc, &token)?;
             let now_s = context.runtime.now().to_string();
             config_store_upsert_item(
@@ -2604,10 +2651,11 @@ pub fn route(
             let (record, mut service) = load_service(context, sid)?;
             let mut sc = require_scoring_enabled(&service)?.clone();
             let token = resolve_brokered_token(context, &service, None)?;
+            context.confirm_with_token(&token);
             let snippet_body = recv_snippet(Some(&cleaned))?;
             update_single_snippet_and_activate(
                 context,
-                sid,
+                &service,
                 &token,
                 SCORING_RECV_NAME,
                 "recv",
@@ -2651,10 +2699,11 @@ pub fn route(
             let (record, mut service) = load_service(context, sid)?;
             let mut sc = require_scoring_enabled(&service)?.clone();
             let token = resolve_brokered_token(context, &service, None)?;
+            context.confirm_with_token(&token);
             let snippet_body = enforce_snippet(Some(code));
             update_single_snippet_and_activate(
                 context,
-                sid,
+                &service,
                 &token,
                 SCORING_ENFORCE_NAME,
                 "recv",
@@ -2685,6 +2734,7 @@ pub fn route(
             let (_, service) = load_service(context, sid)?;
             let sc = require_scoring_enabled(&service)?;
             let token = resolve_brokered_token(context, &service, None)?;
+            reconcile::verify_managed_customer_vcl_ownership(context, &service, &token)?;
             verify_scoring_resources(context, &service.service_id, sc, &token)?;
             let current =
                 config_store_get_item(context, &sc.scoring_keys_store_id, CURRENT_KEY_HEX, &token)?;
@@ -2726,22 +2776,26 @@ pub fn route(
             let (record, mut service) = load_service(context, sid)?;
             let mut sc = require_scoring_enabled(&service)?.clone();
             let token = resolve_brokered_token(context, &service, None)?;
+            context.confirm_with_token(&token);
+            reconcile::verify_managed_customer_vcl_ownership(context, &service, &token)?;
             verify_scoring_resources(context, &service.service_id, &sc, &token)?;
 
             // Validate binary FSM1 encoding before writing anything.
             write_matrix_to_kv(context, &sc.scoring_matrix_store_id, matrix, &token)?;
 
+            let creds = fos::credentials(context, &service)?;
             let prefix = scoring_fos_prefix(&service);
             let ver_key = format!("{prefix}matrices/{version}.json");
             let latest_key = format!("{prefix}matrix_latest.json");
             let index_key = format!("{prefix}matrices/index.json");
 
-            fos_json_put(context, &service, &ver_key, matrix)?;
-            fos_json_put(context, &service, &latest_key, matrix)?;
+            fos_json_put_with_creds(context, &service, &creds, &ver_key, matrix)?;
+            fos_json_put_with_creds(context, &service, &creds, &latest_key, matrix)?;
 
-            let mut versions: Vec<Value> = fos_json_get(context, &service, &index_key)?
-                .and_then(|v| v["versions"].as_array().cloned())
-                .unwrap_or_default();
+            let mut versions: Vec<Value> =
+                fos_json_get_with_creds(context, &service, &creds, &index_key)?
+                    .and_then(|v| v["versions"].as_array().cloned())
+                    .unwrap_or_default();
             let now_iso = rfc3339_from_secs(context.runtime.now());
             versions.retain(|v| v["version"].as_str() != Some(&version));
             versions.insert(
@@ -2757,7 +2811,6 @@ pub fn route(
                 }),
             );
             if versions.len() > MAX_MATRIX_HISTORY {
-                let creds = fos::credentials(context, &service)?;
                 for old in versions.drain(MAX_MATRIX_HISTORY..) {
                     if let Some(old_ver) =
                         old["version"].as_str().filter(|v| valid_matrix_version(v))
@@ -2771,9 +2824,10 @@ pub fn route(
                     }
                 }
             }
-            fos_json_put(
+            fos_json_put_with_creds(
                 context,
                 &service,
+                &creds,
                 &index_key,
                 &json!({"versions": versions}),
             )?;
@@ -2830,15 +2884,19 @@ pub fn route(
             let (record, mut service) = load_service(context, sid)?;
             let mut sc = require_scoring_enabled(&service)?.clone();
             let token = resolve_brokered_token(context, &service, None)?;
+            context.confirm_with_token(&token);
+            reconcile::verify_managed_customer_vcl_ownership(context, &service, &token)?;
             verify_scoring_resources(context, &service.service_id, &sc, &token)?;
+            let creds = fos::credentials(context, &service)?;
             let prefix = scoring_fos_prefix(&service);
             let ver_key = format!("{prefix}matrices/{version}.json");
-            let matrix = fos_json_get(context, &service, &ver_key)?
+            let matrix = fos_json_get_with_creds(context, &service, &creds, &ver_key)?
                 .ok_or_else(|| Error::new(404, "matrix_version_not_found"))?;
             write_matrix_to_kv(context, &sc.scoring_matrix_store_id, &matrix, &token)?;
-            fos_json_put(
+            fos_json_put_with_creds(
                 context,
                 &service,
+                &creds,
                 &format!("{prefix}matrix_latest.json"),
                 &matrix,
             )?;
@@ -2967,14 +3025,15 @@ pub fn route(
 
 fn update_single_snippet_and_activate(
     context: &Context<'_, impl Runtime>,
-    sid: &str,
+    service: &Service,
     token: &str,
     snippet_name: &str,
     snippet_type: &str,
     priority: i64,
     content: &str,
 ) -> Result<(), Error> {
-    let active = reconcile::active_version(context, sid, token)?;
+    let sid = &service.service_id;
+    let active = reconcile::verify_managed_customer_vcl_ownership(context, service, token)?;
     let cloned = context.api(
         "PUT",
         &format!("/service/{sid}/version/{active}/clone"),
