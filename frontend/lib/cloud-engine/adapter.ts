@@ -23,7 +23,8 @@ import {
   type CacheCollapseDetailRequest,
   type InsightsRequest,
 } from "./insights";
-import { INSIGHT_AVAILABILITY_COLUMNS, insightScanColumns, queryCloudInsights, queryCloudCacheCollapse } from "./insight-scans";
+import { INSIGHT_AVAILABILITY_COLUMNS, insightScanColumns, insightsOverBudget, queryCloudInsights, queryCloudCacheCollapse } from "./insight-scans";
+import { insightsDeferredDetectors } from "./insights-rollup";
 import { CLOUD_SCORING_SCAN_ROUTES, cloudScoringRead, scoringScanColumns } from "./scoring-reads";
 import { handleNetworkRequest, networkScanColumns, networkScans, type NetworkQueryParams } from "./network";
 import { isNetworkPartial, mergeNetworkPartial, networkRollupEligible } from "./network-rollup";
@@ -787,8 +788,10 @@ async function cloudInsightsRollup(
 
 /**
  * Merges the v3 summaries for an /insights baseline over the range the raw
- * scan would use, so only the window needs raw Parquet. Null (or a summary
- * failure) leaves the baseline to the raw scan.
+ * scan would use, so only the window needs raw Parquet. A detector follow-up
+ * uses it only when the summaries keep every requested detector's baseline
+ * (the IP detectors' `ins_ip`), since their window still needs raw rows. Null
+ * (or a summary failure) leaves the baseline to the raw scan.
  */
 async function cloudInsightsBaseline(
   request: Request,
@@ -797,8 +800,7 @@ async function cloudInsightsBaseline(
   assertAdapterEpoch(request, entryMetaEpoch);
   const body = await request.clone().json() as Record<string, unknown>;
   assertAdapterEpoch(request, entryMetaEpoch);
-  // A detector-restricted request is the raw follow-up for detectors the summaries can't answer.
-  if (Array.isArray(body.detectors)) return null;
+  const detectors = Array.isArray(body.detectors) ? body.detectors as string[] : null;
   const filters = filtersPayloadToPredicates(body.filters as Parameters<typeof filtersPayloadToPredicates>[0], undefined);
   if (filters.length) return null;
   let end = String(body.end_time ?? body.end ?? body.clamp_end ?? "");
@@ -815,6 +817,10 @@ async function cloudInsightsBaseline(
     const baseline = await rollupAnswer("/api/insights", { ...body, clamp_end: end }, serviceId,
       request.signal) as RollupResult | null;
     assertAdapterEpoch(request, entryMetaEpoch);
+    if (baseline && detectors) {
+      const deferred = insightsDeferredDetectors(baseline.rollup);
+      if (detectors.some((id) => deferred.has(id))) return null;
+    }
     return baseline;
   } catch (error) {
     if (request.signal.aborted || entryMetaEpoch !== currentStoreMetaEpoch() || isAdapterAbortError(error)) {
@@ -935,7 +941,8 @@ async function prepareCloudScan(
   };
   const sessionsFrom = url.pathname === "/api/sessions"
     ? sessionsLoadFrom(params, Date.parse(scanStart), Date.parse(end)) : Date.parse(scanStart);
-  const read = queryPlan ? await loadQuery(firstQueryWindow ?? scanStart) : await ensureCloudRange(
+  const followUp = Boolean(detectors) && url.pathname === "/api/insights";
+  const loadRange = (wider: boolean) => ensureCloudRange(
     sessionsFrom > Date.parse(scanStart) ? new Date(sessionsFrom).toISOString() : scanStart, scanEnd, request.signal, rum ? ["rum"] : ["request"], {
     serviceId: serviceId ? decodeURIComponent(String(serviceId)) : undefined, customFields,
     ...insights ? { projection: {
@@ -943,11 +950,16 @@ async function prepareCloudScan(
         : insightScanColumns(filters, detectors),
       ...request.headers.get("x-flp-cloud-prefetch") === "1" ? { maxBytes: PREFETCH_PROJECTION_BYTES } : {},
       // A detector follow-up reuses the window its summary pass already loaded with every insight column.
-      ...detectors && url.pathname === "/api/insights" ? { wider: {
+      ...wider ? { wider: {
         from: new Date(Date.parse(end) - Number(params.window_size_hrs ?? 24) * 3_600_000).toISOString(),
         columns: insightScanColumns(filters),
       } } : {},
     } } : scanColumns ? { projection: { columns: scanColumns } } : {},
+  });
+  const read = queryPlan ? await loadQuery(firstQueryWindow ?? scanStart) : await loadRange(followUp).catch((error: unknown) => {
+    // When no earlier pass loaded the window wide, its every-column read can outgrow the budget alone.
+    if (followUp && error instanceof CloudBudgetError) return loadRange(false);
+    throw error;
   }).catch((error: unknown) => {
     throw network && error instanceof CloudBudgetError
       ? networkBudgetError(error, networkScans(url.pathname, params.sections), scanColumns) : error;
@@ -1234,7 +1246,15 @@ async function handleCloudRequestInner(
       try {
         await previous;
         assertAdapterEpoch(request, entryMetaEpoch);
-        const prepared = await prepareInsightsScan(request, entryMetaEpoch);
+        let prepared: Request;
+        try {
+          prepared = await prepareInsightsScan(request, entryMetaEpoch);
+        } catch (error) {
+          const skipped = error instanceof CloudBudgetError ? await insightsFollowUpOverBudget(request, error) : null;
+          if (!skipped) throw error;
+          success = true;
+          return skipped;
+        }
         assertAdapterEpoch(request, entryMetaEpoch);
         read = cloudReadContext(prepared);
         const response = /\/scoring\//.test(path)
@@ -1258,6 +1278,19 @@ async function handleCloudRequestInner(
       ? null : unsupportedCloudEndpoint(request);
   };
   return stage ? withLoading(stage, work) : work();
+}
+
+/**
+ * A detector follow-up is one section of an /insights page already rendered
+ * from summaries: when its raw scan stays over budget after the baseline
+ * ladder, its detectors come back marked not evaluated instead of failing.
+ */
+async function insightsFollowUpOverBudget(request: Request, error: CloudBudgetError): Promise<Response | null> {
+  if (request.method !== "POST" || new URL(request.url).pathname !== "/api/insights" || !error.detail) return null;
+  const body = await request.clone().json() as Record<string, unknown>;
+  if (!Array.isArray(body.detectors) || body.detectors.length === 0) return null;
+  console.warn(`flp: /insights ${body.detectors.join(", ")} not evaluated: ${error.message}`);
+  return jsonResponse(insightsOverBudget(body as Parameters<typeof insightsOverBudget>[0], error.detail), request);
 }
 
 async function dispatchCloudRequest(
