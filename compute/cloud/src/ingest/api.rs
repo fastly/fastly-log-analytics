@@ -16,6 +16,8 @@ pub const FILES_PAGE: usize = 500;
 pub const MAX_RANGE_S: i64 = 62 * 24 * 3600;
 const MAX_LIST_CALLS: u32 = 20;
 const MAX_KEY_BYTES: usize = 512;
+/// Cursor `view` of an ops listing that walks the kind's folder across days.
+const SPAN_VIEW: &str = "span";
 
 pub type Failure = (u16, &'static str);
 pub type Api = Result<Value, Failure>;
@@ -397,7 +399,7 @@ pub fn files<R: Runtime>(runtime: &R, service: &Service, query: &str, started: I
         if cursor.from != from
             || cursor.to != to
             || cursor.dataset != dataset
-            || cursor.view.is_some()
+            || cursor.view.as_deref() != compacted(dataset).then_some(SPAN_VIEW)
             || (compacted(dataset) && cursor.after.is_some())
             || (!compacted(dataset) && cursor.token.is_some())
         {
@@ -457,33 +459,32 @@ pub fn files<R: Runtime>(runtime: &R, service: &Service, query: &str, started: I
         }
     }
     let prefix = root;
-    // Operational file names carry minutes, every other dataset seconds.
-    let unit = if dataset.starts_with("ops:") { 60 } else { 1 };
-    // A window can start in the hour before `from` and still overlap it.
-    let first_day = day_start(from - 3600);
-    let last_day = day_start(to - 1);
-    let day_count = usize::try_from((last_day - first_day) / 86_400 + 1).unwrap_or(0);
+    // Operational file names carry minutes.
+    let unit = 60;
+    // A window can start in the hour before `from` and still overlap it. One LIST walks the
+    // kind's folder across day boundaries from the first day, so a sparse month costs one
+    // call rather than one per day.
+    let start_after = format!("{prefix}{}", day_dir(day_start(from - 3600)))
+        .trim_end_matches('/')
+        .to_owned();
+    let last_folder = format!("{prefix}{}", super::hour_dir(to - 1));
     let calls = runtime
         .admin_remaining_calls()
         .saturating_sub(2)
         .min(MAX_LIST_CALLS);
     let mut used = 0;
     let mut files = Vec::new();
-    while files.len() < FILES_PAGE && day < day_count && used < calls {
-        let at = first_day + day as i64 * 86_400;
-        let day_prefix = format!("{prefix}{}", day_dir(at));
-        // `compact=` sorts before `hour=`, so a compacted day is listed from its start.
-        let start_after = (day == 0 && token.is_none() && !compacted(dataset))
-            .then(|| format!("{prefix}{}", super::hour_dir(from - 3600)));
-        let resumed = token.is_some() && compacted(dataset);
-        // A resumed day may need its compacts listed again.
+    let mut complete = false;
+    while !complete && files.len() < FILES_PAGE && used < calls {
+        // A page resumed inside a day folder may need that day's compacts listed again.
+        let resumed = token.is_some();
         if used + 1 + u32::from(resumed) > calls {
             break;
         }
         let page = store
             .list(
-                &day_prefix,
-                start_after.as_deref(),
+                &prefix,
+                Some(&start_after),
                 token.as_deref(),
                 FILES_PAGE - files.len(),
                 None,
@@ -493,7 +494,6 @@ pub fn files<R: Runtime>(runtime: &R, service: &Service, query: &str, started: I
         let relist = days_to_relist(&page.objects, resumed);
         used += relist.len() as u32;
         let visible = visible_keys(&store, &page.objects, &relist)?;
-        let last_folder = format!("{prefix}{}", super::hour_dir(to - 1));
         let past = page
             .objects
             .iter()
@@ -503,11 +503,7 @@ pub fn files<R: Runtime>(runtime: &R, service: &Service, query: &str, started: I
                 continue;
             }
             let entry = if let Some(name) = parse_processed(&object.key) {
-                let (start, end) = if unit == 1 {
-                    (name.start, name.end)
-                } else {
-                    (name.start * unit, name.end * unit + unit)
-                };
+                let (start, end) = (name.start * unit, name.end * unit + unit);
                 (start < to && end > from).then(|| {
                     json!({
                         "key": object.key,
@@ -538,17 +534,12 @@ pub fn files<R: Runtime>(runtime: &R, service: &Service, query: &str, started: I
         }
         match page.next_token.filter(|_| !past) {
             Some(next) => token = Some(next),
-            None if past => {
-                day = day_count;
-                token = None;
-            }
             None => {
-                day += 1;
+                complete = true;
                 token = None;
             }
         }
     }
-    let complete = day >= day_count;
     let next_cursor = if complete {
         Value::Null
     } else {
@@ -557,10 +548,10 @@ pub fn files<R: Runtime>(runtime: &R, service: &Service, query: &str, started: I
             &Cursor {
                 from,
                 to,
-                day,
+                day: 0,
                 token,
                 dataset: dataset.to_owned(),
-                view: None,
+                view: Some(SPAN_VIEW.to_owned()),
                 after: None,
                 table: None,
             }

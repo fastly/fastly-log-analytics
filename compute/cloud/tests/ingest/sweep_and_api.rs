@@ -2133,6 +2133,76 @@ mod compaction {
         );
     }
 
+    #[test]
+    fn files_lists_a_sparse_month_of_days_in_one_page_and_few_lists() {
+        let fake = Fake::new(BASE);
+        let first_day = day_start() - 29 * DAY;
+        let mut expected = Vec::new();
+        for d in 0..30 {
+            let minute = (first_day + d * DAY) / 60 + 30;
+            let hour = ingest::hour_dir(minute * 60);
+            let key = format!(
+                "{}{hour}window={minute}-{minute}-d{d:02}-n1.parquet",
+                ops_prefix(KIND)
+            );
+            fake.bucket.borrow_mut().insert(key.clone(), vec![1]);
+            expected.push(key);
+        }
+        let outside = format!(
+            "{}{}window=1-1-old-n1.parquet",
+            ops_prefix(KIND),
+            ingest::hour_dir(first_day - 3 * DAY)
+        );
+        fake.bucket.borrow_mut().insert(outside, vec![1]);
+        expected.sort();
+        let before = lists();
+        let page = files_page(
+            &fake,
+            &format!(
+                "from={}&to={}&dataset=ops:{KIND}",
+                iso_url(first_day),
+                iso_url(day_start() + DAY)
+            ),
+        )
+        .unwrap();
+        assert_eq!(page["complete"], true);
+        assert_eq!(keys_of(page["files"].as_array().unwrap()), expected);
+        assert!(lists() - before <= 2, "{} LISTs", lists() - before);
+    }
+
+    #[test]
+    fn files_pages_across_days_keep_compacts_hiding_sources_on_the_next_day() {
+        let fake = Fake::new(BASE);
+        let day0 = day_start() - DAY;
+        let prefix0 = format!("{}{}", ops_prefix(KIND), day_dir(day0));
+        let minute0 = day0 / 60;
+        let filler: Vec<String> = (0..api::FILES_PAGE as i64 - 5)
+            .map(|i| format!("{prefix0}hour=00/window={minute0}-{minute0}-f{i:04}-n1.parquet"))
+            .collect();
+        let prefix1 = format!("{}{}", ops_prefix(KIND), day_dir(day_start()));
+        let late = day_start() / 60 + 23 * 60;
+        let sources: Vec<String> = (0..10)
+            .map(|i| {
+                format!(
+                    "{prefix1}hour=23/window={}-{}-s{i}-n1.parquet",
+                    late + i,
+                    late + i
+                )
+            })
+            .collect();
+        let compact = compact_key(&prefix1, late as u64, late as u64 + 9, &sources, 10);
+        for key in filler.iter().chain(&sources).chain([&compact]) {
+            fake.bucket.borrow_mut().insert(key.clone(), vec![1]);
+        }
+        let mut expected = filler.clone();
+        expected.push(compact);
+        expected.sort();
+        assert_eq!(
+            keys_of(&listed_files(&fake, day0, day_start() + DAY)),
+            expected
+        );
+    }
+
     fn ingest_row(id: &str, raw: &str, ts_s: i64) -> Value {
         json!({"timestamp": ts_s * 1000, "event_id": id, "service_id": SID,
                "severity": "info", "run_id": "r", "dataset": "request", "raw_key": raw,
