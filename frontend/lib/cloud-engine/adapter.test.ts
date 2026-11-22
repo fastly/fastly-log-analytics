@@ -303,6 +303,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     const line = (body: { seven_line_table: Array<{ id: string }> }, id: string) =>
       body.seven_line_table.find((l) => l.id === id);
     beforeEach(() => {
+      vi.spyOn(usage, "fetchUsageSettings").mockResolvedValue(fixtureUsageInput.settings);
       const summary = usage.summarizeUsage(fixtureUsageInput);
       vi.spyOn(usage, "fetchUsageSummary").mockResolvedValue({
         ...summary, input: fixtureUsageInput, summary, lines: [], totalUsd: 0,
@@ -472,6 +473,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     ["covers the billing window", 31, 0],
     ["is shorter than the billing window", 1 / 24, 1],
   ])("reports bytes deleted in the last 30 days as still billed when the range %s", async (_, rangeDays, kindReads) => {
+    vi.spyOn(usage, "fetchUsageSettings").mockResolvedValue(fixtureUsageInput.settings);
     const now = fixtureUsageInput.now;
     vi.spyOn(Date, "now").mockReturnValue(now);
     const deletion = (ageDays: number, bytes: number) => ({
@@ -513,6 +515,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
   });
 
   it("marks legacy deletion usage as incomplete instead of proving a measured zero", async () => {
+    vi.spyOn(usage, "fetchUsageSettings").mockResolvedValue(fixtureUsageInput.settings);
     const now = fixtureUsageInput.now;
     vi.spyOn(Date, "now").mockReturnValue(now);
     const legacyDelete = {
@@ -550,7 +553,86 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     });
   });
 
+  it("starts both 30-day deletion reads alongside the range summary", async () => {
+    const now = fixtureUsageInput.now;
+    vi.spyOn(Date, "now").mockReturnValue(now);
+    vi.spyOn(usage, "fetchUsageSettings").mockResolvedValue(fixtureUsageInput.settings);
+    const summary = usage.summarizeUsage(fixtureUsageInput);
+    let summaryDone = false;
+    vi.spyOn(usage, "fetchUsageSummary").mockImplementation(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      summaryDone = true;
+      return { ...summary, input: fixtureUsageInput, summary, lines: [], totalUsd: 0 };
+    });
+    const startedEarly: string[] = [];
+    vi.spyOn(usage, "fetchUsageKindWithCoverage").mockImplementation(async () => {
+      if (!summaryDone) startedEarly.push("fos_usage");
+      return { rows: [], complete: false };
+    });
+    vi.spyOn(usage, "fetchIngestDeletedBytes").mockImplementation(async () => {
+      if (!summaryDone) startedEarly.push("ingest_files");
+      return { bytes: 6_000, complete: true, provenance: "ingest_files_exact" };
+    });
+    const params = new URLSearchParams({
+      start: new Date(now - 3_600_000).toISOString(),
+      end: new Date(now).toISOString(),
+    });
+
+    const response = await handleCloudAnalyticalRequest(
+      new Request(`http://localhost/api/usage/current-storage?${params}`),
+    );
+
+    expect(await response!.json()).toMatchObject({
+      deleted_bytes: 6_000,
+      deleted_bytes_complete: true,
+      deleted_bytes_provenance: "ingest_files_exact",
+    });
+    expect(startedEarly.sort()).toEqual(["fos_usage", "ingest_files"]);
+  });
+
+  it("aborts the speculative ingest read once fos_usage proves the deletions", async () => {
+    const now = fixtureUsageInput.now;
+    vi.spyOn(Date, "now").mockReturnValue(now);
+    vi.spyOn(usage, "fetchUsageSettings").mockResolvedValue(fixtureUsageInput.settings);
+    const summary = usage.summarizeUsage(fixtureUsageInput);
+    vi.spyOn(usage, "fetchUsageSummary").mockResolvedValue({
+      ...summary, input: fixtureUsageInput, summary, lines: [], totalUsd: 0,
+    });
+    vi.spyOn(usage, "fetchUsageKindWithCoverage").mockResolvedValue({
+      rows: [{
+        ...fixtureUsageInput.rows.fos_usage[0], op: "DELETE_OBJECTS", timestamp: now - 60_000,
+        bytes_in: 0, bytes_deleted: 700, bytes_deleted_complete: true,
+      }],
+      complete: true,
+    });
+    let ingestSignal: AbortSignal | undefined;
+    vi.spyOn(usage, "fetchIngestDeletedBytes").mockImplementation(
+      (_range, _identity, _read, signal) => {
+        ingestSignal = signal;
+        return new Promise((_, reject) => {
+          signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      },
+    );
+    const params = new URLSearchParams({
+      start: new Date(now - 3_600_000).toISOString(),
+      end: new Date(now).toISOString(),
+    });
+
+    const response = await handleCloudAnalyticalRequest(
+      new Request(`http://localhost/api/usage/current-storage?${params}`),
+    );
+
+    expect(await response!.json()).toMatchObject({
+      deleted_bytes: 700,
+      deleted_bytes_complete: true,
+      deleted_bytes_provenance: "fos_usage_exact",
+    });
+    expect(ingestSignal?.aborted).toBe(true);
+  });
+
   it("marks an uncovered empty deletion read as incomplete", async () => {
+    vi.spyOn(usage, "fetchUsageSettings").mockResolvedValue(fixtureUsageInput.settings);
     vi.spyOn(usage, "fetchUsageSummary").mockResolvedValue({
       ...usage.summarizeUsage(fixtureUsageInput),
       input: { ...fixtureUsageInput, rows: { ...fixtureUsageInput.rows, fos_usage: [] } },

@@ -155,6 +155,69 @@ export function resetCloudPlatformBundleCache(): void {
   settledPlatformBundles.clear();
 }
 
+type DeletionAccounting = {
+  bytes: number;
+  complete: boolean;
+  provenance: string;
+};
+
+/**
+ * Bytes deleted inside the minimum-billed window, which Object Storage still bills. The
+ * fos_usage and ingest_files reads run together, and the ingest read is dropped once fos_usage
+ * proves the deletions on its own.
+ */
+async function storageDeletion(
+  now: number,
+  fromMs: number,
+  toMs: number,
+  summaryRead: ReturnType<typeof fetchUsageSummary>,
+  signal: AbortSignal,
+): Promise<DeletionAccounting> {
+  const settings = await fetchUsageSettings(signal);
+  const billedFrom = now - settings.min_billed_days * 86_400_000;
+  const window = { from: billedFrom, to: now };
+  const ingestController = new AbortController();
+  const abortIngest = () => ingestController.abort(signal.reason);
+  signal.addEventListener("abort", abortIngest, { once: true });
+  try {
+    const ingestRead = fetchIngestDeletedBytes(
+      window,
+      currentOpsIdentity(),
+      undefined,
+      ingestController.signal,
+    );
+    ingestRead.catch(() => {});
+    const coversBillingWindow = fromMs <= billedFrom && toMs >= now;
+    const source = coversBillingWindow
+      ? await summaryRead.then(({ input }) => ({
+          rows: input.rows.fos_usage,
+          complete: input.telemetryCoverage?.fos_usage === true,
+        }))
+      : await fetchUsageKindWithCoverage(
+          "fos_usage",
+          window,
+          currentOpsIdentity(),
+          undefined,
+          signal,
+        );
+    const accounting = deletedBytesAccountingSince(
+      source.rows,
+      billedFrom,
+      settings.enabled && source.complete,
+    );
+    if (accounting.complete) {
+      ingestController.abort(
+        new DOMException("The operation was aborted.", "AbortError"),
+      );
+      return accounting;
+    }
+    const ingest = await ingestRead;
+    return ingest.complete ? ingest : accounting;
+  } finally {
+    signal.removeEventListener("abort", abortIngest);
+  }
+}
+
 async function cloudPlatformBundle(
   from: number,
   to: number,
@@ -2086,11 +2149,17 @@ async function dispatchCloudRequest(
     const costBilling = pathname === "/api/usage/current-storage"
       ? usageComputeBilling({ from: fromMs, to: toMs }, request.signal)
       : Promise.resolve(null);
-    const usageRes = await fetchUsageSummary({
+    const summaryRead = fetchUsageSummary({
       from: fromMs,
       to: toMs,
       signal: request.signal,
     });
+    // The minimum-billed-days deletion reads span 30 days; start them with the range summary.
+    const deletionRead = pathname === "/api/usage/current-storage"
+      ? storageDeletion(now, fromMs, toMs, summaryRead, request.signal)
+      : null;
+    deletionRead?.catch(() => {});
+    const usageRes = await summaryRead;
     checkUsageEpoch();
     const { input, summary } = usageRes;
     const requestedBucket = searchParams.get("by");
@@ -2118,38 +2187,8 @@ async function dispatchCloudRequest(
     });
 
     if (pathname === "/api/usage/current-storage") {
-      const billedFrom = now - input.settings.min_billed_days * 86_400_000;
-      const coversBillingWindow = fromMs <= billedFrom && toMs >= now;
-      const deletionSource = coversBillingWindow
-        ? {
-            rows: input.rows.fos_usage,
-            complete: input.telemetryCoverage?.fos_usage === true,
-          }
-        : await fetchUsageKindWithCoverage(
-            "fos_usage",
-            { from: billedFrom, to: now },
-            currentOpsIdentity(),
-            undefined,
-            request.signal,
-          );
+      const effectiveDeletion = await deletionRead!;
       checkUsageEpoch();
-      const deletionAccounting = deletedBytesAccountingSince(
-        deletionSource.rows,
-        billedFrom,
-        input.settings.enabled && deletionSource.complete,
-      );
-      const ingestDeletion = deletionAccounting.complete
-        ? null
-        : await fetchIngestDeletedBytes(
-            { from: billedFrom, to: now },
-            { user: "default", role: "admin" },
-            undefined,
-            request.signal,
-          );
-      const effectiveDeletion =
-        ingestDeletion?.complete
-          ? ingestDeletion
-          : deletionAccounting;
       return jsonResponse(
         {
           total_billed_gb_hours: summary.storage.billedGbMonths * 720,
