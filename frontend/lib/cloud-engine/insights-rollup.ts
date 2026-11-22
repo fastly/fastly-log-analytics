@@ -59,18 +59,38 @@ export function insightsDeferredDetectors(rollup: Rollup): ReadonlySet<string> {
 }
 
 /**
- * Whether the window's `ins_ip` proves neither IP detector can fire, so the raw
- * follow-up is unneeded: it must be uncut and list every IP with a 404 or an
- * auth-path 401/403, each under `IP_DETECTOR_MIN_HITS` of both. A non-empty
- * `ins_ip` and `ins_url` also show the `ip`, `status` and `url` columns exist.
+ * The IP detectors the summaries prove can't fire, so the raw follow-up can skip
+ * them. The window's `ins_ip` must be uncut, so it lists every IP with a 404 or
+ * an auth-path 401/403 with exact counts; a non-empty `ins_ip` and `ins_url`
+ * also show the `ip`, `status` and `url` columns exist. Then, for every IP:
+ * - credential_enumeration needs `IP_DETECTOR_MIN_HITS` denials above 3x its
+ *   scaled baseline denials + 5. The baseline `ins_ip` count is the one the
+ *   follow-up uses and never above the true count.
+ * - content_discovery needs `IP_DETECTOR_MIN_HITS` 404s that are 70% of the
+ *   IP's window requests. Its `all_fields` count sums exact per-file counts of
+ *   only the files that kept it, so it never exceeds the true request count.
  */
-export function ipDetectorsRuledOut(window: Rollup): boolean {
+export function ipDetectorsRuledOut(
+  window: Rollup,
+  baseline: Rollup,
+  windowHours: number,
+  baselineHours: number,
+): ReadonlySet<string> {
   const ips = rollupGroup(window, "ins_ip", "ip");
-  if (!ips?.size || window.truncated.has("ins_ip/ip") || !rollupGroup(window, "ins_url", "url")?.size) return false;
-  for (const agg of ips.values()) {
-    if (agg.errors >= IP_DETECTOR_MIN_HITS || agg.count >= IP_DETECTOR_MIN_HITS) return false;
+  if (!ips?.size || window.truncated.has("ins_ip/ip") || !rollupGroup(window, "ins_url", "url")?.size) return new Set();
+  const baselineIps = rollupGroup(baseline, "ins_ip", "ip");
+  const requests = window.fields.get("ip");
+  // insights.ts `scaled` and `pct`, in the same operation order.
+  const scaled = (count: number) => count * windowHours / baselineHours;
+  let credential = true;
+  let content = true;
+  for (const [ip, agg] of ips) {
+    const denied = agg.errors;
+    if (denied >= IP_DETECTOR_MIN_HITS && denied > scaled(baselineIps?.get(ip)?.errors ?? 0) * 3 + 5) credential = false;
+    const seen = requests?.get(ip) ?? 0;
+    if (agg.count >= IP_DETECTOR_MIN_HITS && !(seen > 0 && agg.count * 100 / seen < 70)) content = false;
   }
-  return true;
+  return new Set([...credential ? ["credential_enumeration"] : [], ...content ? ["content_discovery"] : []]);
 }
 
 /** Summaries merge a city's regions and count status 0 as an error. */
@@ -394,7 +414,7 @@ export async function insightsFromRollup(
   spec: SummarySpec | null = INSIGHTS_SUMMARY_SPEC,
 ) {
   if (filters.length || Array.isArray(body.detectors)) return null;
-  const { end, windowStart, start } = resolveInsightWindow(body);
+  const { end, windowStart, start, windowHours, baselineHours } = resolveInsightWindow(body);
   const [windowResult, baselineResult] = await Promise.all([
     queryRollup(source, {
       fromMs: windowStart, toMs: end, signal, spec: spec ?? undefined, residual: INSIGHTS_RESIDUAL,
@@ -580,12 +600,12 @@ export async function insightsFromRollup(
     }
   }
 
-  const ipRuledOut = ipDetectorsRuledOut(wRollup);
+  const ipRuledOut = ipDetectorsRuledOut(wRollup, bRollup, windowHours, baselineHours);
   const deferred = new Set<string>([
     ...INS_IP_DETECTORS,
     ...insightsDeferredDetectors(wRollup),
     ...insightsDeferredDetectors(bRollup),
-  ].filter((id) => !(ipRuledOut && (INS_IP_DETECTORS as readonly string[]).includes(id))));
+  ].filter((id) => !ipRuledOut.has(id)));
   const approximate = new Set(ALWAYS_APPROXIMATE);
   for (const id of ["latency_regression", "tail_latency", "city_latency_regressions", "pop_latency_regression"]) {
     if (!deferred.has(id)) approximate.add(id);
