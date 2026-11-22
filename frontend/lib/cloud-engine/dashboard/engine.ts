@@ -31,7 +31,7 @@ import {
   customFieldsKey,
   decodeSummary,
   normalizeDashboardValue,
-  planCoarsestFirst,
+  planFilteredSummaries,
   planSummaries,
   PIVOT_FIELDS,
   SLICE_COLUMNS,
@@ -1590,7 +1590,7 @@ async function collectAggregator(
     }
     assertActive();
     if (cachedSummaryFiles.length > 0) {
-      const initialPlan = planCoarsestFirst(
+      const initialPlan = planFilteredSummaries(
         files,
         cachedSummaryFiles,
         fromMs,
@@ -1598,13 +1598,10 @@ async function collectAggregator(
       );
       const remainingRaw = new Set(initialPlan.raw.map((f) => f.key));
       const triedSummaries = new Set<string>();
-      const queue: SummaryUse[] = [...initialPlan.summaries];
+      const queue: SummaryUse[][] = [...initialPlan.groups];
       let resolvedSummaries = 0;
       const filterList = options.filters ?? [];
-
-      while (queue.length > 0) {
-        assertActive();
-        const use = queue.shift()!;
+      const resolve = async (use: SummaryUse) => {
         triedSummaries.add(use.file.key);
         let decoded: DecodedSummary | null = null;
         let summaryBytes = 0;
@@ -1665,50 +1662,69 @@ async function collectAggregator(
               : decoded
                 ? classifySummaryAgainstFilters(decoded, filterList, edgeOnly)
                 : "partial";
-        const count = () => {
-          if (downloaded > 0) {
-            keptRows.fetched++;
-            keptRows.downloaded += downloaded;
-          } else {
-            keptRows.cached++;
-          }
-        };
         const interiorBuckets =
           decoded !== null &&
           decoded.rollup.buckets.every(
             (b) => b.t >= fromMs && b.t + MINUTE_MS <= toMs,
           );
-        if (decoded && matchClass === "none") {
-          if (decoded.rollup.hasBytes) aggregator.hasBytes = true;
-          let rows = 0;
-          for (const covered of use.covers) rows += covered.rows ?? 0;
-          count();
-          keptRows.rows += rows;
-          keptRows.bytes += summaryBytes;
-          resolvedSummaries++;
-        } else if (decoded && matchClass === "all" && interiorBuckets) {
-          aggregator.mergeSummary(
-            fromSlices && fromSlices !== "none" ? fromSlices : decoded,
+        const answer =
+          decoded && matchClass === "none"
+            ? ("none" as const)
+            : decoded && matchClass === "all" && interiorBuckets
+              ? fromSlices && fromSlices !== "none"
+                ? fromSlices
+                : decoded
+              : null;
+        return { decoded, answer, summaryBytes, downloaded };
+      };
+
+      while (queue.length > 0) {
+        assertActive();
+        const group = queue.shift()!;
+        const resolved = [];
+        for (const use of group) {
+          const one = await resolve(use);
+          resolved.push(one);
+          if (!one.answer) break;
+        }
+        if (resolved.every((one) => one.answer)) {
+          // Uses of one group share what they cover: count its rows once.
+          const covers = new Map(
+            group.flatMap((use) => use.covers).map((f) => [f.key, f]),
           );
-          let rows = 0;
-          for (const covered of use.covers) rows += covered.rows ?? 0;
-          count();
-          keptRows.rows += rows;
-          keptRows.bytes += summaryBytes;
-          resolvedSummaries++;
-        } else {
+          for (const { decoded, answer, summaryBytes, downloaded } of resolved) {
+            if (decoded!.rollup.hasBytes && answer === "none") {
+              aggregator.hasBytes = true;
+            }
+            if (answer !== "none") aggregator.mergeSummary(answer!);
+            if (downloaded > 0) {
+              keptRows.fetched++;
+              keptRows.downloaded += downloaded;
+            } else {
+              keptRows.cached++;
+            }
+            keptRows.bytes += summaryBytes;
+            resolvedSummaries++;
+          }
+          for (const covered of covers.values()) keptRows.rows += covered.rows ?? 0;
+        } else if (group.length === 1) {
           const finerAvailable = cachedSummaryFiles.filter(
             (f) => !triedSummaries.has(f.key),
           );
-          const subPlan = planCoarsestFirst(
-            use.covers,
+          const subPlan = planFilteredSummaries(
+            group[0].covers,
             finerAvailable,
             fromMs,
             toMs,
           );
-          queue.push(...subPlan.summaries);
+          queue.push(...subPlan.groups);
           for (const rawFile of subPlan.raw) {
             remainingRaw.add(rawFile.key);
+          }
+        } else {
+          // Several summaries answer these raw files together, or none do.
+          for (const use of group) {
+            for (const rawFile of use.covers) remainingRaw.add(rawFile.key);
           }
         }
       }

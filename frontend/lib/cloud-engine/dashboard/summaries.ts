@@ -667,6 +667,36 @@ export function planCompactsFromWindows(
   };
 }
 
+/**
+ * Plans like `planRollup`: coarsest summaries first, then an open hour's compacts from the
+ * window summaries (or open bundle) holding their rows. Uses answering the same raw files are
+ * grouped, since only all of a group or none of it answers them.
+ */
+export function planFilteredSummaries(
+  rawFiles: readonly ManifestFile[],
+  summaryFiles: readonly ManifestFile[],
+  fromMs: number,
+  toMs: number,
+): { groups: SummaryUse[][]; raw: ManifestFile[] } {
+  const coarse = planCoarsestFirst(rawFiles, summaryFiles, fromMs, toMs);
+  const used = new Set(coarse.summaries.map((use) => use.file.key));
+  const compacted = planCompactsFromWindows(
+    coarse.raw,
+    summaryFiles.filter((file) => !used.has(file.key)),
+    fromMs,
+    toMs,
+  );
+  const groups = new Map<string, SummaryUse[]>();
+  for (const use of compacted.summaries) {
+    const key = use.covers.map((file) => file.key).sort().join("\n");
+    groups.set(key, [...(groups.get(key) ?? []), use]);
+  }
+  return {
+    groups: [...coarse.summaries.map((use) => [use]), ...groups.values()],
+    raw: compacted.raw,
+  };
+}
+
 export type DecodedSummary = {
   rollup: FileRollupData;
   /** Card fields whose values were cut to the top K in some source. */
