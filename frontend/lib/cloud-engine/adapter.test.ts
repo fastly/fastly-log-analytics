@@ -1053,7 +1053,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       window_size_hrs: 24, baseline_hours: 168, filters: { host_1: { mode: "include", values: ["example.com"] } },
     }));
     expect(insights?.projection?.columns).toEqual(expect.arrayContaining(["url", "status", "transport", "host"]));
-    expect(insights?.projection?.maxBytes).toBeUndefined();
+    expect(insights?.projection?.maxBytes).toBe(96 * 1024 * 1024);
     // Availability needs only the files' schemas, read from their footers without loading a range.
     expect(await options("/api/insight-availability")).toBeUndefined();
     expect(vi.mocked(cloudRangePresentColumns)).toHaveBeenCalled();
@@ -1377,6 +1377,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     // No raw pass loaded that window wide, so the follow-up reads only its own columns.
     expect(vi.mocked(ensureCloudRange).mock.calls[0][4]?.projection).toEqual({
       columns: insightScanColumns([], ["credential_enumeration"]),
+      maxBytes: 96 * 1024 * 1024,
     });
   });
 
@@ -1513,7 +1514,10 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     expect(calls).toHaveLength(2);
     expect(calls[0][4]?.projection?.wider).toBeDefined();
     expect(calls[1][0]).toBe(calls[0][0]);
-    expect(calls[1][4]?.projection).toEqual({ columns: insightScanColumns([], detectors) });
+    expect(calls[1][4]?.projection).toEqual({
+      columns: insightScanColumns([], detectors),
+      maxBytes: 96 * 1024 * 1024,
+    });
   });
 
   it("marks follow-up detectors not evaluated, rather than failing the page, when even their window exceeds the budget", async () => {

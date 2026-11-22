@@ -561,6 +561,7 @@ async function catalogCustomFields(
 let analyticalQueue = Promise.resolve();
 /** Needed-column bytes a speculative Insights prefetch may load. */
 const PREFETCH_PROJECTION_BYTES = 32 * 1024 * 1024;
+const INSIGHTS_PROJECTION_BYTES = 96 * 1024 * 1024;
 
 function isReadOnlyCloudPost(path: string): boolean {
   return (
@@ -1069,7 +1070,9 @@ async function prepareCloudScan(
     serviceId: serviceId ? decodeURIComponent(String(serviceId)) : undefined, customFields,
     ...insights ? { projection: {
       columns: insightScanColumns(filters, detectors),
-      ...request.headers.get("x-flp-cloud-prefetch") === "1" ? { maxBytes: PREFETCH_PROJECTION_BYTES } : {},
+      maxBytes: request.headers.get("x-flp-cloud-prefetch") === "1"
+        ? PREFETCH_PROJECTION_BYTES
+        : INSIGHTS_PROJECTION_BYTES,
       // A detector follow-up reuses the window its summary pass already loaded with every insight column.
       ...wider ? { wider: {
         from: new Date(Date.parse(end) - Number(params.window_size_hrs ?? 24) * 3_600_000).toISOString(),
