@@ -44,6 +44,7 @@ import {
   useFilterUrlWriteback,
   useInsightsDefaults,
   useReportConfig,
+  useServiceQuery,
   useTimeRange,
 } from '@/hooks/useDashboardCards'
 import {
@@ -405,6 +406,7 @@ describe('useIsAnalyst, useMaskIps, useEnforceMaskedFilters & useIsDataReady', (
     mockServiceState.services = []
     mockServiceState.isInitialized = false
     mockSearchParams = new URLSearchParams()
+    setCloudModeRuntime(false)
     useFilterStore.getState().clearFilters()
   })
 
@@ -470,6 +472,93 @@ describe('useIsAnalyst, useMaskIps, useEnforceMaskedFilters & useIsDataReady', (
         wrapper: settingsWrapper({ bootstrapExtra: { active_service_id: 'svc-from-bootstrap' } }),
       }).result.current,
     ).toBe(true)
+  })
+
+  it.each([
+    ['URL', 'svc-from-url', false],
+    ['persisted store', 'svc-from-store', true],
+  ])('applies hydrated Cloud mode before a %s service query starts', async (_label, serviceId, persisted) => {
+    if (persisted) {
+      mockServiceState.activeServiceId = serviceId
+    } else {
+      mockSearchParams = new URLSearchParams(`service=${serviceId}`)
+    }
+    const qc = createTestQueryClient()
+    qc.setQueryData(queryKeys.bootstrap(), {
+      runtime_mode: 'cloud',
+      services: [{ service_id: serviceId, name: 'Test' }],
+      active_service_id: serviceId,
+    })
+    let modeAtQueryStart: boolean | undefined
+
+    const { result } = renderHook(
+      () => useServiceQuery(
+        ['hydrated-bootstrap', 'report', serviceId],
+        async () => {
+          modeAtQueryStart = isCloudMode()
+          return 'ready'
+        },
+      ),
+      { wrapper: makeQueryWrapper(qc) },
+    )
+
+    await waitFor(() => expect(result.current.data).toBe('ready'))
+    expect(modeAtQueryStart).toBe(true)
+  })
+
+  it('keeps High-Scale queries ready when hydrated bootstrap resolves', async () => {
+    mockServiceState.activeServiceId = 'svc-high-scale'
+    const qc = createTestQueryClient()
+    qc.setQueryData(queryKeys.bootstrap(), {
+      runtime_mode: 'high_scale',
+      services: [{ service_id: 'svc-high-scale', name: 'High Scale' }],
+      active_service_id: 'svc-high-scale',
+    })
+    let modeAtQueryStart: boolean | undefined
+
+    const { result } = renderHook(
+      () => useServiceQuery(
+        ['hydrated-bootstrap', 'report', 'svc-high-scale'],
+        async () => {
+          modeAtQueryStart = isCloudMode()
+          return 'ready'
+        },
+      ),
+      { wrapper: makeQueryWrapper(qc) },
+    )
+
+    await waitFor(() => expect(result.current.data).toBe('ready'))
+    expect(modeAtQueryStart).toBe(false)
+  })
+
+  it('does not clear an already-enabled Cloud mode when bootstrap cache resolves', async () => {
+    setCloudModeRuntime(true)
+    mockServiceState.activeServiceId = 'svc-cloud'
+    const qc = createTestQueryClient()
+    qc.setQueryData(queryKeys.bootstrap(), {
+      runtime_mode: 'high_scale',
+      services: [{ service_id: 'svc-cloud', name: 'Cloud' }],
+      active_service_id: 'svc-cloud',
+    })
+    let modeAtQueryStart: boolean | undefined
+
+    try {
+      const { result } = renderHook(
+        () => useServiceQuery(
+          ['hydrated-bootstrap', 'report', 'svc-cloud'],
+          async () => {
+            modeAtQueryStart = isCloudMode()
+            return 'ready'
+          },
+        ),
+        { wrapper: makeQueryWrapper(qc) },
+      )
+
+      await waitFor(() => expect(result.current.data).toBe('ready'))
+      expect(modeAtQueryStart).toBe(true)
+    } finally {
+      setCloudModeRuntime(false)
+    }
   })
 })
 

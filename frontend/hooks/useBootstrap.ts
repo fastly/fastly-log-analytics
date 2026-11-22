@@ -74,6 +74,12 @@ export function useDebouncedFilterPayload(includeEdgeOnly = false): FiltersPaylo
 
 const subscribeNever = () => () => {}
 
+function applyBootstrapRuntimeMode(data: unknown): void {
+  if ((data as { runtime_mode?: string } | undefined)?.runtime_mode === 'cloud') {
+    setCloudModeRuntime(true)
+  }
+}
+
 /**
  * Returns false on the server and on the client's FIRST (hydration) render,
  * then true after mount.
@@ -97,7 +103,11 @@ export function useBootstrapCacheSelector<T>(
   const queryClient = useQueryClient()
   return useSyncExternalStore(
     (onChange) => queryClient.getQueryCache().subscribe(onChange),
-    () => selector(queryClient.getQueryData<Record<string, unknown>>(queryKeys.bootstrap())),
+    () => {
+      const data = queryClient.getQueryData<Record<string, unknown>>(queryKeys.bootstrap())
+      applyBootstrapRuntimeMode(data)
+      return selector(data)
+    },
     () => serverFallback,
   )
 }
@@ -189,9 +199,7 @@ export function useBootstrapSyncEffects(
       return
     }
     _lastSyncedBootstrapData = data
-    if (data.runtime_mode === 'cloud') {
-      setCloudModeRuntime(true)
-    }
+    applyBootstrapRuntimeMode(data)
     if (IS_CLOUD_MODE || isCloudMode() || data.runtime_mode === 'cloud') {
       void syncOpsCacheForSession({
         userId: data.user?.id ?? null,
@@ -290,9 +298,7 @@ export function useBootstrap() {
     queryKey: queryKeys.bootstrap(),
     queryFn: async ({ signal }) => {
       const data = await unwrapClient(client.GET('/api/bootstrap', { signal }))
-      if ((data as { runtime_mode?: string }).runtime_mode === 'cloud') {
-        setCloudModeRuntime(true)
-      }
+      applyBootstrapRuntimeMode(data)
       useSessionRoleStore.getState().setIsRemoteAnalyst(
         data?.settings?.is_remote_analyst === true,
       )
