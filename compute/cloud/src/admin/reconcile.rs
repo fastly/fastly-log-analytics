@@ -1413,6 +1413,9 @@ pub fn front(
                 if active_version(context, &sid, token)? != source {
                     return Err(Error::new(409, "front_active_version_changed"));
                 }
+                if context.remaining_calls() < 8 {
+                    return Err(Error::new(503, "backend_budget"));
+                }
                 let draft = context.api(
                     "PUT",
                     &format!("/service/{sid}/version/{source}/clone"),

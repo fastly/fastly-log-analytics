@@ -1564,6 +1564,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
             else:
                 parts.append(t)
         seg_sql = "".join(parts)
+        _qual_re = r"(?:(?:[A-Za-z_][A-Za-z0-9_]*|`[^`]+`)\s*\.\s*)*"
         for b_field in ("edge", "is_ipv6", "waf"):
             for pat, repl in (
                 (r"IN\s*\(\s*'true'\s*\)", "IN ('true', '1')"),
@@ -1575,14 +1576,20 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 (r"=\s*\bfalse\b", "IN ('false', '0', '')"),
             ):
                 seg_sql = re.sub(
-                    rf"custom_fields\['{b_field}'\]\s*{pat}",
-                    f"lower(custom_fields['{b_field}']) {repl}",
+                    rf"({_qual_re})custom_fields\['{b_field}'\]\s*{pat}",
+                    rf"lower(\1custom_fields['{b_field}']) {repl}",
                     seg_sql,
                     flags=re.IGNORECASE,
                 )
         for pat, repl in (
-            (r"(custom_fields\['[a-zA-Z0-9_]+'\])\s*(=|!=|<>)\s*(-?\d+(?:\.\d+)?)\b", r"\1 \2 '\3'"),
-            (r"(custom_fields\['[a-zA-Z0-9_]+'\])\s*(<=|>=|<|>)\s*(-?\d+(?:\.\d+)?)\b", r"toFloat64OrZero(\1) \2 \3"),
+            (
+                rf"({_qual_re}custom_fields\['[a-zA-Z0-9_]+'\])\s*(=|!=|<>)\s*(-?\d+(?:\.\d+)?)\b",
+                r"\1 \2 '\3'",
+            ),
+            (
+                rf"({_qual_re}custom_fields\['[a-zA-Z0-9_]+'\])\s*(<=|>=|<|>)\s*(-?\d+(?:\.\d+)?)\b",
+                r"toFloat64OrZero(\1) \2 \3",
+            ),
         ):
             seg_sql = re.sub(pat, repl, seg_sql)
         if saved_lits:

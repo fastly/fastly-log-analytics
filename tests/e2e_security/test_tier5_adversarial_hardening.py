@@ -4308,11 +4308,21 @@ def test_t5_hs01_clickhouse_console_access_ddl_18_masked_keys_and_fail_closed_is
     create_masked_req = next(s for s in ddl_log if f"CREATE VIEW `fla`.`{masked_req_view}`" in s)
     assert "SQL SECURITY DEFINER" in create_masked_req
     assert f"`fla`.`{console_access.PUBLICATIONS_TABLE}` FINAL" in create_masked_req
-    for key in SHARED_18_PII_KEYS:
+    for key in (*SHARED_18_PII_KEYS, "cmcd_sid", "cmcd_cid", "cmcd_session", "cmcd.sid", "cmcd.cid", "cmcd.session"):
         assert f"'{key}'" in create_masked_req
     assert "`custom_fields`) AS `custom_fields`" in create_masked_req
     assert "`cmcd`) AS `cmcd`" in create_masked_req
     assert any("REVOKE ALL ON *.*" in s for s in ddl_log)
+
+    # SEC-T5-ITER24-05: Aliased JOIN predicate coercion wraps qualifier inside lower(...) / toFloat64OrZero(...)
+    aliased_join_sql = hs_query_mod._rewrite_console_sql(
+        "SELECT a.url FROM logs AS a JOIN logs AS b ON a.url = b.url WHERE a.edge = true AND a.status >= 200",
+        svc_table=f"`fla`.`{masked_req_view}`",
+        names={"request_facts": f"fla.{masked_req_view}"},
+    )
+    assert "a.lower(" not in aliased_join_sql and "a.toFloat64OrZero(" not in aliased_join_sql
+    assert "lower(a.custom_fields['edge']) IN ('true', '1')" in aliased_join_sql
+    assert "toFloat64OrZero(a.custom_fields['status']) >= 200" in aliased_join_sql
 
     # Missing view in system.tables aborts BEFORE any GRANT SELECT executes
     ddl_log.clear()
@@ -4342,9 +4352,11 @@ def test_t5_hs01_clickhouse_console_access_ddl_18_masked_keys_and_fail_closed_is
 
     # Case B: _assert_isolated detects unredacted PII row (n=1) -> closes client and returns 403
     closed_count = 0
+    seen_isolation_sql: list[str] = []
 
     class _LeakyViewCH:
         def execute(self, sql: str, *_a: Any, **_kw: Any) -> list[dict[str, Any]]:
+            seen_isolation_sql.append(sql)
             if "service_id !=" in sql:
                 return [{"n": 0}]
             return [{"n": 1}]
@@ -4362,6 +4374,10 @@ def test_t5_hs01_clickhouse_console_access_ddl_18_masked_keys_and_fail_closed_is
     assert r_leaky.status_code == 403
     assert "console_unavailable_for_analysts" in r_leaky.text
     assert closed_count == 1
+    assert any(
+        "cmcd['cmcd_sid']" in q and "cmcd['cmcd_cid']" in q and "cmcd['cmcd_session']" in q and "cmcd['cmcd.sid']" in q
+        for q in seen_isolation_sql
+    )
 
 
 def test_t5_hs02_production_query_and_request_facts_cache_role_mask_window_tenant_isolation(
@@ -5980,10 +5996,12 @@ console.log('NODE_PROXY_AND_CSV_PARITY_OK');
             "lib/cloud-engine/value-stats.test.ts",
             "lib/cloud-engine/security-rollup.test.ts",
             "lib/cloud-engine/telemetry/client.test.ts",
+            "lib/cloud-engine/readiness.test.ts",
+            "lib/cloud-engine/insights-rollup.test.ts",
             "lib/cloud-engine/dashboard/duckdb.test.ts",
             "lib/cloud-engine/adapter.test.ts",
             "-t",
-            "wipes range-loader singleton|aborts in-flight|blocks post-logout OPFS persistFile|blocks multi-step runDashboard|aborts in-flight queryRollup|suppresses pending write|skips CacheStorage and error telemetry|isolates cached service stats|clears decoded SecuritySummary|fences in-flight ops CacheStorage|resets activeOpsUser to null|uses volatile-ops scope|aborts multi-step handleCloudAnalyticalRequest|allows concurrent Compare Mode|allows concurrent same-session writes|fences POST /api/dashboard/bundle|scopes /api/usage/|SEC-T5-ITER23-01|SEC-T5-ITER23-03",
+            "wipes range-loader singleton|aborts in-flight|blocks post-logout OPFS persistFile|blocks multi-step runDashboard|aborts in-flight queryRollup|suppresses pending write|skips CacheStorage and error telemetry|isolates cached service stats|clears decoded SecuritySummary|fences in-flight ops CacheStorage|resets activeOpsUser to null|uses volatile-ops scope|aborts multi-step handleCloudAnalyticalRequest|allows concurrent Compare Mode|allows concurrent same-session writes|fences POST /api/dashboard/bundle|scopes /api/usage/|SEC-T5-ITER23-01|SEC-T5-ITER23-03|SEC-T5-ITER24-03|reports a bounded, redacted error message|keeps urls and ins_lat elapsed histograms clone-safe",
         ],
         cwd=str(REPO_ROOT / "frontend"),
         env=cloud_vitest_env,

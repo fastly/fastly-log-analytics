@@ -15,7 +15,7 @@ from typing import Any
 
 from backend import config
 from backend.core.clickhouse import ClickHouseClient
-from backend.core.share_db import SHARED_PII_KEYS
+from backend.core.share_db import CMCD_SESSION_ALIAS_KEYS, SHARED_PII_KEYS
 from backend.high_scale._common import clickhouse_string_literal
 
 logger = logging.getLogger("backend.high_scale.postgres_control")
@@ -28,6 +28,7 @@ MIN_SECRET_BYTES = 32
 MIN_DISTINCT_SECRET_BYTES = 8
 REDACTED = "[redacted]"
 MASKED_KEYS = tuple(sorted(SHARED_PII_KEYS))
+_MAP_MASKED_KEYS = tuple(sorted(SHARED_PII_KEYS | CMCD_SESSION_ALIAS_KEYS | {"cmcd.sid", "cmcd.cid", "cmcd.session"}))
 _DATABASE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
 _PROFILE_SETTINGS = (
     "readonly = 1, additional_table_filters CHANGEABLE_IN_READONLY, "
@@ -100,7 +101,7 @@ def _view_select(database: str, table: str, columns: list[tuple[str, str]], serv
     source = f"FROM `{database}`.`{table}` WHERE service_id = {sid} AND publication_state = 'visible' AND {fence}"
     if not masked:
         return f"SELECT * {source}"
-    keys = ", ".join(_literal(key) for key in MASKED_KEYS)
+    keys = ", ".join(_literal(key) for key in _MAP_MASKED_KEYS)
     projection = ", ".join(_redaction(name, type_, keys) or f"`{name}`" for name, type_ in columns)
     return f"SELECT {projection} {source}"
 
@@ -251,7 +252,18 @@ class ConsoleClients:
                 "request_facts": (
                     f"(client_ip != '' AND client_ip != {red}) "
                     f"OR custom_fields['cookie_session'] NOT IN ('', {red}) "
-                    f"OR custom_fields['cid'] NOT IN ('', {red})"
+                    f"OR custom_fields['cid'] NOT IN ('', {red}) "
+                    f"OR custom_fields['cmcd_sid'] NOT IN ('', {red}) "
+                    f"OR custom_fields['cmcd_cid'] NOT IN ('', {red}) "
+                    f"OR custom_fields['cmcd_session'] NOT IN ('', {red}) "
+                    f"OR cmcd['sid'] NOT IN ('', {red}) "
+                    f"OR cmcd['cid'] NOT IN ('', {red}) "
+                    f"OR cmcd['cmcd_sid'] NOT IN ('', {red}) "
+                    f"OR cmcd['cmcd_cid'] NOT IN ('', {red}) "
+                    f"OR cmcd['cmcd_session'] NOT IN ('', {red}) "
+                    f"OR cmcd['cmcd.sid'] NOT IN ('', {red}) "
+                    f"OR cmcd['cmcd.cid'] NOT IN ('', {red}) "
+                    f"OR cmcd['cmcd.session'] NOT IN ('', {red})"
                 ),
                 "rum_vitals_facts": f"client_id != '' AND client_id != {red}",
                 "rum_error_facts": f"client_id != '' AND client_id != {red}",

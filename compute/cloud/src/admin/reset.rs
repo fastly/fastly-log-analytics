@@ -1,6 +1,7 @@
 use super::{
-    check_generation, decode, load_service, model::*, save_service, serialize, Context, Error,
-    StageRow,
+    audit_outbox_len, check_generation, check_unlocked, decode, load_service, model::*,
+    reject_blocking_job, save_service, save_service_recovery_capped, serialize, Context, Error,
+    StageRow, AUDIT_OUTBOX_LIMIT,
 };
 use crate::{
     ingest::{
@@ -101,6 +102,15 @@ pub fn start(
     }
     let (record, mut service) = load_service(context, service_id)?;
     check_generation(&record, &input)?;
+    if service.status == "torn_down" {
+        return Err(Error::new(409, "service_torn_down"));
+    }
+    context.confirm_with_secret(&service.fastly_token_ref);
+    reject_blocking_job(context, &service)?;
+    check_unlocked(context, service_id)?;
+    if audit_outbox_len(&record) >= AUDIT_OUTBOX_LIMIT {
+        return Err(Error::new(409, "audit_archive_required"));
+    }
     let existing = load_job(context)?;
     let now = context.runtime.now();
     // With no marker naming it, a job past the fence bound lost its start and its rollback.
@@ -108,10 +118,7 @@ pub fn start(
         !TERMINAL.contains(&job.status.as_str())
             && now <= job.started_at.saturating_add(FENCE_GIVE_UP_S)
     };
-    if service.pending_job_id.is_some()
-        || service.data_reset.is_some()
-        || existing.as_ref().is_some_and(|(_, job)| live(job))
-    {
+    if service.data_reset.is_some() || existing.as_ref().is_some_and(|(_, job)| live(job)) {
         return Err(Error::new(409, "data_reset_in_progress"));
     }
     let job_id = crate::auth::encode(
@@ -201,7 +208,7 @@ pub fn cancel(
     }
     service.data_reset = None;
     service.updated_at = now;
-    save_service(context, &record, &service, actor, "data_reset.cancelled")?;
+    save_service_recovery_capped(context, &record, &service, actor, "data_reset.cancelled")?;
     Ok(json!({"job": serialize(&job)?}))
 }
 
@@ -265,11 +272,24 @@ fn advance_job<R: Runtime>(store: &Store<'_, R>) -> Option<(Result<(), String>, 
         // A terminal job whose marker clear did not land retries here, so ingest resumes: a
         // failed or complete job's own clear, or a cancel or rolled-back start whose save failed.
         let stranded = marker.phase == owned_phase(&job);
-        return stranded.then(|| (clear_marker(store, &job), false));
+        return stranded.then(|| {
+            let res = clear_marker(store, &job);
+            if res.is_ok() && job.status == "complete" {
+                sync_dr_after_complete(store);
+            }
+            (res, false)
+        });
     }
     let result = step(store, &mut job, &record.generation);
     let more = result.is_ok() && job.more && job.status == "cleanup";
     Some((result, more))
+}
+
+fn sync_dr_after_complete<R: Runtime>(store: &Store<'_, R>) {
+    let mut cleared_service = store.service.clone();
+    cleared_service.data_reset = None;
+    cleared_service.updated_at = store.runtime.now();
+    super::dr::sync_best_effort(store.runtime, &cleared_service);
 }
 
 fn step<R: Runtime>(
@@ -334,6 +354,9 @@ fn step<R: Runtime>(
     }
     if job.status == "failed" || job.status == "complete" {
         clear_marker(store, job)?;
+        if job.status == "complete" {
+            sync_dr_after_complete(store);
+        }
     }
     result
 }

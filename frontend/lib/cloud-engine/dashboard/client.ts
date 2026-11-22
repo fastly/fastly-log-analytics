@@ -438,8 +438,15 @@ type IdentityTransitionTarget = {
   syncStorage: boolean;
 };
 
+type QueuedIdentityTransition = {
+  key: string;
+  target: IdentityTransitionTarget;
+  promise: Promise<void>;
+};
+
 let appliedTabIdentity: string | null = null;
-let targetTransitionKey: string | null = null;
+let activeIdentityTransition: Promise<void> | null = null;
+let queuedIdentityTransition: QueuedIdentityTransition | null = null;
 let inFlightIdentityTransition: Promise<void> | null = null;
 let registeredStorageWindow: EventTarget | null = null;
 
@@ -464,11 +471,17 @@ async function executeIdentityTransition(
   updateDashboardCacheIdentity(target.identity, {
     syncStorage: target.syncStorage,
   });
-  await Promise.all([
+  const settled = await Promise.allSettled([
     getDuckDBEngine().reset(),
     clearRequestLogCaches(),
     clearOpsCaches(),
   ]);
+  const failed = settled.find(
+    (item): item is PromiseRejectedResult => item.status === "rejected",
+  );
+  if (failed) {
+    throw failed.reason;
+  }
   appliedTabIdentity = target.kind === "clear" ? null : target.identity;
 }
 
@@ -478,7 +491,7 @@ function runIdentityTransition(
   ensureStorageListenerRegistered();
   const key =
     target.kind === "clear" ? "clear" : `set:${target.identity ?? ""}`;
-  if (inFlightIdentityTransition === null) {
+  if (activeIdentityTransition === null && queuedIdentityTransition === null) {
     if (
       target.kind === "set" &&
       appliedTabIdentity === target.identity &&
@@ -487,47 +500,68 @@ function runIdentityTransition(
       return Promise.resolve();
     }
     const current = executeIdentityTransition(target);
-    targetTransitionKey = key;
+    activeIdentityTransition = current;
     inFlightIdentityTransition = current;
     void current.then(
       () => {
+        if (activeIdentityTransition === current) {
+          activeIdentityTransition = null;
+        }
         if (inFlightIdentityTransition === current) {
           inFlightIdentityTransition = null;
-          targetTransitionKey = null;
         }
       },
       () => {
+        if (activeIdentityTransition === current) {
+          activeIdentityTransition = null;
+        }
         if (inFlightIdentityTransition === current) {
           inFlightIdentityTransition = null;
-          targetTransitionKey = null;
         }
       },
     );
     return current;
   }
-  if (targetTransitionKey === key) {
-    return inFlightIdentityTransition;
+  if (queuedIdentityTransition !== null && queuedIdentityTransition.key === key) {
+    queuedIdentityTransition.target.syncStorage =
+      queuedIdentityTransition.target.syncStorage || target.syncStorage;
+    return queuedIdentityTransition.promise;
   }
-  const previous = inFlightIdentityTransition;
-  const chained = previous
+  const predecessor =
+    queuedIdentityTransition !== null
+      ? queuedIdentityTransition.promise
+      : activeIdentityTransition!;
+  const mutableTarget: IdentityTransitionTarget = { ...target };
+  const chained = predecessor
     .catch(() => {})
-    .then(() => executeIdentityTransition(target));
-  targetTransitionKey = key;
+    .then(() => {
+      if (queuedIdentityTransition?.target === mutableTarget) {
+        queuedIdentityTransition = null;
+      }
+      const exec = executeIdentityTransition(mutableTarget);
+      activeIdentityTransition = exec;
+      return exec.then(
+        () => {
+          if (activeIdentityTransition === exec) {
+            activeIdentityTransition = null;
+          }
+          if (inFlightIdentityTransition === chained) {
+            inFlightIdentityTransition = null;
+          }
+        },
+        (err) => {
+          if (activeIdentityTransition === exec) {
+            activeIdentityTransition = null;
+          }
+          if (inFlightIdentityTransition === chained) {
+            inFlightIdentityTransition = null;
+          }
+          throw err;
+        },
+      );
+    });
+  queuedIdentityTransition = { key, target: mutableTarget, promise: chained };
   inFlightIdentityTransition = chained;
-  void chained.then(
-    () => {
-      if (inFlightIdentityTransition === chained) {
-        inFlightIdentityTransition = null;
-        targetTransitionKey = null;
-      }
-    },
-    () => {
-      if (inFlightIdentityTransition === chained) {
-        inFlightIdentityTransition = null;
-        targetTransitionKey = null;
-      }
-    },
-  );
   return chained;
 }
 

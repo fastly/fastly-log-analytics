@@ -3018,5 +3018,115 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     const fnIngestDel: (() => void) | null = releaseIngestDel;
     fnIngestDel?.();
     expect(await inFlightStorage).toBe("ERR:AbortError");
+
+    // 3b. Auditor Challenge 1: opsCacheEpoch-only bump (via syncOpsCacheForSession role demotion WITHOUT storeMetaEpoch bump)
+    // mid-storageDeletion MUST ALSO abort /api/usage/current-storage via inner checkUsageEpoch()!
+    await setDashboardCacheIdentity("bob:admin");
+    await syncOpsCacheForSession({ userId: "bob", role: "admin", maskIps: false, needsLogin: false });
+    let releaseIngestOpsOnly = null as (() => void) | null;
+    vi.spyOn(usage, "fetchIngestDeletedBytes").mockImplementation(async () => {
+      await new Promise<void>((r) => {
+        releaseIngestOpsOnly = r;
+      });
+      return { bytes: 5555, complete: true, provenance: "ingest_files_exact" };
+    });
+    const metaBeforeOpsOnly = currentStoreMetaEpoch();
+    const opsBeforeOpsOnly = currentOpsCacheEpoch();
+    const inFlightOpsOnly = handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/usage/current-storage"),
+    ).then(
+      (r) => `STATUS:${r?.status}`,
+      (e: unknown) => `ERR:${(e as Error)?.name ?? String(e)}`,
+    );
+    await new Promise((r) => setTimeout(r, 10));
+    await syncOpsCacheForSession({ userId: "bob", role: "analyst-no-pii", maskIps: true, needsLogin: false });
+    expect(currentStoreMetaEpoch()).toBe(metaBeforeOpsOnly);
+    expect(currentOpsCacheEpoch()).toBeGreaterThan(opsBeforeOpsOnly);
+    const fnIngestOpsOnly: (() => void) | null = releaseIngestOpsOnly;
+    fnIngestOpsOnly?.();
+    expect(await inFlightOpsOnly).toBe("ERR:AbortError");
+
+    // 4. SEC-T5-ITER24-01: cloudCacheIdentity & currentOpsIdentity() enforce needs_login & mask_ips boundaries:
+    const { cloudCacheIdentity } = await import("./cache-identity");
+    const { currentOpsIdentity } = await import("./telemetry/sources");
+    expect(
+      cloudCacheIdentity({ user: { id: "alice", role: "analyst" }, settings: { needs_login: false, mask_ips: false } }),
+    ).toBe("alice:analyst");
+    expect(
+      cloudCacheIdentity({ user: { id: "alice", role: "analyst" }, settings: { needs_login: false, mask_ips: true } }),
+    ).toBe("alice:analyst-no-pii");
+    expect(
+      cloudCacheIdentity({ user: { id: "alice", role: "admin" }, settings: { needs_login: false, mask_ips: true } }),
+    ).toBe("alice:admin-no-pii");
+    expect(
+      cloudCacheIdentity({ user: { id: "alice", role: "admin" }, settings: { needs_login: true, mask_ips: false } }),
+    ).toBe("anonymous");
+
+    await clearDashboardData();
+    await syncOpsCacheForSession({ userId: "alice", role: "analyst-no-pii", maskIps: true, needsLogin: false });
+    expect(currentOpsIdentity()).toEqual({ user: "alice", role: "analyst-no-pii" });
+    await syncOpsCacheForSession({ userId: "alice", role: "admin", maskIps: true, needsLogin: false });
+    expect(currentOpsIdentity()).toEqual({ user: "alice", role: "admin-no-pii" });
+
+    // 5. SEC-T5-ITER24-02: Mid-clear sessionRef write followed by explicit await clearDashboardData() must NOT be skipped,
+    // cross-tab syncStorage:false clear must NOT clobber local syncStorage:true clear, and rejected reset() must NOT orphan cache deletes!
+    holdCacheDelete = true;
+    const clear1 = clearDashboardData();
+    await new Promise((r) => setTimeout(r, 10));
+    sessionRefMod.saveCloudSessionReference(refUuid, "leaked-mid-clear-secret");
+    const clear2 = clearDashboardData();
+    holdCacheDelete = false;
+    (releaseCacheDelete as (() => void) | null)?.();
+    await Promise.all([clear1, clear2]);
+    expect(sessionRefMod.readCloudSessionReference(refUuid)).toBeNull();
+
+    if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
+      ls.set("flp-dashboard-cache-identity", "alice:admin");
+      ls.set("flp-dashboard-cache-session", "stale-session-uuid");
+      holdCacheDelete = true;
+      window.dispatchEvent(
+        Object.assign(new Event("storage"), {
+          key: "flp-dashboard-cache-identity",
+          oldValue: "alice:admin",
+          newValue: null,
+        }),
+      );
+      await new Promise((r) => setTimeout(r, 5));
+      const localClear = clearDashboardData();
+      holdCacheDelete = false;
+      (releaseCacheDelete as (() => void) | null)?.();
+      await localClear;
+      expect(ls.has("flp-dashboard-cache-session")).toBe(false);
+      expect(ls.has("flp-dashboard-cache-identity")).toBe(false);
+    }
+
+    // Rejected reset() waits via Promise.allSettled before releasing transition lock so bob's cache survives:
+    duckdbResetSpy.mockRejectedValueOnce(new Error("simulated reset failure"));
+    holdCacheDelete = true;
+    const failingReset = setDashboardCacheIdentity("alice:admin").catch(() => "FAILED");
+    await new Promise((r) => setTimeout(r, 10));
+    const bobAfterFail = setDashboardCacheIdentity("bob:admin").then(async () => {
+      const bobCache = await caches.open("flp-parquet-v1");
+      await bobCache.put("http://localhost/__bob_survives", new Response("bob-data"));
+    });
+    holdCacheDelete = false;
+    (releaseCacheDelete as (() => void) | null)?.();
+    expect(await failingReset).toBe("FAILED");
+    await bobAfterFail;
+    expect(cacheBuckets.get("flp-parquet-v1")?.has("http://localhost/__bob_survives")).toBe(true);
+
+    // 6. SEC-T5-ITER24-04: Malformed %ZZ in service_id / path returns HTTP 400 instead of throwing uncaught URIError:
+    const badSchemaRes = await handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/query/schema/svc%ZZbad"),
+    );
+    expect(badSchemaRes?.status).toBe(400);
+    const badInsightsRes = await handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/insights", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ service_id: "svc%ZZbad" }),
+      }),
+    );
+    expect(badInsightsRes?.status).toBe(400);
   });
 });

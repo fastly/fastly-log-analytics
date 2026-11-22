@@ -3111,3 +3111,100 @@ fn a_burst_backlog_writes_one_summary_file_per_closed_window() {
         "summary files per window after {runs} runs: {per_window:?}"
     );
 }
+
+#[test]
+fn coex_iter24_02_retention_sweeps_expired_cmcd_summary_windows_and_skips_prefix_on_request_sweep()
+{
+    let fake = Fake::new(BASE + 40 * DAY);
+    let expired_hour = ingest::hour_dir(BASE);
+    let fresh_hour = ingest::hour_dir(BASE + 20 * DAY);
+
+    let expired_cmcd_win = format!(
+        "processed/request/cmcd_summary/{expired_hour}window={BASE}-{}-r1-n5.parquet",
+        BASE + 60
+    );
+    let fresh_cmcd_win = format!(
+        "processed/request/cmcd_summary/{fresh_hour}window={}-{}-r1-n5.parquet",
+        BASE + 20 * DAY,
+        BASE + 20 * DAY + 60
+    );
+    let expired_req = format!(
+        "processed/request/{expired_hour}window={BASE}-{}-r1.parquet",
+        BASE + 60
+    );
+    let fresh_req = format!(
+        "processed/request/{fresh_hour}window={}-{}-r1.parquet",
+        BASE + 20 * DAY,
+        BASE + 20 * DAY + 60
+    );
+
+    for k in [&expired_cmcd_win, &fresh_cmcd_win, &expired_req, &fresh_req] {
+        fake.bucket.borrow_mut().insert((*k).clone(), vec![1, 2, 3]);
+    }
+    // Also seed >1000 live cmcd_summary objects so a `"request"` sweep that didn't skip past
+    // `cmcd_summary/` on initial `None` cursor would waste an entire LIST page scanning `cmcd_summary/`!
+    for idx in 0..1005u32 {
+        fake.bucket.borrow_mut().insert(
+            format!(
+                "processed/request/cmcd_summary/{fresh_hour}window={}-{}-r{idx}-n1.parquet",
+                BASE + 20 * DAY,
+                BASE + 20 * DAY + 60
+            ),
+            vec![7],
+        );
+    }
+
+    let svc = service();
+    // 1. Single-step `"request"` retention sweep must skip past `cmcd_summary/` on initial cursor and delete `expired_req` in 1 LIST!
+    fake.new_request();
+    let lists_before = lists();
+    let req_only = ingest::retention::retention_sweep(
+        &store(&fake, &svc),
+        &Default::default(),
+        4,
+        Some("request"),
+    )
+    .unwrap();
+    let req_lists = lists() - lists_before;
+    assert_eq!(
+        req_only.deleted, 1,
+        "expected expired_req deleted: {req_only:?}"
+    );
+    assert_eq!(
+        req_lists, 1,
+        "request sweep must skip cmcd_summary/ via start_after instead of paging >1000 cmcd_summary keys"
+    );
+    assert!(!fake.bucket.borrow().contains_key(&expired_req));
+    assert!(fake.bucket.borrow().contains_key(&fresh_req));
+
+    // 2. Full `retention_sweep` must include `summary:cmcd_summary`, deleting `expired_cmcd_win` while keeping `fresh_cmcd_win`!
+    fake.new_request();
+    let mut report = sweep(&fake, &svc, &Default::default());
+    let mut datasets = report.datasets.clone();
+    while report.more_pending {
+        fake.new_request();
+        report = ingest::retention::retention_sweep_from(
+            &store(&fake, &svc),
+            &Default::default(),
+            4,
+            None,
+            report.resume_from,
+        )
+        .unwrap();
+        datasets.extend(report.datasets.clone());
+    }
+    assert!(
+        datasets
+            .iter()
+            .any(|d| d["dataset"] == "summary:cmcd_summary"),
+        "expected summary:cmcd_summary in retention datasets: {datasets:?}"
+    );
+    assert!(
+        !fake.bucket.borrow().contains_key(&expired_cmcd_win),
+        "expired cmcd_summary window Parquet must be deleted by retention_sweep"
+    );
+    assert!(
+        fake.bucket.borrow().contains_key(&fresh_cmcd_win),
+        "fresh cmcd_summary window Parquet must survive retention_sweep"
+    );
+}

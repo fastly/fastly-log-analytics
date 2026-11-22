@@ -18,6 +18,7 @@ import {
   _coalesced_scalar_aggregates,
   handleInsights,
 } from "./insights";
+import { INSIGHTS_RESIDUAL_FIELDS } from "./insights-residual";
 import { insightsBaselineFromRollup, insightsBaselineRollup, insightsDeferredDetectors, insightsFromRollup, ipDetectorsRuledOut, rollupInsightsBaseline } from "./insights-rollup";
 import { parquetWriteBuffer } from "hyparquet-writer";
 import { _coalesced_ip_security_aggregates } from "./insights";
@@ -500,6 +501,8 @@ describe("insights baseline from summaries vs raw DuckDB over the same rows", ()
       },
     };
     const cut = insightsBaselineRollup(covered);
+    expect([...cut.rollup.fields.keys()].every((k) => (INSIGHTS_RESIDUAL_FIELDS as readonly string[]).includes(k))).toBe(true);
+    expect(cut.rollup.fields.has("status")).toBe(false);
     const cloned = structuredClone(cut);
     expect(cloned).toStrictEqual(cut);
 

@@ -555,6 +555,11 @@ pub fn datasets(
         super::bundle::bundle_prefix(&scope, "cmcd_summary"),
         service.log_retention_days,
     ));
+    out.push((
+        "summary:cmcd_summary".to_owned(),
+        super::cmcd_summary::cmcd_summary_prefix(&scope, "request"),
+        service.log_retention_days,
+    ));
     out
 }
 
@@ -877,7 +882,16 @@ fn sweep_dataset<R: Runtime>(
         if !room(2) {
             return Ok(false);
         }
-        let page = store.list(prefix, state.cursor.as_deref(), None, 1000, None)?;
+        let initial_skip;
+        let start_after = match state.cursor.as_deref() {
+            Some(cursor) => Some(cursor),
+            None if prefix == super::processed_prefix(store.service) => {
+                initial_skip = format!("{prefix}cmcd_summary0");
+                Some(initial_skip.as_str())
+            }
+            None => None,
+        };
+        let page = store.list(prefix, start_after, None, 1000, None)?;
         let mut expired = Vec::new();
         let mut reached_live = false;
         for object in &page.objects {
