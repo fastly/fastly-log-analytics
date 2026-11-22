@@ -121,7 +121,9 @@ export function useEffectiveServiceId(): string | null | undefined {
 }
 
 export function useIsDataReady(): boolean {
-  return !!useEffectiveServiceId()
+  const serviceId = useEffectiveServiceId()
+  const bootstrapSettled = useBootstrapSettled()
+  return bootstrapSettled && !!serviceId
 }
 
 export function useBootstrapResolved(): boolean {
@@ -288,6 +290,9 @@ export function useBootstrap() {
     queryKey: queryKeys.bootstrap(),
     queryFn: async ({ signal }) => {
       const data = await unwrapClient(client.GET('/api/bootstrap', { signal }))
+      if ((data as { runtime_mode?: string }).runtime_mode === 'cloud') {
+        setCloudModeRuntime(true)
+      }
       useSessionRoleStore.getState().setIsRemoteAnalyst(
         data?.settings?.is_remote_analyst === true,
       )

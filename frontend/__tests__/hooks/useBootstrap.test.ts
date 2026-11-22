@@ -23,6 +23,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { server } from '@/__tests__/helpers/msw/handlers'
 import { queryKeys, client } from "@/lib/api";
+import { isCloudMode, setCloudModeRuntime } from '@/lib/cloud-engine/mode'
 import { __resetForTests } from '@/lib/utils'
 import {
   useActiveLogFields,
@@ -66,10 +67,11 @@ import type { FiltersPayload } from '@/types/api'
 const push = vi.fn()
 const replace = vi.fn()
 let currentPathname = '/dashboard'
+let mockSearchParams = new URLSearchParams()
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push, replace }),
   usePathname: () => currentPathname,
-  useSearchParams: () => new URLSearchParams(),
+  useSearchParams: () => mockSearchParams,
 }))
 
 let mockUrlService: string | null = null
@@ -177,6 +179,7 @@ describe('useBootstrap (MSW)', () => {
     mockServiceState.activeServiceId = null
     mockServiceState.services = []
     mockServiceState.isInitialized = false
+    setCloudModeRuntime(false)
   })
 
   it('calls setServices with mapped shape, sets active_service_id, and marks initialized', async () => {
@@ -202,6 +205,37 @@ describe('useBootstrap (MSW)', () => {
     expect(mapped[1].service_id).toBeUndefined()
     expect(mockSetActiveServiceId).toHaveBeenCalledWith('svc-1')
     expect(mockSetInitialized).toHaveBeenCalledWith(true)
+  })
+
+  it('sets Cloud runtime mode before bootstrap success is observable', async () => {
+    server.use(
+      http.get(`${API_BASE}/api/bootstrap`, () =>
+        HttpResponse.json({
+          runtime_mode: 'cloud',
+          services: [{ service_id: 'svc-1', name: 'My CDN' }],
+          active_service_id: 'svc-1',
+        }),
+      ),
+    )
+    const queryClient = createTestQueryClient({ queries: { gcTime: 0 } })
+    let modeAtBootstrapSuccess: boolean | undefined
+    const unsubscribe = queryClient.getQueryCache().subscribe((event) => {
+      if (event.query.state.status === 'success') {
+        modeAtBootstrapSuccess = isCloudMode()
+      }
+    })
+
+    try {
+      const { result } = renderHook(() => useBootstrap(), {
+        wrapper: makeQueryWrapper(queryClient),
+      })
+      await waitFor(() => expect(result.current.isSuccess).toBe(true))
+      expect(modeAtBootstrapSuccess).toBe(true)
+      expect(isCloudMode()).toBe(true)
+    } finally {
+      unsubscribe()
+      setCloudModeRuntime(false)
+    }
   })
 
   it('handles empty services array gracefully and surfaces 500 fetch errors', async () => {
@@ -370,6 +404,7 @@ describe('useIsAnalyst, useMaskIps, useEnforceMaskedFilters & useIsDataReady', (
     mockServiceState.activeServiceId = null
     mockServiceState.services = []
     mockServiceState.isInitialized = false
+    mockSearchParams = new URLSearchParams()
     useFilterStore.getState().clearFilters()
   })
 
@@ -404,15 +439,37 @@ describe('useIsAnalyst, useMaskIps, useEnforceMaskedFilters & useIsDataReady', (
     })
   })
 
-  it('useIsDataReady checks store activeServiceId and falls back to bootstrap.active_service_id', () => {
+  it('useIsDataReady waits for bootstrap after resolving a store service', async () => {
+    mockServiceState.activeServiceId = 'svc-from-store'
+    const qc = createTestQueryClient()
+    const { result } = renderHook(() => useIsDataReady(), {
+      wrapper: makeQueryWrapper(qc),
+    })
+
+    expect(result.current).toBe(false)
+    act(() => qc.setQueryData(queryKeys.bootstrap(), { services: [] }))
+    await waitFor(() => expect(result.current).toBe(true))
+  })
+
+  it('useIsDataReady waits for bootstrap after resolving a URL service', async () => {
+    mockSearchParams = new URLSearchParams('service=svc-from-url')
+    const qc = createTestQueryClient()
+    const { result } = renderHook(() => useIsDataReady(), {
+      wrapper: makeQueryWrapper(qc),
+    })
+
+    expect(result.current).toBe(false)
+    act(() => qc.setQueryData(queryKeys.bootstrap(), { services: [] }))
+    await waitFor(() => expect(result.current).toBe(true))
+  })
+
+  it('useIsDataReady falls back to bootstrap.active_service_id after bootstrap resolves', () => {
     expect(renderHook(() => useIsDataReady(), { wrapper: settingsWrapper() }).result.current).toBe(false)
     expect(
       renderHook(() => useIsDataReady(), {
         wrapper: settingsWrapper({ bootstrapExtra: { active_service_id: 'svc-from-bootstrap' } }),
       }).result.current,
     ).toBe(true)
-    mockServiceState.activeServiceId = 'svc-from-store'
-    expect(renderHook(() => useIsDataReady(), { wrapper: settingsWrapper() }).result.current).toBe(true)
   })
 })
 
@@ -482,13 +539,15 @@ describe('useInsightsDefaults & useAnalyticsReportQuery', () => {
     const events: Array<Record<string, unknown>> = []
     const listener = (event: Event) => events.push((event as CustomEvent).detail)
     window.addEventListener('fla:cloud-query', listener)
+    const qc = createTestQueryClient({ queries: { gcTime: 0 } })
+    qc.setQueryData(queryKeys.bootstrap(), { services: [] })
     try {
       const { result } = renderHook(() => useAnalyticsReportQuery({
         namespace: ['dashboard', 'bundle'], serviceId: 'svc-1', filterPayload: {},
         range: { relativeRange: '1h', isAutoRange: true, startTime: null, endTime: null, anchor: 'now' },
         queryFn: async () => { throw new Error('stale-view sentinel-private-body') },
         queryOptions: { retry: false },
-      }), { wrapper: makeQueryWrapper(createTestQueryClient({ queries: { gcTime: 0 } })) })
+      }), { wrapper: makeQueryWrapper(qc) })
       await waitFor(() => expect(result.current.isError).toBe(true))
       expect(events).toMatchObject([
         { state: 'pending', section: 'dashboard.bundle', search: 'range=1h' },
@@ -526,6 +585,8 @@ describe('useInsightsDefaults & useAnalyticsReportQuery', () => {
   it('does not reuse a long-namespace placeholder after the service changes', async () => {
     let resolveSecond!: (value: { service: string }) => void
     const second = new Promise<{ service: string }>((resolve) => { resolveSecond = resolve })
+    const qc = createTestQueryClient({ queries: { gcTime: 5_000 } })
+    qc.setQueryData(queryKeys.bootstrap(), { services: [] })
     const { result, rerender } = renderHook(
       ({ serviceId }) => useAnalyticsReportQuery<{ service: string }>({
         namespace: ['network', 'health', 'shielding'],
@@ -543,7 +604,7 @@ describe('useInsightsDefaults & useAnalyticsReportQuery', () => {
           : second,
       }),
       {
-        wrapper: makeQueryWrapper(createTestQueryClient({ queries: { gcTime: 5_000 } })),
+        wrapper: makeQueryWrapper(qc),
         initialProps: { serviceId: 'svc-a' },
       },
     )
@@ -558,6 +619,7 @@ describe('useInsightsDefaults & useAnalyticsReportQuery', () => {
     const captured: Array<Record<string, unknown>> = []
     let seenSignal: AbortSignal | undefined
     const qc1 = createTestQueryClient({ queries: { gcTime: 5_000, staleTime: 0 } })
+    qc1.setQueryData(queryKeys.bootstrap(), { services: [] })
     const { result: r1 } = renderHook(
       () =>
         useAnalyticsReportQuery<{ ok: true }>({
@@ -580,12 +642,15 @@ describe('useInsightsDefaults & useAnalyticsReportQuery', () => {
     await waitFor(() => expect(r1.current.data).toEqual({ ok: true }))
     expect(captured[0]).toMatchObject({ rangeToken: '24h', rangeBody: { range_token: '24h', anchor: '2026-06-29T12:00:00Z' } })
     expect(seenSignal).toBeInstanceOf(AbortSignal)
-    const key1 = qc1.getQueryCache().getAll()[0].queryKey
+    const key1 = qc1.getQueryCache().getAll().find(
+      query => Array.isArray(query.queryKey) && query.queryKey[0] === 'origin',
+    )!.queryKey
     const ssrSeedKey = ['origin', 'aggregates', 'svc-1', '24h', '2026-06-29T12:00:00Z', {}, 60, 'ttfb', 'p95']
     expect(key1).toEqual(ssrSeedKey)
     expect(hashKey(key1)).toBe(hashKey(ssrSeedKey))
 
     const qc2 = createTestQueryClient({ queries: { gcTime: 5_000, staleTime: 0 } })
+    qc2.setQueryData(queryKeys.bootstrap(), { services: [] })
     const { result: r2 } = renderHook(
       () =>
         useAnalyticsReportQuery<{ ok: true }>({
@@ -609,7 +674,9 @@ describe('useInsightsDefaults & useAnalyticsReportQuery', () => {
       rangeToken: null,
       rangeBody: { start_time: '2026-06-01T00:00:00Z', end_time: '2026-06-02T00:00:00Z' },
     })
-    expect(qc2.getQueryCache().getAll()[0].queryKey).toEqual([
+    expect(qc2.getQueryCache().getAll().find(
+      query => Array.isArray(query.queryKey) && query.queryKey[0] === 'performance',
+    )?.queryKey).toEqual([
       'performance', 'aggregates', 'svc-1', 'abs:2026-06-01T00:00:00Z|2026-06-02T00:00:00Z',
       '2026-06-02T00:00:00Z', {}, 'p99',
     ])
@@ -1008,6 +1075,7 @@ describe('useDashboardBundle, useSSE, useUrlServiceSync, useDashboardCards, useF
   }
 
   function wrapperFor(qc: QueryClient) {
+    qc.setQueryData(queryKeys.bootstrap(), { services: [] })
     return makeQueryWrapper(qc)
   }
 
