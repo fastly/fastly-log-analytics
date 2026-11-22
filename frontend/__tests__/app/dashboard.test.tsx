@@ -167,7 +167,7 @@ function resetDefaultStores() {
   useInteractiveDataTableMock = false
   useMockActiveLogFields = false
   useSecurityActiveFields = false
-  mockIsDataReady = null
+  mockIsDataReady = true
   useMockHighScaleBootstrap = false
   mockPathname = '/dashboard'
   useServiceStore.setState({ activeServiceId: 'test-svc', isInitialized: true, services: [{ id: 'test-svc', name: 'Test' }] })

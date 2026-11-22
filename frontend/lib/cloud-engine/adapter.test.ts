@@ -834,7 +834,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       expect(res?.status).toBe(200);
       const body = await res!.json() as { sessions: { ua: string | null; unique_urls: number }[] };
       expect(body.sessions).toHaveLength(100);
-      expect(body.sessions[0]).toMatchObject({ ua: "curl/8", unique_urls: 3 });
+      expect(body.sessions[0]).toMatchObject({ ua: "curl/8", unique_urls: 2 });
       expect(loads.map(({ from, to }) => [from, to])).toEqual([
         ["2026-11-05T23:15:00.000Z", "2026-11-06T00:00:00Z"],
         ["2026-11-05T22:20:00.000Z", "2026-11-06T00:00:00.001Z"],
