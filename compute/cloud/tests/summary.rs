@@ -4,6 +4,8 @@ mod common;
 mod core_rollups;
 #[path = "summary/fixtures.rs"]
 mod fixtures;
+#[path = "summary/pivot_slices.rs"]
+mod pivot_slices;
 #[path = "summary/security_and_insights.rs"]
 mod security_and_insights;
 #[path = "summary/support.rs"]

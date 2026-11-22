@@ -6,6 +6,7 @@ import { parquetWriteBuffer } from "hyparquet-writer";
 export const LAYOUT_B: readonly (readonly string[])[] = [
   ["overview", "time_series"],
   ["field_totals", "all_fields", "all_fields_ip"],
+  ["pivot_totals", "slice_overview", "slice_ts", "slice_totals", "slice_fields"],
   ["sessions"],
   ["dims"],
   ["series5"],

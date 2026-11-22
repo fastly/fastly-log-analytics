@@ -255,6 +255,69 @@ required joint dimensions and semantics. Otherwise query raw Parquet through
 the bounded range-read path. Never make an arbitrary filter "fast" by
 silently ignoring it.
 
+### Pivot slices (filtered dashboards from summaries)
+
+Request window summaries and their hour, open-hour and day bundles also
+carry the dashboard rollups conditioned on each value of a small set of
+pivot fields (`summary::PIVOT_FIELDS` in Rust, `PIVOT_FIELDS` in
+`frontend/lib/cloud-engine/dashboard/summaries.ts`; currently `status`).
+They are rows inside the existing summary files, written as their own row
+group that the unfiltered dashboard projection skips:
+
+- `pivot_totals`: per pivot, rows with a non-null value and whether values
+  past `PIVOT_K` (64) were cut;
+- `slice_overview`, `slice_ts`: the overview sums and IP sketch and the
+  per-minute series of the rows with that value;
+- `slice_totals`, `slice_fields`: each field's total and top `TOP_K`
+  values within the slice, with the same truncation flag rules as
+  `field_totals` / `all_fields`.
+
+A bundle writes a pivot's slices only when every source it folded wrote
+them (`PivotAcc::sources`), so a bundle that covers pre-slice windows has
+none and filtered readers use raw Parquet for that range. Bundles merge
+slices like the base rollups: sums, HyperLogLog unions and top-K value
+counts with the same truncation rules.
+
+`resolveSummaryFromSlices` in `dashboard/engine.ts` answers a summary
+from slices only when the result is exact:
+
+- includes OR within a field; the summary is the merge of the slices whose
+  value passes the field's includes and excludes (same matcher as raw);
+- excludes keep rows with a null value, which have no slice, so an exclude
+  is answered only if the pivot's slices sum to the summary's timestamped
+  request total;
+- a truncated pivot (values cut) is not answered from slices;
+- the remaining filters are classified against the merged slice like any
+  summary: "none" prunes it, "all" uses it, anything else tries the next
+  pivot and otherwise reads raw Parquet for that summary's range.
+
+The filtered dashboard uses slices only for ranges of at least an hour
+whose filters include a pivot field and whose cards are all
+summary-backed; other filters keep the raw path.
+
+Cost (bench `summary_bench`, release, native; noisy shared machine):
+
+| | before | with status slices |
+| --- | --- | --- |
+| window write, 800 rows | 9.3 ms | 10.8 ms |
+| window write, 18,000 rows | 74 ms | 93–96 ms |
+| window size, 800 / 18,000 rows | 202 / 680 KB | 214 / 782 KB |
+| hour merge of 24 windows, 18,000 rows | 379 ms | 622–640 ms |
+| hour bundle size, 800 / 18,000 rows | 901 KB / 2.20 MB | 976 KB / 2.28 MB |
+| hour bundle footer | 56 KB | 59 KB (under the 64 KiB browser probe) |
+
+Bundle merges stay inside the existing per-execution fold and write stops
+(600 / 630 ms); a slower merge resumes from its `partial=` on a later turn.
+The bundle writer disables the Parquet offset index, which no reader uses,
+to keep the extra row group's footer under the browser's 64 KiB footer
+probe. The partial format magic moved to `FLPB\x0a`: older partials are
+unreadable and rebuild once.
+
+Not yet done: cache state and method pivots (measured hourly cardinality 5
+and 6, about 2.6–2.8× the base rows each; pop and country at 31× and 15×
+are too large); a column-projected, progressive raw path for non-pivot
+filters; and a `summaryFiles` stat for sliced runs.
+
 Compare ranking recall and count error against exact full-data queries and
 the v3 reference on identical representative and adversarial datasets.
 Accept the replacement only when it matches or improves the reference's
