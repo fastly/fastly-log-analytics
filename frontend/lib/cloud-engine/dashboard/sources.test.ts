@@ -54,6 +54,44 @@ describe("browserSource", () => {
     expect(file).toMatchObject({ cached: false, cdn: "HIT" });
   });
 
+  it("passes the caller's fetch priority to whole-file fetches", async () => {
+    const fetcher = vi.fn(async (_url: string, _init?: RequestInit) => new Response(new Uint8Array([1])));
+    vi.stubGlobal("fetch", fetcher);
+    const source = browserSource("");
+    await source.fetchFile("plain");
+    await source.fetchFile("urgent", undefined, { priority: "high" });
+    expect(fetcher.mock.calls[0][1]!.priority).toBeUndefined();
+    expect(fetcher.mock.calls[1][1]!.priority).toBe("high");
+  });
+
+  it("records Server-Timing and an epoch start time on file call events", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(new Uint8Array([1]), {
+            headers: {
+              "server-timing": "app;dur=3.5, fos;dur=2.0, cdn-cache;desc=HIT, edge;desc=MISS;dur=9",
+              "x-flp-cdn-cache": "HIT",
+            },
+          }),
+      ),
+    );
+    const calls: Array<Record<string, unknown>> = [];
+    const before = performance.timeOrigin + performance.now();
+    await browserSource("", { onApiCall: (call) => calls.push(call) }).fetchFile("timed");
+    const after = performance.timeOrigin + performance.now();
+    expect(calls).toHaveLength(1);
+    expect(calls[0].server_timing).toEqual([
+      { name: "app", dur: 3.5 },
+      { name: "fos", dur: 2 },
+      { name: "cdn-cache", desc: "HIT" },
+      { name: "edge", desc: "MISS", dur: 9 },
+    ]);
+    expect(calls[0].start_ms).toBeGreaterThanOrEqual(before - 1);
+    expect(calls[0].start_ms).toBeLessThanOrEqual(after);
+  });
+
   it("reads one exact byte range of an immutable file", async () => {
     const body = new Uint8Array([7, 8, 9]);
     const fetcher = vi.fn(async (_url: string, _init?: RequestInit) => new Response(body, {

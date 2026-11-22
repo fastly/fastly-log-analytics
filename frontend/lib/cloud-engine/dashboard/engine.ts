@@ -192,7 +192,11 @@ export type FileSource = {
   fetchFile: (
     key: string,
     signal?: AbortSignal,
-    mode?: { transfer?: boolean; identity?: string },
+    mode?: {
+      transfer?: boolean;
+      identity?: string;
+      priority?: RequestPriority;
+    },
   ) => Promise<{ bytes: ArrayBuffer; cached: boolean; cdn?: string | null }>;
   /**
    * Bytes `[start, end)` of an immutable file, uncached. `priority` hints the
@@ -281,8 +285,11 @@ function columnFields(options: EngineOptions): CustomField[] {
 }
 
 // /api/file is latency-bound (~0.55 s per file whatever the width); live
-// probes halved wall time from 8 to 16 lanes, and 32 added little.
-const FETCH_CONCURRENCY = 16;
+// probes halved wall time from 8 to 16 lanes, and 32 added little. The edge
+// allows 100 HTTP/2 streams, so this is a tuning choice, not a browser cap.
+const FETCH_CONCURRENCY = 24;
+// Cache probes read local storage only, so they run wider than network lanes.
+const CACHE_PROBE_CONCURRENCY = 64;
 // One coalesced selective query registers every file it reads in DuckDB memory.
 const SELECTIVE_BATCH_FILES = 16;
 const SELECTIVE_BATCH_BYTES = 16 * 1024 * 1024;
@@ -1569,6 +1576,7 @@ async function collectAggregator(
   const runPool = async <T>(
     items: readonly T[],
     handle: (item: T) => Promise<void>,
+    lanes = options.concurrency ?? FETCH_CONCURRENCY,
   ) => {
     let next = 0;
     const worker = async () => {
@@ -1580,10 +1588,7 @@ async function collectAggregator(
     await Promise.all(
       Array.from(
         {
-          length: Math.min(
-            options.concurrency ?? FETCH_CONCURRENCY,
-            items.length,
-          ),
+          length: Math.min(lanes, items.length),
         },
         worker,
       ),
@@ -1609,6 +1614,8 @@ async function collectAggregator(
     file: ManifestFile;
     scopedKey: string;
     local: boolean;
+    /** Held in OPFS, so `openParquet` opens it without the network. */
+    opfs: boolean;
     hadRollup: boolean;
     rollupMeta?: { rawRows: number; minTs: number; maxTs: number };
     summary?: SummaryUse;
@@ -1618,13 +1625,21 @@ async function collectAggregator(
   const pending: PendingFile[] = [];
   let toFetch = 0;
   let toDecode = 0;
-  const addPending = async (entry: Omit<PendingFile, "local">) => {
+  const addPending = async (entry: Omit<PendingFile, "local" | "opfs">) => {
     assertActive();
     const local = Boolean(await source.hasFile?.(entry.file.key));
     assertActive();
-    if (local) toDecode++;
+    const opfs =
+      !local &&
+      !entry.summary &&
+      Boolean(
+        source.openParquet &&
+        (await source.hasPersistentFile?.(entry.file, signal, variant)),
+      );
+    assertActive();
+    if (local || opfs) toDecode++;
     else toFetch++;
-    pending.push({ ...entry, local });
+    pending.push({ ...entry, local, opfs });
   };
   const classify = async (file: ManifestFile) => {
     const scopedKey = scopedKeyOf(file.key);
@@ -1727,15 +1742,19 @@ async function collectAggregator(
       clipOnly,
     });
   };
-  await runPool(summaryUses, (summary) =>
-    addPending({
-      file: summary.file,
-      scopedKey: scopedKeyOf(summary.file.key),
-      hadRollup: false,
-      summary,
-    }),
+  const probeLanes = options.concurrency ?? CACHE_PROBE_CONCURRENCY;
+  await runPool(
+    summaryUses,
+    (summary) =>
+      addPending({
+        file: summary.file,
+        scopedKey: scopedKeyOf(summary.file.key),
+        hadRollup: false,
+        summary,
+      }),
+    probeLanes,
   );
-  await runPool(files, classify);
+  await runPool(files, classify, probeLanes);
 
   progress.toFetch = toFetch;
   progress.toDecode = toDecode;
@@ -1977,7 +1996,25 @@ async function collectAggregator(
     ? projectedReader(source, scanColumns, signal)
     : null;
 
-  await runPool(pending, async (entry) => {
+  const wholeReadable = (file: ManifestFile) =>
+    searchQuery === undefined &&
+    Number.isSafeInteger(file.size) &&
+    file.size > 0 &&
+    file.size <= WHOLE_READ_MAX_BYTES;
+  // A whole file the browser cache holds is read as is; a Range probe would
+  // only revalidate the remote copy, which cached bytes never come from.
+  const cachedWhole = (entry: PendingFile) =>
+    entry.local &&
+    !entry.opfs &&
+    !microFiles.has(entry.file.key) &&
+    wholeReadable(entry.file);
+  // Cache hits need no network slot, so they run beside the network pool
+  // rather than queueing behind its downloads.
+  const cacheReady = (entry: PendingFile) =>
+    !entry.summary &&
+    (entry.opfs ||
+      (entry.local && (!source.openParquet || cachedWhole(entry))));
+  const readPending = async (entry: PendingFile) => {
     assertActive();
     const { file, scopedKey, hadRollup, rollupMeta } = entry;
     if (entry.summary) {
@@ -2003,25 +2040,21 @@ async function collectAggregator(
         }
       }
       assertActive();
-      let access = await source.openParquet(file, signal, variant);
+      let access = cachedWhole(entry)
+        ? null
+        : await source.openParquet(file, signal, variant);
       try {
         assertActive();
       } catch (error) {
-        access.release?.();
+        access?.release?.();
         throw error;
       }
       let wholeBytes = 0;
       // DuckDB-wasm reads HTTP ranges with serial synchronous XHRs, about two
       // round trips per 32 KiB for a full-card scan; one whole fetch per file
       // runs in the pool instead. Field search reads one column, so it keeps ranges.
-      if (
-        access.kind === "http" &&
-        searchQuery === undefined &&
-        Number.isSafeInteger(file.size) &&
-        file.size > 0 &&
-        file.size <= WHOLE_READ_MAX_BYTES
-      ) {
-        access.release?.();
+      if (access === null || (access.kind === "http" && wholeReadable(file))) {
+        access?.release?.();
         // A whole file the browser already holds costs no transfer.
         const projected =
           readProjected && !entry.local ? await readProjected(file) : null;
@@ -2034,7 +2067,10 @@ async function collectAggregator(
           assertActive();
           whole = projected
             ? await projected.read()
-            : await source.fetchFile(file.key, signal, { transfer: true });
+            : await source.fetchFile(file.key, signal, {
+                transfer: true,
+                priority: "high",
+              });
           assertActive();
         } catch (error) {
           releaseWhole(wholeBytes);
@@ -2150,6 +2186,7 @@ async function collectAggregator(
       assertActive();
       const { bytes, cached, cdn } = await source.fetchFile(file.key, signal, {
         transfer: true,
+        priority: "high",
       });
       assertActive();
       const meta = await lease.ingestFile(
@@ -2177,7 +2214,9 @@ async function collectAggregator(
       ? ((await source.readRollup?.(file.key, variant)) ?? null)
       : null;
     assertActive();
-    const { bytes, cached, cdn } = await source.fetchFile(file.key, signal);
+    const { bytes, cached, cdn } = await source.fetchFile(file.key, signal, {
+      priority: "high",
+    });
     assertActive();
     const decoded = await readColumns(bytes, wanted);
     assertActive();
@@ -2259,7 +2298,17 @@ async function collectAggregator(
     else stats.fetched++;
     if (isCdnHit(cdn)) stats.cdnHits++;
     finishFile();
-  });
+  };
+  // The open hour changes most and is read first; older hours then fill in.
+  const newestFirst = (a: PendingFile, b: PendingFile) =>
+    Date.parse(b.file.end) - Date.parse(a.file.end);
+  await Promise.all([
+    runPool(pending.filter(cacheReady), readPending),
+    runPool(
+      pending.filter((entry) => !cacheReady(entry)).sort(newestFirst),
+      readPending,
+    ),
+  ]);
   progress.phase = "aggregate";
   maybeReportProgress(false);
   if (duckdbScopedKeys.length > 0) {
