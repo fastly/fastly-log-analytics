@@ -54,6 +54,15 @@ const getInlineSource = () =>
     debugTelemetry(),
   ));
 
+let persistRequested = false;
+
+/** Best effort: persistent storage keeps OPFS and Cache Storage files out of eviction. */
+function requestPersistentStorage(): void {
+  if (persistRequested) return;
+  persistRequested = true;
+  void globalThis.navigator?.storage?.persist?.().catch(() => false);
+}
+
 class DashboardWorkerClient extends BaseWorkerRpcClient<
   WorkerRequest,
   WorkerMessage
@@ -67,12 +76,12 @@ class DashboardWorkerClient extends BaseWorkerRpcClient<
   >();
 
   constructor() {
-    super(
-      () =>
-        new Worker(new URL("./engine.worker.ts", import.meta.url), {
-          type: "module",
-        }),
-    );
+    super(() => {
+      requestPersistentStorage();
+      return new Worker(new URL("./engine.worker.ts", import.meta.url), {
+        type: "module",
+      });
+    });
   }
 
   private handleMessage = (msg: WorkerMessage) => {
