@@ -2290,6 +2290,42 @@ mod summary_bundles {
     }
 
     #[test]
+    fn a_request_bundle_backlog_does_not_starve_cmcd_bundles() {
+        let fake = Fake::new(BASE + 3 * HOUR);
+        tick_runtime(&fake);
+        watermark(&fake, BASE + 3 * HOUR);
+        // Each request hour takes more than one execution's folds and calls.
+        seed_hour(&fake, BASE, 50);
+        seed_hour(&fake, BASE + HOUR, 50);
+        for m in 0..3 {
+            cmcd_window(&fake, BASE + m * 60, 0, 4);
+        }
+        fake.kv.borrow_mut().insert(
+            "retention:last_sweep".into(),
+            (1, json!({"at": BASE + 3 * HOUR, "complete": true})),
+        );
+        for _ in 0..60 {
+            fake.now.set(fake.now.get() + 120);
+            watermark(&fake, fake.now.get() as i64);
+            run_tick(&fake);
+            if fake
+                .keys(CMCD_BUNDLES)
+                .iter()
+                .any(|k| k.contains("hour_bundle=08-c3-n12-"))
+            {
+                assert!(
+                    !of(&fake, "hour_bundle=")
+                        .iter()
+                        .any(|k| k.contains("hour_bundle=09-")),
+                    "CMCD waited for the request backlog to clear"
+                );
+                return;
+            }
+        }
+        panic!("CMCD bundling never ran: {:?}", fake.keys(CMCD_BUNDLES));
+    }
+
+    #[test]
     fn summary_bundle_work_left_brings_the_next_maintenance_tick_forward() {
         use fastly_log_analytics::admin::schedule;
         let fake = Fake::new(BASE + 3 * HOUR);

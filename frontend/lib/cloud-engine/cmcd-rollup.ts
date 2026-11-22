@@ -15,9 +15,9 @@ const CMCD_FETCH_CONCURRENCY = 16;
 const CMCD_ROLLUP_BUCKET_MS = 300_000;
 const MAX_CMCD_LIST_PAGES = 64;
 /**
- * Cap uncompacted per-shard cmcd_summary files before falling back to compacted
- * raw Parquet (24h of compacted raw is ~60 files / ~7 MB vs ~6,600 uncompacted
- * cmcd_summary shards / ~95 MB).
+ * Cap per-window cmcd_summary files before falling back to compacted raw Parquet. Hour and day
+ * bundles do not count: each stands for a whole hour or day of windows, so 24h of bundles plus
+ * the open hour's windows (~140) stays on summaries instead of ~150 MB of raw compacts.
  */
 export const MAX_CMCD_ROLLUP_FILES = 250;
 
@@ -217,6 +217,7 @@ async function listCmcdSummaryFiles(
   view?: "summary",
 ): Promise<ManifestFile[] | null> {
   const byKey = new Map<string, ManifestFile>();
+  let windows = 0;
   let cursor: string | null = null;
   for (let pageIndex = 0; pageIndex < MAX_CMCD_LIST_PAGES; pageIndex++) {
     signal?.throwIfAborted();
@@ -234,8 +235,9 @@ async function listCmcdSummaryFiles(
     };
     const pageFiles = Array.isArray(page?.files) ? page.files : [];
     for (const file of filesOverlapping(pageFiles, fromMs, toMs)) {
+      if (byKey.has(file.key)) continue;
       byKey.set(file.key, file);
-      if (byKey.size > maxFiles) return null;
+      if (file.kind !== "hour" && file.kind !== "day" && ++windows > maxFiles) return null;
     }
     if (page?.complete) return [...byKey.values()];
     if (!page?.next_cursor) return null;

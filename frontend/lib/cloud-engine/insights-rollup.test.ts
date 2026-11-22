@@ -630,24 +630,45 @@ describe("IP detectors from the window's ins_ip", () => {
     ...extra,
   });
 
+  const IP_IDS = ["content_discovery", "credential_enumeration"];
+  const ruledOut = (window: Rollup, baseline: Rollup = ipRollup([])) => [...ipDetectorsRuledOut(window, baseline, 1, 1)].sort();
+  const withIpCounts = (rollup: Rollup, counts: [string, number][]): Rollup =>
+    ({ ...rollup, fields: new Map([["ip", new Map(counts)]]) });
+
   it("rules both out only when every IP's denials and 404s are under the 20 either needs", () => {
-    expect(ipDetectorsRuledOut(ipRollup([["1.1.1.1", 19, 19], ["2.2.2.2", 0, 3]]))).toBe(true);
-    expect(ipDetectorsRuledOut(ipRollup([["1.1.1.1", 20, 0]]))).toBe(false);
-    expect(ipDetectorsRuledOut(ipRollup([["1.1.1.1", 0, 20]]))).toBe(false);
+    expect(ruledOut(ipRollup([["1.1.1.1", 19, 19], ["2.2.2.2", 0, 3]]))).toEqual(IP_IDS);
+    expect(ruledOut(ipRollup([["1.1.1.1", 20, 0]]))).toEqual(["content_discovery"]);
+    expect(ruledOut(ipRollup([["1.1.1.1", 0, 20]]))).toEqual(["credential_enumeration"]);
+  });
+
+  it("rules content discovery out when an IP's window requests keep its 404s under 70%", () => {
+    // 20 of at least 29 requests is 69%; of 28, 71%.
+    expect(ruledOut(withIpCounts(ipRollup([["1.1.1.1", 0, 20]]), [["1.1.1.1", 29]]))).toEqual(IP_IDS);
+    expect(ruledOut(withIpCounts(ipRollup([["1.1.1.1", 0, 20]]), [["1.1.1.1", 28]]))).toEqual(["credential_enumeration"]);
+    expect(ruledOut(withIpCounts(ipRollup([["1.1.1.1", 0, 20]]), [["9.9.9.9", 1000]]))).toEqual(["credential_enumeration"]);
+  });
+
+  it("rules credential enumeration out when an IP's baseline denials keep its spike under 3x + 5", () => {
+    // 20 denials against a baseline of 5 is not above 5 * 3 + 5; against 4 it is.
+    expect(ruledOut(ipRollup([["1.1.1.1", 20, 0]]), ipRollup([["1.1.1.1", 5, 0]]))).toEqual(IP_IDS);
+    expect(ruledOut(ipRollup([["1.1.1.1", 20, 0]]), ipRollup([["1.1.1.1", 4, 0]]))).toEqual(["content_discovery"]);
+    expect([...ipDetectorsRuledOut(ipRollup([["1.1.1.1", 20, 0]]), ipRollup([["1.1.1.1", 5, 0]]), 1, 2)])
+      .toEqual(["content_discovery"]);
   });
 
   it("never rules out over cut, missing or empty ins_ip, which can't show the ip column exists", () => {
-    expect(ipDetectorsRuledOut(ipRollup([["1.1.1.1", 1, 1]], { truncated: new Set(["ins_ip/ip"]) }))).toBe(false);
-    expect(ipDetectorsRuledOut(ipRollup([["1.1.1.1", 1, 1]], { present: new Set(["ins_url/url"]) }))).toBe(false);
-    expect(ipDetectorsRuledOut(ipRollup([]))).toBe(false);
-    expect(ipDetectorsRuledOut(ipRollup([["1.1.1.1", 1, 1]], { groups: new Map([["ins_ip", new Map([["ip", new Map([["1.1.1.1", { ...emptyAgg(), requests: 2, errors: 1, count: 1 }]])]])]]) }))).toBe(false);
+    expect(ruledOut(ipRollup([["1.1.1.1", 1, 1]], { truncated: new Set(["ins_ip/ip"]) }))).toEqual([]);
+    expect(ruledOut(ipRollup([["1.1.1.1", 1, 1]], { present: new Set(["ins_url/url"]) }))).toEqual([]);
+    expect(ruledOut(ipRollup([]))).toEqual([]);
+    expect(ruledOut(ipRollup([["1.1.1.1", 1, 1]], { groups: new Map([["ins_ip", new Map([["ip", new Map([["1.1.1.1", { ...emptyAgg(), requests: 2, errors: 1, count: 1 }]])]])]]) }))).toEqual([]);
   });
 
   // One raw file per hour and no summaries, so both ranges come from the raw residual.
   const END = Date.UTC(2030, 0, 1);
-  const rawFile = (fromMs: number, n404: number) => {
+  const rawFile = (fromMs: number, n404: number, n200 = 0) => {
     const rows = [
       ...Array.from({ length: n404 }, (_, i) => ["7.7.7.7", 404, `/probe/${i}`] as const),
+      ...Array.from({ length: n200 }, () => ["7.7.7.7", 200, "/"] as const),
       ...Array.from({ length: 30 }, () => ["8.8.8.8", 200, "/"] as const),
     ];
     return parquetWriteBuffer({
@@ -659,14 +680,14 @@ describe("IP detectors from the window's ins_ip", () => {
       ],
     });
   };
-  const answer = async (n404: number) => {
+  const answer = async (n404: number, n200 = 0) => {
     const files = [END - 2 * HOUR, END - HOUR].map((fromMs, i) => ({
       key: `raw-${i}`,
       start: new Date(fromMs).toISOString(),
       end: new Date(fromMs + HOUR).toISOString(),
       size: 1,
       rows: 1,
-      bytes: rawFile(fromMs, i ? n404 : 0),
+      bytes: rawFile(fromMs, i ? n404 : 0, i ? n200 : 0),
     }));
     const page = { files: files.map(({ bytes: _, ...f }) => f), next_cursor: null, complete: true };
     const src = fixtureSource([page], Object.fromEntries(files.map((f) => [f.key, f.bytes])), { json: [], files: [] }, []);
@@ -688,7 +709,14 @@ describe("IP detectors from the window's ins_ip", () => {
     }
   });
 
-  it("defers them to the raw follow-up once an IP reaches 20", async () => {
-    expect((await answer(20)).deferred_detectors).toEqual(["credential_enumeration", "content_discovery"]);
+  it("defers only content discovery once an IP reaches 20 404s that are 70% of its requests", async () => {
+    expect((await answer(20)).deferred_detectors).toEqual(["content_discovery"]);
+    expect((await answer(20, 8)).deferred_detectors).toEqual(["content_discovery"]);
+  });
+
+  it("skips the follow-up when the IP's other window requests keep its 404s under 70%", async () => {
+    const result = await answer(20, 9);
+    expect(result.deferred_detectors).toEqual([]);
+    expect(result.insights.find((c) => c.id === "content_discovery")!.placeholder).toBeFalsy();
   });
 });

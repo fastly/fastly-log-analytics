@@ -5,8 +5,8 @@ import { emptyAgg, type Rollup, type RollupAgg, type RollupResidual } from "./da
 
 const SERIES_STEP_MS = 300_000;
 
-/** The `all_fields` counts /insights reads (`insights-rollup.ts`). */
-export const INSIGHTS_RESIDUAL_FIELDS = ["country", "p_type", "method", "referer", "ua", "asn", "cache", "transport"] as const;
+/** The `all_fields` counts /insights reads (`insights-rollup.ts`); `ip` bounds content discovery. */
+export const INSIGHTS_RESIDUAL_FIELDS = ["country", "p_type", "method", "referer", "ua", "asn", "cache", "transport", "ip"] as const;
 
 const KEYS = new Set([
   "dims/city",
@@ -119,7 +119,7 @@ function addElapsed(agg: RollupAgg, elapsed: number | null) {
  * histograms. Rows are never cut to a top K, so the residual is never truncated.
  */
 export const INSIGHTS_RESIDUAL: RollupResidual = {
-  id: "insights-residual-v1",
+  id: "insights-residual-v2",
   columns: COLUMNS,
   maxBytes: 256 * 1024 * 1024,
   keys: KEYS,
