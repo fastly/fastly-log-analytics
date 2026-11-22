@@ -502,6 +502,20 @@ sub vcl_deliver {
       }
     }
   }
+  # Edge timing for the browser's PerformanceResourceTiming.serverTiming; appended after any
+  # Compute phases. `cdn-cache` is the shield-aware FOS object outcome, `edge` this node's state.
+  if (fastly.ff.visits_this_service == 0) {
+    declare local var.edge_timing STRING;
+    set var.edge_timing = "edge;desc=" + fastly_info.state + ";dur=" + time.elapsed.msec;
+    if (req.http.x-flp-fos-service && resp.http.x-flp-fos-cache) {
+      set var.edge_timing = "cdn-cache;desc=" + resp.http.x-flp-fos-cache + ", " + var.edge_timing;
+    }
+    if (resp.http.Server-Timing) {
+      set resp.http.Server-Timing = resp.http.Server-Timing + ", " + var.edge_timing;
+    } else {
+      set resp.http.Server-Timing = var.edge_timing;
+    }
+  }
   return(deliver);
 }
 

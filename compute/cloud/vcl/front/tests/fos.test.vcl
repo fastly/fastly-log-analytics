@@ -420,6 +420,28 @@ sub api_file_delivery_sets_parquet_headers_and_cdn_cache_hit() {
 }
 
 
+// @scope: deliver
+sub edge_delivery_appends_cache_state_and_elapsed_to_server_timing() {
+  testing.inject_variable("fastly.ff.visits_this_service", "0");
+  set req.http.x-flp-fos-service = "AAAAAAAAAAAAAAAAAAAAAA";
+  set req.http.x-flp-api-file = "1";
+  set resp.status = 200;
+  set resp.http.x-flp-fos-cache = "HIT";
+  testing.call_subroutine("vcl_deliver");
+  assert.match(resp.http.Server-Timing, "^cdn-cache;desc=HIT, edge;desc=[A-Z-]+;dur=[0-9]+$");
+}
+
+
+// @scope: deliver
+sub edge_delivery_keeps_compute_server_timing_first() {
+  testing.inject_variable("fastly.ff.visits_this_service", "0");
+  set resp.http.Server-Timing = "app;dur=4.2, auth;dur=1.0";
+  testing.call_subroutine("vcl_deliver");
+  assert.match(resp.http.Server-Timing, "^app;dur=4\.2, auth;dur=1\.0, edge;desc=[A-Z-]+;dur=[0-9]+$");
+  assert.not_contains(resp.http.Server-Timing, "cdn-cache");
+}
+
+
 // @scope: recv
 sub direct_fos_parquet_path_with_valid_cdn_cookie_rewrites_to_service_fos_lookup() {
   testing.inject_variable("req.is_ssl", true);
