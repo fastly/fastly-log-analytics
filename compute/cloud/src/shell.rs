@@ -3068,7 +3068,10 @@ mod tests {
         };
 
         let files = shell.handle(&bootstrap_request(
-            "/api/files?dataset=request&start=2026-11-01T00:00:00Z&end=2026-11-01T01:00:00Z",
+            concat!(
+                "/api/files",
+                "?dataset=request&start=2026-11-01T00:00:00Z&end=2026-11-01T01:00:00Z"
+            ),
             Some(&format!("flp_session={cookie}")),
         ));
         let timing = files.headers.get("server-timing").expect("server-timing");
