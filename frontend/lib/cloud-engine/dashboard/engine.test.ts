@@ -283,6 +283,37 @@ describe("runDashboard", () => {
     );
   });
 
+  it("drops a browser-cache hit that resolves after a cache epoch change", async () => {
+    const { source } = await cacheRaceSource();
+    const delivered: string[] = [];
+    const run = runDashboard(
+      {
+        ...source,
+        fetchFile: async (key: string, ...rest: unknown[]) => {
+          const read = await (
+            source.fetchFile as (
+              ...a: unknown[]
+            ) => Promise<{ bytes: ArrayBuffer; cached: boolean }>
+          )(key, ...rest);
+          if (key === "local-0") void getDuckDBEngine().reset();
+          delivered.push(key);
+          return read;
+        },
+      },
+      {
+        from: "2026-10-29T10:00:00Z",
+        to: "2026-10-29T10:03:00Z",
+        concurrency: 2,
+      },
+    );
+    await expect(run).rejects.toThrow(/generation expired/);
+    expect(delivered).toContain("local-0");
+    // At most the two in-flight network reads finish; no queued file starts.
+    expect(
+      delivered.filter((k) => k.startsWith("net-")).length,
+    ).toBeLessThanOrEqual(2);
+  });
+
   it("opens browser-cache and OPFS hits without a network probe or slot", async () => {
     const { source, events, slowNetwork, bytes, local } = await cacheRaceSource(
       ["opfs-0"],
