@@ -23,7 +23,7 @@ import {
   type CacheCollapseDetailRequest,
   type InsightsRequest,
 } from "./insights";
-import { INSIGHT_AVAILABILITY_COLUMNS, insightScanColumns, insightsOverBudget, queryCloudInsights, queryCloudCacheCollapse } from "./insight-scans";
+import { insightScanColumns, insightsOverBudget, queryCloudInsights, queryCloudCacheCollapse } from "./insight-scans";
 import { insightsDeferredDetectors } from "./insights-rollup";
 import { CLOUD_SCORING_SCAN_ROUTES, cloudScoringRead, scoringScanColumns } from "./scoring-reads";
 import { handleNetworkRequest, networkScanColumns, networkScans, type NetworkQueryParams } from "./network";
@@ -66,7 +66,8 @@ import { cloudLogAccounting, cloudQuarantine } from "./admin-reads";
 import { cloudAdminWire } from "./admin-wire";
 import { beginCloudLoading, type LoadingStage } from "./loading-progress";
 import {
-  bindCloudReadContext, CloudBudgetError, cloudFileSource, cloudReadContext, ensureCloudRange, formatBudgetAmount,
+  bindCloudReadContext, CloudBudgetError, cloudFileSource, cloudRangePresentColumns, cloudReadContext, ensureCloudRange,
+  formatBudgetAmount,
 } from "./range-loader";
 import {
   filtersPayloadToPredicates,
@@ -846,6 +847,36 @@ async function cloudInsightsBaseline(
   }
 }
 
+/**
+ * Insights availability from the last 24 h of raw files' footers. It needs
+ * only their schemas, so it neither downloads column data nor waits for the
+ * analytical queue the Insights scans hold.
+ */
+async function cloudInsightAvailability(request: Request, entryMetaEpoch: number): Promise<Response> {
+  const params = await readRequestParams(request);
+  assertAdapterEpoch(request, entryMetaEpoch);
+  const serviceId = params.service_id ?? request.headers.get("x-service-id") ?? undefined;
+  let end = String(params.end_time ?? params.end ?? "");
+  if (!end) {
+    const response = await withLoading("range", () => fetchCloudMetadata("/api/log-extents", request.signal));
+    assertAdapterEpoch(request, entryMetaEpoch);
+    if (!response.ok) throw new Error(`Cloud range discovery failed (${response.status})`);
+    const extents = await response.json() as { latest_log_at?: string | null };
+    assertAdapterEpoch(request, entryMetaEpoch);
+    end = extents.latest_log_at ?? new Date().toISOString();
+  }
+  const start = String(params.start_time ?? params.start ?? new Date(Date.parse(end) - 24 * 3_600_000).toISOString());
+  if (!Number.isFinite(Date.parse(start)) || !Number.isFinite(Date.parse(end)) || Date.parse(start) >= Date.parse(end)) {
+    throw new Error("Invalid Cloud query time range");
+  }
+  const columns = await cloudRangePresentColumns(start, end, request.signal, {
+    serviceId: serviceId ? decodeURIComponent(String(serviceId)) : undefined,
+    isCurrent: () => assertAdapterEpoch(request, entryMetaEpoch),
+  });
+  assertAdapterEpoch(request, entryMetaEpoch);
+  return jsonResponse(handleInsightAvailability(serviceId ? String(serviceId) : undefined, columns), request);
+}
+
 async function prepareCloudScan(
   request: Request,
   insightBaseline?: RollupResult,
@@ -911,8 +942,7 @@ async function prepareCloudScan(
   }
   // Detail and arbitrary SQL may explicitly include their upper endpoint.
   const scanEnd = token || url.pathname === "/api/query" ? new Date(Date.parse(end) + 1).toISOString() : end;
-  const insights = url.pathname === "/api/insights" || url.pathname === "/api/insight-availability" ||
-    url.pathname === "/api/insights/cache-collapse-detail";
+  const insights = url.pathname === "/api/insights" || url.pathname === "/api/insights/cache-collapse-detail";
   const filters = url.pathname === "/api/insights"
     ? filtersPayloadToPredicates(params.filters as Parameters<typeof filtersPayloadToPredicates>[0], undefined) : [];
   const network = /^\/api\/network(?:\/(?:bundle|pop-health)|-health|-quality)$/.test(url.pathname);
@@ -968,8 +998,7 @@ async function prepareCloudScan(
     sessionsFrom > Date.parse(scanStart) ? new Date(sessionsFrom).toISOString() : scanStart, scanEnd, request.signal, rum ? ["rum"] : ["request"], {
     serviceId: serviceId ? decodeURIComponent(String(serviceId)) : undefined, customFields,
     ...insights ? { projection: {
-      columns: url.pathname === "/api/insight-availability" ? INSIGHT_AVAILABILITY_COLUMNS
-        : insightScanColumns(filters, detectors),
+      columns: insightScanColumns(filters, detectors),
       ...request.headers.get("x-flp-cloud-prefetch") === "1" ? { maxBytes: PREFETCH_PROJECTION_BYTES } : {},
       // A detector follow-up reuses the window its summary pass already loaded with every insight column.
       ...wider ? { wider: {
@@ -1252,6 +1281,9 @@ async function handleCloudRequestInner(
           400,
         );
       }
+    }
+    if (localScan && path === "/api/insight-availability") {
+      return cloudInsightAvailability(request, entryMetaEpoch);
     }
     if (localScan && path === "/api/insights" && request.method === "POST") {
       const answer = await cloudInsightsRollup(request, entryMetaEpoch);
@@ -2479,15 +2511,7 @@ async function dispatchCloudRequest(
     }
   }
 
-  // Page 15: Insights (/api/insight-availability, /api/insights, /api/insights/cache-collapse-detail)
-  if (pathname === "/api/insight-availability" && method === "GET") {
-    const serviceId =
-      searchParams.get("service_id") ??
-      request.headers.get("x-service-id") ??
-      undefined;
-    const cols = await getPresentColumns(undefined, request.signal);
-    return jsonResponse(handleInsightAvailability(serviceId, cols), request);
-  }
+  // Page 15: Insights (/api/insights, /api/insights/cache-collapse-detail; availability reads footers before the queue)
 
   if (pathname === "/api/insights" && (method === "POST" || method === "GET")) {
     const params = await parseRequestParams();

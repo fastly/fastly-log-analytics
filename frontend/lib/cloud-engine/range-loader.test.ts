@@ -15,6 +15,7 @@ import { parquetWriteBuffer } from "hyparquet-writer";
 import { cloudRumAnalytics, cloudRumLiveEvents, cloudRumUsage } from "./rum-wire";
 import { executePerformanceAggregates } from "./performance";
 import { handleCloudAnalyticalRequest } from "./adapter";
+import { handleInsightAvailability } from "./insights";
 import * as sqlBuilder from "../sqlBuilder";
 import { insightsBaselineFromRollup } from "./insights-rollup";
 import { mergeRollups } from "./dashboard/rollup-query";
@@ -479,6 +480,29 @@ describe("Cloud first-page analytical range loading", () => {
       detectors: ["error_spikes", "pop_latency_regression"] });
     expect(reads(windowFile.key)).toBe(windowReads);
     expect(reads(baselineFile.key)).toBeGreaterThan(0);
+  });
+
+  it("answers Insights availability from the files' footers alone, without loading DuckDB", async () => {
+    const entries = Array.from({ length: 3 }, (_, i) => {
+      const bytes = wideFile(i);
+      return { ...file, key: `processed/request/a${i}.parquet`, start: "2026-11-05T12:00:00Z",
+        end: "2026-11-05T13:00:00Z", size: bytes.byteLength, bytes };
+    });
+    await analyticalFiles(entries);
+    const response = await handleCloudAnalyticalRequest(new Request("http://localhost/api/insight-availability", {
+      headers: { "x-service-id": "fixture-service" },
+    }));
+    expect(response?.status).toBe(200);
+    const expected = handleInsightAvailability("fixture-service", ["timestamp", "ts_ms", "ua", "status", "cache", "referer"]);
+    expect(await response!.json()).toEqual(JSON.parse(JSON.stringify(expected)));
+    expect(source.fetchFile).not.toHaveBeenCalled();
+    // Only the 64 KiB tail probes: no column chunk is read.
+    for (const [entry, start, end] of source.fetchRange.mock.calls as [ManifestFile, number, number][]) {
+      expect(end).toBe(entry.size);
+      expect(start).toBe(Math.max(0, entry.size - 64 * 1024));
+    }
+    expect(source.fetchRange).toHaveBeenCalledTimes(entries.length);
+    expect([...await getDuckDBEngine().getPresentColumns()]).toEqual([]);
   });
 
   it("keeps a Performance half-open window invariant under valid Parquet regrouping", async () => {

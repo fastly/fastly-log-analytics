@@ -92,7 +92,9 @@ function fakeCacheStorage() {
  */
 const EXPECTED: Record<string, [cold: number, revisit: number, reload: number]> = {
   "/dashboard": [1, 1, 1],
-  "/insights": [3, 3, 3],
+  // Availability lists its 24h raw files before the summary fallback, which extends that listing
+  // to its 8 days with one delta request instead of a full one.
+  "/insights": [4, 4, 4],
   "/network": [1, 1, 1],
   "/security": [1, 1, 1],
   "/origin": [1, 1, 1],
