@@ -14,6 +14,7 @@ import { DEBUG_RESPONSES_COOKIE } from '@/lib/utils'
 import { IS_CLOUD_MODE, isCloudMode } from '@/lib/cloud-engine/mode'
 import type { components } from '@/types/api.generated'
 import type { DebugCall as ApiDebugCall, DebugQuery as ApiDebugQuery } from '@/types/api'
+import { summarizeCalls, type ServerTimingEntry } from '@/lib/call-timeline'
 
 type SqliteRecentResponse = components['schemas']['RecentSqliteResponse']
 type SqliteEntry = components['schemas']['SqliteProfilerEntry']
@@ -30,7 +31,14 @@ type DebugCall = Omit<ApiDebugCall, 'status' | 'caller' | 'details'> & {
   status: string
   details?: string
   vcpu_ms?: number | null
+  start_ms?: number
+  server_timing?: ServerTimingEntry[]
 }
+
+const formatServerTiming = (entries: ServerTimingEntry[]) =>
+  entries
+    .map((e) => [e.name, e.desc, e.dur === undefined ? undefined : `${e.dur}ms`].filter(Boolean).join(' '))
+    .join(' · ')
 
 export function DebugPanel() {
   const { enabled, apiCallsEnabled, apiCalls } = useDebugStore()
@@ -289,11 +297,24 @@ export function DebugPanel() {
           caller: call.endpoint,
           details: call.details,
           vcpu_ms: call.vcpu_ms,
+          start_ms: call.start_ms,
+          server_timing: call.server_timing,
         }))
       : []),
   ]
   const totalQueryTime = queries.reduce((acc, q) => acc + q.time_ms, 0)
-  const totalCallTime = calls.reduce((acc, c) => acc + c.time_ms, 0)
+  const callTimeline = summarizeCalls(calls)
+  const totalCallTime = callTimeline.summedMs
+  const ms = (value: number | null) => (value === null ? 'n/a' : `${value.toFixed(0)}ms`)
+  const callSummaryText = [
+    `Wall clock: ${ms(callTimeline.wallMs)}`,
+    `In flight: ${ms(callTimeline.busyMs)}`,
+    `Critical path: ${callTimeline.criticalPath ? `${callTimeline.criticalPath.calls} calls, ${ms(callTimeline.criticalPath.ms)}` : 'n/a'}`,
+    `Summed: ${totalCallTime.toFixed(2)}ms`,
+  ].join(', ')
+  const callSourceText = callTimeline.bySource
+    .map((s) => `${s.source} ${s.count} (${s.ms.toFixed(0)}ms)`)
+    .join(' · ')
   const isCached = queries.some(q => q.is_cached)
   const defaultEngine = cloudActive ? 'DuckDB' : 'ClickHouse'
   const queryEngines = Array.from(
@@ -313,8 +334,9 @@ ${q.sql}`).join('\n\n')}`
 ${sqliteEntries.map((q) => `[${q.ts}] #${q.seq} ${q.op} (${q.time_ms.toFixed(2)}ms, rows: ${q.rows}):
 ${q.sql}`).join('\n\n')}`
 
-  const callsCopyText = `Fastly API & FOS Calls (Total Time: ${totalCallTime.toFixed(2)}ms)
-${calls.map((c) => `[${c.service}] ${c.method} ${c.path} (${c.status}, ${c.time_ms.toFixed(1)}ms)${c.details ? `\nDetails: ${c.details}` : ''}`).join('\n\n')}`
+  const callsCopyText = `Fastly API & FOS Calls (${callSummaryText})
+By source: ${callSourceText}
+${calls.map((c) => `[${c.service}] ${c.method} ${c.path} (${c.status}, ${c.time_ms.toFixed(1)}ms)${c.server_timing?.length ? `\nServer-Timing: ${formatServerTiming(c.server_timing)}` : ''}${c.details ? `\nDetails: ${c.details}` : ''}`).join('\n\n')}`
 
   return (
     <div className="mt-12 border-t pt-8 space-y-8 pb-12">
@@ -517,12 +539,29 @@ ${calls.map((c) => `[${c.service}] ${c.method} ${c.path} (${c.status}, ${c.time_
             </div>
             <div className="flex items-center gap-3">
               <div className="text-xs font-mono bg-muted/50 border px-2.5 py-1.5 rounded-md text-muted-foreground flex items-center gap-2">
-                <span>Total call time: <span className="font-bold text-foreground">{totalCallTime.toFixed(2)}ms</span></span>
+                <span title="First call start to last call end">Wall clock: <span className="font-bold text-foreground">{ms(callTimeline.wallMs)}</span></span>
+                <span className="w-[1px] h-3 bg-border" />
+                <span title="Longest chain of calls that ran one after another">
+                  Critical path: <span className="font-bold text-foreground">{callTimeline.criticalPath ? `${ms(callTimeline.criticalPath.ms)} (${callTimeline.criticalPath.calls})` : 'n/a'}</span>
+                </span>
+                <span className="w-[1px] h-3 bg-border" />
+                <span title="Sum of per-call durations; overlapping calls count more than once">Summed: <span className="font-bold text-foreground">{totalCallTime.toFixed(2)}ms</span></span>
                 <span className="w-[1px] h-3 bg-border" />
                 <CopyButton text={callsCopyText} />
               </div>
             </div>
           </div>
+
+          {calls.length > 0 && (
+            <div className="mb-3 flex flex-wrap gap-2 text-[10px] font-mono text-muted-foreground">
+              <span>In flight: {ms(callTimeline.busyMs)}</span>
+              {callTimeline.bySource.map((s) => (
+                <Badge key={s.source} variant="outline" className="text-[10px] font-mono">
+                  {s.source}: {s.count} · {s.ms.toFixed(0)}ms
+                </Badge>
+              ))}
+            </div>
+          )}
 
           {isCallsOpen && (
             <div className="grid gap-3 max-h-[500px] overflow-auto pr-2 custom-scrollbar">
@@ -555,6 +594,11 @@ ${calls.map((c) => `[${c.service}] ${c.method} ${c.path} (${c.status}, ${c.time_
                         </span>
                       </div>
                     </div>
+                    {c.server_timing && c.server_timing.length > 0 && (
+                      <div className="text-[10px] text-muted-foreground">
+                        Server-Timing: {formatServerTiming(c.server_timing)}
+                      </div>
+                    )}
                     {c.details && (
                       <div className="text-[10px] text-muted-foreground bg-muted/50 p-2 rounded border border-muted/50">
                         {c.details}
