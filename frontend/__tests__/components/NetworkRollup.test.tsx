@@ -1,12 +1,12 @@
 /**
  * @vitest-environment jsdom
  */
-import { renderWithQuery, stubIntersectionObserver } from '@/__tests__/helpers/page-smoke'
+import { createTestQueryClient, renderWithQuery, stubIntersectionObserver } from '@/__tests__/helpers/page-smoke'
 import { act, cleanup, fireEvent, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { http, HttpResponse } from 'msw/http'
 import { server } from '@/__tests__/helpers/msw/handlers'
-import { getApiBase } from '@/lib/api'
+import { getApiBase, queryKeys } from '@/lib/api'
 import { setCloudModeRuntime } from '@/lib/cloud-engine/mode'
 import { NetworkClient } from '@/app/network/_sections/NetworkClient'
 import { PopHealthHeatmap } from '@/components/network/PopHealthHeatmap'
@@ -186,9 +186,23 @@ describe('PopHealthHeatmap', () => {
     http.get(`${getApiBase()}/api/network/pop-health`, () => HttpResponse.json(body)),
   )
 
+  const renderPopHeatmap = () => {
+    const queryClient = createTestQueryClient({ queries: { retry: false } })
+    queryClient.setQueryData(queryKeys.bootstrap(), {
+      runtime_mode: 'cloud',
+      active_service_id: 'svc-1',
+      services: [{ service_id: 'svc-1', name: 'Demo' }],
+      settings: {},
+    })
+    return renderWithQuery(
+      <PopHealthHeatmap serviceId="svc-1" startTime="2027-01-15T08:00:00Z" endTime="2027-01-15T10:00:00Z" />,
+      { queryClient },
+    )
+  }
+
   it('marks a summary-served hit rate as a lower bound and its latency approximate', async () => {
     respond({ data: [pop], rollup: { ...rollup([]), approximate: ['p50_rtt_us', 'p95_ttfb_ms'], lower_bound: ['cache_hit_rate'] } })
-    renderWithQuery(<PopHealthHeatmap serviceId="svc-1" startTime="2027-01-15T08:00:00Z" endTime="2027-01-15T10:00:00Z" />)
+    renderPopHeatmap()
     fireEvent.click(await screen.findByText('≥40.0% Hit'))
     expect(await screen.findByText('≈12.0 ms')).toBeInTheDocument()
     expect(screen.getByText('≈150.0 ms')).toBeInTheDocument()
@@ -197,7 +211,7 @@ describe('PopHealthHeatmap', () => {
 
   it('shows raw-scan values unmarked', async () => {
     respond({ data: [pop] })
-    renderWithQuery(<PopHealthHeatmap serviceId="svc-1" startTime="2027-01-15T08:00:00Z" endTime="2027-01-15T10:00:00Z" />)
+    renderPopHeatmap()
     fireEvent.click(await screen.findByText('40.0% Hit'))
     expect(await screen.findByText('12.0 ms')).toBeInTheDocument()
   })

@@ -6,6 +6,7 @@ import { useReportPageState, useAnalyticsReportQuery } from '@/hooks/useReportPa
 import { client, unwrapClient } from '@/lib/api'
 import type { RangeWire } from '@/lib/utils'
 import { ReportLayout } from '@/components/ReportLayout'
+import { CardErrorState } from '@/components/AnalyticsCard'
 import { readRollupMeta, RollupDataThroughSlot } from '@/components/network/rollupLabels'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -150,6 +151,17 @@ function FastlyValueBody({ startTime, endTime, activeServiceId, filterPayload }:
                 <Skeleton className="h-80" />
                 <Skeleton className="h-80" />
               </div>
+            </div>
+          ) : activeTab !== 'assets' && firstQuery.isError && !hasActiveSectionData ? (
+            <div className="pt-4">
+              <CardErrorState
+                title="Service Summary unavailable"
+                message="Could not load summary data for this time window."
+                onRetry={() => {
+                  void valueQuery.refetch()
+                  if (split) void rollupQuery.refetch()
+                }}
+              />
             </div>
           ) : (
             <div className={refreshing ? 'opacity-40 pointer-events-none transition-opacity' : 'transition-opacity'}>

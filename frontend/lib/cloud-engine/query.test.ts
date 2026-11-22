@@ -182,4 +182,25 @@ describe("Cloud query scan planning", () => {
     expect(res.status).toBe(200);
     expect(executed[0]).toMatch(/^WITH "requests" AS \(SELECT \* FROM main\."requests" WHERE ts_ms >= 1234\) /);
   });
+
+  it("strips internal DuckDB scoped_key column from SELECT * FROM logs results", async () => {
+    const res = await executeCloudQuery(
+      { sql: "SELECT * FROM logs LIMIT 10", max_rows: 10 },
+      {
+        runSql: async () => [
+          {
+            scoped_key: '["session-uuid","user:admin"]|processed/request/a.parquet|["status"]',
+            timestamp: "2026-11-22T00:00:00Z",
+            status: 200,
+          },
+        ],
+      },
+    );
+    expect(res.status).toBe(200);
+    if ("columns" in res.body) {
+      expect(res.body.columns).not.toContain("scoped_key");
+      expect(res.body.data[0]).not.toHaveProperty("scoped_key");
+      expect(res.body.data[0]).toMatchObject({ status: 200 });
+    }
+  });
 });

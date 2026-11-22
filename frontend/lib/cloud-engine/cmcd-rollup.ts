@@ -4,7 +4,7 @@ import type { FileSource } from "./dashboard/engine";
 import { Histogram } from "./dashboard/histogram";
 import { Hll } from "./dashboard/hll";
 import { mergeHistogramBytes, mergeHllBytes } from "./rollup-merge";
-import { fetchManifest, filesOverlapping } from "./dashboard/manifest";
+import { filesOverlapping, type ManifestFile } from "./dashboard/manifest";
 import { readColumns } from "./dashboard/parquet";
 import { mapLimit } from "./dashboard/sources";
 import { parseEpochMs, roundTo } from "./engine-utils";
@@ -12,6 +12,14 @@ import { fetchLanes } from "./fetch-lanes";
 import { hasFilterValues } from "./rollup-sections";
 
 const CMCD_FETCH_CONCURRENCY = 16;
+const CMCD_ROLLUP_BUCKET_MS = 300_000;
+const MAX_CMCD_LIST_PAGES = 64;
+/**
+ * Cap uncompacted per-shard cmcd_summary files before falling back to compacted
+ * raw Parquet (24h of compacted raw is ~60 files / ~7 MB vs ~6,600 uncompacted
+ * cmcd_summary shards / ~95 MB).
+ */
+export const MAX_CMCD_ROLLUP_FILES = 250;
 
 export type CmcdRollupSource = Pick<FileSource, "fetchJson" | "fetchFile">;
 
@@ -198,6 +206,42 @@ export function cmcdRollupEligible(params: CmcdQueryParams): boolean {
   return (params.bucket_seconds ?? 60) >= 300;
 }
 
+async function listCmcdSummaryFiles(
+  fetchJson: CmcdRollupSource["fetchJson"],
+  fromIso: string,
+  toIso: string,
+  fromMs: number,
+  toMs: number,
+  maxFiles: number,
+  signal?: AbortSignal,
+): Promise<ManifestFile[] | null> {
+  const byKey = new Map<string, ManifestFile>();
+  let cursor: string | null = null;
+  for (let pageIndex = 0; pageIndex < MAX_CMCD_LIST_PAGES; pageIndex++) {
+    signal?.throwIfAborted();
+    const params = new URLSearchParams({
+      from: fromIso,
+      to: toIso,
+      dataset: "cmcd_summary",
+    });
+    if (cursor) params.set("cursor", cursor);
+    const page = (await fetchJson(`/api/files?${params}`, signal)) as {
+      files?: ManifestFile[];
+      next_cursor?: string | null;
+      complete?: boolean;
+    };
+    const pageFiles = Array.isArray(page?.files) ? page.files : [];
+    for (const file of filesOverlapping(pageFiles, fromMs, toMs)) {
+      byKey.set(file.key, file);
+      if (byKey.size > maxFiles) return null;
+    }
+    if (page?.complete) return [...byKey.values()];
+    if (!page?.next_cursor) return null;
+    cursor = page.next_cursor;
+  }
+  return null;
+}
+
 export async function cmcdFromRollup(
   params: CmcdQueryParams,
   source: CmcdRollupSource,
@@ -210,11 +254,16 @@ export async function cmcdFromRollup(
 
   const fromIso = new Date(fromMs).toISOString();
   const toIso = new Date(toMs).toISOString();
-  const cmcdManifest = await fetchManifest(source.fetchJson, fromIso, toIso, signal, "cmcd_summary");
-  if (!cmcdManifest.complete) return null;
-
-  const files = filesOverlapping(cmcdManifest.files, fromMs, toMs);
-  if (files.length === 0) return null;
+  const files = await listCmcdSummaryFiles(
+    source.fetchJson,
+    fromIso,
+    toIso,
+    fromMs,
+    toMs,
+    MAX_CMCD_ROLLUP_FILES,
+    signal,
+  );
+  if (!files || files.length === 0) return null;
 
   const buckets = new Map<number, BucketAgg>();
   const sessions = new Map<string, { firstTs: number; lastTs: number; reqs: number }>();
@@ -294,6 +343,9 @@ export async function cmcdFromRollup(
       }
       if (kind === "bucket") {
         const bucketMs = num(bucketCol, i);
+        if (bucketMs + CMCD_ROLLUP_BUCKET_MS <= fromMs || bucketMs >= toMs) {
+          continue;
+        }
         let agg = buckets.get(bucketMs);
         if (!agg) {
           agg = newBucketAgg();
@@ -342,6 +394,7 @@ export async function cmcdFromRollup(
       } else if (kind === "session" && key) {
         const firstTs = num(firstTsCol, i);
         const lastTs = num(lastTsCol, i);
+        if (lastTs < fromMs || firstTs >= toMs) continue;
         const reqs = num(reqsCol, i);
         const cur = sessions.get(key);
         if (cur) {

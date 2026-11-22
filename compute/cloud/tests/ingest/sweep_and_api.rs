@@ -364,6 +364,66 @@ fn ingested_files_inherits_rows_and_size_in_one_pass_over_a_large_archived_page(
 }
 
 #[test]
+fn ingested_files_splits_large_pages_within_budget_and_resumes_via_cursor() {
+    let fake = Fake::new(BASE + 7200);
+    // Write 3 archived ingest_files Parquet objects with 2,500 distinct raw keys each (7,500 total),
+    // exceeding the per-page row/byte budget so a single Compute request stops early instead of
+    // decoding 10 large compacted files into WASM memory at once.
+    for batch in 0..3 {
+        let mut rows = Vec::with_capacity(2_500);
+        let at_s = BASE - 10_800 + batch * 3600;
+        for n in 0..2_500 {
+            let raw = raw_key(at_s, &format!("b{batch}-f{n:04}"));
+            rows.push(json!({
+                "timestamp": at_s * 1000 + n as i64,
+                "event_id": format!("{batch}-{n}"),
+                "service_id": SID,
+                "severity": "info",
+                "run_id": format!("r{batch}"),
+                "dataset": "request",
+                "raw_key": raw,
+                "raw_size": 42,
+                "status": "converted",
+                "state_version": 1,
+                "rows": n + 1,
+                "raw_deleted": false
+            }));
+        }
+        ops_parquet(&fake, LogKind::IngestFiles, at_s, &rows);
+    }
+
+    let first = admin_page(&fake, None, "").unwrap();
+    assert_eq!(
+        first["complete"], false,
+        "large ingest_files listing must paginate before decoding all objects in one WASM call"
+    );
+    assert!(first["next_cursor"].is_string());
+
+    let mut seen = std::collections::BTreeSet::new();
+    let mut cursor: Option<String> = None;
+    let mut pages = 0;
+    loop {
+        pages += 1;
+        assert!(pages <= 10, "pagination must terminate");
+        let query = cursor
+            .as_deref()
+            .map(|c| format!("cursor={c}"))
+            .unwrap_or_default();
+        let page = admin_page(&fake, None, &query).unwrap();
+        for file in page["files"].as_array().unwrap() {
+            seen.insert(file["key"].as_str().unwrap().to_owned());
+        }
+        if page["complete"] == true {
+            assert!(page["next_cursor"].is_null());
+            break;
+        }
+        cursor = Some(page["next_cursor"].as_str().unwrap().to_owned());
+    }
+    assert!(pages >= 2);
+    assert_eq!(seen.len(), 7_500);
+}
+
+#[test]
 fn files_dataset_selects_request_rum_or_one_ops_kind() {
     let fake = Fake::new(BASE);
     for (prefix, name) in [

@@ -593,4 +593,14 @@ describe("Cloud RUM status and versions services lookup", () => {
     await Promise.all([before, after]);
     expect(servicesCalls()).toBe(2);
   });
+
+  it("rejects an invalid /api/sessions/detail session_token with HTTP 400 before fetching extents or Parquet files", async () => {
+    const fetcher = vi.fn();
+    vi.stubGlobal("fetch", fetcher);
+    const response = await handleCloudAnalyticalRequest(
+      request("/api/sessions/detail", "POST", { session_token: "not_a_valid_token" }, "fixture-a"),
+    );
+    expect(response?.status).toBe(400);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
 });

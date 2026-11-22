@@ -236,6 +236,7 @@ function SessionDetailClient() {
       }))
     },
     enabled: !!serviceId && hasSession,
+    retry: false,
   })
 
   if (hasSession && !serviceId && bootstrapResolved) {

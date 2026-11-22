@@ -149,7 +149,7 @@ export function SchemaTab({
         isLoading={isLoadingSchema}
         hideToolbar
         showPagination={false}
-        tableCaption="ClickHouse Table Schema and Statistics"
+        tableCaption={IS_CLOUD_MODE ? 'Parquet Table Schema and Statistics' : 'ClickHouse Table Schema and Statistics'}
       />
     </>
   )
@@ -159,13 +159,34 @@ export function IngestionTab({
   ingestedColumns,
   ingestedFiles,
   isLoadingIngested,
+  isErrorIngested,
+  ingestedError,
+  onRetryIngested,
 }: {
   ingestedColumns: ColumnDef<IngestedFile>[]
   ingestedFiles: components['schemas']['IngestedFilesResponse'] | undefined
   isLoadingIngested: boolean
+  isErrorIngested?: boolean
+  ingestedError?: unknown
+  onRetryIngested?: () => void
 }) {
   return (
     <div data-testid="ingested-files">
+      {isErrorIngested ? (
+        <div
+          role="alert"
+          className="m-4 flex flex-wrap items-center justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive"
+        >
+          <span>
+            Failed to load ingestion history{ingestedError ? `: ${extractApiError(ingestedError)}` : '.'}
+          </span>
+          {onRetryIngested ? (
+            <Button variant="outline" size="sm" onClick={onRetryIngested}>
+              Retry
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
       <DataTableReadonly
         columns={ingestedColumns}
         data={ingestedFiles?.files || []}

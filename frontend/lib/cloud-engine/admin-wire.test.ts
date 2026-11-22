@@ -38,13 +38,69 @@ describe("Cloud administrative wire parity", () => {
     expect(vi.mocked(adminRequest)).toHaveBeenCalledTimes(2);
   });
 
-  it("maps real native ingested files", async () => {
-    vi.mocked(adminRequest).mockResolvedValueOnce({
-      files: [{ key: "processed/request/one.parquet", rows: 4, size: 128, last_modified: "2026-01-01T00:00:00Z" }],
-      complete: true,
+  it("reads ops:ingest_files in the browser, folds latest state, and inherits rows and size without Compute WASM decoding", async () => {
+    const baseMs = Date.parse("2026-11-22T03:00:00Z");
+    vi.mocked(queryOpsLogs).mockResolvedValueOnce({
+      kind: "ingest_files",
+      from: "2026-11-21T04:00:00Z",
+      to: "2026-11-22T04:00:00Z",
+      rows: [
+        {
+          timestamp: baseMs,
+          event_id: "e1",
+          service_id: "fixture-service",
+          dataset: "request",
+          raw_key: "raw/fixture-service/2026-11-22T03:00:00.000-a.log.zst",
+          raw_size: 1024,
+          rows: 42,
+          status: "converted",
+          state_version: 1,
+          raw_deleted: false,
+        },
+        {
+          timestamp: baseMs + 60_000,
+          event_id: "e2",
+          service_id: "fixture-service",
+          dataset: "request",
+          raw_key: "raw/fixture-service/2026-11-22T03:00:00.000-a.log.zst",
+          raw_size: null,
+          rows: null,
+          status: "deleted",
+          state_version: 3,
+          raw_deleted: true,
+          raw_deleted_at: baseMs + 60_000,
+        },
+        {
+          timestamp: baseMs,
+          event_id: "e-other",
+          service_id: "other-service",
+          dataset: "request",
+          raw_key: "raw/other-service/2026-11-22T03:00:00.000-b.log.zst",
+          raw_size: 512,
+          rows: 10,
+          status: "converted",
+          state_version: 1,
+          raw_deleted: false,
+        },
+      ],
+      oldestLiveMs: null,
+      status: null,
+      stats: { listed: 1, read: 1, cached: 0, cdnHits: 0, skippedCovered: 0, ignoredCompact: 0, evicted: 0, liveRows: 0 },
     });
-    expect(await (await cloudAdminWire(request("/api/admin/ingested-files")))!.json()).toMatchObject({
-      files: [{ file_name: "processed/request/one.parquet", row_count: 4, file_size_bytes: 128, ingested_at: "2026-01-01T00:00:00Z" }],
+    const res = await cloudAdminWire(request("/api/admin/ingested-files"));
+    expect(adminRequest).not.toHaveBeenCalled();
+    expect(await res!.json()).toMatchObject({
+      complete: true,
+      files: [
+        {
+          file_name: "raw/fixture-service/2026-11-22T03:00:00.000-a.log.zst",
+          row_count: 42,
+          file_size_bytes: 1024,
+          status: "deleted",
+          raw_deleted: true,
+          ingested_at: new Date(baseMs + 60_000).toISOString(),
+        },
+      ],
     });
   });
 

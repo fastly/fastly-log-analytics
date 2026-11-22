@@ -196,7 +196,7 @@ export function NetworkKpiGrid({
         },
         {
           title: 'Avg RTT', icon: Zap, loadingMessage: 'Analyzing TCP round-trip times...',
-          value: <>{summary?.avg_rtt_ms ?? '--'}ms</>, sub: 'Across all regions',
+          value: <>{summary?.avg_rtt_ms != null && (summary.avg_rtt_ms > 0 || summary.global_health_score != null) ? `${summary.avg_rtt_ms}ms` : '--'}</>, sub: 'Across all regions',
           helpTitle: 'Average RTT', helpContent: <AvgRttHelp />,
         },
         {

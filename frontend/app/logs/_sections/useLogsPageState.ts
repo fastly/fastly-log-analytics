@@ -274,7 +274,13 @@ export function useLogsPageState(initialTab?: string) {
     staleTime: 60_000,
   })
 
-  const { data: ingestedFiles, isLoading: isLoadingIngested } = useQuery({
+  const {
+    data: ingestedFiles,
+    isLoading: isLoadingIngested,
+    isError: isErrorIngested,
+    error: ingestedError,
+    refetch: refetchIngested,
+  } = useQuery({
     queryKey: queryKeys.admin.ingestedFiles(activeServiceId),
     queryFn: ({ signal }) => unwrapClient(client.GET('/api/admin/ingested-files', { signal })),
     enabled: !!activeServiceId && activeTab === 'ingestion',
@@ -354,6 +360,9 @@ export function useLogsPageState(initialTab?: string) {
     isFetchingAudit,
     ingestedFiles,
     isLoadingIngested,
+    isErrorIngested,
+    ingestedError,
+    refetchIngested,
     schemaData,
     isLoadingSchema,
     purgeMutation,

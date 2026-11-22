@@ -126,4 +126,37 @@ describe('SystemHealthCard in Cloud mode', () => {
       expect(screen.getByText('DEGRADED')).toBeInTheDocument()
     })
   })
+
+  it('shows HEALTHY and real backend_requests_used when Compute returns 1s shield probe cadence with recent CronRun', async () => {
+    setCloudModeRuntime(true)
+    const now = Date.now()
+    const runAt = new Date(now - 15 * 1000).toISOString()
+    const lastTickAt = new Date(now - 90 * 1000).toISOString()
+    const nextTickAt = new Date(now + 10 * 1000).toISOString()
+    server.use(
+      http.get('/api/sync-status', () =>
+        HttpResponse.json({
+          configured: true,
+          last_tick_at: lastTickAt,
+          next_tick_at: nextTickAt,
+          clock_interval_s: 1,
+          cron_runs: [
+            {
+              started_at: runAt,
+              duration_ms: 4000,
+              backend_requests_used: 20,
+              outcome: 'done',
+            },
+          ],
+        }),
+      ),
+    )
+
+    renderWithQuery(<SystemHealthCard />)
+    await waitFor(() => {
+      expect(screen.getByText('HEALTHY')).toBeInTheDocument()
+    })
+    expect(screen.queryByText('DEGRADED')).not.toBeInTheDocument()
+    expect(screen.getByText(`20 / ${TICK_BACKEND_CALL_CEILING}`)).toBeInTheDocument()
+  })
 })

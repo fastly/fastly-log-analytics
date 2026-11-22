@@ -6,7 +6,8 @@ import { act, cleanup, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { http, HttpResponse } from 'msw/http'
 import { server } from '@/__tests__/helpers/msw/handlers'
-import { getApiBase } from '@/lib/api'
+import { getApiBase, queryKeys } from '@/lib/api'
+import { createTestQueryClient } from '@/__tests__/helpers/page-smoke'
 import { setCloudModeRuntime } from '@/lib/cloud-engine/mode'
 import AssetsClient from '@/app/assets-shield/_sections/AssetsClient'
 import FastlyValueClient from '@/app/fastly-value/_sections/FastlyValueClient'
@@ -37,6 +38,17 @@ const meta = {
 }
 
 const never = () => new Promise<never>(() => {})
+
+function renderBootstrapped(ui: React.ReactElement, _opts?: unknown) {
+  const queryClient = createTestQueryClient({ queries: { retry: false } })
+  queryClient.setQueryData(queryKeys.bootstrap(), {
+    runtime_mode: 'cloud',
+    active_service_id: 'svc-1',
+    services: [{ service_id: 'svc-1', name: 'Demo' }],
+    settings: {},
+  })
+  return renderWithQuery(ui, { queryClient, withNuqs: true })
+}
 
 function recordPosts(path: string, answer: (sections: string[] | undefined) => Promise<unknown> | unknown) {
   const sections: (string[] | undefined)[] = []
@@ -77,7 +89,7 @@ describe('AssetsClient on Cloud', () => {
   it('paints the summary-served breakdowns while the URL hotspots load raw', async () => {
     setCloudModeRuntime(true)
     const sections = recordPosts('/api/assets/aggregates', (asked) => asked?.includes('summary') ? { ...assetsSummary, rollup: meta } : never())
-    renderWithQuery(<AssetsClient />, { withNuqs: true })
+    renderBootstrapped(<AssetsClient />, { withNuqs: true })
 
     const slot = screen.getByTestId('rollup-data-through-slot')
     expect(await within(slot).findByText(/Data through 09:45/)).toBeInTheDocument()
@@ -92,7 +104,7 @@ describe('AssetsClient on Cloud', () => {
     let answerTables: (body: unknown) => void = () => {}
     const tables = new Promise((resolve) => { answerTables = resolve })
     const sections = recordPosts('/api/assets/aggregates', (asked) => asked?.includes('summary') ? { ...assetsSummary, rollup: meta } : tables)
-    const { container } = renderWithQuery(<AssetsClient />, { withNuqs: true })
+    const { container } = renderBootstrapped(<AssetsClient />, { withNuqs: true })
 
     expect(await screen.findByText('4,321 reqs')).toBeInTheDocument()
     expect(sections).toEqual([['summary']])
@@ -109,14 +121,14 @@ describe('AssetsClient on Cloud', () => {
     setCloudModeRuntime(true)
     layout.filterPayload = { cache: { mode: 'include', values: ['HIT'] } }
     const split = recordPosts('/api/assets/aggregates', (asked) => asked?.includes('summary') ? assetsSummary : never())
-    const { unmount } = renderWithQuery(<AssetsClient />, { withNuqs: true })
+    const { unmount } = renderBootstrapped(<AssetsClient />, { withNuqs: true })
     expect(await screen.findByText('4,321 reqs')).toBeInTheDocument()
     expect(split).toEqual(expect.arrayContaining([['summary'], ['large_uncompressed_assets', 'low_ttl_assets']]))
     unmount()
 
     layout.filterPayload = { pop: { mode: 'include', values: ['LIS'] } }
     const one = recordPosts('/api/assets/aggregates', () => ({ ...assetsSummary, large_uncompressed_assets: [], low_ttl_assets: [] }))
-    renderWithQuery(<AssetsClient />, { withNuqs: true })
+    renderBootstrapped(<AssetsClient />, { withNuqs: true })
     expect(await screen.findByText('4,321 reqs')).toBeInTheDocument()
     expect(one).toEqual([undefined])
     expect(screen.queryByTestId('rollup-data-through-slot')).not.toBeInTheDocument()
@@ -133,7 +145,7 @@ describe('FastlyValueClient on Cloud', () => {
   it('reads every summary-tab section in one summary read, with no raw read', async () => {
     setCloudModeRuntime(true)
     const sections = recordPosts('/api/value/summary', () => ({ overview, network, caching: null, rollup: meta }))
-    renderWithQuery(<FastlyValueClient />, { withNuqs: true })
+    renderBootstrapped(<FastlyValueClient />, { withNuqs: true })
 
     expect(await screen.findByText('4.3k')).toBeInTheDocument()
     expect(screen.getByText('12.5%')).toBeInTheDocument()
@@ -150,7 +162,7 @@ describe('FastlyValueClient on Cloud', () => {
       overview, network, caching: null, performance,
       rollup: { ...meta, approximate: ['performance.p99_latency_ms'] },
     }))
-    renderWithQuery(<FastlyValueClient />, { withNuqs: true })
+    renderBootstrapped(<FastlyValueClient />, { withNuqs: true })
     await screen.findByText('4.3k')
     const user = (await import('@testing-library/user-event')).default.setup()
     await user.click(screen.getByRole('tab', { name: /Performance/ }))
@@ -162,10 +174,41 @@ describe('FastlyValueClient on Cloud', () => {
     setCloudModeRuntime(true)
     layout.filterPayload = { pop: { mode: 'include', values: ['LIS'] } }
     const sections = recordPosts('/api/value/summary', () => ({ overview, network, caching: null }))
-    renderWithQuery(<FastlyValueClient />, { withNuqs: true })
+    renderBootstrapped(<FastlyValueClient />, { withNuqs: true })
 
     expect(await screen.findByText('4.3k')).toBeInTheDocument()
     expect(sections).toEqual([['overview', 'caching', 'network']])
     expect(screen.queryByTestId('rollup-data-through-slot')).not.toBeInTheDocument()
+  })
+
+  it('shows an error card instead of silent dashes when /api/value/summary fails', async () => {
+    setCloudModeRuntime(true)
+    server.use(
+      http.post(`${getApiBase()}/api/value/summary`, () =>
+        HttpResponse.json({ detail: 'boom' }, { status: 500 }),
+      ),
+    )
+    renderBootstrapped(<FastlyValueClient />)
+    expect(await screen.findByText('Service Summary unavailable')).toBeInTheDocument()
+  })
+
+  it('formats near-zero negative Fastly reported deltas as +0.0% rather than −0.0%', async () => {
+    setCloudModeRuntime(true)
+    recordPosts('/api/value/summary', () => ({
+      overview,
+      network,
+      caching: null,
+      fastly_reported: {
+        window_start: '2027-01-15T08:00:00Z',
+        window_end: '2027-01-15T09:00:00Z',
+        requests: 100_000,
+        logged_requests: 99_990,
+        sample_rate: 100,
+      },
+      rollup: meta,
+    }))
+    renderBootstrapped(<FastlyValueClient />)
+    expect(await screen.findByText(/logs \+0\.0%/)).toBeInTheDocument()
+    expect(screen.queryByText(/−0\.0%/)).not.toBeInTheDocument()
   })
 })

@@ -165,7 +165,9 @@ export function NetworkMap({
         )}
         <table className="sr-only">
           <caption>
-            Network map — top {currentBucketRows.length} metros by {metric} for bucket {currentBucketLabel}.
+            {currentBucketLabel
+              ? `Network map — top ${currentBucketRows.length} metros by ${metric} for bucket ${currentBucketLabel}.`
+              : `Network map — top ${currentBucketRows.length} metros by ${metric}.`}
           </caption>
           <thead>
             <tr>

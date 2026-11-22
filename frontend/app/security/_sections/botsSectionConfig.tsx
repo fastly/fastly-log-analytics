@@ -255,8 +255,16 @@ const COVERAGE_HINT_MESSAGE: Record<string, string> = {
     'TLS fingerprints are only captured when the request lands at the true edge PoP (not shielded). Sparse coverage typically means most traffic is shielded.',
 }
 
-export function FingerprintCoverageHint({ coverage, field }: { coverage: number | undefined; field: string }) {
-  if (coverage === undefined || coverage === null || coverage >= LOW_COVERAGE_THRESHOLD) return null
+export function FingerprintCoverageHint({
+  coverage,
+  field,
+  hasTraffic = true,
+}: {
+  coverage: number | undefined
+  field: string
+  hasTraffic?: boolean
+}) {
+  if (!hasTraffic || coverage === undefined || coverage === null || coverage >= LOW_COVERAGE_THRESHOLD) return null
   const pct = coverage === 0 ? '0%' : coverage < 0.001 ? '<0.1%' : `${(coverage * 100).toFixed(2)}%`
   const msg =
     COVERAGE_HINT_MESSAGE[field] ||

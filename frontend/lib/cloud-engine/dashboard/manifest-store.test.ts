@@ -99,10 +99,25 @@ describe("manifest snapshots", () => {
     expect(entries.get(MANIFEST_SNAPSHOT_CACHE)?.has(url)).toBe(false);
   });
 
+  it("persists and reloads compacted raw files carrying nonnegative integer sources", async () => {
+    fakeCaches();
+    const compacted = {
+      ...snapshot(),
+      manifest: {
+        ...snapshot().manifest,
+        files: [{ ...snapshot().manifest.files[0], sources: 12 }],
+      },
+    };
+    await persistManifestSnapshot(cacheKey, compacted);
+    expect(await readManifestSnapshot(cacheKey)).toEqual(compacted);
+  });
+
   it.each([
     ["kind", "hour"],
-    ["sources", 2],
-  ])("rejects raw files carrying summary-only %s", async (field, value) => {
+    ["sources", -1],
+    ["sources", 1.5],
+    ["sources", "2"],
+  ])("rejects raw files carrying summary-only or invalid %s (%s)", async (field, value) => {
     const { entries } = fakeCaches();
     const summaryFile = { ...snapshot().manifest.files[0], [field]: value };
     const invalid = {

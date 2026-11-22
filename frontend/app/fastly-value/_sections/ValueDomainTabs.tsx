@@ -159,7 +159,10 @@ export function OffloadAndCacheCharts({ caching }: { caching?: CachingData | nul
 const BANDWIDTH_SAVED_TOOLTIP =
   "Logged response bytes of cache hits: what origin would have sent without the cache. Fastly Platform Metrics has no equivalent figure."
 
-const signed = (n: number, digits: number) => `${n < 0 ? '−' : '+'}${Math.abs(n).toFixed(digits)}`
+const signed = (n: number, digits: number) => {
+  const fixed = Math.abs(n).toFixed(digits)
+  return `${n < 0 && Number(fixed) !== 0 ? '−' : '+'}${fixed}`
+}
 
 const utcMinute = (iso: string) => iso.slice(0, 16).replace('T', ' ')
 

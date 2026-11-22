@@ -130,7 +130,7 @@ export function TrafficChart({
   })()
 
   const emptyMessage =
-    metric === 'ttfb_client' && !isFieldActive('ttfb')
+    metric === 'ttfb_ms' && !isFieldActive('ttfb')
       ? 'Requires Infrastructure (Group C) fields to be enabled in Fastly logging.'
       : metric === 'req_size' && !isFieldActive('req_bytes')
         ? 'Requires Request Identity (Group A) fields to be enabled in Fastly logging.'

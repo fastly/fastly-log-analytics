@@ -1259,7 +1259,45 @@ fn signing_key(runtime: &impl Runtime) -> Result<String, Failure> {
 }
 
 const INGEST_FILES_PER_PAGE: usize = 10;
+const INGEST_FILES_BYTE_BUDGET: usize = 128 * 1024;
+const INGEST_FILES_ROW_BUDGET: usize = 5_000;
+const INGEST_FILES_VCPU_BUDGET_MS: u64 = 80;
 const OUTBOX_PAGES: usize = 5;
+
+fn ingest_row_rank(row: &Value) -> (i64, i64, &str) {
+    (
+        row["state_version"].as_i64().unwrap_or(0),
+        row["timestamp"].as_i64().unwrap_or(0),
+        row["event_id"].as_str().unwrap_or_default(),
+    )
+}
+
+fn fold_ingest_rows(
+    decoded: Vec<Value>,
+    known: &mut HashMap<String, [Value; 2]>,
+    latest: &mut std::collections::BTreeMap<String, Value>,
+) {
+    for row in decoded {
+        let Some(key) = row["raw_key"].as_str() else {
+            continue;
+        };
+        let entry = known
+            .entry(key.to_owned())
+            .or_insert([Value::Null, Value::Null]);
+        for (slot, source) in entry.iter_mut().zip(["rows", "raw_size"]) {
+            if slot.is_null() && !row[source].is_null() {
+                *slot = row[source].clone();
+            }
+        }
+        let replace = match latest.get(key) {
+            Some(current) => ingest_row_rank(&row) > ingest_row_rank(current),
+            None => true,
+        };
+        if replace {
+            latest.insert(key.to_owned(), row);
+        }
+    }
+}
 
 fn ingest_file_json(service: &Service, row: &Value) -> Option<Value> {
     let key = row["raw_key"].as_str()?;
@@ -1282,10 +1320,10 @@ fn ingest_file_json(service: &Service, row: &Value) -> Option<Value> {
 }
 
 /// `GET /api/admin/ingested-files?cursor`: raw files with their latest `ingest_files` state.
-/// Each page decodes a few archived `ingest_files` Parquet files in key (time) order; the final
-/// page also folds in the unarchived outbox rows, which are the newest. A raw key can recur on
-/// a later page with a newer state, so clients keep the last occurrence. `complete` is true only
-/// on the last page.
+/// Each page decodes archived `ingest_files` Parquet files in key (time) order within a bounded
+/// byte/row/vCPU budget; the final page also folds in the unarchived outbox rows, which are the
+/// newest. A raw key can recur on a later page with a newer state, so clients keep the last
+/// occurrence. `complete` is true only on the last page.
 pub fn ingested_files<R: Runtime>(
     runtime: &R,
     service: &Service,
@@ -1293,11 +1331,11 @@ pub fn ingested_files<R: Runtime>(
     started: Instant,
 ) -> Api {
     let secret = signing_key(runtime)?;
-    let token = token_from_cursor(secret.as_bytes(), query, "ingested", "")?;
+    let after = token_from_cursor(secret.as_bytes(), query, "ingested", "")?;
     let store = open(runtime, service, started)?;
     let root = dataset_root(service, "ops:ingest_files").ok_or((500, "Dataset"))?;
     let page = store
-        .list(&root, None, token.as_deref(), INGEST_FILES_PER_PAGE, None)
+        .list(&root, after.as_deref(), None, INGEST_FILES_PER_PAGE, None)
         .map_err(failure)?;
     let cdn_key = runtime
         .secret("cdn_key")
@@ -1313,29 +1351,54 @@ pub fn ingested_files<R: Runtime>(
         started,
         vcpu_start: 0,
     };
-    let (mut rows, mut skipped) = (Vec::new(), 0u64);
-    let relist = days_to_relist(&page.objects, token.is_some());
+    let mut known: HashMap<String, [Value; 2]> = HashMap::new();
+    let mut latest: std::collections::BTreeMap<String, Value> = std::collections::BTreeMap::new();
+    let mut skipped = 0u64;
+    let mut decoded_objects = 0usize;
+    let mut decoded_bytes = 0usize;
+    let vcpu_start = runtime.vcpu_ms();
+    let mut last_processed_key: Option<String> = None;
+    let mut stopped_early = false;
+    let relist = days_to_relist(&page.objects, after.is_some());
     let visible = visible_keys(&store, &page.objects, &relist)?;
     for object in page.objects {
         let compact = telemetry::compact::parse_compact_name(&object.key).is_some();
         if parse_processed(&object.key).is_none() && !compact {
             skipped += 1;
+            last_processed_key = Some(object.key);
             continue;
         }
         if !visible.contains(&object.key) {
+            last_processed_key = Some(object.key);
             continue;
+        }
+        if decoded_objects > 0
+            && (decoded_bytes >= INGEST_FILES_BYTE_BUDGET
+                || latest.len() >= INGEST_FILES_ROW_BUDGET
+                || runtime.vcpu_ms().saturating_sub(vcpu_start) >= INGEST_FILES_VCPU_BUDGET_MS)
+        {
+            stopped_early = true;
+            break;
         }
         let body = reader
             .get(&cdn_key, &object.key, CDN_READ_LIMIT)
             .map_err(failure)?;
-        match body
-            .and_then(|bytes| telemetry::schema::from_parquet(LogKind::IngestFiles, bytes).ok())
-        {
-            Some(decoded) => rows.extend(decoded),
+        match body.and_then(|bytes| {
+            let len = bytes.len();
+            telemetry::schema::from_parquet(LogKind::IngestFiles, bytes)
+                .ok()
+                .map(|rows| (len, rows))
+        }) {
+            Some((len, decoded)) => {
+                decoded_objects += 1;
+                decoded_bytes += len;
+                fold_ingest_rows(decoded, &mut known, &mut latest);
+            }
             None => skipped += 1,
         }
+        last_processed_key = Some(object.key);
     }
-    let complete = page.next_token.is_none();
+    let complete = !stopped_early && page.next_token.is_none();
     if complete {
         let mut cursor: Option<String> = None;
         for _ in 0..OUTBOX_PAGES {
@@ -1348,29 +1411,15 @@ pub fn ingested_files<R: Runtime>(
                 cursor.as_deref(),
             )
             .map_err(|_| (502, "Live log read failed"))?;
-            rows.extend(live.rows);
+            fold_ingest_rows(live.rows, &mut known, &mut latest);
             cursor = live.next_cursor;
             if cursor.is_none() {
                 break;
             }
         }
     }
-    // Later states omit the row count and size they inherit from the conversion state; one pass
-    // collects the first non-null value per raw key (a page holds tens of thousands of rows).
-    let mut known: HashMap<&str, [Value; 2]> = HashMap::new();
-    for row in &rows {
-        let Some(key) = row["raw_key"].as_str() else {
-            continue;
-        };
-        let entry = known.entry(key).or_insert([Value::Null, Value::Null]);
-        for (slot, source) in entry.iter_mut().zip(["rows", "raw_size"]) {
-            if slot.is_null() && !row[source].is_null() {
-                *slot = row[source].clone();
-            }
-        }
-    }
-    let files: Vec<Value> = telemetry::latest_ingest_state(&rows)
-        .iter()
+    let files: Vec<Value> = latest
+        .values()
         .filter_map(|row| {
             let mut file = ingest_file_json(service, row)?;
             let inherited = row["raw_key"].as_str().and_then(|key| known.get(key));
@@ -1382,10 +1431,11 @@ pub fn ingested_files<R: Runtime>(
             Some(file)
         })
         .collect();
+    let next_after = if complete { None } else { last_processed_key };
     Ok(json!({
         "files": files,
         "skipped_objects": skipped,
-        "next_cursor": next_token_cursor(secret.as_bytes(), "ingested", "", page.next_token)?,
+        "next_cursor": next_token_cursor(secret.as_bytes(), "ingested", "", next_after)?,
         "complete": complete,
     }))
 }

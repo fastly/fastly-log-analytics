@@ -62,6 +62,7 @@ function ShareDashboardPageContent() {
   const { data: live } = useQuery({
     queryKey: SHARE_LIVE_QUERY_KEY,
     queryFn: async ({ signal }) => (await unwrapClient(client.GET('/api/admin/share/live', { signal }))) as ShareLiveFields,
+    enabled: !IS_CLOUD_MODE,
     staleTime: 10_000,
     refetchInterval: 5 * 60_000,
     refetchIntervalInBackground: false,

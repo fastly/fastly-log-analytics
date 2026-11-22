@@ -149,3 +149,12 @@ it('keeps the Cloud token out of the link but resolves it in the tab that opened
   expect(await screen.findByRole('heading', { name: 'Request trace' })).toBeInTheDocument()
   expect(post).toHaveBeenCalledWith('/api/sessions/detail', expect.objectContaining({ body: { session_token: token } }))
 })
+
+it('shows session link unavailable immediately without hanging on retries for a missing ?ref', async () => {
+  search = 'ref=00000000-0000-4000-8000-000000000000&service=selected-service'
+  // Use default QueryClient (retry: 3 unless query opts out with retry: false).
+  const client = new QueryClient()
+  render(<QueryClientProvider client={client}><SessionDetailPage /></QueryClientProvider>)
+  expect(await screen.findByText('Could not load session details', {}, { timeout: 500 })).toBeInTheDocument()
+  expect(post).not.toHaveBeenCalled()
+})

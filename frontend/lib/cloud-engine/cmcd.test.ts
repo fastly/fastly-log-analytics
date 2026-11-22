@@ -8,6 +8,7 @@ import {
   handleCmcdRequest,
   queryCmcdAggregates,
 } from "./cmcd";
+import { cmcdFromRollup, MAX_CMCD_ROLLUP_FILES } from "./cmcd-rollup";
 import { BOUNDS, Histogram } from "./dashboard/histogram";
 import { Hll } from "./dashboard/hll";
 import {
@@ -474,5 +475,118 @@ describe("Feature F24 — CMCD Streaming Media cloud-engine", () => {
     expect(res.summary.total_requests).toBe(fileCount);
     expect(maxInFlight).toBeGreaterThan(1);
     expect(maxInFlight).toBeLessThanOrEqual(16);
+  });
+
+  it("bails out of uncompacted cmcd_summary rollups on page 1 when file count exceeds cap so callers fall back to compacted raw Parquet", async () => {
+    const t0 = Date.parse("2026-01-01T00:00:00Z");
+    const overCap = MAX_CMCD_ROLLUP_FILES + 50;
+    const files = Array.from({ length: overCap }, (_, i) => ({
+      key: `processed/request/cmcd_summary/window=${i}.parquet`,
+      start: new Date(t0 + i * 60_000).toISOString(),
+      end: new Date(t0 + (i + 1) * 60_000).toISOString(),
+      size: 14_000,
+      rows: 20,
+    }));
+    let jsonCalls = 0;
+    let fileCalls = 0;
+    const res = await cmcdFromRollup(
+      {
+        start_time: new Date(t0).toISOString(),
+        end_time: new Date(t0 + 24 * 3_600_000).toISOString(),
+        bucket_seconds: 300,
+      },
+      {
+        async fetchJson() {
+          jsonCalls++;
+          return { files, next_cursor: "page-2", complete: false };
+        },
+        async fetchFile() {
+          fileCalls++;
+          throw new Error("should not download over-cap cmcd_summary files");
+        },
+      },
+    );
+    expect(res).toBeNull();
+    expect(jsonCalls).toBe(1);
+    expect(fileCalls).toBe(0);
+  });
+
+  it("filters out cmcd_summary buckets outside [fromMs, toMs) and reports has_data=false when none remain", async () => {
+    const t0 = Date.parse("2026-01-01T01:00:00Z");
+    const outOfRangeBucket = t0 - 300_000;
+    const bytes = parquetWriteBuffer({
+      columnData: [
+        { name: "kind", type: "STRING", data: ["bucket"] },
+        { name: "bucket", type: "INT64", data: [BigInt(outOfRangeBucket)] },
+        { name: "key", type: "STRING", data: [null] },
+        { name: "label", type: "STRING", data: [null] },
+        { name: "truncated", type: "BOOLEAN", data: [false] },
+        { name: "reqs", type: "INT64", data: [BigInt(5)] },
+        { name: "sid_hll", type: "BYTE_ARRAY", data: [null] },
+        { name: "rebuffer_events", type: "INT64", data: [BigInt(0)] },
+        { name: "rebuffer_sid_hll", type: "BYTE_ARRAY", data: [null] },
+        { name: "has_bs", type: "INT64", data: [BigInt(0)] },
+        { name: "has_su", type: "INT64", data: [BigInt(0)] },
+        { name: "has_ot", type: "INT64", data: [BigInt(0)] },
+        { name: "has_bl", type: "INT64", data: [BigInt(0)] },
+        { name: "has_br", type: "INT64", data: [BigInt(0)] },
+        { name: "has_mtp", type: "INT64", data: [BigInt(0)] },
+        { name: "has_cid", type: "INT64", data: [BigInt(0)] },
+        { name: "br_sum", type: "DOUBLE", data: [null] },
+        { name: "br_n", type: "INT64", data: [BigInt(0)] },
+        { name: "tb_sum", type: "DOUBLE", data: [null] },
+        { name: "tb_n", type: "INT64", data: [BigInt(0)] },
+        { name: "bl_sum", type: "DOUBLE", data: [null] },
+        { name: "bl_n", type: "INT64", data: [BigInt(0)] },
+        { name: "mtp_sum", type: "DOUBLE", data: [null] },
+        { name: "mtp_n", type: "INT64", data: [BigInt(0)] },
+        { name: "v_br_sum", type: "DOUBLE", data: [null] },
+        { name: "v_br_n", type: "INT64", data: [BigInt(0)] },
+        { name: "v_tb_sum", type: "DOUBLE", data: [null] },
+        { name: "v_tb_n", type: "INT64", data: [BigInt(0)] },
+        { name: "v_bl_sum", type: "DOUBLE", data: [null] },
+        { name: "v_bl_n", type: "INT64", data: [BigInt(0)] },
+        { name: "util_sum", type: "DOUBLE", data: [null] },
+        { name: "util_n", type: "INT64", data: [BigInt(0)] },
+        { name: "util_all_sum", type: "DOUBLE", data: [null] },
+        { name: "util_all_n", type: "INT64", data: [BigInt(0)] },
+        { name: "startup_requests", type: "INT64", data: [BigInt(0)] },
+        { name: "su_bl_sum", type: "DOUBLE", data: [null] },
+        { name: "su_bl_n", type: "INT64", data: [BigInt(0)] },
+        { name: "su_ttfb_sum", type: "DOUBLE", data: [null] },
+        { name: "su_ttfb_n", type: "INT64", data: [BigInt(0)] },
+        { name: "v_bl_hist", type: "BYTE_ARRAY", data: [null] },
+        { name: "bl_hist", type: "BYTE_ARRAY", data: [null] },
+        { name: "v_mtp_hist", type: "BYTE_ARRAY", data: [null] },
+        { name: "mtp_hist", type: "BYTE_ARRAY", data: [null] },
+        { name: "min_ts", type: "INT64", data: [BigInt(outOfRangeBucket)] },
+        { name: "max_ts", type: "INT64", data: [BigInt(outOfRangeBucket + 60_000)] },
+        { name: "first_ts", type: "INT64", data: [null] },
+        { name: "last_ts", type: "INT64", data: [null] },
+      ],
+    });
+    const key = "processed/request/cmcd_summary/window=boundary.parquet";
+    const res = await cmcdFromRollup(
+      {
+        start_time: new Date(t0).toISOString(),
+        end_time: new Date(t0 + 3_600_000).toISOString(),
+        bucket_seconds: 300,
+      },
+      {
+        async fetchJson() {
+          return {
+            files: [{ key, start: new Date(t0 - 60_000).toISOString(), end: new Date(t0 + 60_000).toISOString(), size: bytes.byteLength, rows: 1 }],
+            next_cursor: null,
+            complete: true,
+          };
+        },
+        async fetchFile() {
+          return { bytes, cached: false };
+        },
+      },
+    );
+    expect(res).not.toBeNull();
+    expect(res?.has_data).toBe(false);
+    expect(res?.sessions_ts).toEqual([]);
   });
 });

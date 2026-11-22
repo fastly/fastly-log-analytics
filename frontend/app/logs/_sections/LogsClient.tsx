@@ -156,6 +156,9 @@ export default function LogsClient({ initialTab }: { initialTab?: string } = {})
             ingestedColumns={ingestedFilesColumns}
             ingestedFiles={s.ingestedFiles}
             isLoadingIngested={s.isLoadingIngested}
+            isErrorIngested={s.isErrorIngested}
+            ingestedError={s.ingestedError}
+            onRetryIngested={() => { void s.refetchIngested() }}
           />
         </TabsContent>
         <TabsContent value="storage" className="mt-4 space-y-4">

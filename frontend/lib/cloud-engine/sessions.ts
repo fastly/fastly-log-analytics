@@ -499,7 +499,14 @@ async function enrichSessionsPage(
   return rows.map((row, i) => ({
     ...row,
     ...ua ? { ua: stats.get(i)?.ua ?? null } : {},
-    ...urls ? { unique_urls: stats.get(i)?.unique_urls ?? 0 } : {},
+    ...urls
+      ? {
+          unique_urls: Math.min(
+            Number(stats.get(i)?.unique_urls ?? 0),
+            row.req_count != null ? Number(row.req_count) : Number.POSITIVE_INFINITY,
+          ),
+        }
+      : {},
   }));
 }
 

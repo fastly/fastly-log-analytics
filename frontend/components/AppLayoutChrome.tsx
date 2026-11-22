@@ -232,10 +232,12 @@ export function ServiceUrlWriteback() {
 
 const ROUTE_FRIENDLY_NAMES: Record<string, string> = {
   '/dashboard': 'Dashboard', '/control-room': 'Control Room', '/fastly-value': 'Service Summary',
-  '/security': 'Security', '/network': 'Network', '/streaming': 'Streaming', '/origin': 'Origin',
-  '/performance': 'Performance', '/sessions': 'Sessions', '/insights': 'Insights', '/query': 'Query',
-  '/charts': 'Charts', '/alerts': 'Alerts', '/logs': 'Data Management', '/usage': 'Usage and Cost',
-  '/admin': 'Admin', '/share-login': 'Sign in', '/how-it-works': 'How it works',
+  '/assets-shield': 'Assets & Shield', '/security': 'Security', '/network': 'Network',
+  '/streaming': 'Streaming', '/origin': 'Origin', '/performance': 'Performance', '/rum': 'RUM',
+  '/sessions': 'Sessions', '/sessions/detail': 'Session Details', '/sessions/stream': 'Stream Details',
+  '/insights': 'Insights', '/query': 'Query', '/charts': 'Charts', '/alerts': 'Alerts',
+  '/logs': 'Data Management', '/usage': 'Usage and Cost', '/admin': 'Admin',
+  '/share-login': 'Sign in', '/how-it-works': 'How it works',
 }
 
 function friendlyPageName(pathname: string): string {

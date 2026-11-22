@@ -1373,6 +1373,86 @@ describe("persistent Parquet store", () => {
     expect(wholeFileNetworkHits).toBe(2);
     expect(seenFileServiceHeaders).toEqual(["svc-a", "svc-b"]);
   });
+
+  it("tracks post-bootstrap cacheScope updates so warm reloads hit derived file cache", async () => {
+    const ls = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (k: string) => ls.get(k) ?? null,
+      setItem: (k: string, v: string) => {
+        ls.set(k, v);
+      },
+      removeItem: (k: string) => {
+        ls.delete(k);
+      },
+    });
+    const store = new Map<string, Response>();
+    vi.stubGlobal("caches", {
+      open: vi.fn(async () => ({
+        match: vi.fn(async (req: string) => store.get(req)?.clone()),
+        delete: vi.fn(async (req: string) => store.delete(req)),
+        put: vi.fn(async (req: string, res: Response) => {
+          store.set(req, res.clone());
+        }),
+      })),
+    });
+    const { setDashboardCacheIdentity } = await import("./client");
+
+    // Simulate module-import browserSource("") constructed before /api/bootstrap sets identity.
+    const coldSource = browserSource("");
+    await setDashboardCacheIdentity("user:admin");
+    const scopedCold = coldSource.withOptions!({ serviceId: "svc-demo" });
+    await scopedCold.writeDerivedFile!(
+      "processed/request/year=2026/month=11/day=21/hour=00/compact=1-2.parquet",
+      "proj-network",
+      new Uint8Array([1, 2, 3, 4]).buffer,
+      "meta-v1",
+    );
+
+    // Simulate warm page reload constructing a fresh browserSource("") after identity is persisted.
+    const warmSource = browserSource("").withOptions!({ serviceId: "svc-demo" });
+    const hit = await warmSource.readDerivedFile!(
+      "processed/request/year=2026/month=11/day=21/hour=00/compact=1-2.parquet",
+      "proj-network",
+    );
+    expect(hit).not.toBeNull();
+    expect(hit?.meta).toBe("meta-v1");
+    expect(new Uint8Array(await hit!.bytes())).toEqual(new Uint8Array([1, 2, 3, 4]));
+  });
+
+  it("coalesces concurrent identical fetchRange calls into a single HTTP 206 request", async () => {
+    let resolveFetch!: (res: Response) => void;
+    const fetchMock = vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveFetch = resolve;
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const source = browserSource("");
+    const file = {
+      key: "processed/request/year=2026/month=11/day=21/hour=00/compact=1-2.parquet",
+      start: "2026-11-21T00:00:00Z",
+      end: "2026-11-21T01:00:00Z",
+      size: 100,
+      rows: 10,
+      etag: '"e1"',
+    };
+    const p1 = source.fetchRange!(file, 0, 16);
+    const p2 = source.fetchRange!(file, 0, 16);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    resolveFetch(
+      new Response(new Uint8Array(16).fill(42), {
+        status: 206,
+        headers: { "content-range": "bytes 0-15/100", etag: '"e1"' },
+      }),
+    );
+    const [b1, b2] = await Promise.all([p1, p2]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(new Uint8Array(b1)).toEqual(new Uint8Array(16).fill(42));
+    expect(new Uint8Array(b2)).toEqual(new Uint8Array(16).fill(42));
+    // Distinct buffers so transferring one to a Worker cannot detach the other.
+    expect(b1).not.toBe(b2);
+  });
 });
 
 const flushStore = () => new Promise((resolve) => setTimeout(resolve, 0));

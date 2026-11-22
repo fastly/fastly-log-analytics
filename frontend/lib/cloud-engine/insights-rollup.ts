@@ -354,7 +354,7 @@ export function rollupInsightsBaseline(result: RollupResult, rows: InsightScanRo
   };
 }
 
-export type InsightsRollupRequest = InsightsRequest & { mask_ips?: boolean };
+export type InsightsRollupRequest = InsightsRequest & { mask_ips?: boolean; earliest_log_at?: string | null };
 
 const ROLLUP_INSIGHT_COLUMNS = new Set(
   INSIGHT_DEFINITIONS.filter((d) => CLOUD_INSIGHT_DETECTORS.has(d.id)).flatMap((d) => d.required_fields),
@@ -573,7 +573,11 @@ export async function insightsFromRollup(
   }
 
   const availability = handleInsightAvailability(body.service_id, ROLLUP_INSIGHT_COLUMNS);
-  const historyHours = Math.max(0, (windowStart - baselineResult.dataFromMs) / 3_600_000);
+  const earliestLogMs = body.earliest_log_at ? Date.parse(body.earliest_log_at) : Number.NaN;
+  const effectiveFirstMs = baselineRequests > 0 && Number.isFinite(earliestLogMs)
+    ? Math.min(baselineResult.dataFromMs, earliestLogMs)
+    : baselineRequests > 0 ? baselineResult.dataFromMs : null;
+  const historyHours = effectiveFirstMs == null ? 0 : Math.max(0, (end - effectiveFirstMs) / 3_600_000);
   const envelope = await handleInsights(body, {
     now: new Date(end),
     maskIps: Boolean(body.mask_ips),

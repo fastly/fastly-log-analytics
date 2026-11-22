@@ -208,6 +208,25 @@ describe("local Parquet insight scans", () => {
     }
   });
 
+  it("evaluates 24h baseline detectors when baseline logs start inside [start, windowStart) and service history spans >=24h", async () => {
+    // Mirrors SE-demo default adaptive window: 24h window vs 24h baseline, ~58h total history,
+    // with first matching baseline row inside [start, windowStart) so (windowStart - first_ms) < 24h.
+    const w24Body = { service_id: "example", window_size_hrs: 24, baseline_hours: 24, clamp_end: end };
+    const baselineTs = endMs - 47 * 3_600_000; // 23h before windowStart (47h before end)
+    const currentTs = endMs - 1800_000;
+    await engine.executeSql(`INSERT INTO requests (scoped_key, timestamp, ts_ms, url, cache)
+      SELECT 'baseline', epoch_ms(${baselineTs}), ${baselineTs}, '/hot', 'HIT' FROM range(200)`);
+    await engine.executeSql(`INSERT INTO requests (scoped_key, timestamp, ts_ms, url, cache)
+      SELECT 'current', epoch_ms(${currentTs}), ${currentTs}, '/hot', 'MISS' FROM range(50)`);
+    const result = await queryCloudInsights(w24Body, {
+      ...options,
+      earliestLogAtMs: endMs - 58 * 3_600_000,
+    });
+    const card = result.insights.find((c) => c.id === "cache_collapse");
+    expect(card?.summary).not.toContain("Not evaluated");
+    expect(card?.severity).toBe("critical");
+  });
+
   it("rejects malformed ranges and surfaces failed local scans", async () => {
     await expect(queryCloudInsights({ ...body, window_size_hrs: Number.NaN }, options))
       .rejects.toThrow("Invalid insight analysis window");

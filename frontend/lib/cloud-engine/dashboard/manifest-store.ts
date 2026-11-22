@@ -84,7 +84,10 @@ function validFile(
       (typeof file.schema_version === "number" &&
         Number.isFinite(file.schema_version))) &&
     file.kind === undefined &&
-    file.sources === undefined
+    (file.sources === undefined ||
+      (typeof file.sources === "number" &&
+        Number.isSafeInteger(file.sources) &&
+        file.sources >= 0))
   );
 }
 

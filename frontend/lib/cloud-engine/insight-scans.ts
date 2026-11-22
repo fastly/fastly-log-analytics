@@ -80,6 +80,7 @@ export async function queryCloudInsights(
     filters: DashboardFilter[];
     engine?: DuckDBReadContext;
     baseline?: RollupResult;
+    earliestLogAtMs?: number | null;
   },
 ) {
   const engine = options.engine ?? getDuckDBEngine().readContext();
@@ -99,8 +100,15 @@ export async function queryCloudInsights(
   ]);
   const availability = handleInsightAvailability(body.service_id, availableColumns);
   const availableIds = new Set(availability.insights.filter((d) => d.available).map((d) => d.id));
+  const baselineReqs = options.baseline ? null : Number(totals[0]?.baseline_requests ?? 0);
   const firstMs = options.baseline ? options.baseline.dataFromMs : totals[0]?.first_ms;
-  const historyHours = firstMs == null ? 0 : Math.max(0, (windowStartMs - Number(firstMs)) / 3_600_000);
+  const hasBaselineEvidence = options.baseline ? firstMs != null : (baselineReqs ?? 0) > 0 && firstMs != null;
+  const effectiveFirstMs = !hasBaselineEvidence
+    ? null
+    : options.earliestLogAtMs != null && Number.isFinite(options.earliestLogAtMs)
+      ? Math.min(Number(firstMs), options.earliestLogAtMs)
+      : Number(firstMs);
+  const historyHours = effectiveFirstMs == null ? 0 : Math.max(0, (end - effectiveFirstMs) / 3_600_000);
   const deferred = options.baseline ? insightsDeferredDetectors(options.baseline.rollup) : INSIGHTS_DEFERRED;
   const wanted = (id: string) => body.detectors ? body.detectors.includes(id)
     : !(options.baseline && deferred.has(id));

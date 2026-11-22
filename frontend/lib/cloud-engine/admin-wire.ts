@@ -255,6 +255,81 @@ async function usage(request: Request): Promise<Response> {
   return Response.json({ service_id: service, entries: rows.slice((page - 1) * pageSize, page * pageSize), total: rows.length, aggregate, measurement_basis: basis });
 }
 
+function ingestRowRank(row: Row): [number, number, string] {
+  return [
+    Number(row.state_version ?? 0),
+    Number(row.timestamp ?? 0),
+    String(row.event_id ?? ""),
+  ];
+}
+
+function isHigherIngestRank(a: [number, number, string], b: [number, number, string]): boolean {
+  if (a[0] !== b[0]) return a[0] > b[0];
+  if (a[1] !== b[1]) return a[1] > b[1];
+  return a[2] > b[2];
+}
+
+function isoFromMs(value: unknown): string | null {
+  if (typeof value === "string" && Number.isFinite(Date.parse(value))) return value;
+  const n = Number(value);
+  return value != null && value !== "" && Number.isFinite(n) ? new Date(n).toISOString() : null;
+}
+
+async function ingestedFiles(request: Request): Promise<Response> {
+  const url = new URL(request.url);
+  const params = url.searchParams;
+  const end = params.get("end") ?? params.get("end_time") ?? new Date().toISOString();
+  const to = Date.parse(end);
+  const start = params.get("start") ?? params.get("start_time") ?? new Date(to - 86_400_000).toISOString();
+  const from = Date.parse(start);
+  if (!Number.isFinite(from) || !Number.isFinite(to) || to < from) {
+    return Response.json({ detail: { error: "invalid_time_range" } }, { status: 422 });
+  }
+  const service = params.get("service_id") ?? request.headers.get("x-service-id");
+  const result = await queryOpsLogs(
+    "ingest_files",
+    { from: new Date(from).toISOString(), to: new Date(to).toISOString() },
+    { signal: request.signal },
+  );
+  const known = new Map<string, { rows: unknown; size: unknown }>();
+  const latest = new Map<string, { rank: [number, number, string]; row: Row }>();
+  for (const row of result.rows as Row[]) {
+    if (service && row.service_id && row.service_id !== service) continue;
+    const key = typeof row.raw_key === "string" && row.raw_key ? row.raw_key : null;
+    if (!key) continue;
+    const prevKnown = known.get(key) ?? { rows: null, size: null };
+    if (prevKnown.rows == null && row.rows != null) prevKnown.rows = row.rows;
+    if (prevKnown.size == null && row.raw_size != null) prevKnown.size = row.raw_size;
+    known.set(key, prevKnown);
+    const rank = ingestRowRank(row);
+    const current = latest.get(key);
+    if (!current || isHigherIngestRank(rank, current.rank)) {
+      latest.set(key, { rank, row });
+    }
+  }
+  const files = [...latest.entries()].map(([key, { row }]) => {
+    const inherited = known.get(key);
+    const rows = row.rows ?? inherited?.rows ?? null;
+    const size = row.raw_size ?? inherited?.size ?? null;
+    const at = isoFromMs(row.timestamp);
+    return {
+      key,
+      file_name: key,
+      ingested_at: at,
+      last_modified: at,
+      rows,
+      row_count: rows,
+      size,
+      file_size_bytes: size,
+      status: row.status ?? null,
+      raw_deleted: Boolean(row.raw_deleted),
+      raw_deleted_at: isoFromMs(row.raw_deleted_at),
+      dataset: row.dataset ?? null,
+    };
+  });
+  return Response.json({ files, skipped_objects: 0, next_cursor: null, complete: true });
+}
+
 export async function cloudAdminWire(request: Request): Promise<Response | null> {
   const url = new URL(request.url);
   const path = url.pathname;
@@ -273,11 +348,7 @@ export async function cloudAdminWire(request: Request): Promise<Response | null>
     return Response.json({ ...page, nodes: [...unique.values()] });
   }
   if (path === "/api/admin/ingested-files") {
-    const page = await nativePages(request, path, "files");
-    return Response.json({ ...page, files: (page.files as Row[]).map((file) => ({
-      ...file, file_name: file.key, ingested_at: file.last_modified ?? file.end,
-      row_count: file.rows, file_size_bytes: file.size,
-    })) });
+    return ingestedFiles(request);
   }
   if (path === "/api/audit-logs") {
     const page = await nativePages(request, "/api/admin/audit-logs", "entries");

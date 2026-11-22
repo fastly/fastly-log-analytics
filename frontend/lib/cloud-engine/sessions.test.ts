@@ -255,4 +255,42 @@ describe("cloud-engine sessions & session scoring module", () => {
     });
     expect(openSessionToken("not-valid-base64-json")).toBeNull();
   });
+
+  it("clamps Pass 2 enriched unique_urls to Pass 1 req_count when late shards arrive mid-query", async () => {
+    const res = await handleSessionsList(
+      {
+        start_time: "2026-11-21T00:00:00Z",
+        end_time: "2026-11-22T00:00:00Z",
+        limit: 25,
+        sort_by: "session_start",
+        sort_dir: "desc",
+      },
+      {
+        availableColumns: new Set(["timestamp", "ts_ms", "ip", "ja4", "url", "ua", "status"]),
+        loadedFromMs: 0,
+        runSql: async () => [
+          {
+            ip: "173.234.58.191",
+            ja4: "t13d",
+            session_start: "2026-11-21T10:00:00Z",
+            session_end: "2026-11-21T10:05:00Z",
+            req_count: 16,
+            reqs_4xx: 0,
+            reqs_5xx: 0,
+            unique_urls: 0,
+            ua: null,
+            streaming_reqs: 0,
+          },
+        ],
+        loadRange: async () => ({
+          runSql: async () => [{ i: 0, ua: "Mozilla/5.0", unique_urls: 74 }],
+        }),
+      },
+    );
+    expect(res.status).toBe(200);
+    if ("sessions" in res.body) {
+      expect(res.body.sessions[0].req_count).toBe(16);
+      expect(res.body.sessions[0].unique_urls).toBe(16);
+    }
+  });
 });

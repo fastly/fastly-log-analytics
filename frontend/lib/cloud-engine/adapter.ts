@@ -565,10 +565,19 @@ async function cloudInsightsRollup(request: Request): Promise<Response | null> {
   const filters = filtersPayloadToPredicates(body.filters as Parameters<typeof filtersPayloadToPredicates>[0], undefined);
   if (filters.length) return null;
   let end = String(body.end_time ?? body.end ?? body.clamp_end ?? "");
-  if (!end) {
-    const response = await withLoading("range", () => fetchCloudMetadata("/api/log-extents", request.signal));
-    if (!response.ok) return null;
-    end = (await response.json() as { latest_log_at?: string | null }).latest_log_at ?? new Date().toISOString();
+  let earliestLogAt: string | null = null;
+  const extentsRes = await withLoading("range", () =>
+    fetchCloudMetadata("/api/log-extents", request.signal),
+  ).catch(() => null);
+  if (extentsRes?.ok) {
+    const extents = (await extentsRes.json().catch(() => null)) as {
+      earliest_log_at?: string | null;
+      latest_log_at?: string | null;
+    } | null;
+    earliestLogAt = extents?.earliest_log_at ?? null;
+    if (!end) end = extents?.latest_log_at ?? new Date().toISOString();
+  } else if (!end) {
+    return null;
   }
   const rawServiceId = body.service_id ?? request.headers.get("x-service-id");
   const serviceId = rawServiceId ? decodeURIComponent(String(rawServiceId)) : undefined;
@@ -577,7 +586,11 @@ async function cloudInsightsRollup(request: Request): Promise<Response | null> {
     headerRole === "analyst-no-pii" || useSessionRoleStore.getState().isRemoteAnalyst;
   try {
     const answer = await rollupAnswer("/api/insights/rollup", {
-      ...body, clamp_end: end, ...(serviceId ? { service_id: serviceId } : {}), mask_ips: maskIps,
+      ...body,
+      clamp_end: end,
+      ...(earliestLogAt ? { earliest_log_at: earliestLogAt } : {}),
+      ...(serviceId ? { service_id: serviceId } : {}),
+      mask_ips: maskIps,
     }, serviceId, request.signal);
     return answer ? jsonResponse(answer, request) : null;
   } catch (error) {
@@ -945,6 +958,17 @@ async function handleCloudRequestInner(
     if (sectionRollup) {
       const answer = await cloudSectionRollup(request, path, sectionRollup);
       if (answer) return answer;
+    }
+    if (localScan && path === "/api/sessions/detail") {
+      const params = await readRequestParams(request);
+      if (typeof params.session_token === "string" && params.session_token.length > 0 && !openSessionToken(params.session_token)) {
+        return jsonResponse(
+          { detail: { error: "invalid_session_token", message: "Invalid or malformed session token." } },
+          request,
+          undefined,
+          400,
+        );
+      }
     }
     if (localScan && path === "/api/insights" && request.method === "POST") {
       const answer = await cloudInsightsRollup(request);
@@ -1517,7 +1541,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
           p99_latency_ms: 0,
           cache_hit_ratio: totalCacheRows > 0 ? (totalHits / totalCacheRows) * 100 : 0,
           total_bandwidth_bytes: totalBytes,
-          unique_visitors: result.cards?.client_ip?.distinct ?? 0,
+          unique_visitors: result.cards?.ip?.distinct ?? result.cards?.client_ip?.distinct ?? 0,
         },
         aggregates,
         fields,
@@ -2070,12 +2094,20 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
   if (pathname === "/api/insights" && (method === "POST" || method === "GET")) {
     const params = await parseRequestParams();
     const { maskIps } = resolveMaskIpsAndRole(params);
+    let earliestLogAtMs: number | null = null;
+    const extentsRes = await fetchCloudMetadata("/api/log-extents", request.signal).catch(() => null);
+    if (extentsRes?.ok) {
+      const extents = (await extentsRes.json().catch(() => null)) as { earliest_log_at?: string | null } | null;
+      const parsed = extents?.earliest_log_at ? Date.parse(extents.earliest_log_at) : Number.NaN;
+      if (Number.isFinite(parsed)) earliestLogAtMs = parsed;
+    }
     const data = await queryCloudInsights(params as unknown as InsightsRequest, {
       signal: request.signal,
       maskIps,
       filters: filtersPayloadToPredicates(params.filters as Parameters<typeof filtersPayloadToPredicates>[0], undefined),
       engine: read,
       baseline: insightBaselines.get(request),
+      earliestLogAtMs,
     });
     return jsonResponse(data, request);
   }

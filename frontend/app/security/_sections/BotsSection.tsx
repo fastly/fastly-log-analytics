@@ -246,7 +246,18 @@ export function BotsSection({
           helpTitle={SECURITY_INFO.fingerprints.title}
           helpContent={SECURITY_INFO.fingerprints.body}
         >
-          <FingerprintCoverageHint coverage={data?.fingerprint_coverage?.tls_ciphers_sha} field="tls_ciphers_sha" />
+          <FingerprintCoverageHint
+            coverage={data?.fingerprint_coverage?.tls_ciphers_sha}
+            field="tls_ciphers_sha"
+            hasTraffic={Boolean(
+              data && (
+                (data.tls_fingerprints?.length ?? 0) > 0 ||
+                (data.traffic_quality?.length ?? 0) > 0 ||
+                (data.active_clients?.length ?? 0) > 0 ||
+                (data.req_size_dist?.length ?? 0) > 0
+              ),
+            )}
+          />
           <DataTable
             columns={fpColumns}
             data={data?.tls_fingerprints || []}

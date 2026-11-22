@@ -226,8 +226,8 @@ export function useViewMetricUrlSync(options?: { setMetric?: (m: string) => void
       return
     }
 
-    if (urlMetric) {
-      setMetric?.(urlMetric)
+    if (urlMetric && setMetric) {
+      setMetric(urlMetric)
       void setUrlParams({ metric: null })
     }
     // addFilter/setRange/setMetric/clearFilters are Zustand store methods —

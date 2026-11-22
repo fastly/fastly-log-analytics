@@ -347,6 +347,13 @@ describe('useViewMetricUrlSync', () => {
     expect(remaining.get('other')).toBe('keep')
   })
 
+  it('preserves metric param when caller does not supply setMetric (e.g. /origin owns ?metric via nuqs)', async () => {
+    const { useViewMetricUrlSync } = await import('@/components/ReportLayout')
+    renderHook(() => useViewMetricUrlSync(), viewMetricAdapter('?metric=ttlb&service=svc-1'))
+    await new Promise((r) => setTimeout(r, 20))
+    expect(onUrlUpdate).not.toHaveBeenCalled()
+  })
+
   it('loads a saved view by id and clears URL view param', async () => {
     let viewsRequested = false
     server.use(

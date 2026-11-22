@@ -5,26 +5,44 @@ import { useQuery } from '@tanstack/react-query'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { Badge } from '@/components/ui/badge'
 import { Sparkline } from '@/app/dashboard/_sections/DashboardClient'
-import { ELAPSED_AGE_COMPACT, formatElapsed } from "@/lib/utils"
+import { ELAPSED_AGE_COMPACT, formatCount, formatElapsed } from "@/lib/utils"
 import { useMounted } from '@/hooks/useBootstrap'
 import { client, unwrapClient, queryKeys } from "@/lib/api";
 import { isCloudMode } from '@/lib/cloud-engine/mode'
+import { useServiceStore } from '@/stores/filterStore'
 import type { components } from '@/types/api.generated'
 
 export const TICK_BACKEND_CALL_CEILING = 32
 export const TICK_VCPU_BUDGET_MS = 1000
 export const DEFAULT_CLOCK_INTERVAL_S = 120
+const MIN_TICK_HEALTH_WINDOW_S = 180
+
+export type CloudCronRunSummary = {
+  started_at?: string
+  backend_calls?: number
+  backend_requests_used?: number
+  vcpu_ms?: number
+  duration_ms?: number
+  status?: string
+  outcome?: string
+}
 
 export function summarizeTickHealth(
-  runs: Array<{ started_at?: string; backend_calls?: number; vcpu_ms?: number; status?: string }>,
+  runs: CloudCronRunSummary[],
   nowMs = Date.now(),
   clockIntervalS = DEFAULT_CLOCK_INTERVAL_S,
+  nextTickAt?: string | null,
 ) {
   const latest = runs[0]
   const last_tick_at = latest?.started_at ?? null
   const clock_interval_s = clockIntervalS
-  const maxBackendCalls = runs.reduce((m, r) => Math.max(m, r.backend_calls ?? 0), 0)
+  const maxBackendCalls = runs.reduce(
+    (m, r) => Math.max(m, r.backend_requests_used ?? r.backend_calls ?? 0),
+    0,
+  )
+  const hasVcpu = runs.some((r) => typeof r.vcpu_ms === 'number')
   const maxVcpuMs = runs.reduce((m, r) => Math.max(m, r.vcpu_ms ?? 0), 0)
+  const maxDurationMs = runs.reduce((m, r) => Math.max(m, r.duration_ms ?? 0), 0)
   if (runs.length === 0) {
     return {
       tick_health: 'waiting' as const,
@@ -32,20 +50,27 @@ export function summarizeTickHealth(
       clock_interval_s,
       maxBackendCalls,
       maxVcpuMs,
+      maxDurationMs,
+      hasVcpu,
     }
   }
   const ageSec = last_tick_at ? Math.max(0, (nowMs - Date.parse(last_tick_at)) / 1000) : null
+  const maxAgeSec = Math.max(clock_interval_s * 3, MIN_TICK_HEALTH_WINDOW_S)
+  const nextTickMs = nextTickAt ? Date.parse(nextTickAt) : Number.NaN
+  const scheduleCurrent = Number.isFinite(nextTickMs) && nowMs <= nextTickMs + 60_000
+  const fresh = (ageSec !== null && ageSec <= maxAgeSec) || scheduleCurrent
   const healthy =
-    ageSec !== null &&
-    ageSec <= clock_interval_s * 3 &&
+    fresh &&
     maxBackendCalls <= TICK_BACKEND_CALL_CEILING &&
-    maxVcpuMs <= TICK_VCPU_BUDGET_MS
+    (!hasVcpu || maxVcpuMs <= TICK_VCPU_BUDGET_MS)
   return {
     tick_health: healthy ? ('healthy' as const) : ('degraded' as const),
     last_tick_at,
     clock_interval_s,
     maxBackendCalls,
     maxVcpuMs,
+    maxDurationMs,
+    hasVcpu,
   }
 }
 
@@ -150,8 +175,9 @@ export function SystemHealthCard() {
     refetchIntervalInBackground: false,
   })
 
+  const activeServiceId = useServiceStore((s) => s.activeServiceId)
   const { data: cloudSync, dataUpdatedAt: cloudSyncUpdatedAt } = useQuery({
-    queryKey: ['cloud-system-health-sync'],
+    queryKey: activeServiceId ? queryKeys.syncStatus(activeServiceId) : ['cloud-system-health-sync'],
     enabled: cloud,
     queryFn: async () => {
       const res = await fetch('/api/sync-status', { credentials: 'include' })
@@ -161,10 +187,10 @@ export function SystemHealthCard() {
         last_tick_at?: string | null
         next_tick_at?: string | null
         clock_interval_s?: number
-        cron_runs?: Array<{ started_at?: string; backend_calls?: number; vcpu_ms?: number; status?: string }>
+        cron_runs?: CloudCronRunSummary[]
       }
     },
-    staleTime: 10_000,
+    staleTime: 60_000,
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,
   })
@@ -172,13 +198,20 @@ export function SystemHealthCard() {
   if (cloud) {
     const runs = cloudSync?.cron_runs ?? []
     const clockInterval = cloudSync?.clock_interval_s ?? DEFAULT_CLOCK_INTERVAL_S
-    const tick = summarizeTickHealth(runs, cloudSyncUpdatedAt > 0 ? cloudSyncUpdatedAt : undefined, clockInterval)
-    const lastTickAt = cloudSync?.last_tick_at ?? tick.last_tick_at
+    const nowRef = cloudSyncUpdatedAt > 0 ? cloudSyncUpdatedAt : undefined
+    const tick = summarizeTickHealth(runs, nowRef, clockInterval, cloudSync?.next_tick_at)
+    const tickTs = tick.last_tick_at ? Date.parse(tick.last_tick_at) : Number.NaN
+    const syncTs = cloudSync?.last_tick_at ? Date.parse(cloudSync.last_tick_at) : Number.NaN
+    const lastTickAt =
+      Number.isFinite(tickTs) && (!Number.isFinite(syncTs) || tickTs >= syncTs)
+        ? tick.last_tick_at
+        : (cloudSync?.last_tick_at ?? tick.last_tick_at)
     const tickAgeSec =
       lastTickAt && cloudSyncUpdatedAt > 0
         ? Math.max(0, Math.round((cloudSyncUpdatedAt - Date.parse(lastTickAt)) / 1000))
         : null
-    const lastTickFresh = tickAgeSec !== null && tickAgeSec <= clockInterval * 3
+    const maxHealthyAgeSec = Math.max(clockInterval * 3, MIN_TICK_HEALTH_WINDOW_S)
+    const lastTickFresh = tickAgeSec !== null && tickAgeSec <= maxHealthyAgeSec
     const edgeClockStatus =
       runs.length === 0
         ? (lastTickFresh ? 'HEALTHY' : 'WAITING')
@@ -203,14 +236,23 @@ export function SystemHealthCard() {
             label="Last Ingest Tick"
             value={tickAgeSec == null ? '–' : `${formatElapsed(tickAgeSec, ELAPSED_AGE_COMPACT)} ago`}
             sub={lastTickAt ?? 'awaiting first tick'}
-            tone={tickAgeSec == null ? 'unknown' : tickAgeSec > clockInterval * 3 ? 'warn' : 'default'}
+            tone={tickAgeSec == null ? 'unknown' : tickAgeSec > maxHealthyAgeSec ? 'warn' : 'default'}
           />
-          <Stat
-            label="Peak Tick vCPU"
-            value={`${tick.maxVcpuMs} ms`}
-            sub={`Budget ceiling: ${TICK_VCPU_BUDGET_MS} ms / execution`}
-            tone={tick.maxVcpuMs > TICK_VCPU_BUDGET_MS ? 'crit' : tick.maxVcpuMs > 800 ? 'warn' : 'default'}
-          />
+          {tick.hasVcpu ? (
+            <Stat
+              label="Peak Tick vCPU"
+              value={`${tick.maxVcpuMs} ms`}
+              sub={`Budget ceiling: ${TICK_VCPU_BUDGET_MS} ms / execution`}
+              tone={tick.maxVcpuMs > TICK_VCPU_BUDGET_MS ? 'crit' : tick.maxVcpuMs > 800 ? 'warn' : 'default'}
+            />
+          ) : (
+            <Stat
+              label="Peak Tick Duration"
+              value={runs.length === 0 ? '–' : `${formatCount(tick.maxDurationMs)} ms`}
+              sub="Wall-clock tick runtime (includes FOS I/O)"
+              tone={runs.length === 0 ? 'unknown' : 'default'}
+            />
+          )}
           <Stat
             label="Peak Backend Calls"
             value={`${tick.maxBackendCalls} / ${TICK_BACKEND_CALL_CEILING}`}

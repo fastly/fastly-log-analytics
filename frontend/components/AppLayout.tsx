@@ -246,12 +246,11 @@ export function AppLayout({
     )
   }
 
-  const needsGeoPreload = matchesPrefix(pathname, ['/dashboard', '/network'])
   const needsMapPrewarm = matchesPrefix(pathname, ['/dashboard', '/network', '/security'])
 
   const isQueryRawMode = pathname.startsWith('/query') && isRawQueryMode
   const hideFilterBar =
-    matchesPrefix(pathname, ['/admin', '/insights', '/alerts', '/control-room', '/how-it-works']) ||
+    matchesPrefix(pathname, ['/admin', '/insights', '/alerts', '/control-room', '/how-it-works', '/sessions/detail', '/sessions/stream']) ||
     isQueryRawMode ||
     !hasServices
 
@@ -315,7 +314,6 @@ export function AppLayout({
 
   return (
     <div className="flex flex-col h-screen overflow-hidden bg-background">
-      {needsGeoPreload && <link rel="prefetch" href="/geo/world.topo.json" as="fetch" />}
       {shareBanner.node}
       <div className="flex flex-1 overflow-hidden min-h-0">
         {isAnalyst && disconnected && (

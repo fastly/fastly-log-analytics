@@ -541,6 +541,7 @@ export function planCompactsFromWindows(
     windowsByHour.set(match[1], hour);
   }
   const partialHours = new Set<string>();
+  const liveWindowTags = new Map<string, Set<number>>();
   const merged = new Map<
     string,
     { file: ManifestFile; rows: number; sources: number }[]
@@ -548,14 +549,22 @@ export function planCompactsFromWindows(
   const summaries: SummaryUse[] = [];
   const claimed = new Set<string>();
   for (const file of rawFiles) {
-    const match = RAW_COMPACT.exec(file.key) ?? RAW_WINDOW.exec(file.key);
+    const compact = RAW_COMPACT.exec(file.key);
+    const rawWin = compact ? null : RAW_WINDOW.exec(file.key);
+    const match = compact ?? rawWin;
     if (!match) continue;
     const hourKey = `${match[1]}hour=${match[2]}/`;
+    if (rawWin) {
+      const tags = liveWindowTags.get(hourKey) ?? new Set<number>();
+      tags.add(fnv1a32(`window=${rawWin[3]}.parquet`));
+      liveWindowTags.set(hourKey, tags);
+      if (Date.parse(file.start) < fromMs) partialHours.add(hourKey);
+      continue;
+    }
     if (Date.parse(file.start) < fromMs || Date.parse(file.end) > toMs) {
       partialHours.add(hourKey);
       continue;
     }
-    const compact = RAW_COMPACT.exec(file.key);
     if (!compact) continue;
     const name = /^\d+-\d+-c(\d+)-n(\d+)-([0-9a-f]+)$/.exec(compact[3]);
     const sources = Number(compact[4]);
@@ -587,9 +596,10 @@ export function planCompactsFromWindows(
   }
   for (const [hourKey, compacts] of merged) {
     if (partialHours.has(hourKey)) continue;
-    const unused = [...(windowsByHour.get(hourKey)?.values() ?? [])].filter(
-      (w) => !w.used,
-    );
+    const liveTags = liveWindowTags.get(hourKey);
+    const unused = [...(windowsByHour.get(hourKey)?.entries() ?? [])]
+      .filter(([tag, w]) => !w.used && !liveTags?.has(tag))
+      .map(([, w]) => w);
     const rows = compacts.reduce((sum, c) => sum + c.rows, 0);
     const sources = compacts.reduce((sum, c) => sum + c.sources, 0);
     const unusedRows = unused.reduce((sum, w) => sum + w.rows, 0);

@@ -10,6 +10,7 @@ import {
   decodeSummary,
   fingerprint,
   normalizeDashboardValue,
+  planCompactsFromWindows,
   planSummaries,
   summaryValue,
 } from "./summaries";
@@ -1179,5 +1180,74 @@ describe("projected dashboard summaries", () => {
     expect(filtered.stats).toMatchObject({ listed: 2, fetched: 0, cached: 2 });
     expect(source.log.files).toEqual([]);
     expectMatchesRaw(filtered, await runDashboard(fixtureSource([page(RAW)], BUFFERS), { from, to, filters }));
+  });
+
+  it("covers open-hour compacts via open_bundle + window summaries even when an in-progress tail RAW_WINDOW crosses toMs", () => {
+    const fromMs = Date.parse("2026-11-21T00:00:00Z");
+    const toMs = Date.parse("2026-11-21T01:21:00Z");
+    const dayDir = "year=2026/month=11/day=21/";
+    const hourDir = `processed/request/${dayDir}hour=01/`;
+    const sumDir = `processed/summary/request/${dayDir}hour=01/`;
+    const bundleDir = `processed/summary_bundle/request/${dayDir}`;
+
+    const compactA: ManifestFile = {
+      key: `${hourDir}compact=1795222800-1795223880-c10-n1000-deadbeef.parquet`,
+      start: "2026-11-21T01:00:00Z",
+      end: "2026-11-21T01:18:00Z",
+      size: 50_000,
+      rows: 1000,
+      sources: 10,
+    };
+    const tailLiveWindow: ManifestFile = {
+      key: `${hourDir}window=1795224000-1795224120-aaa-n50.parquet`,
+      start: "2026-11-21T01:20:00Z",
+      end: "2026-11-21T01:22:00Z", // crosses toMs (01:21:00Z)
+      size: 4_000,
+      rows: 50,
+    };
+    const openBundle: ManifestFile = {
+      key: `${bundleDir}open_bundle=01-1795223640-c8-n800-h0123456789abcdef.parquet`,
+      start: "2026-11-21T01:00:00Z",
+      end: "2026-11-21T01:14:00Z",
+      size: 20_000,
+      rows: 800,
+      kind: "hour",
+    };
+    const compactedWin1: ManifestFile = {
+      key: `${sumDir}summary=1795223640-1795223760-w1-n100.parquet`,
+      start: "2026-11-21T01:14:00Z",
+      end: "2026-11-21T01:16:00Z",
+      size: 4_000,
+      rows: 100,
+      kind: "window",
+    };
+    const compactedWin2: ManifestFile = {
+      key: `${sumDir}summary=1795223760-1795223880-w2-n100.parquet`,
+      start: "2026-11-21T01:16:00Z",
+      end: "2026-11-21T01:18:00Z",
+      size: 4_000,
+      rows: 100,
+      kind: "window",
+    };
+    // Window summary corresponding to the still-live uncompacted tail window!
+    const tailLiveWinSummary: ManifestFile = {
+      key: `${sumDir}summary=1795224000-1795224120-aaa-n50.parquet`,
+      start: "2026-11-21T01:20:00Z",
+      end: "2026-11-21T01:22:00Z",
+      size: 3_000,
+      rows: 50,
+      kind: "window",
+    };
+
+    const plan = planCompactsFromWindows(
+      [compactA, tailLiveWindow],
+      [openBundle, compactedWin1, compactedWin2, tailLiveWinSummary],
+      fromMs,
+      toMs,
+    );
+    expect(plan.raw.map((f) => f.key)).toEqual([tailLiveWindow.key]);
+    expect(plan.summaries.map((s) => s.file.key).sort()).toEqual(
+      [openBundle.key, compactedWin1.key, compactedWin2.key].sort(),
+    );
   });
 });

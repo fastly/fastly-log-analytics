@@ -1273,7 +1273,16 @@ export async function executeCloudQuery(
 
     const truncated = fetchedRows.length > maxRows;
     const slicedRows = truncated ? fetchedRows.slice(0, maxRows) : fetchedRows;
-    const redactedRows = redactQueryRowsForPii(slicedRows, maskIps);
+    const hideInternalScopedKey = !/\bscoped_key\b/i.test(req.sql);
+    const cleanedRows = hideInternalScopedKey
+      ? slicedRows.map((row) => {
+          if (!("scoped_key" in row)) return row;
+          const rest = { ...row };
+          delete rest.scoped_key;
+          return rest;
+        })
+      : slicedRows;
+    const redactedRows = redactQueryRowsForPii(cleanedRows, maskIps);
     const columns =
       redactedRows.length > 0 ? Object.keys(redactedRows[0]) : [];
     const elapsedMs = Math.max(
