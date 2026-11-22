@@ -317,8 +317,14 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
     )
   }
 
-  function renderClient() {
+  function seededClient() {
     const qc = createTestQueryClient()
+    qc.setQueryData(queryKeys.bootstrap(), { active_service_id: SVC })
+    return qc
+  }
+
+  function renderClient() {
+    const qc = seededClient()
     return render(
       <RumPageClient initialServiceId={SVC} />,
       { wrapper: makeQueryWrapper(qc) },
@@ -535,7 +541,7 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
         }),
       )
 
-      const qc = createTestQueryClient()
+      const qc = seededClient()
       render(<RumPageClient initialServiceId={SVC} />, { wrapper: makeQueryWrapper(qc) })
       expect(await screen.findByText('Largest Contentful Paint (LCP)')).toBeInTheDocument()
 
@@ -621,7 +627,7 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
         }),
       )
 
-      const qc = createTestQueryClient()
+      const qc = seededClient()
       render(<RumPageClient initialServiceId={SVC} />, { wrapper: makeQueryWrapper(qc) })
       expect(await screen.findByText('Largest Contentful Paint (LCP)')).toBeInTheDocument()
       await waitFor(() => expect(seen.length).toBeGreaterThanOrEqual(2))

@@ -209,7 +209,7 @@ describe("local Parquet insight scans", () => {
   });
 
   it("evaluates 24h baseline detectors when baseline logs start inside [start, windowStart) and service history spans >=24h", async () => {
-    // Mirrors SE-demo default adaptive window: 24h window vs 24h baseline, ~58h total history,
+    // Mirrors a typical Cloud service's default adaptive window: 24h window vs 24h baseline, ~58h total history,
     // with first matching baseline row inside [start, windowStart) so (windowStart - first_ms) < 24h.
     const w24Body = { service_id: "example", window_size_hrs: 24, baseline_hours: 24, clamp_end: end };
     const baselineTs = endMs - 47 * 3_600_000; // 23h before windowStart (47h before end)

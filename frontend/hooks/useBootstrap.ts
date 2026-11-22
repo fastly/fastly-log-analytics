@@ -148,9 +148,15 @@ export function useBootstrapPending(): boolean {
 }
 
 export function useBootstrapSettled(): boolean {
-  return useBootstrapCacheSelector(
-    (bootstrapData) => bootstrapData !== undefined,
-    false,
+  const queryClient = useQueryClient()
+  return useSyncExternalStore(
+    (onChange) => queryClient.getQueryCache().subscribe(onChange),
+    () => {
+      const data = queryClient.getQueryData<Record<string, unknown>>(queryKeys.bootstrap())
+      applyBootstrapRuntimeMode(data)
+      return data !== undefined
+    },
+    () => queryClient.getQueryData(queryKeys.bootstrap()) !== undefined,
   )
 }
 

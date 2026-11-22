@@ -1,12 +1,12 @@
 /**
  * @vitest-environment jsdom
  */
-import { renderWithQuery } from '@/__tests__/helpers/page-smoke'
+import { createTestQueryClient, renderWithQuery } from '@/__tests__/helpers/page-smoke'
 import { cleanup, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { http, HttpResponse } from 'msw/http'
 import { server } from '@/__tests__/helpers/msw/handlers'
-import { getApiBase } from '@/lib/api'
+import { getApiBase, queryKeys } from '@/lib/api'
 import { setCloudModeRuntime } from '@/lib/cloud-engine/mode'
 import OriginClient from '@/app/origin/_sections/OriginClient'
 import PerformanceClient from '@/app/performance/_sections/PerformanceClient'
@@ -136,6 +136,16 @@ describe('OriginClient on Cloud', () => {
 const waterfall = { avg: { edge_processing: 1.5, origin_wait: 40, origin_download: 3, client_download: 7 } }
 const ttlDist = [{ bucket: '< 60s', count: 9 }, { bucket: '> 1d', count: 4 }]
 
+function seededCloudQueryClient() {
+  const queryClient = createTestQueryClient()
+  queryClient.setQueryData(queryKeys.bootstrap(), {
+    runtime_mode: 'cloud',
+    active_service_id: 'svc-1',
+    services: [{ service_id: 'svc-1', name: 'Test Service' }],
+  })
+  return queryClient
+}
+
 describe('PerformanceClient on Cloud', () => {
   it('paints the waterfall, TTL buckets, rankings and scatter sample from one summary read', async () => {
     setCloudModeRuntime(true)
@@ -146,7 +156,7 @@ describe('PerformanceClient on Cloud', () => {
       scatter: [{ origin: 12.5, edge: 3.25, cache: 'MISS' }, { origin: 0.5, edge: 1, cache: 'HIT' }],
       rollup: meta(['top_urls.p99', 'top_asns.p99', 'scatter'], ['ttl_dist', 'top_urls.requests']),
     }))
-    renderWithQuery(<PerformanceClient />, { withNuqs: true })
+    renderWithQuery(<PerformanceClient />, { withNuqs: true, queryClient: seededCloudQueryClient() })
 
     const slot = screen.getByTestId('rollup-data-through-slot')
     expect(slot).toBeEmptyDOMElement()
@@ -171,7 +181,7 @@ describe('PerformanceClient on Cloud', () => {
     const sections = recordPosts('/api/performance/aggregates', () => ({
       ttl_dist: ttlDist, waterfall, top_urls: [], top_asns: [], scatter: [], _approx: false,
     }))
-    renderWithQuery(<PerformanceClient />, { withNuqs: true })
+    renderWithQuery(<PerformanceClient />, { withNuqs: true, queryClient: seededCloudQueryClient() })
 
     expect(await screen.findByText(JSON.stringify([['< 60s', '> 1d'], [9, 4]]))).toBeInTheDocument()
     expect(screen.getByText('Cache TTL Distribution')).toBeInTheDocument()

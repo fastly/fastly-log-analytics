@@ -9,6 +9,8 @@
  * - useShareStatusBanner
  * - useHighScaleRequestFacts
  */
+import React from 'react'
+import { renderToString } from 'react-dom/server'
 import { renderHook, waitFor, act } from '@testing-library/react'
 import { hashKey, QueryClient } from '@tanstack/react-query'
 import {
@@ -559,6 +561,22 @@ describe('useIsAnalyst, useMaskIps, useEnforceMaskedFilters & useIsDataReady', (
     } finally {
       setCloudModeRuntime(false)
     }
+  })
+
+  it('useIsDataReady reads SSR-hydrated bootstrap on the server without forcing a skeleton fallback', () => {
+    const Probe = () => React.createElement('span', null, String(useIsDataReady()))
+    const unseeded = createTestQueryClient()
+    const UnseededWrapper = makeQueryWrapper(unseeded)
+    expect(renderToString(React.createElement(UnseededWrapper, null, React.createElement(Probe)))).toContain('false')
+
+    const seeded = createTestQueryClient()
+    seeded.setQueryData(queryKeys.bootstrap(), {
+      runtime_mode: 'high_scale',
+      active_service_id: 'svc-ssr',
+      services: [{ service_id: 'svc-ssr', name: 'SSR Service' }],
+    })
+    const SeededWrapper = makeQueryWrapper(seeded)
+    expect(renderToString(React.createElement(SeededWrapper, null, React.createElement(Probe)))).toContain('true')
   })
 })
 

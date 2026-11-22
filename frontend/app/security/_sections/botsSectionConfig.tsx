@@ -264,7 +264,8 @@ export function FingerprintCoverageHint({
   field: string
   hasTraffic?: boolean
 }) {
-  if (!hasTraffic || coverage === undefined || coverage === null || coverage >= LOW_COVERAGE_THRESHOLD) return null
+  if (coverage === undefined || coverage === null || coverage >= LOW_COVERAGE_THRESHOLD) return null
+  if (coverage === 0 && !hasTraffic) return null
   const pct = coverage === 0 ? '0%' : coverage < 0.001 ? '<0.1%' : `${(coverage * 100).toFixed(2)}%`
   const msg =
     COVERAGE_HINT_MESSAGE[field] ||
