@@ -6,7 +6,7 @@ import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import { Dialog as DialogPrimitive } from '@base-ui/react/dialog'
 import {
   LayoutDashboard, Network, Users, Settings, Database, Search, Activity, Sparkles,
-  Timer, Shield, Bell, Server, Loader2, Radio, Play, TrendingUp, X, Eye, Moon, Sun, Monitor, BookOpen,
+  Timer, Shield, Bell, Server, Loader2, Radio, Play, TrendingUp, X, Eye, Moon, Sun, Monitor, BookOpen, HardDrive,
 } from 'lucide-react'
 import { useTheme } from 'next-themes'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -192,6 +192,7 @@ export const SERVICE_NAVIGATION: ServiceNavItem[] = [
 ]
 
 export const SYSTEM_NAVIGATION = [
+  ...(IS_CLOUD_MODE ? [{ name: 'Browser Cache', href: '/cache', icon: HardDrive }] : []),
   { name: 'Admin', href: '/admin', icon: Settings },
   { name: 'How it works', href: '/how-it-works', icon: BookOpen },
 ]
@@ -236,7 +237,7 @@ const ROUTE_FRIENDLY_NAMES: Record<string, string> = {
   '/streaming': 'Streaming', '/origin': 'Origin', '/performance': 'Performance', '/rum': 'RUM',
   '/sessions': 'Sessions', '/sessions/detail': 'Session Details', '/sessions/stream': 'Stream Details',
   '/insights': 'Insights', '/query': 'Query', '/charts': 'Charts', '/alerts': 'Alerts',
-  '/logs': 'Data Management', '/usage': 'Usage and Cost', '/admin': 'Admin',
+  '/logs': 'Data Management', '/usage': 'Usage and Cost', '/cache': 'Browser Cache', '/admin': 'Admin',
   '/share-login': 'Sign in', '/how-it-works': 'How it works',
 }
 

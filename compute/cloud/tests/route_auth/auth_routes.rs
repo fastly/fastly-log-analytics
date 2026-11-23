@@ -188,6 +188,7 @@ fn analytics_site_routes_allowlist_covers_all_exported_pages() {
         "/query",
         "/insights",
         "/usage",
+        "/cache",
         "/how-it-works",
         "/share-login",
         "/share-login/acknowledge",

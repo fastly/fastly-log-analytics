@@ -2116,6 +2116,7 @@ pub const ANALYTICS_SITE_ROUTES: &[&str] = &[
     "/query",
     "/insights",
     "/usage",
+    "/cache",
     "/how-it-works",
     "/share-login",
     "/share-login/acknowledge",

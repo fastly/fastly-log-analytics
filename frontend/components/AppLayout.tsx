@@ -189,7 +189,7 @@ export function AppLayout({
     (isAnalyst && matchesPrefix(pathname, IS_CLOUD_MODE ? ['/admin', '/alerts', '/high-scale'] : ['/admin', '/usage', '/alerts', '/high-scale'])) ||
     (!IS_CLOUD_MODE && (isAnalyst || isShareAnalyst) && pathname.startsWith('/logs'))
   const needsSignIn = needsLogin && !isPublicPage && !pathname.startsWith('/share-login')
-  const needsWizard = !needsLogin && !isAnalyst && !hasServices && !isPublicPage && !pathname.startsWith('/admin') && !pathname.startsWith('/share-login')
+  const needsWizard = !needsLogin && !isAnalyst && !hasServices && !isPublicPage && !pathname.startsWith('/admin') && !pathname.startsWith('/cache') && !pathname.startsWith('/share-login')
 
   const redirectAnnouncement = isLoading
     ? ''
@@ -275,7 +275,7 @@ export function AppLayout({
 
   const isQueryRawMode = pathname.startsWith('/query') && isRawQueryMode
   const routeHidesFilterBar =
-    matchesPrefix(pathname, ['/admin', '/insights', '/alerts', '/control-room', '/how-it-works', '/sessions/detail', '/sessions/stream']) ||
+    matchesPrefix(pathname, ['/admin', '/cache', '/insights', '/alerts', '/control-room', '/how-it-works', '/sessions/detail', '/sessions/stream']) ||
     isQueryRawMode
   const hideFilterBar = routeHidesFilterBar || !hasServices
   const reserveFilterBar = !routeHidesFilterBar && !hasServices && isLoading
@@ -458,7 +458,7 @@ export function AppLayout({
                 <main id="main" tabIndex={0} className="flex-1 overflow-auto p-4 md:p-6 outline-none">
               {isLoading && !bootstrapData ? (
                 <CenteredSpinner label="Loading app configuration…" />
-              ) : !hasServices && !matchesPrefix(pathname, ['/admin', '/share-login', '/how-it-works']) ? (
+              ) : !hasServices && !matchesPrefix(pathname, ['/admin', '/cache', '/share-login', '/how-it-works']) ? (
                 <>
                   <CenteredSpinner label="Setting up your workspace…" />
                   <ServiceUrlWriteback />
