@@ -304,6 +304,33 @@ const CACHE_PROBE_CONCURRENCY = 64;
 // One coalesced selective query registers every file it reads in DuckDB memory.
 const SELECTIVE_BATCH_FILES = 16;
 const SELECTIVE_BATCH_BYTES = 16 * 1024 * 1024;
+
+/** Starts each read once, at most `lanes` at a time, so results can be consumed in order. */
+function prefetcher<T>(lanes: number, read: (key: string) => Promise<T>) {
+  let active = 0;
+  const waiting: (() => void)[] = [];
+  const started = new Map<string, Promise<T>>();
+  return (key: string): Promise<T> => {
+    let pending = started.get(key);
+    if (!pending) {
+      pending = (async () => {
+        if (active < lanes) active++;
+        else await new Promise<void>((resolve) => waiting.push(resolve));
+        try {
+          return await read(key);
+        } finally {
+          const next = waiting.shift();
+          if (next) next();
+          else active--;
+        }
+      })();
+      // Awaited later, or never once an earlier failure decides the group.
+      pending.catch(() => {});
+      started.set(key, pending);
+    }
+    return pending;
+  };
+}
 // Larger files keep DuckDB's HTTP ranges; whole reads hold their bytes from
 // fetch until their query settles, within an in-flight budget per run.
 const WHOLE_READ_MAX_BYTES = 64 * 1024 * 1024;
@@ -1567,7 +1594,7 @@ async function collectAggregator(
       }
     : null;
   const next = memo;
-  const keptRows = { cached: 0, fetched: 0, rows: 0, bytes: 0, downloaded: 0 };
+  const keptRows = { cached: 0, fetched: 0, rows: 0, bytes: 0, downloaded: 0, cachedBytes: 0 };
   const scopeListings = summaryListings.get(scope);
   const scopeDecoded = decodedSummaries.get(scope);
   assertActive();
@@ -1576,11 +1603,13 @@ async function collectAggregator(
       keptRows.cached++;
       keptRows.rows += meta.rawRows;
       keptRows.bytes += meta.byteLength;
+      keptRows.cachedBytes += meta.byteLength;
     }
     for (const kept of next.summaries.values()) {
       keptRows.cached++;
       keptRows.rows += kept.rows;
       keptRows.bytes += kept.byteLength;
+      keptRows.cachedBytes += kept.byteLength;
     }
     files = files.filter(
       (file) => !next.interior.has(file.key) && !next.boundary.has(file.key),
@@ -1616,11 +1645,11 @@ async function collectAggregator(
       );
       const remainingRaw = new Set(initialPlan.raw.map((f) => f.key));
       const triedSummaries = new Set<string>();
-      const queue: SummaryUse[][] = [...initialPlan.groups];
+      const queue: SummaryUse[][] = [];
       let resolvedSummaries = 0;
       const filterList = options.filters ?? [];
+      const uses = new Map<string, SummaryUse>();
       const resolve = async (use: SummaryUse) => {
-        triedSummaries.add(use.file.key);
         let decoded: DecodedSummary | null = null;
         let summaryBytes = 0;
         const mem = decodedSummaries.get(scope)?.get(use.file.key);
@@ -1695,13 +1724,25 @@ async function collectAggregator(
               : null;
         return { decoded, answer, summaryBytes, downloaded };
       };
+      const prefetch = prefetcher(options.concurrency ?? FETCH_CONCURRENCY, (key) =>
+        resolve(uses.get(key)!),
+      );
+      const enqueue = (groups: SummaryUse[][]) => {
+        queue.push(...groups);
+        for (const use of groups.flat()) {
+          uses.set(use.file.key, use);
+          void prefetch(use.file.key);
+        }
+      };
+      enqueue(initialPlan.groups);
 
       while (queue.length > 0) {
         assertActive();
         const group = queue.shift()!;
         const resolved = [];
         for (const use of group) {
-          const one = await resolve(use);
+          triedSummaries.add(use.file.key);
+          const one = await prefetch(use.file.key);
           resolved.push(one);
           if (!one.answer) break;
         }
@@ -1720,6 +1761,7 @@ async function collectAggregator(
               keptRows.downloaded += downloaded;
             } else {
               keptRows.cached++;
+              keptRows.cachedBytes += summaryBytes;
             }
             keptRows.bytes += summaryBytes;
             resolvedSummaries++;
@@ -1735,7 +1777,7 @@ async function collectAggregator(
             fromMs,
             toMs,
           );
-          queue.push(...subPlan.groups);
+          enqueue(subPlan.groups);
           for (const rawFile of subPlan.raw) {
             remainingRaw.add(rawFile.key);
           }
@@ -1751,17 +1793,19 @@ async function collectAggregator(
       listed = files.length + summaryUses.length + resolvedSummaries;
     }
   }
-  for (const group of compactGroups) {
-    const resolved: {
-      use: SummaryUse;
-      decoded: DecodedSummary;
-      byteLength: number;
-      downloaded: number;
-    }[] = [];
-    for (const use of group) {
+  type GroupRead = {
+    use: SummaryUse;
+    decoded: DecodedSummary;
+    byteLength: number;
+    downloaded: number;
+  };
+  const groupUses = new Map(compactGroups.flat().map((use) => [use.file.key, use]));
+  const readGroupUse = prefetcher(
+    options.concurrency ?? FETCH_CONCURRENCY,
+    async (key): Promise<GroupRead | null> => {
+      const use = groupUses.get(key)!;
       assertActive();
-      const mem = decodedSummaries.get(scope)?.get(use.file.key);
-      let one: (typeof resolved)[number] | null = null;
+      const mem = decodedSummaries.get(scope)?.get(key);
       if (
         mem &&
         mem.variant === variant &&
@@ -1769,30 +1813,37 @@ async function collectAggregator(
           (b) => b.t >= fromMs && b.t + MINUTE_MS <= toMs,
         )
       ) {
-        one = { use, decoded: mem.decoded, byteLength: mem.byteLength, downloaded: 0 };
-      } else {
-        try {
-          const read = await readDashboardSummary(source, use.file, signal);
-          assertActive();
-          const decoded = await decodeSummary(read.parts, fromMs, toMs, customFields);
-          assertActive();
-          if (decoded) {
-            setScopeEntry(decodedSummaries, scope, use.file.key, {
-              variant,
-              decoded,
-              byteLength: read.byteLength,
-            });
-            one = {
-              use,
-              decoded,
-              byteLength: read.byteLength,
-              downloaded: read.cached ? 0 : read.downloadedBytes,
-            };
-          }
-        } catch {
-          assertActive();
-        }
+        return { use, decoded: mem.decoded, byteLength: mem.byteLength, downloaded: 0 };
       }
+      try {
+        const read = await readDashboardSummary(source, use.file, signal);
+        assertActive();
+        const decoded = await decodeSummary(read.parts, fromMs, toMs, customFields);
+        assertActive();
+        if (!decoded) return null;
+        setScopeEntry(decodedSummaries, scope, key, {
+          variant,
+          decoded,
+          byteLength: read.byteLength,
+        });
+        return {
+          use,
+          decoded,
+          byteLength: read.byteLength,
+          downloaded: read.cached ? 0 : read.downloadedBytes,
+        };
+      } catch {
+        assertActive();
+        return null;
+      }
+    },
+  );
+  for (const key of groupUses.keys()) void readGroupUse(key);
+  for (const group of compactGroups) {
+    const resolved: GroupRead[] = [];
+    for (const use of group) {
+      assertActive();
+      const one = await readGroupUse(use.file.key);
       if (!one) break;
       resolved.push(one);
     }
@@ -1818,6 +1869,7 @@ async function collectAggregator(
         keptRows.downloaded += downloaded;
       } else {
         keptRows.cached++;
+        keptRows.cachedBytes += byteLength;
       }
       keptRows.bytes += byteLength;
     });
@@ -1849,7 +1901,7 @@ async function collectAggregator(
     toDecode: 0,
     done: 0,
     downloadedBytes: keptRows.downloaded,
-    cachedBytes: keptRows.bytes - keptRows.downloaded,
+    cachedBytes: keptRows.cachedBytes,
   };
   let reportProgress = false;
   // Quick runs stay silent so the UI doesn't flash; downloads report at once.

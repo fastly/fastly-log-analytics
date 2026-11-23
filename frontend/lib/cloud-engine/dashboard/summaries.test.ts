@@ -1267,6 +1267,64 @@ describe("pivot slices", () => {
     expectMatchesRaw(fallback, exact);
   });
 
+  it("fetches the summaries of a filtered run and of an open hour's compacts in parallel", async () => {
+    // Under load an hour is many small window summaries; a serial fetch chain
+    // costs a round trip each.
+    const overlapping = <S extends { fetchFile: (key: string, ...a: never[]) => Promise<unknown> }>(
+      source: S,
+      watched: (key: string) => boolean = () => true,
+    ) => {
+      let inFlight = 0;
+      const seen = { peak: 0 };
+      const fetchFile = source.fetchFile.bind(source);
+      source.fetchFile = (async (key: string, ...args: never[]) => {
+        if (!watched(key)) return fetchFile(key, ...args);
+        seen.peak = Math.max(seen.peak, ++inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        try {
+          return await fetchFile(key, ...args);
+        } finally {
+          inFlight--;
+        }
+      }) as S["fetchFile"];
+      return seen;
+    };
+    const filters = [status("200"), status("503")];
+    const windows = pick("window");
+    const filteredSource = fixtureSource([page(RAW)], BUFFERS, { json: [], files: [] }, [page(windows)]);
+    const filtered = overlapping(filteredSource);
+    const fromWindows = await runDashboard(filteredSource, { from, to, filters });
+    expect(filteredSource.log.files.every((k) => k.includes("/summary="))).toBe(true);
+    expect(filtered.peak).toBeGreaterThan(1);
+    expectMatchesRaw(fromWindows, await rawFiltered(filters));
+    clearDashboardMemo();
+
+    const pair = RAW.filter((f) => f.key.includes("/hour=09/")).slice(0, 2);
+    const names = pair.map((w) => /window=(.+)\.parquet$/.exec(w.key)![1]);
+    const tags = names.map((n) => fnv1a32(`window=${n}.parquet`).toString(16).padStart(8, "0"));
+    const compact: ManifestFile = {
+      ...pair[0],
+      key: pair[0].key.replace(/window=.*$/, `compact=1800003600-1800005400-c2-n${pair[0].rows! + pair[1].rows!}-${tags.join("")}.parquet`),
+      end: pair[1].end,
+      rows: pair[0].rows! + pair[1].rows!,
+      sources: 2,
+    };
+    let second: Record<string, unknown>[] = [];
+    await editSummaryRows(BUFFERS[pair[1].key], (rows) => (second = rows));
+    const buffers = { ...BUFFERS, [compact.key]: await editSummaryRows(BUFFERS[pair[0].key], (rows) => [...rows, ...second]) };
+    const raw = [...RAW.filter((f) => !pair.includes(f)), compact];
+    const summaries = pick("window", (e) => e.key.includes("/hour=09/"));
+    const exact = await runDashboard(fixtureSource([page(raw)], buffers), { from, to });
+    clearDashboardMemo();
+    const source = fixtureSource([page(raw)], buffers, { json: [], files: [] }, [page(summaries)]);
+    // The compact's two summaries are read before any other file.
+    const unfiltered = overlapping(source, (key) => names.some((n) => key.includes(`summary=${n}`)));
+    const cold = await runDashboard(source, { from, to });
+    expect(source.log.files.filter((k) => !k.includes("summary"))).not.toContain(compact.key);
+    expect(unfiltered.peak).toBeGreaterThan(1);
+    expectMatchesRaw(cold, exact);
+  });
+
   it("reads raw for summaries written before slices", async () => {
     const hours = pick("hour", (e) => !e.early);
     const buffers = { ...BUFFERS };
@@ -1526,6 +1584,23 @@ describe("projected dashboard summaries", () => {
     expect(filtered.stats).toMatchObject({ listed: 2, fetched: 0, cached: 2 });
     expect(source.log.files).toEqual([]);
     expectMatchesRaw(filtered, await runDashboard(fixtureSource([page(RAW)], BUFFERS), { from, to, filters }));
+  });
+
+  it("reports no cached bytes for a cold filtered run that downloads projected summaries", async () => {
+    const from = "2027-01-15T08:00:00Z";
+    const to = "2027-01-15T10:00:00Z";
+    // Hour 08 has no summaries, so its raw windows are fetched and progress is reported.
+    const windows = pick("window", (e) => e.key.includes("/hour=09/"));
+    const source = projectingSource(fixtureSource([page(RAW)], BUFFERS, { json: [], files: [] }, [page(windows)]), BUFFERS);
+    const reports: { cachedBytes: number; downloadedBytes: number }[] = [];
+    const filters: DashboardFilter[] = [{ mode: "include", field: "status", value: "200" }];
+    const result = await runDashboard(source, { from, to, filters, onProgress: (p) => reports.push({ ...p }) });
+    expect(result.stats).toMatchObject({ cached: 0 });
+    expect(reports.length).toBeGreaterThan(0);
+    for (const report of reports) {
+      expect(report.cachedBytes).toBe(0);
+      expect(report.downloadedBytes).toBeGreaterThan(0);
+    }
   });
 
   it("covers open-hour compacts via open_bundle + window summaries even when an in-progress tail RAW_WINDOW crosses toMs", () => {
