@@ -639,9 +639,14 @@ fn preflight(
     if service["type"] != "vcl" {
         return Err(Error::new(400, "vcl_service_required"));
     }
-    context
-        .api("GET", "/enabled-products/v1/object_storage", token, None)
-        .map_err(|_| Error::new(400, "object_storage_required"))?;
+    let (os_status, os_body) =
+        context.api_status("GET", "/enabled-products/v1/object_storage", token, None)?;
+    if os_status >= 500 {
+        return Err(Error::new(502, "fastly_api_rejected"));
+    }
+    if !(200..300).contains(&os_status) || os_body["enabled"].as_bool() == Some(false) {
+        return Err(Error::new(400, "object_storage_required"));
+    }
     let (_, reservation) = install(context)?;
     if reservation.service_id.as_deref().is_some_and(|v| v != sid) {
         return Err(Error::new(409, "install_already_reserved"));
@@ -1441,11 +1446,22 @@ fn provision(
                         &service.fastly_token_ref,
                         &input.token,
                     )?;
-                    context.cas(
-                        &format!("svc:{}", input.service_id),
-                        None,
-                        &serialize_service(&service)?,
-                    )?;
+                    let mut snap_val = serialize_service(&service)?;
+                    if context.remaining_calls() >= 4 {
+                        if let Ok(Some(cur_rec)) =
+                            context.get(&format!("logs:cursor:{}", input.service_id))
+                        {
+                            if let Some(archived) = cur_rec
+                                .value
+                                .get("svc_outbox_archived")
+                                .and_then(Value::as_u64)
+                                .filter(|&a| a > 0)
+                            {
+                                snap_val["_audit_outbox_base"] = json!(archived);
+                            }
+                        }
+                    }
+                    context.cas(&format!("svc:{}", input.service_id), None, &snap_val)?;
                     service
                 };
                 let record = if let Some(record) = record {
@@ -1462,12 +1478,15 @@ fn provision(
         }
     }
     if let Some(record) = context.get(&format!("svc:{}", input.service_id))? {
-        let existing: Service = decode(record.value)?;
+        let existing: Service = decode(record.value.clone())?;
         if existing.data_reset.is_some() {
             return Err(Error::new(409, "data_reset_in_progress"));
         }
         if existing.status != "torn_down" {
             return Err(Error::new(409, "service_already_configured"));
+        }
+        if audit_outbox_len(&record) >= AUDIT_OUTBOX_LIMIT {
+            return Err(Error::new(409, "audit_archive_required"));
         }
         for name in existing.owned_endpoint_names {
             if !service.owned_endpoint_names.contains(&name) {
@@ -1499,10 +1518,48 @@ fn provision(
     job.service_snapshot = Some(service.clone());
     context.cas(&format!("job:{}", job.id), None, &serialize(&job)?)?;
     let previous = context.get(&format!("svc:{}", input.service_id))?;
+    let mut svc_val = serialize_service(&service)?;
+    let prov_audit = json!({
+        "actor": actor,
+        "at": context.runtime.now(),
+        "event": "job.started",
+        "job_id": job.id,
+        "config_version": service.config_version,
+    });
+    svc_val["_audit"] = prov_audit.clone();
+    if let Some(ref prev_rec) = previous {
+        if audit_outbox_len(prev_rec) >= AUDIT_OUTBOX_LIMIT {
+            return Err(Error::new(409, "audit_archive_required"));
+        }
+        let mut outbox = prev_rec.value["_audit_outbox"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let base = prev_rec.value["_audit_outbox_base"].as_u64().unwrap_or(0);
+        outbox.push(prov_audit);
+        svc_val["_audit_outbox"] = Value::Array(outbox);
+        if base > 0 || prev_rec.value.get("_audit_outbox_base").is_some() {
+            svc_val["_audit_outbox_base"] = json!(base);
+        }
+    } else {
+        svc_val["_audit_outbox"] = json!([prov_audit]);
+        if context.remaining_calls() >= 4 {
+            if let Ok(Some(cur_rec)) = context.get(&format!("logs:cursor:{}", input.service_id)) {
+                if let Some(archived) = cur_rec
+                    .value
+                    .get("svc_outbox_archived")
+                    .and_then(Value::as_u64)
+                    .filter(|&a| a > 0)
+                {
+                    svc_val["_audit_outbox_base"] = json!(archived);
+                }
+            }
+        }
+    }
     context.cas(
         &format!("svc:{}", input.service_id),
         previous.as_ref().map(|r| r.generation.as_str()),
-        &serialize_service(&service)?,
+        &svc_val,
     )?;
     let record = context
         .get(&format!("svc:{}", input.service_id))?
@@ -1565,9 +1622,14 @@ fn teardown(
         if remote_svc["type"] != "vcl" {
             return Err(Error::new(400, "vcl_service_required"));
         }
-        context
-            .api("GET", "/enabled-products/v1/object_storage", &token, None)
-            .map_err(|_| Error::new(400, "object_storage_required"))?;
+        let (os_status, os_body) =
+            context.api_status("GET", "/enabled-products/v1/object_storage", &token, None)?;
+        if os_status >= 500 {
+            return Err(Error::new(502, "fastly_api_rejected"));
+        }
+        if !(200..300).contains(&os_status) || os_body["enabled"].as_bool() == Some(false) {
+            return Err(Error::new(400, "object_storage_required"));
+        }
         let (_, reservation) = install(context)?;
         if reservation.service_id.as_deref().is_some_and(|v| v != sid) {
             return Err(Error::new(409, "install_already_reserved"));

@@ -2079,6 +2079,7 @@ fn main() {
                     break;
                 }
             }
+            let raw_corrupt_deleted = !mini.bucket.borrow().contains_key(&corrupt_key_1);
             // Now test the packed FLPB\x04 variant too
             mini.kv.borrow_mut().clear();
             mini.kv.borrow_mut().insert(
@@ -2124,6 +2125,7 @@ fn main() {
                     break;
                 }
             }
+            let packed_corrupt_deleted = !mini.bucket.borrow().contains_key(&corrupt_key_1);
             let day_bundle_written = mini.bucket.borrow().keys().any(|k| k.contains("day_bundle="));
 
             // 3. Worker x-flp-worker-key gates + query-bearing /api/file & /api/files RBAC/traversal/cursor + telemetry::redact
@@ -2380,6 +2382,8 @@ fn main() {
                     "bundle_packed_errors": packed_errors,
                     "bundle_raw_discarded": bundle_raw_discarded,
                     "bundle_packed_discarded": bundle_packed_discarded,
+                    "raw_corrupt_deleted": raw_corrupt_deleted,
+                    "packed_corrupt_deleted": packed_corrupt_deleted,
                     "day_bundle_written": day_bundle_written,
                     "worker_gates": {
                         "ingest_missing": w_missing,

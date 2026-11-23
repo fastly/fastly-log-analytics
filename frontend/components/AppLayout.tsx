@@ -43,7 +43,28 @@ import {
 
 export { ThemeToggle, TimezoneSwitcher, useShareStatusBanner }
 
-const FilterBar = dynamic(() => import('@/components/FilterBar/FilterBar').then(m => ({ default: m.FilterBar })))
+function FilterBarPlaceholder({ compact = false }: { compact?: boolean }) {
+  return (
+    <div
+      data-testid="filter-bar-placeholder"
+      aria-hidden="true"
+      className={cn(
+        'border-b bg-background shrink-0',
+        compact ? 'min-h-[49px]' : 'min-h-[89px]',
+      )}
+    />
+  )
+}
+
+function FilterBarDynamicLoading() {
+  const pathname = usePathname()
+  return <FilterBarPlaceholder compact={pathname === '/usage' || pathname.startsWith('/usage/')} />
+}
+
+const FilterBar = dynamic(
+  () => import('@/components/FilterBar/FilterBar').then(m => ({ default: m.FilterBar })),
+  { loading: () => <FilterBarDynamicLoading /> },
+)
 const ActiveFiltersBanner = dynamic(() => import('@/components/FilterBar/FilterBar').then(m => ({ default: m.ActiveFiltersBanner })), { ssr: false })
 const DebugPanel = dynamic(() => import('@/components/DebugPanel').then(m => ({ default: m.DebugPanel })), { ssr: false })
 
@@ -253,10 +274,11 @@ export function AppLayout({
   const needsMapPrewarm = matchesPrefix(pathname, ['/dashboard', '/network', '/security'])
 
   const isQueryRawMode = pathname.startsWith('/query') && isRawQueryMode
-  const hideFilterBar =
+  const routeHidesFilterBar =
     matchesPrefix(pathname, ['/admin', '/insights', '/alerts', '/control-room', '/how-it-works', '/sessions/detail', '/sessions/stream']) ||
-    isQueryRawMode ||
-    !hasServices
+    isQueryRawMode
+  const hideFilterBar = routeHidesFilterBar || !hasServices
+  const reserveFilterBar = !routeHidesFilterBar && !hasServices && isLoading
 
   if (isInitializing) {
     return (
@@ -430,7 +452,8 @@ export function AppLayout({
               </div>
             </header>
             {!hideFilterBar && <FilterBar />}
-            {hideFilterBar && <ActiveFiltersBanner />}
+            {reserveFilterBar && <FilterBarPlaceholder compact={pathname.startsWith('/usage')} />}
+            {hideFilterBar && !reserveFilterBar && <ActiveFiltersBanner />}
 
                 <main id="main" tabIndex={0} className="flex-1 overflow-auto p-4 md:p-6 outline-none">
               {isLoading && !bootstrapData ? (

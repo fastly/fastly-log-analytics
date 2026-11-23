@@ -201,7 +201,7 @@ export function InsightTabs<T extends SectionableInsight>({
             {cards.length === 0 ? (
               isLoading ? (
                 <div
-                  className="text-center py-20 text-sm text-muted-foreground min-h-[300px] flex flex-col items-center justify-center [contain-intrinsic-size:300px] [content-visibility:auto]"
+                  className="text-center py-20 text-sm text-muted-foreground min-h-[calc(100vh-14rem)] flex flex-col items-center justify-center [contain-intrinsic-size:700px] [content-visibility:auto]"
                   data-testid="insights-loading"
                 >
                   <Loader2 className="inline-block animate-spin h-5 w-5 mb-2 text-primary" />
@@ -209,7 +209,7 @@ export function InsightTabs<T extends SectionableInsight>({
                 </div>
               ) : (
                 <div
-                  className="py-16 text-center border rounded-xl border-dashed bg-muted/10 min-h-[300px] flex flex-col items-center justify-center [contain-intrinsic-size:300px] [content-visibility:auto]"
+                  className="py-16 text-center border rounded-xl border-dashed bg-muted/10 min-h-[calc(100vh-14rem)] flex flex-col items-center justify-center [contain-intrinsic-size:700px] [content-visibility:auto]"
                   data-testid="insights-empty-pass"
                 >
                   {empty ? <Info className="h-10 w-10 text-muted-foreground mb-3" /> : <CheckCircle className="h-10 w-10 text-emerald-500 mb-3" />}

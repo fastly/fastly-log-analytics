@@ -373,4 +373,16 @@ describe('InsightsClient notices', () => {
 
     expect(await screen.findByRole('alert', {}, { timeout: 5000 })).toHaveTextContent(/Error loading insights/)
   })
+
+  it('reserves viewport height on the initial loading grid so DebugPanel does not jump into view', async () => {
+    server.use(
+      http.get(`${getApiBase()}/api/insight-availability`, () => new Promise(() => {})),
+      http.post(`${getApiBase()}/api/insights`, () => new Promise(() => {})),
+    )
+    useServiceStore.setState({ activeServiceId: 'svc-1' })
+    renderWithQuery(<InsightsClient />, { withNuqs: true })
+
+    const loadingPanel = screen.getByTestId('insights-loading')
+    expect(loadingPanel.className).toContain('min-h-[calc(100vh-14rem)]')
+  })
 })

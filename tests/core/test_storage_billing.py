@@ -417,3 +417,67 @@ def test_python_matches_typescript_shared_storage_billing_fixtures() -> None:
         assert summary.total_gb_hours == pytest.approx(expected["totalGbHours"]), case["name"]
         assert summary.complete is expected["complete"], case["name"]
         assert summary.provenance == expected["provenance"], case["name"]
+
+
+def test_fos_usage_utc_date_helpers_and_ratchet_compliance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """fos_usage uses date_utils (ensure_utc / parse_hour_key) and satisfies check_no_raw_dateparse.sh."""
+    import re
+    import subprocess
+    from datetime import UTC, datetime, timedelta, timezone
+    from pathlib import Path
+
+    from backend.core.metadata import fos_usage
+
+    captured_params: list[tuple[object, ...]] = []
+
+    class FakeCon:
+        def execute(self, _sql: str, params=()):
+            captured_params.append(tuple(params))
+            return self
+
+        def fetchall(self):
+            if len(captured_params) == 1:
+                return [("2026-06-01T12:00:00Z", GIB, 2)]
+            return []
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(fos_usage, "_ul", lambda _sid: FakeCon())
+    monkeypatch.setattr(fos_usage, "open_readonly", lambda _sid: FakeCon())
+
+    # Naive start and non-UTC offset end must both normalize cleanly via ensure_utc:
+    naive_start = datetime(2026, 6, 4, 10, 0, 0)
+    est = timezone(timedelta(hours=-4))
+    offset_end = datetime(2026, 6, 4, 10, 0, 0, tzinfo=est)  # 14:00:00Z
+    records = fos_usage.cloud_copy_deletion_records_in_window("svc-fos", naive_start, offset_end, minimum_days=7)
+    assert len(records) == 1
+    assert captured_params[0] == ("svc-fos", "2026-05-28T10:00:00Z", "2026-06-04T14:00:00Z")
+
+    # Valid 13-char YYYY-MM-DDTHH rolls over midnight cleanly via parse_hour_key:
+    captured_params.clear()
+    fos_usage.get_usage_operation_buckets("svc-fos", "2026-06-04T23:15:00Z", "2026-06-05T02:00:00.000Z", "hour")
+    assert captured_params[0][5] == "2026-06-05T00:00:00.000Z"
+
+    # Malformed non-13-char hour prefix ("2026-06-04T5") must NOT be misparsed as 05:00
+    # (which inverted SQLite ASCII bounds '2026-06-04T5' < '2026-06-04T06...'):
+    captured_params.clear()
+    fos_usage.get_usage_operation_buckets("svc-fos", "2026-06-04T5", "2026-06-05T02:00:00.000Z", "hour")
+    assert captured_params[0][5] == "2026-06-04T5:59:59.999Z"
+
+    # Verify fos_usage.py raw date-parse count stays within B5 ratchet baseline (<= 2):
+    fos_src = Path(fos_usage.__file__).read_text(encoding="utf-8")
+    raw_sites = [
+        line
+        for line in fos_src.splitlines()
+        if not line.lstrip().startswith("#")
+        and re.search(r"strptime\(|fromisoformat\(|replace\(tzinfo=(UTC|timezone\.utc)", line)
+    ]
+    assert len(raw_sites) <= 2, f"fos_usage.py exceeds B5 raw date-parse baseline (found {len(raw_sites)}): {raw_sites}"
+
+    repo_root = Path(fos_usage.__file__).resolve().parents[3]
+    ratchet_script = repo_root / "scripts" / "check_no_raw_dateparse.sh"
+    if (repo_root / ".git").exists() and ratchet_script.exists():
+        proc = subprocess.run(["bash", str(ratchet_script)], cwd=str(repo_root), capture_output=True, text=True)
+        assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+    assert naive_start.replace(tzinfo=UTC) < offset_end.astimezone(UTC)

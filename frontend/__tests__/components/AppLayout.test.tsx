@@ -225,6 +225,28 @@ test('does not render watermark for non-analyst users', () => {
   expect(screen.queryByTestId('analyst-watermark')).not.toBeInTheDocument()
 })
 
+test('reserves FilterBar height while bootstrap is loading on analytical routes to prevent CLS', () => {
+  vi.mocked(usePathname).mockReturnValue('/dashboard')
+  act(() => {
+    useServiceStore.setState({ activeServiceId: null, services: [] })
+  })
+  vi.mocked(useBootstrap).mockReturnValue(partial<ReturnType<typeof useBootstrap>>({
+    data: undefined,
+    isSuccess: false,
+    isLoading: true,
+  }))
+
+  renderWithQueryClient(<AppLayout><div>Content</div></AppLayout>)
+  const placeholder = screen.getByTestId('filter-bar-placeholder')
+  expect(placeholder).toBeInTheDocument()
+  expect(placeholder.className).toContain('min-h-[89px]')
+
+  cleanup()
+  vi.mocked(usePathname).mockReturnValue('/insights')
+  renderWithQueryClient(<AppLayout><div>Content</div></AppLayout>)
+  expect(screen.queryByTestId('filter-bar-placeholder')).not.toBeInTheDocument()
+})
+
 test('keeps anonymous visitors on sign-in before the analyst role hydrates', async () => {
   vi.mocked(usePathname).mockReturnValue('/share-login')
   const replace = vi.fn()

@@ -830,6 +830,7 @@ fn resolve_brokered_token(
     }
     match context.secret(&service.fastly_token_ref) {
         Ok(tok) if !tok.is_empty() => Ok(tok),
+        Err(e) if e.status >= 500 => Err(e),
         _ => Err(Error::new(403, "fastly_token_scope_insufficient")),
     }
 }
@@ -941,7 +942,7 @@ fn find_store_by_name(
         return Err(Error::new(403, "fastly_token_scope_insufficient"));
     }
     if !(200..300).contains(&status) {
-        return Ok(None);
+        return Err(Error::new(502, "store_lookup_failed"));
     }
     let items = if let Some(arr) = resp.as_array() {
         arr.clone()
@@ -1493,11 +1494,10 @@ fn ensure_scorer_stores_step(
     if cfg_list_status == 401 || cfg_list_status == 403 {
         return Err(Error::new(403, "fastly_token_scope_insufficient"));
     }
-    let cfg_items = if (200..300).contains(&cfg_list_status) {
-        store_items(&cfg_list_resp)
-    } else {
-        &[]
-    };
+    if !(200..300).contains(&cfg_list_status) {
+        return Err(Error::new(502, "store_lookup_failed"));
+    }
+    let cfg_items = store_items(&cfg_list_resp);
 
     let keys_name = keys_store_name(&scorer_sid);
     let keys_store_id = if let Some(found) = cfg_items.iter().find(|it| it["name"] == keys_name) {

@@ -737,8 +737,8 @@ describe('Alerts & Insights Pages', () => {
       expect(tablist.className).toContain('lg:flex-nowrap')
 
       const grid = screen.getByTestId('insights-grid')
-      expect(grid.className).toContain('min-h-[300px]')
-      expect(grid.className).toContain('[contain-intrinsic-size:300px]')
+      expect(grid.className).toContain('min-h-[calc(100vh-14rem)]')
+      expect(grid.className).toContain('[contain-intrinsic-size:700px]')
       expect(grid.className).toContain('[content-visibility:auto]')
     })
 
@@ -796,8 +796,8 @@ describe('Alerts & Insights Pages', () => {
       })
 
       const emptyPass = screen.getByTestId('insights-empty-pass')
-      expect(emptyPass.className).toContain('min-h-[300px]')
-      expect(emptyPass.className).toContain('[contain-intrinsic-size:300px]')
+      expect(emptyPass.className).toContain('min-h-[calc(100vh-14rem)]')
+      expect(emptyPass.className).toContain('[contain-intrinsic-size:700px]')
       expect(emptyPass.className).toContain('[content-visibility:auto]')
     })
   })

@@ -15,7 +15,7 @@ from typing import Any
 
 from backend import config
 from backend.core.clickhouse import ClickHouseClient
-from backend.core.share_db import CMCD_SESSION_ALIAS_KEYS, SHARED_PII_KEYS
+from backend.core.share_db import CMCD_SESSION_ALIAS_KEYS, SHARED_PII_KEYS, is_saved_view_pii_key
 from backend.high_scale._common import clickhouse_string_literal
 
 logger = logging.getLogger("backend.high_scale.postgres_control")
@@ -28,7 +28,10 @@ MIN_SECRET_BYTES = 32
 MIN_DISTINCT_SECRET_BYTES = 8
 REDACTED = "[redacted]"
 MASKED_KEYS = tuple(sorted(SHARED_PII_KEYS))
-_MAP_MASKED_KEYS = tuple(sorted(SHARED_PII_KEYS | CMCD_SESSION_ALIAS_KEYS | {"cmcd.sid", "cmcd.cid", "cmcd.session"}))
+_MAP_MASKED_KEYS = tuple(
+    sorted(SHARED_PII_KEYS | CMCD_SESSION_ALIAS_KEYS | {"origin_ip", "cmcd.sid", "cmcd.cid", "cmcd.session"})
+)
+_MAP_MASKED_NONWORD_KEYS = tuple(sorted({re.sub(r"[^a-z0-9]+", "", k.lower()) for k in _MAP_MASKED_KEYS}))
 _DATABASE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
 _PROFILE_SETTINGS = (
     "readonly = 1, additional_table_filters CHANGEABLE_IN_READONLY, "
@@ -81,14 +84,35 @@ def _redaction(name: str, type_: str, keys: str) -> str | None:
         match = re.fullmatch(r"Map\((.+?),\s*(.+)\)", type_)
         if not match or "String" not in match.group(1) or "String" not in match.group(2):
             raise RuntimeError(f"cannot redact column {name} of type {type_}")
+        canon_expr = "trim(BOTH '_' FROM replaceRegexpAll(lower(k), '[^a-z0-9_]+', '_'))"
+        stripped_expr = (
+            "trim(BOTH '_' FROM replaceRegexpOne(replaceRegexpAll("
+            "replaceRegexpOne(lower(k), '^(?:x?filter_)?(?:_cf_)?', ''), '[^a-z0-9_]+', '_'), '_[0-9]+$', ''))"
+        )
+        nw_keys = ", ".join(_literal(nk) for nk in _MAP_MASKED_NONWORD_KEYS)
+        cmcd_extra = " OR lower(k) = 'session'" if name.lower() == "cmcd" else ""
         return (
-            f"mapApply((k, v) -> (k, if(lower(k) IN ({keys}) AND NOT (isNull(v) OR v = ''), {redacted}, v)), "
-            f"`{name}`) AS `{name}`"
+            f"mapApply((k, v) -> (k, if((lower(k) IN ({keys}) OR {canon_expr} IN ({keys}) "
+            f"OR {stripped_expr} IN ({keys}) OR replaceRegexpAll({stripped_expr}, '_', '') IN ({nw_keys}){cmcd_extra}) "
+            f"AND NOT (isNull(v) OR v = ''), {redacted}, v)), `{name}`) AS `{name}`"
         )
     col_lower = name.lower()
+    col_canon = re.sub(r"[^a-z0-9_]+", "_", col_lower).strip("_")
+    col_stripped = re.sub(
+        r"_\d+$",
+        "",
+        re.sub(
+            r"[^a-z0-9_]+",
+            "_",
+            col_lower.removeprefix("xfilter_").removeprefix("filter_").removeprefix("_cf_"),
+        ).strip("_"),
+    )
     if (
         col_lower in MASKED_KEYS
         or col_lower in _MAP_MASKED_KEYS
+        or col_canon in _MAP_MASKED_KEYS
+        or col_stripped in _MAP_MASKED_KEYS
+        or is_saved_view_pii_key(name)
         or (col_lower.startswith("_cf_") and col_lower.removeprefix("_cf_") in _MAP_MASKED_KEYS)
     ):
         if "String" not in type_:

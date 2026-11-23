@@ -351,7 +351,7 @@ fn encode_catalog_object<T: Serialize>(
 
 type HeadDaySnapshot<'a> = (&'a BTreeMap<i64, String>, &'a BTreeMap<i64, Statistics>);
 
-fn put_manifest<R: Runtime>(
+pub(crate) fn put_manifest<R: Runtime>(
     store: &Store<'_, R>,
     manifest: &Manifest,
     reset_generation: Option<u64>,
@@ -378,7 +378,12 @@ fn put_manifest<R: Runtime>(
             );
         }
     }
-    let (key, body) = encode_catalog_object(&scope(store.service), "manifest-", &val, limit)?;
+    let prefix_tag = format!(
+        "manifest-s-{}-rev-{:020}-",
+        manifest.service_id,
+        u64::MAX - manifest.generation
+    );
+    let (key, body) = encode_catalog_object(&scope(store.service), &prefix_tag, &val, limit)?;
     store.put_verified(&key, body)?;
     Ok(key)
 }
@@ -409,6 +414,8 @@ struct Preparing {
     touched: u64,
     days: BTreeMap<i64, Day>,
     published: BTreeMap<i64, String>,
+    #[serde(default)]
+    published_statistics: BTreeMap<i64, Statistics>,
     manifest: Option<String>,
     #[serde(default)]
     proofs: BTreeMap<i64, Proof>,
@@ -511,6 +518,7 @@ pub fn prepare_reserving<R: Runtime>(
             touched: runtime.now(),
             days: BTreeMap::new(),
             published: BTreeMap::new(),
+            published_statistics: BTreeMap::new(),
             manifest: None,
             proofs: BTreeMap::new(),
             blocks: BTreeMap::new(),
@@ -726,7 +734,11 @@ pub fn prepare_reserving<R: Runtime>(
         parents,
     };
     let scope_prefix = scope(store.service);
-    let now_s = runtime.now() as i64;
+    let now_s =
+        time::OffsetDateTime::parse(&work.at, &time::format_description::well_known::Rfc3339)
+            .ok()
+            .map(|dt| dt.unix_timestamp())
+            .unwrap_or_else(|| runtime.now() as i64);
     let mut computed_days: BTreeMap<i64, (Day, String, Vec<u8>)> = BTreeMap::new();
     let mut preview_days = head.days.clone();
     let mut preview_stats = head.statistics.clone();
@@ -827,8 +839,27 @@ pub fn prepare_reserving<R: Runtime>(
             computed_days.insert(*day, (index, day_key, day_body));
         } else {
             preview_days.insert(*day, work.published[day].clone());
-            preview_stats.insert(*day, index.statistics.clone());
+            let stats = work
+                .published_statistics
+                .get(day)
+                .cloned()
+                .unwrap_or_else(|| index.statistics.clone());
+            preview_stats.insert(*day, stats);
         }
+    }
+    for day in &days {
+        if work.published.contains_key(day) {
+            continue;
+        }
+        if runtime.admin_remaining_calls() <= reserve + 1 || !admitted(store) {
+            return pending(&mut work);
+        }
+        let (index, day_key, day_body) = computed_days
+            .remove(day)
+            .ok_or("catalog_preparation_invalid")?;
+        store.put_verified(&day_key, day_body)?;
+        work.published.insert(*day, day_key);
+        work.published_statistics.insert(*day, index.statistics);
     }
     if work.manifest.is_none() {
         if runtime.admin_remaining_calls() <= reserve + 1 || !admitted(store) {
@@ -845,22 +876,9 @@ pub fn prepare_reserving<R: Runtime>(
     }
     let key = work.manifest.clone().ok_or("catalog_preparation_invalid")?;
     for day in &days {
-        if work.published.contains_key(day) {
-            continue;
+        if let Some(stats) = preview_stats.get(day) {
+            head.statistics.insert(*day, stats.clone());
         }
-        if runtime.admin_remaining_calls() <= reserve + 1 || !admitted(store) {
-            return pending(&mut work);
-        }
-        let (index, day_key, day_body) = computed_days
-            .remove(day)
-            .ok_or("catalog_preparation_invalid")?;
-        store.put_verified(&day_key, day_body)?;
-        work.published.insert(*day, day_key);
-        work.days.insert(*day, index);
-    }
-    for day in &days {
-        head.statistics
-            .insert(*day, work.days[day].statistics.clone());
     }
     head.days.extend(work.published);
     head.version = VERSION;
@@ -1014,6 +1032,9 @@ pub fn retire_reserving<R: Runtime>(store: &Store<'_, R>, reserve: u32) -> Resul
         }
         None => None,
     };
+    if let Some((day_key, day_body)) = encoded_partial {
+        store.put_verified(&day_key, day_body)?;
+    }
     let key = put_manifest(
         store,
         &manifest,
@@ -1022,9 +1043,6 @@ pub fn retire_reserving<R: Runtime>(store: &Store<'_, R>, reserve: u32) -> Resul
         Some((&next_days, &next_stats)),
         MANIFEST_LIMIT,
     )?;
-    if let Some((day_key, day_body)) = encoded_partial {
-        store.put_verified(&day_key, day_body)?;
-    }
     catalog.days = next_days;
     catalog.statistics = next_stats;
     catalog.hour_bundles.retain(|hour, _| *hour >= cutoff);

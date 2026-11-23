@@ -104,6 +104,10 @@ pub struct Cursor {
     pub pending: Pending,
     pub audit_seq: Option<u64>,
     pub svc_outbox_archived: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub svc_zero_anchor: Option<String>,
+    #[serde(default)]
+    pub svc_zero_virtual_base: u64,
     pub last_flush_s: u64,
     pub expired: u64,
     pub dropped: u64,
@@ -153,6 +157,12 @@ struct Manifest {
     outbox_keys: Vec<String>,
     auth_keys: Vec<String>,
     svc_range: (u64, u64),
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    svc_virtual_base: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    svc_zero_anchor: Option<String>,
+    #[serde(default)]
+    svc_zero_virtual_base: u64,
     notes: Notes,
     outputs: Vec<String>,
     next_cursor: Cursor,
@@ -454,8 +464,26 @@ enum SourceId {
 
 type LogRow = (LogKind, Value);
 
-fn read_source(runtime: &impl Runtime, sid: &str, id: &SourceId) -> Result<Vec<LogRow>, String> {
-    read_source_with(runtime, sid, id, &Kept::default(), None)
+fn svc_entry_anchor(entry: &Value) -> String {
+    let canonical = json!([
+        entry.get("at"),
+        entry.get("event"),
+        entry.get("actor"),
+        entry.get("job_id"),
+        entry.get("config_version"),
+        entry.get("source"),
+        entry,
+    ]);
+    hex::encode(Sha256::digest(canonical.to_string().as_bytes()))
+}
+
+fn read_source(
+    runtime: &impl Runtime,
+    sid: &str,
+    id: &SourceId,
+    svc_virtual_base: Option<u64>,
+) -> Result<Vec<LogRow>, String> {
+    read_source_with(runtime, sid, id, &Kept::default(), None, svc_virtual_base)
 }
 
 /// Reads one source, taking bucket bodies this execution's scan kept and the `svc:` record
@@ -466,6 +494,7 @@ fn read_source_with(
     id: &SourceId,
     kept: &Kept,
     svc: Option<&Value>,
+    svc_virtual_base: Option<u64>,
 ) -> Result<Vec<LogRow>, String> {
     let mut rows = Vec::new();
     match id {
@@ -518,7 +547,11 @@ fn read_source_with(
                     .map(|record| record.value),
             };
             if let Some(value) = svc.or(fetched.as_ref()) {
-                let base = value["_audit_outbox_base"].as_u64().unwrap_or(0);
+                let raw_base = value["_audit_outbox_base"].as_u64().unwrap_or(0);
+                let base = match svc_virtual_base {
+                    Some(vb) if raw_base == 0 || vb >= raw_base => vb,
+                    _ => raw_base,
+                };
                 for index in *from..*to {
                     let entry = index
                         .checked_sub(base)
@@ -789,7 +822,13 @@ fn build_next_cursor(cursor: &Cursor, manifest: &Manifest, now: u64) -> Cursor {
     if let Some(max_seq) = manifest.auth_keys.iter().filter_map(|k| auth_seq(k)).max() {
         next.audit_seq = Some(max_seq.max(next.audit_seq.unwrap_or(0)));
     }
-    next.svc_outbox_archived = next.svc_outbox_archived.max(manifest.svc_range.1);
+    if manifest.svc_range.0 < manifest.svc_range.1 {
+        next.svc_outbox_archived = manifest.svc_range.1;
+        if let Some(ref anchor) = manifest.svc_zero_anchor {
+            next.svc_zero_anchor = Some(anchor.clone());
+            next.svc_zero_virtual_base = manifest.svc_zero_virtual_base;
+        }
+    }
     next.txn_id = manifest.txn_id.clone();
     next.last_flush_s = now;
     next.expired = 0;
@@ -819,7 +858,12 @@ fn read_manifest_rows(
 ) -> Result<Vec<LogRow>, String> {
     let mut rows = note_rows(sid, manifest);
     for source in manifest_sources(manifest) {
-        rows.extend(read_source(runtime, sid, &source)?);
+        rows.extend(read_source(
+            runtime,
+            sid,
+            &source,
+            manifest.svc_virtual_base,
+        )?);
     }
     Ok(rows)
 }
@@ -887,6 +931,11 @@ fn collect(
             .saturating_sub(after(groups, deletes, svc))
     };
     let mut svc = None;
+    let mut svc_effective_archived = cursor.svc_outbox_archived;
+    let mut svc_virtual_base: Option<u64> = None;
+    let mut svc_zero_anchor: Option<String> = None;
+    let mut svc_zero_virtual_base: u64 = cursor.svc_zero_virtual_base;
+    let mut effective_svc_base: u64 = 0;
     let mut queues: [std::collections::VecDeque<SourceId>; CLASSES] = Default::default();
     queues[0].extend(buckets.into_iter().map(SourceId::Bucket));
     queues[1].extend(outbox.into_iter().map(SourceId::Outbox));
@@ -896,12 +945,47 @@ fn collect(
             let base = record.value["_audit_outbox_base"].as_u64().unwrap_or(0);
             let entries = record.value["_audit_outbox"].as_array();
             let len = entries.map_or(0, Vec::len) as u64;
-            let end = (base + len).min(cursor.svc_outbox_archived.max(base) + MAX_SVC_ENTRIES);
-            let mut seg_start = cursor.svc_outbox_archived.max(base);
+            let first_entry = entries.and_then(|arr| arr.first());
+            let cur_anchor = first_entry.map(svc_entry_anchor);
+            effective_svc_base = if base == 0 && len > 0 {
+                let is_reset = cursor.svc_outbox_archived > 0
+                    && match (&cursor.svc_zero_anchor, &cur_anchor) {
+                        (Some(prev), Some(cur)) => prev != cur,
+                        (None, _) => {
+                            let first_at = first_entry.and_then(|e| e["at"].as_u64()).unwrap_or(0);
+                            cursor.svc_outbox_archived > cursor.svc_zero_virtual_base + len
+                                || (cursor.last_flush_s > 0 && first_at > cursor.last_flush_s)
+                        }
+                        _ => false,
+                    };
+                let vb = if is_reset {
+                    cursor.svc_outbox_archived
+                } else if cursor.svc_zero_anchor.is_some() && cursor.svc_zero_anchor == cur_anchor {
+                    cursor.svc_zero_virtual_base
+                } else {
+                    0
+                };
+                svc_zero_anchor = cur_anchor;
+                svc_zero_virtual_base = vb;
+                if vb > 0 {
+                    svc_virtual_base = Some(vb);
+                }
+                vb
+            } else if len > 0 && cursor.svc_outbox_archived > base + len {
+                let vb = cursor.svc_outbox_archived;
+                svc_virtual_base = Some(vb);
+                vb
+            } else {
+                base
+            };
+            let total = effective_svc_base + len;
+            svc_effective_archived = cursor.svc_outbox_archived.max(effective_svc_base);
+            let end = total.min(svc_effective_archived + MAX_SVC_ENTRIES);
+            let mut seg_start = svc_effective_archived;
             while seg_start < end {
                 let hour_of = |idx: u64| -> u64 {
                     entries
-                        .and_then(|arr| arr.get((idx - base) as usize))
+                        .and_then(|arr| arr.get((idx - effective_svc_base) as usize))
                         .and_then(|e| e["at"].as_u64())
                         .unwrap_or(now)
                         / 3600
@@ -922,6 +1006,9 @@ fn collect(
         cursor_generation: generation,
         start_min: now / 60,
         created_at: now,
+        svc_virtual_base,
+        svc_zero_anchor,
+        svc_zero_virtual_base,
         notes: Notes {
             expired: cursor.expired,
             dropped: cursor.dropped,
@@ -983,7 +1070,14 @@ fn collect(
                 if matches!(source, SourceId::Bucket(_)) && !in_kept {
                     unkept_lookups += 1;
                 }
-                source_rows = read_source_with(runtime, sid, &source, kept, svc.as_ref())?;
+                source_rows = read_source_with(
+                    runtime,
+                    sid,
+                    &source,
+                    kept,
+                    svc.as_ref(),
+                    manifest.svc_virtual_base,
+                )?;
                 let mut next = groups.clone();
                 next.extend(group_count(&source_rows));
                 let extra = usize::from(matches!(source, SourceId::Outbox(_)));
@@ -1022,10 +1116,9 @@ fn collect(
         }
     }
     let svc_end = svc.as_ref().map_or(0, |value| {
-        value["_audit_outbox_base"].as_u64().unwrap_or(0)
-            + value["_audit_outbox"].as_array().map_or(0, Vec::len) as u64
+        effective_svc_base + value["_audit_outbox"].as_array().map_or(0, Vec::len) as u64
     });
-    left |= truncated || manifest.svc_range.1.max(cursor.svc_outbox_archived) < svc_end;
+    left |= truncated || manifest.svc_range.1.max(svc_effective_archived) < svc_end;
     Ok(Collected {
         manifest,
         rows,
@@ -1183,7 +1276,12 @@ fn gc(
     let mut done = manifest.gc_next >= manifest.outbox_keys.len();
     if done && trim > 0 {
         done = runtime.admin_remaining_calls() >= trim + tail
-            && trim_svc_outbox(runtime, sid, manifest.svc_range.1)?;
+            && trim_svc_outbox(
+                runtime,
+                sid,
+                manifest.svc_range.1,
+                manifest.svc_virtual_base,
+            )?;
     }
     if done {
         manifest.gc_done = true;
@@ -1196,12 +1294,21 @@ fn gc(
 
 /// Keeps the newest `SVC_OUTBOX_KEEP` entries, never removing one that is not archived.
 /// A generation conflict leaves the outbox intact; the next tick retries.
-fn trim_svc_outbox(runtime: &impl Runtime, sid: &str, archived: u64) -> Result<bool, String> {
+fn trim_svc_outbox(
+    runtime: &impl Runtime,
+    sid: &str,
+    archived: u64,
+    virtual_base: Option<u64>,
+) -> Result<bool, String> {
     let key = format!("svc:{sid}");
     let Some(record) = runtime.admin_get(&key)? else {
         return Ok(true);
     };
-    let base = record.value["_audit_outbox_base"].as_u64().unwrap_or(0);
+    let raw_base = record.value["_audit_outbox_base"].as_u64().unwrap_or(0);
+    let eff_base = match virtual_base {
+        Some(vb) if vb > raw_base => vb,
+        _ => raw_base,
+    };
     let outbox = record.value["_audit_outbox"]
         .as_array()
         .cloned()
@@ -1209,13 +1316,16 @@ fn trim_svc_outbox(runtime: &impl Runtime, sid: &str, archived: u64) -> Result<b
     let removable = outbox
         .len()
         .saturating_sub(SVC_OUTBOX_KEEP)
-        .min(archived.saturating_sub(base) as usize);
-    if removable == 0 {
+        .min(archived.saturating_sub(eff_base) as usize);
+    let new_base = eff_base + removable as u64;
+    if removable == 0 && new_base == raw_base {
         return Ok(true);
     }
     let mut value = record.value.clone();
-    value["_audit_outbox"] = outbox[removable..].to_vec().into();
-    value["_audit_outbox_base"] = (base + removable as u64).into();
+    if removable > 0 {
+        value["_audit_outbox"] = outbox[removable..].to_vec().into();
+    }
+    value["_audit_outbox_base"] = new_base.into();
     runtime.admin_cas(&key, Some(&record.generation), &value)
 }
 

@@ -130,6 +130,14 @@ it("reports a bounded, redacted error message so a failed query can be diagnosed
       ['JSON Error: bad value "foo\\"AliceRowValue99"', ["AliceRowValue99", "foo"], "Error: JSON Error: bad value [redacted]"],
       ["Binder Error: invalid literal $$SecDollar66$$ in query", ["SecDollar66"], "Error: Binder Error: invalid literal [redacted] in query"],
       ["Binder Error: invalid literal $tag$SecTag55\nSELECT 1$tag$ in query", ["SecTag55", "SELECT 1"], "Error: Binder Error: invalid literal [redacted] in query"],
+      // BUG-T5-ITER27-01: Unicode possessives, plural possessives, trailing SQL backslashes, N'/R' prefixes, unspaced keyword quotes, and raw IPv4:
+      ["Binder Error: café's owner '198.51.100.42' in filter", ["198.51.100.42"], "Error: Binder Error: café's owner [redacted] in filter"],
+      ["Binder Error: users' 'SecAfterPlural' in filter", ["SecAfterPlural"], "Error: Binder Error: users' [redacted] in filter"],
+      ["Binder Error: invalid pattern LIKE '%\\' for client '198.51.100.42'", ["198.51.100.42", "%\\"], "Error: Binder Error: invalid pattern LIKE [redacted] for client [redacted]"],
+      ["Binder Error: invalid pattern LIKE '%\\\\' for client '198.51.100.42'", ["198.51.100.42", "%\\\\"], "Error: Binder Error: invalid pattern LIKE [redacted] for client [redacted]"],
+      ["Parser Error: invalid literal N'198.51.100.42' or n'SecNat88' or R'SecRaw77'", ["198.51.100.42", "SecNat88", "SecRaw77"], "Error: Parser Error: invalid literal [redacted] or [redacted] or [redacted]"],
+      ["Parser Error: syntax error near SELECT'198.51.100.42' or LIKE'SecNoSpace' or WHERE'SecPhrase With Spaces'", ["198.51.100.42", "SecNoSpace", "SecPhrase"], "Error: Parser Error: syntax error near SELECT[redacted] or LIKE[redacted] or WHERE[redacted]"],
+      ["Runtime Error: upstream client 198.51.100.42 timed out", ["198.51.100.42"], "Error: Runtime Error: upstream client [redacted] timed out"],
     ] as const) {
       const advErr = new Error(advMsg);
       const aIdx = events.length;
@@ -231,3 +239,313 @@ it("keeps High-Scale silent and allowlists worker statistics without SQL or toke
     window.removeEventListener("fla:cloud-worker", listener);
   }
 });
+
+it("BUG-T5-ITER27-01: redacts real @duckdb/duckdb-wasm runtime conversion errors over apostrophe-bearing rows", async () => {
+  const { createNodeBackend } = await import("./dashboard/duckdb");
+  const backend = await createNodeBackend();
+  setCloudModeRuntime(true);
+  const events: { state?: string; error?: string }[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    await backend.query("CREATE OR REPLACE TABLE t_apostrophe AS SELECT '/cb?u=O''Brien&tok=SecRowTok99&ip=198.51.100.42' AS url");
+    await expect(
+      measureCloudQuery("query.console", () => backend.query("SELECT CAST(url AS INT) FROM t_apostrophe")),
+    ).rejects.toThrow();
+    const rowErr = events.at(-1)?.error ?? "";
+    expect(rowErr).toContain("Could not convert string [redacted]");
+    for (const leaked of ["Brien", "SecRowTok99", "198.51.100.42"]) {
+      expect(rowErr).not.toContain(leaked);
+    }
+
+    await expect(
+      measureCloudQuery("query.console", () => backend.query("SELECT CAST(E'prefix\\'198.51.100.42' AS INT)")),
+    ).rejects.toThrow();
+    const escErr = events.at(-1)?.error ?? "";
+    expect(escErr).toContain("Could not convert string [redacted]");
+    for (const leaked of ["prefix", "198.51.100.42"]) {
+      expect(escErr).not.toContain(leaked);
+    }
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+    await backend.dispose();
+  }
+});
+
+it("BUG-T5-ITER28-FE-01 & BUG-T5-ITER28-02: redacts internal apostrophe+delimiter URLs, unspaced SQL keyword quotes, name apostrophes, adjacent quotes, and IPv6 literals", async () => {
+  const { createNodeBackend } = await import("./dashboard/duckdb");
+  const backend = await createNodeBackend();
+  setCloudModeRuntime(true);
+  const events: { state?: string; error?: string }[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    for (const [tbl, rawUrl, forbidden] of [
+      [
+        "t_iter28_plural_url",
+        "/search?q=users'' profile&cid=SecCid99&ip6=2001:db8::42",
+        ["SecCid99", "2001:db8::42", "profile", "users"],
+      ],
+      [
+        "t_iter28_sqli_url",
+        "/login?u=admin'';&sid=SecSid88&ip=198.51.100.42",
+        ["SecSid88", "198.51.100.42", "admin"],
+      ],
+    ] as const) {
+      await backend.query(`CREATE OR REPLACE TABLE ${tbl} AS SELECT '${rawUrl}' AS url`);
+      await expect(
+        measureCloudQuery("query.console", () => backend.query(`SELECT CAST(url AS INT) FROM ${tbl}`)),
+      ).rejects.toThrow();
+      const gotReal = events.at(-1)?.error ?? "";
+      expect(gotReal).toContain("Could not convert string [redacted]");
+      for (const frag of forbidden) {
+        expect(gotReal).not.toContain(frag);
+      }
+    }
+
+    for (const [msg, forbidden, expectedExact] of [
+      [
+        "Conversion Error: Could not convert string 'Mozilla/5.0 (users', AliceLaptop)' to INT32",
+        ["AliceLaptop", "Mozilla"],
+        "Error: Conversion Error: Could not convert string [redacted] to INT32",
+      ],
+      [
+        "Conversion Error: invalid string '/docs/users' SecRowTok99' in column",
+        ["SecRowTok99", "users"],
+        "Error: Conversion Error: invalid string [redacted] in column",
+      ],
+      [
+        "Parser Error: syntax error near VALUES' SecVal99'",
+        ["SecVal99"],
+        "Error: Parser Error: syntax error near VALUES[redacted]",
+      ],
+      [
+        "Parser Error: syntax error near SELECT 1 AS' SecretRow99'",
+        ["SecretRow99"],
+        "Error: Parser Error: syntax error near SELECT 1 AS[redacted]",
+      ],
+      [
+        "Parser Error: syntax error near SELECT's SecretRow99'",
+        ["SecretRow99"],
+        "Error: Parser Error: syntax error near SELECT[redacted]",
+      ],
+      [
+        "Parser Error: syntax error near WHERE't SecretRow99'",
+        ["SecretRow99"],
+        "Error: Parser Error: syntax error near WHERE[redacted]",
+      ],
+      [
+        "Binder Error: d'Artagnan filter '.SecDotTok99' and ' SecSpaceTok88'",
+        ["SecDotTok99", "SecSpaceTok88"],
+        "Error: Binder Error: d'Artagnan filter [redacted] and [redacted]",
+      ],
+      [
+        "Binder Error: O'Brien filter '?cid=SecQmark77' failed",
+        ["SecQmark77"],
+        "Error: Binder Error: O'Brien filter [redacted] failed",
+      ],
+      [
+        "Parser Error: syntax error in 'foo'='SecAdjUnclosed33",
+        ["SecAdjUnclosed33", "foo"],
+        "Error: Parser Error: syntax error in [redacted]=[redacted]",
+      ],
+      [
+        "Runtime Error: DB::Exception at 12:34:56 for client 2001:db8:85a3::8a2e:370:7334 or 2001:db8::42 or ::ffff:198.51.100.42",
+        ["2001:db8", "8a2e", "198.51.100.42"],
+        "Error: Runtime Error: DB::Exception at 12:34:56 for client [redacted] or [redacted] or [redacted]",
+      ],
+    ] as const) {
+      const err = new Error(msg);
+      const before = events.length;
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+      const got = events[before + 1]?.error ?? "";
+      for (const frag of forbidden) {
+        expect(got).not.toContain(frag);
+      }
+      expect(got).toBe(expectedExact);
+    }
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+    await backend.dispose();
+  }
+});
+
+it("SEC-T5-ITER29-FE-01 & BUG-T5-ITER29-FE-01: redacts multiline DuckDB casts, double-quoted parse errors, multi-quote strings, IPv6 zone/port, and 2200-trial fuzzer", async () => {
+  const { createNodeBackend } = await import("./dashboard/duckdb");
+  const backend = await createNodeBackend();
+  setCloudModeRuntime(true);
+  const events: { state?: string; error?: string }[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    await backend.query(
+      "CREATE OR REPLACE TABLE t_iter30_adv AS SELECT " +
+        "'/cb?q=users'' SecMultiLine99' || chr(10) || 'line2' AS u_nl, " +
+        "'/up?m=go'' to VIP&u=SecToLeak88' || chr(10) || 'tail' AS u_to, " +
+        "'/q=admin''; SecMid88''; Tail99' AS s_semi, " +
+        "'/search?q=a\" SecDqNl99' || chr(10) || 'line2' AS s_dq_nl",
+    );
+
+    const realQueries: readonly [string, readonly string[]][] = [
+      ["SELECT CAST(u_nl AS INT) FROM t_iter30_adv", ["SecMultiLine99", "users", "line2"]],
+      ["SELECT CAST(u_to AS INT) FROM t_iter30_adv", ["SecToLeak88", "VIP", "tail"]],
+      ["SELECT CAST(s_semi AS STRUCT(a INT)) FROM t_iter30_adv", ["SecMid88", "Tail99", "admin"]],
+      ["SELECT CAST(s_semi AS INT[]) FROM t_iter30_adv", ["SecMid88", "Tail99", "admin"]],
+      ["SELECT CAST(s_dq_nl AS TIMESTAMP) FROM t_iter30_adv", ["SecDqNl99", "search", "line2"]],
+      [
+        "SELECT regexp_matches('x', '[unclosed_SecRegex66_198.51.100.42_2001:db8::42')",
+        ["SecRegex66", "198.51.100.42", "2001:db8", "db8::42"],
+      ],
+    ];
+    for (const [sql, forbidden] of realQueries) {
+      await expect(
+        measureCloudQuery("query.console", () => backend.query(sql)),
+      ).rejects.toThrow();
+      const gotReal = events.at(-1)?.error ?? "";
+      for (const frag of forbidden) {
+        expect(gotReal, `sql=${sql} got=${gotReal}`).not.toContain(frag);
+      }
+    }
+
+    const syntheticCases: readonly [string, readonly string[], string][] = [
+      [
+        "Conversion Error: invalid timestamp field format: \"/search?q=a\" SecDqNl99\nline2\", expected format is (YYYY-MM-DD)",
+        ["SecDqNl99", "search", "line2"],
+        "Error: Conversion Error: invalid timestamp field format: [redacted], expected format is (YYYY-MM-DD)",
+      ],
+      [
+        "Invalid Input Error: Could not parse string \"/u=a\" SecStrp88\ntail\" according to format specifier \"%Y-%m-%d\"",
+        ["SecStrp88", "/u=a"],
+        "Error: Invalid Input Error: Could not parse string [redacted] according to format specifier [redacted]",
+      ],
+      [
+        "Invalid Input Error: Malformed JSON at byte 4 of input: unexpected character. Input: \"{\\\"k\\\":\\\"SecJson99\nline2\\\"}\"",
+        ["SecJson99", "line2"],
+        "Error: Invalid Input Error: Malformed JSON at byte 4 of input: unexpected character. Input: [redacted]",
+      ],
+      [
+        "Conversion Error: invalid string 'O'Brien's users' customers' SecProf99' in column",
+        ["SecProf99", "customers", "users", "Brien"],
+        "Error: Conversion Error: invalid string [redacted] in column",
+      ],
+      [
+        "Conversion Error: invalid string 'Mozilla/5.0 (a', SecUA88') end' in column",
+        ["SecUA88", "Mozilla"],
+        "Error: Conversion Error: invalid string [redacted] in column",
+      ],
+      [
+        "Conversion Error: invalid string '/u=a';SecTwoQuotes88'&z=1' in column",
+        ["SecTwoQuotes88", "/u=a"],
+        "Error: Conversion Error: invalid string [redacted] in column",
+      ],
+      [
+        "Parser Error: syntax error in ('SecIn11','SecIn22','SecUnclosed33",
+        ["SecIn11", "SecIn22", "SecUnclosed33"],
+        "Error: Parser Error: syntax error in ([redacted],[redacted],[redacted]",
+      ],
+      [
+        "Parser Error: syntax error in 'a'+'SecPlusUnclosed22",
+        ["SecPlusUnclosed22"],
+        "Error: Parser Error: syntax error in [redacted]+[redacted]",
+      ],
+      [
+        "Binder Error: N'Djamena '.users' failed",
+        ["users"],
+        "Error: Binder Error: N'Djamena [redacted] failed",
+      ],
+      [
+        "Binder Error: ce n'est '.users' ici",
+        ["users"],
+        "Error: Binder Error: ce n'est [redacted] ici",
+      ],
+      [
+        "Binder Error: B'Elanna and R'lyeh saw 'SecLore77' vs N'SecNat66'",
+        ["SecLore77", "SecNat66"],
+        "Error: Binder Error: B'Elanna and R'lyeh saw [redacted] vs [redacted]",
+      ],
+      [
+        "Runtime Error: DB::Exception at 12:34:56 for fe80::1%eth0 or [fe80::2%en0]:443 or 2001:db8:85a3:0:0:8a2e:370:7334:443 at 09:15:00",
+        ["fe80", "eth0", "en0", "2001:db8", "8a2e", "7334"],
+        "Error: Runtime Error: DB::Exception at 12:34:56 for [redacted] or [[redacted]]:443 or [redacted] at 09:15:00",
+      ],
+    ];
+    for (const [msg, forbidden, expectedExact] of syntheticCases) {
+      const err = new Error(msg);
+      const before = events.length;
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+      const got = events[before + 1]?.error ?? "";
+      for (const frag of forbidden) {
+        expect(got, `msg=${msg}`).not.toContain(frag);
+      }
+      expect(got).toBe(expectedExact);
+    }
+
+    // Deterministic 2,200-trial Mulberry32 property fuzzer across single/double-quoted & multiline templates:
+    let state = 20261123 >>> 0;
+    const rand = () => {
+      state = (state + 0x6d2b79f5) >>> 0;
+      let t = Math.imul(state ^ (state >>> 15), 1 | state);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const pick = <T,>(arr: readonly T[]): T => arr[Math.floor(rand() * arr.length)]!;
+    const frags = [
+      "users' ",
+      "O'Brien's ",
+      "'; ",
+      "', ",
+      "') ",
+      "' to VIP&",
+      "\" ",
+      "\";",
+      "\nline2_",
+      "/cb?x=1&",
+      "198.51.100.42",
+      "fe80::1%eth0",
+      "2001:db8:85a3:0:0:8a2e:370:7334:443",
+    ];
+    const prosePrefixes = [
+      "Binder Error: N'Djamena ",
+      "Binder Error: ce n'est ",
+      "Binder Error: B'Elanna ",
+      "Conversion Error: ",
+    ];
+    for (let trial = 0; trial < 2200; trial += 1) {
+      const sentinel = `SecFz${trial}Z`;
+      const parts = [pick(frags), sentinel, pick(frags), pick(frags)];
+      const payload = parts.join("");
+      const kind = trial % 6;
+      const prefix = pick(prosePrefixes);
+      let rawMsg: string;
+      if (kind === 0) {
+        rawMsg = `${prefix}Could not convert string '${payload}' to INT32 when casting from source column u`;
+      } else if (kind === 1) {
+        rawMsg = `${prefix}Type VARCHAR with value '${payload}' can't be cast to the destination type INTEGER[]`;
+      } else if (kind === 2) {
+        rawMsg = `${prefix}invalid timestamp field format: "${payload}", expected format is (YYYY-MM-DD)`;
+      } else if (kind === 3) {
+        rawMsg = `${prefix}Could not parse string "${payload}" according to format specifier "%Y"`;
+      } else if (kind === 4) {
+        rawMsg = `${prefix}invalid string '${payload}' in column url`;
+      } else {
+        const unclosedPayload = `u=${payload.replace(/[\n)]/g, "_")}`;
+        rawMsg =
+          trial % 12 === 5
+            ? `Parser Error: syntax error in ('a','${unclosedPayload}`
+            : `Parser Error: syntax error in 'a'+'${sentinel}`;
+      }
+      const err = new Error(rawMsg);
+      const before = events.length;
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+      const got = events[before + 1]?.error ?? "";
+      expect(got, `trial=${trial} kind=${kind} raw=${JSON.stringify(rawMsg)} got=${got}`).not.toContain(sentinel);
+      expect(got).not.toContain("198.51.100.42");
+      expect(got).not.toContain("fe80::1");
+      expect(got).not.toContain("eth0");
+      expect(got).not.toContain("2001:db8");
+    }
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+    await backend.dispose();
+  }
+}, 30000);
