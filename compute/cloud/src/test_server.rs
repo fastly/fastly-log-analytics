@@ -65,6 +65,7 @@ impl NativeRuntime {
             .to_string(),
         );
         secrets.insert("front_key".into(), front);
+        secrets.insert("fastly_token".into(), "fixture-token".into());
         let mut random = [0u8; 48];
         getrandom::getrandom(&mut random).map_err(|_| "native random unavailable")?;
         secrets.insert("session_key".into(), auth::encode(&random));

@@ -198,7 +198,7 @@ export const DEFAULT_UNITS: UnitCosts = {
   appRequestsPerDay: 62_000,
   appVcpuMsPerDay: 250_000 + 720 * 795,
   frontRequestsPerDay: 720,
-  // SE-demo, 2026-11-23: 9,136,736 front requests a day at 1 s ≈ 2 checks × 53 POPs × 86,400,
+  // Measured on a live install: 9,136,736 front requests a day at 1 s ≈ 2 checks × 53 POPs × 86,400,
   // and 18.7 GB ≈ 2 KB a probe.
   clockProbeSources: 53,
   clockProbeBytes: 2_000,
