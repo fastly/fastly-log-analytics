@@ -20,6 +20,7 @@ const MAX_RANGE_FILES = 256;
 // count, bounds that scan.
 const MAX_RUM_RANGE_FILES = 2048;
 const MAX_RANGE_BYTES = 64 * 1024 * 1024;
+const MAX_PROJECTED_RANGE_BYTES = 96 * 1024 * 1024;
 const PREFETCH_CONCURRENCY = 6;
 // Projected ranges are mostly a few KiB, so their round trips, not bandwidth, bound a cold load.
 const RANGE_CONCURRENCY = 16;
@@ -233,7 +234,9 @@ export async function ensureCloudRange(
   // The same second-floored bound as the listing below.
   const widerFromMs = wider ? Math.floor(Date.parse(wider.from) / 1000) * 1000 : NaN;
   if (wider && !Number.isFinite(widerFromMs)) throw new Error("Invalid Cloud projection range");
-  const byteLimit = Math.min(projection?.maxBytes ?? MAX_RANGE_BYTES, MAX_RANGE_BYTES);
+  const byteLimit = projection
+    ? Math.min(projection.maxBytes ?? MAX_RANGE_BYTES, MAX_PROJECTED_RANGE_BYTES)
+    : MAX_RANGE_BYTES;
   const engine = getDuckDBEngine();
   const generation = await engine.beginRequest();
   generation.assertCurrent();
