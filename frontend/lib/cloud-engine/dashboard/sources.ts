@@ -101,7 +101,29 @@ const activeSources = new Set<WeakRef<ActiveSourceClosure>>();
 const sourceKeepAlive = new WeakMap<object, ActiveSourceClosure>();
 const pendingSourceClosures = new Set<ActiveSourceClosure>();
 
+// A listed object that answered 404 is remembered for this realm so later reads and pages
+// re-plan around it without another request. Keys are content-named, so one that reappears
+// is a new publish; the TTL only bounds a transient miss right after publication.
+const MISSING_FILE_TTL_MS = 5 * 60_000;
+const knownMissingFiles = new Map<string, number>();
+let knownMissingEpoch = 0;
+
+function knownMissing(scopeKey: string): boolean {
+  const expires = knownMissingFiles.get(scopeKey);
+  if (expires === undefined) return false;
+  if (Date.now() < expires) return true;
+  knownMissingFiles.delete(scopeKey);
+  return false;
+}
+
+function rememberMissing(scopeKey: string, epoch: number): void {
+  if (epoch !== knownMissingEpoch) return;
+  knownMissingFiles.set(scopeKey, Date.now() + MISSING_FILE_TTL_MS);
+}
+
 export function clearBrowserSourceMemoryCaches(): void {
+  knownMissingFiles.clear();
+  knownMissingEpoch += 1;
   bumpStoreMetaEpoch();
   bumpOpfsEpoch();
   for (const ref of activeSources) {
@@ -1049,6 +1071,10 @@ export function browserSource(
     options?.serviceId ? sourceScope(options) : currentCacheScope();
   const fileOwnerScope = (options?: BrowserSourceOptions) =>
     options?.serviceId ? sourceScope(options) : undefined;
+  const missingScopeKey = (
+    options: BrowserSourceOptions | undefined,
+    key: string,
+  ) => JSON.stringify([baseUrl, fileOwnerScope(options) ?? null, key]);
   const fileMemoryIdentity = (
     options: BrowserSourceOptions | undefined,
     identity?: string,
@@ -1508,6 +1534,9 @@ export function browserSource(
           start >= 0 && end > start && (file.size <= 0 || end <= file.size)))
         throw new Error(`Range ${start}-${end} is outside ${file.key}`);
       signal?.throwIfAborted();
+      const missingKey = missingScopeKey(options, file.key);
+      if (knownMissing(missingKey)) throw new MissingCloudFileError(file.key);
+      const missingEpoch = knownMissingEpoch;
       const callEpoch = cacheEpoch;
       const rangeKey = JSON.stringify([
         fileOwnerScope(options) ?? null,
@@ -1541,7 +1570,10 @@ export function browserSource(
             ...(headers ? { headers } : {}),
           });
           try {
-            if (response.status === 404) throw new MissingCloudFileError(file.key);
+            if (response.status === 404) {
+              rememberMissing(missingKey, missingEpoch);
+              throw new MissingCloudFileError(file.key);
+            }
             const range = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(
               response.headers.get("content-range") ?? "",
             );
@@ -1633,6 +1665,9 @@ export function browserSource(
       const url = `${baseUrl}${reqPath}`;
       const cacheUrl = scopedCacheUrl(url, ownerScope, mode?.identity);
       signal?.throwIfAborted();
+      const missingKey = missingScopeKey(options, key);
+      if (knownMissing(missingKey)) throw new MissingCloudFileError(key);
+      const missingEpoch = knownMissingEpoch;
       let inFlight = inFlightFiles.get(cacheUrl);
       const cached = inFlight !== undefined;
       if (!inFlight) {
@@ -1725,7 +1760,10 @@ export function browserSource(
                 server_timing: parseServerTiming(response.headers.get("server-timing")),
                 page_load_id: pageLoadId,
               });
-              if (response.status === 404) throw new MissingCloudFileError(key);
+              if (response.status === 404) {
+                rememberMissing(missingKey, missingEpoch);
+                throw new MissingCloudFileError(key);
+              }
               throw new Error(`File ${key} failed (${response.status})`);
             }
             const bytes = await response.arrayBuffer();

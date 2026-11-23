@@ -321,6 +321,10 @@ rollups (`runRollup`, behind /insights, /network, /origin, /performance,
 re-lists that range per window when a CMCD bundle is gone; /rum reads raw
 Parquet, since each RUM summary is the only one for its window; and the
 dashboard engine reads the summary's raw files, as for any unreadable summary.
+The browser source remembers a 404'd key per base URL and service for five
+minutes (or until the caches are cleared), so later reads and pages throw
+`MissingCloudFileError` at once instead of requesting it again; each JS realm
+(page and worker) still sees one 404 per key.
 
 Cost (bench `summary_bench`, release, native; noisy shared machine):
 

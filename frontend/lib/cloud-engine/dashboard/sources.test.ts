@@ -8,6 +8,7 @@ import {
   ROLLUP_CACHE_VERSION,
   ROLLUP_SEMANTICS,
   browserSource,
+  clearBrowserSourceMemoryCaches,
   clearRequestLogCaches,
   dashboardCacheIdentity,
   dashboardCacheScope,
@@ -135,6 +136,32 @@ describe("browserSource", () => {
     const file = { key: "flp/processed/summary_bundle/request/year=2026/open_bundle=21.parquet", start: "", end: "", size: 100, rows: 1 };
     await expect(source.fetchRange(file, 10, 13)).rejects.toEqual(new MissingCloudFileError(file.key));
     await expect(source.fetchFile(file.key)).rejects.toEqual(new MissingCloudFileError(file.key));
+  });
+
+  it("remembers a listed file whose object is gone, so later pages don't request it again", async () => {
+    const fetcher = vi.fn(async () => new Response("Not Found", { status: 404 }));
+    vi.stubGlobal("fetch", fetcher);
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+    const file = { key: "flp/processed/summary_bundle/request/year=2026/open_bundle=22-gone.parquet", start: "", end: "", size: 100, rows: 1 };
+    await expect(browserSource("", { serviceId: "svc" }).fetchFile(file.key)).rejects.toEqual(new MissingCloudFileError(file.key));
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    const nextPage = browserSource("", { serviceId: "svc" });
+    await expect(nextPage.fetchFile(file.key)).rejects.toEqual(new MissingCloudFileError(file.key));
+    await expect(nextPage.fetchRange(file, 10, 13)).rejects.toEqual(new MissingCloudFileError(file.key));
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    await expect(browserSource("", { serviceId: "other" }).fetchFile(file.key)).rejects.toEqual(new MissingCloudFileError(file.key));
+    expect(fetcher).toHaveBeenCalledTimes(2);
+
+    now.mockReturnValue(1_000_000 + 5 * 60_000 + 1);
+    await expect(nextPage.fetchRange(file, 10, 13)).rejects.toEqual(new MissingCloudFileError(file.key));
+    expect(fetcher).toHaveBeenCalledTimes(3);
+
+    clearBrowserSourceMemoryCaches();
+    await expect(nextPage.fetchFile(file.key)).rejects.toEqual(new MissingCloudFileError(file.key));
+    expect(fetcher).toHaveBeenCalledTimes(4);
+    now.mockRestore();
   });
 
   it("opens a listed file for selective reads without a size probe", async () => {
