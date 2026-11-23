@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import gzip
+import inspect
 import io
 import json
 import math
@@ -1702,6 +1703,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
         *,
         touches_request: bool = True,
         derived_str_cols: frozenset[str] = frozenset(),
+        derived_bool_cols: frozenset[str] = frozenset(),
         derived_qualifiers: frozenset[str] = frozenset(),
         unqualified_derived: bool = False,
     ) -> str:
@@ -1750,10 +1752,15 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
             (r"IN\s*\(\s*'true'\s*\)", "IN ('true', '1')"),
             (r"NOT\s+IN\s*\(\s*'true'\s*\)", "NOT IN ('true', '1')"),
             (r"IN\s*\(\s*'false'\s*\)", "IN ('false', '0', '')"),
-            (r"=\s*'true'", "IN ('true', '1')"),
-            (r"=\s*'false'", "IN ('false', '0', '')"),
-            (r"=\s*\btrue\b", "IN ('true', '1')"),
-            (r"=\s*\bfalse\b", "IN ('false', '0', '')"),
+            (r"NOT\s+IN\s*\(\s*'false'\s*\)", "IN ('true', '1')"),
+            (r"(?:!=|<>)\s*'true'", "NOT IN ('true', '1')"),
+            (r"(?:!=|<>)\s*'false'", "IN ('true', '1')"),
+            (r"(?:!=|<>)\s*\btrue\b", "NOT IN ('true', '1')"),
+            (r"(?:!=|<>)\s*\bfalse\b", "IN ('true', '1')"),
+            (r"(?<![!<>])=\s*'true'", "IN ('true', '1')"),
+            (r"(?<![!<>])=\s*'false'", "IN ('false', '0', '')"),
+            (r"(?<![!<>])=\s*\btrue\b", "IN ('true', '1')"),
+            (r"(?<![!<>])=\s*\bfalse\b", "IN ('false', '0', '')"),
         )
         if touches_request:
             for b_field in sorted(_REQUEST_BOOLEAN_CF_FIELDS):
@@ -1786,7 +1793,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
 
             for d_col in sorted(derived_str_cols):
                 col_pat = rf"(?<![A-Za-z0-9_.\"'`])({_single_ident_re}\s*\.\s*)?(\b{re.escape(d_col)}\b)"
-                if d_col in _REQUEST_BOOLEAN_CF_FIELDS:
+                if d_col in _REQUEST_BOOLEAN_CF_FIELDS or d_col in derived_bool_cols:
                     for b_pat, b_repl in _bool_rules:
 
                         def _sub_bool(m: re.Match[str], _repl: str = b_repl) -> str:
@@ -1827,12 +1834,34 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
             seg_sql = re.sub(rf"__fla_str_lit_{lit_nonce}_(\d+)__", lambda m: saved_lits[int(m.group(1))], seg_sql)
         return seg_sql
 
+    @dataclass(frozen=True)
+    class _DerivedCfSchema:
+        str_cols: frozenset[str] = frozenset()
+        bool_cols: frozenset[str] = frozenset()
+        positional: tuple[tuple[bool, bool], ...] | None = None
+
+    def _remap_derived_cf_schema(schema: _DerivedCfSchema, col_names: list[str]) -> _DerivedCfSchema:
+        if schema.positional is not None:
+            new_str: set[str] = set()
+            new_bool: set[str] = set()
+            new_pos: list[tuple[bool, bool]] = []
+            for idx_c, c_name in enumerate(col_names):
+                is_s, is_b = schema.positional[idx_c] if idx_c < len(schema.positional) else (False, False)
+                if is_s:
+                    new_str.add(c_name)
+                if is_b:
+                    new_bool.add(c_name)
+                new_pos.append((is_s, is_b))
+            return _DerivedCfSchema(frozenset(new_str), frozenset(new_bool), tuple(new_pos))
+        keep = frozenset(col_names)
+        return _DerivedCfSchema(schema.str_cols & keep, schema.bool_cols & keep, None)
+
     def _rewrite_tokens(
         tokens: list[tuple[str, str]],
-        inherited_ctes: dict[str, tuple[set[str], frozenset[str]]],
+        inherited_ctes: dict[str, tuple[set[str], _DerivedCfSchema]],
         *,
         is_subquery: bool = False,
-    ) -> tuple[str, set[str], set[str], frozenset[str]]:
+    ) -> tuple[str, set[str], set[str], _DerivedCfSchema]:
         prefix_wrap: list[str] = []
         suffix_wrap: list[str] = []
         while (enc := _has_enclosing_parens(tokens)) is not None:
@@ -1850,7 +1879,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
         all_canonicals: set[str] = set()
         sig = _sig_indices(tokens)
         if not sig:
-            return _wrap("".join(t for _, t in tokens)), set(), set(), frozenset()
+            return _wrap("".join(t for _, t in tokens)), set(), set(), _DerivedCfSchema()
 
         out_prefix = ""
         if tokens[sig[0]][0] == "IDENT" and tokens[sig[0]][1].upper() == "WITH":
@@ -1913,12 +1942,12 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 close_idx = _find_matching_paren(tokens, p2)
                 if not _is_subquery_tokens(tokens[p2 + 1 : close_idx]):
                     break
-                inner_sql, inner_domains, inner_canonicals, inner_str_cf = _rewrite_tokens(
+                inner_sql, inner_domains, inner_canonicals, inner_schema = _rewrite_tokens(
                     tokens[p2 + 1 : close_idx], ctes, is_subquery=True
                 )
                 if explicit_cte_cols is not None:
-                    inner_str_cf = inner_str_cf & frozenset(explicit_cte_cols)
-                ctes[cte_name.lower()] = (inner_domains, inner_str_cf)
+                    inner_schema = _remap_derived_cf_schema(inner_schema, explicit_cte_cols)
+                ctes[cte_name.lower()] = (inner_domains, inner_schema)
                 all_canonicals |= inner_canonicals
                 buf.extend(tk for _, tk in tokens[i_tok : p2 + 1])
                 buf.append(inner_sql)
@@ -1939,7 +1968,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 out_prefix = "".join(buf)
                 tokens = tokens[i_tok:]
                 if not tokens:
-                    return _wrap(out_prefix), set(), all_canonicals, frozenset()
+                    return _wrap(out_prefix), set(), all_canonicals, _DerivedCfSchema()
 
         top_sig = _sig_indices(tokens)
         top_sig_pos = {idx: pos for pos, idx in enumerate(top_sig)}
@@ -2063,36 +2092,60 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
 
         all_domains: set[str] = set()
         all_str_cf_cols: set[str] = set()
+        all_bool_cf_cols: set[str] = set()
+        merged_positional: tuple[tuple[bool, bool], ...] | None = None
+        first_branch = True
         rendered_parts: list[str] = [out_prefix]
         for b_tokens, sep_tokens in branches:
             if _has_enclosing_parens(b_tokens) is not None:
-                b_sql, b_domains, b_canonicals, b_str_cf = _rewrite_tokens(b_tokens, ctes, is_subquery=is_subquery)
+                b_sql, b_domains, b_canonicals, b_schema = _rewrite_tokens(b_tokens, ctes, is_subquery=is_subquery)
             else:
-                b_sql, b_domains, b_canonicals, b_str_cf = _rewrite_single_branch(
+                b_sql, b_domains, b_canonicals, b_schema = _rewrite_single_branch(
                     b_tokens, ctes, is_subquery=is_subquery
                 )
             all_domains |= b_domains
             all_canonicals |= b_canonicals
-            all_str_cf_cols |= b_str_cf
+            all_str_cf_cols |= b_schema.str_cols
+            all_bool_cf_cols |= b_schema.bool_cols
+            if first_branch:
+                merged_positional = b_schema.positional
+                first_branch = False
+            elif (
+                merged_positional is not None
+                and b_schema.positional is not None
+                and len(merged_positional) == len(b_schema.positional)
+            ):
+                merged_positional = tuple(
+                    (a_s or b_s, a_b or b_b)
+                    for (a_s, a_b), (b_s, b_b) in zip(merged_positional, b_schema.positional, strict=True)
+                )
+            else:
+                merged_positional = None
             rendered_parts.append(b_sql)
             rendered_parts.extend(tk for _, tk in sep_tokens)
-        return _wrap("".join(rendered_parts)), all_domains, all_canonicals, frozenset(all_str_cf_cols)
+        return (
+            _wrap("".join(rendered_parts)),
+            all_domains,
+            all_canonicals,
+            _DerivedCfSchema(frozenset(all_str_cf_cols), frozenset(all_bool_cf_cols), merged_positional),
+        )
 
     def _rewrite_single_branch(
         tokens: list[tuple[str, str]],
-        ctes: dict[str, tuple[set[str], frozenset[str]]],
+        ctes: dict[str, tuple[set[str], _DerivedCfSchema]],
         *,
         is_subquery: bool = False,
-    ) -> tuple[str, set[str], set[str], frozenset[str]]:
+    ) -> tuple[str, set[str], set[str], _DerivedCfSchema]:
         domains: set[str] = set()
         branch_canonicals: set[str] = set()
         alias_domains: dict[str, set[str]] = {}
-        alias_str_cf: dict[str, frozenset[str]] = {}
+        alias_schema: dict[str, _DerivedCfSchema] = {}
         branch_inherited_str_cf: set[str] = set()
+        branch_inherited_bool_cf: set[str] = set()
         processed: list[tuple[str, str]] = []
         subquery_placeholders: dict[str, str] = {}
         subquery_domains: dict[str, set[str]] = {}
-        subquery_str_cf: dict[str, frozenset[str]] = {}
+        subquery_schema: dict[str, _DerivedCfSchema] = {}
         sub_nonce = _secrets.token_hex(6)
 
         i = 0
@@ -2115,12 +2168,12 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                     and inner[inner_sig[0]][1].upper() == "FROM"
                 )
                 if not is_trim_from and _is_subquery_tokens(inner):
-                    sub_sql, sub_doms, sub_canons, sub_str_cf = _rewrite_tokens(inner, ctes, is_subquery=True)
+                    sub_sql, sub_doms, sub_canons, sub_sch = _rewrite_tokens(inner, ctes, is_subquery=True)
                     branch_canonicals |= sub_canons
                     ph = f"__fla_subq_{sub_nonce}_{len(subquery_placeholders)}__"
                     subquery_placeholders[ph] = f"({sub_sql})"
                     subquery_domains[ph] = sub_doms
-                    subquery_str_cf[ph] = sub_str_cf
+                    subquery_schema[ph] = sub_sch
                     processed.append(("SUBQ", ph))
                     i = close_idx + 1
                     continue
@@ -2164,14 +2217,33 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 or (after[0] == "IDENT" and after[1].upper() in _SQL_CLAUSE_STOPWORDS)
             )
 
-        def _record_table_alias(a_idx: int, item_doms: set[str], item_str_cf: frozenset[str]) -> None:
+        def _record_table_alias(a_idx: int, item_doms: set[str], item_sch: _DerivedCfSchema) -> None:
             table_alias_idxs.add(a_idx)
             raw_alias = processed[a_idx][1]
             unq_low = _unquote_sql_ident(raw_alias).lower()
             alias_domains[raw_alias.lower()] = item_doms
             alias_domains[unq_low] = item_doms
-            alias_str_cf[raw_alias.lower()] = item_str_cf
-            alias_str_cf[unq_low] = item_str_cf
+            alias_schema[raw_alias.lower()] = item_sch
+            alias_schema[unq_low] = item_sch
+
+        def _consume_optional_col_alias_list(next_s_pos: int) -> tuple[list[str] | None, int]:
+            if next_s_pos < len(sig_idxs) and processed[sig_idxs[next_s_pos]] == ("OP", "("):
+                lp_idx = sig_idxs[next_s_pos]
+                rp_idx = _find_matching_paren(processed, lp_idx)
+                if _is_valid_lex_ident_list(processed[lp_idx + 1 : rp_idx]):
+                    col_names = [
+                        _unquote_sql_ident(tk).lower()
+                        for kd, tk in processed[lp_idx + 1 : rp_idx]
+                        if kd in ("IDENT", "DQUOTE")
+                    ]
+                    for c_tok_idx in range(lp_idx + 1, rp_idx):
+                        if processed[c_tok_idx][0] in ("IDENT", "DQUOTE"):
+                            table_alias_idxs.add(c_tok_idx)
+                    end_s_pos = next_s_pos + 1
+                    while end_s_pos < len(sig_idxs) and sig_idxs[end_s_pos] <= rp_idx:
+                        end_s_pos += 1
+                    return col_names, end_s_pos
+            return None, next_s_pos
 
         table_token_idxs: dict[int, str] = {}
         table_alias_idxs: set[int] = set()
@@ -2299,9 +2371,8 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                     continue
                 if k == "SUBQ":
                     sub_doms = subquery_domains.get(t, set())
-                    sub_scf = subquery_str_cf.get(t, frozenset())
+                    sub_sch = subquery_schema.get(t, _DerivedCfSchema())
                     domains |= sub_doms
-                    branch_inherited_str_cf |= sub_scf
                     a_pos = s_pos + 1
                     if (
                         a_pos < len(sig_idxs)
@@ -2310,9 +2381,14 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                     ):
                         a_pos += 1
                         if a_pos < len(sig_idxs) and processed[sig_idxs[a_pos]][0] in ("IDENT", "DQUOTE"):
-                            _record_table_alias(sig_idxs[a_pos], sub_doms, sub_scf)
+                            col_list, end_sp = _consume_optional_col_alias_list(a_pos + 1)
+                            if col_list is not None:
+                                sub_sch = _remap_derived_cf_schema(sub_sch, col_list)
+                            branch_inherited_str_cf |= sub_sch.str_cols
+                            branch_inherited_bool_cf |= sub_sch.bool_cols
+                            _record_table_alias(sig_idxs[a_pos], sub_doms, sub_sch)
                             expect_table = False
-                            s_pos = a_pos + 1
+                            s_pos = end_sp
                             continue
                     elif a_pos < len(sig_idxs) and (
                         processed[sig_idxs[a_pos]][0] == "DQUOTE"
@@ -2324,10 +2400,17 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                             )
                         )
                     ):
-                        _record_table_alias(sig_idxs[a_pos], sub_doms, sub_scf)
+                        col_list, end_sp = _consume_optional_col_alias_list(a_pos + 1)
+                        if col_list is not None:
+                            sub_sch = _remap_derived_cf_schema(sub_sch, col_list)
+                        branch_inherited_str_cf |= sub_sch.str_cols
+                        branch_inherited_bool_cf |= sub_sch.bool_cols
+                        _record_table_alias(sig_idxs[a_pos], sub_doms, sub_sch)
                         expect_table = False
-                        s_pos = a_pos + 1
+                        s_pos = end_sp
                         continue
+                    branch_inherited_str_cf |= sub_sch.str_cols
+                    branch_inherited_bool_cf |= sub_sch.bool_cols
                     expect_table = False
                     s_pos += 1
                     continue
@@ -2338,13 +2421,12 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                         continue
                     low_tbl = _unquote_sql_ident(t).lower()
                     item_doms: set[str] = set()
-                    item_str_cf: frozenset[str] = frozenset()
+                    item_sch = _DerivedCfSchema()
                     if low_tbl in ctes:
-                        item_doms, item_str_cf = ctes[low_tbl]
+                        item_doms, item_sch = ctes[low_tbl]
                         domains |= item_doms
-                        branch_inherited_str_cf |= item_str_cf
                         alias_domains[low_tbl] = item_doms
-                        alias_str_cf[low_tbl] = item_str_cf
+                        alias_schema[low_tbl] = item_sch
                     elif k == "IDENT" and low_tbl in table_map:
                         mapped_name, dom, canonical_name = table_map[low_tbl]
                         table_token_idxs[idx] = mapped_name
@@ -2363,9 +2445,14 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                     ):
                         a_pos += 1
                         if a_pos < len(sig_idxs) and processed[sig_idxs[a_pos]][0] in ("IDENT", "DQUOTE"):
-                            _record_table_alias(sig_idxs[a_pos], item_doms, item_str_cf)
+                            col_list, end_sp = _consume_optional_col_alias_list(a_pos + 1)
+                            if col_list is not None:
+                                item_sch = _remap_derived_cf_schema(item_sch, col_list)
+                            branch_inherited_str_cf |= item_sch.str_cols
+                            branch_inherited_bool_cf |= item_sch.bool_cols
+                            _record_table_alias(sig_idxs[a_pos], item_doms, item_sch)
                             expect_table = False
-                            s_pos = a_pos + 1
+                            s_pos = end_sp
                             continue
                     elif a_pos < len(sig_idxs) and (
                         processed[sig_idxs[a_pos]][0] == "DQUOTE"
@@ -2377,10 +2464,17 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                             )
                         )
                     ):
-                        _record_table_alias(sig_idxs[a_pos], item_doms, item_str_cf)
+                        col_list, end_sp = _consume_optional_col_alias_list(a_pos + 1)
+                        if col_list is not None:
+                            item_sch = _remap_derived_cf_schema(item_sch, col_list)
+                        branch_inherited_str_cf |= item_sch.str_cols
+                        branch_inherited_bool_cf |= item_sch.bool_cols
+                        _record_table_alias(sig_idxs[a_pos], item_doms, item_sch)
                         expect_table = False
-                        s_pos = a_pos + 1
+                        s_pos = end_sp
                         continue
+                    branch_inherited_str_cf |= item_sch.str_cols
+                    branch_inherited_bool_cf |= item_sch.bool_cols
                     expect_table = False
                     s_pos += 1
                     continue
@@ -2392,10 +2486,13 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
         touches_request = "request" in domains
         touches_any_fact = bool(domains & raw_fact_domains)
 
-        # Analyze SELECT projection list for *-propagation, subquery AS <col> aliasing, and string-CF tracking:
+        # Analyze SELECT projection list for *-propagation, subquery AS <col> aliasing, and string/bool CF tracking:
         projects_star = False
+        has_star_item = False
         auto_alias_after_idx: dict[int, str] = {}
         out_str_cf_cols: set[str] = set()
+        out_bool_cf_cols: set[str] = set()
+        pos_flags: list[tuple[bool, bool]] = []
         if sig_idxs and processed[sig_idxs[0]][0] == "IDENT" and processed[sig_idxs[0]][1].upper() == "SELECT":
             sel_end = top_from_s_pos if top_from_s_pos is not None else len(sig_idxs)
             sel_start = 1
@@ -2435,22 +2532,29 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
             for it_idxs in proj_items:
                 if len(it_idxs) == 1 and processed[it_idxs[0]] == ("OP", "*"):
                     projects_star = True
+                    has_star_item = True
                     out_str_cf_cols |= branch_inherited_str_cf
+                    out_bool_cf_cols |= branch_inherited_bool_cf
                 elif (
                     len(it_idxs) == 3
                     and processed[it_idxs[0]][0] in ("IDENT", "DQUOTE")
                     and processed[it_idxs[1]] == ("OP", ".")
                     and processed[it_idxs[2]] == ("OP", "*")
                 ):
+                    has_star_item = True
                     q_nm = _unquote_sql_ident(processed[it_idxs[0]][1]).lower()
                     q_dom = alias_domains.get(q_nm, domains)
                     if q_dom & raw_fact_domains:
                         projects_star = True
-                    out_str_cf_cols |= alias_str_cf.get(q_nm, frozenset())
+                    q_sch = alias_schema.get(q_nm, _DerivedCfSchema())
+                    out_str_cf_cols |= q_sch.str_cols
+                    out_bool_cf_cols |= q_sch.bool_cols
                 elif len(it_idxs) == 1 and processed[it_idxs[0]][0] == "IDENT":
                     col_i = it_idxs[0]
                     col_raw = processed[col_i][1]
                     col_low = col_raw.lower()
+                    is_s = False
+                    is_b = False
                     if col_low == "custom_fields" and touches_request:
                         projects_star = True
                     elif (
@@ -2461,9 +2565,16 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                         if is_subquery:
                             auto_alias_after_idx[col_i] = col_raw
                         if col_low in _REQUEST_CF_FIELDS and touches_request:
-                            out_str_cf_cols.add(col_low)
+                            is_s = True
+                            is_b = col_low in _REQUEST_BOOLEAN_CF_FIELDS
                     elif col_low in branch_inherited_str_cf:
+                        is_s = True
+                        is_b = col_low in branch_inherited_bool_cf
+                    if is_s:
                         out_str_cf_cols.add(col_low)
+                    if is_b:
+                        out_bool_cf_cols.add(col_low)
+                    pos_flags.append((is_s, is_b))
                 elif (
                     len(it_idxs) == 3
                     and processed[it_idxs[0]][0] in ("IDENT", "DQUOTE")
@@ -2472,10 +2583,14 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 ):
                     q_nm = _unquote_sql_ident(processed[it_idxs[0]][1]).lower()
                     q_dom = alias_domains.get(q_nm, domains)
-                    q_scf = alias_str_cf.get(q_nm, branch_inherited_str_cf)
+                    q_sch = alias_schema.get(
+                        q_nm, _DerivedCfSchema(frozenset(branch_inherited_str_cf), frozenset(branch_inherited_bool_cf))
+                    )
                     col_i = it_idxs[2]
                     col_raw = processed[col_i][1]
                     col_low = col_raw.lower()
+                    is_s = False
+                    is_b = False
                     if col_low == "custom_fields" and "request" in q_dom:
                         projects_star = True
                     elif (
@@ -2486,9 +2601,16 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                         if is_subquery:
                             auto_alias_after_idx[col_i] = col_raw
                         if col_low in _REQUEST_CF_FIELDS and "request" in q_dom:
-                            out_str_cf_cols.add(col_low)
-                    elif col_low in q_scf:
+                            is_s = True
+                            is_b = col_low in _REQUEST_BOOLEAN_CF_FIELDS
+                    elif col_low in q_sch.str_cols:
+                        is_s = True
+                        is_b = col_low in q_sch.bool_cols
+                    if is_s:
                         out_str_cf_cols.add(col_low)
+                    if is_b:
+                        out_bool_cf_cols.add(col_low)
+                    pos_flags.append((is_s, is_b))
                 elif (
                     len(it_idxs) >= 3
                     and processed[it_idxs[-2]][0] == "IDENT"
@@ -2497,10 +2619,16 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 ):
                     alias_low = _unquote_sql_ident(processed[it_idxs[-1]][1]).lower()
                     expr_i = it_idxs[:-2]
+                    is_s = False
+                    is_b = False
                     if len(expr_i) == 1 and processed[expr_i[0]][0] == "IDENT":
                         e_low = processed[expr_i[0]][1].lower()
-                        if (e_low in _REQUEST_CF_FIELDS and touches_request) or e_low in branch_inherited_str_cf:
-                            out_str_cf_cols.add(alias_low)
+                        if e_low in _REQUEST_CF_FIELDS and touches_request:
+                            is_s = True
+                            is_b = e_low in _REQUEST_BOOLEAN_CF_FIELDS
+                        elif e_low in branch_inherited_str_cf:
+                            is_s = True
+                            is_b = e_low in branch_inherited_bool_cf
                     elif (
                         len(expr_i) == 3
                         and processed[expr_i[0]][0] in ("IDENT", "DQUOTE")
@@ -2509,18 +2637,35 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                     ):
                         q_nm = _unquote_sql_ident(processed[expr_i[0]][1]).lower()
                         q_dom = alias_domains.get(q_nm, domains)
-                        q_scf = alias_str_cf.get(q_nm, branch_inherited_str_cf)
+                        q_sch = alias_schema.get(
+                            q_nm,
+                            _DerivedCfSchema(frozenset(branch_inherited_str_cf), frozenset(branch_inherited_bool_cf)),
+                        )
                         e_low = processed[expr_i[2]][1].lower()
-                        if (e_low in _REQUEST_CF_FIELDS and "request" in q_dom) or e_low in q_scf:
-                            out_str_cf_cols.add(alias_low)
+                        if e_low in _REQUEST_CF_FIELDS and "request" in q_dom:
+                            is_s = True
+                            is_b = e_low in _REQUEST_BOOLEAN_CF_FIELDS
+                        elif e_low in q_sch.str_cols:
+                            is_s = True
+                            is_b = e_low in q_sch.bool_cols
                     elif (
-                        len(expr_i) == 4
-                        and processed[expr_i[0]][0] == "IDENT"
-                        and processed[expr_i[0]][1].lower() == "custom_fields"
-                        and processed[expr_i[1]] == ("OP", "[")
-                        and processed[expr_i[3]] == ("OP", "]")
+                        len(expr_i) >= 4
+                        and processed[expr_i[-4]][0] == "IDENT"
+                        and processed[expr_i[-4]][1].lower() == "custom_fields"
+                        and processed[expr_i[-3]] == ("OP", "[")
+                        and processed[expr_i[-1]] == ("OP", "]")
                     ):
+                        is_s = True
+                        cf_tok = processed[expr_i[-2]]
+                        if cf_tok[0] == "STR" and len(cf_tok[1]) >= 2:
+                            is_b = cf_tok[1][1:-1].lower() in _REQUEST_BOOLEAN_CF_FIELDS
+                    if is_s:
                         out_str_cf_cols.add(alias_low)
+                    if is_b:
+                        out_bool_cf_cols.add(alias_low)
+                    pos_flags.append((is_s, is_b))
+                else:
+                    pos_flags.append((False, False))
 
         rewritten_tokens: list[tuple[str, str]] = []
         sig_pos_by_idx = {idx: pos for pos, idx in enumerate(sig_idxs)}
@@ -2581,13 +2726,14 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
             else:
                 rewritten_tokens.append((k, t))
 
-        derived_qualifiers = frozenset(q for q, scf in alias_str_cf.items() if scf)
+        derived_qualifiers = frozenset(q for q, sch in alias_schema.items() if sch.str_cols)
         has_derived_str_cf = bool(branch_inherited_str_cf)
         if touches_request or has_derived_str_cf:
             branch_sql = _coerce_request_predicates(
                 rewritten_tokens,
                 touches_request=touches_request,
                 derived_str_cols=frozenset(branch_inherited_str_cf),
+                derived_bool_cols=frozenset(branch_inherited_bool_cf),
                 derived_qualifiers=derived_qualifiers,
                 unqualified_derived=has_derived_str_cf and not touches_request,
             )
@@ -2604,7 +2750,13 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 exposed_domains.add("request_derived")
             if domains & {"rum_vitals", "rum_errors", "rum_derived"}:
                 exposed_domains.add("rum_derived")
-        return branch_sql, exposed_domains, branch_canonicals, frozenset(out_str_cf_cols)
+        out_pos = None if (has_star_item or not pos_flags) else tuple(pos_flags)
+        return (
+            branch_sql,
+            exposed_domains,
+            branch_canonicals,
+            _DerivedCfSchema(frozenset(out_str_cf_cols), frozenset(out_bool_cf_cols), out_pos),
+        )
 
     tokens = [(m.lastgroup or "OTHER", m.group(0)) for m in _CONSOLE_SQL_LEX_RE.finditer(sql)]
     rewritten, _, canonicals, _ = _rewrite_tokens(tokens, {}, is_subquery=False)
@@ -2766,7 +2918,11 @@ def query_endpoint(
             return {**cached_res, "_section_timings": section_timings}
     t0 = time.perf_counter()
     try:
-        res = client.execute(sql, settings=settings)
+        exec_fn: Any = client.execute
+        if "rewrite_cf" in inspect.signature(exec_fn).parameters:
+            res = exec_fn(sql, settings=settings, rewrite_cf=False)
+        else:
+            res = client.execute(sql, settings=settings)
     except Exception as e:
         raise RuntimeError(str(e)) from e
     timer.mark("execute", t0)
@@ -2779,10 +2935,19 @@ def query_endpoint(
         res = res[:max_rows]
     total_rows = -1 if (truncated and not has_explicit_limit) else fetched_rows
     _t_serialize = time.perf_counter()
+    _cf_col_re = re.compile(r"^arrayElement\(custom_fields,\s*'([A-Za-z0-9_]+)'\)$")
+
+    def _norm_col(col_key: str) -> str:
+        m = _cf_col_re.match(col_key)
+        return m.group(1) if m else col_key
+
     data: list[dict[str, Any]] = []
-    cols = list(res[0].keys()) if res else []
+    raw_cols = list(res[0].keys()) if res else []
+    seen_cols = set(raw_cols)
+    col_map = {rk: (_norm_col(rk) if _norm_col(rk) not in seen_cols or _norm_col(rk) == rk else rk) for rk in raw_cols}
+    cols = [col_map[rk] for rk in raw_cols]
     for d in res:
-        row_copy = dict(d)
+        row_copy = {col_map.get(k, k): v for k, v in d.items()}
         for k, v in row_copy.items():
             if hasattr(v, "isoformat"):
                 val = v.isoformat()

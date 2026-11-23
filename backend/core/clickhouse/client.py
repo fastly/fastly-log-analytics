@@ -357,7 +357,7 @@ class ClickHouseClient:
             self._cf_materialized_cache = (time.monotonic(), ready)
             return ready
 
-    def rewrite_publication_fence(self, sql: str, params: dict | None = None) -> str:
+    def rewrite_publication_fence(self, sql: str, params: dict | None = None, *, rewrite_cf: bool = True) -> str:
         """Rewrite ``batch_id IN (SELECT ... FROM high_scale_batch_publications FINAL ...)`` when pending set is small."""
         svc_id = (params or {}).get("service_id")
         if (
@@ -394,8 +394,16 @@ class ClickHouseClient:
         is_where_fragment = not upper_sql.startswith(
             ("SELECT", "WITH", "/*", "INSERT", "ALTER", "CREATE", "DROP", "OPTIMIZE", "SYSTEM", "TRUNCATE")
         )
+        is_console_wrapper = bool(re.match(r"^SELECT\s+\*\s+FROM\s*\(\s*\n", upper_sql))
+        has_star_subquery = bool(
+            re.search(r"(?:\bSELECT\s+(?:DISTINCT\s+|ALL\s+)?\*|\.\s*\*)", upper_sql)
+            and (upper_sql.startswith("WITH") or re.search(r"\b(?:FROM|JOIN)\s*\(\s*(?:WITH|SELECT)\b", upper_sql))
+        )
         if (
-            (is_fact_query or is_where_fragment)
+            rewrite_cf
+            and not is_console_wrapper
+            and not has_star_subquery
+            and (is_fact_query or is_where_fragment)
             and "custom_fields[" in sql
             and "SELECT custom_fields FROM" not in sql
             and "SELECT event_timestamp, custom_fields FROM" not in sql
@@ -416,7 +424,14 @@ class ClickHouseClient:
                 )
         return sql
 
-    def execute(self, sql: str, params: dict | None = None, *, settings: Mapping[str, str] | None = None) -> list[dict]:
+    def execute(
+        self,
+        sql: str,
+        params: dict | None = None,
+        *,
+        settings: Mapping[str, str] | None = None,
+        rewrite_cf: bool = True,
+    ) -> list[dict]:
         """Run internal SQL. SELECT-like statements return JSON rows; DDL returns [].
 
         ``settings`` adds allow-listed per-query ClickHouse settings (see ``_QUERY_SETTINGS``).
@@ -430,7 +445,7 @@ class ClickHouseClient:
                 raise ValueError(f"ClickHouse query setting {name!r} needs a nonempty string value")
         if re.search(r"\{[^{}]+:\s*Identifier\s*\}", sql, re.IGNORECASE):
             raise ValueError("ClickHouse identifier parameters are forbidden")
-        sql = self.rewrite_publication_fence(sql, params)
+        sql = self.rewrite_publication_fence(sql, params, rewrite_cf=rewrite_cf)
         form = {"query": sql}
         for name, value in (params or {}).items():
             if not isinstance(name, str) or not _PARAM_NAME.fullmatch(name):

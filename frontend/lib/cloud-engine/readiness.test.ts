@@ -115,6 +115,31 @@ it("reports a bounded, redacted error message so a failed query can be diagnosed
     const cIdx = events.length;
     await expect(measureCloudQuery("dashboard.bundle", async () => { throw contractionErr; })).rejects.toBe(contractionErr);
     expect(events[cIdx + 1]?.error).toBe("Error: Backend can't reach cache metadata");
+
+    // BUG-T5-ITER26-02 / 01: Contractions/possessives before single-quoted secrets, E'...' backslash
+    // escapes, JSON \" escapes, and SQL dollar-quoted strings ($$...$$ / $tag$...$tag$):
+    const multiContractionErr = new Error("Backend can't reach don't user's metadata");
+    const mcIdx = events.length;
+    await expect(measureCloudQuery("dashboard.bundle", async () => { throw multiContractionErr; })).rejects.toBe(multiContractionErr);
+    expect(events[mcIdx + 1]?.error).toBe("Error: Backend can't reach don't user's metadata");
+
+    for (const [advMsg, forbiddenFrags, requiredSubstr] of [
+      ["Binder Error: can't parse value '198.51.100.42' in filter", ["198.51.100.42"], "Error: Binder Error: can't parse value [redacted] in filter"],
+      [`Binder Error: user's column "SecCol99" has value 'SecVal88'`, ["SecCol99", "SecVal88"], "Error: Binder Error: user's column [redacted] has value [redacted]"],
+      ["Parser Error: invalid literal E'prefix\\'SecEsc77'", ["SecEsc77", "prefix"], "Error: Parser Error: invalid literal [redacted]"],
+      ['JSON Error: bad value "foo\\"AliceRowValue99"', ["AliceRowValue99", "foo"], "Error: JSON Error: bad value [redacted]"],
+      ["Binder Error: invalid literal $$SecDollar66$$ in query", ["SecDollar66"], "Error: Binder Error: invalid literal [redacted] in query"],
+      ["Binder Error: invalid literal $tag$SecTag55\nSELECT 1$tag$ in query", ["SecTag55", "SELECT 1"], "Error: Binder Error: invalid literal [redacted] in query"],
+    ] as const) {
+      const advErr = new Error(advMsg);
+      const aIdx = events.length;
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw advErr; })).rejects.toBe(advErr);
+      const got = events[aIdx + 1]?.error ?? "";
+      for (const frag of forbiddenFrags) {
+        expect(got).not.toContain(frag);
+      }
+      expect(got).toBe(requiredSubstr);
+    }
   } finally {
     window.removeEventListener("fla:cloud-query", listener);
   }

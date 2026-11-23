@@ -4869,6 +4869,41 @@ def test_t5_hs03_hs12_py08_sql_console_table_filter_parser_differentials_union_s
         assert "request_facts" not in i16_sql.replace("_m_request_facts", ""), i16_sql
         assert "_m_request_facts" in str((i16_settings or {}).get("additional_table_filters", "")), i16_settings
 
+    # Iteration-27 SQL Console E2E checks: BUG-T5-ITER26-01 (no `_cf_*` on Console wrapper / `SELECT *` CTEs)
+    # and BUG-T5-ITER26-04 (derived boolean custom fields across CTE/subquery aliases, column lists, and `!=`/`<>`).
+    import httpx
+
+    from backend import config as cfg_mod
+    from backend.core.clickhouse import ClickHouseClient
+
+    probe_ch = ClickHouseClient(
+        cfg_mod.ClickHouseConfig("localhost", 8123, "default", "default", ""),
+        transport=httpx.MockTransport(lambda _r: httpx.Response(200, json={"data": []})),
+    )
+    try:
+        probe_ch._enable_cf_rewrite_in_tests = True
+        console_wrapped = (
+            "SELECT * FROM (\nSELECT url, custom_fields['pop'], custom_fields['status'] FROM request_facts\n) LIMIT 51"
+        )
+        assert "`_cf_" not in probe_ch.rewrite_publication_fence(console_wrapped, {"service_id": "svc-a"})
+    finally:
+        probe_ch.close()
+    for iter27_bool_sql, expected_frag in (
+        (
+            "WITH q AS (SELECT url, edge AS ed FROM logs) SELECT q.url FROM q WHERE q.ed = false",
+            "IN ('false', '0', '')",
+        ),
+        ("WITH q(u, ed) AS (SELECT url, edge FROM logs) SELECT q.u FROM q WHERE q.ed != true", "NOT IN ('true', '1')"),
+        ("SELECT sub.u FROM (SELECT url, edge FROM logs) AS sub(u, ed) WHERE sub.ed <> false", "IN ('true', '1')"),
+        ("SELECT url FROM logs WHERE edge != false AND is_bot <> false", "IN ('true', '1')"),
+    ):
+        rewritten_i27 = hs_query_mod._rewrite_console_sql(
+            iter27_bool_sql, svc_table="svc-a", names={"request_facts": "request_facts"}
+        )
+        assert expected_frag in rewritten_i27, f"expected {expected_frag!r} in {rewritten_i27!r}"
+        assert "= true" not in rewritten_i27.lower() and "= false" not in rewritten_i27.lower(), rewritten_i27
+        assert "!= true" not in rewritten_i27.lower() and "!= false" not in rewritten_i27.lower(), rewritten_i27
+
     # 2. Multi-branch UNION ALL rewrites pop -> custom_fields['pop'] ONLY on logs, preserving native pop on client_vitals
     ch_recorder.calls.clear()
     r_union = c.post(
@@ -6054,7 +6089,7 @@ console.log('NODE_PROXY_AND_CSV_PARITY_OK');
             "lib/cloud-engine/dashboard/duckdb.test.ts",
             "lib/cloud-engine/adapter.test.ts",
             "-t",
-            "wipes range-loader singleton|aborts in-flight|blocks post-logout OPFS persistFile|blocks multi-step runDashboard|aborts in-flight queryRollup|suppresses pending write|skips CacheStorage and error telemetry|isolates cached service stats|clears decoded SecuritySummary|fences in-flight ops CacheStorage|resets activeOpsUser to null|uses volatile-ops scope|aborts multi-step handleCloudAnalyticalRequest|allows concurrent Compare Mode|allows concurrent same-session writes|fences POST /api/dashboard/bundle|scopes /api/usage/|SEC-T5-ITER23-01|SEC-T5-ITER23-03|SEC-T5-ITER24-03|BUG-T5-ITER25-02|reports a bounded, redacted error message|keeps urls and ins_lat elapsed histograms clone-safe",
+            "wipes range-loader singleton|aborts in-flight|blocks post-logout OPFS persistFile|blocks multi-step runDashboard|aborts in-flight queryRollup|suppresses pending write|skips CacheStorage and error telemetry|isolates cached service stats|clears decoded SecuritySummary|fences in-flight ops CacheStorage|resets activeOpsUser to null|uses volatile-ops scope|aborts multi-step handleCloudAnalyticalRequest|allows concurrent Compare Mode|allows concurrent same-session writes|fences POST /api/dashboard/bundle|scopes /api/usage/|SEC-T5-ITER23-01|SEC-T5-ITER23-03|SEC-T5-ITER24-03|BUG-T5-ITER25-02|BUG-T5-ITER26-02|BUG-T5-ITER26-03|Check 4|reports a bounded, redacted error message|keeps urls and ins_lat elapsed histograms clone-safe",
         ],
         cwd=str(REPO_ROOT / "frontend"),
         env=cloud_vitest_env,

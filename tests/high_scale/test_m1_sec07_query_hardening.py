@@ -863,3 +863,96 @@ def test_bug_t5_iter25_05_catalog_cf_fields_dquote_aliases_and_cte_subquery_rewr
     outer_star = q_star_cte.split(") SELECT", 1)[1]
     assert "q.custom_fields['bot_score']" in outer_star
     assert "q.custom_fields['status'] = '200'" in outer_star
+
+
+@pytest.mark.security_regression
+def test_bug_t5_iter26_01_and_04_admin_console_cf_fence_and_boolean_alias_col_list_parity() -> None:
+    """BUG-T5-ITER26-01 & BUG-T5-ITER26-04: Admin SQL Console avoids `_cf_*` rewrite and handles aliased bools, CTE/subquery column lists, and !=/."""
+    from backend.high_scale.query import _rewrite_console_sql
+
+    # 1. BUG-T5-ITER26-01: Admin SQL Console (`tables=None`, `_enable_cf_rewrite_in_tests=True`)
+    # must NOT rewrite q.custom_fields['pop'] -> q.`_cf_pop` or top-level custom_fields['pop'] -> `_cf_pop`:
+    captured_queries: list[str] = []
+
+    def _ch_handler(req: httpx.Request) -> httpx.Response:
+        body_text = req.content.decode("utf-8", errors="replace")
+        if "SELECT 1" in body_text and "additional_table_filters" in str(req.url):
+            return httpx.Response(200, json={"data": [{"1": 1}]})
+        captured_queries.append(body_text)
+        return httpx.Response(200, json={"data": [{"url": "/ok", "pop": "DEN"}]})
+
+    ch_client = ClickHouseClient(
+        svcconfig.ClickHouseConfig(host="localhost", port=8123, database="default", user="default", password=""),
+        transport=httpx.MockTransport(_ch_handler),
+    )
+    ch_client._enable_cf_rewrite_in_tests = True
+    ch_client._table_filters_verified = True  # type: ignore[attr-defined]
+    try:
+        svc = SimpleNamespace(service_id="svc_alpha", client=ch_client)
+        for admin_sql in (
+            "WITH q AS (SELECT * FROM logs) SELECT q.url, q.pop FROM q WHERE q.status = 200 ORDER BY q.url",
+            "SELECT sub.url, sub.pop FROM (SELECT * FROM logs) AS sub WHERE sub.status = 200 ORDER BY sub.url",
+            "SELECT url, pop, status FROM logs WHERE status = 200",
+        ):
+            captured_queries.clear()
+            hs_query.query_endpoint(
+                svc,
+                DashboardQueryRequest(sql=admin_sql, max_rows=10),
+                "2026-11-19T00:00:00Z",
+                "2026-11-19T01:00:00Z",
+                mask_ips=False,
+                tables=None,
+            )
+            assert len(captured_queries) == 1
+            assert "`_cf_" not in captured_queries[0], (
+                f"Leaked _cf_ rewrite in Admin SQL Console: {captured_queries[0]}"
+            )
+            assert "custom_fields['pop']" in captured_queries[0]
+    finally:
+        ch_client.close()
+
+    # 2. BUG-T5-ITER26-04: Aliased boolean custom fields in CTEs/subqueries, explicit CTE/subquery column lists, and != / <> bool ops:
+    names = {"request_facts": "hs_test.v_req_m"}
+
+    q_bool_cte = _rewrite_console_sql(
+        "WITH q AS (SELECT url, edge AS is_edge_hit FROM logs) SELECT url FROM q WHERE is_edge_hit = true ORDER BY url",
+        svc_table="svc_alpha",
+        names=names,
+    )
+    assert "lower(is_edge_hit) IN ('true', '1')" in q_bool_cte
+
+    q_bool_sub = _rewrite_console_sql(
+        "SELECT sub.url FROM (SELECT url, is_bot AS bot_flag FROM logs) AS sub WHERE sub.bot_flag = true ORDER BY sub.url",
+        svc_table="svc_alpha",
+        names=names,
+    )
+    assert "lower(sub.bot_flag) IN ('true', '1')" in q_bool_sub
+
+    q_cte_cols = _rewrite_console_sql(
+        "WITH q(u, st, ed) AS (SELECT url, status, edge FROM logs) SELECT u FROM q WHERE st = 200 AND ed = true ORDER BY u",
+        svc_table="svc_alpha",
+        names=names,
+    )
+    outer_cte_cols = q_cte_cols.split("SELECT u FROM q", 1)[1]
+    assert "st = '200'" in outer_cte_cols
+    assert "lower(ed) IN ('true', '1')" in outer_cte_cols
+
+    q_sub_cols = _rewrite_console_sql(
+        "SELECT sub.u FROM (SELECT url, status, edge FROM logs) AS sub(u, st, ed) WHERE sub.st = 200 AND sub.ed != false ORDER BY sub.u",
+        svc_table="svc_alpha",
+        names=names,
+    )
+    outer_sub_cols = q_sub_cols.rsplit("WHERE", 1)[1]
+    assert "sub.st = '200'" in outer_sub_cols
+    assert "lower(sub.ed) IN ('true', '1')" in outer_sub_cols
+
+    for raw_ne, expected_pred in (
+        ("SELECT url FROM logs WHERE edge != false", "lower(custom_fields['edge']) IN ('true', '1')"),
+        ("SELECT url FROM logs WHERE edge <> false", "lower(custom_fields['edge']) IN ('true', '1')"),
+        ("SELECT url FROM logs WHERE edge != 'false'", "lower(custom_fields['edge']) IN ('true', '1')"),
+        ("SELECT url FROM logs WHERE edge != true", "lower(custom_fields['edge']) NOT IN ('true', '1')"),
+        ("SELECT url FROM logs WHERE edge <> true", "lower(custom_fields['edge']) NOT IN ('true', '1')"),
+        ("SELECT url FROM logs WHERE edge <> 'true'", "lower(custom_fields['edge']) NOT IN ('true', '1')"),
+    ):
+        rewritten_ne = _rewrite_console_sql(raw_ne, svc_table="svc_alpha", names=names)
+        assert expected_pred in rewritten_ne, f"Expected {expected_pred!r} in {rewritten_ne!r}"

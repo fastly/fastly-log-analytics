@@ -347,10 +347,18 @@ fn step<R: Runtime>(
     if let Err(error) = &result {
         job.error = Some(error.clone());
     }
+    let sync_dr_now =
+        status == "resetting" && job.status == "cleanup" && runtime.admin_remaining_calls() >= 5;
+    if sync_dr_now {
+        job.steps_done.insert(DR_SYNCED.into());
+    }
     job.updated_at = now;
     let value = serde_json::to_value(&*job).map_err(|_| String::from("state_encoding_failed"))?;
     if !runtime.admin_cas(JOB_KEY, Some(generation), &value)? {
         return Err("data_reset_conflict".into());
+    }
+    if sync_dr_now {
+        sync_dr_after_complete(store);
     }
     if job.status == "failed" || job.status == "complete" {
         clear_marker(store, job)?;
@@ -725,6 +733,7 @@ fn reset_state<R: Runtime>(store: &Store<'_, R>, job: &mut ResetJob) -> Result<b
 }
 
 const RUM_PART: &str = "rum_watermark";
+const DR_SYNCED: &str = "dr_synced";
 const KEYS_PART: &str = "keys";
 const QUEUES: [(&str, &str); 2] = [
     ("deleteq", DELETEQ_PREFIX),
@@ -1113,6 +1122,13 @@ fn finish_reset<R: Runtime>(
         }
         job.steps_done.insert(part.into());
         push_message(job, now, format!("Cleared the {part} queue."));
+    }
+    if rum_error.is_none() && !job.steps_done.contains(DR_SYNCED) {
+        if !affordable(4) {
+            return Ok(false);
+        }
+        sync_dr_after_complete(store);
+        job.steps_done.insert(DR_SYNCED.into());
     }
     rum_error.map_or(Ok(true), Err)
 }

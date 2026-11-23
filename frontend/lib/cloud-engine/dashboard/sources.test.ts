@@ -4,9 +4,11 @@ import { CARD_FIELDS } from "./summaries";
 import { estimateRollupBytes } from "./rollup-codec";
 import {
   CACHE_NAME,
+  IDENTITY_CACHE_KEY,
   ROLLUP_CACHE_NAME,
   ROLLUP_CACHE_VERSION,
   ROLLUP_SEMANTICS,
+  SESSION_CACHE_KEY,
   browserSource,
   clearBrowserSourceMemoryCaches,
   clearRequestLogCaches,
@@ -162,6 +164,53 @@ describe("browserSource", () => {
     await expect(nextPage.fetchFile(file.key)).rejects.toEqual(new MissingCloudFileError(file.key));
     expect(fetcher).toHaveBeenCalledTimes(4);
     now.mockRestore();
+  });
+
+  it("isolates omitted-serviceId knownMissingFiles across cache scopes and bounds capacity at 2048", async () => {
+    const storageMap = new Map<string, string>([
+      [SESSION_CACHE_KEY, "sess-scope-1"],
+      [IDENTITY_CACHE_KEY, "alice:admin"],
+    ]);
+    vi.stubGlobal("window", {});
+    vi.stubGlobal("localStorage", {
+      getItem: (k: string) => storageMap.get(k) ?? null,
+      setItem: (k: string, v: string) => { storageMap.set(k, v); },
+      removeItem: (k: string) => { storageMap.delete(k); },
+    });
+    clearBrowserSourceMemoryCaches();
+    const fetcher = vi.fn(async () => new Response("Not Found", { status: 404 }));
+    vi.stubGlobal("fetch", fetcher);
+
+    const sharedKey = "flp/processed/summary_bundle/request/year=2026/open_bundle=scope-test.parquet";
+    await expect(browserSource("").fetchFile(sharedKey)).rejects.toEqual(new MissingCloudFileError(sharedKey));
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    await expect(browserSource("").fetchFile(sharedKey)).rejects.toEqual(new MissingCloudFileError(sharedKey));
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    // Direct storage identity change (even when serviceId is omitted) must NOT share knownMissingFiles:
+    storageMap.set(IDENTITY_CACHE_KEY, "bob:analyst-no-pii");
+    await expect(browserSource("").fetchFile(sharedKey)).rejects.toEqual(new MissingCloudFileError(sharedKey));
+    expect(fetcher).toHaveBeenCalledTimes(2);
+
+    // Inserting > 2048 (MAX_KNOWN_MISSING_FILES) missing keys evicts the oldest key cleanly:
+    clearBrowserSourceMemoryCaches();
+    fetcher.mockClear();
+    for (let i = 0; i < 2049; i++) {
+      const k = `flp/processed/request/year=2026/missing-${i}.parquet`;
+      await expect(browserSource("").fetchFile(k)).rejects.toEqual(new MissingCloudFileError(k));
+    }
+    expect(fetcher).toHaveBeenCalledTimes(2049);
+
+    // Entry #2048 is still remembered (0 new fetches), whereas entry #0 was FIFO-evicted (1 new fetch):
+    await expect(browserSource("").fetchFile("flp/processed/request/year=2026/missing-2048.parquet")).rejects.toEqual(
+      new MissingCloudFileError("flp/processed/request/year=2026/missing-2048.parquet"),
+    );
+    expect(fetcher).toHaveBeenCalledTimes(2049);
+    await expect(browserSource("").fetchFile("flp/processed/request/year=2026/missing-0.parquet")).rejects.toEqual(
+      new MissingCloudFileError("flp/processed/request/year=2026/missing-0.parquet"),
+    );
+    expect(fetcher).toHaveBeenCalledTimes(2050);
+    clearBrowserSourceMemoryCaches();
   });
 
   it("opens a listed file for selective reads without a size probe", async () => {

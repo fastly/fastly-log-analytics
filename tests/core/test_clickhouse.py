@@ -1818,3 +1818,41 @@ def test_sections_propagation_queue_wait_persistence_and_nesting(monkeypatch) ->
     assert [r["service_id"] for r in scopes] == ["service-parent", "service-child", "service-parent"]
     assert scopes[1]["parent_section_id"] == scopes[0]["section_id"] and child.timings()[0]["outcome"] == "error"
     assert "private-value" not in str(child.timings()) and current_clickhouse_scope()["section_id"] is None
+
+
+@pytest.mark.no_postgres
+def test_rewrite_publication_fence_skips_cf_literal_rewrite_on_console_wrapper_and_star_subqueries(
+    settings, monkeypatch
+) -> None:
+    """BUG-T5-ITER26-01: Do not rewrite custom_fields[...] to `_cf_*` on SQL Console wrapper or SELECT * CTEs/subqueries."""
+    c = ch.ClickHouseClient(settings, transport=httpx.MockTransport(lambda _r: response([])))
+    try:
+        c._enable_cf_rewrite_in_tests = True
+        monkeypatch.setattr(c, "_get_pending_batches", lambda _sid: {"request": ("bid-pending-1",)})
+
+        # Direct internal single-table fact query still rewrites custom_fields['pop'] -> `_cf_pop`:
+        direct_sql = "SELECT custom_fields['pop'] FROM request_facts WHERE service_id = {service_id:String}"
+        assert "`_cf_pop`" in c.rewrite_publication_fence(direct_sql, {"service_id": "svc_alpha"})
+
+        # SQL Console wrapper and SELECT * / t.* CTEs/subqueries never rewrite custom_fields[...] to `_cf_*`:
+        for console_or_star_sql in (
+            "SELECT * FROM (\nSELECT url, custom_fields['pop'], custom_fields['status'] FROM request_facts\n) LIMIT 51",
+            "WITH q AS (SELECT * FROM request_facts) SELECT q.url, q.custom_fields['pop'] FROM q WHERE q.custom_fields['status'] = '200'",
+            "SELECT sub.url, sub.custom_fields['pop'] FROM (SELECT a.* FROM request_facts AS a) AS sub WHERE sub.custom_fields['status'] = '200'",
+        ):
+            out = c.rewrite_publication_fence(console_or_star_sql, {"service_id": "svc_alpha"})
+            assert "`_cf_" not in out, f"Unexpected _cf_ rewrite in: {out}"
+            assert "custom_fields['pop']" in out
+
+        # Explicit rewrite_cf=False skips `_cf_*` while preserving publication fence:
+        fenced_sql = (
+            "SELECT custom_fields['pop'] FROM request_facts WHERE service_id = {service_id:String} "
+            "AND batch_id IN (SELECT batch_id FROM high_scale_batch_publications FINAL "
+            "WHERE domain = 'request' AND service_id = {service_id:String})"
+        )
+        out_no_cf = c.rewrite_publication_fence(fenced_sql, {"service_id": "svc_alpha"}, rewrite_cf=False)
+        assert "`_cf_pop`" not in out_no_cf
+        assert "custom_fields['pop']" in out_no_cf
+        assert "batch_id NOT IN ('bid-pending-1')" in out_no_cf
+    finally:
+        c.close()

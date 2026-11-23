@@ -39,13 +39,86 @@ function rowCount(data: unknown): number | null {
 
 const MESSAGE_LIMIT = 200;
 const SECRET_WORD = String.raw`(?:\w+[_-])?(?:token|key|secret|passw(?:or)?d|authorization|auth|bearer|cookie|signature|sig|credentials?)`;
+const DOLLAR_QUOTE_TAG_RE = /^\$([A-Za-z_\u0080-\uffff][A-Za-z0-9_\u0080-\uffff]*)?\$/;
+const ASCII_WORD_RE = /[A-Za-z0-9_]/;
+
+function redactQuotedLiterals(input: string): string {
+  let out = "";
+  let i = 0;
+  const len = input.length;
+  while (i < len) {
+    const ch = input[i];
+    if (ch === "$") {
+      const match = DOLLAR_QUOTE_TAG_RE.exec(input.slice(i));
+      if (match) {
+        const tag = match[0];
+        const endIdx = input.indexOf(tag, i + tag.length);
+        out += "[redacted]";
+        i = endIdx === -1 ? len : endIdx + tag.length;
+        continue;
+      }
+    }
+    const prevWord = i > 0 && ASCII_WORD_RE.test(input[i - 1]);
+    const typedSingleLen = prevWord
+      ? 0
+      : (ch === "U" || ch === "u") && input[i + 1] === "&" && input[i + 2] === "'"
+        ? 3
+        : (ch === "E" || ch === "e" || ch === "B" || ch === "b" || ch === "X" || ch === "x" || ch === "U" || ch === "u") &&
+            input[i + 1] === "'"
+          ? 2
+          : 0;
+    if (typedSingleLen > 0 || (ch === "'" && !prevWord)) {
+      out += "[redacted]";
+      i += typedSingleLen > 0 ? typedSingleLen : 1;
+      while (i < len) {
+        if (input[i] === "\\") {
+          i += 2;
+          continue;
+        }
+        if (input[i] === "'") {
+          if (input[i + 1] === "'") {
+            i += 2;
+            continue;
+          }
+          i += 1;
+          break;
+        }
+        i += 1;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "`") {
+      const quote = ch;
+      out += "[redacted]";
+      i += 1;
+      while (i < len) {
+        if (input[i] === "\\") {
+          i += 2;
+          continue;
+        }
+        if (input[i] === quote) {
+          if (input[i + 1] === quote) {
+            i += 2;
+            continue;
+          }
+          i += 1;
+          break;
+        }
+        i += 1;
+      }
+      continue;
+    }
+    out += ch;
+    i += 1;
+  }
+  return out;
+}
 
 // Error messages can carry SQL, URLs, keys or tokens: keep the first line,
 // mask anything that may be private, and bound what is left.
 function redactedMessage(message: string): string {
-  const preRedacted = message.replace(/'[^']*'|"[^"]*"|`[^`]*`/g, "[redacted]");
+  const preRedacted = redactQuotedLiterals(message);
   const text = (preRedacted.split(/\r?\n/, 1)[0] ?? "")
-    .replace(/(?:^|(?<=[^\w]))(?:[EeBbXx]?)(?:'[^']*|"[^"]*|`[^`]*)$/, "[redacted]")
     .replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s'"`]+/gi, "[url]")
     .replace(/\S+@\S+/g, "[redacted]")
     .replace(

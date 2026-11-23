@@ -402,11 +402,52 @@ describe("readLogs request sharing", () => {
     expect([...bucketEntries.keys()]).toEqual([]);
 
     // Colon-bearing user whose suffix happens to be "admin" ("org:admin") keeps full user when role is supplied,
-    // and "anonymous:guest1" is NOT treated as anonymous:
+    // AND when signed-in as "org:admin" with role "analyst-no-pii", passing { user: "org:admin" } without role
+    // preserves { user: "org:admin", role: "analyst-no-pii" } instead of splitting into { user: "org", role: "admin" }!
     expect(clientMod.currentOpsIdentity({ user: "org:admin", role: "analyst-no-pii" })).toEqual({
       user: "org:admin",
       role: "analyst-no-pii",
     });
     expect(clientMod.currentOpsIdentity({ user: "anonymous:guest1" }).user).toBe("anonymous:guest1");
+
+    await setDashboardCacheIdentity("org:admin:analyst-no-pii");
+    await clientMod.syncOpsCacheForSession({
+      userId: "org:admin",
+      role: "analyst",
+      maskIps: true,
+      needsLogin: false,
+    });
+    expect(clientMod.currentOpsIdentity()).toEqual({
+      user: "org:admin",
+      role: "analyst-no-pii",
+    });
+    expect(clientMod.currentOpsIdentity({ user: "org:admin" })).toEqual({
+      user: "org:admin",
+      role: "analyst-no-pii",
+    });
+
+    // BUG-T5-ITER26-02 (dashboardRoleForUser): colon-bearing dashId without a known role suffix ("org:alice")
+    // must NOT treat "alice" as user "org"'s role, and ":analyst_masked" must normalize to "analyst-no-pii":
+    await clientMod.clearOpsCaches();
+    await setDashboardCacheIdentity("org:alice");
+    await clientMod.syncOpsCacheForSession({
+      userId: "org",
+      needsLogin: false,
+    });
+    expect(clientMod.currentOpsIdentity()).toEqual({
+      user: "org",
+      role: "admin",
+    });
+
+    await clientMod.clearOpsCaches();
+    await setDashboardCacheIdentity("u1:analyst_masked");
+    await clientMod.syncOpsCacheForSession({
+      userId: "u1",
+      needsLogin: false,
+    });
+    expect(clientMod.currentOpsIdentity()).toEqual({
+      user: "u1",
+      role: "analyst-no-pii",
+    });
   });
 });

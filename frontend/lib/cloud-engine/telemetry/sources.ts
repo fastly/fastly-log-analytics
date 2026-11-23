@@ -90,7 +90,12 @@ export function currentOpsIdentity(
     explicit?.role && explicit.role.trim().length > 0
       ? normalizeOpsRole(explicit.role.trim())
       : null;
-  if (explicitUser && explicitRole === null) {
+  if (
+    explicitUser &&
+    explicitRole === null &&
+    explicitUser !== activeUserId &&
+    explicitUser !== dashUser
+  ) {
     const sep = explicitUser.lastIndexOf(":");
     if (sep > 0) {
       const parsedRole = explicitUser.slice(sep + 1);
@@ -165,7 +170,9 @@ function dashboardRoleForUser(userId: string): string | null {
   if (!dashId || dashId === "anonymous") return null;
   const sep = dashId.lastIndexOf(":");
   if (sep <= 0) return null;
-  return dashId.slice(0, sep) === userId ? dashId.slice(sep + 1) || null : null;
+  const candidate = dashId.slice(sep + 1);
+  if (!KNOWN_IDENTITY_ROLES.has(candidate)) return null;
+  return dashId.slice(0, sep) === userId ? normalizeOpsRole(candidate) : null;
 }
 
 export async function syncOpsCacheForSession(session: {

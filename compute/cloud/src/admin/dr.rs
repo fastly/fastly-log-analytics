@@ -11,6 +11,7 @@ const STRIPPED_SERVICE_FIELDS: &[&str] = &[
     "pending_job_id",
     "data_reset",
     "generation",
+    "active_log_field_ids",
     "_audit",
     "_audit_outbox",
     "_audit_outbox_base",
@@ -179,18 +180,26 @@ pub fn sync_best_effort(runtime: &impl Runtime, service: &Service) {
     else {
         return;
     };
-    let rum_stats = rum_rec.and_then(|rec| {
-        rec.value
-            .get(crate::ingest::RUM_STATS_FIELD)
-            .filter(|v| !v.is_null())
-            .cloned()
-    });
+    let (rum_stats, rum_floor_key) = match rum_rec {
+        Some(rec) => {
+            let stats = rec
+                .value
+                .get(crate::ingest::RUM_STATS_FIELD)
+                .filter(|v| !v.is_null())
+                .cloned();
+            let rfk = rec.value[crate::ingest::FLOOR_FIELD]
+                .as_str()
+                .map(str::to_owned);
+            (stats, rfk)
+        }
+        None => (None, None),
+    };
 
     if runtime.admin_remaining_calls() == 0 {
         return;
     }
 
-    let Ok(state_value) = build_dr_state(
+    let Ok(mut state_value) = build_dr_state(
         service,
         views,
         catalog_head,
@@ -200,6 +209,9 @@ pub fn sync_best_effort(runtime: &impl Runtime, service: &Service) {
     ) else {
         return;
     };
+    if let (Some(rfk), Some(obj)) = (rum_floor_key, state_value.as_object_mut()) {
+        obj.insert("rum_floor_key".into(), json!(rfk));
+    }
     let Ok(body) = serde_json::to_vec(&state_value) else {
         return;
     };
@@ -505,10 +517,25 @@ fn hydrate_service(
     Ok(service)
 }
 
+#[derive(Clone, Debug)]
+struct ScannedReset {
+    generation: u64,
+    reset_at: Option<i64>,
+}
+
+struct ScannedDay {
+    min_gen: u64,
+    max_gen: u64,
+    key: String,
+    stats: crate::ingest::catalog::Statistics,
+    verified_own: bool,
+    sample_block_key: String,
+}
+
 type ScannedHeadPair = (
     crate::ingest::catalog::Head,
     Option<crate::ingest::catalog::Manifest>,
-    Option<crate::ingest::catalog::Manifest>,
+    Option<ScannedReset>,
 );
 
 fn manifest_unix_ts(m: &crate::ingest::catalog::Manifest) -> Option<u64> {
@@ -520,29 +547,61 @@ fn manifest_unix_ts(m: &crate::ingest::catalog::Manifest) -> Option<u64> {
     .and_then(|dt| u64::try_from(dt.unix_timestamp()).ok())
 }
 
-fn manifest_floor_key(service: &Service, m: &crate::ingest::catalog::Manifest) -> Option<String> {
-    let dt = time::OffsetDateTime::parse(
-        &m.committed_at,
-        &time::format_description::well_known::Rfc3339,
-    )
-    .ok()?;
-    let ts = dt.unix_timestamp();
+fn ts_floor_key(service: &Service, ts: i64) -> String {
     let minute_ts = ts - ts.rem_euclid(60);
-    Some(format!(
+    format!(
         "{}{}",
         crate::ingest::raw_prefix(service),
         crate::ingest::minute_dir(minute_ts)
-    ))
+    )
+}
+
+fn ts_rum_floor_key(service: &Service, ts: i64) -> String {
+    let minute_ts = ts - ts.rem_euclid(60);
+    format!(
+        "{}raw/rum/{}",
+        crate::ingest::scope(service),
+        crate::ingest::minute_dir(minute_ts)
+    )
+}
+
+fn record_scanned_reset(slot: &mut Option<ScannedReset>, generation: u64, reset_at: Option<i64>) {
+    let replace = match slot {
+        None => true,
+        Some(prev) => {
+            generation > prev.generation
+                || (generation == prev.generation && prev.reset_at.is_none() && reset_at.is_some())
+        }
+    };
+    if replace {
+        *slot = Some(ScannedReset {
+            generation,
+            reset_at,
+        });
+    }
+}
+
+struct CatalogScanOpts<'a> {
+    reserve_calls: u32,
+    extra_rum_if_reset: u32,
+    foreign_dr_state: bool,
+    expected_manifest: Option<&'a str>,
+    dr_head_gen: Option<u64>,
 }
 
 fn scan_catalog_head(
     context: &Context<'_, impl Runtime>,
     service: &Service,
     creds: &(String, String),
-    reserve_calls: u32,
-    foreign_dr_state: bool,
-    expected_manifest: Option<&str>,
+    opts: CatalogScanOpts<'_>,
 ) -> Result<(Option<ScannedHeadPair>, bool), Error> {
+    let CatalogScanOpts {
+        reserve_calls,
+        extra_rum_if_reset,
+        foreign_dr_state,
+        expected_manifest,
+        dr_head_gen,
+    } = opts;
     if context.remaining_calls() <= reserve_calls + 1 {
         return Ok((None, false));
     }
@@ -555,7 +614,7 @@ fn scan_catalog_head(
     let expected_on_page =
         expected_manifest.is_some_and(|m_key| page.objects.iter().any(|o| o.key == m_key));
     let expected_missing = match expected_manifest {
-        Some(m_key) if !expected_on_page => {
+        Some(m_key) if !expected_on_page && !page.objects.is_empty() => {
             if page.next_token.is_none() {
                 true
             } else if context.remaining_calls() > reserve_calls + 1 {
@@ -571,16 +630,41 @@ fn scan_catalog_head(
         .into_iter()
         .filter(|obj| obj.key.ends_with(".json") && safe_dr_object_key(&obj.key, &prefix))
         .collect();
-    objects.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
+    let is_manifest_name = |k: &str| {
+        k.rsplit('/')
+            .next()
+            .is_some_and(|n| n.starts_with("manifest"))
+    };
+    objects.sort_by(|a, b| {
+        b.last_modified
+            .cmp(&a.last_modified)
+            .then_with(|| is_manifest_name(&b.key).cmp(&is_manifest_name(&a.key)))
+    });
 
     let mut best_manifest: Option<(String, crate::ingest::catalog::Manifest)> = None;
-    let mut latest_reset: Option<crate::ingest::catalog::Manifest> = None;
+    let mut best_manifest_days: Option<(
+        BTreeMap<i64, String>,
+        BTreeMap<i64, crate::ingest::catalog::Statistics>,
+    )> = None;
+    let mut effective_reset: Option<ScannedReset> = None;
     let mut saw_foreign_manifest = false;
-    let mut days: BTreeMap<i64, (u64, String, crate::ingest::catalog::Statistics)> =
-        BTreeMap::new();
+    let mut verified_own_blocks: BTreeSet<String> = BTreeSet::new();
+    let mut days: BTreeMap<i64, ScannedDay> = BTreeMap::new();
 
     for obj in objects {
-        if context.remaining_calls() <= reserve_calls {
+        let extra_verify_hold = u32::from(
+            !foreign_dr_state
+                && !saw_foreign_manifest
+                && best_manifest.is_none()
+                && days.values().any(|d| !d.verified_own)
+                && verified_own_blocks.is_empty(),
+        );
+        let dynamic_reset_hold = if effective_reset.is_some() {
+            extra_rum_if_reset
+        } else {
+            0
+        };
+        if context.remaining_calls() <= reserve_calls + extra_verify_hold + dynamic_reset_hold {
             break;
         }
         let Ok(Some(bytes)) = fos::get_object(context, service, creds, &obj.key) else {
@@ -592,17 +676,44 @@ fn scan_catalog_head(
                 continue;
             }
             if manifest.service_id == service.service_id {
-                if manifest.batch == "reset"
-                    && latest_reset
-                        .as_ref()
-                        .is_none_or(|prev| manifest.generation > prev.generation)
+                let raw_val = serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null);
+                if manifest.batch == "reset" {
+                    let ts = raw_val
+                        .get("reset_at")
+                        .and_then(Value::as_i64)
+                        .or_else(|| manifest_unix_ts(&manifest).map(|u| u as i64));
+                    record_scanned_reset(&mut effective_reset, manifest.generation, ts);
+                }
+                if let Some(rg) = raw_val
+                    .get("reset_generation")
+                    .and_then(Value::as_u64)
+                    .filter(|&rg| rg > 0 && rg <= manifest.generation)
                 {
-                    latest_reset = Some(manifest.clone());
+                    let ra = raw_val.get("reset_at").and_then(Value::as_i64);
+                    record_scanned_reset(&mut effective_reset, rg, ra);
                 }
                 if best_manifest
                     .as_ref()
                     .is_none_or(|(_, prev)| manifest.generation > prev.generation)
                 {
+                    best_manifest_days = raw_val
+                        .get("head_days")
+                        .and_then(|v| {
+                            serde_json::from_value::<BTreeMap<i64, String>>(v.clone()).ok()
+                        })
+                        .filter(|m| m.values().all(|dk| safe_dr_object_key(dk, &prefix)))
+                        .map(|m| {
+                            let st = raw_val
+                                .get("head_statistics")
+                                .and_then(|sv| {
+                                    serde_json::from_value::<
+                                        BTreeMap<i64, crate::ingest::catalog::Statistics>,
+                                    >(sv.clone())
+                                    .ok()
+                                })
+                                .unwrap_or_default();
+                            (m, st)
+                        });
                     best_manifest = Some((obj.key, manifest));
                 }
             } else {
@@ -610,7 +721,47 @@ fn scan_catalog_head(
             }
             continue;
         }
+        if let Ok(block) = serde_json::from_slice::<crate::ingest::catalog::Block>(&bytes) {
+            if block.service_id == service.service_id {
+                verified_own_blocks.insert(obj.key);
+            } else {
+                saw_foreign_manifest = true;
+            }
+            continue;
+        }
         if let Ok(day) = serde_json::from_slice::<crate::ingest::catalog::Day>(&bytes) {
+            if day.version != crate::ingest::catalog::VERSION || day.hours.is_empty() {
+                continue;
+            }
+            if !day
+                .hours
+                .values()
+                .all(|r| safe_dr_object_key(&r.key, &prefix))
+            {
+                saw_foreign_manifest = true;
+                continue;
+            }
+            let day_sid = serde_json::from_slice::<Value>(&bytes).ok().and_then(|v| {
+                v.get("service_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            });
+            if day_sid
+                .as_deref()
+                .is_some_and(|sid| sid != service.service_id)
+            {
+                saw_foreign_manifest = true;
+                continue;
+            }
+            let verified_own = day_sid.as_deref() == Some(service.service_id.as_str());
+            let min_gen = day.hours.values().map(|r| r.generation).min().unwrap_or(0);
+            let max_gen = day.hours.values().map(|r| r.generation).max().unwrap_or(0);
+            let Some(sample_ref) = day.hours.values().next() else {
+                continue;
+            };
+            if min_gen == 0 || max_gen == 0 {
+                continue;
+            }
             if let Some(day_ts) = day
                 .hours
                 .keys()
@@ -618,22 +769,81 @@ fn scan_catalog_head(
                 .map(|h| day_start(*h))
                 .or_else(|| day.statistics.earliest.map(day_start))
             {
-                let max_gen = day.hours.values().map(|r| r.generation).max().unwrap_or(0);
-                let replace = days
-                    .get(&day_ts)
-                    .is_none_or(|(prev_gen, _, _)| max_gen >= *prev_gen);
+                let replace = days.get(&day_ts).is_none_or(|prev| {
+                    (verified_own, max_gen) >= (prev.verified_own, prev.max_gen)
+                });
                 if replace {
-                    days.insert(day_ts, (max_gen, obj.key, day.statistics));
+                    days.insert(
+                        day_ts,
+                        ScannedDay {
+                            min_gen,
+                            max_gen,
+                            key: obj.key,
+                            stats: day.statistics,
+                            verified_own,
+                            sample_block_key: sample_ref.key.clone(),
+                        },
+                    );
                 }
             }
         }
     }
 
-    if best_manifest.is_none() && (days.is_empty() || foreign_dr_state || saw_foreign_manifest) {
-        return Ok((None, expected_missing));
+    if let Some(ref rst) = effective_reset {
+        days.retain(|_, d| d.min_gen > rst.generation && d.max_gen > rst.generation);
+    }
+    if expected_missing {
+        if let Some(g) = dr_head_gen {
+            days.retain(|_, d| d.min_gen > g && d.max_gen > g);
+        }
     }
 
-    let max_day_gen = days.values().map(|(g, _, _)| *g).max().unwrap_or(0);
+    if let Some((_, ref bm)) = best_manifest {
+        days.retain(|_, d| d.max_gen <= bm.generation);
+        if foreign_dr_state || saw_foreign_manifest {
+            days.retain(|_, d| d.verified_own || verified_own_blocks.contains(&d.sample_block_key));
+        }
+    } else {
+        if foreign_dr_state || saw_foreign_manifest {
+            days.retain(|_, d| d.verified_own || verified_own_blocks.contains(&d.sample_block_key));
+        } else if days
+            .values()
+            .any(|d| !d.verified_own && !verified_own_blocks.contains(&d.sample_block_key))
+        {
+            let mut verified_any_block = false;
+            if let Some(sample_key) = days
+                .values()
+                .find(|d| !d.verified_own && !verified_own_blocks.contains(&d.sample_block_key))
+                .map(|d| d.sample_block_key.clone())
+            {
+                if context.remaining_calls() > reserve_calls {
+                    if let Ok(Some(blk_bytes)) =
+                        fos::get_object(context, service, creds, &sample_key)
+                    {
+                        if let Ok(blk) =
+                            serde_json::from_slice::<crate::ingest::catalog::Block>(&blk_bytes)
+                        {
+                            if blk.service_id == service.service_id {
+                                verified_any_block = true;
+                            } else {
+                                saw_foreign_manifest = true;
+                            }
+                        }
+                    }
+                }
+            }
+            if saw_foreign_manifest || !verified_any_block {
+                days.retain(|_, d| {
+                    d.verified_own || verified_own_blocks.contains(&d.sample_block_key)
+                });
+            }
+        }
+        if days.is_empty() {
+            return Ok((None, expected_missing));
+        }
+    }
+
+    let max_day_gen = days.values().map(|d| d.max_gen).max().unwrap_or(0);
     let generation = best_manifest
         .as_ref()
         .map(|(_, m)| m.generation)
@@ -655,14 +865,31 @@ fn scan_catalog_head(
         }],
         ..crate::ingest::catalog::Head::default()
     };
-    for (day_ts, (_, key, stats)) in days {
-        head.days.insert(day_ts, key);
-        head.statistics.insert(day_ts, stats);
+    if let Some((bm_days, bm_stats)) = best_manifest_days {
+        for (day_ts, day_key) in bm_days {
+            if let Some(st) = bm_stats.get(&day_ts) {
+                head.statistics.insert(day_ts, st.clone());
+            }
+            head.days.insert(day_ts, day_key);
+        }
+    }
+    for (day_ts, d) in days {
+        head.days.insert(day_ts, d.key);
+        head.statistics.insert(day_ts, d.stats);
     }
 
-    let encoded = serialize(&head)?;
-    if crate::ingest::catalog::head(&json!({"catalog": encoded})).is_ok() {
-        Ok((Some((head, manifest_obj, latest_reset)), expected_missing))
+    let mut encoded = serialize(&head)?;
+    if let (Some(ref rst), Some(obj)) = (&effective_reset, encoded.as_object_mut()) {
+        obj.insert("reset_generation".into(), json!(rst.generation));
+        if let Some(ra) = rst.reset_at {
+            obj.insert("reset_at".into(), json!(ra));
+        }
+    }
+    if let Ok(validated_head) = crate::ingest::catalog::head(&json!({"catalog": encoded})) {
+        Ok((
+            Some((validated_head, manifest_obj, effective_reset)),
+            expected_missing,
+        ))
     } else {
         Ok((None, expected_missing))
     }
@@ -1010,6 +1237,9 @@ pub(super) fn recover(
 
     let dr_key = state_key(&fallback_svc);
     let dr_bytes = fos::get_object(context, &fallback_svc, &creds, &dr_key)?;
+    let raw_dr_json = dr_bytes
+        .as_deref()
+        .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok());
     let raw_dr = dr_bytes.and_then(|bytes| serde_json::from_slice::<CloudDrState>(&bytes).ok());
     let foreign_dr_state = raw_dr
         .as_ref()
@@ -1024,6 +1254,7 @@ pub(super) fn recover(
         views,
         mut catalog_head,
         mut floor_key,
+        mut rum_floor_key,
         mut rum_stats,
         mut source,
         candidate_names,
@@ -1070,6 +1301,22 @@ pub(super) fn recover(
                 return Err(Error::new(400, "invalid_dr_floor_key"));
             }
         }
+        let parsed_rum_floor = match raw_dr_json
+            .as_ref()
+            .and_then(|v| v.get("rum_floor_key"))
+            .filter(|v| !v.is_null())
+        {
+            Some(v) => {
+                let s = v
+                    .as_str()
+                    .ok_or_else(|| Error::new(400, "invalid_dr_floor_key"))?;
+                if !safe_dr_object_key(s, &format!("{scope}raw/rum/")) {
+                    return Err(Error::new(400, "invalid_dr_floor_key"));
+                }
+                Some(s.to_owned())
+            }
+            None => None,
+        };
         if let Some(ref head) = dr_state.catalog_head {
             validate_dr_catalog_head(head, &scope)?;
         }
@@ -1079,16 +1326,18 @@ pub(super) fn recover(
                     .ok()
                     .is_some_and(|v| crate::ingest::catalog::head(&json!({"catalog": v})).is_ok())
         });
-        let scan_needed = if valid_head.is_none() { 2u32 } else { 0u32 };
+        let mandatory_scan = if valid_head.is_none() { 2u32 } else { 0u32 };
+        let scan_needed = 3u32;
         let num_dr_upserts = u32::from(!views.is_empty())
-            + u32::from(valid_head.is_some() || dr_state.floor_key.is_some() || scan_needed > 0)
-            + u32::from(dr_state.rum_stats.is_some());
-        let mandatory_post = 2 + if cold_start {
+            + u32::from(valid_head.is_some() || dr_state.floor_key.is_some() || mandatory_scan > 0)
+            + u32::from(dr_state.rum_stats.is_some() || parsed_rum_floor.is_some());
+        let upsert_calls = if cold_start {
             num_dr_upserts
         } else {
             PER_UPSERT * num_dr_upserts
         };
-        let conservative_post = 5 + PER_UPSERT * num_dr_upserts;
+        let mandatory_post = 2 + upsert_calls;
+        let conservative_post = 5 + upsert_calls;
         service.owned_endpoint_names.clear();
         let should_inspect = !candidate_names.is_empty() || service.capture == Capture::Managed;
         let mut inspected = false;
@@ -1103,7 +1352,8 @@ pub(super) fn recover(
                 mandatory_post,
             )?;
             inspected = true;
-        } else if !should_inspect || context.remaining_calls() < mandatory_post + scan_needed + 3 {
+        } else if !should_inspect || context.remaining_calls() < mandatory_post + mandatory_scan + 3
+        {
             inspected = true;
         }
         (
@@ -1111,6 +1361,7 @@ pub(super) fn recover(
             views,
             valid_head,
             dr_state.floor_key,
+            parsed_rum_floor,
             dr_state.rum_stats,
             "dr_state",
             candidate_names,
@@ -1123,6 +1374,7 @@ pub(super) fn recover(
             None,
             None,
             None,
+            None,
             "minimal",
             Vec::new(),
             false,
@@ -1130,35 +1382,49 @@ pub(super) fn recover(
     };
 
     {
-        let mut reserve = 2u32; // svc:<sid> + admin:install
-        if !views.is_empty() {
-            reserve += PER_UPSERT;
-        }
-        reserve += PER_UPSERT; // ingest:watermark if found (or floor_key.is_some())
-        if rum_stats.is_some() {
-            reserve += PER_UPSERT;
-        }
-        reserve += if !inspected_active && source != "dr_state" {
-            4
+        let front_or_inspect_calls = if !inspected_active && source != "dr_state" {
+            4u32
         } else {
-            3
-        }; // post-upsert active-version inspection (4 calls on fallback DR) or inline Front dictionary sync
+            3u32
+        };
+        let base_upserts = u32::from(!views.is_empty())
+            + 1
+            + u32::from(rum_stats.is_some() || rum_floor_key.is_some());
+        let full_upsert_reserve = 2 + front_or_inspect_calls + PER_UPSERT * base_upserts;
+        let scan_reserve = if cold_start
+            && views.is_empty()
+            && context.remaining_calls() <= full_upsert_reserve + 2
+        {
+            2 + front_or_inspect_calls + base_upserts
+        } else {
+            full_upsert_reserve
+        };
+        let extra_rum_if_reset = if rum_stats.is_none() && rum_floor_key.is_none() {
+            if cold_start && views.is_empty() {
+                1u32
+            } else {
+                PER_UPSERT
+            }
+        } else {
+            0u32
+        };
 
         if let Some(ref dr_head) = catalog_head {
-            let reconcile_upserts =
-                u32::from(!views.is_empty()) + 1 + u32::from(rum_stats.is_some());
-            let reconcile_reserve = 2 + PER_UPSERT * reconcile_upserts;
             let (scanned_opt, dr_manifest_missing) = scan_catalog_head(
                 context,
                 &service,
                 &creds,
-                reconcile_reserve,
-                foreign_dr_state,
-                dr_head.manifest.as_deref(),
+                CatalogScanOpts {
+                    reserve_calls: scan_reserve,
+                    extra_rum_if_reset,
+                    foreign_dr_state,
+                    expected_manifest: dr_head.manifest.as_deref(),
+                    dr_head_gen: Some(dr_head.generation),
+                },
             )?;
-            if let Some((scanned, scanned_manifest, latest_reset)) = scanned_opt {
+            if let Some((scanned, scanned_manifest, effective_reset)) = scanned_opt {
                 let reset_occurred = dr_manifest_missing
-                    || latest_reset
+                    || effective_reset
                         .as_ref()
                         .is_some_and(|r| r.generation > dr_head.generation)
                     || scanned_manifest
@@ -1166,25 +1432,53 @@ pub(super) fn recover(
                         .is_some_and(|m| m.generation > dr_head.generation && m.batch == "reset");
                 if reset_occurred {
                     rum_stats = None;
-                    if let Some(rf) = latest_reset
-                        .as_ref()
-                        .or(scanned_manifest.as_ref())
-                        .and_then(|m| manifest_floor_key(&service, m))
-                    {
+                    let reset_ts =
+                        effective_reset
+                            .as_ref()
+                            .and_then(|r| r.reset_at)
+                            .or_else(|| {
+                                scanned_manifest
+                                    .as_ref()
+                                    .and_then(manifest_unix_ts)
+                                    .map(|u| u as i64)
+                            });
+                    if let Some(ts) = reset_ts {
+                        let rf = ts_floor_key(&service, ts);
                         if floor_key.as_deref().is_none_or(|cur| cur < rf.as_str()) {
                             floor_key = Some(rf);
+                        }
+                        let rrf = ts_rum_floor_key(&service, ts);
+                        if rum_floor_key
+                            .as_deref()
+                            .is_none_or(|cur| cur < rrf.as_str())
+                        {
+                            rum_floor_key = Some(rrf);
                         }
                     }
                 }
                 if dr_manifest_missing || scanned.generation > dr_head.generation {
                     catalog_head = Some(scanned);
                 }
+            } else if dr_manifest_missing {
+                rum_stats = None;
+                catalog_head = None;
             }
-        } else if let (Some((scanned, scanned_manifest, latest_reset)), _) =
-            scan_catalog_head(context, &service, &creds, reserve, foreign_dr_state, None)?
-        {
-            let reset_occurred = latest_reset.as_ref().is_some_and(|r| {
-                source != "dr_state" || manifest_unix_ts(r).is_none_or(|ts| ts >= dr_updated_at)
+        } else if let (Some((scanned, scanned_manifest, effective_reset)), _) = scan_catalog_head(
+            context,
+            &service,
+            &creds,
+            CatalogScanOpts {
+                reserve_calls: scan_reserve,
+                extra_rum_if_reset,
+                foreign_dr_state,
+                expected_manifest: None,
+                dr_head_gen: None,
+            },
+        )? {
+            let reset_occurred = effective_reset.as_ref().is_some_and(|r| {
+                source != "dr_state"
+                    || r.reset_at
+                        .is_none_or(|ts| u64::try_from(ts).ok().is_none_or(|u| u >= dr_updated_at))
             }) || scanned_manifest.as_ref().is_some_and(|m| {
                 m.batch == "reset"
                     && (source != "dr_state"
@@ -1192,13 +1486,26 @@ pub(super) fn recover(
             });
             if reset_occurred {
                 rum_stats = None;
-                if let Some(rf) = latest_reset
+                let reset_ts = effective_reset
                     .as_ref()
-                    .or(scanned_manifest.as_ref())
-                    .and_then(|m| manifest_floor_key(&service, m))
-                {
+                    .and_then(|r| r.reset_at)
+                    .or_else(|| {
+                        scanned_manifest
+                            .as_ref()
+                            .and_then(manifest_unix_ts)
+                            .map(|u| u as i64)
+                    });
+                if let Some(ts) = reset_ts {
+                    let rf = ts_floor_key(&service, ts);
                     if floor_key.as_deref().is_none_or(|cur| cur < rf.as_str()) {
                         floor_key = Some(rf);
+                    }
+                    let rrf = ts_rum_floor_key(&service, ts);
+                    if rum_floor_key
+                        .as_deref()
+                        .is_none_or(|cur| cur < rrf.as_str())
+                    {
+                        rum_floor_key = Some(rrf);
                     }
                 }
             }
@@ -1211,7 +1518,7 @@ pub(super) fn recover(
 
     let mut remaining_upserts = u32::from(!views.is_empty())
         + u32::from(catalog_head.is_some() || floor_key.is_some())
-        + u32::from(rum_stats.is_some());
+        + u32::from(rum_stats.is_some() || rum_floor_key.is_some());
     let needed_after_upserts = if source != "dr_state" { 6 } else { 5 };
     let initial_try_insert_first =
         cold_start && context.remaining_calls() < needed_after_upserts + 2 * remaining_upserts;
@@ -1250,12 +1557,19 @@ pub(super) fn recover(
         )?;
     }
 
-    if let Some(ref stats) = rum_stats {
+    if rum_stats.is_some() || rum_floor_key.is_some() {
         remaining_upserts -= 1;
+        let mut rum_wm = serde_json::Map::new();
+        if let Some(ref stats) = rum_stats {
+            rum_wm.insert(crate::ingest::RUM_STATS_FIELD.into(), stats.clone());
+        }
+        if let Some(ref rfk) = rum_floor_key {
+            rum_wm.insert(crate::ingest::FLOOR_FIELD.into(), json!(rfk));
+        }
         upsert_kv(
             context,
             &crate::ingest::watermark_key(crate::ingest::rum::STREAM),
-            &json!({ crate::ingest::RUM_STATS_FIELD: stats }),
+            &Value::Object(rum_wm),
             initial_try_insert_first,
             &mut try_insert_first,
             remaining_upserts,

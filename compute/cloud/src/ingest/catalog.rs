@@ -49,6 +49,10 @@ pub struct Head {
     pub day_bundles: BTreeMap<i64, Reference>,
     #[serde(default)]
     pub bundle_retired: BTreeMap<String, u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,6 +71,8 @@ pub struct Reference {
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Day {
     pub version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_id: Option<String>,
     pub hours: BTreeMap<i64, Reference>,
     #[serde(default)]
     pub statistics: Statistics,
@@ -328,17 +334,61 @@ pub(crate) fn put<T: Serialize, R: Runtime>(
     put_limit(store, value, MANIFEST_LIMIT)
 }
 
-fn put_limit<T: Serialize, R: Runtime>(
-    store: &Store<'_, R>,
+fn encode_catalog_object<T: Serialize>(
+    scope_prefix: &str,
+    prefix_tag: &str,
     value: &T,
     limit: usize,
-) -> Result<String, String> {
+) -> Result<(String, Vec<u8>), String> {
     let body = serde_json::to_vec(value).map_err(|e| e.to_string())?;
     if body.len() > limit {
         return Err("catalog_manifest_too_large".into());
     }
     let digest = hex::encode(Sha256::digest(&body));
-    let key = format!("{}processed/_catalog/{digest}.json", scope(store.service));
+    let key = format!("{scope_prefix}processed/_catalog/{prefix_tag}{digest}.json");
+    Ok((key, body))
+}
+
+type HeadDaySnapshot<'a> = (&'a BTreeMap<i64, String>, &'a BTreeMap<i64, Statistics>);
+
+fn put_manifest<R: Runtime>(
+    store: &Store<'_, R>,
+    manifest: &Manifest,
+    reset_generation: Option<u64>,
+    reset_at: Option<i64>,
+    head_snapshot: Option<HeadDaySnapshot<'_>>,
+    limit: usize,
+) -> Result<String, String> {
+    let mut val = serde_json::to_value(manifest).map_err(|e| e.to_string())?;
+    if let Some(obj) = val.as_object_mut() {
+        if let Some(rg) = reset_generation {
+            obj.insert("reset_generation".into(), Value::from(rg));
+        }
+        if let Some(ra) = reset_at {
+            obj.insert("reset_at".into(), Value::from(ra));
+        }
+        if let Some((h_days, h_stats)) = head_snapshot {
+            obj.insert(
+                "head_days".into(),
+                serde_json::to_value(h_days).map_err(|e| e.to_string())?,
+            );
+            obj.insert(
+                "head_statistics".into(),
+                serde_json::to_value(h_stats).map_err(|e| e.to_string())?,
+            );
+        }
+    }
+    let (key, body) = encode_catalog_object(&scope(store.service), "manifest-", &val, limit)?;
+    store.put_verified(&key, body)?;
+    Ok(key)
+}
+
+fn put_limit<T: Serialize, R: Runtime>(
+    store: &Store<'_, R>,
+    value: &T,
+    limit: usize,
+) -> Result<String, String> {
+    let (key, body) = encode_catalog_object(&scope(store.service), "", value, limit)?;
     store.put_verified(&key, body)?;
     Ok(key)
 }
@@ -493,6 +543,7 @@ pub fn prepare_reserving<R: Runtime>(
             .transpose()?
             .unwrap_or_else(|| Day {
                 version: VERSION,
+                service_id: Some(store.service.service_id.clone()),
                 ..Default::default()
             });
         work.days.insert(*day, index);
@@ -674,11 +725,123 @@ pub fn prepare_reserving<R: Runtime>(
         rows: files.iter().map(|f| f.rows).sum(),
         parents,
     };
+    let scope_prefix = scope(store.service);
+    let now_s = runtime.now() as i64;
+    let mut computed_days: BTreeMap<i64, (Day, String, Vec<u8>)> = BTreeMap::new();
+    let mut preview_days = head.days.clone();
+    let mut preview_stats = head.statistics.clone();
+    for day in &days {
+        let mut index = work.days[day].clone();
+        if !work.published.contains_key(day) {
+            let removed = work
+                .proofs
+                .iter()
+                .filter(|(hour, _)| day_start(**hour) == *day)
+                .try_fold(0u64, |sum, (_, proof)| sum.checked_add(proof.rows))
+                .ok_or("catalog_rows_overflow")?;
+            index.statistics.rows = index
+                .statistics
+                .rows
+                .checked_sub(removed)
+                .ok_or("catalog_rows_invalid")?;
+            for file in files
+                .iter()
+                .filter(|file| file_hour(&file.key).map(day_start) == Some(*day))
+            {
+                let (start, end) =
+                    file_bounds(&file.key).ok_or("catalog_file_partition_invalid")?;
+                let (log_start, log_end) = file_log_bounds(file, start, end, now_s);
+                index.statistics.earliest = Some(
+                    index
+                        .statistics
+                        .earliest
+                        .map_or(start, |old| old.min(start)),
+                );
+                index.statistics.latest =
+                    Some(index.statistics.latest.map_or(end, |old| old.max(end)));
+                index.statistics.earliest_log = Some(
+                    index
+                        .statistics
+                        .earliest_log
+                        .or(index.statistics.earliest)
+                        .map_or(log_start, |old| old.min(log_start)),
+                );
+                index.statistics.latest_log = Some(
+                    index
+                        .statistics
+                        .latest_log
+                        .map_or(log_end, |old| old.max(log_end)),
+                );
+                index.statistics.rows = index
+                    .statistics
+                    .rows
+                    .checked_add(file.rows)
+                    .ok_or("catalog_rows_overflow")?;
+            }
+            for hour in hours.iter().filter(|hour| day_start(**hour) == *day) {
+                if index.hour_statistics.contains_key(hour) || !index.hours.contains_key(hour) {
+                    let statistics = index.hour_statistics.entry(*hour).or_default();
+                    statistics.rows = statistics
+                        .rows
+                        .checked_sub(work.proofs.get(hour).map_or(0, |p| p.rows))
+                        .ok_or("catalog_rows_invalid")?;
+                    for file in files
+                        .iter()
+                        .filter(|file| file_hour(&file.key) == Some(*hour))
+                    {
+                        let (a, b) =
+                            file_bounds(&file.key).ok_or("catalog_file_partition_invalid")?;
+                        let (log_a, log_b) = file_log_bounds(file, a, b, now_s);
+                        statistics.earliest = Some(statistics.earliest.map_or(a, |old| old.min(a)));
+                        statistics.latest = Some(statistics.latest.map_or(b, |old| old.max(b)));
+                        statistics.earliest_log = Some(
+                            statistics
+                                .earliest_log
+                                .or(statistics.earliest)
+                                .map_or(log_a, |old| old.min(log_a)),
+                        );
+                        statistics.latest_log =
+                            Some(statistics.latest_log.map_or(log_b, |old| old.max(log_b)));
+                        statistics.rows = statistics
+                            .rows
+                            .checked_add(file.rows)
+                            .ok_or("catalog_rows_overflow")?;
+                    }
+                }
+                let added = summaries
+                    .iter()
+                    .filter(|file| file_hour(&file.key) == Some(*hour))
+                    .count() as u64;
+                if let Some(count) = index.summary_counts.get_mut(hour) {
+                    *count = count.checked_add(added).ok_or("catalog_rows_overflow")?;
+                } else if !index.hours.contains_key(hour) {
+                    index.summary_counts.insert(*hour, added);
+                }
+                index.hours.insert(*hour, work.blocks[hour].clone());
+            }
+            index.service_id = Some(store.service.service_id.clone());
+            let (day_key, day_body) =
+                encode_catalog_object(&scope_prefix, "", &index, MANIFEST_LIMIT)?;
+            preview_days.insert(*day, day_key.clone());
+            preview_stats.insert(*day, index.statistics.clone());
+            computed_days.insert(*day, (index, day_key, day_body));
+        } else {
+            preview_days.insert(*day, work.published[day].clone());
+            preview_stats.insert(*day, index.statistics.clone());
+        }
+    }
     if work.manifest.is_none() {
         if runtime.admin_remaining_calls() <= reserve + 1 || !admitted(store) {
             return pending(&mut work);
         }
-        work.manifest = Some(put_limit(store, &manifest, 4 * 1024 * 1024)?);
+        work.manifest = Some(put_manifest(
+            store,
+            &manifest,
+            head.reset_generation,
+            head.reset_at,
+            Some((&preview_days, &preview_stats)),
+            4 * 1024 * 1024,
+        )?);
     }
     let key = work.manifest.clone().ok_or("catalog_preparation_invalid")?;
     for day in &days {
@@ -688,92 +851,11 @@ pub fn prepare_reserving<R: Runtime>(
         if runtime.admin_remaining_calls() <= reserve + 1 || !admitted(store) {
             return pending(&mut work);
         }
-        let mut index = work.days[day].clone();
-        let removed = work
-            .proofs
-            .iter()
-            .filter(|(hour, _)| day_start(**hour) == *day)
-            .try_fold(0u64, |sum, (_, proof)| sum.checked_add(proof.rows))
-            .ok_or("catalog_rows_overflow")?;
-        index.statistics.rows = index
-            .statistics
-            .rows
-            .checked_sub(removed)
-            .ok_or("catalog_rows_invalid")?;
-        let now_s = runtime.now() as i64;
-        for file in files
-            .iter()
-            .filter(|file| file_hour(&file.key).map(day_start) == Some(*day))
-        {
-            let (start, end) = file_bounds(&file.key).ok_or("catalog_file_partition_invalid")?;
-            let (log_start, log_end) = file_log_bounds(file, start, end, now_s);
-            index.statistics.earliest = Some(
-                index
-                    .statistics
-                    .earliest
-                    .map_or(start, |old| old.min(start)),
-            );
-            index.statistics.latest = Some(index.statistics.latest.map_or(end, |old| old.max(end)));
-            index.statistics.earliest_log = Some(
-                index
-                    .statistics
-                    .earliest_log
-                    .or(index.statistics.earliest)
-                    .map_or(log_start, |old| old.min(log_start)),
-            );
-            index.statistics.latest_log = Some(
-                index
-                    .statistics
-                    .latest_log
-                    .map_or(log_end, |old| old.max(log_end)),
-            );
-            index.statistics.rows = index
-                .statistics
-                .rows
-                .checked_add(file.rows)
-                .ok_or("catalog_rows_overflow")?;
-        }
-        for hour in hours.iter().filter(|hour| day_start(**hour) == *day) {
-            if index.hour_statistics.contains_key(hour) || !index.hours.contains_key(hour) {
-                let statistics = index.hour_statistics.entry(*hour).or_default();
-                statistics.rows = statistics
-                    .rows
-                    .checked_sub(work.proofs.get(hour).map_or(0, |p| p.rows))
-                    .ok_or("catalog_rows_invalid")?;
-                for file in files
-                    .iter()
-                    .filter(|file| file_hour(&file.key) == Some(*hour))
-                {
-                    let (a, b) = file_bounds(&file.key).ok_or("catalog_file_partition_invalid")?;
-                    let (log_a, log_b) = file_log_bounds(file, a, b, now_s);
-                    statistics.earliest = Some(statistics.earliest.map_or(a, |old| old.min(a)));
-                    statistics.latest = Some(statistics.latest.map_or(b, |old| old.max(b)));
-                    statistics.earliest_log = Some(
-                        statistics
-                            .earliest_log
-                            .or(statistics.earliest)
-                            .map_or(log_a, |old| old.min(log_a)),
-                    );
-                    statistics.latest_log =
-                        Some(statistics.latest_log.map_or(log_b, |old| old.max(log_b)));
-                    statistics.rows = statistics
-                        .rows
-                        .checked_add(file.rows)
-                        .ok_or("catalog_rows_overflow")?;
-                }
-            }
-            let added = summaries
-                .iter()
-                .filter(|file| file_hour(&file.key) == Some(*hour))
-                .count() as u64;
-            if let Some(count) = index.summary_counts.get_mut(hour) {
-                *count = count.checked_add(added).ok_or("catalog_rows_overflow")?;
-            } else if !index.hours.contains_key(hour) {
-                index.summary_counts.insert(*hour, added);
-            }
-            index.hours.insert(*hour, work.blocks[hour].clone());
-        }
-        work.published.insert(*day, put(store, &index)?);
+        let (index, day_key, day_body) = computed_days
+            .remove(day)
+            .ok_or("catalog_preparation_invalid")?;
+        store.put_verified(&day_key, day_body)?;
+        work.published.insert(*day, day_key);
         work.days.insert(*day, index);
     }
     for day in &days {
@@ -878,6 +960,7 @@ pub fn retire_reserving<R: Runtime>(store: &Store<'_, R>, reserve: u32) -> Resul
                         Some(day.statistics.latest_log.map_or(b, |old| old.max(b)));
                 }
             }
+            day.service_id = Some(store.service.service_id.clone());
             partial = Some(day);
         }
     }
@@ -912,20 +995,38 @@ pub fn retire_reserving<R: Runtime>(store: &Store<'_, R>, reserve: u32) -> Resul
         rows: 0,
         parents: BTreeMap::new(),
     };
-    let key = put(store, &manifest)?;
-    catalog.days.retain(|day, _| *day >= cutoff_day);
-    catalog.statistics.retain(|day, _| *day >= cutoff_day);
-    if let Some(day) = partial {
-        if day.hours.is_empty() {
-            catalog.days.remove(&cutoff_day);
-            catalog.statistics.remove(&cutoff_day);
-        } else {
-            catalog
-                .statistics
-                .insert(cutoff_day, day.statistics.clone());
-            catalog.days.insert(cutoff_day, put(store, &day)?);
+    let mut next_days = catalog.days.clone();
+    let mut next_stats = catalog.statistics.clone();
+    next_days.retain(|day, _| *day >= cutoff_day);
+    next_stats.retain(|day, _| *day >= cutoff_day);
+    let encoded_partial = match partial {
+        Some(day) if day.hours.is_empty() => {
+            next_days.remove(&cutoff_day);
+            next_stats.remove(&cutoff_day);
+            None
         }
+        Some(day) => {
+            let (day_key, day_body) =
+                encode_catalog_object(&scope(store.service), "", &day, MANIFEST_LIMIT)?;
+            next_stats.insert(cutoff_day, day.statistics.clone());
+            next_days.insert(cutoff_day, day_key.clone());
+            Some((day_key, day_body))
+        }
+        None => None,
+    };
+    let key = put_manifest(
+        store,
+        &manifest,
+        catalog.reset_generation,
+        catalog.reset_at,
+        Some((&next_days, &next_stats)),
+        MANIFEST_LIMIT,
+    )?;
+    if let Some((day_key, day_body)) = encoded_partial {
+        store.put_verified(&day_key, day_body)?;
     }
+    catalog.days = next_days;
+    catalog.statistics = next_stats;
     catalog.hour_bundles.retain(|hour, _| *hour >= cutoff);
     catalog.open_bundles.retain(|hour, _| *hour >= cutoff);
     catalog.day_bundles.retain(|day, _| *day >= cutoff);
@@ -990,6 +1091,8 @@ pub fn reset_head(prev: &Head, now: u64, service_id: &str) -> (Head, Manifest) {
             manifest: None,
         }],
         retirement_grace_until: now.saturating_add(super::compaction::DELETE_GRACE_S),
+        reset_generation: Some(generation),
+        reset_at: Some(now as i64),
         ..Head::default()
     };
     (head, manifest)

@@ -6178,3 +6178,749 @@ fn bug_cloud_dr_25a_post_delete_data_dr_recovery_handles_none_head_and_post_rese
         }
     }
 }
+
+fn commit_real_catalog_batch(
+    p: &Platform,
+    svc: &Service,
+    batch_name: &str,
+    start_ts: i64,
+    rows: u64,
+) -> (String, Value) {
+    use fastly_log_analytics::ingest::{self, storage::Store};
+
+    let pq_key = ingest::processed_key(
+        &format!("{}processed/request/", ingest::scope(svc)),
+        start_ts,
+        start_ts + 60,
+        batch_name,
+        rows,
+    );
+    p.adapter
+        .seed_object_bytes(&svc.fos_bucket, &pq_key, vec![b'P', b'A', b'R', b'1']);
+    let (ak, sk) = fastly_log_analytics::admin::fos_credentials(p, svc).unwrap();
+    CALLS.with(|c| c.set(0));
+    SECRETS.with(|s| s.borrow_mut().clear());
+    ELAPSED_MS.with(|e| e.set(0));
+    let store = Store {
+        runtime: p,
+        service: svc,
+        access_key: ak,
+        secret_key: sk,
+        started: std::time::Instant::now(),
+        vcpu_start: 0,
+    };
+    let prev_rec = p.adapter.records().get(ingest::WATERMARK_KEY).cloned();
+    let prev_val = prev_rec
+        .as_ref()
+        .map(|r| r.value.clone())
+        .unwrap_or(Value::Null);
+    let output = ingest::worker::Output {
+        key: pq_key.clone(),
+        bytes: 128,
+        rows,
+        ..Default::default()
+    };
+    let next_wm = ingest::catalog::prepare(
+        &store,
+        &prev_val,
+        batch_name,
+        "v2",
+        &[output],
+        &[],
+        &[],
+        &[],
+    )
+    .expect("real catalog::prepare 3-file commit");
+    p.adapter
+        .cas(
+            ingest::WATERMARK_KEY,
+            prev_rec.as_ref().map(|r| r.generation.as_str()),
+            &next_wm,
+        )
+        .unwrap();
+    (pq_key, next_wm)
+}
+
+#[test]
+fn bug_cloud_dr_26a_post_delete_data_3file_commits_day_filtering_and_rum_floor() {
+    use fastly_log_analytics::ingest::{self, storage::Store};
+    use std::sync::atomic::Ordering;
+
+    RICH_FOS.with(|r| r.set(true));
+    MTIMES.with(|m| m.borrow_mut().clear());
+
+    let p = Platform::new();
+    let provisioned = p.provision();
+    p.drain(provisioned["job"].clone());
+
+    let mut svc: Service =
+        serde_json::from_value(p.adapter.records()["svc:fixtureService"].value.clone()).unwrap();
+    svc.rum.enabled = true;
+    p.adapter
+        .cas(
+            "svc:fixtureService",
+            Some(&p.adapter.records()["svc:fixtureService"].generation),
+            &serde_json::to_value(&svc).unwrap(),
+        )
+        .unwrap();
+
+    // Commit two real 3-file (Block + Day + Manifest) pre-reset batches across two UTC days:
+    let day1_ts = 1_795_046_400i64; // 2026-11-19T00:00:00Z
+    let day2_ts = 1_795_132_800i64; // 2026-11-20T00:00:00Z
+    p.clock.store(day1_ts as u64 + 120, Ordering::SeqCst);
+    let (pre_pq_1, _) = commit_real_catalog_batch(&p, &svc, "g1s0", day1_ts, 200);
+    p.clock.store(day2_ts as u64 + 120, Ordering::SeqCst);
+    let (pre_pq_2, wm_gen2) = commit_real_catalog_batch(&p, &svc, "g2s0", day2_ts, 300);
+
+    let mut wm_with_pre_floor = wm_gen2;
+    wm_with_pre_floor["floor_key"] =
+        json!("raw/request/year=2026/month=11/day=19/hour=00/minute=00/");
+    p.adapter
+        .cas(
+            ingest::WATERMARK_KEY,
+            Some(&p.adapter.records()[ingest::WATERMARK_KEY].generation),
+            &wm_with_pre_floor,
+        )
+        .unwrap();
+    p.adapter
+        .cas(
+            &ingest::watermark_key("rum"),
+            None,
+            &json!({
+                "floor_key": "raw/rum/year=2026/month=11/day=19/hour=00/minute=00/",
+                "rum_stats": {"earliest": day1_ts, "latest": day2_ts + 60, "rows": 42_000u64, "at": day2_ts + 120}
+            }),
+        )
+        .unwrap();
+
+    CALLS.with(|c| c.set(0));
+    SECRETS.with(|s| s.borrow_mut().clear());
+    dr::sync_best_effort(&p, &svc);
+    let stale_some_dr_bytes =
+        p.adapter.bucket_objects("fos-fixture-logs")["meta/cloud_dr_state.json"].clone();
+    let stale_some_dr_val: Value = serde_json::from_slice(&stale_some_dr_bytes).unwrap();
+    assert_eq!(
+        stale_some_dr_val["rum_floor_key"], "raw/rum/year=2026/month=11/day=19/hour=00/minute=00/",
+        "BUG-CLOUD-DR-26A(c): sync_best_effort must persist ingest:watermark:rum[floor_key]"
+    );
+
+    let mut stale_none_dr_val = stale_some_dr_val.clone();
+    stale_none_dr_val
+        .as_object_mut()
+        .unwrap()
+        .remove("catalog_head");
+    let stale_none_dr_bytes = serde_json::to_vec(&stale_none_dr_val).unwrap();
+
+    // Start Delete Data at 2027-01-15T08:09:00Z (1_800_000_540) and step ONLY into "cleanup"
+    // (still inside DELETE_GRACE_S = 660s, so pre-reset Block/Day/Manifest & Parquet files remain in S3!):
+    let dd_start_ts = 1_800_000_540u64;
+    p.clock.store(dd_start_ts, Ordering::SeqCst);
+    let dd_gen = p.adapter.records()["svc:fixtureService"].generation.clone();
+    p.json(
+        "POST",
+        "/api/admin/services/fixtureService/delete-data",
+        json!({"confirm_service_id": "fixtureService", "generation": dd_gen}),
+    );
+    p.clock.fetch_add(
+        fastly_log_analytics::admin::reset::FENCE_WAIT_S + 5,
+        Ordering::SeqCst,
+    );
+    for _ in 0..4 {
+        let recs = p.adapter.records();
+        let cur_svc: Service =
+            serde_json::from_value(recs["svc:fixtureService"].value.clone()).unwrap();
+        let (ak, sk) = fastly_log_analytics::admin::fos_credentials(&p, &cur_svc).unwrap();
+        CALLS.with(|c| c.set(0));
+        SECRETS.with(|s| s.borrow_mut().clear());
+        ELAPSED_MS.with(|e| e.set(0));
+        let store = Store {
+            runtime: &p,
+            service: &cur_svc,
+            access_key: ak,
+            secret_key: sk,
+            started: std::time::Instant::now(),
+            vcpu_start: 0,
+        };
+        let Some(step_res) = fastly_log_analytics::admin::reset::advance(&store) else {
+            break;
+        };
+        step_res.unwrap();
+        let job_rec = p.adapter.records()[fastly_log_analytics::admin::reset::JOB_KEY]
+            .value
+            .clone();
+        if job_rec["status"] == "cleanup" {
+            break;
+        }
+        p.clock.fetch_add(2, Ordering::SeqCst);
+    }
+
+    let in_grace_objs = p.adapter.bucket_objects("fos-fixture-logs");
+    assert!(
+        in_grace_objs.contains_key(&pre_pq_1) && in_grace_objs.contains_key(&pre_pq_2),
+        "Pre-reset Parquet files must still be present during DELETE_GRACE_S"
+    );
+    let synced_cleanup_dr: Value =
+        serde_json::from_slice(&in_grace_objs["meta/cloud_dr_state.json"]).unwrap();
+    assert!(
+        synced_cleanup_dr.get("rum_stats").is_none_or(Value::is_null),
+        "BUG-CLOUD-DR-26A(a): entering Delete Data cleanup must immediately sanitize meta/cloud_dr_state.json rum_stats: {synced_cleanup_dr}"
+    );
+    assert_eq!(
+        synced_cleanup_dr["catalog_head"]["generation"], 3,
+        "BUG-CLOUD-DR-26A(a): entering Delete Data cleanup must mirror reset catalog_head (gen=3)"
+    );
+
+    let post_dd_wm = p.adapter.records()[ingest::WATERMARK_KEY].value.clone();
+    let reset_manifest_key = post_dd_wm["catalog"]["manifest"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let reset_manifest: Manifest =
+        serde_json::from_slice(&in_grace_objs[&reset_manifest_key]).unwrap();
+    let reset_dt = time::OffsetDateTime::parse(
+        &reset_manifest.committed_at,
+        &time::format_description::well_known::Rfc3339,
+    )
+    .unwrap();
+    let reset_minute_ts = reset_dt.unix_timestamp() - reset_dt.unix_timestamp().rem_euclid(60);
+    let expected_req_floor = format!("raw/request/{}", ingest::minute_dir(reset_minute_ts));
+    let expected_rum_floor = format!("raw/rum/{}", ingest::minute_dir(reset_minute_ts));
+
+    // Test 0, 1, and 12 real 3-file post-reset ingest commits (up to 36 post-reset .json files!)
+    // across both stale Some(head) and stale None cloud_dr_state.json during DELETE_GRACE_S:
+    let mut committed_so_far = 0usize;
+    for post_commits in [0usize, 1, 12] {
+        let cur_svc: Service =
+            serde_json::from_value(p.adapter.records()["svc:fixtureService"].value.clone())
+                .unwrap();
+        while committed_so_far < post_commits {
+            committed_so_far += 1;
+            let commit_ts = reset_dt.unix_timestamp() + (committed_so_far as i64) * 60;
+            p.clock.store(commit_ts as u64, Ordering::SeqCst);
+            commit_real_catalog_batch(
+                &p,
+                &cur_svc,
+                &format!("post{committed_so_far}"),
+                commit_ts,
+                10,
+            );
+        }
+        let sim_objs = p.adapter.bucket_objects("fos-fixture-logs");
+        let sim_mtimes = MTIMES.with(|m| m.borrow().clone());
+
+        for head_is_some in [false, true] {
+            let p_rec = Platform::new();
+            p_rec.clock.store(p.now() + 60, Ordering::SeqCst);
+            p_rec.adapter.seed_resource(
+                "fixtureService",
+                "snippet",
+                json!({"name": "flp-owner-fixtureApp", "type": "recv", "priority": "0", "content": "# flp-owner:fixtureApp:fixtureService"}),
+            );
+            MTIMES.with(|m| *m.borrow_mut() = sim_mtimes.clone());
+            for (k, v) in &sim_objs {
+                p_rec
+                    .adapter
+                    .seed_object_bytes("fos-fixture-logs", k, v.clone());
+            }
+            p_rec.adapter.seed_object_bytes(
+                "fos-fixture-logs",
+                "meta/cloud_dr_state.json",
+                if head_is_some {
+                    stale_some_dr_bytes.clone()
+                } else {
+                    stale_none_dr_bytes.clone()
+                },
+            );
+
+            let rec_res = p_rec.json(
+                "POST",
+                "/api/admin/provision/recover",
+                json!({
+                    "token": "fixture-token",
+                    "service_id": "fixtureService",
+                    "fos_bucket": "fos-fixture-logs",
+                    "fos_region": "us-east-1"
+                }),
+            );
+            assert_eq!(
+                rec_res["catalog_generation"],
+                3 + post_commits as u64,
+                "[post_commits={post_commits}, head_is_some={head_is_some}] wrong generation: {rec_res}"
+            );
+            let rec_records = p_rec.adapter.records();
+            let rum_wm = rec_records
+                .get(&ingest::watermark_key("rum"))
+                .expect("BUG-CLOUD-DR-26A(c): ingest:watermark:rum must be upserted with floor_key after reset");
+            assert!(
+                rum_wm.value.get("rum_stats").is_none_or(Value::is_null),
+                "[post_commits={post_commits}, head_is_some={head_is_some}] rum_stats resurrected: {:?}",
+                rum_wm.value
+            );
+            assert_eq!(
+                rum_wm.value["floor_key"], expected_rum_floor,
+                "[post_commits={post_commits}, head_is_some={head_is_some}] wrong RUM floor_key"
+            );
+            assert!(
+                ingest::below_floor(
+                    "raw/rum/year=2026/month=11/day=20/hour=00/minute=00/beacon.zst",
+                    Some(&rum_wm.value)
+                ),
+                "pre-reset raw/rum beacon must be below recovered RUM floor_key"
+            );
+            assert_eq!(
+                rec_records[ingest::WATERMARK_KEY].value["floor_key"],
+                expected_req_floor,
+                "[post_commits={post_commits}, head_is_some={head_is_some}] request floor_key must equal reset minute"
+            );
+
+            let recovered_svc: Service =
+                serde_json::from_value(rec_records["svc:fixtureService"].value.clone()).unwrap();
+            CALLS.with(|c| c.set(0));
+            let ext =
+                ingest::api::extents(&p_rec, &recovered_svc, std::time::Instant::now()).unwrap();
+            let expected_rows = if post_commits == 0 {
+                Value::Null
+            } else {
+                json!((post_commits as u64) * 10)
+            };
+            assert_eq!(
+                ext["total_rows"],
+                expected_rows,
+                "[post_commits={post_commits}, head_is_some={head_is_some}] pre-reset rows resurrected in log-extents: {ext}"
+            );
+
+            CALLS.with(|c| c.set(0));
+            let pre_files_resp = ingest::api::files(
+                &p_rec,
+                &recovered_svc,
+                "from=2026-11-19T00:00:00Z&to=2026-11-21T00:00:00Z",
+                std::time::Instant::now(),
+            )
+            .unwrap();
+            assert_eq!(
+                pre_files_resp["files"].as_array().unwrap().len(),
+                0,
+                "[post_commits={post_commits}, head_is_some={head_is_some}] pre-reset Parquet files resurrected: {pre_files_resp}"
+            );
+        }
+    }
+
+    // Poisoned rum_floor_key in cloud_dr_state.json must be rejected with 400 invalid_dr_floor_key:
+    let mut bad_rum_dr = stale_some_dr_val;
+    bad_rum_dr["rum_floor_key"] = json!("raw/rum/../../other/evil/");
+    let p_bad = Platform::new();
+    p_bad.adapter.seed_object_bytes(
+        "fos-fixture-logs",
+        "meta/cloud_dr_state.json",
+        serde_json::to_vec(&bad_rum_dr).unwrap(),
+    );
+    let bad_resp = p_bad.call(
+        "POST",
+        "/api/admin/provision/recover",
+        json!({
+            "token": "fixture-token",
+            "service_id": "fixtureService",
+            "fos_bucket": "fos-fixture-logs",
+            "fos_region": "us-east-1"
+        }),
+    );
+    RICH_FOS.with(|r| r.set(false));
+    assert_eq!(bad_resp.status, 400);
+    assert!(
+        String::from_utf8_lossy(&bad_resp.body).contains("invalid_dr_floor_key"),
+        "expected invalid_dr_floor_key, got {}",
+        String::from_utf8_lossy(&bad_resp.body)
+    );
+}
+
+#[test]
+fn bug_cloud_dr_26b_reconcile_reserve_preserves_front_dictionary_sync_across_budgets() {
+    use fastly_log_analytics::{admin, http::Request};
+    use std::collections::BTreeSet;
+    use std::sync::atomic::Ordering;
+
+    RICH_FOS.with(|r| r.set(true));
+    MTIMES.with(|m| m.borrow_mut().clear());
+
+    // Build 9 real 3-file catalog commits (27 .json objects in processed/_catalog/) with catalog_head=Some(gen=3):
+    let p_seed = Platform::new();
+    let provisioned = p_seed.provision();
+    p_seed.drain(provisioned["job"].clone());
+    let svc_seed: Service =
+        serde_json::from_value(p_seed.adapter.records()["svc:fixtureService"].value.clone())
+            .unwrap();
+    let base_ts = 1_795_200_000i64;
+    for i in 1..=3 {
+        p_seed
+            .clock
+            .store((base_ts + i * 60) as u64, Ordering::SeqCst);
+        commit_real_catalog_batch(&p_seed, &svc_seed, &format!("seed{i}"), base_ts + i * 60, 5);
+    }
+    CALLS.with(|c| c.set(0));
+    SECRETS.with(|s| s.borrow_mut().clear());
+    dr::sync_best_effort(&p_seed, &svc_seed);
+    let gen3_dr_bytes =
+        p_seed.adapter.bucket_objects("fos-fixture-logs")["meta/cloud_dr_state.json"].clone();
+    for i in 4..=12 {
+        p_seed
+            .clock
+            .store((base_ts + i * 60) as u64, Ordering::SeqCst);
+        commit_real_catalog_batch(&p_seed, &svc_seed, &format!("seed{i}"), base_ts + i * 60, 5);
+    }
+    let catalog_objs = p_seed.adapter.bucket_objects("fos-fixture-logs");
+    let catalog_json_count = catalog_objs
+        .keys()
+        .filter(|k| k.starts_with("processed/_catalog/") && k.ends_with(".json"))
+        .count();
+    assert!(
+        catalog_json_count >= 24,
+        "expected >= 24 catalog .json objects, got {catalog_json_count}"
+    );
+    let seed_mtimes = MTIMES.with(|m| m.borrow().clone());
+
+    for remaining in [24u32, 25, 32] {
+        let p_cold = Platform::new();
+        p_cold.adapter.seed_resource(
+            "fixtureService",
+            "snippet",
+            json!({"name": "flp-owner-fixtureApp", "type": "recv", "priority": "0", "content": "# flp-owner:fixtureApp:fixtureService"}),
+        );
+        MTIMES.with(|m| *m.borrow_mut() = seed_mtimes.clone());
+        for (k, v) in &catalog_objs {
+            p_cold
+                .adapter
+                .seed_object_bytes("fos-fixture-logs", k, v.clone());
+        }
+        p_cold.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            "meta/cloud_dr_state.json",
+            gen3_dr_bytes.clone(),
+        );
+        ELAPSED_MS.with(|e| e.set(0));
+        CALLS.with(|c| c.set(32 - remaining));
+        SECRETS
+            .with(|s| *s.borrow_mut() = BTreeSet::from(["front_key".into(), "session_key".into()]));
+        let resp = admin::handle(
+            &p_cold,
+            "fixtureAdmin",
+            &Request {
+                method: "POST".into(),
+                path: "/api/admin/provision/recover".into(),
+                headers: BTreeMap::new(),
+                body: json!({
+                    "token": "fixture-token",
+                    "service_id": "fixtureService",
+                    "fos_bucket": "fos-fixture-logs",
+                    "fos_region": "us-east-1"
+                })
+                .to_string()
+                .into_bytes(),
+            },
+        );
+        assert_eq!(
+            resp.status,
+            200,
+            "[cold_start remaining={remaining}] expected 200: {}",
+            String::from_utf8_lossy(&resp.body)
+        );
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["front_synced"], true,
+            "[cold_start remaining={remaining}] BUG-CLOUD-DR-26B: front_synced must be true: {body}"
+        );
+        assert_eq!(
+            p_cold
+                .adapter
+                .dictionary_items("fixtureBuckets")
+                .get("fixtureService")
+                .map(String::as_str),
+            Some("fos-fixture-logs|us-east-1")
+        );
+        let creds_dict = p_cold.adapter.dictionary_items("fixtureCredentials");
+        assert!(creds_dict.contains_key("fixtureService.ak"));
+        assert!(creds_dict.contains_key("fixtureService.sk"));
+    }
+
+    // Warm teardown re-recovery at remaining=25 with views=[v1] and rum_stats=Some(...):
+    let mut torn_svc = svc_seed.clone();
+    torn_svc.status = "torn_down".into();
+    p_seed
+        .adapter
+        .cas(
+            "svc:fixtureService",
+            Some(&p_seed.adapter.records()["svc:fixtureService"].generation),
+            &serde_json::to_value(&torn_svc).unwrap(),
+        )
+        .unwrap();
+    let mut warm_dr_val: Value = serde_json::from_slice(&gen3_dr_bytes).unwrap();
+    warm_dr_val["views"] = json!([{
+        "id": "v1",
+        "service_id": "fixtureService",
+        "name": "Errors",
+        "filters_json": "{\"status\":500}",
+        "time_range_type": "relative",
+        "page": "overview"
+    }]);
+    warm_dr_val["rum_stats"] = json!({"rows": 120, "at": base_ts + 180});
+    p_seed.adapter.seed_object_bytes(
+        "fos-fixture-logs",
+        "meta/cloud_dr_state.json",
+        serde_json::to_vec(&warm_dr_val).unwrap(),
+    );
+    let warm_res = p_seed.json(
+        "POST",
+        "/api/admin/provision/recover",
+        json!({
+            "token": "fixture-token",
+            "service_id": "fixtureService",
+            "fos_bucket": "fos-fixture-logs",
+            "fos_region": "us-east-1"
+        }),
+    );
+    RICH_FOS.with(|r| r.set(false));
+    assert_eq!(
+        warm_res["front_synced"], true,
+        "[teardown_re_recovery remaining=25] BUG-CLOUD-DR-26B: front_synced must be true: {warm_res}"
+    );
+}
+
+#[test]
+fn bug_cloud_dr_26c_shared_prefix_foreign_day_isolation() {
+    use fastly_log_analytics::ingest;
+    use std::sync::atomic::Ordering;
+
+    RICH_FOS.with(|r| r.set(true));
+    MTIMES.with(|m| m.borrow_mut().clear());
+
+    // 1. Mixed shared _catalog/ prefix: fixtureService has gen=1..2 (10 rows total),
+    // while foreignService22Chars0 has gen=2 and gen=10 (9,999 rows) in the same prefix!
+    let p_own = Platform::new();
+    let provisioned = p_own.provision();
+    p_own.drain(provisioned["job"].clone());
+    let own_svc: Service =
+        serde_json::from_value(p_own.adapter.records()["svc:fixtureService"].value.clone())
+            .unwrap();
+    let day_ts = 1_795_132_800i64; // 2026-11-20T00:00:00Z
+    p_own.clock.store(day_ts as u64 + 60, Ordering::SeqCst);
+    let (own_pq_1, _) = commit_real_catalog_batch(&p_own, &own_svc, "own1", day_ts, 4);
+    p_own.clock.store(day_ts as u64 + 120, Ordering::SeqCst);
+    let (own_pq_2, _) = commit_real_catalog_batch(&p_own, &own_svc, "own2", day_ts + 60, 6);
+    let own_wm = p_own.adapter.records()[ingest::WATERMARK_KEY].value.clone();
+    let own_manifest_key = own_wm["catalog"]["manifest"].as_str().unwrap().to_owned();
+    let own_day_key = own_wm["catalog"]["days"][day_ts.to_string()]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let own_objs = p_own.adapter.bucket_objects("fos-fixture-logs");
+    let own_mtimes = MTIMES.with(|m| m.borrow().clone());
+
+    let p_mix = Platform::new();
+    p_mix.adapter.seed_resource(
+        "fixtureService",
+        "snippet",
+        json!({"name": "flp-owner-fixtureApp", "type": "recv", "priority": "0", "content": "# flp-owner:fixtureApp:fixtureService"}),
+    );
+    MTIMES.with(|m| *m.borrow_mut() = own_mtimes);
+    for (k, v) in &own_objs {
+        if k != "meta/cloud_dr_state.json" {
+            p_mix
+                .adapter
+                .seed_object_bytes("fos-fixture-logs", k, v.clone());
+        }
+    }
+    // Seed foreign Manifest (gen=10) + both unattributed high-gen and low-gen foreign Day objects:
+    let foreign_manifest = Manifest {
+        version: VERSION,
+        service_id: "foreignService22Chars0".into(),
+        generation: 10,
+        batch: "foreign-b10".into(),
+        schema: "v2".into(),
+        committed_at: "2026-11-20T02:00:00Z".into(),
+        previous: None,
+        files: vec![],
+        summaries: vec![],
+        sources: vec![],
+        replaces: vec![],
+        bytes: 4096,
+        rows: 9_999,
+        parents: BTreeMap::new(),
+    };
+    let foreign_day_unattributed = Day {
+        version: VERSION,
+        hours: BTreeMap::from([(
+            day_ts,
+            Reference {
+                key: "processed/_catalog/foreign_block_10.json".into(),
+                generation: 10,
+            },
+        )]),
+        statistics: Statistics {
+            earliest: Some(day_ts),
+            latest: Some(day_ts + 3599),
+            earliest_log: None,
+            latest_log: None,
+            rows: 9_999,
+        },
+        ..Day::default()
+    };
+    let foreign_day_low_gen = Day {
+        version: VERSION,
+        hours: BTreeMap::from([(
+            day_ts + 86_400,
+            Reference {
+                key: "processed/_catalog/foreign_block_01.json".into(),
+                generation: 1,
+            },
+        )]),
+        statistics: Statistics {
+            earliest: Some(day_ts + 86_400),
+            latest: Some(day_ts + 89_999),
+            earliest_log: None,
+            latest_log: None,
+            rows: 777,
+        },
+        ..Day::default()
+    };
+    p_mix.adapter.seed_object_bytes(
+        "fos-fixture-logs",
+        "processed/_catalog/foreign_manifest_10.json",
+        serde_json::to_vec(&foreign_manifest).unwrap(),
+    );
+    p_mix.adapter.seed_object_bytes(
+        "fos-fixture-logs",
+        "processed/_catalog/foreign_day_10.json",
+        serde_json::to_vec(&foreign_day_unattributed).unwrap(),
+    );
+    p_mix.adapter.seed_object_bytes(
+        "fos-fixture-logs",
+        "processed/_catalog/foreign_day_01.json",
+        serde_json::to_vec(&foreign_day_low_gen).unwrap(),
+    );
+    MTIMES.with(|m| {
+        let mut m = m.borrow_mut();
+        m.insert(
+            "processed/_catalog/foreign_manifest_10.json".into(),
+            day_ts as u64 + 605,
+        );
+        m.insert(
+            "processed/_catalog/foreign_day_10.json".into(),
+            day_ts as u64 + 604,
+        );
+        m.insert(
+            "processed/_catalog/foreign_day_01.json".into(),
+            day_ts as u64 + 603,
+        );
+        m.insert(own_manifest_key, day_ts as u64 + 602);
+        m.insert(own_day_key, day_ts as u64 + 601);
+    });
+
+    let mix_res = p_mix.json(
+        "POST",
+        "/api/admin/provision/recover",
+        json!({
+            "token": "fixture-token",
+            "service_id": "fixtureService",
+            "fos_bucket": "fos-fixture-logs",
+            "fos_region": "us-east-1"
+        }),
+    );
+    assert_eq!(mix_res["source"], "catalog_scan", "{mix_res}");
+    assert_eq!(mix_res["catalog_generation"], 2, "{mix_res}");
+
+    let mix_svc: Service =
+        serde_json::from_value(p_mix.adapter.records()["svc:fixtureService"].value.clone())
+            .unwrap();
+    CALLS.with(|c| c.set(0));
+    let mix_ext = ingest::api::extents(&p_mix, &mix_svc, std::time::Instant::now()).unwrap();
+    assert_eq!(
+        mix_ext["total_rows"], 10,
+        "BUG-CLOUD-DR-26C: foreign Day rows must NOT leak into log-extents: {mix_ext}"
+    );
+    CALLS.with(|c| c.set(0));
+    let mix_files = ingest::api::files(
+        &p_mix,
+        &mix_svc,
+        "from=2026-11-20T00:00:00Z&to=2026-11-21T00:00:00Z",
+        std::time::Instant::now(),
+    )
+    .expect("BUG-CLOUD-DR-26C: /api/files must succeed 200 OK without foreign Block 503");
+    let returned_keys: Vec<&str> = mix_files["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|f| f["key"].as_str())
+        .collect();
+    assert_eq!(returned_keys, vec![own_pq_1.as_str(), own_pq_2.as_str()]);
+
+    // 2. Foreign Day objects with newer LastModified than foreign Manifest (best_manifest.is_none()):
+    let p_only_foreign = Platform::new();
+    p_only_foreign.adapter.seed_resource(
+        "fixtureService",
+        "snippet",
+        json!({"name": "flp-owner-fixtureApp", "type": "recv", "priority": "0", "content": "# flp-owner:fixtureApp:fixtureService"}),
+    );
+    MTIMES.with(|m| m.borrow_mut().clear());
+    for i in 0..8u64 {
+        let fday_key = format!("processed/_catalog/fday_{i:02}.json");
+        let fblk_key = format!("processed/_catalog/fblk_{i:02}.json");
+        let fblk = json!({
+            "version": VERSION,
+            "service_id": "foreignService22Chars0",
+            "generation": 10 + i,
+            "hour": day_ts + (i as i64) * 3600,
+            "previous": null,
+            "files": [],
+            "summaries": [],
+            "replaces": [],
+            "committed_at": {}
+        });
+        let fday = Day {
+            version: VERSION,
+            hours: BTreeMap::from([(
+                day_ts + (i as i64) * 86_400,
+                Reference {
+                    key: fblk_key.clone(),
+                    generation: 10 + i,
+                },
+            )]),
+            statistics: Statistics {
+                earliest: Some(day_ts),
+                latest: Some(day_ts + 3599),
+                earliest_log: None,
+                latest_log: None,
+                rows: 8_888,
+            },
+            ..Day::default()
+        };
+        p_only_foreign.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            &fblk_key,
+            serde_json::to_vec(&fblk).unwrap(),
+        );
+        p_only_foreign.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            &fday_key,
+            serde_json::to_vec(&fday).unwrap(),
+        );
+        MTIMES.with(|m| {
+            m.borrow_mut().insert(fblk_key, 1_800_000_000 + i);
+            m.borrow_mut().insert(fday_key, 1_800_001_000 + i);
+        });
+    }
+    let only_foreign_res = p_only_foreign.json(
+        "POST",
+        "/api/admin/provision/recover",
+        json!({
+            "token": "fixture-token",
+            "service_id": "fixtureService",
+            "fos_bucket": "fos-fixture-logs",
+            "fos_region": "us-east-1"
+        }),
+    );
+    RICH_FOS.with(|r| r.set(false));
+    assert_eq!(only_foreign_res["source"], "minimal", "{only_foreign_res}");
+    assert!(
+        only_foreign_res["catalog_generation"].is_null(),
+        "{only_foreign_res}"
+    );
+}
