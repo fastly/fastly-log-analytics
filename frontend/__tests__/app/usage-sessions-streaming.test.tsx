@@ -148,7 +148,9 @@ vi.mock('@/hooks/useDashboardCards', async (importOriginal) => {
 
 vi.mock('@/components/CostCalculator/CostCalculator', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/components/CostCalculator/CostCalculator')>()),
-  CostCalculator: ({ prefillNote }: { prefillNote?: string }) => <div data-testid="cost-calculator">{prefillNote}</div>,
+  CostCalculator: ({ prefillNote, localStorageGbHours }: { prefillNote?: string; localStorageGbHours?: number | null }) => (
+    <div data-testid="cost-calculator" data-local-storage-gb-hours={localStorageGbHours ?? ''}>{prefillNote}</div>
+  ),
 }))
 
 function resetDefaultStores() {
@@ -503,6 +505,62 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     expect(await screen.findByText('↳ Cloud copy & compaction:')).toBeInTheDocument()
     expect(screen.getByText('↳ Expired archive:')).toBeInTheDocument()
     expect(screen.getByText('2 GB')).toBeInTheDocument()
+  })
+
+  test('UsagePage keeps local selected-period storage authoritative when Platform storage is present and flags incomplete operations', async () => {
+    mockGet.mockImplementation(async (path: string) => {
+      if (path === '/api/usage/current-storage') {
+        return {
+          data: {
+            live_bytes: 1024 ** 3, live_files: 1, quarantine_bytes: 0,
+            total_billed_bytes: 1024 ** 3, total_billed_gb_hours: 720,
+            storage_billing_complete: true, storage_billing_provenance: ['high-scale:source_objects'],
+            total_files: 1, total_bytes: 1024 ** 3, deleted_bytes: 0, deleted_bytes_complete: true,
+            start: '2026-01-01T00:00:00Z', end: '2026-01-01T01:00:00Z',
+          },
+        } as never
+      }
+      if (path === '/api/usage/platform') {
+        return {
+          data: {
+            _is_cached: false,
+            source: 'fastly',
+            storage: { status: 'ok', scope: 'account', bytes: 2 * 1024 ** 3, buckets: 3, gb_hours: 48 },
+            compute: { status: 'not_configured', scope: null, requests: 0, billed_time_ms: 0, backend_errors: 0, cache_operations: 0, sandboxes: 0, resource_errors: 0 },
+            ngwaf: { status: 'not_configured', scope: null, total: 0, allowed: 0, blocked: 0, challenged: 0, logged: 0, timeout: 0, unknown: 0 },
+          },
+        } as never
+      }
+      if (path === '/api/usage/operations') {
+        return {
+          data: {
+            data: [], total_class_a: 0, total_class_b: 0, granularity: 'hour', note: '', fos_fields_found: [],
+            source: 'local', complete: false, provenance: [],
+          },
+        } as never
+      }
+      if (path === '/api/usage/prefill/rates' || path === '/api/usage/prefill') {
+        return { data: makePrefill({}) } as never
+      }
+      return undefined
+    })
+
+    renderWithQuery(<UsagePage />, { queryClient })
+
+    expect(await screen.findByText('720.00 GB-hrs')).toBeInTheDocument()
+    expect(screen.queryByText('48.00 GB-hrs')).not.toBeInTheDocument()
+    expect(screen.getByText('48.00 GB-hours · 3 buckets')).toBeInTheDocument()
+    expect(screen.getAllByText('Measured · this install').length).toBeGreaterThan(0)
+    expect(screen.queryByText('Measured · Fastly Platform (account-wide)')).not.toBeInTheDocument()
+    expect(screen.getByTestId('cost-calculator')).toHaveAttribute('data-local-storage-gb-hours', '720')
+    expect(screen.getAllByText('Unavailable').length).toBeGreaterThanOrEqual(2)
+    expect(screen.getByText(/Partial estimate.*operations.*excluded/)).toBeInTheDocument()
+    expect(mockGet).toHaveBeenCalledWith(
+      '/api/usage/current-storage',
+      expect.objectContaining({
+        params: { query: { start: '2026-01-01T00:00:00Z', end: '2026-01-01T01:00:00Z' } },
+      }),
+    )
   })
 
   test('sessions page mounts and renders title', () => {

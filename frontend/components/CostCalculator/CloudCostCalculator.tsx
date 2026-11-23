@@ -41,10 +41,10 @@ const RATE_ROWS: [keyof EstimateRates, string][] = [
   ['secret_rate_per_month', 'Secret Store ($/secret-month)'],
 ]
 
-export function CloudCostCalculator({ prefillData, rates: configuredRates, observedStorageGbHours }: {
+export function CloudCostCalculator({ prefillData, rates: configuredRates, localStorageGbHours }: {
   prefillData?: Partial<MeasuredEstimate>
   rates?: Partial<Record<keyof EstimateRates, number | null>>
-  observedStorageGbHours?: number | null
+  localStorageGbHours?: number | null
 }) {
   const [edits, setEdits] = useState<Partial<EstimateInputs>>({})
   const inputs = { ...DEFAULT_INPUTS, ...prefillData?.inputs, ...edits }
@@ -58,24 +58,24 @@ export function CloudCostCalculator({ prefillData, rates: configuredRates, obser
   const result = estimateMonthly(inputs, units, rates, prefillData?.compaction, {
     relay: prefillData?.relay ?? 0,
   })
-  const observedStorageGbMonths = observedStorageGbHours == null
+  const localStorageGbMonths = localStorageGbHours == null
     ? null
-    : observedStorageGbHours / 720
-  const observedStorageCost = observedStorageGbMonths == null
+    : localStorageGbHours / 720
+  const localStorageCost = localStorageGbMonths == null
     ? null
-    : observedStorageGbMonths * rates.storage_rate_per_gb_month
-  const resultLines = observedStorageCost == null
+    : localStorageGbMonths * rates.storage_rate_per_gb_month
+  const resultLines = localStorageCost == null
     ? result.lines
     : result.lines.map((line) => line.id === 'storage'
       ? {
           ...line,
-          detail: `Measured · Fastly Platform (account-wide) · ${(observedStorageGbMonths ?? 0).toFixed(2)} GB-months`,
-          usd: observedStorageCost,
+          detail: `Measured · this install · ${(localStorageGbMonths ?? 0).toFixed(2)} GB-months`,
+          usd: localStorageCost,
         }
       : line)
-  const resultTotal = observedStorageCost == null
+  const resultTotal = localStorageCost == null
     ? result.total
-    : result.total - (result.lines.find((line) => line.id === 'storage')?.usd ?? 0) + observedStorageCost
+    : result.total - (result.lines.find((line) => line.id === 'storage')?.usd ?? 0) + localStorageCost
   const set = (key: keyof EstimateInputs) => (value: number | boolean) =>
     setEdits((current) => ({ ...current, [key]: value }))
   const inputRow = ([key, label]: [keyof EstimateInputs, string]) => (

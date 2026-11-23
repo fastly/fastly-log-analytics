@@ -388,31 +388,31 @@ export function Pricing({ s, setZone }: PricingProps) {
 interface ResultsProps {
   s: CalcState
   r: CalcResults
-  observedStorageGbHours?: number | null
+  localStorageGbHours?: number | null
 }
 
-export function Results({ s, r, observedStorageGbHours }: ResultsProps) {
-  const observedStorageGbMonths = observedStorageGbHours == null
+export function Results({ s, r, localStorageGbHours }: ResultsProps) {
+  const localStorageGbMonths = localStorageGbHours == null
     ? null
-    : observedStorageGbHours / 720
-  const observedStorageCost = observedStorageGbMonths == null
+    : localStorageGbHours / 720
+  const localStorageCost = localStorageGbMonths == null
     ? null
-    : observedStorageGbMonths * s.rateStorage
-  const displayedResult = observedStorageCost == null
+    : localStorageGbMonths * s.rateStorage
+  const displayedResult = localStorageCost == null
     ? r
     : {
         ...r,
-        costStorage: observedStorageCost,
-        totalCost: r.totalCost - r.costStorage + observedStorageCost,
+        costStorage: localStorageCost,
+        totalCost: r.totalCost - r.costStorage + localStorageCost,
         storageTiers: [{
-          label: 'Fastly Platform (account-wide)',
-          gbMonths: observedStorageGbMonths ?? 0,
+          label: 'Measured · this install',
+          gbMonths: localStorageGbMonths ?? 0,
           flagged: false,
         }],
       }
   const storageTierDetail = displayedResult.storageTiers
     .map((tier) => {
-      const value = observedStorageCost == null ? Math.max(0.001, tier.gbMonths) : tier.gbMonths
+      const value = localStorageCost == null ? Math.max(0.001, tier.gbMonths) : tier.gbMonths
       return `${tier.label}: ${value.toFixed(3)} GB-mo${tier.flagged ? '*' : ''}`
     })
     .join(' · ')
@@ -454,9 +454,10 @@ export function Results({ s, r, observedStorageGbHours }: ResultsProps) {
         />
       </div>
 
-      {observedStorageCost != null && (
-        <div className="mt-3 text-xs text-muted-foreground">
-          Measured · Fastly Platform (account-wide)
+      {localStorageCost != null && (
+        <div className="mt-3 text-xs text-muted-foreground space-y-0.5">
+          <div>Measured · this install</div>
+          <div>Operations and egress are modeled monthly estimates and may differ from selected-period incurred cost.</div>
         </div>
       )}
 
@@ -493,10 +494,10 @@ export function Results({ s, r, observedStorageGbHours }: ResultsProps) {
 interface CostCalculatorProps {
   prefillData?: PrefillResponse
   prefillNote?: string
-  observedStorageGbHours?: number | null
+  localStorageGbHours?: number | null
 }
 
-export function CostCalculator({ prefillData, prefillNote, observedStorageGbHours }: CostCalculatorProps) {
+export function CostCalculator({ prefillData, prefillNote, localStorageGbHours }: CostCalculatorProps) {
   const [s, dispatch] = useReducer(reducer, DEFAULTS)
 
   useEffect(() => {
@@ -524,7 +525,7 @@ export function CostCalculator({ prefillData, prefillNote, observedStorageGbHour
         </div>
       </div>
 
-      <Results s={s} r={r} observedStorageGbHours={observedStorageGbHours} />
+      <Results s={s} r={r} localStorageGbHours={localStorageGbHours} />
 
       <p className='text-xs text-muted-foreground leading-relaxed'>
         * Estimates assume ~{RAW_LOG_COMPRESSION_RATIO}× ZSTD compression for raw JSON logs (.zst), ~4× compression of log JSON to Parquet (ZSTD), and client-side RUM beacon batching. Consolidated FOS archive flushes and DR state snapshots (meta/dr_state.json) run on the configured snapshot interval, keeping raw logs in FOS for snapshot interval + 15m grace before auto-delete. Storage is billed in GB-hours;
