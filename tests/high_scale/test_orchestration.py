@@ -2149,7 +2149,11 @@ def test_each_mode_reads_through_its_own_views() -> None:
 def test_a_masked_view_replaces_client_ips_and_sensitive_map_keys_in_the_data() -> None:
     view = _view_stmt(_provision(), "svc-a", True, "request_facts")
     assert "if(isNull(`client_ip`) OR `client_ip` = '', `client_ip`, '[redacted]') AS `client_ip`" in view
-    assert "mapApply((k, v) -> (k, if((lower(k) IN (" in view and "AS `custom_fields`" in view and "AS `cmcd`" in view
+    assert (
+        "mapApply((k, v) -> (k, if((arrayExists(seg -> seg != '' AND (seg IN (" in view
+        and "AS `custom_fields`" in view
+        and "AS `cmcd`" in view
+    )
     for key in ("cookie_session", "cid", "ip", "client_ip", "client_id", "sid", "x-forwarded-for", "true-client-ip"):
         assert f"'{key}'" in view
 
