@@ -1446,11 +1446,22 @@ fn provision(
                         &service.fastly_token_ref,
                         &input.token,
                     )?;
-                    context.cas(
-                        &format!("svc:{}", input.service_id),
-                        None,
-                        &serialize_service(&service)?,
-                    )?;
+                    let mut snap_val = serialize_service(&service)?;
+                    if context.remaining_calls() >= 4 {
+                        if let Ok(Some(cur_rec)) =
+                            context.get(&format!("logs:cursor:{}", input.service_id))
+                        {
+                            if let Some(archived) = cur_rec
+                                .value
+                                .get("svc_outbox_archived")
+                                .and_then(Value::as_u64)
+                                .filter(|&a| a > 0)
+                            {
+                                snap_val["_audit_outbox_base"] = json!(archived);
+                            }
+                        }
+                    }
+                    context.cas(&format!("svc:{}", input.service_id), None, &snap_val)?;
                     service
                 };
                 let record = if let Some(record) = record {
@@ -1467,12 +1478,15 @@ fn provision(
         }
     }
     if let Some(record) = context.get(&format!("svc:{}", input.service_id))? {
-        let existing: Service = decode(record.value)?;
+        let existing: Service = decode(record.value.clone())?;
         if existing.data_reset.is_some() {
             return Err(Error::new(409, "data_reset_in_progress"));
         }
         if existing.status != "torn_down" {
             return Err(Error::new(409, "service_already_configured"));
+        }
+        if audit_outbox_len(&record) >= AUDIT_OUTBOX_LIMIT {
+            return Err(Error::new(409, "audit_archive_required"));
         }
         for name in existing.owned_endpoint_names {
             if !service.owned_endpoint_names.contains(&name) {
@@ -1514,23 +1528,33 @@ fn provision(
     });
     svc_val["_audit"] = prov_audit.clone();
     if let Some(ref prev_rec) = previous {
+        if audit_outbox_len(prev_rec) >= AUDIT_OUTBOX_LIMIT {
+            return Err(Error::new(409, "audit_archive_required"));
+        }
         let mut outbox = prev_rec.value["_audit_outbox"]
             .as_array()
             .cloned()
             .unwrap_or_default();
-        let mut base = prev_rec.value["_audit_outbox_base"].as_u64().unwrap_or(0);
+        let base = prev_rec.value["_audit_outbox_base"].as_u64().unwrap_or(0);
         outbox.push(prov_audit);
-        if outbox.len() > JOB_CHECKPOINT_OUTBOX_LIMIT {
-            let drop_n = outbox.len() - JOB_CHECKPOINT_OUTBOX_LIMIT;
-            outbox.drain(..drop_n);
-            base += drop_n as u64;
-        }
         svc_val["_audit_outbox"] = Value::Array(outbox);
         if base > 0 || prev_rec.value.get("_audit_outbox_base").is_some() {
             svc_val["_audit_outbox_base"] = json!(base);
         }
     } else {
         svc_val["_audit_outbox"] = json!([prov_audit]);
+        if context.remaining_calls() >= 4 {
+            if let Ok(Some(cur_rec)) = context.get(&format!("logs:cursor:{}", input.service_id)) {
+                if let Some(archived) = cur_rec
+                    .value
+                    .get("svc_outbox_archived")
+                    .and_then(Value::as_u64)
+                    .filter(|&a| a > 0)
+                {
+                    svc_val["_audit_outbox_base"] = json!(archived);
+                }
+            }
+        }
     }
     context.cas(
         &format!("svc:{}", input.service_id),

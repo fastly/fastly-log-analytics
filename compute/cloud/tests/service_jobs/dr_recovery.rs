@@ -9102,3 +9102,661 @@ fn bug_cloud_catalog_28f_paused_prepare_reserving_preserves_exact_pre_batch_pare
         serde_json::to_value(&unpaused_h.statistics).unwrap()
     );
 }
+
+#[test]
+fn bug_cloud_dr_29a_cold_start_inspected_active_reserve_sweep_20_to_32() {
+    use fastly_log_analytics::{admin, http::Request};
+    use std::collections::BTreeSet;
+
+    struct RichGuard;
+    impl Drop for RichGuard {
+        fn drop(&mut self) {
+            RICH_FOS.with(|r| r.set(false));
+            MTIMES.with(|m| m.borrow_mut().clear());
+        }
+    }
+    let _guard = RichGuard;
+    RICH_FOS.with(|r| r.set(true));
+    MTIMES.with(|m| m.borrow_mut().clear());
+
+    let day_ts = 1_799_971_200i64;
+    let day_obj = Day {
+        version: VERSION,
+        service_id: Some("fixtureService".into()),
+        hours: BTreeMap::from([(
+            day_ts + 3600,
+            Reference {
+                key: format!("processed/_catalog/{:064x}.json", 1u32),
+                generation: 1,
+            },
+        )]),
+        statistics: Statistics {
+            earliest: Some(day_ts + 3600),
+            latest: Some(day_ts + 3660),
+            rows: 10,
+            ..Default::default()
+        },
+        ..Day::default()
+    };
+    let day_bytes = serde_json::to_vec(&day_obj).unwrap();
+    let dr_state = CloudDrState {
+        schema_version: SCHEMA_VERSION,
+        updated_at: 1_800_000_000,
+        service_id: "fixtureService".into(),
+        service: json!({"log_period": 60}),
+        views: vec![],
+        catalog_head: None,
+        floor_key: None,
+        rum_stats: Some(json!({"rows": 5, "bytes": 120, "files": 1, "at": 1_800_000_000})),
+    };
+    let dr_bytes = serde_json::to_vec(&dr_state).unwrap();
+
+    for budget in 20..=32u32 {
+        let p = Platform::new();
+        p.adapter.seed_resource(
+            "fixtureService",
+            "snippet",
+            json!({
+                "name": "flp-owner-fixtureApp",
+                "type": "recv",
+                "priority": "0",
+                "content": "# flp-owner:fixtureApp:fixtureService"
+            }),
+        );
+        p.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            "meta/cloud_dr_state.json",
+            dr_bytes.clone(),
+        );
+        p.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            &format!("processed/_catalog/{:064x}.json", 0xffu32),
+            day_bytes.clone(),
+        );
+        for idx in 1..=24u32 {
+            let blk = json!({
+                "version": VERSION,
+                "service_id": "fixtureService",
+                "hour": day_ts + 3600,
+                "generation": 1,
+                "previous": null,
+                "files": [],
+                "summaries": [],
+                "replaces": [],
+                "committed_at": {}
+            });
+            p.adapter.seed_object_bytes(
+                "fos-fixture-logs",
+                &format!("processed/_catalog/{idx:064x}.json"),
+                serde_json::to_vec(&blk).unwrap(),
+            );
+        }
+
+        ELAPSED_MS.with(|e| e.set(0));
+        CALLS.with(|c| c.set(32 - budget));
+        SECRETS
+            .with(|s| *s.borrow_mut() = BTreeSet::from(["front_key".into(), "session_key".into()]));
+        let resp = admin::handle(
+            &p,
+            "fixtureAdmin",
+            &Request {
+                method: "POST".into(),
+                path: "/api/admin/provision/recover".into(),
+                headers: BTreeMap::new(),
+                body: json!({
+                    "token": "fixture-token",
+                    "service_id": "fixtureService",
+                    "fos_bucket": "fos-fixture-logs",
+                    "fos_region": "us-east-1"
+                })
+                .to_string()
+                .into_bytes(),
+            },
+        );
+        let body_str = String::from_utf8_lossy(&resp.body);
+        assert_eq!(
+            resp.status, 200,
+            "BUG-CLOUD-DR-29A: cold-start recover failed at budget={budget} with status={}: {body_str}",
+            resp.status
+        );
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["ok"], true);
+        assert_eq!(
+            body["catalog_generation"], 1,
+            "BUG-CLOUD-DR-29A: expected catalog_generation == 1 at budget={budget}, got {body}"
+        );
+        assert!(
+            p.adapter.records().contains_key("svc:fixtureService"),
+            "svc:fixtureService missing at budget={budget}"
+        );
+        assert!(
+            p.adapter.records().contains_key("admin:install"),
+            "admin:install missing at budget={budget}"
+        );
+        if budget >= 23 {
+            assert_eq!(
+                body["front_synced"], true,
+                "BUG-CLOUD-DR-29A: expected front_synced == true at budget={budget}, got {body}"
+            );
+        }
+    }
+}
+
+#[test]
+fn bug_cloud_outbox_dr_29abc_provision_recover_compaction_and_outbox_limit() {
+    use fastly_log_analytics::{
+        ingest::storage::Store,
+        telemetry::{
+            compact::log_compact,
+            flush::{log_flush, FlushStatus, FlushTarget},
+            schema::from_parquet,
+            LogKind, OperationalLogSettings,
+        },
+    };
+    use std::collections::BTreeSet;
+    use std::sync::atomic::Ordering;
+
+    // 1. 29A-2 (end-to-end flush + compact::log_compact): 58 pre-reset rows + 3 post-reset rows on same day D
+    // -> log_compact merges day D and retains ALL 61 unique event_ids (zero collisions!):
+    {
+        struct CdnPlatform<'a>(&'a Platform, &'a str, &'a str, &'a str);
+        impl fastly_log_analytics::setup::SetupStores for CdnPlatform<'_> {
+            fn config_present(&self, name: &str) -> Result<bool, String> {
+                self.0.config_present(name)
+            }
+            fn secret_present(&self, name: &str) -> Result<bool, String> {
+                self.0.secret_present(name)
+            }
+            fn state_linked(&self) -> Result<bool, String> {
+                self.0.state_linked()
+            }
+        }
+        impl Runtime for CdnPlatform<'_> {
+            fn config(&self, k: &str) -> Result<Option<String>, String> {
+                self.0.config(k)
+            }
+            fn secret(&self, k: &str) -> Result<Option<String>, String> {
+                self.0.secret(k)
+            }
+            fn random(&self) -> Result<[u8; 32], String> {
+                self.0.random()
+            }
+            fn now(&self) -> u64 {
+                self.0.now()
+            }
+            fn checks(&self, live: bool) -> Result<Value, String> {
+                self.0.checks(live)
+            }
+            fn versions(&self) -> Result<Value, String> {
+                self.0.versions()
+            }
+            fn compute_service_id(&self) -> Option<String> {
+                self.0.compute_service_id()
+            }
+            fn compute_service_version(&self) -> Option<String> {
+                self.0.compute_service_version()
+            }
+            fn admin_get(&self, key: &str) -> Result<Option<Record>, String> {
+                self.0.admin_get(key)
+            }
+            fn admin_cas(
+                &self,
+                key: &str,
+                generation: Option<&str>,
+                value: &Value,
+            ) -> Result<bool, String> {
+                self.0.admin_cas(key, generation, value)
+            }
+            fn kv_delete(&self, key: &str) -> Result<(), String> {
+                self.0.kv_delete(key)
+            }
+            fn admin_fos(&self, req: FosRequest<'_>) -> Result<FosResponse, String> {
+                self.0.admin_fos(req)
+            }
+            fn admin_cdn_get(
+                &self,
+                _service_id: &str,
+                key: &str,
+                _cdn_key: &str,
+                max_bytes: usize,
+                timeout: std::time::Duration,
+            ) -> Result<FosResponse, String> {
+                self.0.admin_fos(FosRequest {
+                    method: "GET",
+                    region: "us-east-1",
+                    bucket: self.1,
+                    key,
+                    query: "",
+                    access_key: self.2,
+                    secret_key: self.3,
+                    body: Vec::new(),
+                    timeout,
+                    response_limit: max_bytes,
+                    content_md5: None,
+                })
+            }
+            fn admin_remaining_calls(&self) -> u32 {
+                self.0.admin_remaining_calls()
+            }
+            fn admin_elapsed(&self, started: std::time::Instant) -> std::time::Duration {
+                self.0.admin_elapsed(started)
+            }
+            fn admin_wait(&self, millis: u64) {
+                self.0.admin_wait(millis)
+            }
+        }
+
+        struct RichGuard29A;
+        impl Drop for RichGuard29A {
+            fn drop(&mut self) {
+                RICH_FOS.with(|r| r.set(false));
+                MTIMES.with(|m| m.borrow_mut().clear());
+            }
+        }
+        let _guard_29a = RichGuard29A;
+        RICH_FOS.with(|r| r.set(true));
+        MTIMES.with(|m| m.borrow_mut().clear());
+
+        let p = Platform::new();
+        let day_base = 1_800_000_000u64 - (1_800_000_000u64 % 86_400) + 7_200;
+        p.clock.store(day_base, Ordering::SeqCst);
+        let prov = p.provision();
+        p.drain(prov["job"].clone());
+
+        // Seed 58 entries into svc:fixtureService and flush on day D:
+        let rec0 = p.adapter.get("svc:fixtureService").unwrap().unwrap();
+        let mut val58 = rec0.value.clone();
+        val58["_audit_outbox_base"] = json!(0);
+        val58["_audit_outbox"] = Value::Array(
+            (0..58u64)
+                .map(|i| {
+                    json!({
+                        "actor": "fixtureAdmin",
+                        "at": day_base + i,
+                        "event": "service.updated",
+                        "config_version": i + 1
+                    })
+                })
+                .collect(),
+        );
+        assert!(p
+            .adapter
+            .cas("svc:fixtureService", Some(&rec0.generation), &val58)
+            .unwrap());
+
+        let svc_model: Service = serde_json::from_value(val58).unwrap();
+        let (ak, sk) = fastly_log_analytics::admin::fos_credentials(&p, &svc_model).unwrap();
+        let ops_prefix = "processed/ops/";
+        let target = FlushTarget {
+            region: &svc_model.fos_region,
+            bucket: &svc_model.fos_bucket,
+            access_key: &ak,
+            secret_key: &sk,
+            ops_prefix,
+        };
+        p.clock.store(day_base + 300, Ordering::SeqCst);
+        CALLS.with(|c| c.set(0));
+        fastly_log_analytics::telemetry::append_outbox(
+            &p,
+            "fixtureService",
+            "c1",
+            &format!(
+                "{{\"kind\":\"cron_ticks\",\"row\":{{\"timestamp\":{},\"outcome\":\"ok\",\"trigger\":\"cron\"}}}}\n",
+                (day_base + 300) * 1000
+            ),
+        )
+        .unwrap();
+        p.clock.store(day_base + 900, Ordering::SeqCst);
+        CALLS.with(|c| c.set(0));
+        SECRETS.with(|s| s.borrow_mut().clear());
+        let f1 = log_flush(
+            &p,
+            "fixtureService",
+            Some(&target),
+            &OperationalLogSettings::default(),
+            true,
+            std::time::Instant::now(),
+        )
+        .unwrap();
+        assert_eq!(f1.status, FlushStatus::Committed);
+
+        // External KV reset wipes _audit_outbox_base to 0 with 3 post-reset entries on the SAME day D:
+        let rec1 = p.adapter.get("svc:fixtureService").unwrap().unwrap();
+        let mut reset_val = rec1.value.clone();
+        reset_val
+            .as_object_mut()
+            .unwrap()
+            .remove("_audit_outbox_base");
+        reset_val["_audit_outbox"] = Value::Array(
+            (0..3u64)
+                .map(|i| {
+                    json!({
+                        "actor": "fixtureAdmin",
+                        "at": day_base + 1_000 + i,
+                        "event": "service.recovered",
+                        "config_version": i + 1
+                    })
+                })
+                .collect(),
+        );
+        assert!(p
+            .adapter
+            .cas("svc:fixtureService", Some(&rec1.generation), &reset_val)
+            .unwrap());
+
+        p.clock.store(day_base + 1_200, Ordering::SeqCst);
+        CALLS.with(|c| c.set(0));
+        fastly_log_analytics::telemetry::append_outbox(
+            &p,
+            "fixtureService",
+            "c2",
+            &format!(
+                "{{\"kind\":\"cron_ticks\",\"row\":{{\"timestamp\":{},\"outcome\":\"ok\",\"trigger\":\"cron\"}}}}\n",
+                (day_base + 1_200) * 1000
+            ),
+        )
+        .unwrap();
+        p.clock.store(day_base + 1_800, Ordering::SeqCst);
+        CALLS.with(|c| c.set(0));
+        SECRETS.with(|s| s.borrow_mut().clear());
+        let f2 = log_flush(
+            &p,
+            "fixtureService",
+            Some(&target),
+            &OperationalLogSettings::default(),
+            true,
+            std::time::Instant::now(),
+        )
+        .unwrap();
+        assert_eq!(f2.status, FlushStatus::Committed);
+        assert_eq!(
+            p.adapter.records()["svc:fixtureService"].value["_audit_outbox_base"].as_u64(),
+            Some(58)
+        );
+
+        // Advance to Day D + 2 (past CLOSE_GRACE_S) and run real compact::log_compact across ticks until quiescent:
+        let d_prev = (day_base as i64).div_euclid(86_400) - 1;
+        p.adapter
+            .cas(
+                "logs:compact_state",
+                None,
+                &json!({
+                    "done": {
+                        "cron_runs": d_prev,
+                        "cron_ticks": d_prev,
+                        "ingest_files": d_prev,
+                        "fos_usage": d_prev,
+                        "admin_audit": d_prev,
+                        "api_telemetry": d_prev,
+                        "platform_errors": d_prev,
+                        "storage_inventory": d_prev
+                    }
+                }),
+            )
+            .unwrap();
+        p.clock.store(day_base + 172_800, Ordering::SeqCst);
+        let cdn_rt = CdnPlatform(&p, &svc_model.fos_bucket, &ak, &sk);
+        let mut total_chunks = 0u32;
+        for _ in 0..25 {
+            CALLS.with(|c| c.set(0));
+            ELAPSED_MS.with(|e| e.set(0));
+            let store = Store {
+                runtime: &cdn_rt,
+                service: &svc_model,
+                access_key: ak.clone(),
+                secret_key: sk.clone(),
+                started: std::time::Instant::now(),
+                vcpu_start: 0,
+            };
+            let comp = log_compact(
+                &store,
+                "fixture-cdn-key",
+                &OperationalLogSettings::default(),
+                1,
+            )
+            .unwrap();
+            total_chunks += comp.chunks;
+            if !comp.more_pending {
+                break;
+            }
+        }
+        assert!(
+            total_chunks >= 1,
+            "expected admin_audit day compaction to merge chunks"
+        );
+
+        let audit_rows: Vec<Value> = p
+            .adapter
+            .bucket_objects(&svc_model.fos_bucket)
+            .into_iter()
+            .filter(|(k, _)| k.starts_with("processed/ops/admin_audit/"))
+            .flat_map(|(_, bytes)| from_parquet(LogKind::AdminAudit, bytes).unwrap())
+            .collect();
+        let unique_ids: BTreeSet<String> = audit_rows
+            .iter()
+            .map(|r| r["event_id"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(
+            audit_rows.len(),
+            61,
+            "BUG-CLOUD-OUTBOX-DR-29A-2: log_compact dropped colliding post-reset rows!"
+        );
+        assert_eq!(unique_ids.len(), 61);
+    }
+
+    // 2. 29A-3 (admin/mod.rs independent): provision when svc:{sid} is None while logs:cursor:{sid} has svc_outbox_archived = 58
+    // immediately sets svc:{sid}["_audit_outbox_base"] == 58:
+    {
+        let p_prov = Platform::new();
+        p_prov
+            .adapter
+            .cas(
+                "logs:cursor:fixtureService",
+                None,
+                &json!({"svc_outbox_archived": 58, "last_flush_s": 1_799_999_000}),
+            )
+            .unwrap();
+        let _ = p_prov.provision();
+        assert_eq!(
+            p_prov.adapter.records()["svc:fixtureService"].value["_audit_outbox_base"].as_u64(),
+            Some(58),
+            "BUG-CLOUD-OUTBOX-DR-29A-3: provision with previous == None ignored surviving logs:cursor:fixtureService!"
+        );
+    }
+
+    // 3. 29B (dr.rs independent): cold-start dr::recover with surviving logs:cursor:fixtureService (svc_outbox_archived = 58)
+    // in a non-truncated shared bucket containing own rev manifest + 30 higher-gen foreign legacy manifests sets _audit_outbox_base == 58:
+    {
+        struct RichGuard29B;
+        impl Drop for RichGuard29B {
+            fn drop(&mut self) {
+                RICH_FOS.with(|r| r.set(false));
+                MTIMES.with(|m| m.borrow_mut().clear());
+            }
+        }
+        let _guard_29b = RichGuard29B;
+        RICH_FOS.with(|r| r.set(true));
+        MTIMES.with(|m| m.borrow_mut().clear());
+
+        let p_dr = Platform::new();
+        p_dr.adapter
+            .cas(
+                "logs:cursor:fixtureService",
+                None,
+                &json!({"svc_outbox_archived": 58, "last_flush_s": 1_799_999_000}),
+            )
+            .unwrap();
+        p_dr.adapter.seed_resource(
+            "fixtureService",
+            "snippet",
+            json!({
+                "name": "flp-owner-fixtureApp",
+                "type": "recv",
+                "priority": "0",
+                "content": "# flp-owner:fixtureApp:fixtureService"
+            }),
+        );
+        let day_ts = 1_799_971_200i64;
+        let own_d4 = Day {
+            version: VERSION,
+            service_id: Some("fixtureService".into()),
+            hours: BTreeMap::new(),
+            statistics: Statistics {
+                earliest: Some(day_ts + 60),
+                latest: Some(day_ts + 120),
+                rows: 12,
+                ..Default::default()
+            },
+            ..Day::default()
+        };
+        p_dr.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            "processed/_catalog/00000000000000000000000000000000000000000000000000000000000000d4.json",
+            serde_json::to_vec(&own_d4).unwrap(),
+        );
+        let own_m = json!({
+            "version": VERSION,
+            "service_id": "fixtureService",
+            "generation": 4u64,
+            "batch": "b4",
+            "schema": "v2",
+            "committed_at": "2027-01-14T12:00:00Z",
+            "previous": null,
+            "files": [], "summaries": [], "sources": [], "replaces": [],
+            "bytes": 100, "rows": 12, "parents": {},
+            "head_days": {
+                day_ts.to_string(): "processed/_catalog/00000000000000000000000000000000000000000000000000000000000000d4.json"
+            },
+            "head_statistics": {
+                day_ts.to_string(): {
+                    "earliest": day_ts + 60,
+                    "latest": day_ts + 120,
+                    "rows": 12
+                }
+            }
+        });
+        let own_rev = u64::MAX - 4;
+        p_dr.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            &format!("processed/_catalog/manifest-s-fixtureService-rev-{own_rev:020}-aaaa.json"),
+            serde_json::to_vec(&own_m).unwrap(),
+        );
+        for fg in 10..40u64 {
+            let fm = json!({
+                "version": VERSION,
+                "service_id": "foreignService22Chars0",
+                "generation": fg,
+                "batch": format!("f{fg}"),
+                "schema": "v2",
+                "committed_at": "2027-01-14T13:00:00Z",
+                "previous": null,
+                "files": [], "summaries": [], "sources": [], "replaces": [],
+                "bytes": 0, "rows": 9999, "parents": {}, "head_days": {}, "head_statistics": {}
+            });
+            p_dr.adapter.seed_object_bytes(
+                "fos-fixture-logs",
+                &format!("processed/_catalog/manifest-{fg:020}-bbbb.json"),
+                serde_json::to_vec(&fm).unwrap(),
+            );
+        }
+        let rec_out = p_dr.json(
+            "POST",
+            "/api/admin/provision/recover",
+            json!({
+                "token": "fixture-token",
+                "service_id": "fixtureService",
+                "fos_bucket": "fos-fixture-logs",
+                "fos_region": "us-east-1"
+            }),
+        );
+        assert_eq!(rec_out["ok"], true);
+        assert_eq!(rec_out["catalog_generation"], 4);
+        assert_eq!(
+            p_dr.adapter.records()["svc:fixtureService"].value["_audit_outbox_base"].as_u64(),
+            Some(58),
+            "BUG-CLOUD-OUTBOX-DR-29B: cold-start dr::recover skipped logs:cursor:fixtureService in mixed shared bucket!"
+        );
+    }
+
+    // 4. 29C (admin/mod.rs & dr.rs independent): provision over torn_down with 4096 unarchived entries returns 409
+    // audit_archive_required without draining unarchived.0, and dr::recover never drains unarchived entries:
+    {
+        let p_lim = Platform::new();
+        let prov = p_lim.provision();
+        p_lim.drain(prov["job"].clone());
+        let td_gen = p_lim.service()["generation"].clone();
+        let td = p_lim.json(
+            "POST",
+            "/api/admin/provision/teardown",
+            json!({
+                "service_id": "fixtureService",
+                "confirm_service_id": "fixtureService",
+                "generation": td_gen,
+                "remove_logging": false,
+                "remove_snippets": false,
+                "delete_fos_keys": false
+            }),
+        );
+        p_lim.drain(td["job"].clone());
+
+        let td_rec = p_lim.adapter.get("svc:fixtureService").unwrap().unwrap();
+        let mut full_val = td_rec.value.clone();
+        full_val["_audit_outbox_base"] = json!(0);
+        full_val["_audit_outbox"] = Value::Array(
+            (0..4096usize)
+                .map(|i| {
+                    json!({
+                        "actor": "fixtureAdmin",
+                        "at": 1_800_000_000u64 + i as u64,
+                        "event": format!("unarchived.{i}"),
+                        "config_version": 1
+                    })
+                })
+                .collect(),
+        );
+        assert!(p_lim
+            .adapter
+            .cas("svc:fixtureService", Some(&td_rec.generation), &full_val)
+            .unwrap());
+
+        let reprov_resp = p_lim.call(
+            "POST",
+            "/api/admin/provision/execute",
+            json!({
+                "token": "fixture-token",
+                "service_id": "fixtureService",
+                "fos_bucket": "fos-fixture-logs",
+                "fos_region": "us-east-1"
+            }),
+        );
+        assert_eq!(
+            reprov_resp.status,
+            409,
+            "BUG-CLOUD-OUTBOX-DR-29C: provision over torn_down bypassed AUDIT_OUTBOX_LIMIT: {}",
+            String::from_utf8_lossy(&reprov_resp.body)
+        );
+        let reprov_body: Value = serde_json::from_slice(&reprov_resp.body).unwrap();
+        assert_eq!(reprov_body["error"], "audit_archive_required");
+        let preserved = &p_lim.adapter.records()["svc:fixtureService"].value;
+        assert_eq!(preserved["_audit_outbox"][0]["event"], "unarchived.0");
+
+        // dr::recover over torn_down with 4096 unarchived entries must NOT drain unarchived.0:
+        let dr_ok = p_lim.call(
+            "POST",
+            "/api/admin/provision/recover",
+            json!({
+                "token": "fixture-token",
+                "service_id": "fixtureService",
+                "fos_bucket": "fos-fixture-logs",
+                "fos_region": "us-east-1"
+            }),
+        );
+        assert_eq!(dr_ok.status, 200);
+        let after_dr = &p_lim.adapter.records()["svc:fixtureService"].value;
+        assert_eq!(
+            after_dr["_audit_outbox"][0]["event"], "unarchived.0",
+            "BUG-CLOUD-OUTBOX-DR-29C: dr::recover drained unarchived.0!"
+        );
+        assert_eq!(after_dr["_audit_outbox"].as_array().unwrap().len(), 4097);
+    }
+}

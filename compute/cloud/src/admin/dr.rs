@@ -775,10 +775,14 @@ fn scan_catalog_head(
         {
             break;
         }
+        let has_verified_day = day_candidates
+            .values()
+            .any(|v| v.iter().any(|d| d.verified_own));
         let cur_reserve = if best_manifest_days.is_some()
             || best_manifest
                 .as_ref()
                 .is_some_and(|(_, m)| m.batch == "reset")
+            || has_verified_day
         {
             reserve_calls
         } else {
@@ -1414,6 +1418,24 @@ pub(super) fn recover(
         {
             return Err(Error::new(409, "service_already_configured"));
         }
+        let prev_len = rec.value["_audit_outbox"].as_array().map_or(0, Vec::len);
+        if prev_len >= super::JOB_RECOVERY_OUTBOX_LIMIT {
+            let prev_base = rec.value["_audit_outbox_base"].as_u64().unwrap_or(0);
+            let archived = if context.remaining_calls() >= 6 {
+                context
+                    .get(&format!("logs:cursor:{}", input.service_id))
+                    .ok()
+                    .flatten()
+                    .and_then(|c| c.value.get("svc_outbox_archived").and_then(Value::as_u64))
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            let removable = archived.saturating_sub(prev_base) as usize;
+            if prev_len.saturating_sub(removable) >= super::JOB_RECOVERY_OUTBOX_LIMIT {
+                return Err(Error::new(409, "audit_archive_required"));
+            }
+        }
     }
     let cold_start = install_rec.is_none() && existing_svc.is_none();
     const PER_UPSERT: u32 = 2;
@@ -1594,17 +1616,25 @@ pub(super) fn recover(
             }
         };
 
+    let has_front_dicts = config(context.runtime, "front_service_id").is_ok()
+        && config(context.runtime, "buckets_dictionary_id").is_ok()
+        && config(context.runtime, "credentials_dictionary_id").is_ok();
+    let front_calls = if has_front_dicts { 3u32 } else { 0u32 };
+
     {
         let base_upserts = u32::from(!views.is_empty())
             + 1
             + u32::from(rum_stats.is_some() || rum_floor_key.is_some());
+        let tight_floor = |extra: u32| -> u32 {
+            (2 + extra + base_upserts).max(3 + 2 * base_upserts.saturating_sub(1))
+        };
         let compute_reserve = |front_or_inspect: u32, min_inspect: u32| -> u32 {
             let full = 2 + front_or_inspect + PER_UPSERT * base_upserts;
             if cold_start && views.is_empty() && context.remaining_calls() <= full + 2 {
-                if context.remaining_calls() <= 2 + min_inspect + base_upserts + 2 {
-                    2 + min_inspect + base_upserts
+                if context.remaining_calls() <= tight_floor(min_inspect) + 2 {
+                    tight_floor(min_inspect)
                 } else {
-                    2 + front_or_inspect + base_upserts
+                    tight_floor(front_or_inspect)
                 }
             } else {
                 full
@@ -1614,19 +1644,19 @@ pub(super) fn recover(
             compute_reserve(4, 3)
         } else if inspected_active {
             if cold_start && views.is_empty() {
-                2 + base_upserts
+                tight_floor(0)
             } else {
                 2 + PER_UPSERT * base_upserts
             }
         } else {
-            compute_reserve(3, 0)
+            compute_reserve(front_calls, 0)
         };
-        let has_front_dicts = config(context.runtime, "front_service_id").is_ok()
-            && config(context.runtime, "buckets_dictionary_id").is_ok()
-            && config(context.runtime, "credentials_dictionary_id").is_ok();
+        let cursor_hold = u32::from(existing_svc.is_none());
         let scan_reserve = if !inspected_active && source != "dr_state" && has_front_dicts {
             let wf_reserve = if cold_start && views.is_empty() {
-                if context.remaining_calls() <= 2 + 6 + base_upserts + 2 {
+                if context.remaining_calls() >= 2 + 7 + cursor_hold + base_upserts + 2 {
+                    2 + 7 + cursor_hold + base_upserts
+                } else if context.remaining_calls() <= 2 + 6 + base_upserts + 2 {
                     2 + 6 + base_upserts
                 } else {
                     2 + 7 + base_upserts
@@ -1650,11 +1680,7 @@ pub(super) fn recover(
             base_scan_reserve
         };
         let extra_rum_if_reset = if rum_stats.is_none() && rum_floor_key.is_none() {
-            if cold_start && views.is_empty() {
-                1u32
-            } else {
-                PER_UPSERT
-            }
+            PER_UPSERT
         } else {
             0u32
         };
@@ -1847,7 +1873,14 @@ pub(super) fn recover(
         5 + 3
     };
     if !inspected_active && context.remaining_calls() >= post_upsert_floor {
-        let reserve_after = if context.remaining_calls() >= 8 { 5 } else { 2 };
+        let post_inspect_need = 2 + front_calls + u32::from(existing_svc.is_none());
+        let reserve_after = if context.remaining_calls() >= post_inspect_need + 3 {
+            post_inspect_need
+        } else if context.remaining_calls() >= 2 + front_calls + 3 {
+            2 + front_calls
+        } else {
+            2
+        };
         inspect_active_version_for_dr(
             context,
             &mut service,
@@ -1878,9 +1911,27 @@ pub(super) fn recover(
         let mut base = prev_rec.value["_audit_outbox_base"].as_u64().unwrap_or(0);
         outbox.push(audit_entry);
         if outbox.len() > super::AUDIT_OUTBOX_LIMIT {
-            let drop_n = outbox.len() - super::AUDIT_OUTBOX_LIMIT;
-            outbox.drain(..drop_n);
-            base += drop_n as u64;
+            let archived = if context.remaining_calls() > 2 + front_calls {
+                context
+                    .get(&format!("logs:cursor:{}", input.service_id))
+                    .ok()
+                    .flatten()
+                    .and_then(|c| c.value.get("svc_outbox_archived").and_then(Value::as_u64))
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            let archived_removable = archived.saturating_sub(base) as usize;
+            let drop_n = (outbox.len() - super::AUDIT_OUTBOX_LIMIT)
+                .min(archived_removable)
+                .min(outbox.len().saturating_sub(1));
+            if drop_n > 0 {
+                outbox.drain(..drop_n);
+                base += drop_n as u64;
+            }
+            if outbox.len() > super::JOB_RECOVERY_OUTBOX_LIMIT {
+                return Err(Error::new(409, "audit_archive_required"));
+            }
         }
         svc_value["_audit_outbox"] = Value::Array(outbox);
         if base > 0 || prev_rec.value.get("_audit_outbox_base").is_some() {
@@ -1888,7 +1939,7 @@ pub(super) fn recover(
         }
     } else {
         svc_value["_audit_outbox"] = json!([audit_entry]);
-        if context.remaining_calls() >= 6 {
+        if context.remaining_calls() > 2 + front_calls {
             if let Ok(Some(cur_rec)) = context.get(&format!("logs:cursor:{}", input.service_id)) {
                 if let Some(archived) = cur_rec
                     .value

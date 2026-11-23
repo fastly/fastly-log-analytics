@@ -1482,22 +1482,21 @@ fn bug_cloud_outbox_dr_28d_reanchors_svc_outbox_cursor_after_external_kv_reset()
     );
     assert_eq!(
         rt.cursor().svc_outbox_archived,
-        2,
-        "cursor.svc_outbox_archived must re-anchor to 2 so subsequent flushes neither duplicate nor blackhole"
+        59,
+        "cursor.svc_outbox_archived must rebase to 57 + 2 = 59 with zero event_id collision"
+    );
+    assert_eq!(
+        rt.get_kv("svc:svc1").unwrap()["_audit_outbox_base"].as_u64(),
+        Some(57),
+        "trim_svc_outbox must persist rebased _audit_outbox_base = 57 onto svc:svc1 even when removable == 0"
     );
 
-    // Append one more entry (len = 3) and confirm the next flush archives ONLY the 1 new entry (total = 3):
-    rt.put_kv(
-        "svc:svc1",
-        json!({
-            "service_id": SID,
-            "_audit_outbox": [
-                {"actor": "admin", "at": NOW_S - 20, "event": "service.recovered", "config_version": 1},
-                {"actor": "admin", "at": NOW_S - 10, "event": "service.updated", "config_version": 2},
-                {"actor": "admin", "at": NOW_S - 5, "event": "service.updated", "config_version": 3},
-            ]
-        }),
+    // Append one more entry to the rebased svc:svc1 (preserving _audit_outbox_base = 57) and confirm next flush archives ONLY the 1 new entry (total = 60):
+    let mut updated_svc = rt.get_kv("svc:svc1").unwrap();
+    updated_svc["_audit_outbox"].as_array_mut().unwrap().push(
+        json!({"actor": "admin", "at": NOW_S - 5, "event": "service.updated", "config_version": 3}),
     );
+    rt.put_kv("svc:svc1", updated_svc);
     rt.put_kv(
         &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 39, Some("r2")),
         cron_line("tick2"),
@@ -1506,5 +1505,140 @@ fn bug_cloud_outbox_dr_28d_reanchors_svc_outbox_cursor_after_external_kv_reset()
     let second = run(&rt, true);
     assert_eq!(second.status, FlushStatus::Committed);
     assert_eq!(string_rows(&rt, "admin_audit").len(), 3);
+    assert_eq!(rt.cursor().svc_outbox_archived, 60);
+}
+
+#[test]
+fn bug_cloud_outbox_dr_29a_equal_len_reset_and_58_plus_3_unique_event_ids() {
+    // 29A-1: Pre-reset 3 entries archived (svc_outbox_archived == 3), then external KV reset of svc:svc1
+    // (_audit_outbox_base = 0) with 3 new entries (len == 3 == archived) -> 0 blackholed, archived at indices 3, 4, 5!
+    let rt = Rt::new();
+    rt.set_cursor(NOW_MIN - 2);
+    rt.put_kv(
+        "svc:svc1",
+        json!({
+            "service_id": SID,
+            "_audit_outbox": [
+                {"actor": "admin", "at": NOW_S - 30, "event": "job.started", "job_id": "job-pre", "config_version": 1},
+                {"actor": "admin", "at": NOW_S - 25, "event": "job.step", "job_id": "job-pre", "config_version": 1},
+                {"actor": "admin", "at": NOW_S - 20, "event": "job.completed", "job_id": "job-pre", "config_version": 1},
+            ]
+        }),
+    );
+    rt.put_kv(
+        &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("pre")),
+        cron_line("pre-tick"),
+    );
+    rt.budget.set(rt.calls.get() + 32);
+    assert_eq!(run(&rt, false).status, FlushStatus::Committed);
     assert_eq!(rt.cursor().svc_outbox_archived, 3);
+    assert!(rt
+        .get_kv(&cursor_key(SID))
+        .unwrap()
+        .get("svc_zero_anchor")
+        .is_some());
+
+    // External KV reset of svc:svc1 (_audit_outbox_base absent / 0) with 3 post-reset entries (even at same NOW_S):
+    rt.put_kv(
+        "svc:svc1",
+        json!({
+            "service_id": SID,
+            "_audit_outbox": [
+                {"actor": "admin", "at": NOW_S, "event": "job.started", "job_id": "job-post", "config_version": 1},
+                {"actor": "admin", "at": NOW_S, "event": "job.step", "job_id": "job-post", "config_version": 1},
+                {"actor": "admin", "at": NOW_S, "event": "job.completed", "job_id": "job-post", "config_version": 1},
+            ]
+        }),
+    );
+    rt.put_kv(
+        &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 39, Some("post")),
+        cron_line("post-tick"),
+    );
+    rt.budget.set(rt.calls.get() + 32);
+    let post_rep = run(&rt, true);
+    assert_eq!(post_rep.status, FlushStatus::Committed);
+    let all_rows: Vec<Value> = rt
+        .objects
+        .borrow()
+        .iter()
+        .filter(|(k, _)| k.contains("/admin_audit/"))
+        .flat_map(|(_, body)| schema::from_parquet(LogKind::AdminAudit, body.clone()).unwrap())
+        .collect();
+    assert_eq!(
+        all_rows.len(),
+        6,
+        "BUG-CLOUD-OUTBOX-DR-29A-1: equal-length post-reset entries (len == 3 == archived) were blackholed!"
+    );
+    let mut seqs: Vec<i64> = all_rows
+        .iter()
+        .map(|r| r["source_seq"].as_i64().unwrap())
+        .collect();
+    seqs.sort();
+    assert_eq!(seqs, vec![0, 1, 2, 3, 4, 5]);
+    let unique_ids: BTreeSet<String> = all_rows
+        .iter()
+        .map(|r| r["event_id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        unique_ids.len(),
+        6,
+        "0 event_id collisions allowed across pre/post reset"
+    );
+    assert_eq!(rt.cursor().svc_outbox_archived, 6);
+    assert_eq!(
+        rt.get_kv("svc:svc1").unwrap()["_audit_outbox_base"].as_u64(),
+        Some(3)
+    );
+
+    // 29A-2 (flush unit): Pre-reset 58 rows + post-reset 3 rows -> 61 unique event_ids & _audit_outbox_base rebased to 58:
+    let rt2 = Rt::new();
+    rt2.set_cursor(NOW_MIN - 2);
+    let pre58: Vec<Value> = (0..58u64)
+        .map(|i| json!({"actor": "admin", "at": NOW_S - 100 + i, "event": "service.updated", "config_version": i + 1}))
+        .collect();
+    rt2.put_kv(
+        "svc:svc1",
+        json!({"service_id": SID, "_audit_outbox": pre58}),
+    );
+    rt2.put_kv(
+        &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("b58")),
+        cron_line("t58"),
+    );
+    rt2.budget.set(rt2.calls.get() + 64);
+    assert_eq!(run(&rt2, false).status, FlushStatus::Committed);
+    assert_eq!(rt2.cursor().svc_outbox_archived, 58);
+    assert_eq!(
+        rt2.get_kv("svc:svc1").unwrap()["_audit_outbox_base"].as_u64(),
+        Some(8)
+    );
+
+    let post3: Vec<Value> = (0..3u64)
+        .map(|i| json!({"actor": "admin", "at": NOW_S + i, "event": "service.recovered", "config_version": i + 1}))
+        .collect();
+    rt2.put_kv(
+        "svc:svc1",
+        json!({"service_id": SID, "_audit_outbox": post3}),
+    );
+    rt2.put_kv(
+        &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 39, Some("b3")),
+        cron_line("t3"),
+    );
+    rt2.budget.set(rt2.calls.get() + 64);
+    assert_eq!(run(&rt2, true).status, FlushStatus::Committed);
+    let rows61 = string_rows(&rt2, "admin_audit");
+    assert_eq!(rows61.len(), 61);
+    let ids61: BTreeSet<String> = rows61
+        .iter()
+        .map(|r| r["event_id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        ids61.len(),
+        61,
+        "BUG-CLOUD-OUTBOX-DR-29A-2: duplicate event_ids emitted after reset!"
+    );
+    assert_eq!(rt2.cursor().svc_outbox_archived, 61);
+    assert_eq!(
+        rt2.get_kv("svc:svc1").unwrap()["_audit_outbox_base"].as_u64(),
+        Some(58)
+    );
 }
