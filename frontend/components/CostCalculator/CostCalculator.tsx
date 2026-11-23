@@ -102,16 +102,30 @@ export function ReadOnlyValue({ value, wide }: { value: string | number; wide?: 
   )
 }
 
-export function ResultRow({ label, detail, cost, highlight }: {
+export function ResultRow({ label, detail, cost, highlight, parts }: {
   label: string; detail?: string; cost: string; highlight?: boolean
+  /** Component costs listed under the row's total. */
+  parts?: Array<{ label: string; cost: string }>
 }) {
   return (
-    <div className={cn('flex items-center justify-between py-2 border-b border-border/40 last:border-0', highlight && 'border-t-2 border-border pt-3 mt-2')}>
-      <div>
-        <div className={cn('text-sm font-medium', highlight && 'text-base')}>{label}</div>
-        {detail && <div className='text-xs text-muted-foreground mt-0.5'>{detail}</div>}
+    <div data-estimate-line className={cn('py-2 border-b border-border/40 last:border-0', highlight && 'border-t-2 border-border pt-3 mt-2')}>
+      <div className='flex items-center justify-between'>
+        <div>
+          <div className={cn('text-sm font-medium', highlight && 'text-base')}>{label}</div>
+          {detail && <div className='text-xs text-muted-foreground mt-0.5'>{detail}</div>}
+        </div>
+        <div className={cn('font-bold tabular-nums', highlight ? 'text-xl text-emerald-500' : 'text-sm')}>{cost}</div>
       </div>
-      <div className={cn('font-bold tabular-nums', highlight ? 'text-xl text-emerald-500' : 'text-sm')}>{cost}</div>
+      {parts && parts.length > 0 && (
+        <ul className='mt-1 space-y-0.5 pl-3'>
+          {parts.map((part) => (
+            <li key={part.label} className='flex items-center justify-between text-xs text-muted-foreground'>
+              <span>{part.label}</span>
+              <span className='tabular-nums'>{part.cost}</span>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   )
 }

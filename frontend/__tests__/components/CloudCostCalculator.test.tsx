@@ -4,6 +4,13 @@ import { CloudCostCalculator } from '@/components/CostCalculator/CloudCostCalcul
 import { DEFAULT_COMPACTION, DEFAULT_INPUTS, DEFAULT_UNITS, LIST_PRICE_RATES, type UnitCosts } from '@/lib/cloud-engine/usage/estimate'
 
 describe('Cloud cost calculator', () => {
+  it('lists each line\'s component costs under its total', () => {
+    render(<CloudCostCalculator />)
+    const delivery = screen.getByText('CDN delivery').closest('[data-estimate-line]') as HTMLElement
+    expect(delivery).toHaveTextContent(/Egress\s*\$/)
+    expect(delivery).toHaveTextContent(/Requests\s*\$/)
+  })
+
   it('turns measured storage for the selected range into a month at its average size', () => {
     render(<CloudCostCalculator localStorageGbHours={24} localStoragePeriodHours={24} rates={{ storage_rate_per_gb_month: 2 }} />)
     expect(screen.getByText('Measured · this install · 1.00 GB-months')).toBeInTheDocument()

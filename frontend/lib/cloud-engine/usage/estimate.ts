@@ -365,6 +365,18 @@ export interface EstimateLine {
   /** How the line is derived, for lines that only appear under some inputs. */
   help?: string;
   usd: number;
+  /** Priced components, shown under the total; `usd` is their sum. */
+  parts?: EstimatePart[];
+}
+
+export interface EstimatePart {
+  label: string;
+  usd: number;
+}
+
+/** A line's components and their sum, so the total can't drift from what it lists. */
+function priced(parts: EstimatePart[]): { usd: number; parts: EstimatePart[] } {
+  return { usd: parts.reduce((sum, part) => sum + part.usd, 0), parts };
 }
 
 export interface RumDay {
@@ -567,44 +579,52 @@ export function estimateMonthly(
       label: "Object Storage",
       detail: `${gb(storedGb)} GB-months`,
       help: "Includes raw logs, processed Parquet, and fixed pq_ops storage (telemetry plus event-driven meta/cloud_dr_state.json DR snapshots).",
-      usd: storedGb * rates.storage_rate_per_gb_month,
+      ...priced([
+        { label: "Raw logs", usd: rawGbMonths * rates.storage_rate_per_gb_month },
+        { label: "Parquet", usd: parquetGbMonths * rates.storage_rate_per_gb_month },
+        { label: "Fixed", usd: units.fixedStoredGb * rates.storage_rate_per_gb_month },
+      ]),
     },
     {
       id: "ops",
       label: "Storage operations",
       detail: `A ${count(classA)} · B ${count(classB)}`,
       help: "Includes ingest/compaction reads and writes plus fixed Class A ops such as event-driven meta/cloud_dr_state.json DR snapshots (measured from fos_usage when usage logging is enabled).",
-      usd:
-        (classA / 1000) * rates.class_a_rate_per_1k +
-        (classB / 10_000) * rates.class_b_rate_per_10k,
+      ...priced([
+        { label: "Class A", usd: (classA / 1000) * rates.class_a_rate_per_1k },
+        { label: "Class B", usd: (classB / 10_000) * rates.class_b_rate_per_10k },
+      ]),
     },
     {
       id: "delivery",
       label: "CDN delivery",
       detail: `${gb(deliveryGb)} GB · ${count(frontRequests)} front reqs, incl. ${count(probesPerDay)} clock probes/day every ${probeIntervalS} s`,
-      usd:
-        deliveryGb * rates.cdn_egress_rate_per_gb +
-        (frontRequests / 10_000) * rates.cdn_request_rate_per_10k,
+      ...priced([
+        { label: "Egress", usd: deliveryGb * rates.cdn_egress_rate_per_gb },
+        { label: "Requests", usd: (frontRequests / 10_000) * rates.cdn_request_rate_per_10k },
+      ]),
     },
     {
       id: "compute",
       label: "Compute (app + worker)",
       detail: `${count(computeRequests)} reqs · ${count(vcpuMs)} vCPU ms`,
-      usd:
-        (computeRequests / 1e6) * rates.compute_request_rate_per_million +
-        vcpuExecUsd(units.appVcpuMsPerDay, units.appRequestsPerDay) +
-        vcpuExecUsd(
-          (units.vcpuMsPer1kLines * L) / 1000,
-          units.workerRequestsPerFile * F,
-        ),
+      ...priced([
+        { label: "Requests", usd: (computeRequests / 1e6) * rates.compute_request_rate_per_million },
+        { label: "App vCPU", usd: vcpuExecUsd(units.appVcpuMsPerDay, units.appRequestsPerDay) },
+        {
+          label: "Worker vCPU",
+          usd: vcpuExecUsd((units.vcpuMsPer1kLines * L) / 1000, units.workerRequestsPerFile * F),
+        },
+      ]),
     },
     {
       id: "kv",
       label: "KV Store operations",
       detail: `A ${count(kvA)} · B ${count(kvB)}`,
-      usd:
-        (kvA / 1e6) * rates.kv_class_a_rate_per_million +
-        (kvB / 1e6) * rates.kv_class_b_rate_per_million,
+      ...priced([
+        { label: "Class A", usd: (kvA / 1e6) * rates.kv_class_a_rate_per_million },
+        { label: "Class B", usd: (kvB / 1e6) * rates.kv_class_b_rate_per_million },
+      ]),
     },
     {
       id: "secrets",
@@ -622,17 +642,21 @@ export function estimateMonthly(
       id: "summaries",
       label: "Summary bundles",
       detail: `${gb(summaries.storedGb)} GB-months · A ${count(month(summaries.classAPerDay))} · B ${count(month(summaries.classBPerDay))} · ${count(month(summaries.vcpuMsPerDay))} vCPU ms`,
-      usd:
-        summaries.storedGb * rates.storage_rate_per_gb_month +
-        classAUsd(month(summaries.classAPerDay)) +
-        classBUsd(month(summaries.classBPerDay)) +
-        frontUsd(month(summaries.classBPerDay)) +
-        vcpuExecUsd(
-          summaries.vcpuMsPerDay,
-          summaries.windowFilesPerDay > 0
-            ? summaries.windowFilesPerDay
-            : units.workerRequestsPerFile * F,
-        ),
+      ...priced([
+        { label: "Storage", usd: summaries.storedGb * rates.storage_rate_per_gb_month },
+        { label: "Class A", usd: classAUsd(month(summaries.classAPerDay)) },
+        { label: "Class B", usd: classBUsd(month(summaries.classBPerDay)) },
+        { label: "Front requests", usd: frontUsd(month(summaries.classBPerDay)) },
+        {
+          label: "vCPU",
+          usd: vcpuExecUsd(
+            summaries.vcpuMsPerDay,
+            summaries.windowFilesPerDay > 0
+              ? summaries.windowFilesPerDay
+              : units.workerRequestsPerFile * F,
+          ),
+        },
+      ]),
     },
   ];
   const g = ingestDay;
@@ -643,21 +667,27 @@ export function estimateMonthly(
       label: "Split raw files",
       detail: `${count(month(split))} files × ${g.segmentsPerFile} segments · +${count(month(g.extraWorkerRequestsPerDay))} worker reqs · +${gb(month(g.extraRawGbPerDay))} GB re-downloaded · +${count(month(g.skipVcpuMsPerDay))} vCPU ms · A +${count(month(2 * g.extraWindowsPerDay))} · B +${count(reads)}`,
       help: `Raw files over ${(INGEST_LIMITS.shardDecompressedBytes / 1024 / 1024) * 2} MiB decompressed (compressed size × ${INGEST_LIMITS.rawBytesPerGzByte}) are cut into S = ceil(size / ${INGEST_LIMITS.shardDecompressedBytes / 1024 / 1024} MiB) segments, one worker each. Per file: S − worker requests per file extra worker runs; S − 1 extra reads through the front service (front request, Class B and the whole compressed file again as CDN delivery: (S − 1) × compressed size at the egress rate); segment i decompresses and skips i × ${INGEST_LIMITS.shardDecompressedBytes / 1024 / 1024} MiB first, so S(S − 1)/2 × ${INGEST_LIMITS.shardDecompressedBytes / 1024 / 1024} MiB at ${INGEST_ASSUMPTIONS.skipVcpuMsPerMib} vCPU ms per MiB (assumed); and S × windows per shard − window files per file extra windows, each a Parquet and summary PUT (2 Class A), a summary read and a minimal summary file stored.`,
-      usd:
-        requestUsd(month(g.extraWorkerRequestsPerDay)) +
-        vcpuExecUsd(
-          g.skipVcpuMsPerDay,
-          g.extraWorkerRequestsPerDay > 0
-            ? g.extraWorkerRequestsPerDay
-            : split * S,
-        ) +
-        classAUsd(month(2 * g.extraWindowsPerDay)) +
-        classBUsd(reads) +
-        frontUsd(reads) +
-        month(g.extraRawGbPerDay) * rates.cdn_egress_rate_per_gb +
-        ((g.extraWindowsPerDay * SUMMARY_BASE_BYTES) / 1e9) *
-          storedDays *
-          rates.storage_rate_per_gb_month,
+      ...priced([
+        { label: "Worker requests", usd: requestUsd(month(g.extraWorkerRequestsPerDay)) },
+        {
+          label: "vCPU",
+          usd: vcpuExecUsd(
+            g.skipVcpuMsPerDay,
+            g.extraWorkerRequestsPerDay > 0 ? g.extraWorkerRequestsPerDay : split * S,
+          ),
+        },
+        { label: "Class A", usd: classAUsd(month(2 * g.extraWindowsPerDay)) },
+        { label: "Class B", usd: classBUsd(reads) },
+        { label: "Front requests", usd: frontUsd(reads) },
+        { label: "Egress", usd: month(g.extraRawGbPerDay) * rates.cdn_egress_rate_per_gb },
+        {
+          label: "Storage",
+          usd:
+            ((g.extraWindowsPerDay * SUMMARY_BASE_BYTES) / 1e9) *
+            storedDays *
+            rates.storage_rate_per_gb_month,
+        },
+      ]),
     });
   }
   if (g.multipartClassAPerDay > 0) {
@@ -675,9 +705,10 @@ export function estimateMonthly(
       label: "Relayed fan-out",
       detail: `${count(month(g.relayRequestsPerDay))} relay reqs · ${count(month(g.relayVcpuMsPerDay))} vCPU ms`,
       help: `With ingest_relay r, each tick sends its pending shards in groups of up to r through one worker-service execution, which calls a worker on the main service per shard. Relay executions a day = ceil(pending shards per tick / r) × ticks a day, with ${INGEST_ASSUMPTIONS.relayVcpuMsPerCall} vCPU ms each (assumed). The relayed shards are the same worker runs as direct dispatch, so they add nothing else.`,
-      usd:
-        requestUsd(month(g.relayRequestsPerDay)) +
-        vcpuExecUsd(g.relayVcpuMsPerDay, g.relayRequestsPerDay),
+      ...priced([
+        { label: "Requests", usd: requestUsd(month(g.relayRequestsPerDay)) },
+        { label: "vCPU", usd: vcpuExecUsd(g.relayVcpuMsPerDay, g.relayRequestsPerDay) },
+      ]),
     });
   }
   let rumDay: RumDay | null = null;
@@ -725,23 +756,38 @@ export function estimateMonthly(
       id: "rum",
       label: "RUM",
       detail: `${count(month(r.beaconsPerDay))} beacons · ${count(month(r.runsPerDay))} runs · ${gb(r.storedGb)} GB-months · A ${count(rumA)} · B ${count(rumB)}`,
-      usd:
-        r.storedGb * rates.storage_rate_per_gb_month +
-        frontUsd(month(r.beaconsPerDay) + front) +
-        month(rawGb) * rates.cdn_egress_rate_per_gb +
-        classAUsd(rumA) +
-        classBUsd(rumB) +
-        requestUsd(month(units.workerRequestsPerFile * r.filesPerDay)) +
-        vcpuExecUsd(
-          (units.vcpuMsPer1kLines * r.linesPerDay) / 1000,
-          units.workerRequestsPerFile * r.filesPerDay > 0
-            ? units.workerRequestsPerFile * r.filesPerDay
-            : r.runsPerDay,
-        ) +
-        (month(units.kvClassAPerFile * r.filesPerDay) / 1e6) *
-          rates.kv_class_a_rate_per_million +
-        (month(units.kvClassBPerFile * r.filesPerDay) / 1e6) *
-          rates.kv_class_b_rate_per_million,
+      ...priced([
+        { label: "Storage", usd: r.storedGb * rates.storage_rate_per_gb_month },
+        { label: "Front requests", usd: frontUsd(month(r.beaconsPerDay) + front) },
+        { label: "Egress", usd: month(rawGb) * rates.cdn_egress_rate_per_gb },
+        { label: "Class A", usd: classAUsd(rumA) },
+        { label: "Class B", usd: classBUsd(rumB) },
+        {
+          label: "Worker requests",
+          usd: requestUsd(month(units.workerRequestsPerFile * r.filesPerDay)),
+        },
+        {
+          label: "vCPU",
+          usd: vcpuExecUsd(
+            (units.vcpuMsPer1kLines * r.linesPerDay) / 1000,
+            units.workerRequestsPerFile * r.filesPerDay > 0
+              ? units.workerRequestsPerFile * r.filesPerDay
+              : r.runsPerDay,
+          ),
+        },
+        {
+          label: "KV Class A",
+          usd:
+            (month(units.kvClassAPerFile * r.filesPerDay) / 1e6) *
+            rates.kv_class_a_rate_per_million,
+        },
+        {
+          label: "KV Class B",
+          usd:
+            (month(units.kvClassBPerFile * r.filesPerDay) / 1e6) *
+            rates.kv_class_b_rate_per_million,
+        },
+      ]),
     });
   }
   if (compactionDay) {
@@ -754,16 +800,23 @@ export function estimateMonthly(
       label: "Compaction",
       detail: `${count(month(c.dispatchesPerDay))} job runs · ${count(month(c.executionsPerDay))} merges · +${gb(c.extraStoredGb)} GB-months min-billed · A ${count(month(c.classAPerDay))} · B ${count(month(c.classBPerDay))} · −${count(saved)} file reads`,
       help: `The compaction job runs every ${COMPACT_JOB_INTERVAL_S} s (sooner while it has a backlog): one worker-service request and two KV reads each, ${COMPACT_DISPATCH_VCPU_MS} vCPU ms when nothing is due (assumed). Merges are extra worker executions that read every source and write one compact.`,
-      usd:
-        c.extraStoredGb * rates.storage_rate_per_gb_month +
-        classAUsd(month(c.classAPerDay)) +
-        classBUsd(month(c.classBPerDay)) +
-        frontUsd(month(c.classBPerDay)) +
-        requestUsd(month(c.dispatchesPerDay + c.executionsPerDay)) +
-        vcpuExecUsd(c.vcpuMsPerDay, c.dispatchesPerDay + c.executionsPerDay) +
-        (month(c.kvClassAPerDay) / 1e6) * rates.kv_class_a_rate_per_million +
-        (month(c.kvClassBPerDay) / 1e6) * rates.kv_class_b_rate_per_million -
-        (frontUsd(saved) + classBUsd(saved)),
+      ...priced([
+        { label: "Min-billed storage", usd: c.extraStoredGb * rates.storage_rate_per_gb_month },
+        { label: "Class A", usd: classAUsd(month(c.classAPerDay)) },
+        { label: "Class B", usd: classBUsd(month(c.classBPerDay)) },
+        { label: "Front requests", usd: frontUsd(month(c.classBPerDay)) },
+        {
+          label: "Worker requests",
+          usd: requestUsd(month(c.dispatchesPerDay + c.executionsPerDay)),
+        },
+        {
+          label: "vCPU",
+          usd: vcpuExecUsd(c.vcpuMsPerDay, c.dispatchesPerDay + c.executionsPerDay),
+        },
+        { label: "KV Class A", usd: (month(c.kvClassAPerDay) / 1e6) * rates.kv_class_a_rate_per_million },
+        { label: "KV Class B", usd: (month(c.kvClassBPerDay) / 1e6) * rates.kv_class_b_rate_per_million },
+        { label: "Saved dashboard reads", usd: -(frontUsd(saved) + classBUsd(saved)) },
+      ]),
     });
   }
   const telemetryUsd =

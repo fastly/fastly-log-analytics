@@ -66,6 +66,26 @@ describe("front clock probes", () => {
 });
 
 describe("estimateMonthly", () => {
+  it("splits each multi-component line into priced parts that add up to its total", () => {
+    const est = estimateMonthly(
+      { ...DEFAULT_INPUTS, rumPageviewsPerDay: 10_000 },
+      DEFAULT_UNITS,
+      LIST_PRICE_RATES,
+    );
+    const labels = (id: string) => line(est, id).parts?.map((p) => p.label);
+    expect(labels("delivery")).toEqual(["Egress", "Requests"]);
+    expect(labels("ops")).toEqual(["Class A", "Class B"]);
+    expect(labels("kv")).toEqual(["Class A", "Class B"]);
+    expect(labels("storage")).toEqual(["Raw logs", "Parquet", "Fixed"]);
+    expect(labels("compute")).toEqual(["Requests", "App vCPU", "Worker vCPU"]);
+    for (const l of est.lines) {
+      if (!l.parts) continue;
+      expect(l.parts.length).toBeGreaterThan(1);
+      expect(l.parts.reduce((sum, p) => sum + p.usd, 0)).toBeCloseTo(l.usd, 9);
+    }
+    expect(line(est, "secrets").parts).toBeUndefined();
+  });
+
   it("spreads logged lines over the period's writing nodes", () => {
     const at = (linesPerDay: number) => ({
       ...DEFAULT_INPUTS,

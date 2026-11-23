@@ -71,6 +71,7 @@ export function CloudCostCalculator({ prefillData, rates: configuredRates, local
           ...line,
           detail: `Measured · this install · ${(localStorageGbMonths ?? 0).toFixed(2)} GB-months`,
           usd: localStorageCost,
+          parts: undefined,
         }
       : line)
   const resultTotal = localStorageCost == null
@@ -126,7 +127,13 @@ export function CloudCostCalculator({ prefillData, rates: configuredRates, local
       <div className="bg-muted/30 border rounded-lg p-5">
         <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-4">Monthly Estimate Breakdown</h3>
         {resultLines.map((line) => (
-          <ResultRow key={line.id} label={line.label} detail={line.detail} cost={formatUSD(line.usd)} />
+          <ResultRow
+            key={line.id}
+            label={line.label}
+            detail={line.detail}
+            cost={formatUSD(line.usd)}
+            parts={line.parts?.map((part) => ({ label: part.label, cost: formatUSD(part.usd) }))}
+          />
         ))}
         <ResultRow label="Total Estimated Monthly Cost" cost={formatUSD(resultTotal)} highlight />
       </div>
