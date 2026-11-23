@@ -194,19 +194,27 @@ function popLatency(result: RollupResult, body: OriginRollupBody): OriginPopLate
   return shapeOriginPopLatencyRows(rows, { requiresGroupC: false });
 }
 
+/** Whether the series bucket needs the per-minute `series1` rows: it doesn't tile 5 minutes. */
+const minuteSeries = (body: OriginRollupBody) => (body.bucket_minutes ?? 5) % 5 !== 0;
+
 /**
  * The origin latency series of `buildOriginTimeseriesSql` per bucket, and per
- * path leg when split, from the `series5` `origin` histograms: TTFB counts rows
- * with an origin latency and TTLB rows with an OTTLB, as raw does. The unsplit
- * OTTLB series reads the overall histograms, which older summaries carry too.
+ * path leg when split, from the `series5` `origin` histograms (`series1` for
+ * buckets that don't tile 5 minutes): TTFB counts rows with an origin latency
+ * and TTLB rows with an OTTLB, as raw does. The unsplit 5-minute OTTLB series
+ * reads the overall histograms, which older summaries carry too; every row has
+ * a leg row, so the legs sum to it.
  */
 function latencySeries(result: RollupResult, body: OriginRollupBody): OriginTimeseriesSection | null {
   const metric = body.timeseries_metric === "ttlb" ? "ttlb" : "ttfb";
   const percentile = body.timeseries_percentile ?? "p95";
   const bucketMinutes = body.bucket_minutes ?? 5;
-  if (metric === "ttlb" && !body.split_by_leg) return ottlbSeries(result, bucketMinutes, percentile);
-  if (!result.rollup.present?.has("series5/origin")) return null;
-  const rebucketed = rebucketSeries(result.rollup, "origin", bucketMinutes * 60_000);
+  const group = minuteSeries(body) ? "series1" : "series5";
+  if (metric === "ttlb" && !body.split_by_leg && group === "series5") {
+    return ottlbSeries(result, bucketMinutes, percentile);
+  }
+  if (!result.rollup.present?.has(`${group}/origin`)) return null;
+  const rebucketed = rebucketSeries(result.rollup, "origin", bucketMinutes * 60_000, group);
   if (!rebucketed) return null;
   const key = metric === "ttlb" ? "ottlb" : "ttfb";
   const q = PERCENTILES[percentile] ?? 0.95;
@@ -424,14 +432,17 @@ function filteredOriginSummary(
   };
 }
 
+const ORIGIN_COLUMNS = [
+  "count", "requests", "ost_5xx_count", "ost_total_count", "lat_us_count", "miss_requests", "pass_requests",
+  "ttfb_hist", "ottfb_hist", "ottlb_hist", "overhead_hist", "obytes_hist",
+];
+const ORIGIN_GROUPS = ["dims", "all_fields", "field_totals", "origin", "urls", "shield_routes", "filtered_rollups", "dim_totals"];
+
 /** The summary groups and columns /origin reads. */
-export const ORIGIN_SUMMARY_SPEC = defineSummarySpec({
-  groups: ["dims", "series5", "all_fields", "field_totals", "origin", "urls", "shield_routes", "filtered_rollups", "dim_totals"],
-  columns: [
-    "count", "requests", "ost_5xx_count", "ost_total_count", "lat_us_count", "miss_requests", "pass_requests",
-    "ttfb_hist", "ottfb_hist", "ottlb_hist", "overhead_hist", "obytes_hist",
-  ],
-});
+export const ORIGIN_SUMMARY_SPEC = defineSummarySpec({ groups: [...ORIGIN_GROUPS, "series5"], columns: ORIGIN_COLUMNS });
+
+/** `ORIGIN_SUMMARY_SPEC` for a series whose bucket doesn't tile 5 minutes: per-minute rows instead. */
+export const ORIGIN_MINUTE_SUMMARY_SPEC = defineSummarySpec({ groups: [...ORIGIN_GROUPS, "series1"], columns: ORIGIN_COLUMNS });
 
 /**
  * Answers a Cloud /origin aggregates or shielding-analysis read from
@@ -451,6 +462,9 @@ export async function originFromRollup(
   const fromMs = parseEpochMs(body.start_time);
   const toMs = parseEpochMs(body.end_time);
   if (fromMs === null || toMs === null || fromMs >= toMs) return null;
+  if (spec === ORIGIN_SUMMARY_SPEC && body.sections?.includes("timeseries") && minuteSeries(body)) {
+    spec = ORIGIN_MINUTE_SUMMARY_SPEC;
+  }
   const result = await queryRollup(source, { fromMs, toMs, signal, spec: spec ?? undefined });
   if (!result) return null;
   if (hasFilterValues(body.filters, body.custom_filters)) {

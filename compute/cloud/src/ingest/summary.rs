@@ -64,6 +64,8 @@ pub const REF_STEM: &str = "_ref_stem";
 pub const IP_SKETCH_FIELDS: [&str; 2] = ["tls_ciphers_sha", REF_STEM];
 /// `series5` and `bins` bucket width in windows and hour bundles; day bundles use an hour.
 pub const SERIES_STEP_MS: i64 = 300_000;
+/// The step of the `series1` rows: /origin's series below five-minute buckets.
+pub const MINUTE_MS: i64 = 60_000;
 pub use super::hll::{P as HLL_P, VERSION as HLL_VERSION};
 
 /// Dashboard card fields (`web/lib/dashboard/cards.ts` CARD_FIELDS) plus origin fields and the
@@ -1652,7 +1654,8 @@ impl UrlAgg {
     }
 }
 
-/// A `series5` `origin` row per path leg: origin latency and OTTLB for /origin's series.
+/// A `series5` or `series1` `origin` row per path leg: origin latency and OTTLB for /origin's
+/// series.
 #[derive(Default)]
 struct OriginSeries {
     requests: i64,
@@ -2367,7 +2370,10 @@ fn write_v3<'a>(
                 }
             }
             let s = origin_series
-                .entry((step, Cow::Borrowed(leg(edge))))
+                .entry((
+                    ts.div_euclid(MINUTE_MS) * MINUTE_MS,
+                    Cow::Borrowed(leg(edge)),
+                ))
                 .or_default();
             s.requests += 1;
             if let Some((v, slot)) = origin_lat {
@@ -2490,21 +2496,31 @@ fn write_v3<'a>(
         cell.push(out, *step, value);
     }
     drop(cities);
-    let (legs, total, truncated) = top_timed(origin_series, |s| s.requests, DIM_K);
-    push_total(out, bucket, "series5", "origin", total, truncated);
-    for (step, value, s) in &legs {
-        let blobs = [&s.lat, &s.ottlb].map(Hist::to_bytes);
-        let mut row = vec![
-            (C::Bundle, V::S("series5")),
-            (C::Bucket, V::I(*step)),
-            (C::FieldName, V::S("origin")),
-            (C::Value, V::S(value)),
-            (C::Requests, V::I(s.requests)),
-        ];
-        push_hists(&mut row, &[C::TtfbHist, C::OttlbHist], &blobs);
-        out.push(&row);
+    // Accumulated per minute; the five-minute rows merge them.
+    let mut origin_series5: FastMap<(i64, Cow<str>), OriginSeries> = FastMap::default();
+    for ((minute, value), s) in &origin_series {
+        let step = minute.div_euclid(SERIES_STEP_MS) * SERIES_STEP_MS;
+        let into = origin_series5.entry((step, value.clone())).or_default();
+        into.requests += s.requests;
+        into.lat.merge(&s.lat);
+        into.ottlb.merge(&s.ottlb);
     }
-    drop(legs);
+    for (name, series) in [("series5", origin_series5), ("series1", origin_series)] {
+        let (legs, total, truncated) = top_timed(series, |s| s.requests, DIM_K);
+        push_total(out, bucket, name, "origin", total, truncated);
+        for (step, value, s) in &legs {
+            let blobs = [&s.lat, &s.ottlb].map(Hist::to_bytes);
+            let mut row = vec![
+                (C::Bundle, V::S(name)),
+                (C::Bucket, V::I(*step)),
+                (C::FieldName, V::S("origin")),
+                (C::Value, V::S(value)),
+                (C::Requests, V::I(s.requests)),
+            ];
+            push_hists(&mut row, &[C::TtfbHist, C::OttlbHist], &blobs);
+            out.push(&row);
+        }
+    }
 
     for (field, bins) in [("req_header_size", header_bins), ("verified_bot", bot_bins)] {
         let (kept, total, truncated) = top_timed(bins, |n| *n, DIM_K);

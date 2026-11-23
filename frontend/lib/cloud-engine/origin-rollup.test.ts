@@ -7,7 +7,7 @@ import { Histogram } from "./dashboard/histogram";
 import { decodeRollup, mergeRollups, type Rollup, type RollupResult } from "./dashboard/rollup-query";
 import { FIXTURE_START, fixturePage, loadSummaryFixtures } from "./dashboard/summary-fixtures";
 import { fixtureSource } from "./dashboard/test-fixtures";
-import { handleOriginRequest, type OriginAggregatesResponse } from "./origin";
+import { handleOriginRequest, type OriginAggregatesResponse, type OriginTimeseriesPoint } from "./origin";
 import { originAggregatesFromRollup, originFromRollup, originRollupEligible } from "./origin-rollup";
 import { originRollupSections } from "./rollup-sections";
 
@@ -95,6 +95,29 @@ describe("origin rollup vs raw DuckDB over the same rows", () => {
         if (bucket > 5) got.series.forEach((p, i) => near(p.value, want.series[i].value, 0.15));
       }
     }
+  });
+
+  it("matches raw per-minute series counts exactly from window summaries and hour bundles, never day bundles", async () => {
+    for (const [list, step] of [[WINDOWS, 300_000], [HOURS, 300_000]] as const) {
+      const rollup = await rollupOf([...list], step);
+      for (const bucket of [1, 2, 3]) {
+        for (const metric of ["ttfb", "ttlb"]) {
+          for (const split of [false, true]) {
+            const extra = { bucket_minutes: bucket, timeseries_metric: metric, split_by_leg: split, sections: ["timeseries"] };
+            const want = (await raw(extra)).timeseries;
+            const got = originAggregatesFromRollup(rollup, body(extra))?.timeseries;
+            const what = JSON.stringify({ list: list[0].key, ...extra });
+            expect(want.series.length, what).toBeGreaterThan(20);
+            // Raw orders by time only, so legs within a bucket come in any order.
+            const points = (series: OriginTimeseriesPoint[]) =>
+              series.map((p) => [p.time, String(p.edge), p.miss_count]).toSorted((x, y) => (x.join() < y.join() ? -1 : 1));
+            expect(points(got?.series ?? []), what).toEqual(points(want.series));
+          }
+        }
+      }
+    }
+    const day = await rollupOf(files("day"), HOUR);
+    expect(originAggregatesFromRollup(day, body({ bucket_minutes: 1, sections: ["timeseries"] }))).toBeNull();
   });
 
   it("matches raw origin status code counts and shares exactly from window summaries and day bundles", async () => {
@@ -304,10 +327,13 @@ describe("originAggregatesFromRollup", () => {
 });
 
 describe("originRollupSections", () => {
-  it("offers every table always and the latency series only on whole 5-minute steps that tile a day", () => {
+  it("offers every table always and the latency series only on whole-minute steps that tile a day", () => {
     const tables = PAGE_SECTIONS.filter((s) => s !== "timeseries");
-    expect(originRollupSections({ metric: "ttlb", bucketMinutes: 1 })).toEqual(tables);
+    expect(originRollupSections({ metric: "ttlb", bucketMinutes: 1 })).toContain("timeseries");
+    expect(originRollupSections({ metric: "ttfb", bucketMinutes: 2, splitByLeg: true })).toContain("timeseries");
     expect(originRollupSections({ metric: "ttfb", bucketMinutes: 35 })).toEqual(tables);
+    expect(originRollupSections({ metric: "ttfb", bucketMinutes: 7 })).toEqual(tables);
+    expect(originRollupSections({ metric: "ttfb", bucketMinutes: 0.5 })).toEqual(tables);
     expect(originRollupSections({ metric: "other", bucketMinutes: 60 })).toEqual(tables);
     for (const metric of ["ttfb", "ttlb"]) {
       for (const splitByLeg of [false, true]) {
@@ -344,6 +370,18 @@ describe("originFromRollup", () => {
     expect(s.log.files.every((key) => WINDOWS.some((f) => f.key === key))).toBe(true);
   });
 
+  it("answers the page's 1-minute read from window summaries and hour bundles without reading raw files", async () => {
+    for (const summaries of [WINDOWS, HOURS]) {
+      const s = source(summaries);
+      const params = body({ sections: PAGE_SECTIONS, timeseries_metric: "ttfb", bucket_minutes: 1 });
+      const served = await originFromRollup("/api/origin/aggregates", params, s) as OriginAggregatesResponse;
+      expect(served).toEqual(originAggregatesFromRollup(await rollupOf(summaries), params));
+      expect(served.timeseries.series.length).toBeGreaterThan(60);
+      expect(s.log.files.length).toBeGreaterThan(0);
+      expect(s.log.files.every((key) => summaries.some((f) => f.key === key))).toBe(true);
+    }
+  });
+
   it("leaves filtered reads, raw-only sections and options and other routes to the raw scan", async () => {
     for (const params of [
       body({ filters: { pop: { values: ["IAD"], mode: "include" } } }),
@@ -351,7 +389,6 @@ describe("originFromRollup", () => {
       body({ sections: ["ip_health", "drilldown"] }),
       body({ sections: undefined }),
       body({ sections: [] }),
-      body({ bucket_minutes: 1 }),
       body({ timeseries_metric: "ttfb", bucket_minutes: 7 }),
       body({ end_time: "not a time" }),
     ]) {

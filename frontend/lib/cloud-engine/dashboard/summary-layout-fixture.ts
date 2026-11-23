@@ -10,6 +10,7 @@ export const LAYOUT_B: readonly (readonly string[])[] = [
   ["sessions"],
   ["dims"],
   ["series5"],
+  ["series1"],
   ["bins", "assets", "transport", "origin"],
   ["urls"],
   ["quality", "sample"],

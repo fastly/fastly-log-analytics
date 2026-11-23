@@ -24,7 +24,8 @@ export type OriginRollupSection =
 /**
  * The /origin aggregates sections summaries can answer for these options: every
  * table and the summary always, and the latency series (TTFB or OTTLB, with or
- * without a leg split) only on whole 5-minute buckets that tile a day.
+ * without a leg split) only on whole-minute buckets that tile a day (summaries
+ * keep 5-minute and per-minute series).
  */
 export function originRollupSections(options: {
   metric: string;
@@ -33,7 +34,7 @@ export function originRollupSections(options: {
 }): OriginRollupSection[] {
   const { metric, bucketMinutes } = options;
   const series = (metric === "ttlb" || metric === "ttfb") && Number.isInteger(bucketMinutes) &&
-    bucketMinutes % 5 === 0 && bucketMinutes > 0 && 1440 % bucketMinutes === 0;
+    bucketMinutes > 0 && 1440 % bucketMinutes === 0;
   const tables: OriginRollupSection[] = ["summary", "slow_urls", "status_codes", "path_breakdown", "pop_latency", "ip_health"];
   return series ? ["timeseries", ...tables] : tables;
 }
