@@ -806,10 +806,31 @@ const queryScans = new WeakMap<Request, QueryScan>();
 /** A prepared /api/sessions list: where its first read begins, and how to load more. */
 const sessionScans = new WeakMap<Request, { loadedFromMs: number; loadRange: SessionsRangeLoader }>();
 /**
- * The newest window a prepared /origin raw scan narrowed to because its whole
- * range was over the browser budget; the answer is exact over this window.
+ * The newest window a prepared raw scan narrowed to because its whole range
+ * was over the browser budget; the answer is exact over this window.
  */
-const originRawWindows = new WeakMap<Request, { data_from: string; data_through: string }>();
+const rawWindows = new WeakMap<Request, { data_from: string; data_through: string }>();
+/**
+ * Raw scans whose answer over the newest part of a range is still meaningful,
+ * so an over-budget range narrows (see `prepareCloudScan`) rather than 413s.
+ * /query and /insights shorten their own ways; session detail, session events
+ * and exports must cover exactly what they were asked for.
+ */
+const RAW_WINDOW_ROUTES = new RegExp(
+  "^/api/(?:origin/.+|performance(?:/aggregates)?|security/(?:aggregates|bundle|top-bots|proxies|threat-intel)" +
+  "|network(?:/(?:bundle|pop-health)|-health|-quality)|value/summary|assets/aggregates|cmcd/aggregates|sessions" +
+  "|usage/rum-breakdown|rum/(?:analytics|live-events|beacon-health))$" +
+  "|^/api/services/[^/]+/(?:rum/(?:analytics|live-events|beacon-health)|scoring/(?!sessions/).+)$",
+);
+
+/** Adds the window a narrowed scan's answer covers to its JSON response. */
+async function withRawWindow(prepared: Request, response: Response | null): Promise<Response | null> {
+  const rawWindow = rawWindows.get(prepared);
+  if (!rawWindow || response?.status !== 200 || !response.headers.get("content-type")?.includes("json")) return response;
+  const body = await response.json() as unknown;
+  return jsonResponse(body && typeof body === "object" && !Array.isArray(body)
+    ? { ...body, raw_window: rawWindow } : body, prepared);
+}
 
 function queryBudgetError(error: CloudBudgetError, columns: readonly string[] | null): CloudBudgetError {
   const { detail } = error;
@@ -1099,8 +1120,9 @@ async function prepareCloudScan(
     ? sessionsLoadFrom(params, Date.parse(scanStart), Date.parse(end)) : Date.parse(scanStart);
   const followUp = Boolean(detectors) && url.pathname === "/api/insights";
   const widenFollowUp = followUp && !insightsSummaryWindows.includes(insightsWindowKey(decodedServiceId, end));
-  const loadRange = (wider: boolean) => ensureCloudRange(
-    sessionsFrom > Date.parse(scanStart) ? new Date(sessionsFrom).toISOString() : scanStart, scanEnd, request.signal, rum ? ["rum"] : ["request"], {
+  const firstFrom = sessionsFrom > Date.parse(scanStart) ? new Date(sessionsFrom).toISOString() : scanStart;
+  const loadRange = (wider: boolean, from = firstFrom) => ensureCloudRange(
+    from, scanEnd, request.signal, rum ? ["rum"] : ["request"], {
     serviceId: decodedServiceId, customFields,
     ...insights ? { projection: {
       columns: insightScanColumns(filters, detectors),
@@ -1116,25 +1138,23 @@ async function prepareCloudScan(
       columns: scanColumns, ...originScan ? { maxBytes: ORIGIN_PROJECTION_BYTES } : {},
     } } : {},
   });
-  // An /origin range over budget is answered exactly over the widest newest window that fits
+  // A range over budget is answered exactly over the widest newest window that fits
   // (1h, then 4x wider, as /api/query widens), rather than refused.
-  let originWindowFrom: string | null = null;
-  const loadOriginWindow = async (error: unknown): Promise<DuckDBReadContext> => {
-    if (!originScan || !scanColumns || request.method !== "POST" || !(error instanceof CloudBudgetError)) throw error;
+  const narrowable = !insights && !queryPlan && !token && RAW_WINDOW_ROUTES.test(url.pathname) && !params.network_residual;
+  let rawWindowFrom: string | null = null;
+  const loadNewestWindow = async (error: unknown): Promise<DuckDBReadContext> => {
+    if (!narrowable || !(error instanceof CloudBudgetError)) throw error;
     const froms: string[] = [];
     for (let step = 0; ; step++) {
       const from = queryWindow(step);
-      if (from === null) break;
+      if (from === null || Date.parse(from) <= Date.parse(firstFrom)) break;
       froms.unshift(from);
     }
     for (const from of froms) {
       assertAdapterEpoch(request, entryMetaEpoch);
       try {
-        const narrowed = await ensureCloudRange(from, scanEnd, request.signal, ["request"], {
-          serviceId: decodedServiceId, customFields,
-          projection: { columns: scanColumns, maxBytes: ORIGIN_PROJECTION_BYTES },
-        });
-        originWindowFrom = from;
+        const narrowed = await loadRange(false, from);
+        rawWindowFrom = from;
         return narrowed;
       } catch (narrowError) {
         if (!(narrowError instanceof CloudBudgetError)) throw narrowError;
@@ -1146,29 +1166,30 @@ async function prepareCloudScan(
     // When no earlier pass loaded the window wide, its every-column read can outgrow the budget alone.
     if (widenFollowUp && error instanceof CloudBudgetError) return loadRange(false);
     throw error;
-  }).catch(loadOriginWindow).catch((error: unknown) => {
+  }).catch(loadNewestWindow).catch((error: unknown) => {
     throw network && error instanceof CloudBudgetError
       ? networkBudgetError(error, networkScans(url.pathname, params.sections), scanColumns) : error;
   });
   try {
     generation.assertCurrent();
     assertAdapterEpoch(request, entryMetaEpoch);
+    const rawWindow = rawWindowFrom === null ? null
+      : { data_from: rawWindowFrom, data_through: new Date(Date.parse(end)).toISOString() };
     if (request.method === "POST") {
       const prepared = bindCloudReadContext(new Request(request, { body: JSON.stringify({ ...params,
-        start_time: originWindowFrom ?? params.start_time ?? start, end_time: params.end_time ?? end,
+        start_time: rawWindowFrom ?? params.start_time ?? start, end_time: params.end_time ?? end,
         ...(decodedServiceId ? { service_id: decodedServiceId } : {}),
         ...(url.pathname.startsWith("/api/insights") ? { clamp_end: end } : {}),
       }) }), read);
       if (insightBaseline) insightBaselines.set(prepared, insightBaseline);
-      if (originWindowFrom !== null) {
-        originRawWindows.set(prepared, { data_from: originWindowFrom, data_through: new Date(Date.parse(end)).toISOString() });
-      }
+      if (rawWindow) rawWindows.set(prepared, rawWindow);
       if (url.pathname === "/api/sessions") {
-        sessionScans.set(prepared, { loadedFromMs: sessionsFrom, loadRange: async (fromMs, toMs, columns) => {
-          const loaded = await loadSessions(fromMs, toMs, columns);
-          return { runSql: (sql) => loaded.executeSql<Record<string, unknown>>(sql, [], request.signal),
-            release: () => loaded.release?.(), presentColumns: () => loaded.getPresentColumns() };
-        } });
+        sessionScans.set(prepared, { loadedFromMs: rawWindowFrom === null ? sessionsFrom : Date.parse(rawWindowFrom),
+          loadRange: async (fromMs, toMs, columns) => {
+            const loaded = await loadSessions(fromMs, toMs, columns);
+            return { runSql: (sql) => loaded.executeSql<Record<string, unknown>>(sql, [], request.signal),
+              release: () => loaded.release?.(), presentColumns: () => loaded.getPresentColumns() };
+          } });
       }
       if (queryPlan) {
         let step = 0;
@@ -1183,10 +1204,13 @@ async function prepareCloudScan(
       }
       return prepared;
     }
-    if (!url.searchParams.has("start_time")) url.searchParams.set("start_time", start);
+    if (rawWindowFrom !== null) url.searchParams.set("start_time", rawWindowFrom);
+    else if (!url.searchParams.has("start_time")) url.searchParams.set("start_time", start);
     if (!url.searchParams.has("end_time")) url.searchParams.set("end_time", end);
     if (decodedServiceId && !url.searchParams.has("service_id")) url.searchParams.set("service_id", decodedServiceId);
-    return bindCloudReadContext(new Request(url, request), read);
+    const prepared = bindCloudReadContext(new Request(url, request), read);
+    if (rawWindow) rawWindows.set(prepared, rawWindow);
+    return prepared;
   } catch (error) {
     read.release?.();
     throw error;
@@ -1455,9 +1479,9 @@ async function handleCloudRequestInner(
         }
         assertAdapterEpoch(request, entryMetaEpoch);
         read = cloudReadContext(prepared);
-        const response = /\/scoring\//.test(path)
+        const response = await withRawWindow(prepared, /\/scoring\//.test(path)
           ? await cloudScoringRead(prepared)
-          : await dispatchCloudRequest(prepared, origin, cloudReadContext(prepared), entryMetaEpoch);
+          : await dispatchCloudRequest(prepared, origin, cloudReadContext(prepared), entryMetaEpoch));
         cloudReadContext(prepared).assertCurrent();
         assertAdapterEpoch(prepared, entryMetaEpoch);
         success = Boolean(response?.ok);
@@ -2381,10 +2405,7 @@ async function dispatchCloudRequest(
   }
   // Page 8: Origin Analytics (/api/origin/*)
   if (pathname.startsWith("/api/origin/")) {
-    const response = await handleOriginRequest(request, pathname, url, read);
-    const rawWindow = originRawWindows.get(request);
-    if (!rawWindow || response?.status !== 200) return response;
-    return jsonResponse({ ...await response.json() as Record<string, unknown>, raw_window: rawWindow }, request);
+    return handleOriginRequest(request, pathname, url, read);
   }
 
   // Page 9: Performance Analytics (/api/performance, /api/performance/aggregates)

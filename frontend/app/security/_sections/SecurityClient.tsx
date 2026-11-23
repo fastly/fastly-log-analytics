@@ -10,7 +10,7 @@ import { ReportLayout } from '@/components/ReportLayout'
 import { client, extractApiError } from '@/lib/api'
 import { Shield } from 'lucide-react'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
-import { mergeRollupMeta, readRollupMeta, RollupDataThroughSlot } from '@/components/network/rollupLabels'
+import { mergeRollupMeta, RawWindowNote, readRawWindow, readRollupMeta, RollupDataThroughSlot } from '@/components/network/rollupLabels'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { hasFilterValues } from '@/lib/cloud-engine/rollup-sections'
 import type { components } from '@/types/api.generated'
@@ -152,6 +152,7 @@ function SecurityBody({
 
       <TabsContent value="waf-activity" className="space-y-6">
         <RollupDataThroughSlot reserve={rollupFirst} meta={rollup} />
+        <RawWindowNote window={readRawWindow(rawData)} />
         <BotsSection
           {...qCommon}
           intervalButtons={intervalButtons}

@@ -12,6 +12,7 @@ import { useScoringLabels } from '@/components/SessionScoring/ScoringAdminPanels
 import { useServiceStore } from '@/stores/filterStore'
 import { ReportLayout } from '@/components/ReportLayout'
 import { UpdatingBadge } from '@/components/AnalyticsCard'
+import { RawWindowNote, readRawWindow } from '@/components/network/rollupLabels'
 import {
   SessionDetail,
   SessionDetailModal,
@@ -136,6 +137,8 @@ function SessionsBody({
           </button>
         </div>
       ) : null}
+
+      <RawWindowNote window={readRawWindow(data)} />
 
       <ScoringControls
         cmcdEnabled={cmcdEnabled} flaggedOnly={flaggedOnly} setFlaggedOnly={(v) => void setFlaggedOnly(v)}
