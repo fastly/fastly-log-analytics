@@ -1499,6 +1499,36 @@ fn the_outbox_append_counts_its_own_calls_when_remaining_does_not_move() {
 }
 
 #[test]
+fn oversized_outbox_payload_splits_into_bounded_overflow_keys() {
+    let rt = Rt::default();
+    let bucket = NOW_S / OUTBOX_BUCKET_S;
+    let line = format!("{{\"row\":\"{}\"}}", "a".repeat(250));
+    let lines_per_chunk = (OUTBOX_VALUE_CAP + 1) / (line.len() + 1);
+    let total_lines = lines_per_chunk * 2 + 5;
+    let payload = vec![line.as_str(); total_lines].join("\n");
+    assert!(payload.len() > OUTBOX_VALUE_CAP * 2);
+
+    append_outbox(&rt, "global", "big1", &payload).unwrap();
+
+    let keys = outbox_keys(&rt)
+        .into_iter()
+        .filter(|k| k.starts_with(&outbox_key("global", bucket, Some("xbig1"))))
+        .collect::<Vec<_>>();
+    assert!(keys.len() >= 3, "expected >=3 chunks, got {keys:?}");
+    let mut recovered = Vec::new();
+    for key in &keys {
+        let joined = outbox_lines(&rt, key).join("\n");
+        assert!(
+            joined.len() <= OUTBOX_VALUE_CAP,
+            "{key} exceeded cap: {}",
+            joined.len()
+        );
+        recovered.extend(outbox_lines(&rt, key));
+    }
+    assert_eq!(recovered.len(), total_lines);
+}
+
+#[test]
 fn dev_telemetry_gate_and_toggle_drop_dev_only_streams_while_preserving_audit_and_cron_runs() {
     let prod_rt = Rt {
         no_dev_telemetry: true,

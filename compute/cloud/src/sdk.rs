@@ -738,7 +738,7 @@ impl Runtime for FastlyRuntime {
         match kv.lookup(key) {
             Ok(mut response) => {
                 let generation = response.current_generation().to_string();
-                let mut value = bounded_json(response.take_body())?;
+                let mut value = bounded_json_with_limit(response.take_body(), KV_VALUE_MAX_BYTES)?;
                 if Self::is_coordinated_kv_key(key) {
                     if let Some(mut coord) = self.kv_coord_get(key) {
                         let kv_ts = value["_kv_written_ms"].as_u64().unwrap_or(0);
@@ -971,7 +971,7 @@ impl Runtime for FastlyRuntime {
             let kv = self.kv.as_ref()?;
             let mut local = kv.lookup(key).ok()?;
             let generation = local.current_generation().to_string();
-            let value = bounded_json(local.take_body()).ok()?;
+            let value = bounded_json_with_limit(local.take_body(), KV_VALUE_MAX_BYTES).ok()?;
             value["_kv_written_ms"]
                 .as_u64()
                 .is_some_and(|ts| ts >= expected)
@@ -1002,7 +1002,7 @@ impl Runtime for FastlyRuntime {
             .parse::<u64>()
             .map_err(|_| "admin_state_generation_invalid")?
             .to_string();
-        let value = bounded_json(response.take_body())?;
+        let value = bounded_json_with_limit(response.take_body(), KV_VALUE_MAX_BYTES)?;
         if expected_ts.is_some_and(|expected| {
             value["_kv_written_ms"]
                 .as_u64()
@@ -2358,12 +2358,18 @@ impl CheckApi for FastlyApi<'_> {
     }
 }
 
+const KV_VALUE_MAX_BYTES: usize = 25 * 1024 * 1024;
+
 fn bounded_json(body: fastly::Body) -> Result<Value, String> {
+    bounded_json_with_limit(body, 2_097_152)
+}
+
+fn bounded_json_with_limit(body: fastly::Body, max_bytes: usize) -> Result<Value, String> {
     let mut bytes = Vec::new();
-    body.take(2_097_153)
+    body.take((max_bytes + 1) as u64)
         .read_to_end(&mut bytes)
         .map_err(|_| "backend_body_unavailable")?;
-    if bytes.len() > 2_097_152 {
+    if bytes.len() > max_bytes {
         return Err("backend_response_too_large".into());
     }
     if bytes.is_empty() {

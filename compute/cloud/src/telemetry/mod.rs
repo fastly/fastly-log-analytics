@@ -596,12 +596,55 @@ pub fn append_outbox_reserving(
         }
     }
     let bucket = runtime.now() / OUTBOX_BUCKET_S;
-    let key = outbox_key(sid, bucket, Some(&format!("x{first_id}")));
-    match runtime.admin_cas(&key, None, &json!({ "ndjson": ndjson })) {
-        Ok(true) => Ok(()),
-        Ok(false) => Err("outbox_key_exists".into()),
-        Err(error) => Err(error),
+    for (idx, chunk) in split_ndjson_chunks(ndjson, OUTBOX_VALUE_CAP)
+        .into_iter()
+        .enumerate()
+    {
+        let suffix = if idx == 0 {
+            format!("x{first_id}")
+        } else {
+            format!("x{first_id}_{idx}")
+        };
+        let key = outbox_key(sid, bucket, Some(&suffix));
+        match runtime.admin_cas(&key, None, &json!({ "ndjson": chunk })) {
+            Ok(true) => {}
+            Ok(false) => return Err("outbox_key_exists".into()),
+            Err(error) => return Err(error),
+        }
     }
+    Ok(())
+}
+
+fn split_ndjson_chunks(ndjson: &str, cap: usize) -> Vec<&str> {
+    if ndjson.len() <= cap {
+        return vec![ndjson];
+    }
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    while start < ndjson.len() {
+        let remaining = ndjson.len() - start;
+        if remaining <= cap {
+            chunks.push(&ndjson[start..]);
+            break;
+        }
+        let window = &ndjson[start..start + cap];
+        let split_at = match window.rfind('\n') {
+            Some(pos) => start + pos,
+            None => match ndjson[start + cap..].find('\n') {
+                Some(pos) => start + cap + pos,
+                None => ndjson.len(),
+            },
+        };
+        if split_at > start {
+            chunks.push(&ndjson[start..split_at]);
+        }
+        start = if split_at < ndjson.len() && ndjson.as_bytes()[split_at] == b'\n' {
+            split_at + 1
+        } else {
+            split_at
+        };
+    }
+    chunks
 }
 
 /// Appends the request's rows once: one Core Cache replace per touched kind, and one batched
