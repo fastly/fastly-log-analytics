@@ -52,6 +52,11 @@ struct Fake {
     gets: Cell<u64>,
     puts: Cell<u64>,
     lists: Cell<u64>,
+    /// Overrides [`FOLD_MS`] when set.
+    fold_ms: Cell<u64>,
+    /// Window summaries fetched to fold, and bundle or partial files encoded.
+    folds: Cell<u64>,
+    encodes: Cell<u64>,
 }
 
 impl Fake {
@@ -223,11 +228,9 @@ impl Runtime for Fake {
             }
             "PUT" => {
                 // Catalog JSON is cheap to serialize; parquet bundles and partials are encoded.
-                self.charge(if request.key.contains("/_catalog/") {
-                    0
-                } else {
-                    ENCODE_MS
-                })?;
+                let encoded = !request.key.contains("/_catalog/");
+                self.charge(if encoded { ENCODE_MS } else { 0 })?;
+                self.encodes.set(self.encodes.get() + u64::from(encoded));
                 self.puts.set(self.puts.get() + 1);
                 self.bucket
                     .borrow_mut()
@@ -267,7 +270,12 @@ impl Runtime for Fake {
         _timeout: std::time::Duration,
     ) -> Result<FosResponse, String> {
         let partial = key.rsplit('/').next().unwrap().starts_with("partial=");
-        self.charge(if partial { PARTIAL_FOLD_MS } else { FOLD_MS })?;
+        let fold = match self.fold_ms.get() {
+            0 => FOLD_MS,
+            ms => ms,
+        };
+        self.charge(if partial { PARTIAL_FOLD_MS } else { fold })?;
+        self.folds.set(self.folds.get() + u64::from(!partial));
         assert_eq!((service_id, cdn_key), (SID, "ck"));
         self.gets.set(self.gets.get() + 1);
         match self.bucket.borrow().get(key) {
@@ -935,6 +943,52 @@ fn the_open_hour_stays_a_handful_of_files_while_late_runs_keep_arriving() {
     );
 }
 
+/// Live Wasm folds a window in about 50 ms, so a fold started just under the stop gate ends
+/// past the write gate. A run that folds must still write what it folded (a snapshot, a partial
+/// or the bundle) instead of throwing the folds away and repeating them next run.
+#[test]
+fn a_run_that_folds_windows_always_writes_them() {
+    let fake = Fake::default();
+    fake.fold_ms.set(50);
+    let svc = service_with_period(LIVE_PERIOD_S);
+    let bodies = bodies();
+    let (start, end) = (BASE, BASE + 4 * HOUR);
+    let mut written = start;
+    let (mut runs, mut wasted, mut folds, mut busy) = (0usize, Vec::new(), 0u64, 0u64);
+    let mut now = start;
+    while now < end {
+        fake.now.set(now);
+        while written + 2 * LIVE_PERIOD_S <= now {
+            commit_minute(&fake, &svc, written, &bodies);
+            written += 60;
+        }
+        if now % 120 == 0 {
+            let (f, e) = (fake.folds.get(), fake.encodes.get());
+            run_with_cpu(&fake, &svc, STARTUP_MS[runs % STARTUP_MS.len()]);
+            runs += 1;
+            busy += fake.vcpu.get();
+            let run_folds = fake.folds.get() - f;
+            folds += run_folds;
+            if run_folds > 0 && fake.encodes.get() == e {
+                wasted.push(format!("+{}s: {run_folds} folds", now - start));
+            }
+        }
+        now += 10;
+    }
+    let windows = (written - start) as u64 / 60 * u64::from(LIVE_PLANS);
+    eprintln!(
+        "{folds} folds for {windows} windows, {} ms a run, {} wasted runs",
+        busy / runs as u64,
+        wasted.len()
+    );
+    assert!(
+        wasted.is_empty(),
+        "{} of {runs} runs wasted their folds: {:?}",
+        wasted.len(),
+        &wasted[..wasted.len().min(12)]
+    );
+}
+
 /// Every open, hour and day bundle the catalog lists, as `kind@hour: missing object` when its
 /// coverage or its file is gone.
 fn dangling(fake: &Fake) -> Vec<String> {
@@ -1030,10 +1084,16 @@ fn a_catalog_bundle_whose_object_is_missing_is_dropped_on_the_next_run() {
         fake.bucket.borrow_mut().remove(&coverage.file.key);
     }
     assert_eq!(dangling(&fake).len(), 2);
-    // The next run after the last check's interval drops them.
-    let now = BASE + 2 * HOUR - 600 + bundle::HEAL_INTERVAL_S;
-    fake.now.set(now);
-    run(&fake, &svc);
+    // A run after the last check's interval drops them with what its bundling left over.
+    let mut now = BASE + 2 * HOUR - 600 + bundle::HEAL_INTERVAL_S;
+    for _ in 0..5 {
+        fake.now.set(now);
+        run(&fake, &svc);
+        if dangling(&fake).is_empty() {
+            break;
+        }
+        now += 60;
+    }
     assert_eq!(dangling(&fake), Vec::<String>::new());
     // The dropped hour is rebuilt from its windows.
     run_catalog(&fake, &svc, now + 60, now + 1800, &mut written);

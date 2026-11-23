@@ -2557,6 +2557,8 @@ struct Ctx<'s, 'a, R: Runtime> {
     publication: Option<super::catalog::bundles::Coverage>,
     /// Every bundle file the catalog lists, once [`Ctx::heal`] has mapped them this execution.
     referenced: Option<BTreeSet<String>>,
+    /// The vCPU [`Ctx::stop`] last read.
+    vcpu_seen: u64,
 }
 
 /// A partial's state and object count, `Err` when it cannot be read, `None` when out of calls.
@@ -2627,9 +2629,10 @@ impl<R: Runtime> Ctx<'_, '_, R> {
 
     fn stop(&mut self) -> bool {
         let runtime = self.store.runtime;
+        self.vcpu_seen = runtime.vcpu_ms();
         let reason = if runtime.admin_elapsed(self.store.started) >= WALL_STOP {
             Some("wall_time")
-        } else if runtime.vcpu_ms() >= VCPU_STOP_MS {
+        } else if self.vcpu_seen >= VCPU_STOP_MS {
             Some("vcpu")
         } else {
             None
@@ -2821,10 +2824,39 @@ impl<R: Runtime> Ctx<'_, '_, R> {
         } else {
             sources.len()
         };
+        let snapshot_from = open
+            .as_ref()
+            .filter(|_| job.final_key.is_none() && !need_partial)
+            .map(|o| o.covered);
+        let (mut fold_ms, mut fold_from, mut reserved) = (0, None, false);
         while done < limit {
             if done - resumed >= MAX_SOURCES || self.stop() {
                 break;
             }
+            if let Some(from) = fold_from {
+                fold_ms = self.vcpu_seen.saturating_sub(from);
+            }
+            // A Wasm fold is ~50 ms: one started just under the fold stop ends past the write
+            // gate and the snapshot it was for is never written, so stop a fold early instead.
+            if snapshot_from.is_some_and(|covered| done.saturating_sub(covered) >= OPEN_BUNDLE_MIN)
+                && self.vcpu_seen + fold_ms >= WRITE_VCPU_STOP_MS
+            {
+                reserved = true;
+                break;
+            }
+            // Past the settled prefix nothing can be kept but a snapshot: when this execution
+            // cannot fold far enough for one, keep the settled folds as a partial instead.
+            if let Some(covered) = snapshot_from {
+                let short = (covered + OPEN_BUNDLE_MIN).saturating_sub(done) as u64;
+                if done == foldable
+                    && short > 0
+                    && fold_ms > 0
+                    && self.vcpu_seen + short * fold_ms >= WRITE_VCPU_STOP_MS
+                {
+                    break;
+                }
+            }
+            fold_from = Some(self.vcpu_seen);
             if !self.room(tail) {
                 break;
             }
@@ -2853,8 +2885,11 @@ impl<R: Runtime> Ctx<'_, '_, R> {
         }
         // A snapshot cut short by the limits keeps its settled folds as a partial, so a backlog
         // larger than one execution's folds still advances instead of refolding every time.
-        let snapshot_cut =
-            job.final_key.is_none() && !need_partial && done < sources.len() && done <= foldable;
+        let snapshot_cut = job.final_key.is_none()
+            && !need_partial
+            && !reserved
+            && done < sources.len()
+            && done <= foldable;
         let mut wrote_partial = false;
         let (key, mut objects, is_final) = match job
             .final_key
@@ -3615,6 +3650,7 @@ fn run<R: Runtime, A: Fold>(
         catalog: super::catalog::Head::default(),
         publication: None,
         referenced: None,
+        vcpu_seen: 0,
     };
     if ctx.stop() || !ctx.room(2) {
         ctx.report.more_pending = true;
