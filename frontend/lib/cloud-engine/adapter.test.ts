@@ -958,32 +958,44 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       expect(body).toMatchObject({ has_rtt: false, has_ja4: true });
     });
 
-    it("answers a selective filter that widens past the scan budget with the budget's 413", async () => {
+    it("answers a selective filter that widens past the scan budget over the newest slice it could read", async () => {
       const message = "Cloud query range needs 80.0 MiB but the browser scan budget is 64.0 MiB; choose a shorter time range";
       rangeOf((hours) => {
         if (hours > 1) throw new CloudBudgetError(message, { unit: "bytes", needed: 80 * 1024 * 1024, limit: 64 * 1024 * 1024 });
         return 0;
       });
       const res = await list({ flagged_only: true });
-      expect(res?.status).toBe(413);
-      expect(await res!.json()).toEqual({ detail: message });
+      expect(res?.status).toBe(200);
+      const body = await res!.json();
+      expect(body.sessions).toEqual([]);
+      expect(body.raw_window).toEqual({ data_from: "2026-11-05T23:45:00.000Z", data_through: "2026-11-06T00:00:00.000Z" });
       expect(loads.map(({ from }) => from)).toEqual(["2026-11-05T23:15:00.000Z", "2026-11-05T22:30:00.000Z"]);
       expect(loads[0].release).toHaveBeenCalledTimes(1);
     });
+
+    it("still refuses when even the newest slice is over budget", async () => {
+      rangeOf(() => { throw new CloudBudgetError("over", { unit: "files", needed: 300, limit: 256 }); });
+      expect((await list())?.status).toBe(413);
+      expect(loads).toHaveLength(1);
+    });
   });
 
-  it("answers an over-budget range with a terminal 413 instead of a retryable failure", async () => {
+  it("answers a range over budget down to its newest hour with a terminal 413 instead of a retryable failure", async () => {
     const message = "Cloud query range exceeds the browser scan budget; choose a smaller range";
-    vi.mocked(ensureCloudRange).mockRejectedValueOnce(new CloudBudgetError(message));
-    const res = await handleCloudAnalyticalRequest(
-      new Request("http://localhost/api/performance/aggregates", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ sections: ["waterfall"] }),
-      }),
-    );
-    expect(res?.status).toBe(413);
-    expect(await res?.json()).toEqual({ detail: message });
+    vi.mocked(ensureCloudRange).mockRejectedValue(new CloudBudgetError(message));
+    try {
+      const res = await handleCloudAnalyticalRequest(
+        new Request("http://localhost/api/performance/aggregates", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ sections: ["waterfall"] }),
+        }),
+      );
+      expect(res?.status).toBe(413);
+      expect(await res?.json()).toEqual({ detail: message });
+    } finally {
+      vi.mocked(ensureCloudRange).mockReset().mockImplementation(async () => getDuckDBEngine().readContext());
+    }
   });
 
   it("keeps an over-budget speculative prefetch out of the page's query results but reports the requested window", async () => {
@@ -1092,7 +1104,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
   });
 
   it("says which /network scan is over budget, the columns it reads and how to narrow it", async () => {
-    vi.mocked(ensureCloudRange).mockRejectedValueOnce(
+    vi.mocked(ensureCloudRange).mockRejectedValue(
       new CloudBudgetError("over", { unit: "bytes", needed: 80 * 1024 * 1024, limit: 64 * 1024 * 1024 }));
     const res = await handleCloudAnalyticalRequest(new Request("http://localhost/api/network/bundle", {
       method: "POST", headers: { "content-type": "application/json" },
@@ -1102,15 +1114,16 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     expect((await res!.json()).detail).toBe("Cloud /network transport over this time range needs 80.0 MiB of log data " +
       `(columns: ${networkScanColumns("/api/network/bundle", { sections: ["transport"] })!.join(", ")}) ` +
       "but the browser scan budget is 64.0 MiB; choose a shorter time range");
-    vi.mocked(ensureCloudRange).mockRejectedValueOnce(new CloudBudgetError("over", { unit: "files", needed: 300, limit: 256 }));
+    vi.mocked(ensureCloudRange).mockRejectedValue(new CloudBudgetError("over", { unit: "files", needed: 300, limit: 256 }));
     const files = await handleCloudAnalyticalRequest(new Request("http://localhost/api/network-quality", {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({}),
     }));
+    vi.mocked(ensureCloudRange).mockReset().mockImplementation(async () => getDuckDBEngine().readContext());
     expect((await files!.json()).detail).toBe("Cloud /network quality over this time range needs 300 files of log data " +
       "but the browser scan budget is 256 files; choose a shorter time range");
   });
 
-  describe("/origin raw scans over the browser budget", () => {
+  describe("raw scans over the browser budget", () => {
     const MiB = 1024 * 1024;
     const windows: string[][] = [];
     const sql: string[] = [];
@@ -1174,6 +1187,67 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       vi.mocked(ensureCloudRange).mockClear();
       await origin();
       expect(vi.mocked(ensureCloudRange).mock.calls[0]?.[4]?.projection?.maxBytes).toBe(96 * MiB);
+    });
+
+    const host = { host: { mode: "include", values: ["example.com"] } };
+    it.each([
+      ["POST", "/api/performance/aggregates", { sections: ["waterfall", "top_urls"], filters: host }],
+      ["POST", "/api/performance/aggregates", { sections: ["waterfall"] }],
+      ["POST", "/api/security/aggregates", { filters: host }],
+      ["POST", "/api/security/bundle", {}],
+      ["POST", "/api/security/threat-intel", {}],
+      ["GET", "/api/security/top-bots", null],
+      ["POST", "/api/network/bundle", { sections: ["transport"], filters: host }],
+      ["GET", "/api/network/pop-health", null],
+      ["POST", "/api/value/summary", { filters: host }],
+      ["POST", "/api/assets/aggregates", { filters: host }],
+      ["POST", "/api/cmcd/aggregates", { filters: host }],
+      ["POST", "/api/services/svc-1/rum/analytics", {}],
+      ["POST", "/api/sessions", { sort_by: "unique_urls" }],
+      ["GET", "/api/services/svc-1/scoring/analytics", null],
+    ] as const)("narrows %s %s to the widest newest window that fits rather than refusing", async (method, path, body) => {
+      overAbove(5);
+      const res = await handleCloudAnalyticalRequest(new Request(`http://localhost${path}`, body ? {
+        method, headers: { "content-type": "application/json", "x-service-id": "svc-1" },
+        body: JSON.stringify({ start_time: "2026-11-05T00:00:00Z", end_time: "2026-11-06T00:00:00Z", ...body }),
+      } : { method, headers: { "x-service-id": "svc-1" } }));
+      expect(res?.status).toBe(200);
+      expect(windows[0]?.[0]).toMatch(/^2026-11-05T00:00:00(?:\.000)?Z$/);
+      expect(windows.map(([from]) => from)).toContain("2026-11-05T20:00:00.000Z");
+      expect((await res!.json()).raw_window).toEqual({
+        data_from: "2026-11-05T20:00:00.000Z", data_through: "2026-11-06T00:00:00.000Z",
+      });
+    });
+
+    it("scans filtered /performance over the narrowed window only", async () => {
+      const perfSql: string[] = [];
+      setPerformanceEngineClient({
+        getAvailableColumns: async () => new Set(["ts_ms", "url", "asn", "ttl", "elapsed", "ottfb", "ottlb", "cache", "host"]),
+        query: async (text) => { perfSql.push(text); return []; },
+      });
+      overAbove(5);
+      const res = await handleCloudAnalyticalRequest(new Request("http://localhost/api/performance/aggregates", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sections: ["waterfall"], filters: host,
+          start_time: "2026-11-05T00:00:00Z", end_time: "2026-11-06T00:00:00Z" }),
+      }));
+      expect(res?.status).toBe(200);
+      expect(perfSql.length).toBeGreaterThan(0);
+      for (const text of perfSql) {
+        expect(text).toContain(`"ts_ms" >= ${Date.parse("2026-11-05T20:00:00Z")}`);
+        expect(text).not.toContain(`"ts_ms" >= ${Date.parse("2026-11-05T00:00:00Z")}`);
+      }
+    });
+
+    it("keeps refusing a /network residual, which merges into a summary answer over the whole range", async () => {
+      overAbove(5);
+      const res = await handleCloudAnalyticalRequest(new Request("http://localhost/api/network-health", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sections: ["summary"], network_residual: true,
+          start_time: "2026-11-05T00:00:00Z", end_time: "2026-11-06T00:00:00Z" }),
+      }));
+      expect(res?.status).toBe(413);
+      expect(windows).toHaveLength(1);
     });
   });
 

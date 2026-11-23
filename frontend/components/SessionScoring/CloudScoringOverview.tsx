@@ -5,6 +5,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { RefreshCw, ShieldCheck } from 'lucide-react'
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { BackToAdminLink } from '@/components/ReportLayout'
+import { RawWindowNote, readRawWindow } from '@/components/network/rollupLabels'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { PageHeader } from '@/components/ui/confirm-dialog'
@@ -91,6 +92,7 @@ export function CloudScoringOverview() {
           Existing scoring fields in request logs can still be analyzed below.
         </AlertDescription>
       </Alert>
+      <RawWindowNote window={readRawWindow(analytics.data)} />
       {error ? (
         <Alert variant="destructive"><AlertDescription>{error.message}</AlertDescription></Alert>
       ) : !mounted || services.isPending || (serviceId && analytics.isPending) ? (

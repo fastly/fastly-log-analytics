@@ -316,11 +316,22 @@ Where raw reads remain:
 /origin has no slices: a filtered /origin reads every section raw (only a
 summary-only request with one low-cardinality include comes from
 `filtered_rollups`). Its column projection may load up to 96 MiB, the
-projected ceiling Insights uses. When a range needs more, the adapter
-narrows the read to the widest newest window that fits (1h, then 4× wider,
-like `/api/query`), answers exactly over that window and adds
-`raw_window: { data_from, data_through }`, which the page shows as a note.
-Only when even the newest hour is over budget does it return 413.
+projected ceiling Insights uses.
+
+Any raw scan over the browser budget narrows the same way rather than
+failing the page: /origin, /performance, /security (not the proxy export),
+/network (not the residual of a partial summary answer, which must cover the
+summaries' range), /fastly-value, /assets, /streaming, /rum, the
+/sessions list and Session Scoring. The adapter (`prepareCloudScan`) reads
+the widest newest window that fits (1h, then 4× wider, like `/api/query`),
+answers exactly over that window and adds
+`raw_window: { data_from, data_through }`, which each page shows as a note.
+A newest-first /sessions page that must widen past the budget keeps the
+newest slice that fit and reports it the same way. Only when even the newest
+hour (or 45-minute sessions slice) is over budget does a route return 413.
+`/api/query` and /insights keep their own shortening (newest-first SQL
+windows, baseline steps); session detail and session event lists must cover
+exactly what they ask for and still 413.
 
 A summary or bundle the listing names but storage answers with 404 (a
 catalog entry that outlived its object) never fails a page. Its read throws

@@ -4,7 +4,7 @@ import React from 'react'
 import { AlertTriangle, Layers } from 'lucide-react'
 import { useInViewOnce } from '@/components/AnalyticsCard'
 import { ReportLayout } from '@/components/ReportLayout'
-import { readRollupMeta, RollupDataThroughSlot } from '@/components/network/rollupLabels'
+import { RawWindowNote, readRawWindow, readRollupMeta, RollupDataThroughSlot } from '@/components/network/rollupLabels'
 import { useAnalyticsReportQuery, useReportRangeAnchor } from '@/hooks/useReportPageState'
 import { client, unwrapClient } from '@/lib/api'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
@@ -159,6 +159,7 @@ export function AssetsReportContent({
   return (
     <div className={cn('space-y-8 py-6 transition-opacity duration-150', isFetching && !isLoading && 'opacity-60 pointer-events-none')}>
       <RollupDataThroughSlot reserve={rollupFirst} meta={rollup} />
+      <RawWindowNote window={readRawWindow(bundle.data)} />
 
       <AssetsOverviewGrid
         breakdown={breakdown}

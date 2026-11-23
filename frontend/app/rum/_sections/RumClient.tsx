@@ -5,6 +5,7 @@ import { useQuery } from '@tanstack/react-query'
 import { BookOpen, Radio } from 'lucide-react'
 import { CardErrorState } from '@/components/AnalyticsCard'
 import { DashboardSkeleton, ReportLayout } from '@/components/ReportLayout'
+import { RawWindowNote, readRawWindow } from '@/components/network/rollupLabels'
 import { Button } from '@/components/ui/button'
 import { useIsAnalyst, useMounted } from '@/hooks/useBootstrap'
 import { useRumStatus } from '@/hooks/useDashboardCards'
@@ -174,6 +175,7 @@ export function RumClient({
 
   return (
     <div className="space-y-6">
+      <RawWindowNote window={readRawWindow(analytics)} />
       <RumVitalsTopSection
         analytics={analytics}
         startTime={startTime}

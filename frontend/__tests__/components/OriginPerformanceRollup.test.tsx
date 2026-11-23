@@ -106,7 +106,7 @@ describe('OriginClient on Cloud', () => {
 
   it('reads the latency series raw when its bucket does not tile summary steps, and the rest from summaries', async () => {
     setCloudModeRuntime(true)
-    layout.interval = '1 minute'
+    layout.interval = '1 second'
     const sections = recordPosts('/api/origin/aggregates', (asked) => asked?.includes('timeseries') ? never() : {
       ...originRaw,
       rollup: meta(['ip_health.p50_ms', 'ip_health.p95_ms'], []),
@@ -203,5 +203,18 @@ describe('PerformanceClient on Cloud', () => {
     expect(screen.getByText('Origin vs Edge Processing (ms)')).toBeInTheDocument()
     expect(screen.queryByText(/Data through/)).not.toBeInTheDocument()
     expect(screen.queryByTestId('rollup-data-through-slot')).not.toBeInTheDocument()
+  })
+
+  it('says when a filtered raw read covered only the newest part of the range', async () => {
+    setCloudModeRuntime(true)
+    layout.filterPayload = { host: { mode: 'include', values: ['example.com'] } }
+    recordPosts('/api/performance/aggregates', () => ({
+      ttl_dist: ttlDist, waterfall, top_urls: [], top_asns: [], scatter: [], _approx: false,
+      raw_window: { data_from: '2027-01-15T06:00:00.000Z', data_through: '2027-01-15T10:00:00.000Z' },
+    }))
+    renderWithQuery(<PerformanceClient />, { withNuqs: true, queryClient: seededCloudQueryClient() })
+
+    const note = await screen.findByTestId('raw-window-note')
+    expect(note).toHaveTextContent(/Showing 06:00–10:00 only/)
   })
 })

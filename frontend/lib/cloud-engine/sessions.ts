@@ -7,6 +7,7 @@
  */
 
 import { escapeSqlLiteral, requireSafeIdent } from "./sql-validator";
+import { CloudBudgetError } from "./range-loader";
 import { redactQueryRowsForPii } from "./query";
 import { compileFiltersToSql, type DuckDBColumnType } from "./dashboard/duckdb";
 import {
@@ -602,6 +603,7 @@ export async function handleSessionsList(
     sliceFromMs,
   });
   let rawRows: Record<string, unknown>[] = [];
+  let rawWindow: { data_from: string; data_through: string } | undefined;
   const held: { read?: SessionsRead } = {};
   try {
     let runSql = ctx.runSql;
@@ -619,11 +621,18 @@ export async function handleSessionsList(
       if (present?.size) cols = present;
     };
     // The newest sessions only need the end of the range: widen a slice from the end until it holds
-    // the requested page, so memory follows recent traffic rather than the range.
+    // the requested page, so memory follows recent traffic rather than the range. A wider slice
+    // over the browser budget leaves the page exact over the newest slice that fit.
     if (ctx.runSql && sessionsNewestFirst(body)) {
       for (let sliceMs = SESSIONS_FIRST_SLICE_MS; ; sliceMs *= 4) {
         const sliceFromMs = endMs - sliceMs;
-        await ensureFrom(sessionsSliceLoadFrom(sliceFromMs, startMs));
+        try {
+          await ensureFrom(sessionsSliceLoadFrom(sliceFromMs, startMs));
+        } catch (error) {
+          if (!(error instanceof CloudBudgetError) || sliceMs === SESSIONS_FIRST_SLICE_MS) throw error;
+          rawWindow = { data_from: new Date(endMs - sliceMs / 4).toISOString(), data_through: new Date(endMs).toISOString() };
+          break;
+        }
         rawRows = await runSql!(sqlFor(sliceFromMs > startMs ? sliceFromMs : undefined));
         if (sliceFromMs <= startMs || rawRows.length >= limit) break;
       }
@@ -719,6 +728,7 @@ export async function handleSessionsList(
       min_4xx_pct_flag: min4xxPctFlag,
       asn_names: {},
       section_timings: [{ name: "sessions", duration_ms: elapsedMs }],
+      ...(rawWindow ? { raw_window: rawWindow } : {}),
     },
   };
 }

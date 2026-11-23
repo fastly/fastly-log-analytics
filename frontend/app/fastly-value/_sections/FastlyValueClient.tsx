@@ -7,7 +7,7 @@ import { client, unwrapClient } from '@/lib/api'
 import type { RangeWire } from '@/lib/utils'
 import { ReportLayout } from '@/components/ReportLayout'
 import { CardErrorState } from '@/components/AnalyticsCard'
-import { readRollupMeta, RollupDataThroughSlot } from '@/components/network/rollupLabels'
+import { RawWindowNote, readRawWindow, readRollupMeta, RollupDataThroughSlot } from '@/components/network/rollupLabels'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { Skeleton } from '@/components/ui/skeleton'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
@@ -123,6 +123,7 @@ function FastlyValueBody({ startTime, endTime, activeServiceId, filterPayload }:
   return (
     <div className="space-y-6">
       <RollupDataThroughSlot reserve={split} meta={rollup} />
+      <RawWindowNote window={readRawWindow(valueQuery.data)} />
       <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as TabId)}>
         <TabsList className="flex flex-wrap h-auto gap-1">
           {TABS.map((tab) => (

@@ -16,6 +16,7 @@ import { CHART_COLORS, formatCountMaybe, formatDate, formatDuration, resolveRang
 import { analyticsReportQueryKey } from '@/lib/report-query-key'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { ReportLayout } from '@/components/ReportLayout'
+import { RawWindowNote, readRawWindow } from '@/components/network/rollupLabels'
 import { StatCard } from '@/components/ui/confirm-dialog'
 import {
   cmcdLabel,
@@ -238,6 +239,7 @@ function StreamingBody({
 
   return (
     <>
+      <RawWindowNote window={readRawWindow(data)} />
       {overviewGrid}
       <StreamingChartsGrid
         data={data}
