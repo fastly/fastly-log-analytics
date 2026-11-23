@@ -1230,18 +1230,16 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
         `WITH base AS ${materialize} (SELECT ${FILE_COLUMN}, ${project(group.map((i) => fields[i]))} FROM ${relation} WHERE ${where})`;
 
       const sizes = new Map<number, { rows: number; bytes: number }>();
-      for (const group of fieldGroups) {
-        const statsTable = await backend.query(
-          `${groupBase(group)} ${fieldStatsSql(fields, true, true, group)}`,
-          signal,
-        );
-        signal?.throwIfAborted();
-        const sf = column(statsTable, "file");
-        const si = column(statsTable, "field_idx");
-        const snn = column(statsTable, "nn");
-        const sd = column(statsTable, "d");
-        const sml = column(statsTable, "ml");
-        for (let r = 0; r < statsTable.numRows; r++) {
+      // Statistics rows carry `nn` (a COUNT, never null); value rows `cnt`.
+      const readStats = (table: ArrowTableLike) => {
+        const sf = column(table, "file");
+        const si = column(table, "field_idx");
+        const snn = column(table, "nn");
+        const sd = column(table, "d");
+        const sml = column(table, "ml");
+        const cnt = column(table, "cnt");
+        for (let r = 0; r < table.numRows; r++) {
+          if (cnt[r] != null) continue;
           const file = Number(sf[r]);
           const i = Number(si[r]);
           const distinct = Number(sd[r] ?? 0);
@@ -1258,46 +1256,71 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
             complete: false,
           };
         }
-      }
-
-      // Each file may return its own bounded values, so files share a values
-      // pass only while their worst case fits the browser's result budget.
-      const chunks: number[][] = [];
-      let chunkRows = 0;
-      let chunkBytes = 0;
-      for (const [file, { rows, bytes }] of [...sizes].sort(([a], [b]) => a - b)) {
-        if (
-          chunks.length === 0 ||
-          chunkRows + rows > this.valuesBudget.rows ||
-          chunkBytes + bytes > this.valuesBudget.bytes
-        ) {
-          chunks.push([]);
-          chunkRows = 0;
-          chunkBytes = 0;
+      };
+      const readValues = (table: ArrowTableLike) => {
+        const vf = column(table, "file");
+        const idxCol = column(table, "field_idx");
+        const cntCol = column(table, "cnt");
+        const valueCols = fields.map((field) => column(table, valueColumn(typeOf(field))));
+        for (let r = 0; r < table.numRows; r++) {
+          if (cntCol[r] == null) continue;
+          const i = Number(idxCol[r]);
+          const value = toScalarValue(valueCols[i][r]);
+          if (value === null) continue;
+          parts.get(Number(vf[r]))?.fields[fields[i]]?.entries.push([value, Number(cntCol[r])]);
         }
-        chunks[chunks.length - 1].push(file);
-        chunkRows += rows;
-        chunkBytes += bytes;
-      }
-
+      };
       const qualify = boundedQualify(fields, candidateLimit, fieldByteCap);
-      for (const chunk of chunks) {
-        const only = chunks.length > 1 ? ` AND ${FILE_COLUMN} IN (${chunk.join(", ")})` : "";
+
+      if (parts.size === 1) {
+        // One file's values are always a single pass, so they share the
+        // statistics statement and its columns are decoded once.
         for (const group of fieldGroups) {
-          const valuesTable = await backend.query(
-            `${groupBase(group)} ${fieldValuesSql(fields, typeOf, true, only, qualify, group)}`,
+          const table = await backend.query(
+            `${groupBase(group)} SELECT * FROM (${fieldStatsSql(fields, true, true, group)}) UNION ALL BY NAME SELECT * FROM (${fieldValuesSql(fields, typeOf, true, "", qualify, group)})`,
             signal,
           );
           signal?.throwIfAborted();
-          const vf = column(valuesTable, "file");
-          const idxCol = column(valuesTable, "field_idx");
-          const cntCol = column(valuesTable, "cnt");
-          const valueCols = fields.map((field) => column(valuesTable, valueColumn(typeOf(field))));
-          for (let r = 0; r < valuesTable.numRows; r++) {
-            const i = Number(idxCol[r]);
-            const value = toScalarValue(valueCols[i][r]);
-            if (value === null) continue;
-            parts.get(Number(vf[r]))?.fields[fields[i]]?.entries.push([value, Number(cntCol[r])]);
+          readStats(table);
+          readValues(table);
+        }
+      } else {
+        for (const group of fieldGroups) {
+          readStats(await backend.query(
+            `${groupBase(group)} ${fieldStatsSql(fields, true, true, group)}`,
+            signal,
+          ));
+          signal?.throwIfAborted();
+        }
+
+        // Each file may return its own bounded values, so files share a values
+        // pass only while their worst case fits the browser's result budget.
+        const chunks: number[][] = [];
+        let chunkRows = 0;
+        let chunkBytes = 0;
+        for (const [file, { rows, bytes }] of [...sizes].sort(([a], [b]) => a - b)) {
+          if (
+            chunks.length === 0 ||
+            chunkRows + rows > this.valuesBudget.rows ||
+            chunkBytes + bytes > this.valuesBudget.bytes
+          ) {
+            chunks.push([]);
+            chunkRows = 0;
+            chunkBytes = 0;
+          }
+          chunks[chunks.length - 1].push(file);
+          chunkRows += rows;
+          chunkBytes += bytes;
+        }
+
+        for (const chunk of chunks) {
+          const only = chunks.length > 1 ? ` AND ${FILE_COLUMN} IN (${chunk.join(", ")})` : "";
+          for (const group of fieldGroups) {
+            readValues(await backend.query(
+              `${groupBase(group)} ${fieldValuesSql(fields, typeOf, true, only, qualify, group)}`,
+              signal,
+            ));
+            signal?.throwIfAborted();
           }
         }
       }
@@ -1435,35 +1458,32 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
         };
       });
       // As in `queryRelationPerFile`: a few cards per statement, each over
-      // its own columns of the filtered rows.
+      // its own columns of the filtered rows. Statistics and values share the
+      // statement, so the group's columns are decoded from Parquet once.
       const materialize = totalRequests <= MATERIALIZE_ROWS;
       for (const group of fieldGroupsOf(fields.length)) {
-        const statsTable = await backend.query(
-          `${groupBase(group, materialize)} ${fieldStatsSql(fields, false, false, group)}`,
+        const table = await backend.query(
+          `${groupBase(group, materialize)} SELECT * FROM (${fieldStatsSql(fields, false, false, group)}) UNION ALL BY NAME SELECT * FROM (${fieldValuesSql(fields, typeOf, false, "", qualify, group)})`,
           signal,
         );
         signal?.throwIfAborted();
-        const valuesTable = await backend.query(
-          `${groupBase(group, materialize)} ${fieldValuesSql(fields, typeOf, false, "", qualify, group)}`,
-          signal,
-        );
-        signal?.throwIfAborted();
-        const si = column(statsTable, "field_idx");
-        const snn = column(statsTable, "nn");
-        const sd = column(statsTable, "d");
-        for (let r = 0; r < statsTable.numRows; r++) {
-          const aggregate = fieldAggregates[fields[Number(si[r])]];
-          aggregate.nonNull = Number(snn[r] ?? 0);
-          aggregate.distinct = Number(sd[r] ?? 0);
-        }
-        const idxCol = column(valuesTable, "field_idx");
-        const cntCol = column(valuesTable, "cnt");
-        const valueCols = fields.map((field) => column(valuesTable, valueColumn(typeOf(field))));
-        for (let r = 0; r < valuesTable.numRows; r++) {
+        const idxCol = column(table, "field_idx");
+        const snn = column(table, "nn");
+        const sd = column(table, "d");
+        const cntCol = column(table, "cnt");
+        const valueCols = fields.map((field) => column(table, valueColumn(typeOf(field))));
+        for (let r = 0; r < table.numRows; r++) {
           const i = Number(idxCol[r]);
+          const aggregate = fieldAggregates[fields[i]];
+          // Statistics rows carry `nn` (a COUNT, never null); value rows `cnt`.
+          if (cntCol[r] == null) {
+            aggregate.nonNull = Number(snn[r] ?? 0);
+            aggregate.distinct = Number(sd[r] ?? 0);
+            continue;
+          }
           const value = toScalarValue(valueCols[i][r]);
           if (value === null) continue;
-          fieldAggregates[fields[i]].entries.push([value, Number(cntCol[r])]);
+          aggregate.entries.push([value, Number(cntCol[r])]);
         }
       }
       if (bounded) {

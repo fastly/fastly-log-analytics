@@ -1022,6 +1022,57 @@ describe("runDashboard", () => {
     expect(answer).toEqual(wholeAnswer);
   });
 
+  it("starts the range-edge compact's read before the newer files", async () => {
+    rangedReadsOnly();
+    const n = 600;
+    const at = (i: number) => T0 + Math.floor(i / 100) * 600_000 + (i % 100) * 6000;
+    const hour = parquetWriteBuffer({
+      codec: "SNAPPY",
+      rowGroupSize: 100,
+      columnData: [
+        { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: n }, (_, i) => new Date(at(i))) },
+        { name: "status", type: "INT32", data: Array.from({ length: n }, (_, i) => (i % 5 === 0 ? 503 : 200)) },
+        { name: "cache", type: "STRING", data: Array.from({ length: n }, () => "HIT") },
+        { name: "resp_bytes", type: "INT64", data: Array.from({ length: n }, () => BigInt(100)) },
+      ],
+    });
+    const windows = ["11:00", "11:02", "11:04"].map((start, i) => ({
+      key: `w${i}`,
+      start: `2026-10-29T${start}:00Z`,
+      end: `2026-10-29T11:0${2 * i + 2}:00Z`,
+    }));
+    const buffers: Record<string, ArrayBuffer> = { hour };
+    for (const [i, w] of windows.entries()) buffers[w.key] = await parquetFixture([row(3600 + 120 * i + 5)]);
+    const page = {
+      files: [
+        { ...manifestEntry("hour", "2026-10-29T10:00:00Z", "2026-10-29T11:00:00Z", n), size: hour.byteLength },
+        ...windows.map((w) => ({ ...manifestEntry(w.key, w.start, w.end, 1), size: buffers[w.key].byteLength })),
+      ],
+      next_cursor: null,
+      complete: true,
+    };
+    const source = fixtureSource([page], buffers);
+    const order: string[] = [];
+    const result = await runDashboard({
+      ...source,
+      openParquet: async (file) => ({
+        kind: "http" as const, url: `https://flp.example/api/file/${file.key}`, cached: false,
+      }),
+      fetchFile: async (key, signal, mode) => {
+        order.push(key);
+        return source.fetchFile(key, signal, mode);
+      },
+      fetchRange: async (file: { key: string }, start: number, end: number) => {
+        order.push(file.key);
+        return hour.slice(start, end);
+      },
+    }, { from: "2026-10-29T10:53:30Z", to: "2026-10-29T11:30:00Z", concurrency: 1 });
+    expect(order[0]).toBe("hour");
+    expect([...new Set(order)]).toEqual(["hour", "w2", "w1", "w0"]);
+    // 10:53:30–11:00 holds the last 65 rows of the hour, plus one row per window.
+    expect(result.totalRequests).toBe(65 + 3);
+  });
+
   it("parallelizes whole selective fallback within a bounded 160 MiB budget", async () => {
     const MiB = 1024 * 1024;
     const keys = ["a", "b", "c", "d"] as const;
