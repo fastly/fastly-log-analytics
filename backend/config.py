@@ -470,10 +470,9 @@ def _save_config_unlocked(service_id: str, cfg: dict, *, allow_cid_salt_change: 
         rum["cid_salt"] = secrets.token_hex(32)
     from backend.core import catalog
 
-    cfg["active_log_fields"] = {
-        "catalog": catalog.CATALOG_FINGERPRINT,
-        "ids": catalog.resolve_active_log_field_ids(catalog.get_lf_config(cfg)),
-    }
+    # Resolved here only, so the list matches the settings last saved (and deployed), even after
+    # a release changes the catalog.
+    cfg["active_log_field_ids"] = catalog.resolve_active_log_field_ids(catalog.get_lf_config(cfg))
     try:
         _atomic_write_json(config_path(service_id), cfg)
     except (OSError, PermissionError) as e:
@@ -498,9 +497,9 @@ def active_log_field_ids(cfg: dict) -> list[str]:
     """The service's enabled log field ids, as stored by the last save of its log field settings."""
     from backend.core import catalog
 
-    stored = cfg.get("active_log_fields")
-    if isinstance(stored, dict) and stored.get("catalog") == catalog.CATALOG_FINGERPRINT:
-        return list(stored.get("ids") or [])
+    stored = cfg.get("active_log_field_ids")
+    if isinstance(stored, list):
+        return list(stored)
     return catalog.resolve_active_log_field_ids(catalog.get_lf_config(cfg))
 
 

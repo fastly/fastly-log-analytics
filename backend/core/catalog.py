@@ -264,22 +264,6 @@ GROUP_DEPENDENCIES = {g: info["requires"] for g, info in GROUP_INFO.items() if i
 DEFAULT_OFF_FIELD_IDS: frozenset[str] = frozenset(f["id"] for f in LOG_FIELD_CATALOG if f.get("default_off"))
 
 
-def _catalog_fingerprint() -> str:
-    import hashlib
-    import json
-
-    shape = {
-        "fields": [[f["id"], f["group"], bool(f.get("default_off"))] for f in LOG_FIELD_CATALOG],
-        "requires": GROUP_DEPENDENCIES,
-        "standard": PRESETS["standard"]["groups"],
-    }
-    return hashlib.sha256(json.dumps(shape, sort_keys=True).encode()).hexdigest()[:16]
-
-
-# Stored enabled-field ids are reused only while the catalog that resolved them is unchanged.
-CATALOG_FINGERPRINT = _catalog_fingerprint()
-
-
 def resolve_active_log_field_ids(lf_config: dict) -> list[str]:
     """Enabled catalog field ids in id order, then the enabled custom field names."""
     return sorted(resolve_enabled_fields(lf_config)) + [
