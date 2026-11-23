@@ -4449,7 +4449,7 @@ mod tests {
         let bundle = acc.write(1_800_000_000, Some(Unit::Hour), "hour").unwrap();
         assert_eq!(
             hex::encode(Sha256::digest(&bundle)),
-            "798a6935e3102df38c17d7398405396d5b40a3ee27086836afbeff30a2c8223f"
+            "1ced50948cb6fe80727bd3b8aeb121a0b452d5a94657f24eda56b2da17dab980"
         );
         let resumed = Acc::decode_partial(&acc.encode_partial(), Unit::Hour).unwrap();
         assert_eq!(

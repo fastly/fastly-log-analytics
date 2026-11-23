@@ -41,6 +41,9 @@ export interface DimRowInput {
   sum_origin_ms?: number;
   origin_Count?: number;
   origin_count?: number;
+  /** High-Scale's flags: the encoding is exactly gzip/br/deflate; the URL is compressible text. */
+  is_compressed?: number | boolean;
+  is_compressible?: number | boolean;
 }
 
 export function emptyAssetsAggregates() {
@@ -100,13 +103,17 @@ export function computeSummaryFromDims(
   let totalRequests = 0;
   let totalBytes = 0;
   let hitRequests = 0;
+  let cacheDenomRequests = 0;
   let totalTtfbWeighted = 0;
   let totalOriginWeighted = 0;
   let totalOriginCount = 0;
 
   const byAsset = new Map<
     string,
-    { requests: number; bytes: number; hits: number; compressed: number; ttfbSum: number }
+    {
+      requests: number; bytes: number; hits: number; cacheDenom: number;
+      compressed: number; compressible: number; ttfbSum: number;
+    }
   >();
   const byCache = new Map<
     string,
@@ -126,21 +133,27 @@ export function computeSummaryFromDims(
     let sumTtfb: number;
     let sumOriginMs: number;
     let origCount: number;
+    let compressed = false;
+    let compressible = false;
 
     if (Array.isArray(raw)) {
-      assetType = String(raw[0] ?? "Other");
-      cacheStatus = String(raw[1] ?? "OTHER").toUpperCase();
+      assetType = String(raw[0] ?? "API/Dynamic");
+      cacheStatus = String(raw[1] ?? "MISS").toUpperCase();
       reqs = Number(raw[2] ?? 0);
       bytesVal = Number(raw[3] ?? 0);
       sumTtfb = Number(raw[4] ?? 0);
       sumOriginMs = Number(raw[5] ?? 0);
       origCount = Number(raw[6] ?? 0);
-      encoding = String(raw[7] ?? "none").toLowerCase();
+      encoding = String(raw[7] ?? "uncompressed");
+      compressed = Boolean(Number(raw[8] ?? 0));
+      compressible = Boolean(Number(raw[9] ?? 0));
     } else {
       const obj = raw as DimRowInput;
-      assetType = String(obj.asset_type ?? "Other");
-      cacheStatus = String(obj.cache_status ?? "OTHER").toUpperCase();
-      encoding = String(obj.content_encoding ?? "none").toLowerCase();
+      assetType = String(obj.asset_type ?? "API/Dynamic");
+      cacheStatus = String(obj.cache_status ?? "MISS").toUpperCase();
+      encoding = String(obj.content_encoding ?? "uncompressed");
+      compressed = Boolean(Number(obj.is_compressed ?? 0));
+      compressible = Boolean(Number(obj.is_compressible ?? 0));
       reqs = Number(obj.requests ?? 0);
       bytesVal = Number(obj.total_bytes ?? obj.bytes ?? 0);
       sumTtfb = Number(obj.sum_ttfb ?? 0);
@@ -150,8 +163,11 @@ export function computeSummaryFromDims(
 
     totalRequests += reqs;
     totalBytes += bytesVal;
-    const isHit = cacheStatus === "HIT" || cacheStatus.startsWith("HIT");
+    // High-Scale's cache hit ratio: HIT and HIT-SYNTHETIC over HIT, HIT-SYNTHETIC, MISS, PASS and BYPASS.
+    const isHit = cacheStatus === "HIT" || cacheStatus === "HIT-SYNTHETIC";
+    const inCacheDenom = isHit || cacheStatus === "MISS" || cacheStatus === "PASS" || cacheStatus === "BYPASS";
     if (isHit) hitRequests += reqs;
+    if (inCacheDenom) cacheDenomRequests += reqs;
     totalTtfbWeighted += sumTtfb;
     totalOriginWeighted += sumOriginMs;
     totalOriginCount += origCount;
@@ -160,13 +176,19 @@ export function computeSummaryFromDims(
       requests: 0,
       bytes: 0,
       hits: 0,
+      cacheDenom: 0,
       compressed: 0,
+      compressible: 0,
       ttfbSum: 0,
     };
     aBucket.requests += reqs;
     aBucket.bytes += bytesVal;
     if (isHit) aBucket.hits += reqs;
-    if (["gzip", "br", "zstd", "deflate"].includes(encoding)) aBucket.compressed += reqs;
+    if (inCacheDenom) aBucket.cacheDenom += reqs;
+    if (compressible) {
+      aBucket.compressible += reqs;
+      if (compressed) aBucket.compressed += reqs;
+    }
     aBucket.ttfbSum += sumTtfb;
     byAsset.set(assetType, aBucket);
 
@@ -198,7 +220,7 @@ export function computeSummaryFromDims(
   }
 
   const hitRatioPct =
-    totalRequests > 0 ? roundTo((hitRequests * 100) / totalRequests, 2) : 0;
+    cacheDenomRequests > 0 ? roundTo((hitRequests * 100) / cacheDenomRequests, 2) : 0;
   const avgTtfbMs =
     totalRequests > 0 ? roundTo(totalTtfbWeighted / totalRequests, 2) : 0;
   const avgOriginMs =
@@ -211,13 +233,13 @@ export function computeSummaryFromDims(
       requests: b.requests,
       total_bytes: b.bytes,
       egress_bytes: b.bytes,
-      cache_hit_ratio: b.requests > 0 ? b.hits / b.requests : 0,
-      compression_rate: b.requests > 0 ? b.compressed / b.requests : 0,
+      cache_hit_ratio: b.cacheDenom > 0 ? b.hits / b.cacheDenom : 0,
+      compression_rate: b.compressible > 0 ? b.compressed / b.compressible : 0,
       bytes: b.bytes,
       pct_requests:
         totalRequests > 0 ? roundTo((b.requests * 100) / totalRequests, 2) : 0,
       hit_ratio_pct:
-        b.requests > 0 ? roundTo((b.hits * 100) / b.requests, 2) : 0,
+        b.cacheDenom > 0 ? roundTo((b.hits * 100) / b.cacheDenom, 2) : 0,
       avg_ttfb_ms:
         b.requests > 0 ? roundTo(b.ttfbSum / b.requests, 2) : 0,
     }));
@@ -303,30 +325,51 @@ function buildAssetsWhere(params: AssetsQueryParams): string {
   return clauses.join(" AND ");
 }
 
+const LIKE_ANY = (column: string, exts: readonly string[]) =>
+  exts.map((ext) => `${column} LIKE '%${ext}'`).join(" OR ");
+
+/** High-Scale's `_ASSET_TYPE_CASE`: the asset type from the URL's extension. */
+const ASSET_TYPE_SQL = `CASE
+          WHEN ${LIKE_ANY("url_lower", [".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico"])} THEN 'Images'
+          WHEN ${LIKE_ANY("url_lower", [".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt", ".csv", ".zip", ".tar", ".gz", ".tgz", ".rar", ".7z"])} THEN 'Documents'
+          WHEN ${LIKE_ANY("url_lower", [".js", ".mjs", ".css"])} THEN 'JavaScript/CSS'
+          WHEN ${LIKE_ANY("url_lower", [".woff", ".woff2", ".ttf", ".otf", ".eot"])} THEN 'Fonts'
+          WHEN ${LIKE_ANY("url_lower", [".m3u8", ".ts", ".mp4", ".m4s", ".webm"])} THEN 'Video'
+          ELSE 'API/Dynamic'
+        END`;
+
+/**
+ * Assets & Shield over raw rows by High-Scale's rules (`backend/high_scale/ingest_controller/service.py`):
+ * URL-extension asset types, an empty cache counted as MISS, `content_encoding_norm`, and compression
+ * judged over compressible URLs only. The summary writer (`compute/cloud/src/ingest/summary.rs`) keys
+ * its `assets` rows the same way.
+ */
 const DERIVED_ASSET_CTE = `
-  WITH enriched AS (
+  WITH asset_base AS (
     SELECT
       *,
-      COALESCE(
-        NULLIF(asset_type, ''),
-        CASE
-          WHEN LOWER(COALESCE(content_type, '')) LIKE '%javascript%' OR LOWER(COALESCE(url, path, '')) LIKE '%.js' THEN 'JavaScript'
-          WHEN LOWER(COALESCE(content_type, '')) LIKE '%text/css%' OR LOWER(COALESCE(url, path, '')) LIKE '%.css' THEN 'CSS'
-          WHEN LOWER(COALESCE(content_type, '')) LIKE 'image/%' THEN 'Image'
-          WHEN LOWER(COALESCE(content_type, '')) LIKE 'font/%' OR LOWER(COALESCE(url, path, '')) LIKE '%.woff%' THEN 'Font'
-          WHEN LOWER(COALESCE(content_type, '')) LIKE 'video/%' OR LOWER(COALESCE(content_type, '')) LIKE 'audio/%' THEN 'Media'
-          WHEN LOWER(COALESCE(content_type, '')) LIKE '%application/json%' THEN 'JSON'
-          WHEN LOWER(COALESCE(content_type, '')) LIKE '%text/html%' THEN 'HTML'
-          ELSE 'Other'
-        END
-      ) AS derived_asset_type,
-      UPPER(COALESCE(cache_status, cache, 'OTHER')) AS norm_cache_status,
-      LOWER(COALESCE(NULLIF(content_encoding, ''), NULLIF(resp_header_content_encoding, ''), 'unknown')) AS norm_encoding,
+      LOWER(COALESCE(url, path, '')) AS url_lower,
+      COALESCE(NULLIF(content_encoding, ''), NULLIF(resp_header_content_encoding, ''), '') AS raw_encoding
+    FROM requests
+  ),
+  enriched AS (
+    SELECT
+      *,
+      ${ASSET_TYPE_SQL} AS derived_asset_type,
+      UPPER(COALESCE(NULLIF(cache_status, ''), NULLIF(cache, ''), 'MISS')) AS norm_cache_status,
+      CASE
+        WHEN LOWER(raw_encoding) LIKE '%br%' THEN 'br'
+        WHEN LOWER(raw_encoding) LIKE '%gzip%' THEN 'gzip'
+        WHEN raw_encoding != '' THEN raw_encoding
+        ELSE 'uncompressed'
+      END AS norm_encoding,
+      (LOWER(raw_encoding) IN ('gzip', 'br', 'deflate'))::INTEGER AS is_compressed,
+      (${LIKE_ANY("url_lower", [".js", ".mjs", ".css", ".svg", ".html", ".json"])})::INTEGER AS is_compressible,
       COALESCE(resp_body_size, resp_bytes, 0)::BIGINT AS body_bytes,
       COALESCE(ttfb_ms, ttfb * 1000.0, time_to_first_byte_ns / 1000000.0, time_elapsed_usec / 1000.0, elapsed / 1000.0, 0.0)::DOUBLE AS norm_ttfb_ms,
       COALESCE(origin_Whole_ms, origin_time_ms, 0.0)::DOUBLE AS norm_origin_ms,
       COALESCE(url, path, '/') AS norm_url
-    FROM requests
+    FROM asset_base
   )
 `;
 
@@ -343,6 +386,8 @@ export async function queryAssetsAggregates(params: AssetsQueryParams = {}) {
       derived_asset_type AS asset_type,
       norm_cache_status AS cache_status,
       norm_encoding AS content_encoding,
+      is_compressed,
+      is_compressible,
       COUNT(*)::BIGINT AS requests,
       COALESCE(SUM(body_bytes), 0)::BIGINT AS total_bytes,
       COALESCE(SUM(norm_ttfb_ms), 0)::DOUBLE AS sum_ttfb,
@@ -350,7 +395,7 @@ export async function queryAssetsAggregates(params: AssetsQueryParams = {}) {
       (COUNT(*) FILTER (WHERE norm_origin_ms > 0))::BIGINT AS origin_Count
     FROM enriched
     WHERE ${where}
-    GROUP BY 1, 2, 3`,
+    GROUP BY 1, 2, 3, 4, 5`,
     [],
     params.signal,
   );
@@ -361,46 +406,46 @@ export async function queryAssetsAggregates(params: AssetsQueryParams = {}) {
 
   const computed = computeSummaryFromDims(dimRows);
 
-  // Large uncompressed text assets (JavaScript/CSS/HTML/JSON with avg size > 10240 bytes and identity/none encoding)
+  // High-Scale's large uncompressed assets: compressible URLs served uncompressed, by bytes.
   const largeUncompressedRows = !want("large_uncompressed_assets") ? [] : await engine.executeSql<Record<string, unknown>>(
     `${DERIVED_ASSET_CTE}
     SELECT
       norm_url AS url,
-      derived_asset_type AS asset_type,
-      norm_encoding AS content_encoding,
+      ANY_VALUE(derived_asset_type) AS asset_type,
+      ANY_VALUE(norm_encoding) AS content_encoding,
       COUNT(*)::BIGINT AS requests,
       AVG(body_bytes)::DOUBLE AS avg_size_bytes,
-      MIN(status)::INTEGER AS status,
+      COALESCE(status, 200)::INTEGER AS status,
       SUM(body_bytes)::BIGINT AS total_bytes
     FROM enriched
     WHERE ${where}
-      AND derived_asset_type IN ('JavaScript', 'CSS', 'HTML', 'JSON')
-      AND norm_encoding IN ('none', 'identity', '')
-    GROUP BY 1, 2, 3
-    HAVING AVG(body_bytes) > 10240
+      AND is_compressed = 0
+      AND is_compressible = 1
+      AND COALESCE(status, 200) NOT IN (304, 204)
+    GROUP BY norm_url, COALESCE(status, 200)
     ORDER BY total_bytes DESC
-    LIMIT 50`,
+    LIMIT 20`,
     [],
     params.signal,
   );
 
-  // Low TTL static assets (ttl < 3600s and not cache hit)
+  // High-Scale's low-TTL hotspots: static (non-API) URLs answered with a cache MISS, by requests.
   const lowTtlRows = !want("low_ttl_assets") ? [] : await engine.executeSql<Record<string, unknown>>(
     `${DERIVED_ASSET_CTE}
     SELECT
       norm_url AS url,
       derived_asset_type AS asset_type,
-      norm_cache_status AS cache_status,
+      'MISS' AS cache_status,
       COUNT(*)::BIGINT AS requests,
       AVG(ttl)::DOUBLE AS avg_ttl_seconds,
-      (COUNT(*) FILTER (WHERE starts_with(norm_cache_status, 'HIT')) * 100.0 / NULLIF(COUNT(*), 0))::DOUBLE AS hit_ratio_pct
+      0.0::DOUBLE AS hit_ratio_pct
     FROM enriched
     WHERE ${where}
-      AND ttl < 3600
-      AND NOT starts_with(norm_cache_status, 'HIT')
-    GROUP BY 1, 2, 3
+      AND norm_cache_status = 'MISS'
+      AND derived_asset_type != 'API/Dynamic'
+    GROUP BY 1, 2
     ORDER BY requests DESC
-    LIMIT 50`,
+    LIMIT 20`,
     [],
     params.signal,
   );
@@ -424,8 +469,8 @@ export async function queryAssetsAggregates(params: AssetsQueryParams = {}) {
     compression_performance: computed.compression_performance,
     large_uncompressed_assets: largeUncompressedRows.map((r) => ({
       url: String(r.url ?? "/"),
-      asset_type: String(r.asset_type ?? "Other"),
-      content_encoding: String(r.content_encoding ?? "none"),
+      asset_type: String(r.asset_type ?? "API/Dynamic"),
+      content_encoding: String(r.content_encoding ?? "uncompressed"),
       requests: Number(r.requests ?? 0),
       avg_size_bytes: roundTo(Number(r.avg_size_bytes ?? 0), 1),
       avg_bytes: roundTo(Number(r.avg_size_bytes ?? 0), 1),
@@ -434,7 +479,7 @@ export async function queryAssetsAggregates(params: AssetsQueryParams = {}) {
     })),
     low_ttl_assets: lowTtlRows.map((r) => ({
       url: String(r.url ?? "/"),
-      asset_type: String(r.asset_type ?? "Other"),
+      asset_type: String(r.asset_type ?? "API/Dynamic"),
       cache_status: String(r.cache_status ?? "MISS"),
       requests: Number(r.requests ?? 0),
       avg_ttl_seconds: roundTo(Number(r.avg_ttl_seconds ?? 0), 1),
@@ -446,13 +491,13 @@ export async function queryAssetsAggregates(params: AssetsQueryParams = {}) {
 
 /** Every request column the /api/assets/aggregates scans read, physical Cloud names and their aliases alike. */
 export const ASSETS_SCAN_COLUMNS = [
-  "timestamp", "ts_ms", "service_id", "status", "ttl", "asset_type", "content_type", "url", "path", "cache_status",
+  "timestamp", "ts_ms", "service_id", "status", "ttl", "url", "path", "cache_status",
   "cache", "content_encoding", "resp_header_content_encoding", "resp_body_size", "resp_bytes", "ttfb_ms", "ttfb",
   "time_to_first_byte_ns", "time_elapsed_usec", "elapsed", "origin_Whole_ms", "origin_time_ms",
 ] as const;
 
 // The window, service and `derived_asset_type`/`norm_url` columns every section reads, then each section's own.
-const ASSETS_BASE_COLUMNS = ["timestamp", "ts_ms", "service_id", "asset_type", "content_type", "url", "path"] as const;
+const ASSETS_BASE_COLUMNS = ["timestamp", "ts_ms", "service_id", "url", "path"] as const;
 const ENCODING_BYTES_COLUMNS = ["content_encoding", "resp_header_content_encoding", "resp_body_size", "resp_bytes"] as const;
 const ASSETS_SECTION_COLUMNS: Record<AssetsSection, readonly string[]> = {
   summary: ASSETS_SCAN_COLUMNS.filter((column) => column !== "status" && column !== "ttl"),
@@ -478,7 +523,10 @@ export function assetsScanColumns(filters: unknown, sections?: unknown): string[
     if (!clause || typeof clause !== "object") return null;
     const column = (clause as { column?: unknown }).column;
     // `buildAssetsWhere` reads a `cache_status` filter through `COALESCE(cache_status, cache, ...)`.
-    if (typeof column === "string" && ALLOWED_FILTER_COLS.has(column)) fields.push(column, ...column === "cache_status" ? ["cache"] : []);
+    // An `asset_type` filter matches the URL-derived type, so it reads no column of its own.
+    if (typeof column === "string" && ALLOWED_FILTER_COLS.has(column) && column !== "asset_type") {
+      fields.push(column, ...column === "cache_status" ? ["cache"] : []);
+    }
   }
   return [...new Set([...columns, ...fields])];
 }

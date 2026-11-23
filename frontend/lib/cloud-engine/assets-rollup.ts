@@ -25,8 +25,9 @@ export function assetsRollupEligible(path: string, body: AssetsRollupBody): bool
 
 /**
  * The /assets totals and breakdowns from the `assets` rows' `[asset_type,
- * cache, encoding]` sums, shaped like `queryAssetsAggregates` with sections
- * `["summary"]`, or null when they can't match it exactly: the summaries cut
+ * cache, encoding_norm, compressed, compressible]` sums (High-Scale's rules),
+ * shaped like `queryAssetsAggregates` with sections `["summary"]`, or null when
+ * they can't match it exactly: a summary predates those keys, the summaries cut
  * the keys to their top K, or a key holds non-ASCII text (summaries case-fold
  * ASCII only; DuckDB folds all of Unicode). A cache filter is applied to the
  * keys only when the logged `cache` values are all upper case, none is
@@ -48,7 +49,10 @@ export function assetsAggregatesFromRollup(result: RollupResult, body: AssetsRol
   const rows: DimRowInput[] = [];
   let requests = 0;
   for (const [key, asset] of assets ?? []) {
-    const [assetType, cache, encoding] = JSON.parse(key) as [string, string, string];
+    const parts = JSON.parse(key) as unknown[];
+    // Summaries written before High-Scale's rules keyed three parts; the raw scan answers their ranges.
+    if (parts.length !== 5) return null;
+    const [assetType, cache, encoding, compressed, compressible] = parts as [string, string, string, number, number];
     if (!ASCII.test(cache) || !ASCII.test(encoding)) return null;
     requests += asset.requests;
     if (cacheFilter && (cacheFilter.mode === "include"
@@ -56,8 +60,11 @@ export function assetsAggregatesFromRollup(result: RollupResult, body: AssetsRol
       : cache !== "OTHER" && cacheFilter.values.includes(cache))) continue;
     rows.push({
       asset_type: assetType,
-      cache_status: cache,
+      // `OTHER` stands for no cache value, which High-Scale counts as MISS.
+      cache_status: cache === "OTHER" ? "MISS" : cache,
       content_encoding: encoding,
+      is_compressed: compressed,
+      is_compressible: compressible,
       requests: asset.requests,
       total_bytes: asset.respBytes,
       sum_ttfb: asset.ttfbSum,

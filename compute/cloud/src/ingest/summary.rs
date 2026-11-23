@@ -1739,6 +1739,84 @@ fn starts_with_ci(s: &str, prefix: &str) -> bool {
     s.len() >= prefix.len() && s.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
 }
 
+/// The Assets & Shield asset type from the URL's extension, as High-Scale's `_ASSET_TYPE_CASE`
+/// and `assets.ts` `ASSET_TYPE_SQL` classify it.
+fn url_asset_type(url: &str) -> &'static str {
+    let ends = |exts: &[&str]| exts.iter().any(|ext| ends_with_ci(url, ext));
+    if ends(&[".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico"]) {
+        "Images"
+    } else if ends(&[
+        ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt", ".csv", ".zip", ".tar",
+        ".gz", ".tgz", ".rar", ".7z",
+    ]) {
+        "Documents"
+    } else if ends(&[".js", ".mjs", ".css"]) {
+        "JavaScript/CSS"
+    } else if ends(&[".woff", ".woff2", ".ttf", ".otf", ".eot"]) {
+        "Fonts"
+    } else if ends(&[".m3u8", ".ts", ".mp4", ".m4s", ".webm"]) {
+        "Video"
+    } else {
+        "API/Dynamic"
+    }
+}
+
+/// Whether High-Scale counts the URL as compressible text.
+fn url_compressible(url: &str) -> bool {
+    [".js", ".mjs", ".css", ".svg", ".html", ".json"]
+        .iter()
+        .any(|ext| ends_with_ci(url, ext))
+}
+
+/// High-Scale's `content_encoding_norm`: `br`, `gzip`, the logged value, or `uncompressed`.
+fn encoding_norm(encoding: Option<&str>) -> &str {
+    match encoding.unwrap_or("") {
+        "" => "uncompressed",
+        e if contains_ci(e, "br") => "br",
+        e if contains_ci(e, "gzip") => "gzip",
+        e => e,
+    }
+}
+
+/// High-Scale's `is_compressed`: exactly `gzip`, `br` or `deflate`, in any case.
+fn encoding_compressed(encoding: Option<&str>) -> bool {
+    let e = encoding.unwrap_or("");
+    ["gzip", "br", "deflate"]
+        .iter()
+        .any(|c| e.eq_ignore_ascii_case(c))
+}
+
+#[cfg(test)]
+mod asset_rule_tests {
+    use super::*;
+
+    #[test]
+    fn assets_follow_the_high_scale_url_and_encoding_rules() {
+        for (url, kind) in [
+            ("/a/LOGO.PNG", "Images"),
+            ("/r.pdf", "Documents"),
+            ("/app.mjs", "JavaScript/CSS"),
+            ("/f.woff2", "Fonts"),
+            ("/s/seg.ts", "Video"),
+            ("/login", "API/Dynamic"),
+            ("/x.js?v=1", "API/Dynamic"),
+        ] {
+            assert_eq!(url_asset_type(url), kind, "{url}");
+        }
+        assert!(
+            url_compressible("/i.SVG")
+                && url_compressible("/d.json")
+                && !url_compressible("/p.png")
+        );
+        assert_eq!(encoding_norm(None), "uncompressed");
+        assert_eq!(encoding_norm(Some("")), "uncompressed");
+        assert_eq!(encoding_norm(Some("gzip, br")), "br");
+        assert_eq!(encoding_norm(Some("GZIP")), "gzip");
+        assert_eq!(encoding_norm(Some("zstd")), "zstd");
+        assert!(encoding_compressed(Some("Deflate")) && !encoding_compressed(Some("gzip, br")));
+    }
+}
+
 /// `assets.ts` `DERIVED_ASSET_CTE`'s `derived_asset_type`.
 fn asset_type<'a>(
     declared: Option<&'a str>,
@@ -2147,7 +2225,8 @@ fn write_v3<'a>(
     let mut by_asn: FastMap<(i64, Cow<str>), Series> = FastMap::default();
     let mut header_bins: FastMap<(i64, Cow<str>), i64> = FastMap::default();
     let mut bot_bins: FastMap<(i64, Cow<str>), i64> = FastMap::default();
-    let mut assets: FastMap<(&str, Cow<str>, Cow<str>), Asset> = FastMap::default();
+    // `[asset_type, cache, encoding_norm, compressed, compressible]`, by High-Scale's rules.
+    let mut assets: FastMap<(&str, Cow<str>, &str, bool, bool), Asset> = FastMap::default();
     // Max-heap of the smallest sample keys: (key, ts, batch, row).
     let mut sample: std::collections::BinaryHeap<SampleAt> =
         std::collections::BinaryHeap::with_capacity(SAMPLE_K + 1);
@@ -2298,12 +2377,14 @@ fn write_v3<'a>(
             }
 
             let url = c.url.get(i, false);
-            let kind = asset_type(c.asset_type.get(i, true), c.content_type.get(i, false), url);
+            let encoding = c.encoding.get(i, true);
             let a = assets
                 .entry((
-                    kind,
-                    ascii_case(c.cache.get(i, false).unwrap_or("OTHER"), true),
-                    ascii_case(c.encoding.get(i, true).unwrap_or("unknown"), false),
+                    url_asset_type(url.unwrap_or("")),
+                    ascii_case(c.cache.get(i, true).unwrap_or("OTHER"), true),
+                    encoding_norm(encoding),
+                    encoding_compressed(encoding),
+                    url_compressible(url.unwrap_or("")),
                 ))
                 .or_default();
             a.requests += 1;
@@ -2540,8 +2621,9 @@ fn write_v3<'a>(
     let truncated = assets.len() > DIM_K;
     let kept = top_keys(
         assets.iter().map(|(k, a)| {
-            let value = serde_json::to_string(&[k.0, k.1.as_ref(), k.2.as_ref()])
-                .expect("strings serialize");
+            let value =
+                serde_json::to_string(&(k.0, k.1.as_ref(), k.2, u8::from(k.3), u8::from(k.4)))
+                    .expect("strings serialize");
             (k, a.requests, value)
         }),
         DIM_K,

@@ -207,26 +207,48 @@ fn v3_rows_match_a_brute_force_computation_over_the_rows() {
     assert_eq!(got, want);
     assert!(got.contains_key(&("verified_bot".into(), "verified-bot.bingbot".into())));
 
-    // assets: derived type, upper cache, lower encoding, the /assets sums.
+    // assets, by High-Scale's rules: URL-extension type, upper cache, normalized encoding,
+    // compressed and compressible flags, then the /assets sums.
     let mut want: BTreeMap<String, (i64, i64, f64)> = BTreeMap::new();
     for r in &rows {
         let url = s(r, "url").unwrap().to_lowercase();
-        let kind = if url.ends_with(".js") {
-            "JavaScript"
-        } else if url.ends_with(".css") {
-            "CSS"
-        } else if url.contains(".woff") {
-            "Font"
+        let ends = |exts: &[&str]| exts.iter().any(|e| url.ends_with(e));
+        let kind = if ends(&[".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico"]) {
+            "Images"
+        } else if ends(&[
+            ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt", ".csv", ".zip",
+            ".tar", ".gz", ".tgz", ".rar", ".7z",
+        ]) {
+            "Documents"
+        } else if ends(&[".js", ".mjs", ".css"]) {
+            "JavaScript/CSS"
+        } else if ends(&[".woff", ".woff2", ".ttf", ".otf", ".eot"]) {
+            "Fonts"
+        } else if ends(&[".m3u8", ".ts", ".mp4", ".m4s", ".webm"]) {
+            "Video"
         } else {
-            "Other"
+            "API/Dynamic"
         };
-        let key = serde_json::to_string(&[
-            kind.to_owned(),
+        let raw = s(r, "resp_header_content_encoding").unwrap_or("");
+        let lower = raw.to_lowercase();
+        let encoding = if raw.is_empty() {
+            "uncompressed".to_owned()
+        } else if lower.contains("br") {
+            "br".to_owned()
+        } else if lower.contains("gzip") {
+            "gzip".to_owned()
+        } else {
+            raw.to_owned()
+        };
+        let compressed = u8::from(["gzip", "br", "deflate"].contains(&lower.as_str()));
+        let compressible = u8::from(ends(&[".js", ".mjs", ".css", ".svg", ".html", ".json"]));
+        let key = serde_json::to_string(&(
+            kind,
             s(r, "cache").unwrap().to_uppercase(),
-            s(r, "resp_header_content_encoding")
-                .unwrap_or("unknown")
-                .to_lowercase(),
-        ])
+            encoding,
+            compressed,
+            compressible,
+        ))
         .unwrap();
         let ttfb_ms = f(r, "ttfb").map_or(f(r, "elapsed").unwrap() / 1000.0, |t| t * 1000.0);
         let e = want.entry(key).or_default();

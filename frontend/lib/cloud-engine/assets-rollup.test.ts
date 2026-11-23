@@ -124,7 +124,7 @@ describe("assetsAggregatesFromRollup", () => {
     const asset = { requests: 1, respBytes: 2, ttfbSum: 3, originWaitSum: 0, originRequests: 0 };
     const accented: Rollup = {
       ...empty(), overview: { ...full.rollup.overview!, requests: 1 },
-      assets: new Map([[JSON.stringify(["Other", "HÍT", "unknown"]), asset]]),
+      assets: new Map([[JSON.stringify(["API/Dynamic", "HÍT", "uncompressed", 0, 0]), asset]]),
     };
     expect(assetsAggregatesFromRollup(result(accented), body())).toBeNull();
     const caught: Rollup = { ...full.rollup, fields: new Map([...full.rollup.fields, ["cache_status", new Map([["HIT", 1]])]]) };
@@ -138,16 +138,29 @@ describe("assetsAggregatesFromRollup", () => {
     const rollup: Rollup = {
       ...empty(), overview: { ...(await rollupOf("origin", FIXTURES.origin.files("window"))).rollup.overview!, requests: 5 },
       fields: new Map([["cache", new Map([["HIT", 2]])]]),
-      assets: new Map([[JSON.stringify(["Other", "HIT", "unknown"]), asset(2)], [JSON.stringify(["Other", "OTHER", "unknown"]), asset(3)]]),
+      assets: new Map([[JSON.stringify(["API/Dynamic", "HIT", "uncompressed", 0, 0]), asset(2)], [JSON.stringify(["API/Dynamic", "OTHER", "uncompressed", 0, 0]), asset(3)]]),
     };
     const total = (filters: unknown) => assetsAggregatesFromRollup(result(rollup), body({ filters }))?.summary.total_requests;
     expect(total(undefined)).toBe(5);
     expect(total({ cache: { mode: "include", values: ["HIT", "OTHER"] } })).toBe(2);
     expect(total({ cache: { mode: "exclude", values: ["OTHER"] } })).toBe(5);
     expect(total({ cache: { mode: "exclude", values: ["HIT"] } })).toBe(3);
+    // High-Scale shows a request with no cache value as MISS.
+    expect(assetsAggregatesFromRollup(result(rollup), body())?.cache_performance)
+      .toEqual(expect.arrayContaining([expect.objectContaining({ cache_status: "MISS", requests: 3 })]));
     const logsOther = { ...rollup, fields: new Map([["cache", new Map([["HIT", 2], ["OTHER", 1]])]]) };
     expect(assetsAggregatesFromRollup(result(logsOther), body({ filters: { cache: { mode: "exclude", values: ["HIT"] } } })))
       .toBeNull();
+  });
+
+  it("leaves summaries keyed before High-Scale's rules to the raw scan", async () => {
+    const asset = { requests: 1, respBytes: 2, ttfbSum: 3, originWaitSum: 0, originRequests: 0 };
+    const full = await rollupOf("origin", FIXTURES.origin.files("window"));
+    const older: Rollup = {
+      ...empty(), overview: { ...full.rollup.overview!, requests: 1 },
+      assets: new Map([[JSON.stringify(["Other", "HIT", "unknown"]), asset]]),
+    };
+    expect(assetsAggregatesFromRollup(result(older), body())).toBeNull();
   });
 
   it("answers an empty range like the raw scan's empty response", () => {
@@ -217,7 +230,8 @@ describe("queryAssetsAggregates sections", () => {
       "asset_type_breakdown", "cache_performance", "compression_performance", "large_uncompressed_assets",
       "low_ttl_assets", "missing_fields", "summary",
     ]);
-    expect((full.low_ttl_assets as unknown[]).length).toBeGreaterThan(0);
+    // The fixture URLs carry no extension, so High-Scale's rules find no static low-TTL hotspot.
+    expect(full.low_ttl_assets).toEqual([]);
     const hotspots = await queryAssetsAggregates({ ...range, sections: ["large_uncompressed_assets", "low_ttl_assets"] });
     expect(hotspots).toEqual({ large_uncompressed_assets: full.large_uncompressed_assets, low_ttl_assets: full.low_ttl_assets });
     const summary = await queryAssetsAggregates({ ...range, sections: ["summary"] }) as Record<string, unknown>;
