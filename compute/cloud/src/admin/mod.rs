@@ -639,9 +639,14 @@ fn preflight(
     if service["type"] != "vcl" {
         return Err(Error::new(400, "vcl_service_required"));
     }
-    context
-        .api("GET", "/enabled-products/v1/object_storage", token, None)
-        .map_err(|_| Error::new(400, "object_storage_required"))?;
+    let (os_status, os_body) =
+        context.api_status("GET", "/enabled-products/v1/object_storage", token, None)?;
+    if os_status >= 500 {
+        return Err(Error::new(502, "fastly_api_rejected"));
+    }
+    if !(200..300).contains(&os_status) || os_body["enabled"].as_bool() == Some(false) {
+        return Err(Error::new(400, "object_storage_required"));
+    }
     let (_, reservation) = install(context)?;
     if reservation.service_id.as_deref().is_some_and(|v| v != sid) {
         return Err(Error::new(409, "install_already_reserved"));

@@ -3989,8 +3989,12 @@ def test_t5_b01_b07_b09_cloud_file_rbac_worker_gates_and_fsm1_bundle_oom_guards(
         "pairs_u32_max_some": False,
         "valid_some": True,
     }
-    assert res["bundle_raw_discarded"] >= 1
-    assert res["bundle_packed_discarded"] >= 1
+    assert res["bundle_raw_errors"] == []
+    assert res["bundle_packed_errors"] == []
+    assert res["bundle_raw_discarded"] == 1
+    assert res["bundle_packed_discarded"] == 1
+    assert res["raw_corrupt_deleted"] is True
+    assert res["packed_corrupt_deleted"] is True
     assert res["day_bundle_written"] is True
 
     # GAP-CLOUD-B01: /api/file & /api/files RBAC, traversal, and HMAC cursor enforcement
@@ -6089,7 +6093,7 @@ console.log('NODE_PROXY_AND_CSV_PARITY_OK');
             "lib/cloud-engine/dashboard/duckdb.test.ts",
             "lib/cloud-engine/adapter.test.ts",
             "-t",
-            "wipes range-loader singleton|aborts in-flight|blocks post-logout OPFS persistFile|blocks multi-step runDashboard|aborts in-flight queryRollup|suppresses pending write|skips CacheStorage and error telemetry|isolates cached service stats|clears decoded SecuritySummary|fences in-flight ops CacheStorage|resets activeOpsUser to null|uses volatile-ops scope|aborts multi-step handleCloudAnalyticalRequest|allows concurrent Compare Mode|allows concurrent same-session writes|fences POST /api/dashboard/bundle|scopes /api/usage/|SEC-T5-ITER23-01|SEC-T5-ITER23-03|SEC-T5-ITER24-03|BUG-T5-ITER25-02|BUG-T5-ITER26-02|BUG-T5-ITER26-03|Check 4|reports a bounded, redacted error message|keeps urls and ins_lat elapsed histograms clone-safe",
+            "wipes range-loader singleton|aborts in-flight|blocks post-logout OPFS persistFile|blocks multi-step runDashboard|aborts in-flight queryRollup|suppresses pending write|skips CacheStorage and error telemetry|isolates cached service stats|clears decoded SecuritySummary|fences in-flight ops CacheStorage|resets activeOpsUser to null|uses volatile-ops scope|aborts multi-step handleCloudAnalyticalRequest|allows concurrent Compare Mode|allows concurrent same-session writes|fences POST /api/dashboard/bundle|scopes /api/usage/|SEC-T5-ITER23-01|SEC-T5-ITER23-03|SEC-T5-ITER24-03|BUG-T5-ITER25-02|BUG-T5-ITER26-02|BUG-T5-ITER26-03|isolates omitted-serviceId knownMissingFiles|reports a bounded, redacted error message|keeps urls and ins_lat elapsed histograms clone-safe",
         ],
         cwd=str(REPO_ROOT / "frontend"),
         env=cloud_vitest_env,

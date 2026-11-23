@@ -214,7 +214,14 @@ pub fn publish<R: Runtime>(
         rows: 0,
         parents: BTreeMap::new(),
     };
-    let manifest_key = put(store, &manifest)?;
+    let manifest_key = put_manifest(
+        store,
+        &manifest,
+        root.reset_generation,
+        root.reset_at,
+        Some((&root.days, &root.statistics)),
+        MANIFEST_LIMIT,
+    )?;
     let reference = Reference { key, generation };
     let grace = if is_open {
         super::super::bundle::RETIRE_GRACE_S as u64
@@ -309,24 +316,29 @@ pub fn drop_missing<R: Runtime>(
         .filter(|n| *n <= 9_007_199_254_740_991)
         .ok_or("catalog_generation_exhausted")?;
     let at = rfc3339(runtime.now() as i64);
-    let manifest_key = put(
+    let manifest = Manifest {
+        version: VERSION,
+        service_id: store.service.service_id.clone(),
+        generation,
+        batch: "summary_bundle_repair".into(),
+        schema: String::new(),
+        committed_at: at.clone(),
+        previous: root.manifest.clone(),
+        files: Vec::new(),
+        summaries: dropped,
+        sources: Vec::new(),
+        replaces: Vec::new(),
+        bytes: 0,
+        rows: 0,
+        parents: BTreeMap::new(),
+    };
+    let manifest_key = put_manifest(
         store,
-        &Manifest {
-            version: VERSION,
-            service_id: store.service.service_id.clone(),
-            generation,
-            batch: "summary_bundle_repair".into(),
-            schema: String::new(),
-            committed_at: at.clone(),
-            previous: root.manifest.clone(),
-            files: Vec::new(),
-            summaries: dropped,
-            sources: Vec::new(),
-            replaces: Vec::new(),
-            bytes: 0,
-            rows: 0,
-            parents: BTreeMap::new(),
-        },
+        &manifest,
+        root.reset_generation,
+        root.reset_at,
+        Some((&root.days, &root.statistics)),
+        MANIFEST_LIMIT,
     )?;
     root.generation = generation;
     root.manifest = Some(manifest_key.clone());

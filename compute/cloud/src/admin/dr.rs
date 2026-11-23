@@ -536,6 +536,7 @@ type ScannedHeadPair = (
     crate::ingest::catalog::Head,
     Option<crate::ingest::catalog::Manifest>,
     Option<ScannedReset>,
+    bool,
 );
 
 fn manifest_unix_ts(m: &crate::ingest::catalog::Manifest) -> Option<u64> {
@@ -583,6 +584,7 @@ fn record_scanned_reset(slot: &mut Option<ScannedReset>, generation: u64, reset_
 
 struct CatalogScanOpts<'a> {
     reserve_calls: u32,
+    fallback_reserve_calls: u32,
     extra_rum_if_reset: u32,
     foreign_dr_state: bool,
     expected_manifest: Option<&'a str>,
@@ -597,12 +599,13 @@ fn scan_catalog_head(
 ) -> Result<(Option<ScannedHeadPair>, bool), Error> {
     let CatalogScanOpts {
         reserve_calls,
+        fallback_reserve_calls,
         extra_rum_if_reset,
         foreign_dr_state,
         expected_manifest,
         dr_head_gen,
     } = opts;
-    if context.remaining_calls() <= reserve_calls + 1 {
+    if context.remaining_calls() <= fallback_reserve_calls + 1 {
         return Ok((None, false));
     }
     let scope = crate::ingest::scope(service);
@@ -630,15 +633,30 @@ fn scan_catalog_head(
         .into_iter()
         .filter(|obj| obj.key.ends_with(".json") && safe_dr_object_key(&obj.key, &prefix))
         .collect();
-    let is_manifest_name = |k: &str| {
-        k.rsplit('/')
-            .next()
-            .is_some_and(|n| n.starts_with("manifest"))
+    let manifest_sort_rank = |k: &str| -> (bool, Option<u64>) {
+        let Some(name) = k.rsplit('/').next() else {
+            return (false, None);
+        };
+        if !name.starts_with("manifest") {
+            return (false, None);
+        }
+        let gen_hint = name
+            .strip_prefix("manifest-")
+            .and_then(|rest| rest.split_once('-'))
+            .and_then(|(g, _)| {
+                (!g.is_empty() && g.bytes().all(|b| b.is_ascii_digit()))
+                    .then(|| g.parse::<u64>().ok())
+                    .flatten()
+            });
+        (true, gen_hint)
     };
     objects.sort_by(|a, b| {
-        b.last_modified
-            .cmp(&a.last_modified)
-            .then_with(|| is_manifest_name(&b.key).cmp(&is_manifest_name(&a.key)))
+        let (a_m, a_g) = manifest_sort_rank(&a.key);
+        let (b_m, b_g) = manifest_sort_rank(&b.key);
+        b_m.cmp(&a_m)
+            .then_with(|| b_g.cmp(&a_g))
+            .then_with(|| b.last_modified.cmp(&a.last_modified))
+            .then_with(|| b.key.cmp(&a.key))
     });
 
     let mut best_manifest: Option<(String, crate::ingest::catalog::Manifest)> = None;
@@ -652,19 +670,30 @@ fn scan_catalog_head(
     let mut days: BTreeMap<i64, ScannedDay> = BTreeMap::new();
 
     for obj in objects {
-        let extra_verify_hold = u32::from(
-            !foreign_dr_state
-                && !saw_foreign_manifest
-                && best_manifest.is_none()
-                && days.values().any(|d| !d.verified_own)
-                && verified_own_blocks.is_empty(),
-        );
+        let cur_reserve = if best_manifest_days.is_some()
+            || best_manifest
+                .as_ref()
+                .is_some_and(|(_, m)| m.batch == "reset")
+        {
+            reserve_calls
+        } else {
+            fallback_reserve_calls
+        };
+        let extra_verify_hold = if !foreign_dr_state && best_manifest_days.is_none() {
+            days.values()
+                .filter(|d| !d.verified_own && !verified_own_blocks.contains(&d.sample_block_key))
+                .map(|d| d.sample_block_key.as_str())
+                .collect::<BTreeSet<_>>()
+                .len() as u32
+        } else {
+            0
+        };
         let dynamic_reset_hold = if effective_reset.is_some() {
             extra_rum_if_reset
         } else {
             0
         };
-        if context.remaining_calls() <= reserve_calls + extra_verify_hold + dynamic_reset_hold {
+        if context.remaining_calls() <= cur_reserve + extra_verify_hold + dynamic_reset_hold {
             break;
         }
         let Ok(Some(bytes)) = fos::get_object(context, service, creds, &obj.key) else {
@@ -798,47 +827,54 @@ fn scan_catalog_head(
         }
     }
 
-    if let Some((_, ref bm)) = best_manifest {
-        days.retain(|_, d| d.max_gen <= bm.generation);
-        if foreign_dr_state || saw_foreign_manifest {
-            days.retain(|_, d| d.verified_own || verified_own_blocks.contains(&d.sample_block_key));
+    let has_authoritative_days = best_manifest_days.is_some()
+        && effective_reset.as_ref().is_none_or(|r| {
+            best_manifest
+                .as_ref()
+                .is_some_and(|(_, bm)| r.generation <= bm.generation)
+        });
+    if !has_authoritative_days {
+        if let Some((_, ref bm)) = best_manifest {
+            days.retain(|_, d| d.max_gen <= bm.generation);
         }
-    } else {
-        if foreign_dr_state || saw_foreign_manifest {
-            days.retain(|_, d| d.verified_own || verified_own_blocks.contains(&d.sample_block_key));
-        } else if days
-            .values()
-            .any(|d| !d.verified_own && !verified_own_blocks.contains(&d.sample_block_key))
-        {
-            let mut verified_any_block = false;
-            if let Some(sample_key) = days
+        if !foreign_dr_state {
+            let pending_samples: Vec<String> = days
                 .values()
-                .find(|d| !d.verified_own && !verified_own_blocks.contains(&d.sample_block_key))
+                .filter(|d| !d.verified_own && !verified_own_blocks.contains(&d.sample_block_key))
                 .map(|d| d.sample_block_key.clone())
-            {
-                if context.remaining_calls() > reserve_calls {
-                    if let Ok(Some(blk_bytes)) =
-                        fos::get_object(context, service, creds, &sample_key)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            let reset_hold = if effective_reset.is_some() {
+                extra_rum_if_reset
+            } else {
+                0
+            };
+            for sample_key in pending_samples {
+                if context.remaining_calls() <= fallback_reserve_calls + reset_hold {
+                    break;
+                }
+                if let Ok(Some(blk_bytes)) = fos::get_object(context, service, creds, &sample_key) {
+                    if let Ok(blk) =
+                        serde_json::from_slice::<crate::ingest::catalog::Block>(&blk_bytes)
                     {
-                        if let Ok(blk) =
-                            serde_json::from_slice::<crate::ingest::catalog::Block>(&blk_bytes)
-                        {
-                            if blk.service_id == service.service_id {
-                                verified_any_block = true;
-                            } else {
-                                saw_foreign_manifest = true;
-                            }
+                        if blk.service_id == service.service_id {
+                            verified_own_blocks.insert(sample_key);
+                        } else {
+                            saw_foreign_manifest = true;
                         }
+                    } else {
+                        saw_foreign_manifest = true;
                     }
                 }
             }
-            if saw_foreign_manifest || !verified_any_block {
-                days.retain(|_, d| {
-                    d.verified_own || verified_own_blocks.contains(&d.sample_block_key)
-                });
-            }
         }
-        if days.is_empty() {
+        let _ = saw_foreign_manifest;
+        days.retain(|_, d| {
+            !foreign_dr_state
+                && (d.verified_own || verified_own_blocks.contains(&d.sample_block_key))
+        });
+        if best_manifest.is_none() && days.is_empty() {
             return Ok((None, expected_missing));
         }
     }
@@ -865,17 +901,23 @@ fn scan_catalog_head(
         }],
         ..crate::ingest::catalog::Head::default()
     };
-    if let Some((bm_days, bm_stats)) = best_manifest_days {
-        for (day_ts, day_key) in bm_days {
-            if let Some(st) = bm_stats.get(&day_ts) {
-                head.statistics.insert(day_ts, st.clone());
+    if has_authoritative_days {
+        if let Some((bm_days, bm_stats)) = best_manifest_days {
+            for (day_ts, day_key) in bm_days {
+                if !safe_dr_object_key(&day_key, &prefix) {
+                    continue;
+                }
+                if let Some(st) = bm_stats.get(&day_ts) {
+                    head.statistics.insert(day_ts, st.clone());
+                }
+                head.days.insert(day_ts, day_key);
             }
-            head.days.insert(day_ts, day_key);
         }
-    }
-    for (day_ts, d) in days {
-        head.days.insert(day_ts, d.key);
-        head.statistics.insert(day_ts, d.stats);
+    } else {
+        for (day_ts, d) in days {
+            head.days.insert(day_ts, d.key);
+            head.statistics.insert(day_ts, d.stats);
+        }
     }
 
     let mut encoded = serialize(&head)?;
@@ -887,7 +929,12 @@ fn scan_catalog_head(
     }
     if let Ok(validated_head) = crate::ingest::catalog::head(&json!({"catalog": encoded})) {
         Ok((
-            Some((validated_head, manifest_obj, effective_reset)),
+            Some((
+                validated_head,
+                manifest_obj,
+                effective_reset,
+                has_authoritative_days,
+            )),
             expected_missing,
         ))
     } else {
@@ -1381,23 +1428,59 @@ pub(super) fn recover(
         )
     };
 
-    {
-        let front_or_inspect_calls = if !inspected_active && source != "dr_state" {
-            4u32
-        } else {
-            3u32
+    let clamp_floors_to_ts =
+        |svc: &Service, ts: i64, fk: &mut Option<String>, rfk: &mut Option<String>| {
+            let rf = ts_floor_key(svc, ts);
+            if fk.as_deref().is_none_or(|cur| cur < rf.as_str()) {
+                *fk = Some(rf);
+            }
+            let rrf = ts_rum_floor_key(svc, ts);
+            if rfk.as_deref().is_none_or(|cur| cur < rrf.as_str()) {
+                *rfk = Some(rrf);
+            }
         };
+
+    {
         let base_upserts = u32::from(!views.is_empty())
             + 1
             + u32::from(rum_stats.is_some() || rum_floor_key.is_some());
-        let full_upsert_reserve = 2 + front_or_inspect_calls + PER_UPSERT * base_upserts;
-        let scan_reserve = if cold_start
-            && views.is_empty()
-            && context.remaining_calls() <= full_upsert_reserve + 2
-        {
-            2 + front_or_inspect_calls + base_upserts
+        let compute_reserve = |front_or_inspect: u32, min_inspect: u32| -> u32 {
+            let full = 2 + front_or_inspect + PER_UPSERT * base_upserts;
+            if cold_start && views.is_empty() && context.remaining_calls() <= full + 2 {
+                if context.remaining_calls() <= 2 + min_inspect + base_upserts + 2 {
+                    2 + min_inspect + base_upserts
+                } else {
+                    2 + front_or_inspect + base_upserts
+                }
+            } else {
+                full
+            }
+        };
+        let base_scan_reserve = if !inspected_active && source != "dr_state" {
+            compute_reserve(4, 3)
         } else {
-            full_upsert_reserve
+            compute_reserve(3, 3)
+        };
+        let has_front_dicts = config(context.runtime, "front_service_id").is_ok()
+            && config(context.runtime, "buckets_dictionary_id").is_ok()
+            && config(context.runtime, "credentials_dictionary_id").is_ok();
+        let scan_reserve = if !inspected_active && source != "dr_state" && has_front_dicts {
+            let wf_reserve = if cold_start && views.is_empty() {
+                if context.remaining_calls() <= 2 + 6 + base_upserts + 2 {
+                    2 + 6 + base_upserts
+                } else {
+                    2 + 7 + base_upserts
+                }
+            } else {
+                compute_reserve(4 + 3, 3 + 3)
+            };
+            if context.remaining_calls() >= wf_reserve + 2 {
+                wf_reserve
+            } else {
+                base_scan_reserve
+            }
+        } else {
+            base_scan_reserve
         };
         let extra_rum_if_reset = if rum_stats.is_none() && rum_floor_key.is_none() {
             if cold_start && views.is_empty() {
@@ -1416,13 +1499,16 @@ pub(super) fn recover(
                 &creds,
                 CatalogScanOpts {
                     reserve_calls: scan_reserve,
+                    fallback_reserve_calls: base_scan_reserve,
                     extra_rum_if_reset,
                     foreign_dr_state,
                     expected_manifest: dr_head.manifest.as_deref(),
                     dr_head_gen: Some(dr_head.generation),
                 },
             )?;
-            if let Some((scanned, scanned_manifest, effective_reset)) = scanned_opt {
+            if let Some((mut scanned, scanned_manifest, effective_reset, has_authoritative_days)) =
+                scanned_opt
+            {
                 let reset_occurred = dr_manifest_missing
                     || effective_reset
                         .as_ref()
@@ -1430,6 +1516,9 @@ pub(super) fn recover(
                     || scanned_manifest
                         .as_ref()
                         .is_some_and(|m| m.generation > dr_head.generation && m.batch == "reset");
+                if let Some(ts) = effective_reset.as_ref().and_then(|r| r.reset_at) {
+                    clamp_floors_to_ts(&service, ts, &mut floor_key, &mut rum_floor_key);
+                }
                 if reset_occurred {
                     rum_stats = None;
                     let reset_ts =
@@ -1443,18 +1532,16 @@ pub(super) fn recover(
                                     .map(|u| u as i64)
                             });
                     if let Some(ts) = reset_ts {
-                        let rf = ts_floor_key(&service, ts);
-                        if floor_key.as_deref().is_none_or(|cur| cur < rf.as_str()) {
-                            floor_key = Some(rf);
-                        }
-                        let rrf = ts_rum_floor_key(&service, ts);
-                        if rum_floor_key
-                            .as_deref()
-                            .is_none_or(|cur| cur < rrf.as_str())
-                        {
-                            rum_floor_key = Some(rrf);
-                        }
+                        clamp_floors_to_ts(&service, ts, &mut floor_key, &mut rum_floor_key);
                     }
+                } else if !dr_manifest_missing
+                    && !has_authoritative_days
+                    && scanned.days.is_empty()
+                    && !dr_head.days.is_empty()
+                    && scanned_manifest.as_ref().is_none_or(|m| m.batch != "reset")
+                {
+                    scanned.days = dr_head.days.clone();
+                    scanned.statistics = dr_head.statistics.clone();
                 }
                 if dr_manifest_missing || scanned.generation > dr_head.generation {
                     catalog_head = Some(scanned);
@@ -1463,18 +1550,21 @@ pub(super) fn recover(
                 rum_stats = None;
                 catalog_head = None;
             }
-        } else if let (Some((scanned, scanned_manifest, effective_reset)), _) = scan_catalog_head(
-            context,
-            &service,
-            &creds,
-            CatalogScanOpts {
-                reserve_calls: scan_reserve,
-                extra_rum_if_reset,
-                foreign_dr_state,
-                expected_manifest: None,
-                dr_head_gen: None,
-            },
-        )? {
+        } else if let (Some((scanned, scanned_manifest, effective_reset, _)), _) =
+            scan_catalog_head(
+                context,
+                &service,
+                &creds,
+                CatalogScanOpts {
+                    reserve_calls: scan_reserve,
+                    fallback_reserve_calls: base_scan_reserve,
+                    extra_rum_if_reset,
+                    foreign_dr_state,
+                    expected_manifest: None,
+                    dr_head_gen: None,
+                },
+            )?
+        {
             let reset_occurred = effective_reset.as_ref().is_some_and(|r| {
                 source != "dr_state"
                     || r.reset_at
@@ -1484,6 +1574,9 @@ pub(super) fn recover(
                     && (source != "dr_state"
                         || manifest_unix_ts(m).is_none_or(|ts| ts >= dr_updated_at))
             });
+            if let Some(ts) = effective_reset.as_ref().and_then(|r| r.reset_at) {
+                clamp_floors_to_ts(&service, ts, &mut floor_key, &mut rum_floor_key);
+            }
             if reset_occurred {
                 rum_stats = None;
                 let reset_ts = effective_reset
@@ -1496,17 +1589,7 @@ pub(super) fn recover(
                             .map(|u| u as i64)
                     });
                 if let Some(ts) = reset_ts {
-                    let rf = ts_floor_key(&service, ts);
-                    if floor_key.as_deref().is_none_or(|cur| cur < rf.as_str()) {
-                        floor_key = Some(rf);
-                    }
-                    let rrf = ts_rum_floor_key(&service, ts);
-                    if rum_floor_key
-                        .as_deref()
-                        .is_none_or(|cur| cur < rrf.as_str())
-                    {
-                        rum_floor_key = Some(rrf);
-                    }
+                    clamp_floors_to_ts(&service, ts, &mut floor_key, &mut rum_floor_key);
                 }
             }
             catalog_head = Some(scanned);
@@ -1516,10 +1599,21 @@ pub(super) fn recover(
         }
     }
 
+    if let Some(ts) = catalog_head.as_ref().and_then(|h| h.reset_at) {
+        clamp_floors_to_ts(&service, ts, &mut floor_key, &mut rum_floor_key);
+        if rum_stats
+            .as_ref()
+            .and_then(|v| v["at"].as_i64())
+            .is_some_and(|at| at < ts)
+        {
+            rum_stats = None;
+        }
+    }
+
     let mut remaining_upserts = u32::from(!views.is_empty())
         + u32::from(catalog_head.is_some() || floor_key.is_some())
         + u32::from(rum_stats.is_some() || rum_floor_key.is_some());
-    let needed_after_upserts = if source != "dr_state" { 6 } else { 5 };
+    let needed_after_upserts = if source != "dr_state" { 9 } else { 5 };
     let initial_try_insert_first =
         cold_start && context.remaining_calls() < needed_after_upserts + 2 * remaining_upserts;
     let mut try_insert_first = initial_try_insert_first

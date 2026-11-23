@@ -20,7 +20,7 @@ from backend.core.metadata.pg_pool import (
 from backend.core.metadata.pg_pool import (
     get_con_readonly as open_readonly,
 )
-from backend.utils.date_utils import iso_z, iso_z_now, parse_hour_key, parse_iso_utc
+from backend.utils.date_utils import ensure_utc, iso_z, iso_z_now, parse_hour_key, parse_iso_utc
 
 logger = logging.getLogger(__name__)
 
@@ -548,8 +548,8 @@ def cloud_copy_deletion_records_in_window(
     minimum_days: int = _FOS_MIN_BILLING_DAYS,
 ) -> list[dict[str, Any]]:
     """Return conservative minimum-billing intervals for local cloud-copy deletions overlapping [start, end)."""
-    start_utc = start.astimezone(UTC) if start.tzinfo is not None else start.replace(tzinfo=UTC)
-    end_utc = end.astimezone(UTC) if end.tzinfo is not None else end.replace(tzinfo=UTC)
+    start_utc = ensure_utc(start)
+    end_utc = ensure_utc(end)
     min_days = max(0, int(minimum_days))
     min_window_ms = min_days * 86_400_000
     cutoff = iso_z(start_utc - timedelta(days=min_days))
@@ -666,7 +666,11 @@ def _query_usage_log_aggregate_rollup(
     # match what writers store.
     def _next_hour_start(hour_prefix: str) -> str:
         # "2026-06-04T23" → "2026-06-05T00:00:00.000Z"
-        dt = parse_hour_key(hour_prefix)
+        dt = (
+            parse_hour_key(f"{hour_prefix[:10]}-{hour_prefix[11:]}")
+            if len(hour_prefix) == 13 and hour_prefix[10] == "T"
+            else None
+        )
         if dt is None:
             return hour_prefix + ":59:59.999Z"
         nxt = dt + timedelta(hours=1)
@@ -734,7 +738,11 @@ def get_usage_operation_buckets(
     bucket_len = 13 if by == "hour" else 10
 
     def _next_hour_start(hour_prefix: str) -> str:
-        dt = parse_hour_key(hour_prefix)
+        dt = (
+            parse_hour_key(f"{hour_prefix[:10]}-{hour_prefix[11:]}")
+            if len(hour_prefix) == 13 and hour_prefix[10] == "T"
+            else None
+        )
         if dt is None:
             return hour_prefix + ":59:59.999Z"
         return (dt + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z")

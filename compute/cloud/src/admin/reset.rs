@@ -347,8 +347,10 @@ fn step<R: Runtime>(
     if let Err(error) = &result {
         job.error = Some(error.clone());
     }
-    let sync_dr_now =
-        status == "resetting" && job.status == "cleanup" && runtime.admin_remaining_calls() >= 5;
+    let sync_dr_now = status == "resetting"
+        && job.status == "cleanup"
+        && job.steps_done.contains(RUM_PART)
+        && runtime.admin_remaining_calls() >= 5;
     if sync_dr_now {
         job.steps_done.insert(DR_SYNCED.into());
     }
@@ -676,7 +678,8 @@ fn reset_state<R: Runtime>(store: &Store<'_, R>, job: &mut ResetJob) -> Result<b
                 let old = catalog::head(prev.unwrap_or(&Value::Null))?;
                 let (mut head, manifest) =
                     catalog::reset_head(&old, now, &store.service.service_id);
-                let key = catalog::put(store, &manifest)?;
+                head.reset_at = Some(job.reset_at as i64);
+                let key = put_reset_manifest(store, &manifest, &head)?;
                 job.reset_manifest = Some(key.clone());
                 head.manifest = Some(key.clone());
                 for event in &mut head.recent {
@@ -734,6 +737,44 @@ fn reset_state<R: Runtime>(store: &Store<'_, R>, job: &mut ResetJob) -> Result<b
 
 const RUM_PART: &str = "rum_watermark";
 const DR_SYNCED: &str = "dr_synced";
+
+fn put_reset_manifest<R: Runtime>(
+    store: &Store<'_, R>,
+    manifest: &catalog::Manifest,
+    head: &catalog::Head,
+) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+
+    let mut val = serde_json::to_value(manifest).map_err(|e| e.to_string())?;
+    if let Some(obj) = val.as_object_mut() {
+        if let Some(rg) = head.reset_generation {
+            obj.insert("reset_generation".into(), Value::from(rg));
+        }
+        if let Some(ra) = head.reset_at {
+            obj.insert("reset_at".into(), Value::from(ra));
+        }
+        obj.insert(
+            "head_days".into(),
+            serde_json::to_value(&head.days).map_err(|e| e.to_string())?,
+        );
+        obj.insert(
+            "head_statistics".into(),
+            serde_json::to_value(&head.statistics).map_err(|e| e.to_string())?,
+        );
+    }
+    let body = serde_json::to_vec(&val).map_err(|e| e.to_string())?;
+    if body.len() > catalog::MANIFEST_LIMIT {
+        return Err("catalog_manifest_too_large".into());
+    }
+    let digest = hex::encode(Sha256::digest(&body));
+    let key = format!(
+        "{}processed/_catalog/manifest-{:020}-{digest}.json",
+        scope(store.service),
+        manifest.generation
+    );
+    store.put_verified(&key, body)?;
+    Ok(key)
+}
 const KEYS_PART: &str = "keys";
 const QUEUES: [(&str, &str); 2] = [
     ("deleteq", DELETEQ_PREFIX),

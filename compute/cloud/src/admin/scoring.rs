@@ -830,6 +830,7 @@ fn resolve_brokered_token(
     }
     match context.secret(&service.fastly_token_ref) {
         Ok(tok) if !tok.is_empty() => Ok(tok),
+        Err(e) if e.status >= 500 => Err(e),
         _ => Err(Error::new(403, "fastly_token_scope_insufficient")),
     }
 }

@@ -956,3 +956,152 @@ def test_bug_t5_iter26_01_and_04_admin_console_cf_fence_and_boolean_alias_col_li
     ):
         rewritten_ne = _rewrite_console_sql(raw_ne, svc_table="svc_alpha", names=names)
         assert expected_pred in rewritten_ne, f"Expected {expected_pred!r} in {rewritten_ne!r}"
+
+
+@pytest.mark.security_regression
+def test_bug_t5_iter27_02_and_03_console_col_lists_unsafe_fn_guard_and_derived_parity() -> None:
+    """BUG-T5-ITER27-02 & BUG-T5-ITER27-03: End-to-end query_endpoint CTE/subquery column lists and derived CF coercions."""
+    captured_queries: list[str] = []
+
+    def _ch_handler(req: httpx.Request) -> httpx.Response:
+        body_text = req.content.decode("utf-8", errors="replace")
+        if "SELECT 1" in body_text and "additional_table_filters" in str(req.url):
+            return httpx.Response(200, json={"data": [{"1": 1}]})
+        captured_queries.append(body_text)
+        return httpx.Response(200, json={"data": [{"u": "/ok", "url": "/ok"}]})
+
+    ch_client = ClickHouseClient(
+        svcconfig.ClickHouseConfig(host="localhost", port=8123, database="default", user="default", password=""),
+        transport=httpx.MockTransport(_ch_handler),
+    )
+    ch_client._enable_cf_rewrite_in_tests = True
+    ch_client._table_filters_verified = True  # type: ignore[attr-defined]
+    try:
+        svc = SimpleNamespace(service_id="svc_alpha", client=ch_client)
+        from backend.high_scale.postgres_control import console_access
+
+        role_configs: list[tuple[bool, dict[str, str] | None]] = [
+            (False, None),
+            (False, console_access.console_tables("svc_alpha", masked=False)),
+            (True, console_access.console_tables("svc_alpha", masked=True)),
+        ]
+
+        # 1. BUG-T5-ITER27-02: CTE & FROM/JOIN column-list aliases execute end-to-end across Admin, Analyst Raw, and Analyst Masked:
+        col_list_queries = (
+            "WITH q(u, st, ed) AS (SELECT url, status, edge FROM logs) SELECT u FROM q WHERE st = 200 AND ed = true ORDER BY u",
+            "WITH a(u, st) AS (SELECT url, status FROM logs), b(u2, st2) AS (SELECT u, st FROM a) SELECT u2 FROM b WHERE st2 = 200 ORDER BY u2",
+            "SELECT sub.u FROM (SELECT url, status, edge FROM logs) AS sub(u, st, ed) WHERE sub.st = 200 AND sub.ed != true ORDER BY sub.u",
+            "SELECT sub.u FROM (SELECT url, status, edge FROM logs) sub(u, st, ed) WHERE sub.st = 200 AND sub.ed != false ORDER BY sub.u",
+            "WITH q AS (SELECT url, status FROM logs) SELECT t.u FROM q AS t(u, st) WHERE t.st = 200 ORDER BY t.u",
+            "WITH q AS (SELECT url, status FROM logs) SELECT t.u FROM q t(u, st) WHERE t.st = 200 ORDER BY t.u",
+        )
+        for mask_ips, tables in role_configs:
+            for sql in col_list_queries:
+                captured_queries.clear()
+                res = hs_query.query_endpoint(
+                    svc,
+                    DashboardQueryRequest(sql=sql, max_rows=10),
+                    "2026-11-19T00:00:00Z",
+                    "2026-11-19T01:00:00Z",
+                    mask_ips=mask_ips,
+                    tables=tables,
+                )
+                assert len(res["data"]) == 1
+                assert len(captured_queries) == 1
+
+        # Genuine forbidden functions and table functions remain 100% blocked:
+        for forbidden_sql in (
+            "SELECT file('etc/passwd', 'CSV') FROM logs",
+            "SELECT * FROM file(a, b)",
+            "SELECT * FROM logs JOIN url(a, b) ON 1 = 1",
+            "SELECT * FROM logs LEFT JOIN remote(a, b) ON 1 = 1",
+            "SELECT * FROM logs, s3(a, b)",
+            "WITH q(u) AS (SELECT file(url) FROM logs) SELECT u FROM q",
+            "SELECT url FROM logs WHERE remote(a, b) = 1",
+        ):
+            with pytest.raises((PermissionError, ValueError)):
+                hs_query._reject_unsafe_functions(forbidden_sql)
+            with pytest.raises((PermissionError, ValueError)):
+                hs_query.query_endpoint(
+                    svc,
+                    DashboardQueryRequest(sql=forbidden_sql, max_rows=10),
+                    "2026-11-19T00:00:00Z",
+                    "2026-11-19T01:00:00Z",
+                    mask_ips=False,
+                    tables=None,
+                )
+
+        # 2. BUG-T5-ITER27-03: Mixed SELECT * + aliases, JOIN with logs, bare column aliases,
+        # chained SELECT * / q1.* into column-list CTEs, IS [NOT] TRUE/FALSE, and reversed literals:
+        coercion_cases: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = [
+            (
+                "WITH q AS (SELECT *, edge AS b1, status AS st1 FROM logs) SELECT url FROM q WHERE b1 = true AND st1 = 200 ORDER BY url",
+                ("lower(b1) IN ('true', '1')", "st1 = '200'"),
+                (),
+            ),
+            (
+                "SELECT url FROM (SELECT *, edge AS b1, status AS st1 FROM logs) AS sub WHERE b1 = true AND st1 = 200 ORDER BY url",
+                ("lower(b1) IN ('true', '1')", "st1 = '200'"),
+                (),
+            ),
+            (
+                "WITH q AS (SELECT url AS qurl, edge AS b1, status AS st1 FROM logs) SELECT l.url FROM logs l JOIN q ON l.url = q.qurl WHERE b1 = true AND st1 = 200 ORDER BY l.url",
+                ("lower(b1) IN ('true', '1')", "st1 = '200'"),
+                (),
+            ),
+            (
+                "WITH q AS (SELECT url, status st, edge b1 FROM logs) SELECT url FROM q WHERE st = 200 AND b1 = true ORDER BY url",
+                ("st = '200'", "lower(b1) IN ('true', '1')"),
+                (),
+            ),
+            (
+                "SELECT sub.url FROM (SELECT url, status st, edge b1 FROM logs) sub WHERE sub.st = 200 AND sub.b1 = true ORDER BY sub.url",
+                ("sub.st = '200'", "lower(sub.b1) IN ('true', '1')"),
+                (),
+            ),
+            (
+                "WITH q1 AS (SELECT url, status, edge FROM logs), q2(u, st, ed) AS (SELECT * FROM q1) SELECT u FROM q2 WHERE st = 200 AND ed = true ORDER BY u",
+                ("st = '200'", "lower(ed) IN ('true', '1')"),
+                (),
+            ),
+            (
+                "WITH q1 AS (SELECT url, status FROM logs), q2(u, st, ed) AS (SELECT q1.*, true FROM q1) SELECT u FROM q2 WHERE st = 200 AND ed = true ORDER BY u",
+                ("st = '200'",),
+                ("lower(ed)",),
+            ),
+            (
+                "WITH q AS (SELECT url, edge AS b1, status AS st1 FROM logs) SELECT url FROM q WHERE true = b1 AND 200 = st1 AND 100 < st1 AND b1 IS TRUE ORDER BY url",
+                ("lower(b1) IN ('true', '1')", "'200' = st1", "100 < toFloat64OrZero(st1)"),
+                (),
+            ),
+            (
+                "SELECT url FROM logs WHERE edge IS TRUE AND is_bot IS NOT TRUE AND waf IS FALSE AND is_ipv6 IS NOT FALSE AND true = edge AND 200 = status AND 500 > status",
+                (
+                    "lower(custom_fields['edge']) IN ('true', '1')",
+                    "lower(custom_fields['is_bot']) NOT IN ('true', '1')",
+                    "lower(custom_fields['waf']) IN ('false', '0')",
+                    "lower(custom_fields['is_ipv6']) NOT IN ('false', '0')",
+                    "'200' = custom_fields['status']",
+                    "500 > toFloat64OrZero(custom_fields['status'])",
+                ),
+                (),
+            ),
+        ]
+        for sql, expected_subs, forbidden_subs in coercion_cases:
+            captured_queries.clear()
+            hs_query.query_endpoint(
+                svc,
+                DashboardQueryRequest(sql=sql, max_rows=10),
+                "2026-11-19T00:00:00Z",
+                "2026-11-19T01:00:00Z",
+                mask_ips=False,
+                tables=None,
+            )
+            assert len(captured_queries) == 1
+            emitted = captured_queries[0]
+            for exp in expected_subs:
+                assert exp in emitted, f"Missing {exp!r} in emitted SQL for {sql!r}:\n{emitted}"
+            for forb in forbidden_subs:
+                assert forb not in emitted, f"Unexpected {forb!r} in emitted SQL for {sql!r}:\n{emitted}"
+    finally:
+        ch_client.close()

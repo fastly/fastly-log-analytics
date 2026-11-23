@@ -351,7 +351,7 @@ fn encode_catalog_object<T: Serialize>(
 
 type HeadDaySnapshot<'a> = (&'a BTreeMap<i64, String>, &'a BTreeMap<i64, Statistics>);
 
-fn put_manifest<R: Runtime>(
+pub(crate) fn put_manifest<R: Runtime>(
     store: &Store<'_, R>,
     manifest: &Manifest,
     reset_generation: Option<u64>,
@@ -378,7 +378,8 @@ fn put_manifest<R: Runtime>(
             );
         }
     }
-    let (key, body) = encode_catalog_object(&scope(store.service), "manifest-", &val, limit)?;
+    let prefix_tag = format!("manifest-{:020}-", manifest.generation);
+    let (key, body) = encode_catalog_object(&scope(store.service), &prefix_tag, &val, limit)?;
     store.put_verified(&key, body)?;
     Ok(key)
 }
@@ -726,7 +727,11 @@ pub fn prepare_reserving<R: Runtime>(
         parents,
     };
     let scope_prefix = scope(store.service);
-    let now_s = runtime.now() as i64;
+    let now_s =
+        time::OffsetDateTime::parse(&work.at, &time::format_description::well_known::Rfc3339)
+            .ok()
+            .map(|dt| dt.unix_timestamp())
+            .unwrap_or_else(|| runtime.now() as i64);
     let mut computed_days: BTreeMap<i64, (Day, String, Vec<u8>)> = BTreeMap::new();
     let mut preview_days = head.days.clone();
     let mut preview_stats = head.statistics.clone();
@@ -830,20 +835,6 @@ pub fn prepare_reserving<R: Runtime>(
             preview_stats.insert(*day, index.statistics.clone());
         }
     }
-    if work.manifest.is_none() {
-        if runtime.admin_remaining_calls() <= reserve + 1 || !admitted(store) {
-            return pending(&mut work);
-        }
-        work.manifest = Some(put_manifest(
-            store,
-            &manifest,
-            head.reset_generation,
-            head.reset_at,
-            Some((&preview_days, &preview_stats)),
-            4 * 1024 * 1024,
-        )?);
-    }
-    let key = work.manifest.clone().ok_or("catalog_preparation_invalid")?;
     for day in &days {
         if work.published.contains_key(day) {
             continue;
@@ -858,6 +849,20 @@ pub fn prepare_reserving<R: Runtime>(
         work.published.insert(*day, day_key);
         work.days.insert(*day, index);
     }
+    if work.manifest.is_none() {
+        if runtime.admin_remaining_calls() <= reserve + 1 || !admitted(store) {
+            return pending(&mut work);
+        }
+        work.manifest = Some(put_manifest(
+            store,
+            &manifest,
+            head.reset_generation,
+            head.reset_at,
+            Some((&preview_days, &preview_stats)),
+            4 * 1024 * 1024,
+        )?);
+    }
+    let key = work.manifest.clone().ok_or("catalog_preparation_invalid")?;
     for day in &days {
         head.statistics
             .insert(*day, work.days[day].statistics.clone());
@@ -1014,6 +1019,9 @@ pub fn retire_reserving<R: Runtime>(store: &Store<'_, R>, reserve: u32) -> Resul
         }
         None => None,
     };
+    if let Some((day_key, day_body)) = encoded_partial {
+        store.put_verified(&day_key, day_body)?;
+    }
     let key = put_manifest(
         store,
         &manifest,
@@ -1022,9 +1030,6 @@ pub fn retire_reserving<R: Runtime>(store: &Store<'_, R>, reserve: u32) -> Resul
         Some((&next_days, &next_stats)),
         MANIFEST_LIMIT,
     )?;
-    if let Some((day_key, day_body)) = encoded_partial {
-        store.put_verified(&day_key, day_body)?;
-    }
     catalog.days = next_days;
     catalog.statistics = next_stats;
     catalog.hour_bundles.retain(|hour, _| *hour >= cutoff);

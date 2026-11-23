@@ -637,13 +637,231 @@ def _reject_ambiguous_syntax(sql: str, table_names: frozenset[str]) -> None:
             raise PermissionError(msg)
 
 
+def _exempt_col_list_ident_starts(sql: str) -> set[int]:
+    """Return character start offsets of valid CTE header and FROM/JOIN column-list aliases."""
+    sig = [
+        (m.lastgroup or "OTHER", m.group(0), m.start())
+        for m in _CONSOLE_SQL_LEX_RE.finditer(sql)
+        if (m.lastgroup or "OTHER") not in ("WS", "COMMENT")
+    ]
+    exempt: set[int] = set()
+
+    def _match_paren(s_list: list[tuple[str, str, int]], open_i: int) -> int:
+        depth = 0
+        for idx in range(open_i, len(s_list)):
+            k, t, _ = s_list[idx]
+            if k == "OP" and t == "(":
+                depth += 1
+            elif k == "OP" and t == ")":
+                depth -= 1
+                if depth == 0:
+                    return idx
+        return -1
+
+    def _valid_ident_list(sub_s: list[tuple[str, str, int]]) -> bool:
+        if not sub_s or len(sub_s) % 2 == 0:
+            return False
+        return all(
+            (sub_s[p][0] in ("IDENT", "DQUOTE") if p % 2 == 0 else (sub_s[p][0], sub_s[p][1]) == ("OP", ","))
+            for p in range(len(sub_s))
+        )
+
+    def _looks_like_subquery(sub_s: list[tuple[str, str, int]]) -> bool:
+        cur = sub_s
+        while len(cur) >= 2 and (cur[0][0], cur[0][1]) == ("OP", "("):
+            close_first = _match_paren(cur, 0)
+            if close_first == len(cur) - 1:
+                cur = cur[1:-1]
+                continue
+            if (
+                0 < close_first < len(cur) - 1
+                and cur[close_first + 1][0] == "IDENT"
+                and cur[close_first + 1][1].upper()
+                in ("UNION", "INTERSECT", "EXCEPT", "ORDER", "LIMIT", "OFFSET", "FETCH")
+            ):
+                return _looks_like_subquery(cur[1:close_first])
+            break
+        return bool(cur) and cur[0][0] == "IDENT" and cur[0][1].upper() in ("SELECT", "WITH", "FROM", "TABLE")
+
+    def _walk_nested_parens(sub_s: list[tuple[str, str, int]]) -> None:
+        if _looks_like_subquery(sub_s):
+            _walk_query(sub_s)
+            return
+        idx = 0
+        while idx < len(sub_s):
+            if (sub_s[idx][0], sub_s[idx][1]) == ("OP", "("):
+                cl = _match_paren(sub_s, idx)
+                if cl > idx:
+                    _walk_nested_parens(sub_s[idx + 1 : cl])
+                    idx = cl + 1
+                    continue
+            idx += 1
+
+    def _consume_alias_col_list(s_list: list[tuple[str, str, int]], a_i: int) -> int | None:
+        n = len(s_list)
+        if a_i >= n:
+            return None
+        if s_list[a_i][0] == "IDENT" and s_list[a_i][1].upper() == "AS":
+            a_i += 1
+            if a_i >= n or s_list[a_i][0] not in ("IDENT", "DQUOTE"):
+                return None
+            alias_tok = s_list[a_i]
+            lp_i = a_i + 1
+        elif s_list[a_i][0] in ("IDENT", "DQUOTE") and (
+            s_list[a_i][0] == "DQUOTE" or s_list[a_i][1].upper() not in _SQL_CLAUSE_STOPWORDS
+        ):
+            alias_tok = s_list[a_i]
+            lp_i = a_i + 1
+        else:
+            return None
+        if lp_i < n and (s_list[lp_i][0], s_list[lp_i][1]) == ("OP", "("):
+            rp_i = _match_paren(s_list, lp_i)
+            if rp_i > lp_i and _valid_ident_list(s_list[lp_i + 1 : rp_i]):
+                if alias_tok[0] == "IDENT":
+                    exempt.add(alias_tok[2])
+                return rp_i + 1
+        return None
+
+    def _walk_query(s_list: list[tuple[str, str, int]]) -> None:
+        while (
+            len(s_list) >= 2
+            and (s_list[0][0], s_list[0][1]) == ("OP", "(")
+            and _match_paren(s_list, 0) == len(s_list) - 1
+        ):
+            s_list = s_list[1:-1]
+        if not s_list:
+            return
+        pos = 0
+        n = len(s_list)
+        if s_list[0][0] == "IDENT" and s_list[0][1].upper() == "WITH":
+            p = 1
+            if p < n and s_list[p][0] == "IDENT" and s_list[p][1].upper() == "RECURSIVE":
+                p += 1
+            parsed_cte = False
+            while p < n:
+                if s_list[p][0] not in ("IDENT", "DQUOTE") or (
+                    s_list[p][0] == "IDENT" and s_list[p][1].upper() == "SELECT"
+                ):
+                    break
+                cte_tok = s_list[p]
+                p2 = p + 1
+                has_col_list = False
+                if p2 < n and (s_list[p2][0], s_list[p2][1]) == ("OP", "("):
+                    rp = _match_paren(s_list, p2)
+                    if rp <= p2 or not _valid_ident_list(s_list[p2 + 1 : rp]):
+                        break
+                    has_col_list = True
+                    p2 = rp + 1
+                if p2 >= n or s_list[p2][0] != "IDENT" or s_list[p2][1].upper() != "AS":
+                    break
+                p2 += 1
+                while p2 < n and s_list[p2][0] == "IDENT" and s_list[p2][1].upper() in ("NOT", "MATERIALIZED"):
+                    p2 += 1
+                if p2 >= n or (s_list[p2][0], s_list[p2][1]) != ("OP", "("):
+                    break
+                close_cte = _match_paren(s_list, p2)
+                if close_cte <= p2 or not _looks_like_subquery(s_list[p2 + 1 : close_cte]):
+                    break
+                if has_col_list and cte_tok[0] == "IDENT":
+                    exempt.add(cte_tok[2])
+                _walk_query(s_list[p2 + 1 : close_cte])
+                p = close_cte + 1
+                parsed_cte = True
+                if p < n and (s_list[p][0], s_list[p][1]) == ("OP", ","):
+                    p += 1
+                    continue
+                break
+            if parsed_cte:
+                pos = p
+
+        in_from = False
+        expect_table = False
+        in_on = False
+        while pos < n:
+            k, t, _ = s_list[pos]
+            if (k, t) == ("OP", "("):
+                cl = _match_paren(s_list, pos)
+                if cl <= pos:
+                    break
+                inner = s_list[pos + 1 : cl]
+                if in_from and expect_table and _looks_like_subquery(inner):
+                    _walk_query(inner)
+                    end_alias = _consume_alias_col_list(s_list, cl + 1)
+                    expect_table = False
+                    pos = end_alias if end_alias is not None else cl + 1
+                    continue
+                _walk_nested_parens(inner)
+                if in_from and expect_table:
+                    expect_table = False
+                pos = cl + 1
+                continue
+            if k == "IDENT":
+                wu = t.upper()
+                is_distinct_from = (
+                    wu == "FROM"
+                    and pos >= 2
+                    and s_list[pos - 1][0] == "IDENT"
+                    and s_list[pos - 1][1].upper() == "DISTINCT"
+                )
+                if (wu == "FROM" and not is_distinct_from) or wu == "JOIN":
+                    in_from = True
+                    expect_table = True
+                    in_on = False
+                    pos += 1
+                    continue
+                if in_from and wu in _JOIN_MODIFIER_KEYWORDS:
+                    expect_table = False
+                    pos += 1
+                    continue
+                if in_from and expect_table and wu in ("LATERAL", "ONLY"):
+                    pos += 1
+                    continue
+                if in_from and (wu == "ON" or (wu == "USING" and not in_on)):
+                    expect_table = False
+                    in_on = wu == "ON"
+                    pos += 1
+                    continue
+                if wu in _FROM_EXIT_KEYWORDS:
+                    in_from = False
+                    expect_table = False
+                    in_on = False
+                    pos += 1
+                    continue
+            if in_from and not in_on and (k, t) == ("OP", ","):
+                expect_table = True
+                pos += 1
+                continue
+            if in_from and expect_table and k in ("IDENT", "DQUOTE"):
+                if pos + 1 < n and (s_list[pos + 1][0], s_list[pos + 1][1]) == ("OP", "("):
+                    # Table function call (e.g. FROM file(...)): do NOT exempt, recurse args only.
+                    cl_fn = _match_paren(s_list, pos + 1)
+                    if cl_fn > pos + 1:
+                        _walk_nested_parens(s_list[pos + 2 : cl_fn])
+                        pos = cl_fn + 1
+                    else:
+                        pos += 1
+                    expect_table = False
+                    continue
+                end_alias = _consume_alias_col_list(s_list, pos + 1)
+                expect_table = False
+                pos = end_alias if end_alias is not None else pos + 1
+                continue
+            pos += 1
+
+    _walk_query(sig)
+    return exempt
+
+
 def _reject_unsafe_functions(sql: str) -> None:
+    exempt_starts = _exempt_col_list_ident_starts(sql)
     for match in _SQL_TOKEN.finditer(sql):
         token = match.group(0)
         name = match.group(1)
         if name is None:
             if token.startswith('"'):
                 raise PermissionError("quoted function names are not allowed")
+            continue
+        if match.start(1) in exempt_starts:
             continue
         lowered = name.lower()
         if lowered in _SQL_KEYWORDS or lowered in _ALLOWED_FUNCTIONS:
@@ -1755,6 +1973,10 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
             (r"NOT\s+IN\s*\(\s*'true'\s*\)", "NOT IN ('true', '1')"),
             (r"IN\s*\(\s*'false'\s*\)", "IN ('false', '0', '')"),
             (r"NOT\s+IN\s*\(\s*'false'\s*\)", "IN ('true', '1')"),
+            (r"IS\s+NOT\s+TRUE\b", "NOT IN ('true', '1')"),
+            (r"IS\s+TRUE\b", "IN ('true', '1')"),
+            (r"IS\s+NOT\s+FALSE\b", "NOT IN ('false', '0')"),
+            (r"IS\s+FALSE\b", "IN ('false', '0')"),
             (r"(?:!=|<>)\s*'true'", "NOT IN ('true', '1')"),
             (r"(?:!=|<>)\s*'false'", "IN ('true', '1')"),
             (r"(?:!=|<>)\s*\btrue\b", "NOT IN ('true', '1')"),
@@ -1764,12 +1986,57 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
             (r"(?<![!<>])=\s*\btrue\b", "IN ('true', '1')"),
             (r"(?<![!<>])=\s*\bfalse\b", "IN ('false', '0', '')"),
         )
+        _rev_bool_rules = (
+            (r"(?<![A-Za-z0-9_.\"'`])(?:'true'|\btrue\b)\s*(?:!=|<>)", "NOT IN ('true', '1')"),
+            (r"(?<![A-Za-z0-9_.\"'`])(?:'false'|\bfalse\b)\s*(?:!=|<>)", "IN ('true', '1')"),
+            (r"(?<![A-Za-z0-9_.\"'`])(?:'true'|\btrue\b)\s*(?<![!<>])=", "IN ('true', '1')"),
+            (r"(?<![A-Za-z0-9_.\"'`])(?:'false'|\bfalse\b)\s*(?<![!<>])=", "IN ('false', '0', '')"),
+        )
+        _unary_kw = frozenset(
+            {
+                "WHERE",
+                "AND",
+                "OR",
+                "NOT",
+                "XOR",
+                "ON",
+                "WHEN",
+                "THEN",
+                "ELSE",
+                "HAVING",
+                "PREWHERE",
+                "SELECT",
+                "CASE",
+                "BY",
+            }
+        )
+
+        def _is_standalone_num(src: str, start_idx: int, num_tok: str) -> bool:
+            if not num_tok.startswith("-"):
+                return True
+            before = src[:start_idx].rstrip()
+            if not before:
+                return True
+            if before[-1] in ")]\"'`":
+                return False
+            if before[-1].isalnum() or before[-1] == "_":
+                m_w = re.search(r"([A-Za-z_][A-Za-z0-9_]*)$", before)
+                return bool(m_w and m_w.group(1).upper() in _unary_kw)
+            return True
+
         if touches_request:
             for b_field in sorted(_REQUEST_BOOLEAN_CF_FIELDS):
                 for pat, repl in _bool_rules:
                     seg_sql = re.sub(
                         rf"({_qual_re})custom_fields\['{re.escape(b_field)}'\]\s*{pat}",
                         rf"lower(\1custom_fields['{b_field}']) {repl}",
+                        seg_sql,
+                        flags=re.IGNORECASE,
+                    )
+                for r_pat, r_repl in _rev_bool_rules:
+                    seg_sql = re.sub(
+                        rf"{r_pat}\s*({_qual_re})custom_fields\['{re.escape(b_field)}'\]",
+                        rf"lower(\1custom_fields['{b_field}']) {r_repl}",
                         seg_sql,
                         flags=re.IGNORECASE,
                     )
@@ -1785,30 +2052,72 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
             ):
                 seg_sql = re.sub(pat, repl, seg_sql)
 
-        if derived_str_cols and (unqualified_derived or derived_qualifiers):
+            def _sub_req_rev_eq(m: re.Match[str]) -> str:
+                if not _is_standalone_num(m.string, m.start(), m.group(1)):
+                    return m.group(0)
+                return f"'{m.group(1)}' {m.group(2)} {m.group(3)}"
 
-            def _qual_matches_derived(raw_qual: str) -> bool:
+            seg_sql = re.sub(
+                rf"(?<![A-Za-z0-9_.\"'`])(-?\d+(?:\.\d+)?)\s*(=|!=|<>)\s*({_qual_re}custom_fields\['[a-zA-Z0-9_]+'\])",
+                _sub_req_rev_eq,
+                seg_sql,
+            )
+
+            def _sub_req_rev_cmp(m: re.Match[str]) -> str:
+                if not _is_standalone_num(m.string, m.start(), m.group(1)):
+                    return m.group(0)
+                return f"{m.group(1)} {m.group(2)} toFloat64OrZero({m.group(3)})"
+
+            seg_sql = re.sub(
+                rf"(?<![A-Za-z0-9_.\"'`])(-?\d+(?:\.\d+)?)\s*(<=|>=|<|>)\s*({_qual_re}custom_fields\['[a-zA-Z0-9_]+'\])",
+                _sub_req_rev_cmp,
+                seg_sql,
+            )
+
+        if derived_str_cols and (unqualified_derived or derived_qualifiers):
+            _physical_req_cols = _REQUEST_TYPED_COLUMNS | {
+                "timestamp",
+                "event_timestamp",
+                "ip",
+                "client_ip",
+                "custom_fields",
+            }
+
+            def _qual_matches_derived(raw_qual: str, col_name: str) -> bool:
                 if not raw_qual:
-                    return unqualified_derived
+                    if not unqualified_derived:
+                        return False
+                    if touches_request and col_name in _physical_req_cols:
+                        return False
+                    return True
                 q_tok = raw_qual.rstrip()[:-1].strip()
                 return _unquote_sql_ident(q_tok).lower() in derived_qualifiers
 
             for d_col in sorted(derived_str_cols):
-                col_pat = rf"(?<![A-Za-z0-9_.\"'`])({_single_ident_re}\s*\.\s*)?(\b{re.escape(d_col)}\b)"
+                col_pat = rf"(?<![A-Za-z0-9_.\"'`])({_single_ident_re}\s*\.\s*)?(\b{re.escape(d_col)}\b)(?!\s*[.(])"
                 if d_col in _REQUEST_BOOLEAN_CF_FIELDS or d_col in derived_bool_cols:
                     for b_pat, b_repl in _bool_rules:
 
-                        def _sub_bool(m: re.Match[str], _repl: str = b_repl) -> str:
+                        def _sub_bool(m: re.Match[str], _repl: str = b_repl, _dc: str = d_col) -> str:
                             q_part = m.group(1) or ""
-                            if not _qual_matches_derived(q_part):
+                            if not _qual_matches_derived(q_part, _dc):
                                 return m.group(0)
                             return f"lower({q_part}{m.group(2)}) {_repl}"
 
                         seg_sql = re.sub(rf"{col_pat}\s*{b_pat}", _sub_bool, seg_sql, flags=re.IGNORECASE)
+                    for rb_pat, rb_repl in _rev_bool_rules:
 
-                def _sub_eq(m: re.Match[str]) -> str:
+                        def _sub_rev_bool(m: re.Match[str], _repl: str = rb_repl, _dc: str = d_col) -> str:
+                            q_part = m.group(1) or ""
+                            if not _qual_matches_derived(q_part, _dc):
+                                return m.group(0)
+                            return f"lower({q_part}{m.group(2)}) {_repl}"
+
+                        seg_sql = re.sub(rf"{rb_pat}\s*{col_pat}", _sub_rev_bool, seg_sql, flags=re.IGNORECASE)
+
+                def _sub_eq(m: re.Match[str], _dc: str = d_col) -> str:
                     q_part = m.group(1) or ""
-                    if not _qual_matches_derived(q_part):
+                    if not _qual_matches_derived(q_part, _dc):
                         return m.group(0)
                     return f"{q_part}{m.group(2)} {m.group(3)} '{m.group(4)}'"
 
@@ -1819,15 +2128,45 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                     flags=re.IGNORECASE,
                 )
 
-                def _sub_cmp(m: re.Match[str]) -> str:
+                def _sub_rev_eq(m: re.Match[str], _dc: str = d_col) -> str:
+                    q_part = m.group(3) or ""
+                    if not _is_standalone_num(m.string, m.start(), m.group(1)) or not _qual_matches_derived(
+                        q_part, _dc
+                    ):
+                        return m.group(0)
+                    return f"'{m.group(1)}' {m.group(2)} {q_part}{m.group(4)}"
+
+                seg_sql = re.sub(
+                    rf"(?<![A-Za-z0-9_.\"'`])(-?\d+(?:\.\d+)?)\s*(=|!=|<>)\s*{col_pat}",
+                    _sub_rev_eq,
+                    seg_sql,
+                    flags=re.IGNORECASE,
+                )
+
+                def _sub_cmp(m: re.Match[str], _dc: str = d_col) -> str:
                     q_part = m.group(1) or ""
-                    if not _qual_matches_derived(q_part):
+                    if not _qual_matches_derived(q_part, _dc):
                         return m.group(0)
                     return f"toFloat64OrZero({q_part}{m.group(2)}) {m.group(3)} {m.group(4)}"
 
                 seg_sql = re.sub(
                     rf"{col_pat}\s*(<=|>=|<|>)\s*(-?\d+(?:\.\d+)?)\b",
                     _sub_cmp,
+                    seg_sql,
+                    flags=re.IGNORECASE,
+                )
+
+                def _sub_rev_cmp(m: re.Match[str], _dc: str = d_col) -> str:
+                    q_part = m.group(3) or ""
+                    if not _is_standalone_num(m.string, m.start(), m.group(1)) or not _qual_matches_derived(
+                        q_part, _dc
+                    ):
+                        return m.group(0)
+                    return f"{m.group(1)} {m.group(2)} toFloat64OrZero({q_part}{m.group(4)})"
+
+                seg_sql = re.sub(
+                    rf"(?<![A-Za-z0-9_.\"'`])(-?\d+(?:\.\d+)?)\s*(<=|>=|<|>)\s*{col_pat}",
+                    _sub_rev_cmp,
                     seg_sql,
                     flags=re.IGNORECASE,
                 )
@@ -2249,6 +2588,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
 
         table_token_idxs: dict[int, str] = {}
         table_alias_idxs: set[int] = set()
+        from_source_schemas: list[_DerivedCfSchema] = []
         func_stack: list[str] = []
         top_from_s_pos: int | None = None
         in_from = False
@@ -2386,6 +2726,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                             col_list, end_sp = _consume_optional_col_alias_list(a_pos + 1)
                             if col_list is not None:
                                 sub_sch = _remap_derived_cf_schema(sub_sch, col_list)
+                            from_source_schemas.append(sub_sch)
                             branch_inherited_str_cf |= sub_sch.str_cols
                             branch_inherited_bool_cf |= sub_sch.bool_cols
                             _record_table_alias(sig_idxs[a_pos], sub_doms, sub_sch)
@@ -2405,12 +2746,14 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                         col_list, end_sp = _consume_optional_col_alias_list(a_pos + 1)
                         if col_list is not None:
                             sub_sch = _remap_derived_cf_schema(sub_sch, col_list)
+                        from_source_schemas.append(sub_sch)
                         branch_inherited_str_cf |= sub_sch.str_cols
                         branch_inherited_bool_cf |= sub_sch.bool_cols
                         _record_table_alias(sig_idxs[a_pos], sub_doms, sub_sch)
                         expect_table = False
                         s_pos = end_sp
                         continue
+                    from_source_schemas.append(sub_sch)
                     branch_inherited_str_cf |= sub_sch.str_cols
                     branch_inherited_bool_cf |= sub_sch.bool_cols
                     expect_table = False
@@ -2418,6 +2761,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                     continue
                 if k in ("IDENT", "DQUOTE"):
                     if k == "IDENT" and s_pos + 1 < len(sig_idxs) and processed[sig_idxs[s_pos + 1]] == ("OP", "("):
+                        from_source_schemas.append(_DerivedCfSchema())
                         expect_table = False
                         s_pos += 1
                         continue
@@ -2450,6 +2794,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                             col_list, end_sp = _consume_optional_col_alias_list(a_pos + 1)
                             if col_list is not None:
                                 item_sch = _remap_derived_cf_schema(item_sch, col_list)
+                            from_source_schemas.append(item_sch)
                             branch_inherited_str_cf |= item_sch.str_cols
                             branch_inherited_bool_cf |= item_sch.bool_cols
                             _record_table_alias(sig_idxs[a_pos], item_doms, item_sch)
@@ -2469,12 +2814,14 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                         col_list, end_sp = _consume_optional_col_alias_list(a_pos + 1)
                         if col_list is not None:
                             item_sch = _remap_derived_cf_schema(item_sch, col_list)
+                        from_source_schemas.append(item_sch)
                         branch_inherited_str_cf |= item_sch.str_cols
                         branch_inherited_bool_cf |= item_sch.bool_cols
                         _record_table_alias(sig_idxs[a_pos], item_doms, item_sch)
                         expect_table = False
                         s_pos = end_sp
                         continue
+                    from_source_schemas.append(item_sch)
                     branch_inherited_str_cf |= item_sch.str_cols
                     branch_inherited_bool_cf |= item_sch.bool_cols
                     expect_table = False
@@ -2490,11 +2837,25 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
 
         # Analyze SELECT projection list for *-propagation, subquery AS <col> aliasing, and string/bool CF tracking:
         projects_star = False
-        has_star_item = False
+        has_unknown_star_item = False
         auto_alias_after_idx: dict[int, str] = {}
+        proj_alias_idxs: set[int] = set()
         out_str_cf_cols: set[str] = set()
         out_bool_cf_cols: set[str] = set()
         pos_flags: list[tuple[bool, bool]] = []
+        _non_bare_col_alias_words = (
+            _SQL_CLAUSE_STOPWORDS
+            | _ON_EXPR_PREV_WORDS
+            | _ON_EXPR_NEXT_WORDS
+            | _SQL_INTERVAL_UNITS
+            | frozenset(w.upper() for w in _SQL_KEYWORDS)
+            | {"END", "NULL", "TRUE", "FALSE", "ASC", "DESC", "FIRST", "LAST", "NULLS"}
+        )
+        _non_bare_col_expr_ends = (
+            _SQL_CLAUSE_STOPWORDS
+            | _ON_EXPR_PREV_WORDS
+            | {"DISTINCT", "ALL", "CASE", "WHEN", "THEN", "ELSE", "INTERVAL", "CAST"}
+        )
         if sig_idxs and processed[sig_idxs[0]][0] == "IDENT" and processed[sig_idxs[0]][1].upper() == "SELECT":
             sel_end = top_from_s_pos if top_from_s_pos is not None else len(sig_idxs)
             sel_start = 1
@@ -2534,16 +2895,18 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
             for it_idxs in proj_items:
                 if len(it_idxs) == 1 and processed[it_idxs[0]] == ("OP", "*"):
                     projects_star = True
-                    has_star_item = True
                     out_str_cf_cols |= branch_inherited_str_cf
                     out_bool_cf_cols |= branch_inherited_bool_cf
+                    if len(from_source_schemas) == 1 and from_source_schemas[0].positional is not None:
+                        pos_flags.extend(from_source_schemas[0].positional)
+                    else:
+                        has_unknown_star_item = True
                 elif (
                     len(it_idxs) == 3
                     and processed[it_idxs[0]][0] in ("IDENT", "DQUOTE")
                     and processed[it_idxs[1]] == ("OP", ".")
                     and processed[it_idxs[2]] == ("OP", "*")
                 ):
-                    has_star_item = True
                     q_nm = _unquote_sql_ident(processed[it_idxs[0]][1]).lower()
                     q_dom = alias_domains.get(q_nm, domains)
                     if q_dom & raw_fact_domains:
@@ -2551,6 +2914,10 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                     q_sch = alias_schema.get(q_nm, _DerivedCfSchema())
                     out_str_cf_cols |= q_sch.str_cols
                     out_bool_cf_cols |= q_sch.bool_cols
+                    if q_sch.positional is not None:
+                        pos_flags.extend(q_sch.positional)
+                    else:
+                        has_unknown_star_item = True
                 elif len(it_idxs) == 1 and processed[it_idxs[0]][0] == "IDENT":
                     col_i = it_idxs[0]
                     col_raw = processed[col_i][1]
@@ -2613,61 +2980,83 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                     if is_b:
                         out_bool_cf_cols.add(col_low)
                     pos_flags.append((is_s, is_b))
-                elif (
-                    len(it_idxs) >= 3
-                    and processed[it_idxs[-2]][0] == "IDENT"
-                    and processed[it_idxs[-2]][1].upper() == "AS"
-                    and processed[it_idxs[-1]][0] in ("IDENT", "DQUOTE")
-                ):
-                    alias_low = _unquote_sql_ident(processed[it_idxs[-1]][1]).lower()
-                    expr_i = it_idxs[:-2]
-                    is_s = False
-                    is_b = False
-                    if len(expr_i) == 1 and processed[expr_i[0]][0] == "IDENT":
-                        e_low = processed[expr_i[0]][1].lower()
-                        if e_low in _REQUEST_CF_FIELDS and touches_request:
-                            is_s = True
-                            is_b = e_low in _REQUEST_BOOLEAN_CF_FIELDS
-                        elif e_low in branch_inherited_str_cf:
-                            is_s = True
-                            is_b = e_low in branch_inherited_bool_cf
-                    elif (
-                        len(expr_i) == 3
-                        and processed[expr_i[0]][0] in ("IDENT", "DQUOTE")
-                        and processed[expr_i[1]] == ("OP", ".")
-                        and processed[expr_i[2]][0] == "IDENT"
-                    ):
-                        q_nm = _unquote_sql_ident(processed[expr_i[0]][1]).lower()
-                        q_dom = alias_domains.get(q_nm, domains)
-                        q_sch = alias_schema.get(
-                            q_nm,
-                            _DerivedCfSchema(frozenset(branch_inherited_str_cf), frozenset(branch_inherited_bool_cf)),
-                        )
-                        e_low = processed[expr_i[2]][1].lower()
-                        if e_low in _REQUEST_CF_FIELDS and "request" in q_dom:
-                            is_s = True
-                            is_b = e_low in _REQUEST_BOOLEAN_CF_FIELDS
-                        elif e_low in q_sch.str_cols:
-                            is_s = True
-                            is_b = e_low in q_sch.bool_cols
-                    elif (
-                        len(expr_i) >= 4
-                        and processed[expr_i[-4]][0] == "IDENT"
-                        and processed[expr_i[-4]][1].lower() == "custom_fields"
-                        and processed[expr_i[-3]] == ("OP", "[")
-                        and processed[expr_i[-1]] == ("OP", "]")
-                    ):
-                        is_s = True
-                        cf_tok = processed[expr_i[-2]]
-                        if cf_tok[0] == "STR" and len(cf_tok[1]) >= 2:
-                            is_b = cf_tok[1][1:-1].lower() in _REQUEST_BOOLEAN_CF_FIELDS
-                    if is_s:
-                        out_str_cf_cols.add(alias_low)
-                    if is_b:
-                        out_bool_cf_cols.add(alias_low)
-                    pos_flags.append((is_s, is_b))
                 else:
-                    pos_flags.append((False, False))
+                    explicit_as_alias = (
+                        len(it_idxs) >= 3
+                        and processed[it_idxs[-2]][0] == "IDENT"
+                        and processed[it_idxs[-2]][1].upper() == "AS"
+                        and processed[it_idxs[-1]][0] in ("IDENT", "DQUOTE")
+                    )
+                    bare_col_alias = (
+                        not explicit_as_alias
+                        and len(it_idxs) >= 2
+                        and processed[it_idxs[-1]][0] in ("IDENT", "DQUOTE")
+                        and (
+                            processed[it_idxs[-1]][0] == "DQUOTE"
+                            or processed[it_idxs[-1]][1].upper() not in _non_bare_col_alias_words
+                        )
+                        and (
+                            processed[it_idxs[-2]][0] in ("DQUOTE", "STR", "NUM", "SUBQ")
+                            or processed[it_idxs[-2]] in (("OP", ")"), ("OP", "]"))
+                            or (
+                                processed[it_idxs[-2]][0] == "IDENT"
+                                and processed[it_idxs[-2]][1].upper() not in _non_bare_col_expr_ends
+                            )
+                        )
+                    )
+                    if explicit_as_alias or bare_col_alias:
+                        proj_alias_idxs.add(it_idxs[-1])
+                        alias_low = _unquote_sql_ident(processed[it_idxs[-1]][1]).lower()
+                        expr_i = it_idxs[:-2] if explicit_as_alias else it_idxs[:-1]
+                        is_s = False
+                        is_b = False
+                        if len(expr_i) == 1 and processed[expr_i[0]][0] == "IDENT":
+                            e_low = processed[expr_i[0]][1].lower()
+                            if e_low in _REQUEST_CF_FIELDS and touches_request:
+                                is_s = True
+                                is_b = e_low in _REQUEST_BOOLEAN_CF_FIELDS
+                            elif e_low in branch_inherited_str_cf:
+                                is_s = True
+                                is_b = e_low in branch_inherited_bool_cf
+                        elif (
+                            len(expr_i) == 3
+                            and processed[expr_i[0]][0] in ("IDENT", "DQUOTE")
+                            and processed[expr_i[1]] == ("OP", ".")
+                            and processed[expr_i[2]][0] == "IDENT"
+                        ):
+                            q_nm = _unquote_sql_ident(processed[expr_i[0]][1]).lower()
+                            q_dom = alias_domains.get(q_nm, domains)
+                            q_sch = alias_schema.get(
+                                q_nm,
+                                _DerivedCfSchema(
+                                    frozenset(branch_inherited_str_cf), frozenset(branch_inherited_bool_cf)
+                                ),
+                            )
+                            e_low = processed[expr_i[2]][1].lower()
+                            if e_low in _REQUEST_CF_FIELDS and "request" in q_dom:
+                                is_s = True
+                                is_b = e_low in _REQUEST_BOOLEAN_CF_FIELDS
+                            elif e_low in q_sch.str_cols:
+                                is_s = True
+                                is_b = e_low in q_sch.bool_cols
+                        elif (
+                            len(expr_i) >= 4
+                            and processed[expr_i[-4]][0] == "IDENT"
+                            and processed[expr_i[-4]][1].lower() == "custom_fields"
+                            and processed[expr_i[-3]] == ("OP", "[")
+                            and processed[expr_i[-1]] == ("OP", "]")
+                        ):
+                            is_s = True
+                            cf_tok = processed[expr_i[-2]]
+                            if cf_tok[0] == "STR" and len(cf_tok[1]) >= 2:
+                                is_b = cf_tok[1][1:-1].lower() in _REQUEST_BOOLEAN_CF_FIELDS
+                        if is_s:
+                            out_str_cf_cols.add(alias_low)
+                        if is_b:
+                            out_bool_cf_cols.add(alias_low)
+                        pos_flags.append((is_s, is_b))
+                    else:
+                        pos_flags.append((False, False))
 
         rewritten_tokens: list[tuple[str, str]] = []
         sig_pos_by_idx = {idx: pos for pos, idx in enumerate(sig_idxs)}
@@ -2675,7 +3064,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
             if idx in table_token_idxs:
                 rewritten_tokens.append(("IDENT", table_token_idxs[idx]))
                 continue
-            if idx in table_alias_idxs or k != "IDENT":
+            if idx in table_alias_idxs or idx in proj_alias_idxs or k != "IDENT":
                 rewritten_tokens.append((k, t))
                 continue
             s_pos = sig_pos_by_idx[idx]
@@ -2737,7 +3126,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 derived_str_cols=frozenset(branch_inherited_str_cf),
                 derived_bool_cols=frozenset(branch_inherited_bool_cf),
                 derived_qualifiers=derived_qualifiers,
-                unqualified_derived=has_derived_str_cf and not touches_request,
+                unqualified_derived=has_derived_str_cf,
             )
         else:
             branch_sql = "".join(_normalize_iso(tk) if kd == "STR" else tk for kd, tk in rewritten_tokens)
@@ -2752,7 +3141,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 exposed_domains.add("request_derived")
             if domains & {"rum_vitals", "rum_errors", "rum_derived"}:
                 exposed_domains.add("rum_derived")
-        out_pos = None if (has_star_item or not pos_flags) else tuple(pos_flags)
+        out_pos = None if (has_unknown_star_item or not pos_flags) else tuple(pos_flags)
         return (
             branch_sql,
             exposed_domains,

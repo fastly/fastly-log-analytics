@@ -40,7 +40,10 @@ function rowCount(data: unknown): number | null {
 const MESSAGE_LIMIT = 200;
 const SECRET_WORD = String.raw`(?:\w+[_-])?(?:token|key|secret|passw(?:or)?d|authorization|auth|bearer|cookie|signature|sig|credentials?)`;
 const DOLLAR_QUOTE_TAG_RE = /^\$([A-Za-z_\u0080-\uffff][A-Za-z0-9_\u0080-\uffff]*)?\$/;
-const ASCII_WORD_RE = /[A-Za-z0-9_]/;
+const WORD_CHAR_RE = /[\p{L}\p{N}_]/u;
+const QUOTE_DELIM_AFTER_RE = /[\s,.;:!?)\]}]/;
+const CONTRACTION_SUFFIX_RE = /^(?:s|t|d|m|re|ve|ll)(?=$|[\s,.;:!?)\]}])/iu;
+const IPV4_LITERAL_RE = /\b(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\b/g;
 
 function redactQuotedLiterals(input: string): string {
   let out = "";
@@ -58,20 +61,29 @@ function redactQuotedLiterals(input: string): string {
         continue;
       }
     }
-    const prevWord = i > 0 && ASCII_WORD_RE.test(input[i - 1]);
+    const prevWord = i > 0 && WORD_CHAR_RE.test(input[i - 1]);
     const typedSingleLen = prevWord
       ? 0
       : (ch === "U" || ch === "u") && input[i + 1] === "&" && input[i + 2] === "'"
         ? 3
-        : (ch === "E" || ch === "e" || ch === "B" || ch === "b" || ch === "X" || ch === "x" || ch === "U" || ch === "u") &&
-            input[i + 1] === "'"
+        : /^[EeBbXxUuNnRr]$/.test(ch) && input[i + 1] === "'"
           ? 2
           : 0;
-    if (typedSingleLen > 0 || (ch === "'" && !prevWord)) {
+    const isApostrophe =
+      ch === "'" &&
+      prevWord &&
+      (((input[i - 1] === "s" || input[i - 1] === "S") && (i + 1 >= len || QUOTE_DELIM_AFTER_RE.test(input[i + 1]))) ||
+        (i + 1 < len && CONTRACTION_SUFFIX_RE.test(input.slice(i + 1))));
+    if (typedSingleLen > 0 || (ch === "'" && !isApostrophe)) {
+      const isEscapeSingle = typedSingleLen > 0 && (ch === "E" || ch === "e" || ch === "U" || ch === "u");
       out += "[redacted]";
       i += typedSingleLen > 0 ? typedSingleLen : 1;
       while (i < len) {
-        if (input[i] === "\\") {
+        if (input[i] === "\\" && input[i + 1] === "\\") {
+          i += 2;
+          continue;
+        }
+        if (isEscapeSingle && input[i] === "\\") {
           i += 2;
           continue;
         }
@@ -79,6 +91,14 @@ function redactQuotedLiterals(input: string): string {
           if (input[i + 1] === "'") {
             i += 2;
             continue;
+          }
+          if (i + 1 < len && !QUOTE_DELIM_AFTER_RE.test(input[i + 1])) {
+            const nl = input.indexOf("\n", i + 1);
+            const restOfLine = input.slice(i + 1, nl === -1 ? len : nl);
+            if (restOfLine.includes("'")) {
+              i += 1;
+              continue;
+            }
           }
           i += 1;
           break;
@@ -121,6 +141,7 @@ function redactedMessage(message: string): string {
   const text = (preRedacted.split(/\r?\n/, 1)[0] ?? "")
     .replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s'"`]+/gi, "[url]")
     .replace(/\S+@\S+/g, "[redacted]")
+    .replace(IPV4_LITERAL_RE, "[redacted]")
     .replace(
       new RegExp(
         String.raw`\b(${SECRET_WORD})\b\s*[:=]?\s*(?:(?:bearer|basic|digest|token)\s+)?[^\s,;]+`,

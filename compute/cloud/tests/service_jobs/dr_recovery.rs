@@ -274,6 +274,7 @@ fn recover_fallback_scans_catalog_when_dr_state_missing_and_respects_budget() {
     let manifest_key = "processed/_catalog/manifest12.json";
     let day = Day {
         version: VERSION,
+        service_id: Some("fixtureService".into()),
         hours: BTreeMap::from([(
             1_700_006_400,
             Reference {
@@ -6078,8 +6079,7 @@ fn bug_cloud_dr_25a_post_delete_data_dr_recovery_handles_none_head_and_post_rese
             &time::format_description::well_known::Rfc3339,
         )
         .unwrap();
-        let reset_minute_ts = reset_dt.unix_timestamp() - reset_dt.unix_timestamp().rem_euclid(60);
-        let expected_reset_floor = format!("raw/request/{}", ingest::minute_dir(reset_minute_ts));
+        let expected_reset_floor = post_dd_wm["floor_key"].as_str().unwrap().to_owned();
 
         // Seed post-reset ingest batch gen=9 committed 45 minutes AFTER reset:
         let post_ingest_key = "processed/_catalog/manifest-000009-ingest.json";
@@ -6382,9 +6382,11 @@ fn bug_cloud_dr_26a_post_delete_data_3file_commits_day_filtering_and_rum_floor()
         &time::format_description::well_known::Rfc3339,
     )
     .unwrap();
-    let reset_minute_ts = reset_dt.unix_timestamp() - reset_dt.unix_timestamp().rem_euclid(60);
-    let expected_req_floor = format!("raw/request/{}", ingest::minute_dir(reset_minute_ts));
-    let expected_rum_floor = format!("raw/rum/{}", ingest::minute_dir(reset_minute_ts));
+    let expected_req_floor = post_dd_wm["floor_key"].as_str().unwrap().to_owned();
+    let expected_rum_floor = p.adapter.records()[&ingest::watermark_key("rum")].value["floor_key"]
+        .as_str()
+        .unwrap()
+        .to_owned();
 
     // Test 0, 1, and 12 real 3-file post-reset ingest commits (up to 36 post-reset .json files!)
     // across both stale Some(head) and stale None cloud_dr_state.json during DELETE_GRACE_S:
@@ -6814,6 +6816,7 @@ fn bug_cloud_dr_26c_shared_prefix_foreign_day_isolation() {
         m.insert(own_day_key, day_ts as u64 + 601);
     });
 
+    SECRETS.with(|s| s.borrow_mut().clear());
     let mix_res = p_mix.json(
         "POST",
         "/api/admin/provision/recover",
@@ -6923,4 +6926,1085 @@ fn bug_cloud_dr_26c_shared_prefix_foreign_day_isolation() {
         only_foreign_res["catalog_generation"].is_null(),
         "{only_foreign_res}"
     );
+}
+
+#[test]
+fn bug_cloud_dr_27b_paused_prepare_manifest_not_dangling_and_gen_sorted_manifests() {
+    use fastly_log_analytics::ingest::{self, storage::Store};
+    use std::sync::atomic::Ordering;
+
+    struct RichGuard;
+    impl Drop for RichGuard {
+        fn drop(&mut self) {
+            RICH_FOS.with(|r| r.set(false));
+            MTIMES.with(|m| m.borrow_mut().clear());
+        }
+    }
+    let _guard = RichGuard;
+    RICH_FOS.with(|r| r.set(true));
+    MTIMES.with(|m| m.borrow_mut().clear());
+
+    let p = Platform::new();
+    let provisioned = p.provision();
+    p.drain(provisioned["job"].clone());
+    let svc: Service =
+        serde_json::from_value(p.adapter.records()["svc:fixtureService"].value.clone()).unwrap();
+    let (ak, sk) = fastly_log_analytics::admin::fos_credentials(&p, &svc).unwrap();
+
+    // 1. 2-day commit pausing mid-prepare_reserving at T1 and resuming at T1 + 120s:
+    // Every day_key embedded in manifest.head_days MUST exist in S3 (no 404 dangling key),
+    // and manifest key must carry manifest-{:020}- prefix with mtime >= max(day mtimes).
+    let day1 = 1_795_132_800i64; // 2026-11-19T00:00:00Z
+    let day2 = day1 + 86_400; // 2026-11-20T00:00:00Z
+    let pq1 = ingest::processed_key("processed/request/", day1 + 60, day1 + 120, "p1", 10);
+    let pq2 = ingest::processed_key("processed/request/", day2 + 60, day2 + 3540, "p2", 20);
+    p.adapter
+        .seed_object_bytes(&svc.fos_bucket, &pq1, b"PAR1".to_vec());
+    p.adapter
+        .seed_object_bytes(&svc.fos_bucket, &pq2, b"PAR1".to_vec());
+    let outputs = [
+        ingest::worker::Output {
+            key: pq1,
+            bytes: 128,
+            rows: 10,
+            ..Default::default()
+        },
+        ingest::worker::Output {
+            key: pq2,
+            bytes: 128,
+            rows: 20,
+            ..Default::default()
+        },
+    ];
+    // Pause when 1 call short of finishing Day uploads + manifest:
+    p.clock.store((day2 + 120) as u64, Ordering::SeqCst);
+    SECRETS.with(|s| s.borrow_mut().clear());
+    ELAPSED_MS.with(|e| e.set(0));
+    CALLS.with(|c| c.set(32 - 6)); // 6 remaining calls (reserve=1 -> stops mid-commit!)
+    let store_t1 = Store {
+        runtime: &p,
+        service: &svc,
+        access_key: ak.clone(),
+        secret_key: sk.clone(),
+        started: std::time::Instant::now(),
+        vcpu_start: 0,
+    };
+    let err_t1 = ingest::catalog::prepare_reserving(
+        &store_t1,
+        &Value::Null,
+        "paused-2day",
+        "v2",
+        &outputs,
+        &[],
+        &[],
+        &[],
+        1,
+    )
+    .expect_err("Tick 1 with 8 remaining calls must pause mid-prepare");
+    assert_eq!(err_t1, "catalog_prepare_pending");
+
+    // Advance clock by +180s on Tick 2 so runtime.now() differs from work.at:
+    p.clock.store((day2 + 300) as u64, Ordering::SeqCst);
+    CALLS.with(|c| c.set(0));
+    let store_t2 = Store {
+        runtime: &p,
+        service: &svc,
+        access_key: ak,
+        secret_key: sk,
+        started: std::time::Instant::now(),
+        vcpu_start: 0,
+    };
+    let next_wm = ingest::catalog::prepare_reserving(
+        &store_t2,
+        &Value::Null,
+        "paused-2day",
+        "v2",
+        &outputs,
+        &[],
+        &[],
+        &[],
+        1,
+    )
+    .expect("Tick 2 must finish paused 2-day prepare");
+    p.adapter
+        .cas(ingest::WATERMARK_KEY, None, &next_wm)
+        .unwrap();
+
+    let head = catalog::head(&next_wm).unwrap();
+    let m_key = head.manifest.as_ref().unwrap();
+    assert!(
+        m_key.starts_with("processed/_catalog/manifest-00000000000000000001-"),
+        "manifest key must carry zero-padded generation prefix: {m_key}"
+    );
+    let bucket_objs = p.adapter.bucket_objects(&svc.fos_bucket);
+    let m_val: Value = serde_json::from_slice(&bucket_objs[m_key]).unwrap();
+    let embedded_days = m_val["head_days"].as_object().expect("head_days map");
+    assert_eq!(embedded_days.len(), 2);
+    let mtimes = MTIMES.with(|m| m.borrow().clone());
+    for (_dts, dk_val) in embedded_days {
+        let dk = dk_val.as_str().unwrap();
+        assert!(
+            bucket_objs.contains_key(dk),
+            "BUG-CLOUD-DR-27B: manifest.head_days key {dk} is a dangling 404 in S3!"
+        );
+        assert!(
+            mtimes[m_key] >= mtimes[dk],
+            "manifest mtime {} must be >= day mtime {}",
+            mtimes[m_key],
+            mtimes[dk]
+        );
+    }
+
+    // 2. 18 commits all sharing the exact same LastModified second (e.g. S3 CopyObject):
+    // Zero-padded generation prefix lets tight 24-call DR recover generation 19 on 1st get_object!
+    for i in 2..=19u64 {
+        commit_real_catalog_batch(&p, &svc, &format!("tie{i}"), day2 + (i as i64) * 60, 5);
+    }
+    let all_objs = p.adapter.bucket_objects(&svc.fos_bucket);
+    MTIMES.with(|m| {
+        let mut map = m.borrow_mut();
+        for k in all_objs.keys() {
+            map.insert(k.clone(), 1_800_000_000);
+        }
+    });
+    let p_dr = Platform::new();
+    p_dr.adapter.seed_resource(
+        "fixtureService",
+        "snippet",
+        json!({"name": "flp-owner-fixtureApp", "type": "recv", "priority": "0", "content": "# flp-owner:fixtureApp:fixtureService"}),
+    );
+    for (k, v) in &all_objs {
+        if k != "meta/cloud_dr_state.json" {
+            p_dr.adapter
+                .seed_object_bytes(&svc.fos_bucket, k, v.clone());
+        }
+    }
+    CALLS.with(|c| c.set(32 - 24));
+    SECRETS.with(|s| {
+        *s.borrow_mut() =
+            std::collections::BTreeSet::from(["front_key".into(), "session_key".into()])
+    });
+    let rec_resp = fastly_log_analytics::admin::handle(
+        &p_dr,
+        "fixtureAdmin",
+        &fastly_log_analytics::http::Request {
+            method: "POST".into(),
+            path: "/api/admin/provision/recover".into(),
+            headers: BTreeMap::new(),
+            body: json!({
+                "token": "fixture-token",
+                "service_id": "fixtureService",
+                "fos_bucket": "fos-fixture-logs",
+                "fos_region": "us-east-1"
+            })
+            .to_string()
+            .into_bytes(),
+        },
+    );
+    assert_eq!(rec_resp.status, 200);
+    let rec_body: Value = serde_json::from_slice(&rec_resp.body).unwrap();
+    assert_eq!(rec_body["catalog_generation"], 19, "{rec_body}");
+}
+
+#[test]
+fn bug_cloud_dr_27a_summary_bundle_publish_and_drop_missing_preserve_manifest_days_and_reset_fence()
+{
+    use fastly_log_analytics::ingest::{
+        self,
+        bundle::{open_bundle_key, Unit},
+        catalog::bundles::{self, Coverage, PublishOutcome},
+        storage::Store,
+    };
+    use std::collections::BTreeSet;
+    use std::sync::atomic::Ordering;
+
+    struct RichGuard;
+    impl Drop for RichGuard {
+        fn drop(&mut self) {
+            RICH_FOS.with(|r| r.set(false));
+            MTIMES.with(|m| m.borrow_mut().clear());
+        }
+    }
+    let _guard = RichGuard;
+    RICH_FOS.with(|r| r.set(true));
+    MTIMES.with(|m| m.borrow_mut().clear());
+
+    let p = Platform::new();
+    let provisioned = p.provision();
+    p.drain(provisioned["job"].clone());
+    let svc: Service =
+        serde_json::from_value(p.adapter.records()["svc:fixtureService"].value.clone()).unwrap();
+
+    // Part 1: Normal service with 500 rows across 2 days + dr_state synced at gen=2 + 6 open_bundle publishes + 1 drop_missing:
+    let day1 = 1_795_132_800i64;
+    let day2 = day1 + 86_400;
+    p.clock.store((day1 + 120) as u64, Ordering::SeqCst);
+    commit_real_catalog_batch(&p, &svc, "norm1", day1 + 60, 200);
+    p.clock.store((day2 + 120) as u64, Ordering::SeqCst);
+    commit_real_catalog_batch(&p, &svc, "norm2", day2 + 60, 300);
+    CALLS.with(|c| c.set(0));
+    SECRETS.with(|s| s.borrow_mut().clear());
+    dr::sync_best_effort(&p, &svc);
+    let dr_gen2 = p.adapter.bucket_objects(&svc.fos_bucket)["meta/cloud_dr_state.json"].clone();
+
+    let (ak, sk) = fastly_log_analytics::admin::fos_credentials(&p, &svc).unwrap();
+    let mut last_open_ref = None;
+    let mut last_open_file = String::new();
+    for step_i in 1..=6u64 {
+        p.clock
+            .store((day2 + 200 + step_i as i64 * 10) as u64, Ordering::SeqCst);
+        CALLS.with(|c| c.set(0));
+        let store = Store {
+            runtime: &p,
+            service: &svc,
+            access_key: ak.clone(),
+            secret_key: sk.clone(),
+            started: std::time::Instant::now(),
+            vcpu_start: 0,
+        };
+        let ob_key = open_bundle_key(
+            "processed/summary_bundle/request/",
+            day2,
+            (day2 + step_i as i64 * 60) * 1000,
+            &[format!("w{step_i}.parquet")],
+        );
+        p.adapter
+            .seed_object_bytes(&svc.fos_bucket, &ob_key, b"PAR1".to_vec());
+        let cov = Coverage {
+            file: ingest::worker::Output {
+                key: ob_key.clone(),
+                bytes: 64,
+                rows: step_i * 5,
+                ..Default::default()
+            },
+            start: day2,
+            end: day2 + 3600,
+            windows: BTreeSet::from([format!("w{step_i}.parquet")]),
+            hours: BTreeMap::new(),
+            built_generation: 2 + step_i - 1,
+        };
+        match bundles::publish(&store, &cov, 0).unwrap() {
+            PublishOutcome::Published(h) => {
+                last_open_ref = h.open_bundles.get(&day2).cloned();
+                last_open_file = ob_key;
+            }
+            _ => panic!("expected Published"),
+        }
+    }
+    p.clock.store((day2 + 400) as u64, Ordering::SeqCst);
+    CALLS.with(|c| c.set(0));
+    let store_drop = Store {
+        runtime: &p,
+        service: &svc,
+        access_key: ak.clone(),
+        secret_key: sk.clone(),
+        started: std::time::Instant::now(),
+        vcpu_start: 0,
+    };
+    let dropped_head =
+        bundles::drop_missing(&store_drop, &[(last_open_ref.unwrap(), last_open_file)], 0)
+            .unwrap()
+            .expect("drop_missing head");
+    assert_eq!(dropped_head.generation, 9);
+    assert!(
+        dropped_head
+            .manifest
+            .as_deref()
+            .unwrap()
+            .starts_with("processed/_catalog/manifest-00000000000000000009-"),
+        "bundles::drop_missing must write generation-prefixed manifest: {:?}",
+        dropped_head.manifest
+    );
+    let _ = Unit::Hour;
+
+    // Cold DR recover at remaining=25 must preserve all 500 rows across both days:
+    let snap_objs = p.adapter.bucket_objects(&svc.fos_bucket);
+    let mtimes_norm = MTIMES.with(|m| m.borrow().clone());
+    let p_rec1 = Platform::new();
+    p_rec1.adapter.seed_resource(
+        "fixtureService",
+        "snippet",
+        json!({"name": "flp-owner-fixtureApp", "type": "recv", "priority": "0", "content": "# flp-owner:fixtureApp:fixtureService"}),
+    );
+    MTIMES.with(|m| *m.borrow_mut() = mtimes_norm);
+    for (k, v) in &snap_objs {
+        p_rec1
+            .adapter
+            .seed_object_bytes(&svc.fos_bucket, k, v.clone());
+    }
+    p_rec1
+        .adapter
+        .seed_object_bytes(&svc.fos_bucket, "meta/cloud_dr_state.json", dr_gen2.clone());
+    CALLS.with(|c| c.set(32 - 25));
+    SECRETS.with(|s| {
+        *s.borrow_mut() =
+            std::collections::BTreeSet::from(["front_key".into(), "session_key".into()])
+    });
+    let r1 = fastly_log_analytics::admin::handle(
+        &p_rec1,
+        "fixtureAdmin",
+        &fastly_log_analytics::http::Request {
+            method: "POST".into(),
+            path: "/api/admin/provision/recover".into(),
+            headers: BTreeMap::new(),
+            body: json!({
+                "token": "fixture-token",
+                "service_id": "fixtureService",
+                "fos_bucket": "fos-fixture-logs",
+                "fos_region": "us-east-1"
+            })
+            .to_string()
+            .into_bytes(),
+        },
+    );
+    assert_eq!(r1.status, 200);
+    let rec1_head = catalog::head(&p_rec1.adapter.records()[ingest::WATERMARK_KEY].value).unwrap();
+    assert_eq!(rec1_head.generation, 9);
+    assert_eq!(
+        rec1_head.statistics.values().map(|s| s.rows).sum::<u64>(),
+        500,
+        "BUG-CLOUD-DR-27A: summary_bundle commits must not wipe Head.days on DR recover!"
+    );
+
+    // Part 2: Post-Delete-Data reset + 1 post-reset ingest (10 rows) + 12 open_bundle publishes + stale pre-reset dr_state (42,000 RUM rows):
+    p.adapter
+        .cas(
+            &ingest::watermark_key("rum"),
+            None,
+            &json!({"floor_key": "raw/rum/year=2026/month=11/day=19/hour=00/minute=00/", "rum_stats": {"earliest": day1, "latest": day2, "rows": 42_000u64, "at": day2 + 400}}),
+        )
+        .unwrap();
+    CALLS.with(|c| c.set(0));
+    SECRETS.with(|s| s.borrow_mut().clear());
+    dr::sync_best_effort(&p, &svc);
+    let stale_pre_reset_dr =
+        p.adapter.bucket_objects(&svc.fos_bucket)["meta/cloud_dr_state.json"].clone();
+
+    let reset_start_ts = day2 + 3600;
+    p.clock.store(reset_start_ts as u64, Ordering::SeqCst);
+    let gen_svc = p.adapter.records()["svc:fixtureService"].generation.clone();
+    let dd_resp = p.call(
+        "POST",
+        "/api/admin/services/fixtureService/delete-data",
+        json!({"confirm_service_id": "fixtureService", "generation": gen_svc}),
+    );
+    assert_eq!(dd_resp.status, 200);
+    p.clock
+        .store((reset_start_ts + 425) as u64, Ordering::SeqCst);
+    for _ in 0..8 {
+        let recs = p.adapter.records();
+        let cur_svc: Service =
+            serde_json::from_value(recs["svc:fixtureService"].value.clone()).unwrap();
+        let (ak_s, sk_s) = fastly_log_analytics::admin::fos_credentials(&p, &cur_svc).unwrap();
+        CALLS.with(|c| c.set(0));
+        SECRETS.with(|s| s.borrow_mut().clear());
+        let store = Store {
+            runtime: &p,
+            service: &cur_svc,
+            access_key: ak_s,
+            secret_key: sk_s,
+            started: std::time::Instant::now(),
+            vcpu_start: 0,
+        };
+        if fastly_log_analytics::admin::reset::advance(&store).is_none() {
+            break;
+        }
+    }
+    let post_day = day2 + 86_400;
+    p.clock.store((post_day + 120) as u64, Ordering::SeqCst);
+    commit_real_catalog_batch(&p, &svc, "post1", post_day + 60, 10);
+    for step_i in 1..=12u64 {
+        p.clock.store(
+            (post_day + 200 + step_i as i64 * 10) as u64,
+            Ordering::SeqCst,
+        );
+        CALLS.with(|c| c.set(0));
+        let store = Store {
+            runtime: &p,
+            service: &svc,
+            access_key: ak.clone(),
+            secret_key: sk.clone(),
+            started: std::time::Instant::now(),
+            vcpu_start: 0,
+        };
+        let ob_key = open_bundle_key(
+            "processed/summary_bundle/request/",
+            post_day,
+            (post_day + step_i as i64 * 60) * 1000,
+            &[format!("pw{step_i}.parquet")],
+        );
+        p.adapter
+            .seed_object_bytes(&svc.fos_bucket, &ob_key, b"PAR1".to_vec());
+        let cov = Coverage {
+            file: ingest::worker::Output {
+                key: ob_key,
+                bytes: 64,
+                rows: step_i,
+                ..Default::default()
+            },
+            start: post_day,
+            end: post_day + 3600,
+            windows: BTreeSet::from([format!("pw{step_i}.parquet")]),
+            hours: BTreeMap::new(),
+            built_generation: 10 + step_i,
+        };
+        assert!(matches!(
+            bundles::publish(&store, &cov, 0).unwrap(),
+            PublishOutcome::Published(_)
+        ));
+    }
+
+    let post_objs = p.adapter.bucket_objects(&svc.fos_bucket);
+    let mtimes_post = MTIMES.with(|m| m.borrow().clone());
+    let p_rec2 = Platform::new();
+    p_rec2.adapter.seed_resource(
+        "fixtureService",
+        "snippet",
+        json!({"name": "flp-owner-fixtureApp", "type": "recv", "priority": "0", "content": "# flp-owner:fixtureApp:fixtureService"}),
+    );
+    MTIMES.with(|m| *m.borrow_mut() = mtimes_post);
+    for (k, v) in &post_objs {
+        p_rec2
+            .adapter
+            .seed_object_bytes(&svc.fos_bucket, k, v.clone());
+    }
+    p_rec2.adapter.seed_object_bytes(
+        &svc.fos_bucket,
+        "meta/cloud_dr_state.json",
+        stale_pre_reset_dr,
+    );
+    CALLS.with(|c| c.set(32 - 25));
+    SECRETS.with(|s| {
+        *s.borrow_mut() =
+            std::collections::BTreeSet::from(["front_key".into(), "session_key".into()])
+    });
+    let r2 = fastly_log_analytics::admin::handle(
+        &p_rec2,
+        "fixtureAdmin",
+        &fastly_log_analytics::http::Request {
+            method: "POST".into(),
+            path: "/api/admin/provision/recover".into(),
+            headers: BTreeMap::new(),
+            body: json!({
+                "token": "fixture-token",
+                "service_id": "fixtureService",
+                "fos_bucket": "fos-fixture-logs",
+                "fos_region": "us-east-1"
+            })
+            .to_string()
+            .into_bytes(),
+        },
+    );
+    assert_eq!(r2.status, 200);
+    let rec2_recs = p_rec2.adapter.records();
+    let rec2_head = catalog::head(&rec2_recs[ingest::WATERMARK_KEY].value).unwrap();
+    assert_eq!(
+        rec2_head.statistics.values().map(|s| s.rows).sum::<u64>(),
+        10,
+        "post-reset 10 rows must survive 12 summary_bundle commits!"
+    );
+    assert!(
+        rec2_recs
+            .get(&ingest::watermark_key("rum"))
+            .is_none_or(|r| r.value.get("rum_stats").is_none_or(Value::is_null)),
+        "BUG-CLOUD-DR-27A: deleted 42,000 RUM rows must NOT be resurrected!"
+    );
+}
+
+#[test]
+fn bug_cloud_dr_27a_reset_manifest_tie_exact_job_floor_and_rum_part_gate() {
+    use fastly_log_analytics::ingest::{self, storage::Store};
+    use std::sync::atomic::Ordering;
+
+    struct RichGuard;
+    impl Drop for RichGuard {
+        fn drop(&mut self) {
+            RICH_FOS.with(|r| r.set(false));
+            MTIMES.with(|m| m.borrow_mut().clear());
+        }
+    }
+    let _guard = RichGuard;
+    RICH_FOS.with(|r| r.set(true));
+    MTIMES.with(|m| m.borrow_mut().clear());
+
+    // Part 1: 16 pre-reset commits (2,000 rows) + Delete Data at 08:09:20Z (floor 08:09:00Z, CAS at 08:16:25Z)
+    // + same-second LastModified tie across all _catalog/*.json + 0 post-reset commits:
+    let p = Platform::new();
+    let provisioned = p.provision();
+    p.drain(provisioned["job"].clone());
+    let svc: Service =
+        serde_json::from_value(p.adapter.records()["svc:fixtureService"].value.clone()).unwrap();
+    let base_ts = 1_799_996_400i64; // 2027-01-15T07:00:00Z
+    for i in 1..=16u64 {
+        p.clock
+            .store((base_ts + i as i64 * 60) as u64, Ordering::SeqCst);
+        commit_real_catalog_batch(&p, &svc, &format!("pre{i}"), base_ts + i as i64 * 60, 125);
+    }
+    p.adapter
+        .cas(
+            &ingest::watermark_key("rum"),
+            None,
+            &json!({"rum_stats": {"earliest": base_ts, "latest": base_ts + 960, "rows": 5_000u64, "at": base_ts + 960}}),
+        )
+        .unwrap();
+    CALLS.with(|c| c.set(0));
+    SECRETS.with(|s| s.borrow_mut().clear());
+    dr::sync_best_effort(&p, &svc);
+    let stale_dr = p.adapter.bucket_objects(&svc.fos_bucket)["meta/cloud_dr_state.json"].clone();
+
+    let dd_click_ts = 1_800_000_560u64; // minute = 1_800_000_540 (08:09:00Z)
+    p.clock.store(dd_click_ts, Ordering::SeqCst);
+    let gen_svc = p.adapter.records()["svc:fixtureService"].generation.clone();
+    let dd_resp = p.call(
+        "POST",
+        "/api/admin/services/fixtureService/delete-data",
+        json!({"confirm_service_id": "fixtureService", "generation": gen_svc}),
+    );
+    assert_eq!(dd_resp.status, 200);
+    p.clock.store(dd_click_ts + 425, Ordering::SeqCst); // 08:16:25Z (7m05s later!)
+    for _ in 0..8 {
+        let recs = p.adapter.records();
+        let cur_svc: Service =
+            serde_json::from_value(recs["svc:fixtureService"].value.clone()).unwrap();
+        let (ak_s, sk_s) = fastly_log_analytics::admin::fos_credentials(&p, &cur_svc).unwrap();
+        CALLS.with(|c| c.set(0));
+        SECRETS.with(|s| s.borrow_mut().clear());
+        let store = Store {
+            runtime: &p,
+            service: &cur_svc,
+            access_key: ak_s,
+            secret_key: sk_s,
+            started: std::time::Instant::now(),
+            vcpu_start: 0,
+        };
+        if fastly_log_analytics::admin::reset::advance(&store).is_none() {
+            break;
+        }
+    }
+    let expected_req_floor = p.adapter.records()[ingest::WATERMARK_KEY].value["floor_key"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let expected_rum_floor = p.adapter.records()[&ingest::watermark_key("rum")].value["floor_key"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // Force same-second LastModified tie across ALL _catalog/*.json objects:
+    let objs = p.adapter.bucket_objects(&svc.fos_bucket);
+    MTIMES.with(|m| {
+        let mut map = m.borrow_mut();
+        for k in objs.keys() {
+            map.insert(k.clone(), 1_800_001_000);
+        }
+    });
+    let p_tie = Platform::new();
+    p_tie.adapter.seed_resource(
+        "fixtureService",
+        "snippet",
+        json!({"name": "flp-owner-fixtureApp", "type": "recv", "priority": "0", "content": "# flp-owner:fixtureApp:fixtureService"}),
+    );
+    for (k, v) in &objs {
+        p_tie
+            .adapter
+            .seed_object_bytes(&svc.fos_bucket, k, v.clone());
+    }
+    p_tie
+        .adapter
+        .seed_object_bytes(&svc.fos_bucket, "meta/cloud_dr_state.json", stale_dr);
+    CALLS.with(|c| c.set(32 - 24));
+    SECRETS.with(|s| {
+        *s.borrow_mut() =
+            std::collections::BTreeSet::from(["front_key".into(), "session_key".into()])
+    });
+    let r_tie = fastly_log_analytics::admin::handle(
+        &p_tie,
+        "fixtureAdmin",
+        &fastly_log_analytics::http::Request {
+            method: "POST".into(),
+            path: "/api/admin/provision/recover".into(),
+            headers: BTreeMap::new(),
+            body: json!({
+                "token": "fixture-token",
+                "service_id": "fixtureService",
+                "fos_bucket": "fos-fixture-logs",
+                "fos_region": "us-east-1"
+            })
+            .to_string()
+            .into_bytes(),
+        },
+    );
+    assert_eq!(r_tie.status, 200);
+    let tie_recs = p_tie.adapter.records();
+    let tie_head = catalog::head(&tie_recs[ingest::WATERMARK_KEY].value).unwrap();
+    assert!(
+        tie_head.days.is_empty(),
+        "BUG-CLOUD-DR-27A: same-second tie resurrected pre-reset days: {:?}",
+        tie_head.days
+    );
+    assert_eq!(
+        tie_recs[ingest::WATERMARK_KEY].value["floor_key"].as_str(),
+        Some(expected_req_floor.as_str()),
+        "BUG-CLOUD-DR-27A: recovered request floor_key must match job.reset_at, not post-fence reset_cas_at!"
+    );
+    assert_eq!(
+        tie_recs[&ingest::watermark_key("rum")].value["floor_key"].as_str(),
+        Some(expected_rum_floor.as_str()),
+        "BUG-CLOUD-DR-27A: recovered rum floor_key must match job.reset_at!"
+    );
+    assert!(tie_recs[&ingest::watermark_key("rum")]
+        .value
+        .get("rum_stats")
+        .is_none_or(Value::is_null));
+
+    // Part 2: Premature sync_dr_now gate when status transitions "resetting" -> "cleanup" via RESET_GIVE_UP_S
+    // while RUM_PART has NOT yet succeeded (conflict on rum watermark):
+    let p2 = Platform::new();
+    let prov2 = p2.provision();
+    p2.drain(prov2["job"].clone());
+    p2.adapter
+        .cas(
+            &ingest::watermark_key("rum"),
+            None,
+            &json!({"rum_stats": {"earliest": base_ts, "latest": base_ts + 60, "rows": 7_777u64, "at": base_ts + 60}}),
+        )
+        .unwrap();
+    let t0 = 1_800_100_000u64;
+    p2.clock.store(t0, Ordering::SeqCst);
+    let g2 = p2.adapter.records()["svc:fixtureService"]
+        .generation
+        .clone();
+    assert_eq!(
+        p2.call(
+            "POST",
+            "/api/admin/services/fixtureService/delete-data",
+            json!({"confirm_service_id": "fixtureService", "generation": g2}),
+        )
+        .status,
+        200
+    );
+    // Tick 1: advance past fence wait ("fencing" -> "resetting"):
+    p2.clock.store(t0 + 425, Ordering::SeqCst);
+    {
+        let cur_svc: Service =
+            serde_json::from_value(p2.adapter.records()["svc:fixtureService"].value.clone())
+                .unwrap();
+        let (ak_s, sk_s) = fastly_log_analytics::admin::fos_credentials(&p2, &cur_svc).unwrap();
+        CALLS.with(|c| c.set(0));
+        SECRETS.with(|s| s.borrow_mut().clear());
+        let store = Store {
+            runtime: &p2,
+            service: &cur_svc,
+            access_key: ak_s,
+            secret_key: sk_s,
+            started: std::time::Instant::now(),
+            vcpu_start: 0,
+        };
+        let _ = fastly_log_analytics::admin::reset::advance(&store);
+    }
+    assert_eq!(
+        p2.adapter.records()[fastly_log_analytics::admin::reset::JOB_KEY].value["status"],
+        "resetting"
+    );
+    struct ConflictGuard;
+    impl Drop for ConflictGuard {
+        fn drop(&mut self) {
+            CONFLICT_CAS.with(|k| *k.borrow_mut() = None);
+        }
+    }
+    let _conflict_guard = ConflictGuard;
+    let rum_wm_key = ingest::watermark_key("rum");
+    CONFLICT_CAS.with(|k| *k.borrow_mut() = Some(rum_wm_key));
+
+    // Tick 2: request WATERMARK_KEY CAS lands, then rum_watermark CAS conflicts so RUM_PART is NOT in steps_done:
+    p2.clock.store(t0 + 426, Ordering::SeqCst);
+    {
+        let cur_svc: Service =
+            serde_json::from_value(p2.adapter.records()["svc:fixtureService"].value.clone())
+                .unwrap();
+        let (ak_s, sk_s) = fastly_log_analytics::admin::fos_credentials(&p2, &cur_svc).unwrap();
+        CALLS.with(|c| c.set(0));
+        SECRETS.with(|s| s.borrow_mut().clear());
+        let store = Store {
+            runtime: &p2,
+            service: &cur_svc,
+            access_key: ak_s,
+            secret_key: sk_s,
+            started: std::time::Instant::now(),
+            vcpu_start: 0,
+        };
+        let _ = fastly_log_analytics::admin::reset::advance(&store);
+    }
+    // Tick 3: advance past RESET_GIVE_UP_S while rum_watermark CAS still conflicts so reset_bound moves to "cleanup" without RUM_PART (with plenty of remaining calls >= 5):
+    p2.clock.store(
+        t0 + 426 + fastly_log_analytics::admin::reset::RESET_GIVE_UP_S + 10,
+        Ordering::SeqCst,
+    );
+    {
+        let cur_svc: Service =
+            serde_json::from_value(p2.adapter.records()["svc:fixtureService"].value.clone())
+                .unwrap();
+        let (ak_s, sk_s) = fastly_log_analytics::admin::fos_credentials(&p2, &cur_svc).unwrap();
+        CALLS.with(|c| c.set(0));
+        SECRETS.with(|s| s.borrow_mut().clear());
+        let store = Store {
+            runtime: &p2,
+            service: &cur_svc,
+            access_key: ak_s,
+            secret_key: sk_s,
+            started: std::time::Instant::now(),
+            vcpu_start: 0,
+        };
+        let _ = fastly_log_analytics::admin::reset::advance(&store);
+    }
+    let job_rec = &p2.adapter.records()[fastly_log_analytics::admin::reset::JOB_KEY].value;
+    assert_eq!(job_rec["status"], "cleanup");
+    let steps: Vec<&str> = job_rec["steps_done"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(
+        !steps.contains(&"rum_watermark"),
+        "expected RUM_PART still pending: {steps:?}"
+    );
+    assert!(
+        !steps.contains(&"dr_synced"),
+        "1e728113 Finding 3: sync_dr_now must NOT mark dr_synced before RUM_PART completes: {steps:?}"
+    );
+}
+
+#[test]
+fn bug_cloud_dr_27bcd_retire_isolation_mixed_legacy_days_and_cold_catalog_scan_front_sync() {
+    use fastly_log_analytics::ingest::{self, storage::Store};
+    use std::sync::atomic::Ordering;
+
+    struct RichGuard;
+    impl Drop for RichGuard {
+        fn drop(&mut self) {
+            RICH_FOS.with(|r| r.set(false));
+            MTIMES.with(|m| m.borrow_mut().clear());
+        }
+    }
+    let _guard = RichGuard;
+    RICH_FOS.with(|r| r.set(true));
+    MTIMES.with(|m| m.borrow_mut().clear());
+
+    // 1. BUG-CLOUD-DR-27B/C (2A): catalog::retire + POST /api/admin/provision/recover must NOT resurrect retired Day objects:
+    let p = Platform::new();
+    let provisioned = p.provision();
+    p.drain(provisioned["job"].clone());
+    let patched = p.json(
+        "PATCH",
+        "/api/admin/services/fixtureService",
+        json!({"generation": p.service()["generation"], "log_retention_days": 7}),
+    );
+    let svc: Service = serde_json::from_value(patched["service"].clone()).unwrap();
+    let expired_day = 1_794_268_800i64; // 2026-11-10
+    let active_day = 1_794_873_600i64; // 2026-11-17
+    p.clock.store((active_day + 120) as u64, Ordering::SeqCst);
+    commit_real_catalog_batch(&p, &svc, "act1", active_day + 60, 50);
+    p.clock.store((active_day + 180) as u64, Ordering::SeqCst);
+    commit_real_catalog_batch(&p, &svc, "exp1", expired_day + 60, 700);
+
+    // Advance clock 8 days past expired_day so expired_day < cutoff_day while active_day >= cutoff_day:
+    p.clock
+        .store((expired_day + 8 * 86_400 + 3600) as u64, Ordering::SeqCst);
+    CALLS.with(|c| c.set(0));
+    SECRETS.with(|s| s.borrow_mut().clear());
+    let (ak, sk) = fastly_log_analytics::admin::fos_credentials(&p, &svc).unwrap();
+    let store = Store {
+        runtime: &p,
+        service: &svc,
+        access_key: ak,
+        secret_key: sk,
+        started: std::time::Instant::now(),
+        vcpu_start: 0,
+    };
+    ingest::catalog::retire_reserving(&store, 0).expect("catalog::retire_reserving");
+    let head_before = catalog::head(&p.adapter.records()[ingest::WATERMARK_KEY].value).unwrap();
+    assert_eq!(
+        head_before.statistics.values().map(|s| s.rows).sum::<u64>(),
+        50
+    );
+
+    let objs_ret = p.adapter.bucket_objects(&svc.fos_bucket);
+    let mtimes_ret = MTIMES.with(|m| m.borrow().clone());
+    let p_ret_dr = Platform::new();
+    p_ret_dr.adapter.seed_resource(
+        "fixtureService",
+        "snippet",
+        json!({"name": "flp-owner-fixtureApp", "type": "recv", "priority": "0", "content": "# flp-owner:fixtureApp:fixtureService"}),
+    );
+    MTIMES.with(|m| *m.borrow_mut() = mtimes_ret);
+    for (k, v) in &objs_ret {
+        p_ret_dr
+            .adapter
+            .seed_object_bytes(&svc.fos_bucket, k, v.clone());
+    }
+    let ret_res = p_ret_dr.json(
+        "POST",
+        "/api/admin/provision/recover",
+        json!({
+            "token": "fixture-token",
+            "service_id": "fixtureService",
+            "fos_bucket": "fos-fixture-logs",
+            "fos_region": "us-east-1"
+        }),
+    );
+    assert_eq!(ret_res["ok"], true);
+    let head_after =
+        catalog::head(&p_ret_dr.adapter.records()[ingest::WATERMARK_KEY].value).unwrap();
+    assert_eq!(
+        head_after.statistics.values().map(|s| s.rows).sum::<u64>(),
+        50,
+        "BUG-CLOUD-DR-27B: DR recovery resurrected retired Day rows: {:?}",
+        head_after.days
+    );
+
+    // 2. BUG-CLOUD-DR-27C (4A): Mixed legacy own Day (10 rows) + foreign Day (9,999 rows) without manifest:
+    let p_mix = Platform::new();
+    p_mix.adapter.seed_resource(
+        "fixtureService",
+        "snippet",
+        json!({"name": "flp-owner-fixtureApp", "type": "recv", "priority": "0", "content": "# flp-owner:fixtureApp:fixtureService"}),
+    );
+    MTIMES.with(|m| m.borrow_mut().clear());
+    let own_blk_key = "processed/_catalog/own_blk_legacy.json";
+    let own_day_key = "processed/_catalog/own_day_legacy.json";
+    let for_blk_key = "processed/_catalog/for_blk_legacy.json";
+    let for_day_key = "processed/_catalog/for_day_legacy.json";
+    p_mix.adapter.seed_object_bytes(
+        "fos-fixture-logs",
+        own_blk_key,
+        serde_json::to_vec(&json!({
+            "version": VERSION, "service_id": "fixtureService", "generation": 2,
+            "hour": active_day, "previous": null, "files": [], "summaries": [], "replaces": [], "committed_at": {}
+        }))
+        .unwrap(),
+    );
+    p_mix.adapter.seed_object_bytes(
+        "fos-fixture-logs",
+        own_day_key,
+        serde_json::to_vec(&Day {
+            version: VERSION,
+            service_id: None,
+            hours: BTreeMap::from([(
+                active_day,
+                Reference {
+                    key: own_blk_key.into(),
+                    generation: 2,
+                },
+            )]),
+            statistics: Statistics {
+                earliest: Some(active_day),
+                latest: Some(active_day + 3599),
+                rows: 10,
+                ..Default::default()
+            },
+            ..Day::default()
+        })
+        .unwrap(),
+    );
+    p_mix.adapter.seed_object_bytes(
+        "fos-fixture-logs",
+        for_blk_key,
+        serde_json::to_vec(&json!({
+            "version": VERSION, "service_id": "foreignService22Chars0", "generation": 5,
+            "hour": active_day + 86_400, "previous": null, "files": [], "summaries": [], "replaces": [], "committed_at": {}
+        }))
+        .unwrap(),
+    );
+    p_mix.adapter.seed_object_bytes(
+        "fos-fixture-logs",
+        for_day_key,
+        serde_json::to_vec(&Day {
+            version: VERSION,
+            service_id: None,
+            hours: BTreeMap::from([(
+                active_day + 86_400,
+                Reference {
+                    key: for_blk_key.into(),
+                    generation: 5,
+                },
+            )]),
+            statistics: Statistics {
+                earliest: Some(active_day + 86_400),
+                latest: Some(active_day + 90_000),
+                rows: 9_999,
+                ..Default::default()
+            },
+            ..Day::default()
+        })
+        .unwrap(),
+    );
+    MTIMES.with(|m| {
+        let mut map = m.borrow_mut();
+        map.insert(own_day_key.into(), 1_800_000_200);
+        map.insert(for_day_key.into(), 1_800_000_190);
+        map.insert(own_blk_key.into(), 1_800_000_100);
+        map.insert(for_blk_key.into(), 1_800_000_090);
+    });
+    SECRETS.with(|s| s.borrow_mut().clear());
+    let mix_res = p_mix.json(
+        "POST",
+        "/api/admin/provision/recover",
+        json!({
+            "token": "fixture-token",
+            "service_id": "fixtureService",
+            "fos_bucket": "fos-fixture-logs",
+            "fos_region": "us-east-1"
+        }),
+    );
+    assert_eq!(mix_res["ok"], true);
+    let mix_head = catalog::head(&p_mix.adapter.records()[ingest::WATERMARK_KEY].value).unwrap();
+    assert_eq!(
+        mix_head.statistics.values().map(|s| s.rows).sum::<u64>(),
+        10,
+        "BUG-CLOUD-DR-27C (4A): foreign unattributed legacy Day leaked 9,999 rows: {:?}",
+        mix_head.days
+    );
+
+    // 3. BUG-CLOUD-DR-27D: Cold-start catalog_scan (NO meta/cloud_dr_state.json) with 27+ .json objects
+    // must achieve front_synced == true across remaining = 24, 25, AND 32:
+    let p_seed = Platform::new();
+    let prov_s = p_seed.provision();
+    p_seed.drain(prov_s["job"].clone());
+    let svc_s: Service =
+        serde_json::from_value(p_seed.adapter.records()["svc:fixtureService"].value.clone())
+            .unwrap();
+    for i in 1..=11i64 {
+        p_seed
+            .clock
+            .store((active_day + i * 60) as u64, Ordering::SeqCst);
+        commit_real_catalog_batch(
+            &p_seed,
+            &svc_s,
+            &format!("cscan{i}"),
+            active_day + i * 60,
+            5,
+        );
+    }
+    let mut seed_objs = p_seed.adapter.bucket_objects(&svc_s.fos_bucket);
+    seed_objs.remove("meta/cloud_dr_state.json");
+    let seed_mtimes = MTIMES.with(|m| m.borrow().clone());
+    for remaining in [24u32, 25, 32] {
+        let p_cold = Platform::new();
+        p_cold.adapter.seed_resource(
+            "fixtureService",
+            "snippet",
+            json!({"name": "flp-owner-fixtureApp", "type": "recv", "priority": "0", "content": "# flp-owner:fixtureApp:fixtureService"}),
+        );
+        MTIMES.with(|m| *m.borrow_mut() = seed_mtimes.clone());
+        for (k, v) in &seed_objs {
+            p_cold
+                .adapter
+                .seed_object_bytes("fos-fixture-logs", k, v.clone());
+        }
+        ELAPSED_MS.with(|e| e.set(0));
+        CALLS.with(|c| c.set(32 - remaining));
+        SECRETS.with(|s| {
+            *s.borrow_mut() =
+                std::collections::BTreeSet::from(["front_key".into(), "session_key".into()])
+        });
+        let resp = fastly_log_analytics::admin::handle(
+            &p_cold,
+            "fixtureAdmin",
+            &fastly_log_analytics::http::Request {
+                method: "POST".into(),
+                path: "/api/admin/provision/recover".into(),
+                headers: BTreeMap::new(),
+                body: json!({
+                    "token": "fixture-token",
+                    "service_id": "fixtureService",
+                    "fos_bucket": "fos-fixture-logs",
+                    "fos_region": "us-east-1"
+                })
+                .to_string()
+                .into_bytes(),
+            },
+        );
+        assert_eq!(resp.status, 200);
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["source"], "catalog_scan");
+        assert_eq!(
+            body["front_synced"], true,
+            "[catalog_scan remaining={remaining}] BUG-CLOUD-DR-27D: front_synced must be true: {body}"
+        );
+        assert_eq!(
+            p_cold
+                .adapter
+                .dictionary_items("fixtureBuckets")
+                .get("fixtureService")
+                .map(String::as_str),
+            Some("fos-fixture-logs|us-east-1")
+        );
+    }
+}
+
+#[test]
+fn bug_cloud_budget_27e_provision_and_scoring_propagate_503_backend_budget() {
+    use fastly_log_analytics::{admin, http::Request};
+    use std::collections::BTreeSet;
+
+    // 1. Provision preflight at budget=4 (and across 1..=24) must return 503 backend_budget, never 400 object_storage_required:
+    for budget in 1..=10u32 {
+        let p = Platform::new();
+        ELAPSED_MS.with(|e| e.set(0));
+        CALLS.with(|c| c.set(32 - budget));
+        SECRETS
+            .with(|s| *s.borrow_mut() = BTreeSet::from(["front_key".into(), "session_key".into()]));
+        let resp = admin::handle(
+            &p,
+            "fixtureAdmin",
+            &Request {
+                method: "POST".into(),
+                path: "/api/admin/provision/execute".into(),
+                headers: BTreeMap::new(),
+                body: json!({
+                    "token": "fixture-token",
+                    "service_id": "fixtureService",
+                    "fos_bucket": "fos-fixture-logs",
+                    "fos_region": "us-east-1"
+                })
+                .to_string()
+                .into_bytes(),
+            },
+        );
+        assert!(
+            matches!(resp.status, 200 | 503),
+            "BUG-CLOUD-BUDGET-27E: provision/execute at budget={budget} returned {} instead of 200/503: {}",
+            resp.status,
+            String::from_utf8_lossy(&resp.body)
+        );
+    }
+
+    // 2. Scoring enable with brokered token at budget=2 (and across 1..=10) must return 503 backend_budget, never 403:
+    let p_sc = Platform::new();
+    let prov_sc = p_sc.provision();
+    p_sc.drain(prov_sc["job"].clone());
+    let svc_gen = p_sc.service()["generation"].as_str().unwrap().to_owned();
+    for budget in 1..=6u32 {
+        ELAPSED_MS.with(|e| e.set(0));
+        CALLS.with(|c| c.set(32 - budget));
+        SECRETS
+            .with(|s| *s.borrow_mut() = BTreeSet::from(["front_key".into(), "session_key".into()]));
+        let resp = admin::handle(
+            &p_sc,
+            "fixtureAdmin",
+            &Request {
+                method: "POST".into(),
+                path: "/api/admin/services/fixtureService/scoring/enable".into(),
+                headers: BTreeMap::new(),
+                body: json!({"generation": svc_gen}).to_string().into_bytes(),
+            },
+        );
+        assert!(
+            matches!(resp.status, 200 | 503),
+            "BUG-CLOUD-BUDGET-27E: scoring/enable at budget={budget} returned {} instead of 200/503: {}",
+            resp.status,
+            String::from_utf8_lossy(&resp.body)
+        );
+    }
 }

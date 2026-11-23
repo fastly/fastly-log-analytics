@@ -130,6 +130,14 @@ it("reports a bounded, redacted error message so a failed query can be diagnosed
       ['JSON Error: bad value "foo\\"AliceRowValue99"', ["AliceRowValue99", "foo"], "Error: JSON Error: bad value [redacted]"],
       ["Binder Error: invalid literal $$SecDollar66$$ in query", ["SecDollar66"], "Error: Binder Error: invalid literal [redacted] in query"],
       ["Binder Error: invalid literal $tag$SecTag55\nSELECT 1$tag$ in query", ["SecTag55", "SELECT 1"], "Error: Binder Error: invalid literal [redacted] in query"],
+      // BUG-T5-ITER27-01: Unicode possessives, plural possessives, trailing SQL backslashes, N'/R' prefixes, unspaced keyword quotes, and raw IPv4:
+      ["Binder Error: café's owner '198.51.100.42' in filter", ["198.51.100.42"], "Error: Binder Error: café's owner [redacted] in filter"],
+      ["Binder Error: users' 'SecAfterPlural' in filter", ["SecAfterPlural"], "Error: Binder Error: users' [redacted] in filter"],
+      ["Binder Error: invalid pattern LIKE '%\\' for client '198.51.100.42'", ["198.51.100.42", "%\\"], "Error: Binder Error: invalid pattern LIKE [redacted] for client [redacted]"],
+      ["Binder Error: invalid pattern LIKE '%\\\\' for client '198.51.100.42'", ["198.51.100.42", "%\\\\"], "Error: Binder Error: invalid pattern LIKE [redacted] for client [redacted]"],
+      ["Parser Error: invalid literal N'198.51.100.42' or n'SecNat88' or R'SecRaw77'", ["198.51.100.42", "SecNat88", "SecRaw77"], "Error: Parser Error: invalid literal [redacted] or [redacted] or [redacted]"],
+      ["Parser Error: syntax error near SELECT'198.51.100.42' or LIKE'SecNoSpace' or WHERE'SecPhrase With Spaces'", ["198.51.100.42", "SecNoSpace", "SecPhrase"], "Error: Parser Error: syntax error near SELECT[redacted] or LIKE[redacted] or WHERE[redacted]"],
+      ["Runtime Error: upstream client 198.51.100.42 timed out", ["198.51.100.42"], "Error: Runtime Error: upstream client [redacted] timed out"],
     ] as const) {
       const advErr = new Error(advMsg);
       const aIdx = events.length;
@@ -229,5 +237,37 @@ it("keeps High-Scale silent and allowlists worker statistics without SQL or toke
     mode.setCloudModeRuntime(false);
     vi.unstubAllEnvs();
     window.removeEventListener("fla:cloud-worker", listener);
+  }
+});
+
+it("BUG-T5-ITER27-01: redacts real @duckdb/duckdb-wasm runtime conversion errors over apostrophe-bearing rows", async () => {
+  const { createNodeBackend } = await import("./dashboard/duckdb");
+  const backend = await createNodeBackend();
+  setCloudModeRuntime(true);
+  const events: { state?: string; error?: string }[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    await backend.query("CREATE OR REPLACE TABLE t_apostrophe AS SELECT '/cb?u=O''Brien&tok=SecRowTok99&ip=198.51.100.42' AS url");
+    await expect(
+      measureCloudQuery("query.console", () => backend.query("SELECT CAST(url AS INT) FROM t_apostrophe")),
+    ).rejects.toThrow();
+    const rowErr = events.at(-1)?.error ?? "";
+    expect(rowErr).toContain("Could not convert string [redacted]");
+    for (const leaked of ["Brien", "SecRowTok99", "198.51.100.42"]) {
+      expect(rowErr).not.toContain(leaked);
+    }
+
+    await expect(
+      measureCloudQuery("query.console", () => backend.query("SELECT CAST(E'prefix\\'198.51.100.42' AS INT)")),
+    ).rejects.toThrow();
+    const escErr = events.at(-1)?.error ?? "";
+    expect(escErr).toContain("Could not convert string [redacted]");
+    for (const leaked of ["prefix", "198.51.100.42"]) {
+      expect(escErr).not.toContain(leaked);
+    }
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+    await backend.dispose();
   }
 });
