@@ -585,7 +585,7 @@ fn record_scanned_reset(slot: &mut Option<ScannedReset>, generation: u64, reset_
 struct CatalogScanOpts<'a> {
     reserve_calls: u32,
     fallback_reserve_calls: u32,
-    extra_rum_if_reset: u32,
+    extra_if_reset: (u32, u32),
     foreign_dr_state: bool,
     from_dr_state: bool,
     now: u64,
@@ -602,7 +602,7 @@ fn scan_catalog_head(
     let CatalogScanOpts {
         reserve_calls,
         fallback_reserve_calls,
-        extra_rum_if_reset,
+        extra_if_reset,
         foreign_dr_state,
         from_dr_state,
         now,
@@ -778,12 +778,12 @@ fn scan_catalog_head(
         let has_verified_day = day_candidates
             .values()
             .any(|v| v.iter().any(|d| d.verified_own));
-        let cur_reserve = if best_manifest_days.is_some()
+        let use_primary_reserve = best_manifest_days.is_some()
             || best_manifest
                 .as_ref()
                 .is_some_and(|(_, m)| m.batch == "reset")
-            || has_verified_day
-        {
+            || has_verified_day;
+        let cur_reserve = if use_primary_reserve {
             reserve_calls
         } else {
             fallback_reserve_calls
@@ -801,8 +801,12 @@ fn scan_catalog_head(
         } else {
             0
         };
-        let dynamic_reset_hold = if effective_reset.is_some() {
-            extra_rum_if_reset
+        let dynamic_reset_hold = if effective_reset.is_some() || m_tier > 0 {
+            if use_primary_reserve {
+                extra_if_reset.0
+            } else {
+                extra_if_reset.1
+            }
         } else {
             0
         };
@@ -966,7 +970,7 @@ fn scan_catalog_head(
         }
         day_candidates.retain(|_, vec_d| !vec_d.is_empty());
         let reset_hold = if effective_reset.is_some() {
-            extra_rum_if_reset
+            extra_if_reset.1
         } else {
             0
         };
@@ -1118,22 +1122,98 @@ fn kv_payload_matches(key: &str, existing: &Value, desired: &Value) -> bool {
     }
 }
 
+fn dr_svc_entry_anchor(entry: &Value) -> String {
+    use sha2::{Digest, Sha256};
+    let canonical = json!([
+        entry.get("at"),
+        entry.get("event"),
+        entry.get("actor"),
+        entry.get("job_id"),
+        entry.get("config_version"),
+        entry.get("source"),
+        entry,
+    ]);
+    hex::encode(Sha256::digest(canonical.to_string().as_bytes()))
+}
+
+fn dr_svc_archived_removable(svc_val: &Value, cursor_val: Option<&Value>) -> (u64, usize) {
+    let raw_base = svc_val["_audit_outbox_base"].as_u64().unwrap_or(0);
+    let Some(cv) = cursor_val else {
+        return (raw_base, 0);
+    };
+    let archived = cv
+        .get("svc_outbox_archived")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let svc_last_base = cv.get("svc_last_base").and_then(Value::as_u64);
+    let svc_zero_anchor = cv.get("svc_zero_anchor").and_then(Value::as_str);
+    let svc_zero_virtual_base = cv
+        .get("svc_zero_virtual_base")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let last_flush_s = cv.get("last_flush_s").and_then(Value::as_u64).unwrap_or(0);
+    let eff_last_svc_s = cv
+        .get("last_svc_flush_s")
+        .and_then(Value::as_u64)
+        .unwrap_or(last_flush_s);
+    let entries = svc_val["_audit_outbox"].as_array();
+    let len = entries.map_or(0, Vec::len) as u64;
+    let first_entry = entries.and_then(|arr| arr.first());
+    let cur_anchor = first_entry.map(dr_svc_entry_anchor);
+    let is_reset = if len == 0 || archived == 0 {
+        false
+    } else if raw_base == 0 {
+        if svc_last_base.is_some_and(|lb| lb > 0) {
+            true
+        } else {
+            match (svc_zero_anchor, cur_anchor.as_deref()) {
+                (Some(prev), Some(cur)) => prev != cur,
+                (None, _) => {
+                    let first_at = first_entry.and_then(|e| e["at"].as_u64()).unwrap_or(0);
+                    archived > svc_zero_virtual_base + len
+                        || (eff_last_svc_s > 0 && first_at > eff_last_svc_s)
+                }
+                _ => false,
+            }
+        }
+    } else {
+        archived > raw_base + len || svc_last_base.is_some_and(|lb| raw_base < lb)
+    };
+    if is_reset {
+        return (archived, 0);
+    }
+    let eff_base =
+        if raw_base == 0 && svc_zero_anchor.is_some() && svc_zero_anchor == cur_anchor.as_deref() {
+            svc_zero_virtual_base
+        } else {
+            raw_base
+        };
+    let removable = archived.saturating_sub(eff_base) as usize;
+    (eff_base, removable)
+}
+
 fn upsert_kv(
     context: &Context<'_, impl Runtime>,
     key: &str,
     value: &Value,
-    allow_insert_first: bool,
+    allow_insert_first: &mut bool,
     try_insert_first: &mut bool,
     remaining_upserts: u32,
+    pending_secret_puts: u32,
 ) -> Result<(), Error> {
     if *try_insert_first {
         match context.cas(key, None, value) {
             Ok(()) => {
-                *try_insert_first =
-                    allow_insert_first && context.remaining_calls() > 2 + 2 * remaining_upserts;
+                *try_insert_first = *allow_insert_first
+                    && context
+                        .remaining_calls()
+                        .saturating_sub(pending_secret_puts)
+                        > 2 + 2 * remaining_upserts.saturating_sub(1);
                 return Ok(());
             }
-            Err(err) if err.status == 409 => {}
+            Err(err) if err.status == 409 => {
+                *allow_insert_first = false;
+            }
             Err(err) => return Err(err),
         }
     }
@@ -1144,9 +1224,16 @@ fn upsert_kv(
     {
         Ok(())
     } else {
+        if context.remaining_calls() < pending_secret_puts + 1 + 2 * remaining_upserts + 2 {
+            return Err(Error::new(503, "backend_budget"));
+        }
         context.cas(key, existing.as_ref().map(|r| r.generation.as_str()), value)
     };
-    *try_insert_first = allow_insert_first && context.remaining_calls() > 2 + 2 * remaining_upserts;
+    *try_insert_first = *allow_insert_first
+        && context
+            .remaining_calls()
+            .saturating_sub(pending_secret_puts)
+            > 2 + 2 * remaining_upserts.saturating_sub(1);
     res
 }
 
@@ -1405,6 +1492,7 @@ pub(super) fn recover(
     }
     let svc_key = format!("svc:{}", input.service_id);
     let existing_svc = context.get(&svc_key)?;
+    let mut cached_existing_outbox_trim: Option<(u64, usize)> = None;
     if let Some(ref rec) = existing_svc {
         if rec.value.get("data_reset").is_some_and(|v| !v.is_null()) {
             return Err(Error::new(409, "data_reset_in_progress"));
@@ -1419,44 +1507,54 @@ pub(super) fn recover(
             return Err(Error::new(409, "service_already_configured"));
         }
         let prev_len = rec.value["_audit_outbox"].as_array().map_or(0, Vec::len);
-        if prev_len >= super::JOB_RECOVERY_OUTBOX_LIMIT {
-            let prev_base = rec.value["_audit_outbox_base"].as_u64().unwrap_or(0);
-            let archived = if context.remaining_calls() >= 6 {
-                context
-                    .get(&format!("logs:cursor:{}", input.service_id))
-                    .ok()
-                    .flatten()
-                    .and_then(|c| c.value.get("svc_outbox_archived").and_then(Value::as_u64))
-                    .unwrap_or(0)
-            } else {
-                0
-            };
-            let removable = archived.saturating_sub(prev_base) as usize;
-            if prev_len.saturating_sub(removable) >= super::JOB_RECOVERY_OUTBOX_LIMIT {
+        if prev_len >= super::AUDIT_OUTBOX_LIMIT {
+            let cur_rec = context.get(&format!("logs:cursor:{}", input.service_id))?;
+            let (eff_base, removable) =
+                dr_svc_archived_removable(&rec.value, cur_rec.as_ref().map(|c| &c.value));
+            let drop_n = ((prev_len + 1) - super::AUDIT_OUTBOX_LIMIT)
+                .min(removable)
+                .min(prev_len);
+            if (prev_len + 1).saturating_sub(drop_n) > super::JOB_RECOVERY_OUTBOX_LIMIT {
                 return Err(Error::new(409, "audit_archive_required"));
             }
+            cached_existing_outbox_trim = Some((eff_base, removable));
         }
     }
     let cold_start = install_rec.is_none() && existing_svc.is_none();
+    let cursor_hold = u32::from(existing_svc.is_none());
     const PER_UPSERT: u32 = 2;
 
     let now = context.runtime.now();
     let owner_id = owner(context.runtime)?;
     let fallback_svc = bootstrap_service(owner_id.clone(), &input, now);
 
-    put_secret(
-        context,
-        &input.token,
-        &fallback_svc.fastly_token_ref,
-        &input.token,
-    )?;
-    let creds = match explicit_creds {
+    let (creds, persist_explicit, pending_secret_puts) = match explicit_creds {
         Some((ak, sk)) => {
-            fos::persist_explicit_credentials(context, &fallback_svc, &input.token, &ak, &sk)?;
-            (ak, sk)
+            if context.remaining_calls() < 6 {
+                return Err(Error::new(503, "backend_budget"));
+            }
+            ((ak, sk), true, 3u32)
         }
-        None => fos::ensure_key_with_credentials(context, &fallback_svc, &input.token)?,
+        None => {
+            if context.remaining_calls() < 5 {
+                return Err(Error::new(503, "backend_budget"));
+            }
+            let pair = fos::ensure_key_with_credentials(context, &fallback_svc, &input.token)?;
+            (pair, false, 1u32)
+        }
     };
+
+    let clamp_floors_to_ts =
+        |svc: &Service, ts: i64, fk: &mut Option<String>, rfk: &mut Option<String>| {
+            let rf = ts_floor_key(svc, ts);
+            if fk.as_deref().is_none_or(|cur| cur < rf.as_str()) {
+                *fk = Some(rf);
+            }
+            let rrf = ts_rum_floor_key(svc, ts);
+            if rfk.as_deref().is_none_or(|cur| cur < rrf.as_str()) {
+                *rfk = Some(rrf);
+            }
+        };
 
     let dr_key = state_key(&fallback_svc);
     let dr_bytes = fos::get_object(context, &fallback_svc, &creds, &dr_key)?;
@@ -1549,18 +1647,31 @@ pub(super) fn recover(
                     .ok()
                     .is_some_and(|v| crate::ingest::catalog::head(&json!({"catalog": v})).is_ok())
         });
+        let mut floor_key = dr_state.floor_key;
+        let mut rum_floor_key = parsed_rum_floor;
+        let mut rum_stats = dr_state.rum_stats;
+        if let Some(ts) = valid_head.as_ref().and_then(|h| h.reset_at) {
+            clamp_floors_to_ts(&service, ts, &mut floor_key, &mut rum_floor_key);
+            if rum_stats
+                .as_ref()
+                .and_then(|v| v["at"].as_i64())
+                .is_some_and(|at| at < ts)
+            {
+                rum_stats = None;
+            }
+        }
         let mandatory_scan = if valid_head.is_none() { 2u32 } else { 0u32 };
         let scan_needed = 3u32;
         let num_dr_upserts = u32::from(!views.is_empty())
-            + u32::from(valid_head.is_some() || dr_state.floor_key.is_some() || mandatory_scan > 0)
-            + u32::from(dr_state.rum_stats.is_some() || parsed_rum_floor.is_some());
+            + u32::from(valid_head.is_some() || floor_key.is_some() || mandatory_scan > 0)
+            + u32::from(rum_stats.is_some() || rum_floor_key.is_some());
         let upsert_calls = if cold_start {
             num_dr_upserts
         } else {
             PER_UPSERT * num_dr_upserts
         };
-        let mandatory_post = 2 + upsert_calls;
-        let conservative_post = 5 + upsert_calls;
+        let mandatory_post = pending_secret_puts + 2 + upsert_calls;
+        let conservative_post = pending_secret_puts + 5 + cursor_hold + upsert_calls;
         service.owned_endpoint_names.clear();
         let should_inspect = !candidate_names.is_empty() || service.capture == Capture::Managed;
         let mut inspected = false;
@@ -1583,9 +1694,9 @@ pub(super) fn recover(
             service,
             views,
             valid_head,
-            dr_state.floor_key,
-            parsed_rum_floor,
-            dr_state.rum_stats,
+            floor_key,
+            rum_floor_key,
+            rum_stats,
             "dr_state",
             candidate_names,
             inspected,
@@ -1604,85 +1715,126 @@ pub(super) fn recover(
         )
     };
 
-    let clamp_floors_to_ts =
-        |svc: &Service, ts: i64, fk: &mut Option<String>, rfk: &mut Option<String>| {
-            let rf = ts_floor_key(svc, ts);
-            if fk.as_deref().is_none_or(|cur| cur < rf.as_str()) {
-                *fk = Some(rf);
-            }
-            let rrf = ts_rum_floor_key(svc, ts);
-            if rfk.as_deref().is_none_or(|cur| cur < rrf.as_str()) {
-                *rfk = Some(rrf);
-            }
-        };
-
     let has_front_dicts = config(context.runtime, "front_service_id").is_ok()
         && config(context.runtime, "buckets_dictionary_id").is_ok()
         && config(context.runtime, "credentials_dictionary_id").is_ok();
     let front_calls = if has_front_dicts { 3u32 } else { 0u32 };
 
     {
+        let plan_reserves = |u: u32| -> (u32, u32) {
+            let rem = context
+                .remaining_calls()
+                .saturating_sub(pending_secret_puts);
+            let tight_floor =
+                |extra: u32| -> u32 { (2 + extra + u).max(3 + 2 * u.saturating_sub(1)) };
+            let (scan_r, base_r) = if !inspected_active && source != "dr_state" {
+                let full_b = 2 + 4 + PER_UPSERT * u;
+                let min_b = 2 + 3 + PER_UPSERT * u;
+                let base_r = if cold_start {
+                    if rem >= tight_floor(4) + 2 {
+                        tight_floor(4)
+                    } else {
+                        tight_floor(3)
+                    }
+                } else if rem >= full_b + 2 {
+                    full_b
+                } else {
+                    min_b
+                };
+                let scan_r = if has_front_dicts {
+                    let full_wf = 2 + 7 + PER_UPSERT * u;
+                    if cold_start && rem < full_wf + 2 {
+                        [7 + cursor_hold, 6 + cursor_hold, 7, 6]
+                            .into_iter()
+                            .map(tight_floor)
+                            .find(|&cand| rem >= cand + 2)
+                            .unwrap_or(base_r)
+                    } else if rem >= full_wf + cursor_hold + 2 {
+                        full_wf + cursor_hold
+                    } else if rem >= full_wf + 2 {
+                        full_wf
+                    } else if rem >= 2 + 6 + PER_UPSERT * u + 2 {
+                        2 + 6 + PER_UPSERT * u
+                    } else {
+                        base_r
+                    }
+                } else {
+                    base_r
+                };
+                (scan_r, base_r)
+            } else if inspected_active {
+                let full_no_f = 2 + PER_UPSERT * u;
+                let use_tight = cold_start
+                    && !((catalog_head.is_some() || service.scoring.is_some()) && u >= 3);
+                let base_r = if use_tight { tight_floor(0) } else { full_no_f };
+                let scan_r = if has_front_dicts {
+                    let full_wf = 2 + 3 + PER_UPSERT * u;
+                    if use_tight && rem < full_wf + 2 {
+                        [3 + cursor_hold, 3, cursor_hold]
+                            .into_iter()
+                            .filter(|&e| e > 0)
+                            .map(tight_floor)
+                            .find(|&cand| rem >= cand + 2)
+                            .unwrap_or(base_r)
+                    } else if rem >= full_wf + cursor_hold + 2 {
+                        full_wf + cursor_hold
+                    } else if rem >= full_wf + 2 {
+                        full_wf
+                    } else {
+                        base_r
+                    }
+                } else if rem >= full_no_f + cursor_hold + 2 {
+                    full_no_f + cursor_hold
+                } else if use_tight && cursor_hold > 0 && rem >= tight_floor(cursor_hold) + 2 {
+                    tight_floor(cursor_hold)
+                } else {
+                    base_r
+                };
+                (scan_r, base_r)
+            } else {
+                let full_b = 2 + front_calls + PER_UPSERT * u;
+                let full_no_f = 2 + PER_UPSERT * u;
+                let use_tight = cold_start
+                    && !((catalog_head.is_some() || service.scoring.is_some()) && u >= 3);
+                if use_tight && rem < full_b + 2 {
+                    let base_r = tight_floor(0);
+                    let scan_r = if has_front_dicts {
+                        [6 + cursor_hold, 3 + cursor_hold, 3]
+                            .into_iter()
+                            .map(tight_floor)
+                            .find(|&cand| rem >= cand + 2)
+                            .unwrap_or(base_r)
+                    } else {
+                        [3 + cursor_hold, cursor_hold]
+                            .into_iter()
+                            .filter(|&e| e > 0)
+                            .map(tight_floor)
+                            .find(|&cand| rem >= cand + 2)
+                            .unwrap_or(base_r)
+                    };
+                    (scan_r, base_r)
+                } else if rem >= full_b + cursor_hold + 2 {
+                    (full_b + cursor_hold, full_b)
+                } else if rem >= full_b + 2 {
+                    (full_b, full_b)
+                } else {
+                    (full_no_f, full_no_f)
+                }
+            };
+            (scan_r + pending_secret_puts, base_r + pending_secret_puts)
+        };
         let base_upserts = u32::from(!views.is_empty())
             + 1
             + u32::from(rum_stats.is_some() || rum_floor_key.is_some());
-        let tight_floor = |extra: u32| -> u32 {
-            (2 + extra + base_upserts).max(3 + 2 * base_upserts.saturating_sub(1))
-        };
-        let compute_reserve = |front_or_inspect: u32, min_inspect: u32| -> u32 {
-            let full = 2 + front_or_inspect + PER_UPSERT * base_upserts;
-            if cold_start && views.is_empty() && context.remaining_calls() <= full + 2 {
-                if context.remaining_calls() <= tight_floor(min_inspect) + 2 {
-                    tight_floor(min_inspect)
-                } else {
-                    tight_floor(front_or_inspect)
-                }
-            } else {
-                full
-            }
-        };
-        let base_scan_reserve = if !inspected_active && source != "dr_state" {
-            compute_reserve(4, 3)
-        } else if inspected_active {
-            if cold_start && views.is_empty() {
-                tight_floor(0)
-            } else {
-                2 + PER_UPSERT * base_upserts
-            }
+        let (scan_reserve, base_scan_reserve) = plan_reserves(base_upserts);
+        let extra_if_reset = if rum_stats.is_none() && rum_floor_key.is_none() {
+            let (sr_rst, br_rst) = plan_reserves(base_upserts + 1);
+            (
+                sr_rst.saturating_sub(scan_reserve),
+                br_rst.saturating_sub(base_scan_reserve),
+            )
         } else {
-            compute_reserve(front_calls, 0)
-        };
-        let cursor_hold = u32::from(existing_svc.is_none());
-        let scan_reserve = if !inspected_active && source != "dr_state" && has_front_dicts {
-            let wf_reserve = if cold_start && views.is_empty() {
-                if context.remaining_calls() >= 2 + 7 + cursor_hold + base_upserts + 2 {
-                    2 + 7 + cursor_hold + base_upserts
-                } else if context.remaining_calls() <= 2 + 6 + base_upserts + 2 {
-                    2 + 6 + base_upserts
-                } else {
-                    2 + 7 + base_upserts
-                }
-            } else {
-                compute_reserve(4 + 3, 3 + 3)
-            };
-            if context.remaining_calls() >= wf_reserve + 2 {
-                wf_reserve
-            } else {
-                base_scan_reserve
-            }
-        } else if has_front_dicts {
-            let wf_reserve = compute_reserve(3, 3);
-            if context.remaining_calls() >= wf_reserve + 2 {
-                wf_reserve
-            } else {
-                base_scan_reserve
-            }
-        } else {
-            base_scan_reserve
-        };
-        let extra_rum_if_reset = if rum_stats.is_none() && rum_floor_key.is_none() {
-            PER_UPSERT
-        } else {
-            0u32
+            (0u32, 0u32)
         };
 
         if let Some(ref dr_head) = catalog_head {
@@ -1693,7 +1845,7 @@ pub(super) fn recover(
                 CatalogScanOpts {
                     reserve_calls: scan_reserve,
                     fallback_reserve_calls: base_scan_reserve,
-                    extra_rum_if_reset,
+                    extra_if_reset,
                     foreign_dr_state,
                     from_dr_state: source == "dr_state",
                     now,
@@ -1753,7 +1905,7 @@ pub(super) fn recover(
                 CatalogScanOpts {
                     reserve_calls: scan_reserve,
                     fallback_reserve_calls: base_scan_reserve,
-                    extra_rum_if_reset,
+                    extra_if_reset,
                     foreign_dr_state,
                     from_dr_state: source == "dr_state",
                     now,
@@ -1810,11 +1962,33 @@ pub(super) fn recover(
     let mut remaining_upserts = u32::from(!views.is_empty())
         + u32::from(catalog_head.is_some() || floor_key.is_some())
         + u32::from(rum_stats.is_some() || rum_floor_key.is_some());
-    let needed_after_upserts = if source != "dr_state" { 9 } else { 5 };
-    let initial_try_insert_first =
-        cold_start && context.remaining_calls() < needed_after_upserts + 2 * remaining_upserts;
-    let mut try_insert_first = initial_try_insert_first
-        && context.remaining_calls() > 2 + 2 * remaining_upserts.saturating_sub(1);
+    let eff_rem = context
+        .remaining_calls()
+        .saturating_sub(pending_secret_puts);
+    let needed_after_upserts = if source != "dr_state" {
+        2 + front_calls + cursor_hold + 4
+    } else {
+        2 + front_calls
+            + if remaining_upserts < 3 {
+                cursor_hold
+            } else {
+                0
+            }
+    };
+    let mut allow_insert_first =
+        cold_start && eff_rem < needed_after_upserts + 2 * remaining_upserts;
+    let mut try_insert_first =
+        allow_insert_first && eff_rem > 2 + 2 * remaining_upserts.saturating_sub(1);
+    let min_commit_calls = pending_secret_puts
+        + 2
+        + if try_insert_first {
+            remaining_upserts
+        } else {
+            PER_UPSERT * remaining_upserts
+        };
+    if context.remaining_calls() < min_commit_calls {
+        return Err(Error::new(503, "backend_budget"));
+    }
 
     let views_restored = views.len();
     if !views.is_empty() {
@@ -1823,9 +1997,10 @@ pub(super) fn recover(
             context,
             &crate::views::key(&input.service_id),
             &json!({"views": views, "updated_at": now}),
-            initial_try_insert_first,
+            &mut allow_insert_first,
             &mut try_insert_first,
             remaining_upserts,
+            pending_secret_puts,
         )?;
     }
 
@@ -1842,9 +2017,10 @@ pub(super) fn recover(
             context,
             crate::ingest::WATERMARK_KEY,
             &Value::Object(wm),
-            initial_try_insert_first,
+            &mut allow_insert_first,
             &mut try_insert_first,
             remaining_upserts,
+            pending_secret_puts,
         )?;
     }
 
@@ -1861,25 +2037,31 @@ pub(super) fn recover(
             context,
             &crate::ingest::watermark_key(crate::ingest::rum::STREAM),
             &Value::Object(rum_wm),
-            initial_try_insert_first,
+            &mut allow_insert_first,
             &mut try_insert_first,
             remaining_upserts,
+            pending_secret_puts,
         )?;
     }
 
-    let post_upsert_floor = if initial_try_insert_first || source != "dr_state" {
+    let eff_rem_post = context
+        .remaining_calls()
+        .saturating_sub(pending_secret_puts);
+    let post_upsert_floor = if source != "dr_state"
+        || (allow_insert_first && service.scoring.is_some() && eff_rem_post < 2 + front_calls + 3)
+    {
         2 + 3
     } else {
-        5 + 3
+        2 + front_calls + cursor_hold + 3
     };
-    if !inspected_active && context.remaining_calls() >= post_upsert_floor {
-        let post_inspect_need = 2 + front_calls + u32::from(existing_svc.is_none());
-        let reserve_after = if context.remaining_calls() >= post_inspect_need + 3 {
-            post_inspect_need
-        } else if context.remaining_calls() >= 2 + front_calls + 3 {
-            2 + front_calls
+    if !inspected_active && eff_rem_post >= post_upsert_floor {
+        let post_inspect_need = 2 + front_calls + cursor_hold;
+        let reserve_after = if eff_rem_post >= post_inspect_need + 3 {
+            post_inspect_need + pending_secret_puts
+        } else if eff_rem_post >= 2 + front_calls + 3 {
+            2 + front_calls + pending_secret_puts
         } else {
-            2
+            2 + pending_secret_puts
         };
         inspect_active_version_for_dr(
             context,
@@ -1888,7 +2070,7 @@ pub(super) fn recover(
             &candidate_names,
             source != "dr_state",
             reserve_after,
-            2,
+            2 + pending_secret_puts,
         )?;
         inspected_active = true;
     }
@@ -1910,18 +2092,10 @@ pub(super) fn recover(
             .unwrap_or_default();
         let mut base = prev_rec.value["_audit_outbox_base"].as_u64().unwrap_or(0);
         outbox.push(audit_entry);
-        if outbox.len() > super::AUDIT_OUTBOX_LIMIT {
-            let archived = if context.remaining_calls() > 2 + front_calls {
-                context
-                    .get(&format!("logs:cursor:{}", input.service_id))
-                    .ok()
-                    .flatten()
-                    .and_then(|c| c.value.get("svc_outbox_archived").and_then(Value::as_u64))
-                    .unwrap_or(0)
-            } else {
-                0
-            };
-            let archived_removable = archived.saturating_sub(base) as usize;
+        if let Some((eff_base, archived_removable)) = cached_existing_outbox_trim {
+            if eff_base > base {
+                base = eff_base;
+            }
             let drop_n = (outbox.len() - super::AUDIT_OUTBOX_LIMIT)
                 .min(archived_removable)
                 .min(outbox.len().saturating_sub(1));
@@ -1939,7 +2113,7 @@ pub(super) fn recover(
         }
     } else {
         svc_value["_audit_outbox"] = json!([audit_entry]);
-        if context.remaining_calls() > 2 + front_calls {
+        if context.remaining_calls() > pending_secret_puts + 2 + front_calls {
             if let Ok(Some(cur_rec)) = context.get(&format!("logs:cursor:{}", input.service_id)) {
                 if let Some(archived) = cur_rec
                     .value
@@ -1952,8 +2126,17 @@ pub(super) fn recover(
             }
         }
     }
-    if context.remaining_calls() < 2 {
+    if context.remaining_calls() < pending_secret_puts + 2 {
         return Err(Error::new(503, "backend_budget"));
+    }
+    put_secret(
+        context,
+        &input.token,
+        &service.fastly_token_ref,
+        &input.token,
+    )?;
+    if persist_explicit {
+        fos::persist_explicit_credentials(context, &service, &input.token, &creds.0, &creds.1)?;
     }
     context.cas(
         &svc_key,

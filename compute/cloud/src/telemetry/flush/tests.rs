@@ -1642,3 +1642,154 @@ fn bug_cloud_outbox_dr_29a_equal_len_reset_and_58_plus_3_unique_event_ids() {
         Some(58)
     );
 }
+
+#[test]
+fn bug_cloud_outbox_dr_30a_post_nonzero_base_reset_and_tight_budget_flush_preserve_reset_detection()
+{
+    // 2A-adv-i: Flush svc:svc1 when _audit_outbox_base > 0 (base = 1, len = 2 -> archived = 3),
+    // then external KV reset of svc:svc1 to base = 0 with 3 entries at same/earlier second (at <= last_flush_s).
+    // Must detect reset (raw_base dropped from 1 -> 0), archive all 3 post-reset rows at seqs 3..6, 0 blackholed!
+    let rt = Rt::new();
+    rt.set_cursor(NOW_MIN - 2);
+    rt.put_kv(
+        "logs:cursor:svc1",
+        json!({
+            "scan_min": NOW_MIN - 2,
+            "cache_min": NOW_MIN - 2,
+            "svc_outbox_archived": 1,
+            "last_flush_s": NOW_S - 600,
+        }),
+    );
+    rt.put_kv(
+        "svc:svc1",
+        json!({
+            "service_id": SID,
+            "_audit_outbox_base": 1,
+            "_audit_outbox": [
+                {"actor": "admin", "at": NOW_S - 10, "event": "service.updated", "config_version": 2},
+                {"actor": "admin", "at": NOW_S - 5, "event": "service.updated", "config_version": 3},
+            ]
+        }),
+    );
+    rt.put_kv(
+        &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("b-gt0")),
+        cron_line("pre-gt0"),
+    );
+    rt.budget.set(rt.calls.get() + 32);
+    assert_eq!(run(&rt, false).status, FlushStatus::Committed);
+    assert_eq!(rt.cursor().svc_outbox_archived, 3);
+
+    // External KV reset to base = 0 with 3 entries at NOW_S - 1 (<= last_flush_s == NOW_S):
+    rt.put_kv(
+        "svc:svc1",
+        json!({
+            "service_id": SID,
+            "_audit_outbox": [
+                {"actor": "admin", "at": NOW_S - 1, "event": "job.started", "job_id": "j-reset", "config_version": 1},
+                {"actor": "admin", "at": NOW_S, "event": "job.step", "job_id": "j-reset", "config_version": 1},
+                {"actor": "admin", "at": NOW_S, "event": "job.completed", "job_id": "j-reset", "config_version": 1},
+            ]
+        }),
+    );
+    rt.put_kv(
+        &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 39, Some("b-rst")),
+        cron_line("post-gt0"),
+    );
+    let audit_rows = |r: &Rt| -> Vec<Value> {
+        r.objects
+            .borrow()
+            .iter()
+            .filter(|(k, _)| k.contains("/admin_audit/"))
+            .flat_map(|(_, body)| schema::from_parquet(LogKind::AdminAudit, body.clone()).unwrap())
+            .collect()
+    };
+
+    rt.budget.set(rt.calls.get() + 32);
+    assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+    let rows_2a1 = audit_rows(&rt);
+    assert_eq!(
+        rows_2a1.len(),
+        5,
+        "BUG-CLOUD-OUTBOX-DR-30A (2A-adv-i): post-base>0 reset rows were blackholed! got {}",
+        rows_2a1.len()
+    );
+    let mut seqs_2a1: Vec<i64> = rows_2a1
+        .iter()
+        .map(|r| r["source_seq"].as_i64().unwrap())
+        .collect();
+    seqs_2a1.sort();
+    assert_eq!(seqs_2a1, vec![1, 2, 3, 4, 5]);
+    assert_eq!(rt.cursor().svc_outbox_archived, 6);
+
+    // 2A-adv-ii: Legacy cursor (no svc_last_base / svc_zero_anchor, archived = 3, last_flush_s = NOW_S - 300),
+    // svc:svc1 reset at NOW_S - 200 (> NOW_S - 300), then a tight-budget flush at NOW_S - 100 (CALLS = 12 -> spare <= 1,
+    // skips reading svc:svc1 while flushing outbox), followed by a full flush at NOW_S!
+    // Tight flush must NOT overwrite last_svc_flush_s, so full flush detects first_at > eff_last_svc_s and archives 3/3!
+    let rt2 = Rt::new();
+    rt2.now.set(NOW_S - 100);
+    for aseq in 1..=1001u64 {
+        rt2.put_kv(&format!("audit:{aseq:020}"), json!({"seq": aseq}));
+    }
+    rt2.put_kv(
+        "logs:cursor:svc1",
+        json!({
+            "scan_min": (NOW_S - 100) / 60 - 1,
+            "cache_min": (NOW_S - 100) / 60 - 1,
+            "audit_seq": 1001,
+            "purge_due": [["api_telemetry", 1, SID]],
+            "svc_outbox_archived": 3,
+            "last_flush_s": NOW_S - 300,
+        }),
+    );
+    rt2.put_kv(
+        "svc:svc1",
+        json!({
+            "service_id": SID,
+            "_audit_outbox": [
+                {"actor": "admin", "at": NOW_S - 200, "event": "service.recovered", "config_version": 1},
+                {"actor": "admin", "at": NOW_S - 199, "event": "service.updated", "config_version": 2},
+                {"actor": "admin", "at": NOW_S - 198, "event": "service.updated", "config_version": 3},
+            ]
+        }),
+    );
+    rt2.put_kv(
+        &outbox_key(SID, (NOW_S - 100) / OUTBOX_BUCKET_S - 40, Some("tight")),
+        cron_line("tight-tick"),
+    );
+    // Grant exact tight budget (CALLS = 12 out of 32 -> 20 remaining == FLUSH_TICK_CALLS -> spare(1,0,true) == 1 <= 1 skips svc:svc1):
+    rt2.budget.set(rt2.calls.get() + 20);
+    let tight_rep = run(&rt2, true);
+    assert!(matches!(
+        tight_rep.status,
+        FlushStatus::Committed | FlushStatus::GcPending
+    ));
+    assert_eq!(rt2.cursor().last_flush_s, NOW_S - 100);
+    assert_eq!(
+        audit_rows(&rt2).len(),
+        0,
+        "tight budget flush should skip svc:svc1"
+    );
+
+    // Full flush at NOW_S must still detect the reset and archive all 3 rows at 3..6!
+    rt2.now.set(NOW_S);
+    rt2.put_kv(
+        &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 38, Some("full")),
+        cron_line("full-tick"),
+    );
+    rt2.budget.set(rt2.calls.get() + 32);
+    let full_rep = run(&rt2, true);
+    assert_eq!(full_rep.status, FlushStatus::Committed);
+    let rows_2a2 = audit_rows(&rt2);
+    assert_eq!(
+        rows_2a2.len(),
+        3,
+        "BUG-CLOUD-OUTBOX-DR-30A (2A-adv-ii): tight-budget outbox flush clobbered reset timestamp baseline!"
+    );
+    let mut seqs_2a2: Vec<i64> = rows_2a2
+        .iter()
+        .map(|r| r["source_seq"].as_i64().unwrap())
+        .collect();
+    seqs_2a2.sort();
+    assert_eq!(seqs_2a2, vec![3, 4, 5]);
+    assert_eq!(rt2.cursor().svc_outbox_archived, 6);
+}

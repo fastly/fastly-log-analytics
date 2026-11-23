@@ -14,7 +14,7 @@ import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import parse_qs, urlparse
 
 import orjson
@@ -22,7 +22,16 @@ import zstandard as zstd
 
 from backend.core.catalog import _CANONICAL_SYSTEM_FIELD_SPECS
 from backend.core.log_fields import LOG_FIELD_CATALOG, SqlType, try_get
-from backend.core.share_db import apply_pii_policy, is_saved_view_pii_key, mask_ip_values, scrub_ip_text
+from backend.core.share_db import (
+    CMCD_SESSION_ALIAS_KEYS,
+    PII_IP_KEYS,
+    PII_SESSION_KEYS,
+    apply_pii_policy,
+    is_saved_view_pii_key,
+    mask_ip_or_chain,
+    mask_ip_values,
+    scrub_ip_text,
+)
 from backend.core.sql_validator import SAFE_IDENT_RE, SQLValidationError, validate_user_sql
 from backend.high_scale._common import _FIELD_DIMENSIONS, clickhouse_string_literal
 from backend.high_scale._common import range_value as _range_value
@@ -654,6 +663,16 @@ def _collect_ast_base_tables_for_exempt(node_obj: Any) -> set[str]:
     return found
 
 
+def _ast_has_parse_error(node_obj: Any) -> bool:
+    if isinstance(node_obj, dict):
+        if node_obj.get("type") in ("PARSE_ERROR_NODE", "DISALLOWED_SUBQUERY_STATEMENT"):
+            return True
+        return any(_ast_has_parse_error(v_child) for v_child in node_obj.values())
+    if isinstance(node_obj, list):
+        return any(_ast_has_parse_error(item) for item in node_obj)
+    return False
+
+
 def _exempt_col_list_ident_starts(
     sql: str,
     *,
@@ -668,7 +687,11 @@ def _exempt_col_list_ident_starts(
         eff_tree, _n, err_c, _err_m = _sv._parse_single_select_node(sql)
         if err_c is not None:
             eff_tree = None
-    known_relations: set[str] | None = _collect_ast_base_tables_for_exempt(eff_tree) if eff_tree is not None else None
+    known_relations: set[str] | None
+    if eff_tree is not None:
+        known_relations = set() if _ast_has_parse_error(eff_tree) else _collect_ast_base_tables_for_exempt(eff_tree)
+    else:
+        known_relations = None
 
     sig = [
         (m.lastgroup or "OTHER", m.group(0), m.start())
@@ -989,10 +1012,59 @@ def _exempt_col_list_ident_starts(
                 pos = p
 
         active_ctes = frozenset(in_scope_ctes)
+        disallowed_unquoted_as = (
+            (_FROM_EXIT_KEYWORDS - {"SAMPLE", "UNION"})
+            | _JOIN_MODIFIER_KEYWORDS
+            | frozenset(
+                {
+                    "JOIN",
+                    "FROM",
+                    "ON",
+                    "USING",
+                    "VALUES",
+                    "SET",
+                    "WITH",
+                    "TABLE",
+                    "AS",
+                    "FINAL",
+                    "LATERAL",
+                    "ONLY",
+                    "PIVOT",
+                    "UNPIVOT",
+                    "PIVOT_WIDER",
+                    "PIVOT_LONGER",
+                    "TABLESAMPLE",
+                }
+            )
+        )
+        disallowed_bare_alias = disallowed_unquoted_as | frozenset({"SELECT", "UNION", "SAMPLE"})
         in_from = False
         in_array_join = False
         expect_table = False
         in_on = False
+        in_sample = False
+        allow_post_table_alias = False
+        saw_final = False
+        in_join_mod = False
+        saw_join = False
+
+        def _starts_join_mod_seq(idx: int) -> bool:
+            q_i = idx
+            while q_i < n and s_list[q_i][0] == "IDENT" and s_list[q_i][1].upper() in _JOIN_MODIFIER_KEYWORDS:
+                q_i += 1
+            if q_i < n and s_list[q_i][0] == "IDENT":
+                qu = s_list[q_i][1].upper()
+                if qu == "JOIN":
+                    return True
+                if (
+                    qu == "ARRAY"
+                    and q_i + 1 < n
+                    and s_list[q_i + 1][0] == "IDENT"
+                    and s_list[q_i + 1][1].upper() == "JOIN"
+                ):
+                    return True
+            return False
+
         while pos < n:
             k, t, _ = s_list[pos]
             if (k, t) == ("OP", "("):
@@ -1005,6 +1077,9 @@ def _exempt_col_list_ident_starts(
                     _walk_query(inner, active_ctes)
                     end_alias = _consume_alias_col_list(s_list, cl + 1, record_ast_fn=True)
                     expect_table = False
+                    allow_post_table_alias = end_alias is None
+                    saw_final = False
+                    in_join_mod = False
                     pos = end_alias if end_alias is not None else cl + 1
                     continue
                 if is_fn_call:
@@ -1013,6 +1088,13 @@ def _exempt_col_list_ident_starts(
                     _walk_paren_group(inner, active_ctes)
                 if in_from and expect_table:
                     expect_table = False
+                    allow_post_table_alias = True
+                    saw_final = False
+                    in_join_mod = False
+                elif in_from and not expect_table and not in_on and not in_sample and not in_array_join:
+                    in_from = False
+                    allow_post_table_alias = False
+                    in_join_mod = False
                 pos = cl + 1
                 continue
             if k == "OP" and t in ("[", "{"):
@@ -1020,13 +1102,65 @@ def _exempt_col_list_ident_starts(
                 if cl_br <= pos:
                     break
                 _walk_expr_tokens(s_list[pos + 1 : cl_br], active_ctes)
-                if in_from and expect_table:
+                if in_from and (expect_table or (not in_on and not in_sample and not in_array_join)):
+                    in_from = False
                     expect_table = False
+                    allow_post_table_alias = False
+                    in_join_mod = False
                 pos = cl_br + 1
                 continue
             prev_is_dot = pos >= 1 and (s_list[pos - 1][0], s_list[pos - 1][1]) == ("OP", ".")
+            if (
+                in_from
+                and not expect_table
+                and not in_on
+                and not in_sample
+                and not in_array_join
+                and k == "IDENT"
+                and t.upper() == "AS"
+                and not prev_is_dot
+            ):
+                if (
+                    not allow_post_table_alias
+                    or in_join_mod
+                    or pos + 1 >= n
+                    or s_list[pos + 1][0] not in ("IDENT", "DQUOTE")
+                ):
+                    in_from = False
+                    allow_post_table_alias = False
+                    in_join_mod = False
+                    pos += 1
+                    continue
+                ak, at, _ = s_list[pos + 1]
+                if ak == "IDENT":
+                    au = at.upper()
+                    if au in disallowed_unquoted_as:
+                        in_from = False
+                        allow_post_table_alias = False
+                        in_join_mod = False
+                        pos += 2
+                        continue
+                    if au in ("SELECT", "UNION"):
+                        nxt2 = s_list[pos + 2] if pos + 2 < n else None
+                        nxt2_dot = pos + 3 < n and (s_list[pos + 3][0], s_list[pos + 3][1]) == ("OP", ".")
+                        if not (
+                            nxt2 is not None
+                            and nxt2[0] == "IDENT"
+                            and nxt2[1].upper() in ("WHERE", "ON")
+                            and not nxt2_dot
+                        ):
+                            in_from = False
+                            allow_post_table_alias = False
+                            in_join_mod = False
+                            pos += 2
+                            continue
+                end_as_col = _consume_alias_col_list(s_list, pos, record_ast_fn=True)
+                allow_post_table_alias = False
+                pos = end_as_col if end_as_col is not None else pos + 2
+                continue
             prev_is_as_kw = (
-                not expect_table
+                (not in_from or in_on or in_array_join)
+                and not expect_table
                 and pos >= 1
                 and s_list[pos - 1][0] == "IDENT"
                 and s_list[pos - 1][1].upper() == "AS"
@@ -1051,38 +1185,186 @@ def _exempt_col_list_ident_starts(
                     and s_list[pos - 1][1].upper() == "ARRAY"
                     and not (pos >= 2 and (s_list[pos - 2][0], s_list[pos - 2][1]) == ("OP", "."))
                 )
-                if in_from and not expect_table and wu == "ARRAY":
+                if (
+                    in_from
+                    and not expect_table
+                    and not in_on
+                    and not in_sample
+                    and wu == "ARRAY"
+                    and pos + 1 < n
+                    and s_list[pos + 1][0] == "IDENT"
+                    and s_list[pos + 1][1].upper() == "JOIN"
+                ):
                     in_array_join = True
                     expect_table = False
                     in_on = False
-                    pos += 1
+                    allow_post_table_alias = False
+                    in_join_mod = False
+                    pos += 2
                     continue
                 if in_from and wu == "JOIN" and is_prev_array:
                     in_array_join = True
                     expect_table = False
                     in_on = False
+                    allow_post_table_alias = False
+                    in_join_mod = False
                     pos += 1
                     continue
                 if (wu == "FROM" and not is_distinct_from) or (in_from and not expect_table and wu == "JOIN"):
                     in_from = True
-                    in_array_join = False
+                    if wu == "FROM":
+                        in_array_join = False
+                        saw_join = False
+                    else:
+                        in_array_join = False
+                        saw_join = True
                     expect_table = True
                     in_on = False
+                    in_sample = False
+                    allow_post_table_alias = False
+                    saw_final = False
+                    in_join_mod = False
                     pos += 1
                     continue
                 if in_from and not expect_table and wu in _JOIN_MODIFIER_KEYWORDS:
-                    expect_table = False
-                    pos += 1
-                    continue
+                    if _starts_join_mod_seq(pos):
+                        expect_table = False
+                        in_on = False
+                        in_sample = False
+                        in_array_join = False
+                        allow_post_table_alias = False
+                        in_join_mod = True
+                        pos += 1
+                        continue
+                    if not in_on and not in_sample and not in_array_join:
+                        in_from = False
+                        allow_post_table_alias = False
+                        in_join_mod = False
+                        pos += 1
+                        continue
                 if in_from and expect_table and wu in ("LATERAL", "ONLY"):
                     pos += 1
                     continue
-                if in_from and not expect_table and (wu == "ON" or (wu == "USING" and not in_on)):
-                    expect_table = False
-                    in_on = wu == "ON"
+                if (
+                    in_from
+                    and not expect_table
+                    and not in_on
+                    and not in_sample
+                    and not in_array_join
+                    and not in_join_mod
+                    and not saw_final
+                    and wu == "FINAL"
+                ):
+                    saw_final = True
+                    allow_post_table_alias = False
                     pos += 1
                     continue
-                if wu == "SELECT" and in_from and not expect_table and not in_on:
+                if (
+                    in_from
+                    and not expect_table
+                    and not in_on
+                    and not in_array_join
+                    and not in_join_mod
+                    and wu == "TABLESAMPLE"
+                ):
+                    in_sample = True
+                    allow_post_table_alias = False
+                    pos += 1
+                    continue
+                if (
+                    in_from
+                    and not expect_table
+                    and not in_on
+                    and not in_sample
+                    and not in_array_join
+                    and not in_join_mod
+                    and wu in ("SETTINGS", "FORMAT", "PREWHERE", "SAMPLE", "FOR", "SET")
+                ):
+                    nxt_s = s_list[pos + 1] if pos + 1 < n else None
+                    nxt_s_dot = pos + 2 < n and (s_list[pos + 2][0], s_list[pos + 2][1]) == ("OP", ".")
+                    is_bare_ctx_alias = (
+                        allow_post_table_alias
+                        and not saw_final
+                        and (
+                            nxt_s is None
+                            or (nxt_s[0], nxt_s[1]) in (("OP", ","), ("OP", "("))
+                            or (
+                                nxt_s[0] == "IDENT"
+                                and not nxt_s_dot
+                                and nxt_s[1].upper()
+                                in (
+                                    _JOIN_MODIFIER_KEYWORDS
+                                    | _FROM_EXIT_KEYWORDS
+                                    | {"JOIN", "ON", "USING", "FINAL", "SELECT"}
+                                )
+                            )
+                        )
+                    )
+                    if is_bare_ctx_alias or wu == "SAMPLE":
+                        in_sample = wu == "SAMPLE" and not is_bare_ctx_alias
+                        allow_post_table_alias = False
+                        if (
+                            is_bare_ctx_alias
+                            and pos + 1 < n
+                            and (s_list[pos + 1][0], s_list[pos + 1][1]) == ("OP", "(")
+                        ):
+                            end_ctx = _consume_alias_col_list(s_list, pos, record_ast_fn=True)
+                            pos = end_ctx if end_ctx is not None else pos + 1
+                        else:
+                            pos += 1
+                        continue
+                if in_from and in_sample and wu == "OFFSET":
+                    pos += 1
+                    continue
+                if in_from and not expect_table and (wu == "ON" or (wu == "USING" and not in_on)):
+                    if (
+                        wu == "USING"
+                        and not in_join_mod
+                        and pos + 1 < n
+                        and s_list[pos + 1][0] == "IDENT"
+                        and s_list[pos + 1][1].upper() == "SAMPLE"
+                    ):
+                        in_sample = True
+                        allow_post_table_alias = False
+                        pos += 2
+                        continue
+                    if in_join_mod or not saw_join:
+                        in_from = False
+                        in_on = False
+                        in_sample = False
+                        allow_post_table_alias = False
+                        in_join_mod = False
+                        saw_join = False
+                        pos += 1
+                        continue
+                    expect_table = False
+                    in_sample = False
+                    allow_post_table_alias = False
+                    if wu == "ON":
+                        in_on = True
+                        pos += 1
+                        continue
+                    if pos + 1 < n and (s_list[pos + 1][0], s_list[pos + 1][1]) == ("OP", "("):
+                        rp_u = _match_delim(s_list, pos + 1)
+                        if rp_u > pos + 1 and _valid_ident_list(s_list[pos + 2 : rp_u]):
+                            in_on = False
+                            pos = rp_u + 1
+                            continue
+                    in_from = False
+                    in_on = False
+                    pos += 1
+                    continue
+                if (
+                    wu == "SELECT"
+                    and in_from
+                    and not expect_table
+                    and not in_on
+                    and not in_sample
+                    and not in_array_join
+                    and allow_post_table_alias
+                    and not in_join_mod
+                    and not saw_final
+                ):
                     nxt_t = s_list[pos + 1] if pos + 1 < n else None
                     is_fn_proj = (
                         nxt_t is not None
@@ -1102,6 +1384,7 @@ def _exempt_col_list_ident_starts(
                         )
                     )
                     if is_bare_sel_alias:
+                        allow_post_table_alias = False
                         pos += 1
                         continue
                 is_within_group = (
@@ -1130,10 +1413,24 @@ def _exempt_col_list_ident_starts(
                     in_array_join = False
                     expect_table = False
                     in_on = False
+                    in_sample = False
+                    allow_post_table_alias = False
+                    saw_final = False
+                    in_join_mod = False
+                    saw_join = False
                     pos += 1
                     continue
             if in_from and not expect_table and (k, t) == ("OP", ","):
+                if in_join_mod:
+                    in_from = False
+                    in_join_mod = False
+                    pos += 1
+                    continue
                 in_on = False
+                in_sample = False
+                allow_post_table_alias = False
+                saw_final = False
+                saw_join = False
                 expect_table = not in_array_join
                 pos += 1
                 continue
@@ -1160,33 +1457,66 @@ def _exempt_col_list_ident_starts(
                                 and fn_low in _ALLOWED_FUNCTIONS
                             ):
                                 end_tf_alias = _consume_alias_col_list(s_list, cl_fn + 1, record_ast_fn=False)
+                                allow_post_table_alias = end_tf_alias is None
                                 pos = end_tf_alias if end_tf_alias is not None else cl_fn + 1
                             else:
+                                in_from = False
+                                allow_post_table_alias = False
                                 pos = cl_fn + 1
                         else:
+                            in_from = False
+                            allow_post_table_alias = False
                             pos = j + 1
                         expect_table = False
+                        saw_final = False
+                        in_join_mod = False
                         continue
                     if (
                         len(parts) == 1
                         and parts[0][0] == "IDENT"
                         and parts[0][1].upper() in non_table_or_alias_keywords
                     ):
+                        in_from = False
                         expect_table = False
+                        allow_post_table_alias = False
+                        in_join_mod = False
                         pos = j
                         continue
                     tbl_low = _unquote_tok(parts[-1][0], parts[-1][1]).lower()
                     if known_relations is not None and tbl_low not in (known_relations | active_ctes):
+                        in_from = False
                         expect_table = False
+                        allow_post_table_alias = False
+                        in_join_mod = False
                         pos = j
                         continue
                     end_alias = _consume_alias_col_list(s_list, j, record_ast_fn=True)
                     expect_table = False
+                    allow_post_table_alias = end_alias is None
+                    saw_final = False
+                    in_join_mod = False
                     pos = end_alias if end_alias is not None else j
                     continue
+                in_from = False
                 expect_table = False
+                allow_post_table_alias = False
+                in_join_mod = False
                 pos += 1
                 continue
+            if in_from and not expect_table and not in_on and not in_sample and not in_array_join:
+                if (
+                    allow_post_table_alias
+                    and not in_join_mod
+                    and not saw_final
+                    and k in ("IDENT", "DQUOTE")
+                    and not (k == "IDENT" and t.upper() in disallowed_bare_alias)
+                ):
+                    allow_post_table_alias = False
+                    pos += 1
+                    continue
+                in_from = False
+                allow_post_table_alias = False
+                in_join_mod = False
             pos += 1
 
     _walk_query(sig)
@@ -2433,76 +2763,41 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                         seg_sql,
                         flags=re.IGNORECASE,
                     )
-            for pat, repl in (
-                (
-                    rf"({_qual_re}custom_fields\['[a-zA-Z0-9_]+'\])\s*(=|!=|<>)\s*(-?\d+(?:\.\d+)?)\b",
-                    r"\1 \2 '\3'",
-                ),
-                (
-                    rf"({_qual_re}custom_fields\['[a-zA-Z0-9_]+'\])\s*(<=|>=|<|>)\s*(-?\d+(?:\.\d+)?)\b",
-                    r"toFloat64OrZero(\1) \2 \3",
-                ),
-                (
-                    rf"({_qual_re}custom_fields\['[a-zA-Z0-9_]+'\])\s*((?:NOT\s+)?BETWEEN)\s+(-?\d+(?:\.\d+)?)(?![A-Za-z0-9_.])\s+AND\s+(-?\d+(?:\.\d+)?)(?![A-Za-z0-9_.])",
-                    r"toFloat64OrZero(\1) \2 \3 AND \4",
-                ),
-            ):
-                seg_sql = re.sub(pat, repl, seg_sql, flags=re.IGNORECASE)
-
-            def _sub_req_rev_eq(m: re.Match[str]) -> str:
-                if not _is_standalone_num(m.string, m.start(), m.group(1)):
-                    return m.group(0)
-                return f"'{m.group(1)}' {m.group(2)} {m.group(3)}"
-
-            seg_sql = re.sub(
-                rf"(?<![A-Za-z0-9_.\"'`])(-?\d+(?:\.\d+)?)\s*(=|!=|<>)\s*({_qual_re}custom_fields\['[a-zA-Z0-9_]+'\])",
-                _sub_req_rev_eq,
-                seg_sql,
-            )
-
-            def _sub_req_rev_cmp(m: re.Match[str]) -> str:
-                if not _is_standalone_num(m.string, m.start(), m.group(1)):
-                    return m.group(0)
-                return f"{m.group(1)} {m.group(2)} toFloat64OrZero({m.group(3)})"
-
-            seg_sql = re.sub(
-                rf"(?<![A-Za-z0-9_.\"'`])(-?\d+(?:\.\d+)?)\s*(<=|>=|<|>)\s*({_qual_re}custom_fields\['[a-zA-Z0-9_]+'\])",
-                _sub_req_rev_cmp,
-                seg_sql,
-            )
 
         _alias_map = alias_schema_map or {}
-        if derived_str_cols and (unqualified_derived or _alias_map):
-            _physical_req_cols = _REQUEST_TYPED_COLUMNS | {
-                "timestamp",
-                "event_timestamp",
-                "ip",
-                "client_ip",
-                "custom_fields",
-            }
+        _physical_req_cols = _REQUEST_TYPED_COLUMNS | {
+            "timestamp",
+            "event_timestamp",
+            "ip",
+            "client_ip",
+            "custom_fields",
+        }
 
-            def _qual_matches_derived(raw_qual: str, col_name: str, *, want_bool: bool = False) -> bool:
-                if not raw_qual:
-                    if not unqualified_derived:
-                        return False
-                    if touches_request and col_name in _physical_req_cols:
-                        return False
-                    if want_bool and col_name in non_cf_shadowed_bool_cols:
-                        return False
-                    if not want_bool and col_name in non_cf_shadowed_str_cols:
-                        return False
-                    return True
-                q_tok = _unquote_sql_ident(raw_qual.rstrip()[:-1].strip()).lower()
-                q_sch = _alias_map.get(q_tok)
-                if q_sch is None:
+        def _qual_matches_derived(raw_qual: str, col_name: str, *, want_bool: bool = False) -> bool:
+            if not (derived_str_cols and (unqualified_derived or _alias_map)):
+                return False
+            if not raw_qual:
+                if not unqualified_derived:
                     return False
-                if want_bool:
-                    return col_name in q_sch.bool_cols
-                return col_name in q_sch.str_cols
+                if touches_request and col_name in _physical_req_cols:
+                    return False
+                if want_bool and col_name in non_cf_shadowed_bool_cols:
+                    return False
+                if not want_bool and col_name in non_cf_shadowed_str_cols:
+                    return False
+                return True
+            q_tok = _unquote_sql_ident(raw_qual.rstrip()[:-1].strip()).lower()
+            q_sch = _alias_map.get(q_tok)
+            if q_sch is None:
+                return False
+            if want_bool:
+                return col_name in q_sch.bool_cols
+            return col_name in q_sch.str_cols
 
+        if derived_str_cols and (unqualified_derived or _alias_map):
             for d_col in sorted(derived_str_cols):
-                col_pat = rf"(?<![A-Za-z0-9_.\"'`])({_single_ident_re}\s*\.\s*)?(\b{re.escape(d_col)}\b)(?!\s*[.(])"
                 if d_col in _REQUEST_BOOLEAN_CF_FIELDS or d_col in derived_bool_cols:
+                    col_pat = rf"(?<![A-Za-z0-9_.\"'`])({_single_ident_re}\s*\.\s*)?(\b{re.escape(d_col)}\b)(?!\s*[.(])"
                     for b_pat, b_repl in _bool_rules:
 
                         def _sub_bool(m: re.Match[str], _repl: str = b_repl, _dc: str = d_col) -> str:
@@ -2522,74 +2817,288 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
 
                         seg_sql = re.sub(rf"{rb_pat}\s*{col_pat}", _sub_rev_bool, seg_sql, flags=re.IGNORECASE)
 
-                def _sub_eq(m: re.Match[str], _dc: str = d_col) -> str:
-                    q_part = m.group(1) or ""
-                    if not _qual_matches_derived(q_part, _dc):
-                        return m.group(0)
-                    return f"{q_part}{m.group(2)} {m.group(3)} '{m.group(4)}'"
+        if touches_request or (derived_str_cols and (unqualified_derived or _alias_map)):
+            lex_toks = [
+                (m.lastgroup or "OTHER", m.group(0), m.start(), m.end()) for m in _CONSOLE_SQL_LEX_RE.finditer(seg_sql)
+            ]
+            sig_c = [idx_t for idx_t, tk_t in enumerate(lex_toks) if tk_t[0] not in ("WS", "COMMENT")]
+            _non_call_open_kw = _unary_kw | frozenset(
+                {"IN", "BETWEEN", "IS", "DISTINCT", "FROM", "AS", "JOIN", "USING", "EXISTS", "ALL", "ANY", "SOME"}
+            )
+            _post_num_kw = frozenset(
+                {
+                    "AND",
+                    "OR",
+                    "XOR",
+                    "ORDER",
+                    "GROUP",
+                    "HAVING",
+                    "LIMIT",
+                    "OFFSET",
+                    "FETCH",
+                    "UNION",
+                    "INTERSECT",
+                    "EXCEPT",
+                    "WINDOW",
+                    "QUALIFY",
+                    "SETTINGS",
+                    "FORMAT",
+                    "PREWHERE",
+                    "SAMPLE",
+                    "INTO",
+                    "FOR",
+                    "WHEN",
+                    "THEN",
+                    "ELSE",
+                    "END",
+                    "AS",
+                    "FROM",
+                    "WHERE",
+                    "ON",
+                }
+            )
+            _lit_prefix = f"__fla_str_lit_{lit_nonce}_"
 
-                seg_sql = re.sub(
-                    rf"{col_pat}\s*(=|!=|<>)\s*(-?\d+(?:\.\d+)?)\b",
-                    _sub_eq,
-                    seg_sql,
-                    flags=re.IGNORECASE,
-                )
+            def _match_paren_sp(open_sp: int) -> int:
+                depth = 0
+                for cur_sp in range(open_sp, len(sig_c)):
+                    ck, ct, _, _ = lex_toks[sig_c[cur_sp]]
+                    if ck == "OP" and ct == "(":
+                        depth += 1
+                    elif ck == "OP" and ct == ")":
+                        depth -= 1
+                        if depth == 0:
+                            return cur_sp
+                return -1
 
-                def _sub_rev_eq(m: re.Match[str], _dc: str = d_col) -> str:
-                    q_part = m.group(3) or ""
-                    if not _is_standalone_num(m.string, m.start(), m.group(1)) or not _qual_matches_derived(
-                        q_part, _dc
+            def _is_call_before_sp(open_sp: int) -> bool:
+                if open_sp <= 0:
+                    return False
+                pk, pt, _, _ = lex_toks[sig_c[open_sp - 1]]
+                if pk == "DQUOTE":
+                    return True
+                if pk == "IDENT":
+                    if open_sp >= 2 and lex_toks[sig_c[open_sp - 2]][0:2] == ("OP", "."):
+                        return True
+                    return pt.upper() not in _non_call_open_kw
+                return False
+
+            def _not_chained_after(end_sp: int) -> bool:
+                if end_sp + 1 >= len(sig_c):
+                    return True
+                nk, nt, _, _ = lex_toks[sig_c[end_sp + 1]]
+                return not (nk == "OP" and nt in (".", "[", "("))
+
+            def _parse_str_col_sp(sp: int) -> tuple[int, str, bool] | None:
+                if sp >= len(sig_c):
+                    return None
+                tk0, tt0, _, _ = lex_toks[sig_c[sp]]
+                if (tk0, tt0) == ("OP", "(") and not _is_call_before_sp(sp):
+                    close_sp = _match_paren_sp(sp)
+                    if close_sp > sp + 1 and _not_chained_after(close_sp):
+                        inner_col = _parse_str_col_sp(sp + 1)
+                        if inner_col is not None and inner_col[0] == close_sp - 1:
+                            return (close_sp, inner_col[1], True)
+                    return None
+                if sp > 0 and lex_toks[sig_c[sp - 1]][0:2] == ("OP", "."):
+                    return None
+                q_sp = sp
+                while (
+                    q_sp + 2 < len(sig_c)
+                    and lex_toks[sig_c[q_sp]][0] in ("IDENT", "DQUOTE")
+                    and not lex_toks[sig_c[q_sp]][1].startswith(_lit_prefix)
+                    and lex_toks[sig_c[q_sp + 1]][0:2] == ("OP", ".")
+                ):
+                    q_sp += 2
+                if q_sp >= len(sig_c):
+                    return None
+                qk, qt, _, q_end = lex_toks[sig_c[q_sp]]
+                if (
+                    touches_request
+                    and qk == "IDENT"
+                    and qt.lower() == "custom_fields"
+                    and q_sp + 3 < len(sig_c)
+                    and lex_toks[sig_c[q_sp + 1]][0:2] == ("OP", "[")
+                    and lex_toks[sig_c[q_sp + 2]][0] == "STR"
+                    and cf_key_lit_re.fullmatch(lex_toks[sig_c[q_sp + 2]][1]) is not None
+                    and lex_toks[sig_c[q_sp + 3]][0:2] == ("OP", "]")
+                    and _not_chained_after(q_sp + 3)
+                ):
+                    core_sql = seg_sql[lex_toks[sig_c[sp]][2] : lex_toks[sig_c[q_sp + 3]][3]]
+                    return (q_sp + 3, core_sql, False)
+                if (
+                    q_sp in (sp, sp + 2)
+                    and qk == "IDENT"
+                    and not qt.startswith(_lit_prefix)
+                    and qt.lower() in derived_str_cols
+                    and _not_chained_after(q_sp)
+                ):
+                    raw_qual = seg_sql[lex_toks[sig_c[sp]][2] : lex_toks[sig_c[q_sp]][2]] if q_sp > sp else ""
+                    if _qual_matches_derived(raw_qual, qt.lower()):
+                        core_sql = seg_sql[lex_toks[sig_c[sp]][2] : q_end]
+                        return (q_sp, core_sql, False)
+                return None
+
+            def _parse_num_expr_sp(sp: int, *, atom_only: bool = False) -> tuple[int, str, bool] | None:
+                if sp >= len(sig_c):
+                    return None
+                tk0, tt0, t_start, t_end = lex_toks[sig_c[sp]]
+                atom_end: int
+                plain_dec: bool
+                if tk0 == "OP" and tt0 in ("+", "-"):
+                    sub = _parse_num_expr_sp(sp + 1, atom_only=True)
+                    if sub is None:
+                        return None
+                    atom_end = sub[0]
+                    atom_sql = seg_sql[t_start : lex_toks[sig_c[atom_end]][3]]
+                    plain_dec = bool(re.fullmatch(r"-?\d+(?:\.\d+)?", atom_sql))
+                elif tk0 == "NUM":
+                    if sp > 0 and lex_toks[sig_c[sp - 1]][0:2] == ("OP", "."):
+                        return None
+                    if sp + 1 < len(sig_c) and lex_toks[sig_c[sp + 1]][0:2] == ("OP", "."):
+                        return None
+                    atom_end = sp
+                    atom_sql = seg_sql[t_start:t_end]
+                    plain_dec = bool(re.fullmatch(r"\d+(?:\.\d+)?", atom_sql))
+                elif (tk0, tt0) == ("OP", "(") and not _is_call_before_sp(sp):
+                    close_sp = _match_paren_sp(sp)
+                    if close_sp <= sp + 1 or not _not_chained_after(close_sp):
+                        return None
+                    inner_n = _parse_num_expr_sp(sp + 1, atom_only=False)
+                    if inner_n is None or inner_n[0] != close_sp - 1:
+                        return None
+                    atom_end = close_sp
+                    atom_sql = seg_sql[t_start : lex_toks[sig_c[close_sp]][3]]
+                    plain_dec = False
+                else:
+                    return None
+                if atom_only:
+                    return (atom_end, atom_sql, plain_dec)
+                while (
+                    atom_end + 1 < len(sig_c)
+                    and lex_toks[sig_c[atom_end + 1]][0] == "OP"
+                    and lex_toks[sig_c[atom_end + 1]][1] in ("+", "-", "*", "/")
+                ):
+                    rhs_a = _parse_num_expr_sp(atom_end + 2, atom_only=True)
+                    if rhs_a is None:
+                        return None
+                    atom_end = rhs_a[0]
+                    plain_dec = False
+                full_sql = seg_sql[t_start : lex_toks[sig_c[atom_end]][3]]
+                return (atom_end, full_sql, plain_dec)
+
+            def _valid_num_start_boundary(sp: int) -> bool:
+                if sp <= 0:
+                    return True
+                pk, pt, _, _ = lex_toks[sig_c[sp - 1]]
+                if (pk, pt) in (("OP", "("), ("OP", ","), ("OP", ";")):
+                    return True
+                return pk == "IDENT" and pt.upper() in _unary_kw
+
+            def _valid_num_end_boundary(next_sp: int) -> bool:
+                if next_sp >= len(sig_c):
+                    return True
+                nk, nt, _, _ = lex_toks[sig_c[next_sp]]
+                if (nk, nt) in (("OP", ")"), ("OP", ","), ("OP", ";")):
+                    return True
+                return nk == "IDENT" and nt.upper() in _post_num_kw
+
+            edits: list[tuple[int, int, str]] = []
+            sp_i = 0
+            while sp_i < len(sig_c):
+                col_m = _parse_str_col_sp(sp_i)
+                if col_m is not None:
+                    c_end, c_core, c_parens = col_m
+                    op_sp = c_end + 1
+                    if op_sp < len(sig_c) and lex_toks[sig_c[op_sp]][0] == "IDENT":
+                        w1 = lex_toks[sig_c[op_sp]][1]
+                        bw_kw: str | None = None
+                        low_sp = -1
+                        if w1.upper() == "BETWEEN":
+                            bw_kw = w1
+                            low_sp = op_sp + 1
+                        elif (
+                            w1.upper() == "NOT"
+                            and op_sp + 1 < len(sig_c)
+                            and lex_toks[sig_c[op_sp + 1]][0] == "IDENT"
+                            and lex_toks[sig_c[op_sp + 1]][1].upper() == "BETWEEN"
+                        ):
+                            bw_kw = f"{w1} {lex_toks[sig_c[op_sp + 1]][1]}"
+                            low_sp = op_sp + 2
+                        if bw_kw is not None:
+                            low_m = _parse_num_expr_sp(low_sp)
+                            if low_m is not None:
+                                l_end, l_sql, _ = low_m
+                                and_sp = l_end + 1
+                                if (
+                                    and_sp < len(sig_c)
+                                    and lex_toks[sig_c[and_sp]][0] == "IDENT"
+                                    and lex_toks[sig_c[and_sp]][1].upper() == "AND"
+                                ):
+                                    high_m = _parse_num_expr_sp(and_sp + 1)
+                                    if high_m is not None and _valid_num_end_boundary(high_m[0] + 1):
+                                        h_end, h_sql, _ = high_m
+                                        and_kw = lex_toks[sig_c[and_sp]][1]
+                                        edits.append(
+                                            (
+                                                lex_toks[sig_c[sp_i]][2],
+                                                lex_toks[sig_c[h_end]][3],
+                                                f"toFloat64OrZero({c_core}) {bw_kw} {l_sql} {and_kw} {h_sql}",
+                                            )
+                                        )
+                                        sp_i = h_end + 1
+                                        continue
+                    if (
+                        op_sp < len(sig_c)
+                        and lex_toks[sig_c[op_sp]][0] == "OP"
+                        and lex_toks[sig_c[op_sp]][1] in ("=", "!=", "<>", "<", "<=", ">", ">=")
                     ):
-                        return m.group(0)
-                    return f"'{m.group(1)}' {m.group(2)} {q_part}{m.group(4)}"
-
-                seg_sql = re.sub(
-                    rf"(?<![A-Za-z0-9_.\"'`])(-?\d+(?:\.\d+)?)\s*(=|!=|<>)\s*{col_pat}",
-                    _sub_rev_eq,
-                    seg_sql,
-                    flags=re.IGNORECASE,
-                )
-
-                def _sub_cmp(m: re.Match[str], _dc: str = d_col) -> str:
-                    q_part = m.group(1) or ""
-                    if not _qual_matches_derived(q_part, _dc):
-                        return m.group(0)
-                    return f"toFloat64OrZero({q_part}{m.group(2)}) {m.group(3)} {m.group(4)}"
-
-                seg_sql = re.sub(
-                    rf"{col_pat}\s*(<=|>=|<|>)\s*(-?\d+(?:\.\d+)?)\b",
-                    _sub_cmp,
-                    seg_sql,
-                    flags=re.IGNORECASE,
-                )
-
-                def _sub_rev_cmp(m: re.Match[str], _dc: str = d_col) -> str:
-                    q_part = m.group(3) or ""
-                    if not _is_standalone_num(m.string, m.start(), m.group(1)) or not _qual_matches_derived(
-                        q_part, _dc
-                    ):
-                        return m.group(0)
-                    return f"{m.group(1)} {m.group(2)} toFloat64OrZero({q_part}{m.group(4)})"
-
-                seg_sql = re.sub(
-                    rf"(?<![A-Za-z0-9_.\"'`])(-?\d+(?:\.\d+)?)\s*(<=|>=|<|>)\s*{col_pat}",
-                    _sub_rev_cmp,
-                    seg_sql,
-                    flags=re.IGNORECASE,
-                )
-
-                def _sub_between(m: re.Match[str], _dc: str = d_col) -> str:
-                    q_part = m.group(1) or ""
-                    if not _qual_matches_derived(q_part, _dc):
-                        return m.group(0)
-                    return f"toFloat64OrZero({q_part}{m.group(2)}) {m.group(3)} {m.group(4)} AND {m.group(5)}"
-
-                seg_sql = re.sub(
-                    rf"{col_pat}\s+((?:NOT\s+)?BETWEEN)\s+(-?\d+(?:\.\d+)?)(?![A-Za-z0-9_.])\s+AND\s+(-?\d+(?:\.\d+)?)(?![A-Za-z0-9_.])",
-                    _sub_between,
-                    seg_sql,
-                    flags=re.IGNORECASE,
-                )
+                        op_txt = lex_toks[sig_c[op_sp]][1]
+                        rhs_m = _parse_num_expr_sp(op_sp + 1)
+                        if rhs_m is not None and _valid_num_end_boundary(rhs_m[0] + 1):
+                            r_end, r_sql, r_plain = rhs_m
+                            if op_txt in ("<", "<=", ">", ">="):
+                                repl_s = f"toFloat64OrZero({c_core}) {op_txt} {r_sql}"
+                            elif r_plain and not c_parens:
+                                repl_s = f"{c_core} {op_txt} '{r_sql}'"
+                            else:
+                                repl_s = f"toFloat64OrNull(nullIf({c_core}, '')) {op_txt} {r_sql}"
+                            edits.append((lex_toks[sig_c[sp_i]][2], lex_toks[sig_c[r_end]][3], repl_s))
+                            sp_i = r_end + 1
+                            continue
+                if _valid_num_start_boundary(sp_i):
+                    lhs_m = _parse_num_expr_sp(sp_i)
+                    if lhs_m is not None:
+                        l_end2, l_sql2, l_plain2 = lhs_m
+                        op_sp2 = l_end2 + 1
+                        if (
+                            op_sp2 < len(sig_c)
+                            and lex_toks[sig_c[op_sp2]][0] == "OP"
+                            and lex_toks[sig_c[op_sp2]][1] in ("=", "!=", "<>", "<", "<=", ">", ">=")
+                        ):
+                            op_txt2 = lex_toks[sig_c[op_sp2]][1]
+                            rhs_c = _parse_str_col_sp(op_sp2 + 1)
+                            if rhs_c is not None and _valid_num_end_boundary(rhs_c[0] + 1):
+                                rc_end, rc_core, rc_parens = rhs_c
+                                if op_txt2 in ("<", "<=", ">", ">="):
+                                    repl_r = f"{l_sql2} {op_txt2} toFloat64OrZero({rc_core})"
+                                elif l_plain2 and not rc_parens:
+                                    repl_r = f"'{l_sql2}' {op_txt2} {rc_core}"
+                                else:
+                                    repl_r = f"{l_sql2} {op_txt2} toFloat64OrNull(nullIf({rc_core}, ''))"
+                                edits.append((lex_toks[sig_c[sp_i]][2], lex_toks[sig_c[rc_end]][3], repl_r))
+                                sp_i = rc_end + 1
+                                continue
+                sp_i += 1
+            if edits:
+                out_chunks: list[str] = []
+                last_pos = 0
+                for e_start, e_end, e_repl in edits:
+                    out_chunks.append(seg_sql[last_pos:e_start])
+                    out_chunks.append(e_repl)
+                    last_pos = e_end
+                out_chunks.append(seg_sql[last_pos:])
+                seg_sql = "".join(out_chunks)
 
         if saved_lits:
             seg_sql = re.sub(rf"__fla_str_lit_{lit_nonce}_(\d+)__", lambda m: saved_lits[int(m.group(1))], seg_sql)
@@ -3672,6 +4181,132 @@ def _rewrite_console_sql(sql: str, *, svc_table: str, names: Mapping[str, str]) 
     return rewritten
 
 
+_CONSOLE_EXTRA_SESSION_PII_KEYS = (
+    PII_SESSION_KEYS
+    | CMCD_SESSION_ALIAS_KEYS
+    | frozenset(
+        {
+            "authorization",
+            "proxy_authorization",
+            "cookie",
+            "set_cookie",
+            "x_api_key",
+            "api_key",
+            "access_token",
+            "id_token",
+            "refresh_token",
+            "auth_token",
+            "csrf_token",
+            "xsrf_token",
+            "x_csrf_token",
+            "x_xsrf_token",
+            "session",
+            "session_token",
+            "cmcd.sid",
+            "cmcd.cid",
+            "cmcd.session",
+        }
+    )
+)
+_CONSOLE_EXTRA_SESSION_NONWORD = frozenset(
+    re.sub(r"[^a-z0-9]+", "", k.lower()) for k in _CONSOLE_EXTRA_SESSION_PII_KEYS
+)
+_CONSOLE_EXTRA_IP_PII_KEYS = PII_IP_KEYS | frozenset(
+    {
+        "origin_ip",
+        "cf_connecting_ip",
+        "cf_connecting_ipv6",
+        "x_real_ip",
+        "x_client_ip",
+        "x_cluster_client_ip",
+        "x_original_forwarded_for",
+        "forwarded",
+        "forwarded_for",
+    }
+)
+_CONSOLE_EXTRA_IP_NONWORD = frozenset(re.sub(r"[^a-z0-9]+", "", k.lower()) for k in _CONSOLE_EXTRA_IP_PII_KEYS)
+_CONSOLE_BRACKET_PII_RE = re.compile(r"\[['\"`]?([^'\"`\]]+)['\"`]?\]")
+_CONSOLE_ARRAY_ELEM_PII_RE = re.compile(r"arrayelement\(\s*(?:custom_fields|cmcd)\s*,\s*'([^']+)'\s*\)", re.IGNORECASE)
+_CONSOLE_AFFIX_PREFIX_RE = re.compile(
+    r"^(?:_cf_)?(?:x?filter_(?:_?cf_)?)?(?:_cf_)?(?:(?:req|resp|bereq|beresp|obj)_http_|headers?_)?"
+)
+_CONSOLE_NUM_SUFFIX_RE = re.compile(r"_[0-9]+$")
+
+
+def _classify_console_pii_key(raw_key: Any) -> Literal["session", "ip"] | None:
+    if not isinstance(raw_key, str) or not raw_key.strip():
+        return None
+    low_s = raw_key.strip().lower()
+    unbracketed = _CONSOLE_BRACKET_PII_RE.sub("", low_s)
+    candidates = [low_s]
+    if "." in unbracketed:
+        candidates.extend(seg.strip() for seg in unbracketed.split(".") if seg.strip())
+    for m_br in _CONSOLE_BRACKET_PII_RE.finditer(low_s):
+        if m_br.group(1).strip():
+            candidates.append(m_br.group(1).strip())
+    for m_ae in _CONSOLE_ARRAY_ELEM_PII_RE.finditer(low_s):
+        if m_ae.group(1).strip():
+            candidates.append(m_ae.group(1).strip())
+    matched_ip = False
+    for seg in candidates:
+        clean = seg.strip(" \t'\"`")
+        if not clean:
+            continue
+        raw_norm = re.sub(r"[^a-z0-9_]+", "_", clean)
+        canon = raw_norm.strip("_")
+        stripped = _CONSOLE_NUM_SUFFIX_RE.sub("", _CONSOLE_AFFIX_PREFIX_RE.sub("", raw_norm)).strip("_")
+        nw = stripped.replace("_", "")
+        if (
+            clean in _CONSOLE_EXTRA_SESSION_PII_KEYS
+            or canon in _CONSOLE_EXTRA_SESSION_PII_KEYS
+            or stripped in _CONSOLE_EXTRA_SESSION_PII_KEYS
+            or (nw != "" and nw in _CONSOLE_EXTRA_SESSION_NONWORD)
+        ):
+            return "session"
+        if (
+            clean in _CONSOLE_EXTRA_IP_PII_KEYS
+            or canon in _CONSOLE_EXTRA_IP_PII_KEYS
+            or stripped in _CONSOLE_EXTRA_IP_PII_KEYS
+            or (nw != "" and nw in _CONSOLE_EXTRA_IP_NONWORD)
+        ):
+            matched_ip = True
+    if matched_ip:
+        return "ip"
+    if is_saved_view_pii_key(raw_key):
+        return "session"
+    return None
+
+
+def _mask_nested_extra_pii(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _walk_nested(obj: Any, *, top_row: bool = False) -> Any:
+        if isinstance(obj, dict):
+            out_d: dict[str, Any] = {}
+            for k, v in obj.items():
+                if top_row:
+                    out_d[k] = _walk_nested(v, top_row=False) if isinstance(v, (dict, list, tuple)) else v
+                    continue
+                kind = _classify_console_pii_key(k)
+                if isinstance(v, str):
+                    if kind == "session":
+                        out_d[k] = "[redacted]" if v else v
+                    elif kind == "ip":
+                        out_d[k] = v if v == "[redacted]" else mask_ip_or_chain(v)
+                    else:
+                        out_d[k] = v
+                elif isinstance(v, (dict, list, tuple)):
+                    out_d[k] = _walk_nested(v, top_row=False)
+                else:
+                    out_d[k] = v
+            return out_d
+        if isinstance(obj, list):
+            return [_walk_nested(x, top_row=False) for x in obj]
+        if isinstance(obj, tuple):
+            return tuple(_walk_nested(x, top_row=False) for x in obj)
+        return obj
+
+    return [_walk_nested(r, top_row=True) for r in rows]
+
+
 def _scrub_ip_leaves(obj: Any) -> Any:
     if isinstance(obj, dict):
         return {k: _scrub_ip_leaves(v) for k, v in obj.items()}
@@ -3857,11 +4492,17 @@ def query_endpoint(
             if hasattr(v, "isoformat"):
                 val = v.isoformat()
                 row_copy[k] = val.replace("+00:00", "Z") if "+" in val else val + "Z"
-            elif mask_ips and is_saved_view_pii_key(str(k)) and v:
+            elif (
+                mask_ips
+                and not isinstance(v, (dict, list, tuple))
+                and v
+                and _classify_console_pii_key(str(k)) is not None
+            ):
                 row_copy[k] = "[redacted]"
         data.append(row_copy)
     if mask_ips:
         data = apply_pii_policy(data, {"mask_ips": True})
+        data = _mask_nested_extra_pii(data)
         data = mask_ip_values(data)
         data = _scrub_ip_leaves(data)
     timer.mark("serialize_json", _t_serialize)

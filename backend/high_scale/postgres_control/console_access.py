@@ -28,10 +28,79 @@ MIN_SECRET_BYTES = 32
 MIN_DISTINCT_SECRET_BYTES = 8
 REDACTED = "[redacted]"
 MASKED_KEYS = tuple(sorted(SHARED_PII_KEYS))
-_MAP_MASKED_KEYS = tuple(
-    sorted(SHARED_PII_KEYS | CMCD_SESSION_ALIAS_KEYS | {"origin_ip", "cmcd.sid", "cmcd.cid", "cmcd.session"})
+_EXTRA_MAP_MASKED_KEYS = frozenset(
+    {
+        "origin_ip",
+        "cf_connecting_ip",
+        "cf_connecting_ipv6",
+        "x_real_ip",
+        "x_client_ip",
+        "x_cluster_client_ip",
+        "x_original_forwarded_for",
+        "forwarded",
+        "forwarded_for",
+        "authorization",
+        "proxy_authorization",
+        "cookie",
+        "set_cookie",
+        "x_api_key",
+        "api_key",
+        "access_token",
+        "id_token",
+        "refresh_token",
+        "auth_token",
+        "csrf_token",
+        "xsrf_token",
+        "x_csrf_token",
+        "x_xsrf_token",
+        "session",
+        "session_token",
+        "cmcd.sid",
+        "cmcd.cid",
+        "cmcd.session",
+    }
 )
+_MAP_MASKED_KEYS = tuple(sorted(SHARED_PII_KEYS | CMCD_SESSION_ALIAS_KEYS | _EXTRA_MAP_MASKED_KEYS))
+_MAP_MASKED_KEY_SET = frozenset(_MAP_MASKED_KEYS)
 _MAP_MASKED_NONWORD_KEYS = tuple(sorted({re.sub(r"[^a-z0-9]+", "", k.lower()) for k in _MAP_MASKED_KEYS}))
+_MAP_MASKED_NONWORD_SET = frozenset(_MAP_MASKED_NONWORD_KEYS)
+_PII_BRACKET_RE = re.compile(r"\[['\"`]?([^'\"`\]]+)['\"`]?\]")
+_PII_AFFIX_PREFIX_RE = re.compile(
+    r"^(?:_cf_)?(?:x?filter_(?:_?cf_)?)?(?:_cf_)?(?:(?:req|resp|bereq|beresp|obj)_http_|headers?_)?"
+)
+_PII_NUM_SUFFIX_RE = re.compile(r"_[0-9]+$")
+
+
+def _is_console_pii_identifier(name: str) -> bool:
+    raw = name.strip().lower()
+    if not raw:
+        return False
+    if raw in MASKED_KEYS or raw in _MAP_MASKED_KEY_SET or is_saved_view_pii_key(name):
+        return True
+    unbracketed = _PII_BRACKET_RE.sub("", raw)
+    candidates = [raw]
+    if "." in unbracketed:
+        candidates.extend(seg.strip() for seg in unbracketed.split(".") if seg.strip())
+    for match in _PII_BRACKET_RE.finditer(raw):
+        if match.group(1).strip():
+            candidates.append(match.group(1).strip())
+    for seg in candidates:
+        clean = seg.strip(" \t'\"`")
+        if not clean:
+            continue
+        raw_norm = re.sub(r"[^a-z0-9_]+", "_", clean)
+        canon = raw_norm.strip("_")
+        stripped = _PII_NUM_SUFFIX_RE.sub("", _PII_AFFIX_PREFIX_RE.sub("", raw_norm)).strip("_")
+        if (
+            clean in _MAP_MASKED_KEY_SET
+            or canon in _MAP_MASKED_KEY_SET
+            or stripped in _MAP_MASKED_KEY_SET
+            or (stripped != "" and stripped.replace("_", "") in _MAP_MASKED_NONWORD_SET)
+        ):
+            return True
+    return False
+
+
 _DATABASE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
 _PROFILE_SETTINGS = (
     "readonly = 1, additional_table_filters CHANGEABLE_IN_READONLY, "
@@ -84,37 +153,32 @@ def _redaction(name: str, type_: str, keys: str) -> str | None:
         match = re.fullmatch(r"Map\((.+?),\s*(.+)\)", type_)
         if not match or "String" not in match.group(1) or "String" not in match.group(2):
             raise RuntimeError(f"cannot redact column {name} of type {type_}")
-        canon_expr = "trim(BOTH '_' FROM replaceRegexpAll(lower(k), '[^a-z0-9_]+', '_'))"
-        stripped_expr = (
-            "trim(BOTH '_' FROM replaceRegexpOne(replaceRegexpAll("
-            "replaceRegexpOne(lower(k), '^(?:x?filter_)?(?:_cf_)?', ''), '[^a-z0-9_]+', '_'), '_[0-9]+$', ''))"
+        bracket_pat = _literal(r"\[([^\]]+)\]")
+        trim_quotes_pat = _literal("^['\"` \t]+|['\"` \t]+$")
+        affix_pat = _literal(
+            r"^(?:_cf_)?(?:x?filter_(?:_?cf_)?)?(?:_cf_)?(?:(?:req|resp|bereq|beresp|obj)_http_|headers?_)?"
+        )
+        seg_clean = f"replaceRegexpAll(seg, {trim_quotes_pat}, '')"
+        seg_raw_norm = f"replaceRegexpAll({seg_clean}, '[^a-z0-9_]+', '_')"
+        seg_canon = f"trim(BOTH '_' FROM {seg_raw_norm})"
+        seg_stripped = (
+            f"trim(BOTH '_' FROM replaceRegexpOne(replaceRegexpOne({seg_raw_norm}, {affix_pat}, ''), '_[0-9]+$', ''))"
         )
         nw_keys = ", ".join(_literal(nk) for nk in _MAP_MASKED_NONWORD_KEYS)
+        candidates_expr = (
+            f"arrayConcat([lower(k)], "
+            f"splitByChar('.', replaceRegexpAll(lower(k), {bracket_pat}, '')), "
+            f"extractAll(lower(k), {bracket_pat}))"
+        )
         cmcd_extra = " OR lower(k) = 'session'" if name.lower() == "cmcd" else ""
         return (
-            f"mapApply((k, v) -> (k, if((lower(k) IN ({keys}) OR {canon_expr} IN ({keys}) "
-            f"OR {stripped_expr} IN ({keys}) OR replaceRegexpAll({stripped_expr}, '_', '') IN ({nw_keys}){cmcd_extra}) "
+            f"mapApply((k, v) -> (k, if((arrayExists(seg -> seg != '' AND ("
+            f"seg IN ({keys}) OR {seg_canon} IN ({keys}) OR {seg_stripped} IN ({keys}) "
+            f"OR ({seg_stripped} != '' AND replaceRegexpAll({seg_stripped}, '_', '') IN ({nw_keys}))"
+            f"), {candidates_expr}){cmcd_extra}) "
             f"AND NOT (isNull(v) OR v = ''), {redacted}, v)), `{name}`) AS `{name}`"
         )
-    col_lower = name.lower()
-    col_canon = re.sub(r"[^a-z0-9_]+", "_", col_lower).strip("_")
-    col_stripped = re.sub(
-        r"_\d+$",
-        "",
-        re.sub(
-            r"[^a-z0-9_]+",
-            "_",
-            col_lower.removeprefix("xfilter_").removeprefix("filter_").removeprefix("_cf_"),
-        ).strip("_"),
-    )
-    if (
-        col_lower in MASKED_KEYS
-        or col_lower in _MAP_MASKED_KEYS
-        or col_canon in _MAP_MASKED_KEYS
-        or col_stripped in _MAP_MASKED_KEYS
-        or is_saved_view_pii_key(name)
-        or (col_lower.startswith("_cf_") and col_lower.removeprefix("_cf_") in _MAP_MASKED_KEYS)
-    ):
+    if _is_console_pii_identifier(name):
         if "String" not in type_:
             raise RuntimeError(f"cannot redact column {name} of type {type_}")
         return f"if(isNull(`{name}`) OR `{name}` = '', `{name}`, {redacted}) AS `{name}`"
@@ -298,6 +362,13 @@ class ConsoleClients:
                     f"OR custom_fields['cmcd_sid'] NOT IN ('', {red}) "
                     f"OR custom_fields['cmcd_cid'] NOT IN ('', {red}) "
                     f"OR custom_fields['cmcd_session'] NOT IN ('', {red}) "
+                    f"OR custom_fields['cf-connecting-ip'] NOT IN ('', {red}) "
+                    f"OR custom_fields['x-real-ip'] NOT IN ('', {red}) "
+                    f"OR custom_fields['authorization'] NOT IN ('', {red}) "
+                    f"OR custom_fields['cookie'] NOT IN ('', {red}) "
+                    f"OR custom_fields['set-cookie'] NOT IN ('', {red}) "
+                    f"OR custom_fields['filter-session-id'] NOT IN ('', {red}) "
+                    f"OR custom_fields['req.http.session_id'] NOT IN ('', {red}) "
                     f"OR cmcd['sid'] NOT IN ('', {red}) "
                     f"OR cmcd['cid'] NOT IN ('', {red}) "
                     f"OR cmcd['cmcd_sid'] NOT IN ('', {red}) "

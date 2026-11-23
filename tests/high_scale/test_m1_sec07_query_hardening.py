@@ -1765,3 +1765,398 @@ def test_sec_t5_iter29_01_and_bug_hs01_allowlist_collist_between_and_hyphenated_
                     f"Real chdb/duckdb Iter30 suite failed:\nSTDOUT:\n{run_res.stdout}\nSTDERR:\n{run_res.stderr}"
                 )
                 assert "ITER30_CHDB_DUCKDB_PARITY_OK" in run_res.stdout
+
+
+_REAL_CHDB_DUCKDB_ITER31_SCRIPT = """
+import json
+import tempfile
+from types import SimpleNamespace
+
+import chdb
+from chdb import session as chdb_session
+import duckdb
+
+from backend.high_scale import query as hs_query
+from backend.high_scale.postgres_control import console_access
+from backend.models.analytics import QueryRequest as DashboardQueryRequest
+
+with tempfile.TemporaryDirectory(prefix="fla_iter31_chdb_") as tmpdir:
+    sess = chdb_session.Session(tmpdir)
+    sess.query(
+        "CREATE TABLE high_scale_batch_publications ("
+        "service_id String, domain String, batch_id String, publication_state String"
+        ") ENGINE = ReplacingMergeTree() ORDER BY (service_id, domain, batch_id)"
+    )
+    sess.query(
+        "CREATE TABLE request_facts ("
+        "service_id String, batch_id String, publication_state String, "
+        "event_timestamp DateTime64(6, 'UTC'), line_ordinal UInt32, "
+        "url String, client_ip String, req_id String, response_size UInt64, "
+        "custom_fields Map(String, String), cmcd Map(String, String)"
+        ") ENGINE = MergeTree() ORDER BY (service_id, event_timestamp, line_ordinal)"
+    )
+    sess.query("CREATE TABLE rum_vitals_facts (service_id String, batch_id String, publication_state String, event_timestamp DateTime64(6, 'UTC')) ENGINE = MergeTree() ORDER BY (service_id, event_timestamp)")
+    sess.query("CREATE TABLE rum_error_facts (service_id String, batch_id String, publication_state String, event_timestamp DateTime64(6, 'UTC')) ENGINE = MergeTree() ORDER BY (service_id, event_timestamp)")
+
+    sess.query("INSERT INTO high_scale_batch_publications VALUES ('svc_alpha', 'request', 'b1', 'visible')")
+    row1_cf = (
+        "{'status': '200', 'bytes': '250', 'origin_time_ms': '-12.5', "
+        "'filter-origin-ip': '203.0.113.10', 'filter-session-id': 'fsess-secret-11', "
+        "'xfilter-cookie-session': 'xfcookie-secret-22', 'filter-client-ip': '198.51.100.20', "
+        "'req.http.session_id': 'req-sess-secret-33', 'header.cookie_session': 'hdr-cookie-secret-44', "
+        "'meta[session_id]': 'meta-sess-secret-55', 'x.real.ip': '198.51.100.30', "
+        "'cf-connecting-ip': '198.51.100.40', 'x-real-ip': '198.51.100.50', "
+        "'Authorization': 'Bearer super-secret-jwt-66', 'set-cookie': 'sid=setcookie-secret-77', "
+        "'cookie': 'sid=cookie-secret-88', "
+        "'cache-status': 'HIT', 'origin-time': '14', 'session_duration_ms': '900', "
+        "'ip_version': '4', 'client_asn': '54113', 'token_count': '7'}"
+    )
+    row2_cf = "{'status': '200', 'bytes': '100', 'origin_time_ms': '-0.25'}"
+    row3_cf = "{'status': '500', 'bytes': '750', 'origin_time_ms': '42.0'}"
+    sess.query(
+        "INSERT INTO request_facts VALUES "
+        f"('svc_alpha', 'b1', 'visible', '2026-11-19 00:10:00.000000', 1, '/r1', '198.51.100.10', 'req-1', 250, {row1_cf}, {{'CMCD_BR': '3200'}}), "
+        f"('svc_alpha', 'b1', 'visible', '2026-11-19 00:11:00.000000', 2, '/r2', '198.51.100.11', 'req-2', 100, {row2_cf}, {{}}), "
+        f"('svc_alpha', 'b1', 'visible', '2026-11-19 00:12:00.000000', 3, '/r3', '198.51.100.12', 'req-3', 750, {row3_cf}, {{}})"
+    )
+
+    desc_rows = json.loads(sess.query("DESCRIBE TABLE default.request_facts", "JSON").bytes())["data"]
+    cols = [(r["name"], r["type"]) for r in desc_rows if str(r.get("default_type") or "").upper() not in ("MATERIALIZED", "ALIAS")]
+    for masked in (False, True):
+        v_map = console_access.console_tables("svc_alpha", masked=masked)
+        v_sql = console_access._view_select("default", "request_facts", cols, "svc_alpha", masked=masked)
+        sess.query(f"CREATE VIEW `{v_map['request_facts']}` AS {v_sql}")
+
+    class _ChdbClient:
+        _table_filters_verified = True
+
+        def execute(self, sql, settings=None, rewrite_cf=False):
+            s_parts = []
+            for k, v in (settings or {}).items():
+                val_esc = str(v).replace("\\\\", "\\\\\\\\").replace("'", "\\\\'")
+                s_parts.append(f"{k} = '{val_esc}'")
+            full_sql = f"{sql} SETTINGS {', '.join(s_parts)}" if s_parts else sql
+            raw = sess.query(full_sql, "JSON").bytes()
+            return json.loads(raw.decode("utf-8"))["data"] if raw else []
+
+    svc = SimpleNamespace(service_id="svc_alpha", client=_ChdbClient())
+    raw_tables = console_access.console_tables("svc_alpha", masked=False)
+    masked_tables = console_access.console_tables("svc_alpha", masked=True)
+
+    # 1. Masked view aliased projections & WHERE blind-oracle (oracle_n == 0) across all 13 Iter-31 PII keys + non-PII preservation:
+    iter31_pii_pairs = (
+        ("filter-origin-ip", "203.0.113.10"),
+        ("filter-session-id", "fsess-secret-11"),
+        ("xfilter-cookie-session", "xfcookie-secret-22"),
+        ("filter-client-ip", "198.51.100.20"),
+        ("req.http.session_id", "req-sess-secret-33"),
+        ("header.cookie_session", "hdr-cookie-secret-44"),
+        ("meta[session_id]", "meta-sess-secret-55"),
+        ("x.real.ip", "198.51.100.30"),
+        ("cf-connecting-ip", "198.51.100.40"),
+        ("x-real-ip", "198.51.100.50"),
+        ("Authorization", "Bearer super-secret-jwt-66"),
+        ("set-cookie", "sid=setcookie-secret-77"),
+        ("cookie", "sid=cookie-secret-88"),
+    )
+    non_pii_expected = (
+        ("cache-status", "HIT"),
+        ("origin-time", "14"),
+        ("session_duration_ms", "900"),
+        ("ip_version", "4"),
+        ("client_asn", "54113"),
+        ("token_count", "7"),
+    )
+    proj_sql = (
+        "SELECT "
+        + ", ".join(f"custom_fields['{k}'] AS p_{i}" for i, (k, _) in enumerate(iter31_pii_pairs))
+        + ", "
+        + ", ".join(f"custom_fields['{k}'] AS np_{i}" for i, (k, _) in enumerate(non_pii_expected))
+        + ", cmcd['CMCD_BR'] AS m_br FROM logs WHERE line_ordinal = 1"
+    )
+    masked_row = hs_query.query_endpoint(
+        svc, DashboardQueryRequest(sql=proj_sql, max_rows=10),
+        "2026-11-19T00:00:00Z", "2026-11-19T01:00:00Z", mask_ips=True, tables=masked_tables,
+    )["data"][0]
+    raw_row = hs_query.query_endpoint(
+        svc, DashboardQueryRequest(sql=proj_sql, max_rows=10),
+        "2026-11-19T00:00:00Z", "2026-11-19T01:00:00Z", mask_ips=False, tables=raw_tables,
+    )["data"][0]
+    for i, (k, raw_secret) in enumerate(iter31_pii_pairs):
+        assert masked_row[f"p_{i}"] == "[redacted]", f"Unredacted {k}: {masked_row[f'p_{i}']!r}"
+        assert raw_row[f"p_{i}"] == raw_secret, f"Raw analyst lost {k}: {raw_row[f'p_{i}']!r}"
+        oracle_sql = f"SELECT count() AS oracle_n FROM logs WHERE custom_fields['{k}'] = '{raw_secret}'"
+        oracle_res = hs_query.query_endpoint(
+            svc, DashboardQueryRequest(sql=oracle_sql, max_rows=10),
+            "2026-11-19T00:00:00Z", "2026-11-19T01:00:00Z", mask_ips=True, tables=masked_tables,
+        )["data"]
+        assert int(oracle_res[0]["oracle_n"]) == 0, f"Blind-oracle leaked {k}: {oracle_res}"
+    for i, (nk, nv) in enumerate(non_pii_expected):
+        assert masked_row[f"np_{i}"] == nv, f"False redaction on {nk}: {masked_row[f'np_{i}']!r}"
+    assert masked_row["m_br"] == "3200"
+
+    # 2. Real chdb == duckdb numeric differential parity:
+    dcon = duckdb.connect(":memory:")
+    dcon.execute(
+        "CREATE TABLE logs (url VARCHAR, bytes BIGINT, origin_time_ms DOUBLE, status BIGINT); "
+        "INSERT INTO logs VALUES "
+        "('/r1', 250, -12.5, 200), "
+        "('/r2', 100, -0.25, 200), "
+        "('/r3', 750, 42.0, 500);"
+    )
+    parity_queries = (
+        "SELECT url FROM logs WHERE (bytes) BETWEEN (100) AND (500) ORDER BY url",
+        "SELECT url FROM logs WHERE origin_time_ms BETWEEN (-20.5) AND (-5.0) ORDER BY url",
+        "SELECT url FROM logs WHERE bytes = +100 ORDER BY url",
+        "SELECT url FROM logs WHERE bytes = 1e2 ORDER BY url",
+        "SELECT url FROM logs WHERE origin_time_ms > -.5 AND origin_time_ms < 0 ORDER BY url",
+        "SELECT url FROM logs WHERE bytes = 50 + 50 ORDER BY url",
+        "SELECT url FROM logs WHERE origin_time_ms <= -10 * 2 + 10 ORDER BY url",
+        "WITH t AS (SELECT url, origin_time_ms AS ot, bytes AS b FROM logs) SELECT t.url FROM t WHERE (t.ot) BETWEEN (-20.5) AND (-5.0) AND (t.b) = (125 + 125) ORDER BY t.url",
+    )
+    for q_sql in parity_queries:
+        duck_urls = [r[0] for r in dcon.execute(q_sql).fetchall()]
+        assert len(duck_urls) >= 1, f"Empty expected set for {q_sql}"
+        for mask_flag, tbls in ((False, raw_tables), (True, masked_tables)):
+            ch_urls = [
+                r["url"]
+                for r in hs_query.query_endpoint(
+                    svc, DashboardQueryRequest(sql=q_sql, max_rows=10),
+                    "2026-11-19T00:00:00Z", "2026-11-19T01:00:00Z", mask_ips=mask_flag, tables=tbls,
+                )["data"]
+            ]
+            assert ch_urls == duck_urls, f"Parity mismatch ({mask_flag}) on {q_sql}: ch={ch_urls} vs duck={duck_urls}"
+    print("ITER31_CHDB_DUCKDB_PARITY_OK")
+"""
+
+
+@pytest.mark.security_regression
+def test_sec_t5_iter30_hs01_01_and_bug_hs01_canonical_pii_numeric_predicates_and_as_clause_guards() -> None:
+    """ITER31 remediation: SEC-T5-ITER30-HS-01, SEC-T5-ITER30-01, BUG-T5-ITER30-HS-01."""
+    import os
+    import shutil
+    import site
+    import subprocess
+    from pathlib import Path
+
+    from backend.core.share_db import SHARED_PII_KEYS
+    from backend.core.sql_validator import SQLValidationError, validate_user_sql
+    from backend.high_scale.postgres_control import console_access
+
+    # (a) Preserve exact 18-key MASKED_KEYS == SHARED_PII_KEYS invariant while canonicalizing segment/bracket/header PII:
+    assert len(console_access.MASKED_KEYS) == 18
+    assert len(SHARED_PII_KEYS) == 18
+    assert set(console_access.MASKED_KEYS) == set(SHARED_PII_KEYS)
+    keys_sql = ", ".join(f"'{k}'" for k in console_access._MAP_MASKED_KEYS)
+    for pii_col in (
+        "_cf_filter-origin-ip",
+        "_cf_filter-session-id",
+        "_cf_xfilter-cookie-session",
+        "_cf_filter-client-ip",
+        "req.http.session_id",
+        "header.cookie_session",
+        "meta[session_id]",
+        "x.real.ip",
+        "cf-connecting-ip",
+        "x-real-ip",
+        "Authorization",
+        "set-cookie",
+        "cookie",
+    ):
+        assert console_access._redaction(pii_col, "LowCardinality(String)", keys_sql) is not None, pii_col
+    for safe_col in (
+        "cache-status",
+        "origin-time",
+        "session_duration_ms",
+        "ip_version",
+        "client_asn",
+        "token_count",
+        "CMCD_BR",
+    ):
+        assert console_access._redaction(safe_col, "LowCardinality(String)", keys_sql) is None, safe_col
+
+    seen_iso_queries: list[str] = []
+
+    class _FakeIsoCH:
+        def execute(self, sql: str, *args: object, **kwargs: object) -> list[dict[str, int]]:
+            seen_iso_queries.append(sql)
+            return [{"n": 0}]
+
+        def close(self) -> None:
+            pass
+
+    iso_clients = console_access.ConsoleClients(
+        settings=svcconfig.ClickHouseConfig(
+            host="127.0.0.1", port=8123, database="default", user="default", password=""
+        ),
+        secret=bytes(range(40, 88)),
+        client_factory=lambda _cfg: _FakeIsoCH(),
+    )
+    assert iso_clients.client_for("svc_alpha", masked=True) is not None
+    req_iso_sql = next(q for q in seen_iso_queries if "request_facts" in q and "client_ip !=" in q)
+    for iso_frag in (
+        "custom_fields['cf-connecting-ip']",
+        "custom_fields['x-real-ip']",
+        "custom_fields['authorization']",
+        "custom_fields['cookie']",
+        "custom_fields['set-cookie']",
+    ):
+        assert iso_frag in req_iso_sql, f"_assert_isolated missing {iso_frag}"
+
+    # (b) validate_user_sql & _reject_unsafe_functions block AS-clause-keyword & FROM stray-token/ON desyncs
+    # while keeping AS select WHERE, AS union WHERE/ON, TABLESAMPLE, and SAMPLE ... OFFSET green:
+    disallowed_from_sqls = (
+        "FROM logs as SELECT 1, logs sleepEachRow(line_ordinal)",
+        "SELECT * FROM logs as WHERE 1, logs sleepEachRow(line_ordinal)",
+        "SELECT * FROM logs a 1, logs sleepEachRow(line_ordinal)",
+        "SELECT * FROM logs ON ORDER LEFT GROUP, logs file(url)",
+    )
+    for bad_sql in disallowed_from_sqls:
+        with pytest.raises(SQLValidationError):
+            validate_user_sql(bad_sql, allowed_tables=frozenset({"logs"}))
+        assert hs_query._exempt_col_list_ident_starts(bad_sql) == set(), bad_sql
+        with pytest.raises((PermissionError, ValueError)):
+            hs_query._reject_unsafe_functions(bad_sql)
+
+    for allowed_sql in (
+        "SELECT select.status FROM logs AS select WHERE select.status = 200",
+        "SELECT union.status FROM logs AS union WHERE union.status = 200",
+        "SELECT a.url FROM logs AS a JOIN logs AS union ON a.url = union.url WHERE union.status = 200",
+        "SELECT url FROM logs TABLESAMPLE 10 PERCENT WHERE status = 200",
+        "SELECT url FROM logs SAMPLE 1/10 OFFSET 1/2 WHERE status = 200",
+    ):
+        res_v = validate_user_sql(allowed_sql, allowed_tables=frozenset({"logs"}))
+        assert res_v.parse_tree is not None
+
+    # (c) Direct rewriter + post-query Authorization/cookie/nested-IP masking checks:
+    rewritten_between, _ = hs_query._rewrite_console_sql_with_canonicals(
+        "SELECT url FROM logs WHERE (bytes) BETWEEN (100) AND (500) AND origin_time_ms BETWEEN (-20.5) AND (-5.0) "
+        "AND bytes = +100 AND bytes = 1e2 AND origin_time_ms > -.5 AND bytes = 50 + 50 AND origin_time_ms <= -10 * 2",
+        svc_table="request_facts",
+        names={"request_facts": "request_facts"},
+    )
+    assert "toFloat64OrZero(custom_fields['bytes']) BETWEEN (100) AND (500)" in rewritten_between
+    assert "toFloat64OrZero(custom_fields['origin_time_ms']) BETWEEN (-20.5) AND (-5.0)" in rewritten_between
+    assert "toFloat64OrNull(nullIf(custom_fields['bytes'], '')) = +100" in rewritten_between
+    assert "toFloat64OrNull(nullIf(custom_fields['bytes'], '')) = 1e2" in rewritten_between
+    assert "toFloat64OrZero(custom_fields['origin_time_ms']) > -.5" in rewritten_between
+    assert "toFloat64OrNull(nullIf(custom_fields['bytes'], '')) = 50 + 50" in rewritten_between
+    assert "toFloat64OrZero(custom_fields['origin_time_ms']) <= -10 * 2" in rewritten_between
+
+    def _mock_post_mask_handler(req: httpx.Request) -> httpx.Response:
+        body_text = req.content.decode("utf-8", errors="replace")
+        if "SELECT 1" in body_text and "additional_table_filters" in str(req.url):
+            return httpx.Response(200, json={"data": [{"1": 1}]})
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "Authorization": "Bearer secret-jwt-tok",
+                        "cookie": "sid=secret-cookie-val",
+                        "set-cookie": "sid=secret-setcookie-val",
+                        "filter-session-id": "fsess-99",
+                        "oip": "203.0.113.9",
+                        "cache-status": "HIT",
+                        "custom_fields": {
+                            "Authorization": "Bearer nested-jwt",
+                            "cookie": "sid=nested-cookie",
+                            "req.http.session_id": "nested-req-sess",
+                            "cf-connecting-ip": "198.51.100.77",
+                            "x-real-ip": "198.51.100.88",
+                            "oip": "151.101.1.42",
+                            "cache-status": "HIT",
+                        },
+                    }
+                ]
+            },
+        )
+
+    mock_ch = ClickHouseClient(
+        svcconfig.ClickHouseConfig(host="localhost", port=8123, database="default", user="default", password=""),
+        transport=httpx.MockTransport(_mock_post_mask_handler),
+    )
+    mock_ch._enable_cf_rewrite_in_tests = True
+    mock_ch._table_filters_verified = True  # type: ignore[attr-defined]
+    try:
+        svc_mock = SimpleNamespace(service_id="svc_alpha", client=mock_ch)
+        post_out = hs_query.query_endpoint(
+            svc_mock,
+            DashboardQueryRequest(sql="SELECT * FROM logs LIMIT 1", max_rows=10),
+            "2026-11-19T00:00:00Z",
+            "2026-11-19T01:00:00Z",
+            mask_ips=True,
+            tables=console_access.console_tables("svc_alpha", masked=True),
+        )["data"][0]
+        assert post_out["Authorization"] == "[redacted]"
+        assert post_out["cookie"] == "[redacted]"
+        assert post_out["set-cookie"] == "[redacted]"
+        assert post_out["filter-session-id"] == "[redacted]"
+        assert post_out["oip"] == "[redacted]"
+        assert post_out["cache-status"] == "HIT"
+        assert post_out["custom_fields"]["Authorization"] == "[redacted]"
+        assert post_out["custom_fields"]["cookie"] == "[redacted]"
+        assert post_out["custom_fields"]["req.http.session_id"] == "[redacted]"
+        assert post_out["custom_fields"]["cf-connecting-ip"] == "198.51.100.xxx"
+        assert post_out["custom_fields"]["x-real-ip"] == "198.51.100.xxx"
+        assert post_out["custom_fields"]["oip"] == "151.101.1.xxx"
+        assert post_out["custom_fields"]["cache-status"] == "HIT"
+    finally:
+        mock_ch.close()
+
+    # Real chdb + duckdb execution (in-process if installed, else offline uv cache when available):
+    repo_root = str(Path(hs_query.__file__).resolve().parents[2])
+    try:
+        import chdb as _chdb  # noqa: F401
+        import duckdb as _duckdb  # noqa: F401
+
+        exec(_REAL_CHDB_DUCKDB_ITER31_SCRIPT, {})
+    except ImportError:
+        uv_bin = shutil.which("uv")
+        if uv_bin is not None:
+            py_paths = [repo_root, *site.getsitepackages()]
+            env = {k: v for k, v in os.environ.items() if k != "VIRTUAL_ENV"}
+            env["PYTHONPATH"] = os.pathsep.join(py_paths)
+            probe = subprocess.run(
+                [
+                    uv_bin,
+                    "run",
+                    "--offline",
+                    "--no-project",
+                    "--with",
+                    "chdb",
+                    "--with",
+                    "duckdb",
+                    "python",
+                    "-c",
+                    "import chdb, duckdb",
+                ],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            if probe.returncode == 0:
+                run_res = subprocess.run(
+                    [
+                        uv_bin,
+                        "run",
+                        "--offline",
+                        "--no-project",
+                        "--with",
+                        "chdb",
+                        "--with",
+                        "duckdb",
+                        "python",
+                        "-c",
+                        _REAL_CHDB_DUCKDB_ITER31_SCRIPT,
+                    ],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                )
+                assert run_res.returncode == 0, (
+                    f"Real chdb/duckdb Iter31 suite failed:\nSTDOUT:\n{run_res.stdout}\nSTDERR:\n{run_res.stderr}"
+                )
+                assert "ITER31_CHDB_DUCKDB_PARITY_OK" in run_res.stdout

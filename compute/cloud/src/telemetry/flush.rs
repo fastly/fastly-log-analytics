@@ -105,9 +105,13 @@ pub struct Cursor {
     pub audit_seq: Option<u64>,
     pub svc_outbox_archived: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub svc_last_base: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub svc_zero_anchor: Option<String>,
     #[serde(default)]
     pub svc_zero_virtual_base: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_svc_flush_s: Option<u64>,
     pub last_flush_s: u64,
     pub expired: u64,
     pub dropped: u64,
@@ -163,6 +167,10 @@ struct Manifest {
     svc_zero_anchor: Option<String>,
     #[serde(default)]
     svc_zero_virtual_base: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    svc_observed_base: Option<u64>,
+    #[serde(default)]
+    svc_caught_up: bool,
     notes: Notes,
     outputs: Vec<String>,
     next_cursor: Cursor,
@@ -475,6 +483,35 @@ fn svc_entry_anchor(entry: &Value) -> String {
         entry,
     ]);
     hex::encode(Sha256::digest(canonical.to_string().as_bytes()))
+}
+
+fn svc_is_reset(svc_val: &Value, cursor: &Cursor) -> bool {
+    let raw_base = svc_val["_audit_outbox_base"].as_u64().unwrap_or(0);
+    let entries = svc_val["_audit_outbox"].as_array();
+    let len = entries.map_or(0, Vec::len) as u64;
+    if len == 0 || cursor.svc_outbox_archived == 0 {
+        return false;
+    }
+    let first_entry = entries.and_then(|arr| arr.first());
+    let cur_anchor = first_entry.map(svc_entry_anchor);
+    let eff_last_svc_s = cursor.last_svc_flush_s.unwrap_or(cursor.last_flush_s);
+    if raw_base == 0 {
+        if cursor.svc_last_base.is_some_and(|lb| lb > 0) {
+            return true;
+        }
+        match (&cursor.svc_zero_anchor, &cur_anchor) {
+            (Some(prev), Some(cur)) => prev != cur,
+            (None, _) => {
+                let first_at = first_entry.and_then(|e| e["at"].as_u64()).unwrap_or(0);
+                cursor.svc_outbox_archived > cursor.svc_zero_virtual_base + len
+                    || (eff_last_svc_s > 0 && first_at > eff_last_svc_s)
+            }
+            _ => false,
+        }
+    } else {
+        cursor.svc_outbox_archived > raw_base + len
+            || cursor.svc_last_base.is_some_and(|lb| raw_base < lb)
+    }
 }
 
 fn read_source(
@@ -822,12 +859,43 @@ fn build_next_cursor(cursor: &Cursor, manifest: &Manifest, now: u64) -> Cursor {
     if let Some(max_seq) = manifest.auth_keys.iter().filter_map(|k| auth_seq(k)).max() {
         next.audit_seq = Some(max_seq.max(next.audit_seq.unwrap_or(0)));
     }
+    let prev_svc_flush_s = cursor
+        .last_svc_flush_s
+        .or((cursor.last_flush_s > 0).then_some(cursor.last_flush_s));
     if manifest.svc_range.0 < manifest.svc_range.1 {
         next.svc_outbox_archived = manifest.svc_range.1;
-        if let Some(ref anchor) = manifest.svc_zero_anchor {
+        if let Some(obs_base) = manifest.svc_observed_base {
+            next.svc_last_base = Some(obs_base);
+            if obs_base == 0 {
+                if let Some(ref anchor) = manifest.svc_zero_anchor {
+                    next.svc_zero_anchor = Some(anchor.clone());
+                    next.svc_zero_virtual_base = manifest.svc_zero_virtual_base;
+                }
+            } else {
+                next.svc_zero_anchor = None;
+                next.svc_zero_virtual_base = 0;
+            }
+        } else if let Some(ref anchor) = manifest.svc_zero_anchor {
             next.svc_zero_anchor = Some(anchor.clone());
             next.svc_zero_virtual_base = manifest.svc_zero_virtual_base;
         }
+        next.last_svc_flush_s = Some(now);
+    } else if manifest.svc_caught_up {
+        if let Some(obs_base) = manifest.svc_observed_base {
+            next.svc_last_base = Some(obs_base);
+            if obs_base == 0 {
+                if let Some(ref anchor) = manifest.svc_zero_anchor {
+                    next.svc_zero_anchor = Some(anchor.clone());
+                    next.svc_zero_virtual_base = manifest.svc_zero_virtual_base;
+                }
+            } else {
+                next.svc_zero_anchor = None;
+                next.svc_zero_virtual_base = 0;
+            }
+        }
+        next.last_svc_flush_s = Some(now);
+    } else {
+        next.last_svc_flush_s = prev_svc_flush_s;
     }
     next.txn_id = manifest.txn_id.clone();
     next.last_flush_s = now;
@@ -935,6 +1003,8 @@ fn collect(
     let mut svc_virtual_base: Option<u64> = None;
     let mut svc_zero_anchor: Option<String> = None;
     let mut svc_zero_virtual_base: u64 = cursor.svc_zero_virtual_base;
+    let mut svc_observed_base: Option<u64> = None;
+    let mut svc_caught_up = false;
     let mut effective_svc_base: u64 = 0;
     let mut queues: [std::collections::VecDeque<SourceId>; CLASSES] = Default::default();
     queues[0].extend(buckets.into_iter().map(SourceId::Bucket));
@@ -947,17 +1017,8 @@ fn collect(
             let len = entries.map_or(0, Vec::len) as u64;
             let first_entry = entries.and_then(|arr| arr.first());
             let cur_anchor = first_entry.map(svc_entry_anchor);
+            let is_reset = svc_is_reset(&record.value, cursor);
             effective_svc_base = if base == 0 && len > 0 {
-                let is_reset = cursor.svc_outbox_archived > 0
-                    && match (&cursor.svc_zero_anchor, &cur_anchor) {
-                        (Some(prev), Some(cur)) => prev != cur,
-                        (None, _) => {
-                            let first_at = first_entry.and_then(|e| e["at"].as_u64()).unwrap_or(0);
-                            cursor.svc_outbox_archived > cursor.svc_zero_virtual_base + len
-                                || (cursor.last_flush_s > 0 && first_at > cursor.last_flush_s)
-                        }
-                        _ => false,
-                    };
                 let vb = if is_reset {
                     cursor.svc_outbox_archived
                 } else if cursor.svc_zero_anchor.is_some() && cursor.svc_zero_anchor == cur_anchor {
@@ -971,16 +1032,18 @@ fn collect(
                     svc_virtual_base = Some(vb);
                 }
                 vb
-            } else if len > 0 && cursor.svc_outbox_archived > base + len {
+            } else if len > 0 && is_reset {
                 let vb = cursor.svc_outbox_archived;
                 svc_virtual_base = Some(vb);
                 vb
             } else {
                 base
             };
+            svc_observed_base = Some(base);
             let total = effective_svc_base + len;
             svc_effective_archived = cursor.svc_outbox_archived.max(effective_svc_base);
             let end = total.min(svc_effective_archived + MAX_SVC_ENTRIES);
+            svc_caught_up = svc_effective_archived == end && !is_reset;
             let mut seg_start = svc_effective_archived;
             while seg_start < end {
                 let hour_of = |idx: u64| -> u64 {
@@ -1009,6 +1072,8 @@ fn collect(
         svc_virtual_base,
         svc_zero_anchor,
         svc_zero_virtual_base,
+        svc_observed_base,
+        svc_caught_up,
         notes: Notes {
             expired: cursor.expired,
             dropped: cursor.dropped,
@@ -1281,6 +1346,7 @@ fn gc(
                 sid,
                 manifest.svc_range.1,
                 manifest.svc_virtual_base,
+                manifest.svc_zero_anchor.as_deref(),
             )?;
     }
     if done {
@@ -1299,20 +1365,27 @@ fn trim_svc_outbox(
     sid: &str,
     archived: u64,
     virtual_base: Option<u64>,
+    expected_zero_anchor: Option<&str>,
 ) -> Result<bool, String> {
     let key = format!("svc:{sid}");
     let Some(record) = runtime.admin_get(&key)? else {
         return Ok(true);
     };
     let raw_base = record.value["_audit_outbox_base"].as_u64().unwrap_or(0);
-    let eff_base = match virtual_base {
-        Some(vb) if vb > raw_base => vb,
-        _ => raw_base,
-    };
     let outbox = record.value["_audit_outbox"]
         .as_array()
         .cloned()
         .unwrap_or_default();
+    if raw_base == 0
+        && expected_zero_anchor.is_some()
+        && outbox.first().map(svc_entry_anchor).as_deref() != expected_zero_anchor
+    {
+        return Ok(true);
+    }
+    let eff_base = match virtual_base {
+        Some(vb) if vb > raw_base => vb,
+        _ => raw_base,
+    };
     let removable = outbox
         .len()
         .saturating_sub(SVC_OUTBOX_KEEP)

@@ -549,3 +549,142 @@ it("SEC-T5-ITER29-FE-01 & BUG-T5-ITER29-FE-01: redacts multiline DuckDB casts, d
     await backend.dispose();
   }
 }, 30000);
+
+it("SEC-T5-ITER30-FE-01: closed-vocabulary O(N) sanitizer blocks DECIMAL/TIME/base64 casts, RE2 unquoted echoes, multi-span quote phase inversion, IPv6 colon/zone/port, 5000-trial fuzzer, and runs <50ms on 8KB", async () => {
+  const { createNodeBackend } = await import("./dashboard/duckdb");
+  const backend = await createNodeBackend();
+  setCloudModeRuntime(true);
+  const events: { state?: string; error?: string }[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    await backend.query(
+      "CREATE OR REPLACE TABLE t_iter31_sec AS SELECT "
+        + "'/p?\" SecDecEven1 \" SecDecEven2' AS c_dq_even, "
+        + "' sec val ' AS secret_col",
+    );
+    const realDuckRepros: readonly [string, readonly string[]][] = [
+      ["SELECT CAST(c_dq_even AS DECIMAL(3,1)) FROM t_iter31_sec", ["SecDecEven1", "SecDecEven2", "c_dq_even"]],
+      ["SELECT CAST(c_dq_even AS TIME) FROM t_iter31_sec", ["SecDecEven1", "SecDecEven2", "c_dq_even"]],
+      ["SELECT from_base64(c_dq_even) FROM t_iter31_sec", ["SecDecEven1", "SecDecEven2"]],
+      ["SELECT regexp_matches('x', '[u=Alice SecBrackSpace99')", ["Alice", "SecBrackSpace99"]],
+      ["SELECT regexp_matches('x', '(unclosed_SecParen99')", ["SecParen99", "unclosed"]],
+      ["SELECT regexp_matches('x', '(u=Alice&s=Sec99')", ["Alice", "Sec99"]],
+      ["SELECT regexp_matches('x', '(2001:db8::42:end')", ["2001:db8", "db8::42"]],
+      ["SELECT regexp_matches('x', '(fe80::1%eth0:end')", ["fe80", "eth0"]],
+      ["SELECT regexp_matches('x', '(?P<bad' || secret_col) FROM t_iter31_sec", ["sec val", "?P<"]],
+      ["SELECT regexp_matches('x', '[z-a]\\p{Alice_Sec77}')", ["Alice", "Sec77", "z-a"]],
+      ["SELECT * FROM no_such_tbl_SecTbl", ["no_such_tbl", "SecTbl"]],
+      ["SELECT no_such_fn_SecFn(1)", ["no_such_fn", "secfn"]],
+      ["SELECT CAST(999999999999999 AS TINYINT)", ["999999999999999"]],
+      ["SELECT 9223372036854775807 + 1", ["9223372036854775807"]],
+    ];
+    for (const [sql, forbidden] of realDuckRepros) {
+      await expect(measureCloudQuery("query.console", () => backend.query(sql))).rejects.toThrow();
+      const got = events.at(-1)?.error ?? "";
+      for (const frag of forbidden) {
+        expect(got, `sql=${sql} got=${got}`).not.toContain(frag);
+      }
+    }
+
+    const syntheticRepros: readonly [string, readonly string[]][] = [
+      ["Invalid Input Error: Failed to cast value: '/p?'; SecWordBeta 'tail'", ["SecWordBeta", "/p?", "tail"]],
+      ["Error: span 'span1' failed: value ' sec leak ' rejected", ["span1", "sec leak"]],
+      ["Error: key 'sec_a' failed: value ' sec leak ' rejected", ["sec_a", "sec leak"]],
+      ["Binder Error: filter 'sec_a' could not be matched against value ' sec leak ' in query", ["sec_a", "sec leak"]],
+      ["Binder Error: column 'sec_a' not found!\nCandidate bindings: ' sec leak '", ["sec_a", "sec leak", "Candidate"]],
+      ["Catalog Error: Scalar Function with name 'f' does not exist!\nDid you mean ' secret fn '?", ["secret fn", "Did you mean"]],
+      ["Binder Error: column 'sec_a' not found\nCandidate bindings: 'pub_b", ["sec_a", "pub_b", "Candidate"]],
+      ["Invalid Input Error: missing ]: [unclosed SecSpace99", ["SecSpace99", "unclosed"]],
+      ["Invalid Input Error: missing ): (unclosed SecParenSpace99", ["SecParenSpace99", "unclosed"]],
+      ["Invalid Input Error: invalid named capture group: (?P<SecGroup99", ["SecGroup99", "?P<"]],
+      ["Invalid Input Error: invalid character class range: \\p{SecRange99}", ["SecRange99"]],
+      ["IO Error: Could not connect to 2001:db8::42: connection refused", ["2001:db8", "db8::42"]],
+      ["Runtime Error: failed for fe80::1%eth0: permission denied", ["fe80", "eth0"]],
+      ["Runtime Error: failed for 2001:db8::1:443: connection reset", ["2001:db8", "443"]],
+      ["Invalid Input Error: failed processing '/q=admin' Select User 'SecProseMid99' end", ["admin", "Select", "User", "SecProseMid99"]],
+      ["Invalid Input Error: bad header \"Cookie: a=\"SecDqMid99\"; b=1\" in request", ["Cookie", "SecDqMid99", "b=1"]],
+      ["Binder Error: can't parse E'secretword\\'SecEsc77' in filter", ["secretword", "SecEsc77"]],
+      ["Parser Error: unterminated string near can't 'secretword", ["secretword"]],
+      ["Parser Error: invalid literal n'secret word'", ["secret", "word"]],
+      ["Parser Error: unterminated quoted string at or near \"'foo\" secretword \"bar\"", ["secretword", "foo", "bar"]],
+      ["IO Error: No files found that match the pattern \"/p/\" secretword \"/a.parquet\"", ["secretword", "parquet"]],
+      ["Binder Error: JSON path error near '[secretword' in query", ["secretword"]],
+    ];
+    for (const [msg, forbidden] of syntheticRepros) {
+      const err = new Error(msg);
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+      const got = events.at(-1)?.error ?? "";
+      for (const frag of forbidden) {
+        expect(got, `msg=${msg} got=${got}`).not.toContain(frag);
+      }
+    }
+
+    // Deterministic 5,000-trial Mulberry32 property fuzzer across DECIMAL/TIME/base64/RE2/multi-span/newline/IPv6/Cookie frames:
+    let fzState = 20261131 >>> 0;
+    const fzRand = () => {
+      fzState = (fzState + 0x6d2b79f5) >>> 0;
+      let t = Math.imul(fzState ^ (fzState >>> 15), 1 | fzState);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const fzPick = <T,>(arr: readonly T[]): T => arr[Math.floor(fzRand() * arr.length)]!;
+    const fzNoise = [
+      "\" ",
+      "\" \"",
+      "'; ",
+      "' failed: '",
+      "\nCandidate bindings: '",
+      " 2001:db8::42: ",
+      " fe80::1%eth0: ",
+      " 2001:db8::1:443 ",
+      " O'Brien ",
+      " can't ",
+    ];
+    for (let trial = 0; trial < 5000; trial += 1) {
+      const sentinel = `SecIter31Fz${trial}Q`;
+      const body = `${fzPick(fzNoise)}${sentinel}${fzPick(fzNoise)}`;
+      const kind = trial % 10;
+      let rawMsg: string;
+      if (kind === 0) {
+        rawMsg = `Conversion Error: Could not convert string "${body}" to DECIMAL(3,1) when casting from source column c_${sentinel}`;
+      } else if (kind === 1) {
+        rawMsg = `Conversion Error: time field value out of range: "${body}", expected format is ([YYYY-MM-DD ]HH:MM:SS[.MS]) when casting from source column c_${sentinel}`;
+      } else if (kind === 2) {
+        rawMsg = `Conversion Error: Could not decode string "${body}" as base64: length must be a multiple of 4`;
+      } else if (kind === 3) {
+        rawMsg = `Invalid Input Error: missing ): (${body}`;
+      } else if (kind === 4) {
+        rawMsg = `Invalid Input Error: invalid character class range: \\p{${sentinel}} ${body}`;
+      } else if (kind === 5) {
+        rawMsg = `Binder Error: span 'a' failed: value ' ${sentinel} ' rejected\nCandidate bindings: '${sentinel}_b`;
+      } else if (kind === 6) {
+        rawMsg = `Invalid Input Error: bad header "Cookie: a=\\"${sentinel}\\"; b=1" in request`;
+      } else if (kind === 7) {
+        rawMsg = `IO Error: connect to 2001:db8::42: ${sentinel} or fe80::1%eth0: failed`;
+      } else if (kind === 8) {
+        rawMsg = `Catalog Error: Table with name tbl_${sentinel} does not exist!`;
+      } else {
+        rawMsg = `Invalid Input Error: Failed to cast value: '/p?'; ${sentinel} 'tail'`;
+      }
+      const err = new Error(rawMsg);
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+      const got = events.at(-1)?.error ?? "";
+      expect(got, `trial=${trial} kind=${kind} got=${got}`).not.toContain(sentinel);
+      expect(got).not.toContain("2001:db8");
+      expect(got).not.toContain("fe80::1");
+      expect(got).not.toContain("eth0");
+    }
+
+    const eightKbErr = new Error("Error: " + "'a' ".repeat(2000));
+    await expect(measureCloudQuery("dashboard.bundle", async () => { throw eightKbErr; })).rejects.toBe(eightKbErr);
+    const t0 = performance.now();
+    for (let k = 0; k < 10; k += 1) {
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw eightKbErr; })).rejects.toBe(eightKbErr);
+    }
+    expect((performance.now() - t0) / 10).toBeLessThan(50);
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+    await backend.dispose();
+  }
+}, 45000);

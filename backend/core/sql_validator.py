@@ -1879,6 +1879,33 @@ def _scan_expr_tokens(
         i += 1
 
 
+_DISALLOWED_UNQUOTED_AS_TABLE_ALIASES = (
+    (_CLAUSE_STOP_KEYWORDS - {"SAMPLE", "UNION"})
+    | _JOIN_MODIFIERS
+    | frozenset(
+        {
+            "FROM",
+            "ON",
+            "USING",
+            "VALUES",
+            "SET",
+            "WITH",
+            "TABLE",
+            "AS",
+            "FINAL",
+            "LATERAL",
+            "ONLY",
+            "PIVOT",
+            "UNPIVOT",
+            "PIVOT_WIDER",
+            "PIVOT_LONGER",
+            "TABLESAMPLE",
+        }
+    )
+)
+_DISALLOWED_BARE_TABLE_ALIASES = _DISALLOWED_UNQUOTED_AS_TABLE_ALIASES | frozenset({"SELECT", "UNION", "SAMPLE"})
+
+
 def _scan_body_tokens(
     tokens: list[_Tok],
     node: dict[str, Any],
@@ -1891,9 +1918,102 @@ def _scan_body_tokens(
     at_branch_start = not in_from
     in_sample_clause = False
     in_on_clause = False
+    in_array_join = False
+    allow_table_alias = False
+    saw_final = False
+    in_join_mod = False
+    saw_join = False
+
+    def _starts_join_modifier_seq(idx: int) -> bool:
+        k = idx
+        while k < n and tokens[k].kind == "WORD" and tokens[k].val.upper() in (_JOIN_MODIFIERS - {"JOIN"}):
+            k += 1
+        if k < n and tokens[k].kind == "WORD":
+            ku = tokens[k].val.upper()
+            if ku == "JOIN":
+                return True
+            if ku == "ARRAY" and k + 1 < n and tokens[k + 1].kind == "WORD" and tokens[k + 1].val.upper() == "JOIN":
+                return True
+        return False
 
     while i < n:
         tok = tokens[i]
+        if (
+            in_from
+            and not expect_table
+            and not in_on_clause
+            and not in_sample_clause
+            and not in_array_join
+            and tok.kind == "WORD"
+            and tok.val.upper() == "AS"
+            and not _is_dot_or_typecast_tok(tokens, i - 1)
+        ):
+            if not allow_table_alias or in_join_mod or i + 1 >= n or tokens[i + 1].kind not in ("WORD", "QIDENT"):
+                node["children"].append(
+                    {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: invalid table alias after AS"}
+                )
+                in_from = False
+                allow_table_alias = False
+                in_join_mod = False
+                i += 1
+                continue
+            alias_tok = tokens[i + 1]
+            if alias_tok.kind == "WORD":
+                au = alias_tok.val.upper()
+                if au in _DISALLOWED_UNQUOTED_AS_TABLE_ALIASES:
+                    node["children"].append(
+                        {
+                            "type": "PARSE_ERROR_NODE",
+                            "message": "SQL parse error: reserved keyword cannot be unquoted table alias",
+                        }
+                    )
+                    in_from = False
+                    allow_table_alias = False
+                    in_join_mod = False
+                    i += 2
+                    continue
+                if au in ("SELECT", "UNION"):
+                    nxt2 = tokens[i + 2] if i + 2 < n else None
+                    if not (
+                        nxt2 is not None
+                        and nxt2.kind == "WORD"
+                        and nxt2.val.upper() in ("WHERE", "ON")
+                        and not _is_dot_qualifier_at(tokens, i + 2)
+                    ):
+                        node["children"].append(
+                            {
+                                "type": "PARSE_ERROR_NODE",
+                                "message": "SQL parse error: invalid clause after AS alias",
+                            }
+                        )
+                        in_from = False
+                        allow_table_alias = False
+                        in_join_mod = False
+                        i += 2
+                        continue
+            allow_table_alias = False
+            at_branch_start = False
+            i += 2
+            if i < n and tokens[i].kind == "LPAREN":
+                rp_alias = _find_matching_rparen(tokens, i)
+                if rp_alias == -1:
+                    node["children"].append(
+                        {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: invalid column alias list"}
+                    )
+                    in_from = False
+                    continue
+                alias_cols = tokens[i + 1 : rp_alias]
+                if not (alias_tok.kind == "WORD" and alias_tok.val.lower() in _NON_FUNCTION_KEYWORDS):
+                    node["children"].append({"class": "FUNCTION", "function_name": alias_tok.val})
+                _scan_expr_tokens(alias_cols, node)
+                if not _is_valid_ident_list(alias_cols):
+                    node["children"].append(
+                        {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: invalid column alias list"}
+                    )
+                    in_from = False
+                i = rp_alias + 1
+            continue
+
         if tok.kind == "WORD" and not _is_non_keyword_ident_pos(tokens, i):
             wu = tok.val.upper()
             if wu in ("PIVOT", "UNPIVOT", "PIVOT_WIDER", "PIVOT_LONGER"):
@@ -1938,7 +2058,7 @@ def _scan_body_tokens(
                 in_sample_clause = False
             else:
                 if wu in ("UNION", "INTERSECT", "EXCEPT"):
-                    if expect_table:
+                    if expect_table or in_join_mod:
                         node["children"].append(
                             {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: expected table reference"}
                         )
@@ -1947,6 +2067,11 @@ def _scan_body_tokens(
                     expect_table = False
                     in_sample_clause = False
                     in_on_clause = False
+                    in_array_join = False
+                    allow_table_alias = False
+                    saw_final = False
+                    in_join_mod = False
+                    saw_join = False
                     i += 1
                     while (
                         i < n
@@ -1957,7 +2082,16 @@ def _scan_body_tokens(
                     at_branch_start = True
                     continue
                 if wu == "SELECT":
-                    if in_from and not expect_table and not in_on_clause:
+                    if (
+                        in_from
+                        and not expect_table
+                        and not in_on_clause
+                        and not in_sample_clause
+                        and not in_array_join
+                        and allow_table_alias
+                        and not in_join_mod
+                        and not saw_final
+                    ):
                         nxt_tok = tokens[i + 1] if i + 1 < n else None
                         is_fn_projection = (
                             nxt_tok is not None
@@ -1981,11 +2115,12 @@ def _scan_body_tokens(
                             )
                         )
                         if is_bare_select_alias:
+                            allow_table_alias = False
                             in_sample_clause = False
                             at_branch_start = False
                             i += 1
                             continue
-                    if expect_table:
+                    if expect_table or in_join_mod:
                         node["children"].append(
                             {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: expected table reference"}
                         )
@@ -1993,6 +2128,11 @@ def _scan_body_tokens(
                     expect_table = False
                     in_sample_clause = False
                     in_on_clause = False
+                    in_array_join = False
+                    allow_table_alias = False
+                    saw_final = False
+                    in_join_mod = False
+                    saw_join = False
                     at_branch_start = False
                     i += 1
                     continue
@@ -2001,19 +2141,11 @@ def _scan_body_tokens(
                     expect_table = True
                     in_sample_clause = False
                     in_on_clause = False
-                    at_branch_start = False
-                    i += 1
-                    continue
-                if wu == "JOIN":
-                    in_from = True
-                    expect_table = True
-                    in_sample_clause = False
-                    in_on_clause = False
-                    at_branch_start = False
-                    i += 1
-                    continue
-                if wu in _JOIN_MODIFIERS and not (in_on_clause and i + 1 < n and tokens[i + 1].kind == "LPAREN"):
-                    in_sample_clause = False
+                    in_array_join = False
+                    allow_table_alias = False
+                    saw_final = False
+                    in_join_mod = False
+                    saw_join = False
                     at_branch_start = False
                     i += 1
                     continue
@@ -2021,26 +2153,124 @@ def _scan_body_tokens(
                     in_from
                     and not expect_table
                     and not in_on_clause
-                    and wu in ("SETTINGS", "FORMAT", "PREWHERE", "SAMPLE", "FOR")
+                    and not in_sample_clause
+                    and wu == "ARRAY"
+                    and i + 1 < n
+                    and tokens[i + 1].kind == "WORD"
+                    and tokens[i + 1].val.upper() == "JOIN"
+                ):
+                    in_array_join = True
+                    allow_table_alias = False
+                    in_join_mod = False
+                    at_branch_start = False
+                    i += 2
+                    continue
+                if wu == "JOIN":
+                    in_from = True
+                    if in_array_join:
+                        expect_table = False
+                    else:
+                        expect_table = True
+                        saw_join = True
+                    in_sample_clause = False
+                    in_on_clause = False
+                    allow_table_alias = False
+                    saw_final = False
+                    in_join_mod = False
+                    at_branch_start = False
+                    i += 1
+                    continue
+                if wu in (_JOIN_MODIFIERS - {"JOIN"}):
+                    if in_from and not expect_table:
+                        if _starts_join_modifier_seq(i):
+                            in_sample_clause = False
+                            in_on_clause = False
+                            in_array_join = False
+                            allow_table_alias = False
+                            in_join_mod = True
+                            at_branch_start = False
+                            i += 1
+                            continue
+                        if not in_on_clause and not in_sample_clause and not in_array_join:
+                            node["children"].append(
+                                {
+                                    "type": "PARSE_ERROR_NODE",
+                                    "message": "SQL parse error: incomplete JOIN modifier in FROM clause",
+                                }
+                            )
+                            in_from = False
+                            allow_table_alias = False
+                            in_join_mod = False
+                            i += 1
+                            continue
+                    elif not in_from:
+                        in_sample_clause = False
+                        at_branch_start = False
+                        i += 1
+                        continue
+                if (
+                    in_from
+                    and not expect_table
+                    and not in_on_clause
+                    and not in_sample_clause
+                    and not in_array_join
+                    and not in_join_mod
+                    and not saw_final
+                    and wu == "FINAL"
+                ):
+                    saw_final = True
+                    allow_table_alias = False
+                    at_branch_start = False
+                    i += 1
+                    continue
+                if (
+                    in_from
+                    and not expect_table
+                    and not in_on_clause
+                    and not in_array_join
+                    and not in_join_mod
+                    and wu == "TABLESAMPLE"
+                ):
+                    in_sample_clause = True
+                    allow_table_alias = False
+                    at_branch_start = False
+                    i += 1
+                    continue
+                if (
+                    in_from
+                    and not expect_table
+                    and not in_on_clause
+                    and not in_sample_clause
+                    and not in_array_join
+                    and not in_join_mod
+                    and wu in ("SETTINGS", "FORMAT", "PREWHERE", "SAMPLE", "FOR", "SET")
                 ):
                     nxt_tok = tokens[i + 1] if i + 1 < n else None
                     is_bare_table_alias = (
-                        nxt_tok is None
-                        or nxt_tok.kind in ("COMMA", "LPAREN")
-                        or (
-                            nxt_tok.kind == "WORD"
-                            and nxt_tok.val.upper()
-                            in (_JOIN_MODIFIERS | _CLAUSE_STOP_KEYWORDS | {"ON", "USING", "FINAL", "SELECT"})
+                        allow_table_alias
+                        and not saw_final
+                        and (
+                            nxt_tok is None
+                            or nxt_tok.kind in ("COMMA", "LPAREN")
+                            or (
+                                nxt_tok.kind == "WORD"
+                                and not _is_dot_qualifier_at(tokens, i + 1)
+                                and nxt_tok.val.upper()
+                                in (_JOIN_MODIFIERS | _CLAUSE_STOP_KEYWORDS | {"ON", "USING", "FINAL", "SELECT"})
+                            )
                         )
                     )
                     if is_bare_table_alias or wu == "SAMPLE":
                         in_sample_clause = wu == "SAMPLE" and not is_bare_table_alias
+                        allow_table_alias = False
                         at_branch_start = False
                         i += 1
                         if is_bare_table_alias and i < n and tokens[i].kind == "LPAREN":
                             rp_alias = _find_matching_rparen(tokens, i)
                             if rp_alias != -1:
                                 alias_cols = tokens[i + 1 : rp_alias]
+                                if wu.lower() not in _NON_FUNCTION_KEYWORDS:
+                                    node["children"].append({"class": "FUNCTION", "function_name": tok.val})
                                 _scan_expr_tokens(alias_cols, node)
                                 if not _is_valid_ident_list(alias_cols):
                                     node["children"].append(
@@ -2049,15 +2279,15 @@ def _scan_body_tokens(
                                             "message": "SQL parse error: invalid column alias list",
                                         }
                                     )
+                                    in_from = False
                                 i = rp_alias + 1
                         continue
                 if in_from and in_sample_clause and wu == "OFFSET":
-                    in_sample_clause = False
                     at_branch_start = False
                     i += 1
                     continue
                 if wu in _CLAUSE_STOP_KEYWORDS and _can_exit_from_on_stop_kw(tokens, i, in_on_clause=in_on_clause):
-                    if expect_table:
+                    if expect_table or in_join_mod:
                         node["children"].append(
                             {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: expected table reference"}
                         )
@@ -2065,29 +2295,84 @@ def _scan_body_tokens(
                     expect_table = False
                     in_sample_clause = False
                     in_on_clause = False
+                    in_array_join = False
+                    allow_table_alias = False
+                    saw_final = False
+                    in_join_mod = False
+                    saw_join = False
                     at_branch_start = False
                     i += 1
                     continue
                 if in_from and (wu == "ON" or (wu == "USING" and not in_on_clause)):
-                    if expect_table:
+                    is_using_sample = (
+                        wu == "USING"
+                        and not expect_table
+                        and not in_join_mod
+                        and i + 1 < n
+                        and tokens[i + 1].kind == "WORD"
+                        and tokens[i + 1].val.upper() == "SAMPLE"
+                    )
+                    if is_using_sample:
+                        in_sample_clause = True
+                        allow_table_alias = False
+                        at_branch_start = False
+                        i += 2
+                        continue
+                    if expect_table or in_join_mod or not saw_join:
                         node["children"].append(
-                            {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: expected table reference"}
+                            {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: invalid ON/USING in FROM clause"}
                         )
+                        in_from = False
+                        expect_table = False
+                        in_sample_clause = False
+                        in_on_clause = False
+                        in_array_join = False
+                        allow_table_alias = False
+                        in_join_mod = False
+                        saw_join = False
+                        i += 1
+                        continue
                     expect_table = False
                     in_sample_clause = False
-                    in_on_clause = wu == "ON"
+                    allow_table_alias = False
                     at_branch_start = False
-                    i += 1
+                    if wu == "ON":
+                        in_on_clause = True
+                        i += 1
+                        continue
+                    # USING (<valid_ident_list>)
+                    if i + 1 >= n or tokens[i + 1].kind != "LPAREN":
+                        node["children"].append(
+                            {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: expected column list after USING"}
+                        )
+                        in_from = False
+                        i += 1
+                        continue
+                    rp_using = _find_matching_rparen(tokens, i + 1)
+                    if rp_using == -1 or not _is_valid_ident_list(tokens[i + 2 : rp_using]):
+                        node["children"].append(
+                            {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: invalid USING column list"}
+                        )
+                        in_from = False
+                        i += 1
+                        continue
+                    _scan_expr_tokens(tokens[i + 2 : rp_using], node)
+                    in_on_clause = False
+                    i = rp_using + 1
                     continue
 
         if in_from and tok.kind == "COMMA":
-            if expect_table:
+            if expect_table or in_join_mod:
                 node["children"].append(
                     {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: expected table reference"}
                 )
-            expect_table = True
+            expect_table = not in_array_join
             in_sample_clause = False
             in_on_clause = False
+            allow_table_alias = False
+            saw_final = False
+            in_join_mod = False
+            saw_join = False
             at_branch_start = False
             i += 1
             continue
@@ -2105,6 +2390,9 @@ def _scan_body_tokens(
                     else:
                         _scan_body_tokens(inner, node, in_from=True, expect_table=True)
                     expect_table = False
+                    allow_table_alias = True
+                    saw_final = False
+                    in_join_mod = False
                     at_branch_start = False
                     i = rp + 1
                     continue
@@ -2118,6 +2406,9 @@ def _scan_body_tokens(
                     }
                 )
                 expect_table = False
+                allow_table_alias = True
+                saw_final = False
+                in_join_mod = False
                 at_branch_start = False
                 i += 1
                 continue
@@ -2140,47 +2431,57 @@ def _scan_body_tokens(
                         _scan_expr_tokens(tokens[j + 1 : rp], node)
                         i = rp + 1
                         # Skip optional table alias and column alias list: e.g. `range(3) t(n)` or `AS t(n)`
+                        used_as_tf = False
                         if i < n and tokens[i].kind == "WORD" and tokens[i].val.upper() == "AS":
+                            used_as_tf = True
                             i += 1
-                        if (
-                            i < n
-                            and tokens[i].kind in ("WORD", "QIDENT")
-                            and not (
-                                tokens[i].kind == "WORD"
-                                and tokens[i].val.upper()
-                                in (
-                                    _CLAUSE_STOP_KEYWORDS
-                                    | _JOIN_MODIFIERS
-                                    | {
-                                        "ON",
-                                        "USING",
-                                        "SELECT",
-                                        "PIVOT",
-                                        "UNPIVOT",
-                                        "PIVOT_WIDER",
-                                        "PIVOT_LONGER",
-                                        "TABLESAMPLE",
-                                    }
+                        if i < n and tokens[i].kind in ("WORD", "QIDENT"):
+                            tf_au = tokens[i].val.upper() if tokens[i].kind == "WORD" else ""
+                            tf_bad_as = used_as_tf and (
+                                tf_au in _DISALLOWED_UNQUOTED_AS_TABLE_ALIASES
+                                or (
+                                    tf_au in ("SELECT", "UNION")
+                                    and not (
+                                        i + 1 < n
+                                        and tokens[i + 1].kind == "WORD"
+                                        and tokens[i + 1].val.upper() in ("WHERE", "ON")
+                                        and not _is_dot_qualifier_at(tokens, i + 1)
+                                    )
                                 )
                             )
-                        ):
-                            i += 1
-                            if i < n and tokens[i].kind == "LPAREN":
-                                rp_alias = _find_matching_rparen(tokens, i)
-                                if rp_alias != -1:
-                                    alias_cols = tokens[i + 1 : rp_alias]
-                                    _scan_expr_tokens(alias_cols, node)
-                                    if not alias_cols or not all(
-                                        tc.kind in ("WORD", "QIDENT", "COMMA") for tc in alias_cols
-                                    ):
-                                        node["children"].append(
-                                            {
-                                                "type": "PARSE_ERROR_NODE",
-                                                "message": "SQL parse error: invalid column alias list",
-                                            }
-                                        )
-                                    i = rp_alias + 1
+                            if tf_bad_as:
+                                node["children"].append(
+                                    {
+                                        "type": "PARSE_ERROR_NODE",
+                                        "message": "SQL parse error: reserved keyword cannot be unquoted table alias",
+                                    }
+                                )
+                                in_from = False
+                            elif used_as_tf or tf_au not in _DISALLOWED_BARE_TABLE_ALIASES:
+                                i += 1
+                                if i < n and tokens[i].kind == "LPAREN":
+                                    rp_alias = _find_matching_rparen(tokens, i)
+                                    if rp_alias != -1:
+                                        alias_cols = tokens[i + 1 : rp_alias]
+                                        _scan_expr_tokens(alias_cols, node)
+                                        if not _is_valid_ident_list(alias_cols):
+                                            node["children"].append(
+                                                {
+                                                    "type": "PARSE_ERROR_NODE",
+                                                    "message": "SQL parse error: invalid column alias list",
+                                                }
+                                            )
+                                            in_from = False
+                                        i = rp_alias + 1
+                        elif used_as_tf:
+                            node["children"].append(
+                                {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: invalid table alias after AS"}
+                            )
+                            in_from = False
                         expect_table = False
+                        allow_table_alias = False
+                        saw_final = False
+                        in_join_mod = False
                         at_branch_start = False
                         continue
                 else:
@@ -2199,6 +2500,9 @@ def _scan_body_tokens(
                         }
                     )
                     expect_table = False
+                    allow_table_alias = True
+                    saw_final = False
+                    in_join_mod = False
                     at_branch_start = False
                     i = j
                     continue
@@ -2206,11 +2510,51 @@ def _scan_body_tokens(
                 {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: expected table reference"}
             )
             expect_table = False
+            allow_table_alias = False
+            in_join_mod = False
             at_branch_start = False
             i += 1
             continue
 
         at_branch_start = False
+
+        if in_from and not expect_table and not in_on_clause and not in_sample_clause and not in_array_join:
+            if (
+                allow_table_alias
+                and not in_join_mod
+                and not saw_final
+                and tok.kind in ("WORD", "QIDENT")
+                and not (tok.kind == "WORD" and tok.val.upper() in _DISALLOWED_BARE_TABLE_ALIASES)
+            ):
+                allow_table_alias = False
+                if i + 1 < n and tokens[i + 1].kind == "LPAREN":
+                    rp_alias = _find_matching_rparen(tokens, i + 1)
+                    if rp_alias == -1:
+                        node["children"].append(
+                            {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: invalid column alias list"}
+                        )
+                        in_from = False
+                        i += 1
+                        continue
+                    alias_cols = tokens[i + 2 : rp_alias]
+                    if not (tok.kind == "WORD" and tok.val.lower() in _NON_FUNCTION_KEYWORDS):
+                        node["children"].append({"class": "FUNCTION", "function_name": tok.val})
+                    _scan_expr_tokens(alias_cols, node)
+                    if not _is_valid_ident_list(alias_cols):
+                        node["children"].append(
+                            {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: invalid column alias list"}
+                        )
+                        in_from = False
+                    i = rp_alias + 1
+                    continue
+                i += 1
+                continue
+            node["children"].append(
+                {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: unexpected token in FROM clause"}
+            )
+            in_from = False
+            allow_table_alias = False
+            in_join_mod = False
 
         # Scalar expression / subquery outside table-reference position
         if tok.kind in ("WORD", "QIDENT") and i + 1 < n and tokens[i + 1].kind == "LPAREN":
@@ -2242,7 +2586,7 @@ def _scan_body_tokens(
 
         i += 1
 
-    if expect_table:
+    if expect_table or in_join_mod:
         node["children"].append({"type": "PARSE_ERROR_NODE", "message": "SQL parse error: expected table reference"})
 
 
