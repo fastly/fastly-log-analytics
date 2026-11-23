@@ -6,6 +6,7 @@ import { securityScanColumns, setSecurityEngineClient } from "./security";
 import { getDuckDBEngine, type DuckDBReadContext } from "./dashboard/duckdb";
 import * as usage from "./usage/summary";
 import { parseComputeBilling } from "./usage/summary";
+import * as storageBilling from "./usage/storageBilling";
 import { fixtureUsageInput } from "./usage/fixtures";
 import { resetComputeBillingCache } from "./usage/computeUsage";
 import * as ops from "./telemetry/client";
@@ -312,10 +313,18 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
         rows: [],
         complete: true,
       });
-      vi.spyOn(usage, "fetchIngestDeletedBytes").mockResolvedValue({
+      vi.spyOn(usage, "fetchCloudStorageInventory").mockResolvedValue({
+        intervals: [],
+        complete: true,
+        snapshotId: "snap-1",
+        observedAt: from,
+        provenance: "cloud:inventory",
+      });
+      vi.spyOn(usage, "fetchIngestDeletedIntervals").mockResolvedValue({
+        intervals: [],
         bytes: 0,
-        complete: false,
-        provenance: "ingest_files_incomplete",
+        complete: true,
+        provenance: "cloud:ingest_files",
       });
     });
 
@@ -494,6 +503,19 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     const fetchKind = vi
       .spyOn(usage, "fetchUsageKindWithCoverage")
       .mockResolvedValue({ rows: fosUsage, complete: true });
+    vi.spyOn(usage, "fetchCloudStorageInventory").mockResolvedValue({
+      intervals: [],
+      complete: true,
+      snapshotId: "snap-1",
+      observedAt: now,
+      provenance: "cloud:inventory",
+    });
+    vi.spyOn(usage, "fetchIngestDeletedIntervals").mockResolvedValue({
+      intervals: [],
+      bytes: 0,
+      complete: true,
+      provenance: "cloud:ingest_files",
+    });
     const params = new URLSearchParams({
       start: new Date(now - rangeDays * 86_400_000).toISOString(),
       end: new Date(now).toISOString(),
@@ -505,8 +527,9 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
 
     expect(await response!.json()).toMatchObject({
       deleted_bytes: 2_500,
-      deleted_bytes_complete: true,
+      deleted_bytes_complete: false,
       deleted_bytes_provenance: "fos_usage_exact",
+      storage_billing_complete: false,
     });
     expect(fetchKind).toHaveBeenCalledTimes(kindReads);
     if (kindReads) {
@@ -536,10 +559,22 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       lines: [],
       totalUsd: 0,
     });
-    vi.spyOn(usage, "fetchIngestDeletedBytes").mockResolvedValue({
+    vi.spyOn(usage, "fetchUsageKindWithCoverage").mockResolvedValue({
+      rows: [legacyDelete],
+      complete: true,
+    });
+    vi.spyOn(usage, "fetchCloudStorageInventory").mockResolvedValue({
+      intervals: [],
+      complete: false,
+      snapshotId: null,
+      observedAt: null,
+      provenance: "cloud:inventory_incomplete",
+    });
+    vi.spyOn(usage, "fetchIngestDeletedIntervals").mockResolvedValue({
+      intervals: [],
       bytes: 0,
       complete: false,
-      provenance: "ingest_files_incomplete",
+      provenance: "cloud:ingest_files_incomplete",
     });
 
     const response = await handleCloudAnalyticalRequest(
@@ -550,10 +585,11 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       deleted_bytes: 0,
       deleted_bytes_complete: false,
       deleted_bytes_provenance: "fos_usage_incomplete",
+      storage_billing_complete: false,
     });
   });
 
-  it("starts both 30-day deletion reads alongside the range summary", async () => {
+  it("starts inventory and 30-day deletion reads alongside the range summary", async () => {
     const now = fixtureUsageInput.now;
     vi.spyOn(Date, "now").mockReturnValue(now);
     vi.spyOn(usage, "fetchUsageSettings").mockResolvedValue(fixtureUsageInput.settings);
@@ -565,13 +601,41 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       return { ...summary, input: fixtureUsageInput, summary, lines: [], totalUsd: 0 };
     });
     const startedEarly: string[] = [];
+    vi.spyOn(usage, "fetchCloudStorageInventory").mockImplementation(async () => {
+      if (!summaryDone) startedEarly.push("storage_inventory");
+      return {
+        intervals: [],
+        complete: true,
+        snapshotId: "snap-1",
+        observedAt: now,
+        provenance: "cloud:inventory",
+      };
+    });
     vi.spyOn(usage, "fetchUsageKindWithCoverage").mockImplementation(async () => {
       if (!summaryDone) startedEarly.push("fos_usage");
       return { rows: [], complete: false };
     });
-    vi.spyOn(usage, "fetchIngestDeletedBytes").mockImplementation(async () => {
+    vi.spyOn(usage, "fetchIngestDeletedIntervals").mockImplementation(async () => {
       if (!summaryDone) startedEarly.push("ingest_files");
-      return { bytes: 6_000, complete: true, provenance: "ingest_files_exact" };
+      return {
+        intervals: [
+          {
+            id: "raw_request:raw/a.zst",
+            dataset: "raw_request",
+            kind: "minimum_billed",
+            bytes: 6_000,
+            createdAt: now - 3_600_000,
+            deletedAt: now - 1_800_000,
+            billedFrom: now - 3_600_000,
+            billedUntil: now - 3_600_000 + 30 * 86_400_000,
+            complete: true,
+            provenance: "cloud:ingest_files",
+          },
+        ],
+        bytes: 6_000,
+        complete: true,
+        provenance: "cloud:ingest_files",
+      };
     });
     const params = new URLSearchParams({
       start: new Date(now - 3_600_000).toISOString(),
@@ -586,11 +650,12 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       deleted_bytes: 6_000,
       deleted_bytes_complete: true,
       deleted_bytes_provenance: "ingest_files_exact",
+      storage_billing_complete: true,
     });
-    expect(startedEarly.sort()).toEqual(["fos_usage", "ingest_files"]);
+    expect(startedEarly.sort()).toEqual(["fos_usage", "ingest_files", "storage_inventory"]);
   });
 
-  it("aborts the speculative ingest read once fos_usage proves the deletions", async () => {
+  it("prefers exact ingest_files intervals over aggregate fos_usage raw_request deletions without double counting", async () => {
     const now = fixtureUsageInput.now;
     vi.spyOn(Date, "now").mockReturnValue(now);
     vi.spyOn(usage, "fetchUsageSettings").mockResolvedValue(fixtureUsageInput.settings);
@@ -598,22 +663,44 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     vi.spyOn(usage, "fetchUsageSummary").mockResolvedValue({
       ...summary, input: fixtureUsageInput, summary, lines: [], totalUsd: 0,
     });
+    vi.spyOn(usage, "fetchCloudStorageInventory").mockResolvedValue({
+      intervals: [],
+      complete: true,
+      snapshotId: "snap-1",
+      observedAt: now,
+      provenance: "cloud:inventory",
+    });
     vi.spyOn(usage, "fetchUsageKindWithCoverage").mockResolvedValue({
       rows: [{
-        ...fixtureUsageInput.rows.fos_usage[0], op: "DELETE_OBJECTS", timestamp: now - 60_000,
-        bytes_in: 0, bytes_deleted: 700, bytes_deleted_complete: true,
+        ...fixtureUsageInput.rows.fos_usage[0],
+        op: "DELETE_OBJECTS",
+        dataset: "raw_request",
+        timestamp: now - 60_000,
+        bytes_in: 0,
+        bytes_deleted: 700,
+        bytes_deleted_complete: true,
       }],
       complete: true,
     });
-    let ingestSignal: AbortSignal | undefined;
-    vi.spyOn(usage, "fetchIngestDeletedBytes").mockImplementation(
-      (_range, _identity, _read, signal) => {
-        ingestSignal = signal;
-        return new Promise((_, reject) => {
-          signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
-        });
-      },
-    );
+    vi.spyOn(usage, "fetchIngestDeletedIntervals").mockResolvedValue({
+      intervals: [
+        {
+          id: "raw_request:raw/a.zst",
+          dataset: "raw_request",
+          kind: "minimum_billed",
+          bytes: 700,
+          createdAt: now - 3_600_000,
+          deletedAt: now - 60_000,
+          billedFrom: now - 3_600_000,
+          billedUntil: now - 3_600_000 + 30 * 86_400_000,
+          complete: true,
+          provenance: "cloud:ingest_files",
+        },
+      ],
+      bytes: 700,
+      complete: true,
+      provenance: "cloud:ingest_files",
+    });
     const params = new URLSearchParams({
       start: new Date(now - 3_600_000).toISOString(),
       end: new Date(now).toISOString(),
@@ -622,16 +709,20 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     const response = await handleCloudAnalyticalRequest(
       new Request(`http://localhost/api/usage/current-storage?${params}`),
     );
+    const body = await response!.json();
 
-    expect(await response!.json()).toMatchObject({
+    expect(body).toMatchObject({
       deleted_bytes: 700,
       deleted_bytes_complete: true,
-      deleted_bytes_provenance: "fos_usage_exact",
+      deleted_bytes_provenance: "ingest_files_exact",
+      storage_billing_complete: true,
     });
-    expect(ingestSignal?.aborted).toBe(true);
+    expect(body.storage_intervals).toHaveLength(1);
   });
 
-  it("marks an uncovered empty deletion read as incomplete", async () => {
+  it("uses exact ingest_files deletion intervals even when fos_usage coverage is incomplete", async () => {
+    const now = fixtureUsageInput.now;
+    vi.spyOn(Date, "now").mockReturnValue(now);
     vi.spyOn(usage, "fetchUsageSettings").mockResolvedValue(fixtureUsageInput.settings);
     vi.spyOn(usage, "fetchUsageSummary").mockResolvedValue({
       ...usage.summarizeUsage(fixtureUsageInput),
@@ -640,14 +731,35 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       lines: [],
       totalUsd: 0,
     });
+    vi.spyOn(usage, "fetchCloudStorageInventory").mockResolvedValue({
+      intervals: [],
+      complete: true,
+      snapshotId: "snap-1",
+      observedAt: now,
+      provenance: "cloud:inventory",
+    });
     vi.spyOn(usage, "fetchUsageKindWithCoverage").mockResolvedValue({
       rows: [],
       complete: false,
     });
-    vi.spyOn(usage, "fetchIngestDeletedBytes").mockResolvedValue({
+    vi.spyOn(usage, "fetchIngestDeletedIntervals").mockResolvedValue({
+      intervals: [
+        {
+          id: "raw_request:raw/b.zst",
+          dataset: "raw_request",
+          kind: "minimum_billed",
+          bytes: 6_000,
+          createdAt: now - 3_600_000,
+          deletedAt: now - 1_800_000,
+          billedFrom: now - 3_600_000,
+          billedUntil: now - 3_600_000 + 30 * 86_400_000,
+          complete: true,
+          provenance: "cloud:ingest_files",
+        },
+      ],
       bytes: 6_000,
       complete: true,
-      provenance: "ingest_files_exact",
+      provenance: "cloud:ingest_files",
     });
 
     const response = await handleCloudAnalyticalRequest(
@@ -658,6 +770,271 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       deleted_bytes: 6_000,
       deleted_bytes_complete: true,
       deleted_bytes_provenance: "ingest_files_exact",
+    });
+  });
+
+  describe("local lifecycle storage billing on /api/usage/current-storage", () => {
+    const GiB = 1024 ** 3;
+    const hour = 3_600_000;
+    const from = Date.parse("2026-11-22T12:00:00.000Z");
+    const to = from + 2 * hour;
+
+    it("combines live inventory and exact deletion intervals without double counting and calls calculateStorageBilling once", async () => {
+      vi.spyOn(Date, "now").mockReturnValue(to);
+      vi.spyOn(usage, "fetchUsageSettings").mockResolvedValue(fixtureUsageInput.settings);
+      const input = {
+        ...fixtureUsageInput,
+        telemetryCoverage: { fos_usage: true },
+        rows: { ...fixtureUsageInput.rows, fos_usage: [] },
+      };
+      const summary = usage.summarizeUsage(input);
+      vi.spyOn(usage, "fetchUsageSummary").mockResolvedValue({
+        ...summary, input, summary, lines: [], totalUsd: 0,
+      });
+      vi.spyOn(usage, "fetchUsageKindWithCoverage").mockResolvedValue({
+        rows: [],
+        complete: true,
+      });
+      vi.spyOn(usage, "fetchCloudStorageInventory").mockResolvedValue({
+        intervals: [
+          {
+            id: "pq_request:processed/request/live.parquet",
+            dataset: "pq_request",
+            kind: "live",
+            bytes: GiB,
+            createdAt: from - 2 * hour,
+            deletedAt: null,
+            billedFrom: from - 2 * hour,
+            billedUntil: to,
+            complete: true,
+            provenance: "cloud:inventory",
+          },
+          // Also present in ingest_files as deleted; must not be double counted.
+          {
+            id: "raw_request:raw/request/deleted.zst",
+            dataset: "raw_request",
+            kind: "live",
+            bytes: 2 * GiB,
+            createdAt: from - hour,
+            deletedAt: null,
+            billedFrom: from - hour,
+            billedUntil: to,
+            complete: true,
+            provenance: "cloud:inventory",
+          },
+        ],
+        complete: true,
+        snapshotId: "snap-42",
+        observedAt: from,
+        provenance: "cloud:inventory",
+      });
+      vi.spyOn(usage, "fetchIngestDeletedIntervals").mockResolvedValue({
+        intervals: [
+          {
+            id: "raw_request:raw/request/deleted.zst",
+            dataset: "raw_request",
+            kind: "minimum_billed",
+            bytes: 2 * GiB,
+            createdAt: from - hour,
+            deletedAt: from,
+            billedFrom: from - hour,
+            billedUntil: from + hour,
+            complete: true,
+            provenance: "cloud:ingest_files",
+          },
+        ],
+        bytes: 2 * GiB,
+        complete: true,
+        provenance: "cloud:ingest_files",
+      });
+      const calcSpy = vi.spyOn(storageBilling, "calculateStorageBilling");
+      const params = new URLSearchParams({
+        start: new Date(from).toISOString(),
+        end: new Date(to).toISOString(),
+      });
+
+      const response = await handleCloudAnalyticalRequest(
+        new Request(`http://localhost/api/usage/current-storage?${params}`),
+      );
+      const body = await response!.json();
+
+      expect(calcSpy).toHaveBeenCalledTimes(1);
+      expect(body).toMatchObject({
+        storage_billing_complete: true,
+        storage_billing_provenance: ["cloud:ingest_files", "cloud:inventory"],
+        live_billed_gb_hours: 2,
+        deleted_billed_gb_hours: 2,
+        minimum_billed_gb_hours: 2,
+        total_billed_gb_hours: 4,
+        observed_at: new Date(from).toISOString(),
+      });
+      expect(body.storage_intervals).toHaveLength(2);
+    });
+
+    it("preserves storage_billing_complete: false when FOS aggregate deletions are the only deletion evidence", async () => {
+      vi.spyOn(Date, "now").mockReturnValue(to);
+      vi.spyOn(usage, "fetchUsageSettings").mockResolvedValue(fixtureUsageInput.settings);
+      const input = {
+        ...fixtureUsageInput,
+        telemetryCoverage: { fos_usage: true },
+        rows: { ...fixtureUsageInput.rows, fos_usage: [] },
+      };
+      const summary = usage.summarizeUsage(input);
+      vi.spyOn(usage, "fetchUsageSummary").mockResolvedValue({
+        ...summary, input, summary, lines: [], totalUsd: 0,
+      });
+      vi.spyOn(usage, "fetchCloudStorageInventory").mockResolvedValue({
+        intervals: [
+          {
+            id: "pq_request:processed/request/live.parquet",
+            dataset: "pq_request",
+            kind: "live",
+            bytes: GiB,
+            createdAt: from - hour,
+            deletedAt: null,
+            billedFrom: from - hour,
+            billedUntil: to,
+            complete: true,
+            provenance: "cloud:inventory",
+          },
+        ],
+        complete: true,
+        snapshotId: "snap-42",
+        observedAt: from,
+        provenance: "cloud:inventory",
+      });
+      vi.spyOn(usage, "fetchIngestDeletedIntervals").mockResolvedValue({
+        intervals: [],
+        bytes: 0,
+        complete: true,
+        provenance: "cloud:ingest_files",
+      });
+      vi.spyOn(usage, "fetchUsageKindWithCoverage").mockResolvedValue({
+        rows: [
+          {
+            ...fixtureUsageInput.rows.fos_usage[0],
+            op: "DELETE_OBJECTS",
+            dataset: "pq_request",
+            timestamp: from,
+            bytes_in: 0,
+            bytes_deleted: GiB,
+            bytes_deleted_complete: true,
+          },
+        ],
+        complete: true,
+      });
+      const params = new URLSearchParams({
+        start: new Date(from).toISOString(),
+        end: new Date(to).toISOString(),
+      });
+
+      const response = await handleCloudAnalyticalRequest(
+        new Request(`http://localhost/api/usage/current-storage?${params}`),
+      );
+      const body = await response!.json();
+
+      expect(body.storage_billing_complete).toBe(false);
+      expect(body.storage_billing_provenance).toContain("cloud:fos_usage");
+      expect(body.live_billed_gb_hours).toBe(2);
+      expect(body.deleted_billed_gb_hours).toBe(2);
+      expect(body.total_billed_gb_hours).toBe(4);
+    });
+  });
+
+  describe("usage operations normalized contract", () => {
+    it("returns local source, completeness, provenance, and buckets matching the High-Scale fixture", async () => {
+      const from = Date.parse("2026-11-22T12:00:00.000Z");
+      const to = Date.parse("2026-11-22T12:59:59.000Z");
+      const input = {
+        ...fixtureUsageInput,
+        now: to,
+        days: 1,
+        telemetryCoverage: { fos_usage: true },
+        rows: {
+          fos_usage: [
+            {
+              ...fixtureUsageInput.rows.fos_usage[0],
+              timestamp: Date.parse("2026-11-22T12:15:00.000Z"),
+              op: "PUT",
+              op_class: "A" as const,
+              op_count: 7,
+              bytes_in: 4096,
+              bytes_out: 0,
+              bytes_deleted: 0,
+            },
+          ],
+          api_telemetry: [],
+          cron_runs: [],
+          cron_ticks: [],
+        },
+      };
+      const summary = usage.summarizeUsage(input);
+      vi.spyOn(usage, "fetchUsageSummary").mockResolvedValue({
+        ...summary, input, summary, lines: [], totalUsd: 0,
+      });
+      const params = new URLSearchParams({
+        start: new Date(from).toISOString(),
+        end: new Date(to).toISOString(),
+        by: "hour",
+      });
+
+      const response = await handleCloudAnalyticalRequest(
+        new Request(`http://localhost/api/usage/operations?${params}`),
+      );
+      const body = await response!.json();
+
+      expect(body).toMatchObject({
+        source: "local",
+        complete: true,
+        provenance: ["fos_usage"],
+        total_class_a: 7,
+        total_class_b: 0,
+        data: [
+          expect.objectContaining({
+            date: "2026-11-22T12:00:00.000Z",
+            class_a: 7,
+            class_b: 0,
+          }),
+        ],
+      });
+    });
+
+    it("marks /api/usage/operations incomplete when fos_usage telemetry coverage is incomplete", async () => {
+      const from = Date.parse("2026-11-22T12:00:00.000Z");
+      const to = Date.parse("2026-11-22T12:59:59.000Z");
+      const input = {
+        ...fixtureUsageInput,
+        now: to,
+        days: 1,
+        telemetryCoverage: { fos_usage: false },
+        rows: {
+          fos_usage: [],
+          api_telemetry: [],
+          cron_runs: [],
+          cron_ticks: [],
+        },
+      };
+      const summary = usage.summarizeUsage(input);
+      vi.spyOn(usage, "fetchUsageSummary").mockResolvedValue({
+        ...summary, input, summary, lines: [], totalUsd: 0,
+      });
+      const params = new URLSearchParams({
+        start: new Date(from).toISOString(),
+        end: new Date(to).toISOString(),
+        by: "hour",
+      });
+
+      const response = await handleCloudAnalyticalRequest(
+        new Request(`http://localhost/api/usage/operations?${params}`),
+      );
+
+      expect(await response!.json()).toMatchObject({
+        source: "local",
+        complete: false,
+        provenance: ["fos_usage"],
+        total_class_a: 0,
+        total_class_b: 0,
+      });
     });
   });
 
@@ -3137,10 +3514,17 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       totalUsd: 0,
     });
     vi.spyOn(usage, "fetchUsageKindWithCoverage").mockResolvedValue({ rows: [], complete: false });
+    vi.spyOn(usage, "fetchCloudStorageInventory").mockResolvedValue({
+      intervals: [],
+      complete: true,
+      snapshotId: "snap-1",
+      observedAt: fixtureUsageInput.now,
+      provenance: "cloud:inventory",
+    });
     let seenIngestIdentity: { user: string; role: string } | null = null;
-    vi.spyOn(usage, "fetchIngestDeletedBytes").mockImplementation(async (_range, identity) => {
+    vi.spyOn(usage, "fetchIngestDeletedIntervals").mockImplementation(async (_range, identity) => {
       seenIngestIdentity = identity;
-      return { bytes: 1234, complete: true, provenance: "ingest_files_exact" };
+      return { intervals: [], bytes: 1234, complete: true, provenance: "cloud:ingest_files" };
     });
     const storageRes = await handleCloudAnalyticalRequest(
       new Request("http://localhost/api/usage/current-storage"),
@@ -3148,13 +3532,13 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     expect(storageRes?.status).toBe(200);
     expect(seenIngestIdentity).toEqual({ user: "bob", role: "admin" });
 
-    // Also verify checkUsageEpoch() aborts /api/usage/current-storage if opsCacheEpoch bumps mid-fetchIngestDeletedBytes:
+    // Also verify checkUsageEpoch() aborts /api/usage/current-storage if opsCacheEpoch bumps mid-fetchIngestDeletedIntervals:
     let releaseIngestDel = null as (() => void) | null;
-    vi.spyOn(usage, "fetchIngestDeletedBytes").mockImplementation(async () => {
+    vi.spyOn(usage, "fetchIngestDeletedIntervals").mockImplementation(async () => {
       await new Promise<void>((r) => {
         releaseIngestDel = r;
       });
-      return { bytes: 9999, complete: true, provenance: "ingest_files_exact" };
+      return { intervals: [], bytes: 9999, complete: true, provenance: "cloud:ingest_files" };
     });
     const inFlightStorage = handleCloudAnalyticalRequest(
       new Request("http://localhost/api/usage/current-storage"),
@@ -3169,15 +3553,15 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     expect(await inFlightStorage).toBe("ERR:AbortError");
 
     // 3b. Auditor Challenge 1: opsCacheEpoch-only bump (via syncOpsCacheForSession role demotion WITHOUT storeMetaEpoch bump)
-    // mid-storageDeletion MUST ALSO abort /api/usage/current-storage via inner checkUsageEpoch()!
+    // mid-storageBillingIntervals MUST ALSO abort /api/usage/current-storage via inner checkUsageEpoch()!
     await setDashboardCacheIdentity("bob:admin");
     await syncOpsCacheForSession({ userId: "bob", role: "admin", maskIps: false, needsLogin: false });
     let releaseIngestOpsOnly = null as (() => void) | null;
-    vi.spyOn(usage, "fetchIngestDeletedBytes").mockImplementation(async () => {
+    vi.spyOn(usage, "fetchIngestDeletedIntervals").mockImplementation(async () => {
       await new Promise<void>((r) => {
         releaseIngestOpsOnly = r;
       });
-      return { bytes: 5555, complete: true, provenance: "ingest_files_exact" };
+      return { intervals: [], bytes: 5555, complete: true, provenance: "cloud:ingest_files" };
     });
     const metaBeforeOpsOnly = currentStoreMetaEpoch();
     const opsBeforeOpsOnly = currentOpsCacheEpoch();

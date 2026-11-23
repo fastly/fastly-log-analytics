@@ -117,9 +117,15 @@ import { fetchEstimatePrefill } from "./usage/estimatePrefill";
 import { LIST_RATES } from "./usage/rates";
 import { bucketUsage } from "./usage/series";
 import {
+  calculateStorageBilling,
+  type StorageBillingInterval,
+  type StorageBillingSummary,
+} from "./usage/storageBilling";
+import {
   buildSevenLineCostTable,
   deletedBytesAccountingSince,
-  fetchIngestDeletedBytes,
+  fetchCloudStorageInventory,
+  fetchIngestDeletedIntervals,
   fetchUsageKindWithCoverage,
   fetchUsageSettings,
   resetUsageSettingsCache,
@@ -156,71 +162,159 @@ export function resetCloudPlatformBundleCache(): void {
   settledPlatformBundles.clear();
 }
 
-type DeletionAccounting = {
-  bytes: number;
-  complete: boolean;
-  provenance: string;
+type CloudStorageBillingResult = {
+  intervals: StorageBillingInterval[];
+  summary: StorageBillingSummary;
+  observedAt: number | null;
+  deletedBytes: number;
+  deletedBytesComplete: boolean;
+  deletedBytesProvenance: string;
 };
 
 /**
- * Bytes deleted inside the minimum-billed window, which Object Storage still bills. The
- * fos_usage and ingest_files reads run together, and the ingest read is dropped once fos_usage
- * proves the deletions on its own.
+ * Combines Cloud's latest complete live inventory snapshot with exact `ingest_files`
+ * deletion intervals (and conservative incomplete `fos_usage` fallback for non-raw or
+ * aggregate deletions) and integrates them once over `[fromMs, toMs)`.
  */
-async function storageDeletion(
+async function storageBillingIntervals(
   now: number,
   fromMs: number,
   toMs: number,
   summaryRead: ReturnType<typeof fetchUsageSummary>,
   signal: AbortSignal,
   checkUsageEpoch: () => void,
-): Promise<DeletionAccounting> {
+): Promise<CloudStorageBillingResult> {
   const settings = await fetchUsageSettings(signal);
   checkUsageEpoch();
-  const billedFrom = now - settings.min_billed_days * 86_400_000;
-  const window = { from: billedFrom, to: now };
-  const ingestController = new AbortController();
-  const abortIngest = () => ingestController.abort(signal.reason);
-  signal.addEventListener("abort", abortIngest, { once: true });
-  try {
-    const ingestRead = fetchIngestDeletedBytes(
-      window,
-      currentOpsIdentity(),
-      undefined,
-      ingestController.signal,
-    );
-    ingestRead.catch(() => {});
-    const coversBillingWindow = fromMs <= billedFrom && toMs >= now;
-    const source = coversBillingWindow
-      ? await summaryRead.then(({ input }) => ({
-          rows: input.rows.fos_usage,
-          complete: input.telemetryCoverage?.fos_usage === true,
-        }))
-      : await fetchUsageKindWithCoverage(
-          "fos_usage",
-          window,
-          currentOpsIdentity(),
-          undefined,
-          signal,
-        );
-    checkUsageEpoch();
-    const accounting = deletedBytesAccountingSince(
-      source.rows,
-      billedFrom,
-      settings.enabled && source.complete,
-    );
-    if (accounting.complete) {
-      ingestController.abort(
-        new DOMException("The operation was aborted.", "AbortError"),
+  const minBilledDays = settings.min_billed_days;
+  const minWindowMs = minBilledDays * 86_400_000;
+  const deletionWindow =
+    toMs < now
+      ? { from: fromMs - minWindowMs, to: toMs }
+      : { from: Math.min(fromMs, now - minWindowMs), to: now };
+  const identity = currentOpsIdentity();
+  const inventoryRead = fetchCloudStorageInventory({
+    now: toMs,
+    identity,
+    signal,
+  });
+  inventoryRead.catch(() => {});
+  const ingestRead = fetchIngestDeletedIntervals(
+    deletionWindow,
+    identity,
+    undefined,
+    { minimumBilledDays: minBilledDays, signal },
+  );
+  ingestRead.catch(() => {});
+  const coversBillingWindow =
+    fromMs <= deletionWindow.from && toMs >= deletionWindow.to;
+  const fosSourceRead = coversBillingWindow
+    ? summaryRead.then(({ input }) => ({
+        rows: input.rows.fos_usage,
+        complete: input.telemetryCoverage?.fos_usage === true,
+      }))
+    : fetchUsageKindWithCoverage(
+        "fos_usage",
+        deletionWindow,
+        identity,
+        undefined,
+        signal,
       );
-      return accounting;
+  fosSourceRead.catch(() => {});
+
+  const [inventory, ingest, fosSource] = await Promise.all([
+    inventoryRead,
+    ingestRead,
+    fosSourceRead,
+  ]);
+  checkUsageEpoch();
+
+  const deletedIds = new Set(ingest.intervals.map((interval) => interval.id));
+  const liveIntervals = inventory.intervals.filter(
+    (interval) => !deletedIds.has(interval.id),
+  );
+
+  const fosAccounting = deletedBytesAccountingSince(
+    fosSource.rows,
+    deletionWindow.from,
+    settings.enabled && fosSource.complete,
+  );
+  const fosDeletionIntervals: StorageBillingInterval[] = [];
+  let fosExtraBytes = 0;
+  fosSource.rows.forEach((row, index) => {
+    if (
+      row.timestamp < deletionWindow.from ||
+      row.timestamp > deletionWindow.to ||
+      (row.op !== "DELETE_OBJECTS" && row.op !== "DELETE")
+    ) {
+      return;
     }
-    const ingest = await ingestRead;
-    checkUsageEpoch();
-    return ingest.complete ? ingest : accounting;
-  } finally {
-    signal.removeEventListener("abort", abortIngest);
-  }
+    const bytesDeleted = Number(row.bytes_deleted ?? 0);
+    if (!Number.isFinite(bytesDeleted) || bytesDeleted <= 0) return;
+    if (ingest.intervals.length > 0 && row.dataset === "raw_request") return;
+    fosExtraBytes += bytesDeleted;
+    fosDeletionIntervals.push({
+      id: `fos_usage:${row.dataset || "unknown"}:${row.timestamp}:${index}`,
+      dataset: row.dataset || "unknown",
+      kind: "deleted",
+      bytes: bytesDeleted,
+      createdAt: null,
+      deletedAt: row.timestamp,
+      billedFrom: row.timestamp,
+      billedUntil: row.timestamp + minWindowMs,
+      complete: false,
+      provenance: "cloud:fos_usage",
+    });
+  });
+
+  const intervals = [
+    ...liveIntervals,
+    ...ingest.intervals,
+    ...fosDeletionIntervals,
+  ];
+  const calculated = calculateStorageBilling(intervals, fromMs, toMs);
+  const provenanceSet = new Set(calculated.provenance);
+  if (!inventory.complete) provenanceSet.add("cloud:inventory_incomplete");
+  if (!ingest.complete) provenanceSet.add("cloud:ingest_files_incomplete");
+  if (fosDeletionIntervals.length > 0) provenanceSet.add("cloud:fos_usage");
+
+  const complete =
+    calculated.complete &&
+    inventory.complete &&
+    ingest.complete &&
+    fosDeletionIntervals.length === 0;
+
+  const hasExactIngest = ingest.intervals.length > 0 && ingest.complete;
+  const deletedBytes = hasExactIngest
+    ? ingest.bytes + fosExtraBytes
+    : fosAccounting.complete
+      ? fosAccounting.bytes
+      : ingest.intervals.length > 0
+        ? ingest.bytes + fosExtraBytes
+        : fosAccounting.bytes;
+  const deletedBytesComplete =
+    fosExtraBytes === 0 && (hasExactIngest || fosAccounting.complete);
+  const deletedBytesProvenance =
+    hasExactIngest && fosExtraBytes === 0
+      ? "ingest_files_exact"
+      : fosAccounting.complete && ingest.intervals.length === 0
+        ? "fos_usage_exact"
+        : ingest.intervals.length > 0
+          ? "ingest_files_incomplete"
+          : fosAccounting.provenance;
+
+  return {
+    intervals,
+    summary: {
+      ...calculated,
+      complete,
+      provenance: Array.from(provenanceSet).sort(),
+    },
+    observedAt: inventory.observedAt,
+    deletedBytes,
+    deletedBytesComplete,
+    deletedBytesProvenance,
+  };
 }
 
 async function cloudPlatformBundle(
@@ -2259,11 +2353,11 @@ async function dispatchCloudRequest(
       to: toMs,
       signal: request.signal,
     });
-    // The minimum-billed-days deletion reads span 30 days; start them with the range summary.
-    const deletionRead = pathname === "/api/usage/current-storage"
-      ? storageDeletion(now, fromMs, toMs, summaryRead, request.signal, checkUsageEpoch)
+    // The minimum-billed-days lifecycle reads span 30 days; start them with the range summary.
+    const storageBillingRead = pathname === "/api/usage/current-storage"
+      ? storageBillingIntervals(now, fromMs, toMs, summaryRead, request.signal, checkUsageEpoch)
       : null;
-    deletionRead?.catch(() => {});
+    storageBillingRead?.catch(() => {});
     const usageRes = await summaryRead;
     checkUsageEpoch();
     const { input, summary } = usageRes;
@@ -2277,10 +2371,14 @@ async function dispatchCloudRequest(
     });
     const resolvedBilling = await costBilling;
     checkUsageEpoch();
+    const resolvedStorageBilling = storageBillingRead ? await storageBillingRead : null;
+    checkUsageEpoch();
     const costLines = buildSevenLineCostTable({
       hours: (toMs - fromMs) / 3_600_000,
       settings: input.settings,
-      billedGbHours: summary.storage.billedGbMonths * 720,
+      billedGbHours: resolvedStorageBilling
+        ? resolvedStorageBilling.summary.totalGbHours
+        : summary.storage.billedGbMonths * 720,
       classA: summary.totals.classA,
       classB: summary.totals.classB,
       cdnHits: summary.totals.cdnHit,
@@ -2292,15 +2390,25 @@ async function dispatchCloudRequest(
     });
 
     if (pathname === "/api/usage/current-storage") {
-      const effectiveDeletion = await deletionRead!;
-      checkUsageEpoch();
+      const storageBilling = resolvedStorageBilling!;
+      const observedAtMs = storageBilling.observedAt ?? summary.storage.snapshotAt;
       return jsonResponse(
         {
-          total_billed_gb_hours: summary.storage.billedGbMonths * 720,
+          total_billed_gb_hours: storageBilling.summary.totalGbHours,
+          live_billed_gb_hours: storageBilling.summary.liveGbHours,
+          deleted_billed_gb_hours:
+            storageBilling.summary.deletedGbHours +
+            storageBilling.summary.minimumBilledGbHours,
+          minimum_billed_gb_hours: storageBilling.summary.minimumBilledGbHours,
+          storage_billing_complete: storageBilling.summary.complete,
+          storage_billing_provenance: storageBilling.summary.provenance,
+          storage_intervals: storageBilling.intervals,
+          observed_at:
+            observedAtMs !== null ? new Date(observedAtMs).toISOString() : null,
           live_bytes: summary.storage.totalBytes,
-          deleted_bytes: effectiveDeletion.bytes,
-          deleted_bytes_complete: effectiveDeletion.complete,
-          deleted_bytes_provenance: effectiveDeletion.provenance,
+          deleted_bytes: storageBilling.deletedBytes,
+          deleted_bytes_complete: storageBilling.deletedBytesComplete,
+          deleted_bytes_provenance: storageBilling.deletedBytesProvenance,
           regular_log_bytes:
             summary.storage.datasets.find((d) => d.dataset === "pq_request")
               ?.bytes ?? 0,
@@ -2324,6 +2432,9 @@ async function dispatchCloudRequest(
     if (pathname === "/api/usage/operations") {
       return jsonResponse(
         {
+          source: "local",
+          complete: input.telemetryCoverage?.fos_usage === true,
+          provenance: ["fos_usage"],
           total_class_a: summary.totals.classA,
           total_class_b: summary.totals.classB,
           data: points.map((p) => ({

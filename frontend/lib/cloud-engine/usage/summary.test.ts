@@ -7,9 +7,11 @@ import {
   deletedBytesAccountingSince,
   billedVcpuForExecutions,
   billedVcpuMsPerRequest,
+  fetchCloudStorageInventory,
   fetchUsageInput,
   fetchUsageSettings,
   fetchIngestDeletedBytes,
+  fetchIngestDeletedIntervals,
   resetUsageSettingsCache,
   incurredCost,
   parseComputeBilling,
@@ -96,6 +98,317 @@ describe("fetchIngestDeletedBytes", () => {
       bytes: 6_000,
       complete: true,
       provenance: "ingest_files_exact",
+    });
+  });
+});
+
+describe("fetchCloudStorageInventory", () => {
+  const identity = { user: "admin", role: "admin" };
+
+  it("selects the newest complete snapshot_id and returns exact live intervals", async () => {
+    const now = Date.parse("2026-11-22T12:00:00.000Z");
+    const olderModified = "2026-11-20T00:00:00.000Z";
+    const newerModified = "2026-11-21T06:00:00.000Z";
+    const read = vi.fn(async () => ({
+      rows: [
+        {
+          snapshot_id: "snap-1",
+          dataset: "pq_request",
+          key: "processed/request/old.parquet",
+          size: 1000,
+          last_modified: olderModified,
+          complete: false,
+          timestamp: Date.parse("2026-11-21T00:00:00.000Z"),
+        },
+        {
+          snapshot_id: "snap-1",
+          dataset: null,
+          key: null,
+          size: 0,
+          last_modified: null,
+          complete: true,
+          timestamp: Date.parse("2026-11-21T00:01:00.000Z"),
+        },
+        {
+          snapshot_id: "snap-2",
+          dataset: "pq_request",
+          key: "processed/request/new.parquet",
+          size: 2048,
+          last_modified: newerModified,
+          complete: false,
+          timestamp: Date.parse("2026-11-22T10:00:00.000Z"),
+        },
+        {
+          snapshot_id: "snap-2",
+          dataset: "raw_request",
+          key: "raw/request/a.zst",
+          size: 512,
+          last_modified: newerModified,
+          complete: false,
+          timestamp: Date.parse("2026-11-22T10:00:01.000Z"),
+        },
+        {
+          snapshot_id: "snap-2",
+          dataset: null,
+          key: null,
+          size: 0,
+          last_modified: null,
+          complete: true,
+          timestamp: Date.parse("2026-11-22T10:00:05.000Z"),
+        },
+      ],
+      liveTruncated: false,
+    }));
+
+    const result = await fetchCloudStorageInventory({
+      now,
+      identity,
+      read,
+    });
+
+    expect(read).toHaveBeenCalledWith(
+      "storage_inventory",
+      expect.objectContaining({ to: new Date(now).toISOString() }),
+      expect.objectContaining(identity),
+    );
+    expect(result.complete).toBe(true);
+    expect(result.snapshotId).toBe("snap-2");
+    expect(result.observedAt).toBe(Date.parse("2026-11-22T10:00:05.000Z"));
+    expect(result.provenance).toBe("cloud:inventory");
+    expect(result.intervals).toEqual([
+      {
+        id: "pq_request:processed/request/new.parquet",
+        dataset: "pq_request",
+        kind: "live",
+        bytes: 2048,
+        createdAt: Date.parse(newerModified),
+        deletedAt: null,
+        billedFrom: Date.parse(newerModified),
+        billedUntil: now,
+        complete: true,
+        provenance: "cloud:inventory",
+      },
+      {
+        id: "raw_request:raw/request/a.zst",
+        dataset: "raw_request",
+        kind: "live",
+        bytes: 512,
+        createdAt: Date.parse(newerModified),
+        deletedAt: null,
+        billedFrom: Date.parse(newerModified),
+        billedUntil: now,
+        complete: true,
+        provenance: "cloud:inventory",
+      },
+    ]);
+  });
+
+  it("marks inventory incomplete when the newest snapshot lacks a terminal marker", async () => {
+    const now = Date.parse("2026-11-22T12:00:00.000Z");
+    const modified = "2026-11-21T06:00:00.000Z";
+    const read = vi.fn(async () => ({
+      rows: [
+        {
+          snapshot_id: "snap-1",
+          dataset: "pq_request",
+          key: "processed/request/a.parquet",
+          size: 1024,
+          last_modified: modified,
+          complete: false,
+          timestamp: Date.parse("2026-11-21T07:00:00.000Z"),
+        },
+        {
+          snapshot_id: "snap-1",
+          dataset: null,
+          key: null,
+          size: 0,
+          last_modified: null,
+          complete: true,
+          timestamp: Date.parse("2026-11-21T07:00:05.000Z"),
+        },
+        {
+          snapshot_id: "snap-2-in-progress",
+          dataset: "pq_request",
+          key: "processed/request/b.parquet",
+          size: 4096,
+          last_modified: modified,
+          complete: false,
+          timestamp: Date.parse("2026-11-22T11:59:00.000Z"),
+        },
+      ],
+      liveTruncated: false,
+    }));
+
+    const result = await fetchCloudStorageInventory({ now, identity, read });
+
+    expect(result.snapshotId).toBe("snap-1");
+    expect(result.complete).toBe(false);
+    expect(result.provenance).toBe("cloud:inventory_incomplete");
+    expect(result.intervals).toHaveLength(1);
+    expect(result.intervals[0].id).toBe("pq_request:processed/request/a.parquet");
+  });
+
+  it("returns empty incomplete result when no snapshot has a terminal marker", async () => {
+    const now = Date.parse("2026-11-22T12:00:00.000Z");
+    const read = vi.fn(async () => ({
+      rows: [
+        {
+          snapshot_id: "snap-partial",
+          dataset: "pq_request",
+          key: "processed/request/a.parquet",
+          size: 1024,
+          last_modified: "2026-11-22T11:00:00.000Z",
+          complete: false,
+          timestamp: Date.parse("2026-11-22T11:30:00.000Z"),
+        },
+      ],
+      liveTruncated: false,
+    }));
+
+    const result = await fetchCloudStorageInventory({ now, identity, read });
+
+    expect(result).toEqual({
+      intervals: [],
+      complete: false,
+      snapshotId: null,
+      observedAt: null,
+      provenance: "cloud:inventory_incomplete",
+    });
+  });
+});
+
+describe("fetchIngestDeletedIntervals", () => {
+  const identity = { user: "admin", role: "admin" };
+
+  it("builds an exact billed interval from the first and deleted ingest_file states", async () => {
+    const read = vi.fn(async () => ({
+      rows: [
+        { timestamp: 10, raw_key: "a", raw_size: 100, state_version: 1, raw_deleted: false },
+        {
+          timestamp: 20,
+          raw_key: "a",
+          raw_size: 100,
+          state_version: 2,
+          raw_deleted: true,
+          raw_deleted_at: 20,
+        },
+      ],
+      liveTruncated: false,
+    }));
+
+    const result = await fetchIngestDeletedIntervals(
+      { from: 0, to: 100 },
+      identity,
+      read,
+      { minimumBilledDays: 30 },
+    );
+
+    expect(result.complete).toBe(true);
+    expect(result.bytes).toBe(100);
+    expect(result.provenance).toBe("cloud:ingest_files");
+    expect(result.intervals).toEqual([
+      expect.objectContaining({
+        id: "raw_request:a",
+        dataset: "raw_request",
+        kind: "minimum_billed",
+        bytes: 100,
+        createdAt: 10,
+        deletedAt: 20,
+        billedFrom: 10,
+        billedUntil: 30 * 86_400_000 + 10,
+        complete: true,
+        provenance: "cloud:ingest_files",
+      }),
+    ]);
+  });
+
+  it("stops at deleted_at when deleted after the minimum billing term", async () => {
+    const day = 86_400_000;
+    const read = vi.fn(async () => ({
+      rows: [
+        { timestamp: 0, raw_key: "old", raw_size: 500, state_version: 1, raw_deleted: false },
+        {
+          timestamp: 40 * day,
+          raw_key: "old",
+          raw_size: 500,
+          state_version: 2,
+          raw_deleted: true,
+          raw_deleted_at: 40 * day,
+        },
+      ],
+      liveTruncated: false,
+    }));
+
+    const result = await fetchIngestDeletedIntervals(
+      { from: 0, to: 45 * day },
+      identity,
+      read,
+      { minimumBilledDays: 30 },
+    );
+
+    expect(result.intervals).toEqual([
+      expect.objectContaining({
+        id: "raw_request:old",
+        kind: "deleted",
+        billedFrom: 0,
+        billedUntil: 40 * day,
+        complete: true,
+      }),
+    ]);
+  });
+
+  it("marks missing size or creation evidence incomplete and deduplicates by raw key", async () => {
+    const read = vi.fn(async () => ({
+      rows: [
+        {
+          timestamp: 500,
+          raw_key: "no-creation",
+          raw_size: 200,
+          state_version: 2,
+          raw_deleted: true,
+          raw_deleted_at: 500,
+        },
+        {
+          timestamp: 500,
+          raw_key: "no-creation",
+          raw_size: 200,
+          state_version: 2,
+          raw_deleted: true,
+          raw_deleted_at: 500,
+        },
+        {
+          timestamp: 100,
+          raw_key: "no-size",
+          raw_size: null,
+          state_version: 1,
+          raw_deleted: false,
+        },
+        {
+          timestamp: 200,
+          raw_key: "no-size",
+          raw_size: null,
+          state_version: 2,
+          raw_deleted: true,
+          raw_deleted_at: 200,
+        },
+      ],
+      liveTruncated: false,
+    }));
+
+    const result = await fetchIngestDeletedIntervals(
+      { from: 0, to: 1000 },
+      identity,
+      read,
+      { minimumBilledDays: 30 },
+    );
+
+    expect(result.complete).toBe(false);
+    expect(result.provenance).toBe("cloud:ingest_files_incomplete");
+    expect(result.intervals).toHaveLength(1);
+    expect(result.intervals[0]).toMatchObject({
+      id: "raw_request:no-creation",
+      bytes: 200,
+      complete: false,
     });
   });
 });

@@ -9,6 +9,10 @@ import {
   currentOpsIdentity,
 } from "../telemetry/sources";
 import { DAY_MS, LIST_RATES } from "./rates";
+import type {
+  StorageBillingInterval,
+  StorageBillingIntervalKind,
+} from "./storageBilling";
 
 const readLogs: UsageLogReader = async (...args) =>
   (await import("../telemetry/client")).readLogs(...args);
@@ -38,6 +42,319 @@ export function resetUsageSettingsCache(
     }
     activeSettingsControllers.clear();
   }
+}
+
+function parseTimestampMs(raw: unknown): number | null {
+  if (raw === null || raw === undefined || raw === "") return null;
+  const numeric = Number(raw);
+  if (Number.isFinite(numeric)) return numeric;
+  if (typeof raw === "string") {
+    const parsed = Date.parse(raw);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+export interface CloudStorageInventoryResult {
+  intervals: StorageBillingInterval[];
+  complete: boolean;
+  snapshotId: string | null;
+  observedAt: number | null;
+  provenance: "cloud:inventory" | "cloud:inventory_incomplete";
+}
+
+export async function fetchCloudStorageInventory(
+  options: {
+    now?: number;
+    lookbackDays?: number;
+    identity?: { user: string; role: string };
+    read?: UsageLogReader;
+    signal?: AbortSignal;
+  } = {},
+): Promise<CloudStorageInventoryResult> {
+  const startOpsEpoch = currentOpsCacheEpoch();
+  const scope = dashboardCacheIdentity();
+  assertOpsEpoch(startOpsEpoch, options.signal);
+  const now = options.now ?? Date.now();
+  const lookbackDays = options.lookbackDays ?? 30;
+  const identity = options.identity ?? currentOpsIdentity();
+  const read = options.read ?? readLogs;
+  const result = await read(
+    "storage_inventory",
+    {
+      from: new Date(now - lookbackDays * DAY_MS).toISOString(),
+      to: new Date(now).toISOString(),
+    },
+    { ...identity, signal: options.signal },
+  );
+  assertOpsEpoch(startOpsEpoch, options.signal);
+  if (dashboardCacheIdentity() !== scope) {
+    throw settingsAbortError();
+  }
+
+  type InventoryObject = {
+    dataset: string;
+    key: string;
+    size: number;
+    lastModifiedMs: number | null;
+  };
+  const snapshots = new Map<
+    string,
+    {
+      latestTs: number;
+      terminalTs: number | null;
+      objects: Map<string, InventoryObject>;
+      hasIncompleteRow: boolean;
+    }
+  >();
+
+  for (const row of result.rows) {
+    const snapshotId =
+      typeof row.snapshot_id === "string" ? row.snapshot_id.trim() : "";
+    if (!snapshotId) continue;
+    const rowTs = parseTimestampMs(row.timestamp) ?? 0;
+    let snap = snapshots.get(snapshotId);
+    if (!snap) {
+      snap = {
+        latestTs: rowTs,
+        terminalTs: null,
+        objects: new Map(),
+        hasIncompleteRow: false,
+      };
+      snapshots.set(snapshotId, snap);
+    } else if (rowTs > snap.latestTs) {
+      snap.latestTs = rowTs;
+    }
+    if (row.complete === true) {
+      snap.terminalTs =
+        snap.terminalTs === null ? rowTs : Math.max(snap.terminalTs, rowTs);
+      continue;
+    }
+    const dataset = typeof row.dataset === "string" ? row.dataset : "";
+    const key = typeof row.key === "string" ? row.key : "";
+    if (!dataset || !key) {
+      snap.hasIncompleteRow = true;
+      continue;
+    }
+    const size = Number(row.size);
+    const lastModifiedMs = parseTimestampMs(row.last_modified);
+    if (!Number.isFinite(size) || size < 0 || lastModifiedMs === null) {
+      snap.hasIncompleteRow = true;
+    }
+    snap.objects.set(`${dataset}:${key}`, {
+      dataset,
+      key,
+      size: Number.isFinite(size) && size >= 0 ? size : 0,
+      lastModifiedMs,
+    });
+  }
+
+  let newestOverall: { id: string; latestTs: number } | null = null;
+  let newestComplete: {
+    id: string;
+    terminalTs: number;
+    objects: Map<string, InventoryObject>;
+    hasIncompleteRow: boolean;
+  } | null = null;
+
+  for (const [id, snap] of snapshots) {
+    if (!newestOverall || snap.latestTs > newestOverall.latestTs) {
+      newestOverall = { id, latestTs: snap.latestTs };
+    }
+    if (
+      snap.terminalTs !== null &&
+      (!newestComplete || snap.terminalTs > newestComplete.terminalTs)
+    ) {
+      newestComplete = {
+        id,
+        terminalTs: snap.terminalTs,
+        objects: snap.objects,
+        hasIncompleteRow: snap.hasIncompleteRow,
+      };
+    }
+  }
+
+  if (!newestComplete) {
+    return {
+      intervals: [],
+      complete: false,
+      snapshotId: null,
+      observedAt: null,
+      provenance: "cloud:inventory_incomplete",
+    };
+  }
+
+  const newestIsIncomplete =
+    newestOverall !== null && newestOverall.id !== newestComplete.id;
+  const intervals: StorageBillingInterval[] = [];
+  for (const [id, obj] of newestComplete.objects) {
+    const rowComplete = obj.lastModifiedMs !== null;
+    const billedFrom = obj.lastModifiedMs ?? newestComplete.terminalTs;
+    intervals.push({
+      id,
+      dataset: obj.dataset,
+      kind: "live",
+      bytes: obj.size,
+      createdAt: obj.lastModifiedMs,
+      deletedAt: null,
+      billedFrom,
+      billedUntil: now,
+      complete: rowComplete,
+      provenance: "cloud:inventory",
+    });
+  }
+
+  const complete =
+    result.liveTruncated !== true &&
+    !newestIsIncomplete &&
+    !newestComplete.hasIncompleteRow;
+  return {
+    intervals,
+    complete,
+    snapshotId: newestComplete.id,
+    observedAt: newestComplete.terminalTs,
+    provenance: complete ? "cloud:inventory" : "cloud:inventory_incomplete",
+  };
+}
+
+export interface IngestDeletedIntervalsResult {
+  intervals: StorageBillingInterval[];
+  bytes: number;
+  complete: boolean;
+  provenance: "cloud:ingest_files" | "cloud:ingest_files_incomplete";
+}
+
+export async function fetchIngestDeletedIntervals(
+  range: { from: number; to: number },
+  identity: { user: string; role: string },
+  read: UsageLogReader = readLogs,
+  options: {
+    minimumBilledDays?: number;
+    signal?: AbortSignal;
+  } = {},
+): Promise<IngestDeletedIntervalsResult> {
+  const minimumBilledDays = options.minimumBilledDays ?? 30;
+  const minWindowMs = minimumBilledDays * DAY_MS;
+  const result = await read(
+    "ingest_files",
+    {
+      from: new Date(range.from).toISOString(),
+      to: new Date(range.to).toISOString(),
+    },
+    { ...identity, signal: options.signal },
+  );
+
+  type RawLifecycle = {
+    earliestTs: number | null;
+    sawNonDeleted: boolean;
+    knownSize: number | undefined;
+    latest: {
+      deleted: boolean;
+      deletedAt: number | null;
+      rowAt: number;
+      version: number;
+    };
+  };
+
+  const lifecycles = new Map<string, RawLifecycle>();
+  for (const row of result.rows) {
+    const rawKey = typeof row.raw_key === "string" ? row.raw_key : "";
+    if (!rawKey) continue;
+    const rawSize = row.raw_size;
+    const size =
+      rawSize !== null && rawSize !== undefined ? Number(rawSize) : NaN;
+    const validSize = Number.isFinite(size) && size >= 0 ? size : undefined;
+    const ts = parseTimestampMs(row.timestamp);
+    const deletedAt = parseTimestampMs(row.raw_deleted_at);
+    const rowAt = deletedAt ?? ts ?? 0;
+    const version = Number(row.state_version ?? 0);
+    const validVersion = Number.isFinite(version) ? version : 0;
+    const deleted = row.raw_deleted === true;
+
+    const existing = lifecycles.get(rawKey);
+    if (!existing) {
+      lifecycles.set(rawKey, {
+        earliestTs: ts,
+        sawNonDeleted: !deleted,
+        knownSize: validSize,
+        latest: {
+          deleted,
+          deletedAt,
+          rowAt,
+          version: validVersion,
+        },
+      });
+      continue;
+    }
+
+    if (ts !== null && (existing.earliestTs === null || ts < existing.earliestTs)) {
+      existing.earliestTs = ts;
+    }
+    if (!deleted) {
+      existing.sawNonDeleted = true;
+    }
+    if (existing.knownSize === undefined && validSize !== undefined) {
+      existing.knownSize = validSize;
+    }
+    if (
+      validVersion > existing.latest.version ||
+      (validVersion === existing.latest.version && rowAt > existing.latest.rowAt)
+    ) {
+      existing.latest = {
+        deleted,
+        deletedAt,
+        rowAt,
+        version: validVersion,
+      };
+    }
+  }
+
+  const intervals: StorageBillingInterval[] = [];
+  let bytes = 0;
+  let complete = result.liveTruncated !== true;
+
+  for (const [rawKey, entry] of lifecycles) {
+    if (!entry.latest.deleted) continue;
+    const deletedAt = entry.latest.deletedAt ?? entry.latest.rowAt;
+    if (entry.knownSize === undefined) {
+      complete = false;
+      continue;
+    }
+    const hasCreationEvidence =
+      entry.sawNonDeleted ||
+      (entry.earliestTs !== null && entry.earliestTs < deletedAt);
+    const createdAt = entry.earliestTs ?? deletedAt;
+    const minFloor = createdAt + minWindowMs;
+    const billedUntil = Math.max(deletedAt, minFloor);
+    const kind: StorageBillingIntervalKind =
+      billedUntil > deletedAt ? "minimum_billed" : "deleted";
+    const intervalComplete = hasCreationEvidence && result.liveTruncated !== true;
+    if (!intervalComplete) {
+      complete = false;
+    }
+    bytes += entry.knownSize;
+    intervals.push({
+      id: `raw_request:${rawKey}`,
+      dataset: "raw_request",
+      kind,
+      bytes: entry.knownSize,
+      createdAt: hasCreationEvidence ? createdAt : null,
+      deletedAt,
+      billedFrom: createdAt,
+      billedUntil,
+      complete: intervalComplete,
+      provenance: "cloud:ingest_files",
+    });
+  }
+
+  return {
+    intervals,
+    bytes,
+    complete,
+    provenance: complete
+      ? "cloud:ingest_files"
+      : "cloud:ingest_files_incomplete",
+  };
 }
 
 export async function fetchIngestDeletedBytes(
@@ -1298,7 +1615,7 @@ export const USAGE_KINDS = [
 ] as const;
 
 export type UsageKind = (typeof USAGE_KINDS)[number];
-type UsageReadKind = UsageKind | "ingest_files";
+type UsageReadKind = UsageKind | "ingest_files" | "storage_inventory";
 
 export type UsageLogReader = (
   kind: UsageReadKind,
