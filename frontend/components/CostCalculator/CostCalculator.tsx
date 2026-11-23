@@ -12,7 +12,6 @@ import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { Table, TableBody, TableCell, TableRow } from '@/components/ui/table'
 import { LabelWithInfo } from '@/components/ui/confirm-dialog'
-import { measuredStorageGbMonths } from './measuredStorage'
 import {
   Tooltip,
   TooltipContent,
@@ -407,28 +406,9 @@ interface ResultsProps {
   localStoragePeriodHours?: number | null
 }
 
-export function Results({ s, r, localStorageGbHours, localStoragePeriodHours }: ResultsProps) {
-  const localStorageGbMonths = measuredStorageGbMonths(localStorageGbHours, localStoragePeriodHours)
-  const localStorageCost = localStorageGbMonths == null
-    ? null
-    : localStorageGbMonths * s.rateStorage
-  const displayedResult = localStorageCost == null
-    ? r
-    : {
-        ...r,
-        costStorage: localStorageCost,
-        totalCost: r.totalCost - r.costStorage + localStorageCost,
-        storageTiers: [{
-          label: 'Measured · this install',
-          gbMonths: localStorageGbMonths ?? 0,
-          flagged: false,
-        }],
-      }
-  const storageTierDetail = displayedResult.storageTiers
-    .map((tier) => {
-      const value = localStorageCost == null ? Math.max(0.001, tier.gbMonths) : tier.gbMonths
-      return `${tier.label}: ${value.toFixed(3)} GB-mo${tier.flagged ? '*' : ''}`
-    })
+export function Results({ s, r }: ResultsProps) {
+  const storageTierDetail = r.storageTiers
+    .map((tier) => `${tier.label}: ${Math.max(0.001, tier.gbMonths).toFixed(3)} GB-mo${tier.flagged ? '*' : ''}`)
     .join(' · ')
   return (
     <div className='bg-muted/30 border rounded-lg p-5'>
@@ -447,7 +427,7 @@ export function Results({ s, r, localStorageGbHours, localStoragePeriodHours }: 
         <ResultRow
           label='Storage (GB-months billed)'
           detail={storageTierDetail}
-          cost={formatUSD(displayedResult.costStorage)}
+          cost={formatUSD(r.costStorage)}
         />
         <ResultRow
           label='CDN Egress'
@@ -463,17 +443,10 @@ export function Results({ s, r, localStorageGbHours, localStoragePeriodHours }: 
         )}
         <ResultRow
           label='Total Estimated Monthly Cost'
-          cost={formatUSD(displayedResult.totalCost)}
+          cost={formatUSD(r.totalCost)}
           highlight
         />
       </div>
-
-      {localStorageCost != null && (
-        <div className="mt-3 text-xs text-muted-foreground space-y-0.5">
-          <div>Measured · this install</div>
-          <div>Operations and egress are modeled monthly estimates and may differ from selected-period incurred cost.</div>
-        </div>
-      )}
 
       <div className='mt-5 pt-4 border-t border-border/40'>
         <h4 className='text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3'>Volume Estimates</h4>

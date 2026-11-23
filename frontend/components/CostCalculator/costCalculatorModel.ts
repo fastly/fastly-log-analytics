@@ -109,14 +109,6 @@ export function reducer(state: CalcState, action: CalcAction): CalcState {
       const edgeReq = p.edge_requests_per_day ?? state.edgeReqDay
       const lp = p.log_period_seconds ?? state.logPeriod
 
-      let bpl = state.bytesPerLine
-      if (p.avg_log_file_size_kb != null && req > 0) {
-        const filesPerDay = (86400 / lp) * suggestNodes(req)
-        bpl = (p.avg_log_file_size_kb * 1024 * RAW_LOG_COMPRESSION_RATIO * filesPerDay) / req
-      } else if (p.estimated_bytes_per_line != null) {
-        bpl = p.estimated_bytes_per_line
-      }
-
       const rawZone = p.billing_zone
       const resolvedZone: BillingZone = rawZone && rawZone in BILLING_ZONE_RATES ? (rawZone as BillingZone) : state.billingZone
       const resolvedEgress = p.cdn_egress_rate_per_gb ?? BILLING_ZONE_RATES[resolvedZone] ?? state.rateEgress
@@ -127,7 +119,7 @@ export function reducer(state: CalcState, action: CalcAction): CalcState {
         reqDay: req,
         edgeReqDay: edgeReq,
         logPeriod: lp,
-        bytesPerLine: Math.max(10, Math.round(bpl)),
+        bytesPerLine: DEFAULTS.bytesPerLine,
         rumBeaconsDay: p.rum_beacons_per_day ?? state.rumBeaconsDay,
         ...(p.edge_only != null && { edgeOnly: p.edge_only }),
         ...(p.delete_after != null && { deleteLogs: p.delete_after }),
@@ -140,7 +132,7 @@ export function reducer(state: CalcState, action: CalcAction): CalcState {
         billingZone: resolvedZone,
         ...(p.storage_rate_per_gb_month != null && { rateStorage: p.storage_rate_per_gb_month }),
         ...(p.min_billed_days != null && { minDays: p.min_billed_days }),
-        logNodes: p.avg_nodes_per_flush ?? suggestNodes(req),
+        logNodes: suggestNodes(req),
         userEditedNodes: false,
       }
     }

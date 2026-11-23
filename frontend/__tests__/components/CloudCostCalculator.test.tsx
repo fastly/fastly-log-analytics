@@ -1,23 +1,39 @@
 import { fireEvent, render, screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { CloudCostCalculator } from '@/components/CostCalculator/CloudCostCalculator'
 import { DEFAULT_COMPACTION, DEFAULT_INPUTS, DEFAULT_UNITS, LIST_PRICE_RATES, type UnitCosts } from '@/lib/cloud-engine/usage/estimate'
 
+vi.mock('next/navigation', () => ({
+  useRouter: () => ({ push: vi.fn() }),
+}))
+
 describe('Cloud cost calculator', () => {
-  it('lists each line\'s component costs under its total', () => {
+  it('renders the unified layout matching High-Scale plus Cloud platform rows', () => {
     render(<CloudCostCalculator />)
-    const delivery = screen.getByText('CDN delivery').closest('[data-estimate-line]') as HTMLElement
-    expect(delivery).toHaveTextContent(/Egress\s*\$/)
-    expect(delivery).toHaveTextContent(/Requests\s*\$/)
+    expect(screen.getByText('Your Traffic & Config')).toBeInTheDocument()
+    expect(screen.getByText('Minimum Charge per Object')).toBeInTheDocument()
+    expect(screen.getByText('Pricing (per 1,000 ops)')).toBeInTheDocument()
+    expect(screen.getByText('Delivery Billing Zone')).toBeInTheDocument()
+    expect(screen.getByText('What generates operations')).toBeInTheDocument()
+    expect(screen.getByText('Monthly Estimate Breakdown')).toBeInTheDocument()
+    expect(screen.getByText('Volume Estimates')).toBeInTheDocument()
+
+    expect(screen.getByText('Class A Operations (writes, lists)')).toBeInTheDocument()
+    expect(screen.getByText('Class B Operations (reads)')).toBeInTheDocument()
+    expect(screen.getByText('Storage (GB-months billed)')).toBeInTheDocument()
+    expect(screen.getByText('CDN Egress')).toBeInTheDocument()
+    expect(screen.getByText('CDN Requests')).toBeInTheDocument()
+    expect(screen.getByText('Compute (app + worker)')).toBeInTheDocument()
+    expect(screen.getByText('KV Store')).toBeInTheDocument()
+    expect(screen.getByText('Secret Store')).toBeInTheDocument()
   })
 
-  it('turns measured storage for the selected range into a month at its average size', () => {
-    render(<CloudCostCalculator localStorageGbHours={24} localStoragePeriodHours={24} rates={{ storage_rate_per_gb_month: 2 }} />)
-    expect(screen.getByText('Measured · this install · 1.00 GB-months')).toBeInTheDocument()
-    const storage = screen.getByText('Object Storage').closest('[data-estimate-line]') as HTMLElement
-    expect(storage).toHaveTextContent(/Storage\s*\$2\.00/)
-    expect(storage).toHaveTextContent(/Class A\s*\$/)
-    expect(storage).toHaveTextContent(/Class B\s*\$/)
+  it('keeps storage modelled even when localStorageGbHours is passed', () => {
+    const { rerender } = render(<CloudCostCalculator rates={{ storage_rate_per_gb_month: 2 }} />)
+    const reference = screen.getByText('Total Estimated Monthly Cost').parentElement?.nextElementSibling?.textContent
+    rerender(<CloudCostCalculator localStorageGbHours={24} localStoragePeriodHours={24} rates={{ storage_rate_per_gb_month: 2 }} />)
+    expect(screen.queryByText(/Measured · this install/)).not.toBeInTheDocument()
+    expect(screen.getByText('Total Estimated Monthly Cost').parentElement?.nextElementSibling?.textContent).toBe(reference)
   })
 
   it('falls back for a null rate without replacing an explicit zero rate', () => {
@@ -30,59 +46,45 @@ describe('Cloud cost calculator', () => {
     expect(total?.textContent).not.toBe(reference)
   })
 
-  it('keeps observed zero traffic and zero operation units while applying configured secret rates', () => {
-    const units = Object.fromEntries(Object.keys(DEFAULT_UNITS).map((key) => [key, 0])) as unknown as UnitCosts
+  it('uses live request volume and configured rates while keeping expected canonical unit costs', () => {
+    const noisyUnits = Object.fromEntries(Object.keys(DEFAULT_UNITS).map((key) => [key, 999_999])) as unknown as UnitCosts
     render(<CloudCostCalculator prefillData={{
-      inputs: { ...DEFAULT_INPUTS, requestsPerDay: 0, edgeRequestsPerDay: 0 },
-      units: { ...units, secrets: 3 },
+      inputs: { ...DEFAULT_INPUTS, requestsPerDay: 250_000, edgeRequestsPerDay: 200_000 },
+      units: { ...noisyUnits, deliveryGbPerDay: 500 },
       compaction: { ...DEFAULT_COMPACTION, enabled: false },
       measuredInputs: { requestsPerDay: true, edgeRequestsPerDay: true },
-      measuredUnits: { secrets: true },
+      measuredUnits: { deliveryGbPerDay: true },
       rates: { ...LIST_PRICE_RATES, secret_rate_per_month: 7 },
     }} />)
-    expect(screen.getByRole('spinbutton', { name: 'Total requests per day' })).toHaveValue(0)
-    expect(screen.getByText('0 reqs · 0 vCPU ms')).toBeInTheDocument()
-    expect(screen.getAllByText('$21.00')).toHaveLength(2)
+    expect(screen.getByRole('spinbutton', { name: 'Total requests per day' })).toHaveValue(250_000)
+    expect(screen.getByText(/Pre-filled with this service's live request volume/)).toBeInTheDocument()
+    const egress = screen.getByText('CDN Egress').closest('[data-estimate-line]') as HTMLElement
+    expect(egress).not.toHaveTextContent(/15,0\d\d/)
+    expect(screen.getByText('$7.00')).toBeInTheDocument()
     expect(screen.queryByText(/ClickHouse/)).not.toBeInTheDocument()
   })
 
-  it('labels missing measurements as reference assumptions and recalculates what-if traffic', () => {
+  it('updates egress cost when switching Delivery Billing Zone', () => {
     render(<CloudCostCalculator />)
-    expect(screen.getByText(/Unavailable measurements retain/)).toBeInTheDocument()
-    expect(screen.getByText(/meta\/cloud_dr_state\.json/)).toBeInTheDocument()
-    expect(screen.getAllByText('Reference')).toHaveLength(5)
-    const total = screen.getByText('Total Estimated Monthly Cost').parentElement?.nextElementSibling
-    const initial = total?.textContent
-    fireEvent.change(screen.getByRole('spinbutton', { name: 'Total requests per day' }), { target: { value: '0' } })
-    expect(screen.getByText('What-if')).toBeInTheDocument()
-    expect(total?.textContent).not.toBe(initial)
+    const egress = screen.getByText('CDN Egress').closest('[data-estimate-line]') as HTMLElement
+    const before = egress.textContent
+    fireEvent.click(screen.getByRole('button', { name: 'Global' }))
+    expect(egress.textContent).not.toBe(before)
   })
 
-  it('asks only for what a user knows and derives the rest', () => {
-    render(<CloudCostCalculator />)
-    const inputs = screen.getAllByRole('spinbutton').map((el) => el.getAttribute('aria-label'))
-    expect(inputs).toEqual([
-      'Total requests per day',
-      'Log sample rate (%)',
-      'Log period (seconds)',
-      'Log line size (bytes, uncompressed)',
-      'Log retention (days)',
-    ])
-    expect(screen.getByRole('switch', { name: 'Edge-only logging' })).toBeInTheDocument()
-    expect(screen.queryByRole('switch', { name: 'Delete raw logs after ingest' })).not.toBeInTheDocument()
-  })
-
-  it('lets an edit replace measured storage with the modelled figure', () => {
-    render(<CloudCostCalculator localStorageGbHours={24} localStoragePeriodHours={24} />)
-    expect(screen.getByText(/Measured · this install/)).toBeInTheDocument()
-    fireEvent.change(screen.getByRole('spinbutton', { name: 'Log retention (days)' }), { target: { value: '90' } })
-    expect(screen.queryByText(/Measured · this install/)).not.toBeInTheDocument()
+  it('ignores measured line size and compression overrides in favor of canonical defaults', () => {
+    render(<CloudCostCalculator prefillData={{
+      inputs: { ...DEFAULT_INPUTS, gzBytesPerLine: 100, rawBytesPerGzByte: 12 },
+      measuredInputs: { gzBytesPerLine: true, rawBytesPerGzByte: true },
+    }} />)
+    const field = screen.getByRole('spinbutton', { name: 'Average bytes per log line' })
+    expect(field).toHaveValue(Math.round(DEFAULT_INPUTS.gzBytesPerLine * DEFAULT_INPUTS.rawBytesPerGzByte))
   })
 
   it('scales stored bytes with the uncompressed line size', () => {
     render(<CloudCostCalculator />)
-    const storage = () => screen.getByText('Object Storage').closest('[data-estimate-line]')!.querySelector('li')!.textContent
-    const field = screen.getByRole('spinbutton', { name: 'Log line size (bytes, uncompressed)' }) as HTMLInputElement
+    const storage = () => screen.getByText('Storage (GB-months billed)').closest('[data-estimate-line]')!.textContent
+    const field = screen.getByRole('spinbutton', { name: 'Average bytes per log line' }) as HTMLInputElement
     const before = storage()
     fireEvent.change(field, { target: { value: String(Number(field.value) * 4) } })
     expect(storage()).not.toBe(before)
@@ -96,19 +98,5 @@ describe('Cloud cost calculator', () => {
       target: { value: String(DEFAULT_INPUTS.requestsPerDay * 10) },
     })
     expect(total?.textContent).not.toBe(before)
-  })
-  it('converts the line size with the install\'s measured compression ratio', () => {
-    const { rerender } = render(<CloudCostCalculator prefillData={{
-      inputs: { ...DEFAULT_INPUTS, gzBytesPerLine: 100, rawBytesPerGzByte: 12 },
-      measuredInputs: { gzBytesPerLine: true, rawBytesPerGzByte: true },
-    }} />)
-    const field = () => screen.getByRole('spinbutton', { name: 'Log line size (bytes, uncompressed)' })
-    expect(field()).toHaveValue(1200)
-    expect(field().parentElement).toHaveTextContent('Measured')
-    rerender(<CloudCostCalculator key="unmeasured" prefillData={{
-      inputs: { ...DEFAULT_INPUTS, gzBytesPerLine: 100 },
-      measuredInputs: { gzBytesPerLine: true },
-    }} />)
-    expect(field().parentElement).toHaveTextContent('Reference')
   })
 })

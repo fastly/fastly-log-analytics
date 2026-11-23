@@ -358,7 +358,7 @@ export type EstimateFeature =
   | "compaction";
 
 /** One feature's monthly usage of each Fastly product. vCPU is priced per execution group. */
-interface ProductUsage {
+export interface ProductUsage {
   storageGb: number;
   fosA: number;
   fosB: number;
@@ -420,6 +420,7 @@ export interface Estimate {
   filesPerDay: number;
   lines: EstimateLine[];
   total: number;
+  totals: ProductUsage;
   /** Monthly USD attributable to telemetry and operational logs at rest and in fixed FOS ops. */
   telemetryUsd: number;
   summaries: SummaryDay;
@@ -822,6 +823,7 @@ export function estimateMonthly(
     filesPerDay: F,
     lines,
     total: lines.reduce((sum, line) => sum + line.usd, 0),
+    totals: all,
     featureUsd: byFeature,
     telemetryUsd,
     summaries,
