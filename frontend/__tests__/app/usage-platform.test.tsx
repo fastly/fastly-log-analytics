@@ -11,7 +11,6 @@ vi.mock('next/navigation', () => ({
 }))
 
 type PlatformUsage = components['schemas']['PlatformUsageResponse']
-type StorageUsage = components['schemas']['PlatformStorageUsage']
 
 const platform: PlatformUsage = {
   _is_cached: false,
@@ -167,28 +166,44 @@ describe('observed Platform usage', () => {
     expect(screen.getAllByText('Not configured')).toHaveLength(4)
   })
 
-  it('uses Platform gb-hours for the period storage cost before local inventory', () => {
-    render(<UsageStatCards {...statProps} platformStorage={platform.storage} />)
+  it('keeps local selected-period storage authoritative and labels it Measured · this install', () => {
+    render(<UsageStatCards {...statProps} localStorageGbHours={720} />)
 
-    expect(screen.getByText('48.00 GB-hrs')).toBeInTheDocument()
-    expect(screen.getAllByText('$0.07')).toHaveLength(2)
-    expect(screen.getAllByText('Measured · Fastly Platform (account-wide)').length).toBeGreaterThan(0)
+    expect(screen.getByText('720.00 GB-hrs')).toBeInTheDocument()
+    expect(screen.getAllByText('$1.00')).toHaveLength(2)
+    expect(screen.getAllByText('Measured · this install').length).toBeGreaterThan(0)
+    expect(screen.queryByText('Measured · Fastly Platform (account-wide)')).not.toBeInTheDocument()
   })
 
-  it('preserves local storage costs when Platform storage is unavailable', () => {
-    const unavailable: StorageUsage = {
-      status: 'unavailable',
-      scope: 'account',
-      reason: 'metrics_unavailable',
-    }
-    const { rerender } = render(<UsageStatCards {...statProps} />)
-    const referenceCost = screen.getAllByText('$1.00')[0].textContent
+  it('shows a partial storage warning with provenance when storage billing is incomplete', () => {
+    render(
+      <UsageStatCards
+        {...statProps}
+        localStorageGbHours={720}
+        storageBillingComplete={false}
+        storageBillingProvenance={['cloud:fos_usage']}
+      />,
+    )
 
-    rerender(<UsageStatCards {...statProps} platformStorage={unavailable} />)
+    expect(screen.getByText(/Partial storage cost/)).toBeInTheDocument()
+    expect(screen.getByText(/cloud:fos_usage/)).toBeInTheDocument()
+  })
 
-    expect(screen.getAllByText('$1.00')[0].textContent).toBe(referenceCost)
-    expect(screen.getByText('720.00 GB-hrs')).toBeInTheDocument()
-    expect(screen.queryByText('Measured · Fastly Platform (account-wide)')).not.toBeInTheDocument()
+  it('does not present incomplete local operations as an exact zero', () => {
+    render(
+      <UsageStatCards
+        {...statProps}
+        totalClassA={0}
+        totalClassB={0}
+        totalBwGB={10}
+        operationsSource="local"
+        operationsComplete={false}
+      />,
+    )
+
+    expect(screen.getAllByText('Unavailable').length).toBeGreaterThanOrEqual(2)
+    expect(screen.queryByText('$0.00')).not.toBeInTheDocument()
+    expect(screen.getByText(/Partial estimate.*operations.*excluded/)).toBeInTheDocument()
   })
 
   it('preserves authoritative zero Compute usage instead of falling back to logged values', () => {
@@ -217,30 +232,32 @@ describe('observed Platform usage', () => {
     expect(screen.getByText('Fastly stats · KV logged')).toBeInTheDocument()
   })
 
-  it('replaces estimator storage cost and total with the measured account-wide source', () => {
+  it('replaces estimator storage cost and total with local measured storage', () => {
     const { rerender } = render(<CostCalculator />)
     const reference = screen.getByText('Total Estimated Monthly Cost').parentElement?.nextElementSibling?.textContent
-    rerender(<CostCalculator observedStorageGbHours={720} />)
+    rerender(<CostCalculator localStorageGbHours={720} />)
 
-    expect(screen.getByText(/Fastly Platform \(account-wide\).*1\.000 GB-mo/)).toBeInTheDocument()
-    expect(screen.getByText('Measured · Fastly Platform (account-wide)')).toBeInTheDocument()
+    expect(screen.getByText(/Measured · this install: 1\.000 GB-mo/)).toBeInTheDocument()
+    expect(screen.getByText('Measured · this install')).toBeInTheDocument()
+    expect(screen.queryByText(/Fastly Platform \(account-wide\)/)).not.toBeInTheDocument()
     expect(screen.getByText('Total Estimated Monthly Cost').parentElement?.nextElementSibling?.textContent)
       .not.toBe(reference)
   })
 
-  it('keeps an authoritative zero Platform storage value visible', () => {
-    render(<CostCalculator observedStorageGbHours={0} />)
+  it('keeps an authoritative zero local storage value visible', () => {
+    render(<CostCalculator localStorageGbHours={0} />)
 
-    expect(screen.getByText(/Fastly Platform \(account-wide\).*0\.000 GB-mo/)).toBeInTheDocument()
-    expect(screen.queryByText(/Fastly Platform \(account-wide\).*0\.001 GB-mo/)).not.toBeInTheDocument()
+    expect(screen.getByText(/Measured · this install: 0\.000 GB-mo/)).toBeInTheDocument()
+    expect(screen.queryByText(/Measured · this install: 0\.001 GB-mo/)).not.toBeInTheDocument()
   })
 
-  it('replaces only the Cloud Object Storage line and total', () => {
+  it('replaces only the Cloud Object Storage line and total with local measured storage', () => {
     const { rerender } = render(<CloudCostCalculator />)
     const reference = screen.getByText('Total Estimated Monthly Cost').parentElement?.nextElementSibling?.textContent
-    rerender(<CloudCostCalculator observedStorageGbHours={720} />)
+    rerender(<CloudCostCalculator localStorageGbHours={720} />)
 
-    expect(screen.getByText(/Measured · Fastly Platform \(account-wide\).*1\.00 GB-months/)).toBeInTheDocument()
+    expect(screen.getByText(/Measured · this install · 1\.00 GB-months/)).toBeInTheDocument()
+    expect(screen.queryByText(/Fastly Platform \(account-wide\)/)).not.toBeInTheDocument()
     expect(screen.getByText('Total Estimated Monthly Cost').parentElement?.nextElementSibling?.textContent)
       .not.toBe(reference)
   })

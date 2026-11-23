@@ -241,8 +241,13 @@ export function UsagePageContent({
     enabled: isReady,
     staleTime: 60_000,
   })
-  const observedStorageGbHours =
-    platform?.storage.status === 'ok' ? platform.storage.gb_hours ?? null : null
+  const storageWithMeta = storage as StorageUsageData | undefined
+  const opsWithMeta = ops as (typeof ops & {
+    source?: string
+    complete?: boolean
+    provenance?: string[]
+  }) | undefined
+  const localStorageGbHours = storageWithMeta?.total_billed_gb_hours ?? null
 
   // One Platform Metrics read per range, shared by the cost card and both Compute charts.
   const {
@@ -302,7 +307,7 @@ export function UsagePageContent({
       />
 
       <UsageStatCards
-        storage={storage}
+        storage={storageWithMeta}
         loadingStorage={loadingStorage}
         errorStorage={errorStorage}
         loadingOps={loadingOps}
@@ -322,7 +327,11 @@ export function UsagePageContent({
         activeServiceId={activeServiceId}
         onNavigateToAdmin={(href) => router.push(href)}
         compute={compute}
-        platformStorage={platform?.storage}
+        localStorageGbHours={localStorageGbHours}
+        storageBillingComplete={storageWithMeta?.storage_billing_complete}
+        storageBillingProvenance={storageWithMeta?.storage_billing_provenance}
+        operationsSource={opsWithMeta?.source}
+        operationsComplete={opsWithMeta?.complete}
       />
 
       <UsageChartsGrid
@@ -377,13 +386,13 @@ export function UsagePageContent({
               key={activeServiceId}
               prefillData={cloudPrefill}
               rates={prefillRates}
-              observedStorageGbHours={observedStorageGbHours}
+              localStorageGbHours={localStorageGbHours}
             />
           ) : (
             <CostCalculator
               prefillData={prefill ?? undefined}
               prefillNote={prefillNote}
-              observedStorageGbHours={observedStorageGbHours}
+              localStorageGbHours={localStorageGbHours}
             />
           )}
         </AnalyticsCard>

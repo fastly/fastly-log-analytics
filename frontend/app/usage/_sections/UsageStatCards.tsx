@@ -24,12 +24,18 @@ import {
   formatUSD,
 } from '@/lib/utils'
 import type { ComputeUsageResponse } from '@/lib/cloud-engine/usage/computeSeries'
-import type { components, operations } from '@/types/api.generated'
+import type { operations } from '@/types/api.generated'
 
 const formatVcpu = (ms: number) => (ms < 1000 ? `${Math.round(ms)}ms` : formatDuration(ms / 1000))
 
 export type StorageUsageData =
-  operations['usage_current_storage_api_usage_current_storage_get']['responses'][200]['content']['application/json']
+  operations['usage_current_storage_api_usage_current_storage_get']['responses'][200]['content']['application/json'] & {
+    storage_billing_complete?: boolean
+    storage_billing_provenance?: string[]
+    live_billed_gb_hours?: number
+    deleted_billed_gb_hours?: number
+    minimum_billed_gb_hours?: number
+  }
 
 export type BreakdownRow = {
   id: string
@@ -90,7 +96,11 @@ export function UsageStatCards({
   activeServiceId,
   onNavigateToAdmin,
   compute,
-  platformStorage,
+  localStorageGbHours,
+  storageBillingComplete,
+  storageBillingProvenance,
+  operationsSource,
+  operationsComplete,
 }: {
   storage: StorageUsageData | undefined
   loadingStorage: boolean
@@ -113,22 +123,28 @@ export function UsageStatCards({
   onNavigateToAdmin: (href: string) => void
   /** Cloud only: Fastly Platform Metrics Compute for the range; logs are the fallback. */
   compute?: ComputeUsageResponse
-  platformStorage?: components['schemas']['PlatformStorageUsage']
+  localStorageGbHours?: number | null
+  storageBillingComplete?: boolean
+  storageBillingProvenance?: string[]
+  operationsSource?: string
+  operationsComplete?: boolean
 }) {
-  const observedStorageGbHours =
-    platformStorage?.status === 'ok' ? platformStorage.gb_hours ?? null : null
   const deletedBytesComplete = storage?.deleted_bytes_complete
   const deletedBytesProvenance = storage?.deleted_bytes_provenance
-  const billedGbHours = observedStorageGbHours ?? storage?.total_billed_gb_hours ?? 0
-  const loadingLocalStorage = loadingStorage && observedStorageGbHours == null
-  const roughCostA = errorOps ? 0 : (totalClassA / 1000) * rateA
-  const roughCostB = errorOps ? 0 : (totalClassB / 1000) * rateB
-  const roughStorage = (billedGbHours / 720) * rateStorage
+  const resolvedLocalGbHours = localStorageGbHours ?? storage?.total_billed_gb_hours ?? null
+  const billedGbHours = resolvedLocalGbHours ?? 0
+  const storageIncomplete = (storageBillingComplete ?? storage?.storage_billing_complete) === false
+  const storageProvenance = storageBillingProvenance ?? storage?.storage_billing_provenance
+  const opsIncomplete = operationsComplete === false
+  const opsUnavailable = Boolean(errorOps) || opsIncomplete
+  const roughCostA = opsUnavailable ? 0 : (totalClassA / 1000) * rateA
+  const roughCostB = opsUnavailable ? 0 : (totalClassB / 1000) * rateB
+  const roughStorage = errorStorage ? 0 : (billedGbHours / 720) * rateStorage
   const roughBandwidth = errorBw ? 0 : totalBwGB * rateEgress
   const roughTotal = roughCostA + roughCostB + roughStorage + roughBandwidth
   const excludedCosts = [
-    errorStorage && observedStorageGbHours == null ? 'storage' : null,
-    errorOps ? 'operations' : null,
+    errorStorage ? 'storage' : null,
+    opsUnavailable ? 'operations' : null,
     errorBw ? 'CDN egress' : null,
   ].filter((cost): cost is string => Boolean(cost))
   const hasPartialCost = excludedCosts.length > 0
@@ -279,15 +295,16 @@ export function UsageStatCards({
         label: <span>Storage:</span>,
         value: (
           <div className="flex flex-col items-end">
-            {errorStorage && observedStorageGbHours == null ? (
+            {errorStorage ? (
               <strong className="text-destructive">n/a</strong>
             ) : (
               <strong className="text-foreground">{fmtUSD(roughStorage)}</strong>
             )}
             <span className="text-[9px] uppercase tracking-tighter text-muted-foreground">
-              {observedStorageGbHours != null
-                ? 'Measured · Fastly Platform (account-wide)'
-                : `Rate: $${rateStorage}/GB`}
+              Measured · this install
+            </span>
+            <span className="text-[9px] uppercase tracking-tighter text-muted-foreground">
+              Rate: ${rateStorage}/GB
             </span>
           </div>
         ),
@@ -299,6 +316,8 @@ export function UsageStatCards({
           <div className="flex flex-col items-end">
             {errorOps ? (
               <strong className="text-destructive">n/a</strong>
+            ) : opsIncomplete ? (
+              <strong className="text-muted-foreground">Unavailable</strong>
             ) : (
               <strong className="text-foreground">{fmtUSD(roughCostA + roughCostB)}</strong>
             )}
@@ -353,12 +372,12 @@ export function UsageStatCards({
     ],
     [
       errorStorage,
-      observedStorageGbHours,
       roughStorage,
       rateStorage,
       roughCostA,
       roughCostB,
       errorOps,
+      opsIncomplete,
       rateA,
       rateBPer10k,
       roughBandwidth,
@@ -379,7 +398,7 @@ export function UsageStatCards({
       <StatCard
         title="Storage Impact (Period)"
         value={
-          errorStorage && observedStorageGbHours == null ? (
+          errorStorage ? (
             <span className="text-muted-foreground">—</span>
           ) : (
             <span className="text-green-600">
@@ -389,27 +408,32 @@ export function UsageStatCards({
         }
         sub={
           <div className="min-h-[96px]">
-            {errorStorage && observedStorageGbHours == null ? (
+            {errorStorage ? (
               <span role="alert" className="text-[11px] text-destructive">
                 Failed to load storage usage.
               </span>
-            ) : loadingLocalStorage ? (
+            ) : loadingStorage ? (
               <div className="flex flex-col gap-1.5 mt-2">
                 <Skeleton className="h-3 w-full" />
                 <Skeleton className="h-3 w-full" />
               </div>
             ) : (
-              <BreakdownTable rows={storageBreakdownRows} />
+              <div>
+                <BreakdownTable rows={storageBreakdownRows} />
+                <div className="mt-1 text-[9px] uppercase tracking-tighter text-muted-foreground">
+                  Measured · this install
+                </div>
+              </div>
             )}
           </div>
         }
         icon={HardDrive}
-        loading={loadingLocalStorage}
-        tooltip="Estimated minimum billed storage hours for objects created in this period."
+        loading={loadingStorage}
+        tooltip="Selected-period billed storage hours for live and deleted-but-still-billed objects owned by this install."
       />
       <StatCard
         title="Class A Ops (period)"
-        value={errorOps ? 'Unavailable' : formatAbbreviatedCount(totalClassA)}
+        value={opsUnavailable ? 'Unavailable' : formatAbbreviatedCount(totalClassA)}
         sub={
           <div className="min-h-[96px] space-y-1">
             <div>Writes, lists, deletes</div>
@@ -430,11 +454,15 @@ export function UsageStatCards({
         }
         icon={Zap}
         loading={loadingOps}
-        tooltip="Writes (log uploads) and lists (checking for new logs). Note: This is an account-wide total."
+        tooltip={
+          operationsSource === 'fastly'
+            ? 'Writes (log uploads) and lists (checking for new logs). Fallback: Fastly account-wide total.'
+            : 'Writes (log uploads) and lists (checking for new logs) recorded locally for this install.'
+        }
       />
       <StatCard
         title="Class B Ops (period)"
-        value={errorOps ? 'Unavailable' : formatAbbreviatedCount(totalClassB)}
+        value={opsUnavailable ? 'Unavailable' : formatAbbreviatedCount(totalClassB)}
         sub={
           <div className="min-h-[96px] space-y-1">
             <div>Reads / downloads</div>
@@ -455,14 +483,18 @@ export function UsageStatCards({
         }
         icon={Database}
         loading={loadingOps}
-        tooltip="Reads (downloading logs for processing). Note: This is an account-wide total."
+        tooltip={
+          operationsSource === 'fastly'
+            ? 'Reads (downloading logs for processing). Fallback: Fastly account-wide total.'
+            : 'Reads (downloading logs for processing) recorded locally for this install.'
+        }
       />
       <StatCard
         title="Estimated Incurred Cost"
         value={fmtUSD(roughTotal)}
         sub={
           <div className="min-h-[96px]">
-            {loadingOps || loadingLocalStorage || loadingBw ? (
+            {loadingOps || loadingStorage || loadingBw ? (
               <div className="flex flex-col gap-1.5 mt-2">
                 <Skeleton className="h-3 w-full" />
                 <Skeleton className="h-3 w-full" />
@@ -476,13 +508,21 @@ export function UsageStatCards({
                     Partial estimate — {excludedCosts.join(excludedCosts.length > 2 ? ', ' : ' and ')} cost excluded.
                   </div>
                 )}
+                {storageIncomplete && (
+                  <div role="alert" className="text-[10px] text-amber-700 dark:text-amber-500 mt-0.5">
+                    Partial storage cost — incomplete lifecycle data
+                    {storageProvenance && storageProvenance.length > 0
+                      ? ` (${storageProvenance.join(', ')})`
+                      : ''}.
+                  </div>
+                )}
               </div>
             )}
           </div>
         }
         icon={DollarSign}
-        loading={loadingOps || loadingLocalStorage || loadingBw}
-        tooltip="Total estimated cost incurred for the selected period (Storage, Ops, Egress). Note: Operations are account-wide totals."
+        loading={loadingOps || loadingStorage || loadingBw}
+        tooltip="Total estimated cost incurred for the selected period (service-local Storage, Ops, and Egress)."
       />
     </div>
   )
