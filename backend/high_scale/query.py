@@ -2413,7 +2413,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
             if before[-1] in ")]\"'`":
                 return False
             if before[-1].isalnum() or before[-1] == "_":
-                m_w = re.search(r"([A-Za-z_][A-Za-z0-9_]*)$", before)
+                m_w = re.search(rf"({SAFE_IDENT_RE.pattern})$", before)
                 return bool(m_w and m_w.group(1).upper() in _unary_kw)
             return True
 

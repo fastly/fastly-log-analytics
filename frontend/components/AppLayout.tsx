@@ -50,7 +50,7 @@ function FilterBarPlaceholder({ compact = false }: { compact?: boolean }) {
       aria-hidden="true"
       className={cn(
         'border-b bg-background shrink-0',
-        compact ? 'min-h-[49px]' : 'min-h-[89px]',
+        compact ? 'min-h-[89px] min-[1400px]:min-h-[49px]' : 'min-h-[89px]',
       )}
     />
   )

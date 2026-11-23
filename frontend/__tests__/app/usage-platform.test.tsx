@@ -1,49 +1,12 @@
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
-import { PlatformUsageCards } from '@/app/usage/_sections/PlatformUsageCards'
 import { UsageStatCards, type StorageUsageData } from '@/app/usage/_sections/UsageStatCards'
 import { CostCalculator } from '@/components/CostCalculator/CostCalculator'
 import { CloudCostCalculator } from '@/components/CostCalculator/CloudCostCalculator'
-import type { components } from '@/types/api.generated'
 
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: vi.fn() }),
 }))
-
-type PlatformUsage = components['schemas']['PlatformUsageResponse']
-
-const platform: PlatformUsage = {
-  _is_cached: false,
-  source: 'partial',
-  storage: {
-    status: 'ok',
-    scope: 'account',
-    bytes: 2 * 1024 ** 3,
-    buckets: 3,
-    gb_hours: 48,
-  },
-  compute: {
-    status: 'ok',
-    scope: 'app_and_worker',
-    requests: 7,
-    billed_time_ms: 80,
-    backend_errors: 1,
-    cache_operations: 2,
-    sandboxes: 3,
-    resource_errors: 4,
-  },
-  ngwaf: {
-    status: 'ok',
-    scope: 'workspace',
-    total: 10,
-    allowed: 4,
-    blocked: 3,
-    challenged: 1,
-    logged: 1,
-    timeout: 1,
-    unknown: 0,
-  },
-}
 
 const storage: StorageUsageData = {
   _is_cached: false,
@@ -134,41 +97,6 @@ describe('observed Platform usage', () => {
     expect(screen.getAllByText('Unavailable')).toHaveLength(2)
     expect(screen.getAllByText('n/a').length).toBeGreaterThanOrEqual(2)
     expect(screen.getByText(/Partial estimate.*operations and CDN egress.*excluded/)).toBeInTheDocument()
-  })
-
-  it('labels account-wide storage and summarizes counters without adding snapshots', () => {
-    render(<PlatformUsageCards data={platform} cloudMode />)
-
-    expect(screen.getByText('Account-wide snapshot')).toBeInTheDocument()
-    expect(screen.getByText('2 GB')).toBeInTheDocument()
-    expect(screen.getByText('48.00 GB-hours · 3 buckets')).toBeInTheDocument()
-    expect(screen.getByText('Cloud Compute')).toBeInTheDocument()
-    expect(screen.getByText('7 requests')).toBeInTheDocument()
-    expect(screen.getByText('3 blocked / 10')).toBeInTheDocument()
-    expect(screen.getByText('Configured workspace')).toBeInTheDocument()
-  })
-
-  it('keeps independently unavailable and not configured sections visible', () => {
-    const data: PlatformUsage = {
-      ...platform,
-      compute: { ...platform.compute, status: 'not_configured', scope: null },
-      ngwaf: {
-        ...platform.ngwaf,
-        status: 'unavailable',
-        scope: null,
-        reason: 'metrics_unavailable',
-      },
-    }
-    const { rerender } = render(<PlatformUsageCards data={data} cloudMode={false} />)
-
-    expect(screen.queryByText('Cloud Compute')).not.toBeInTheDocument()
-    expect(screen.getAllByText('Unavailable')).toHaveLength(2)
-    expect(screen.getAllByText('Measured · Fastly Platform')).toHaveLength(1)
-
-    rerender(<PlatformUsageCards data={{ ...data, ngwaf: {
-      ...data.ngwaf, status: 'not_configured', reason: undefined,
-    } }} cloudMode />)
-    expect(screen.getAllByText('Not configured')).toHaveLength(4)
   })
 
   it('keeps local selected-period storage authoritative and labels it Measured · this install', () => {

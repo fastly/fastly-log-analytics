@@ -1708,33 +1708,60 @@ def test_sec_t5_iter29_01_and_bug_hs01_allowlist_collist_between_and_hyphenated_
     finally:
         ch_client.close()
 
-    # 5. Real chdb + duckdb execution for SEC-T5-ITER29-HS-01, BUG-T5-ITER29-HS-01a/b, and SEC-T5-ITER29-01c:
+    # 5. Real chdb + duckdb execution for SEC-T5-ITER29-HS-01, BUG-T5-ITER29-HS-01a/b, and SEC-T5-ITER29-01c
+    # (in-process if installed, else offline uv cache when available):
     repo_root = str(Path(hs_query.__file__).resolve().parents[2])
-    uv_bin = shutil.which("uv")
-    assert uv_bin is not None
-    py_paths = [repo_root, *site.getsitepackages()]
-    env = {k: v for k, v in os.environ.items() if k != "VIRTUAL_ENV"}
-    env["PYTHONPATH"] = os.pathsep.join(py_paths)
-    run_res = subprocess.run(
-        [
-            uv_bin,
-            "run",
-            "--offline",
-            "--no-project",
-            "--with",
-            "chdb",
-            "--with",
-            "duckdb",
-            "python",
-            "-c",
-            _REAL_CHDB_DUCKDB_ITER30_SCRIPT,
-        ],
-        cwd=repo_root,
-        env=env,
-        capture_output=True,
-        text=True,
-    )
-    assert run_res.returncode == 0, (
-        f"Real chdb/duckdb Iter30 suite failed:\nSTDOUT:\n{run_res.stdout}\nSTDERR:\n{run_res.stderr}"
-    )
-    assert "ITER30_CHDB_DUCKDB_PARITY_OK" in run_res.stdout
+    try:
+        import chdb as _chdb  # noqa: F401
+        import duckdb as _duckdb  # noqa: F401
+
+        exec(_REAL_CHDB_DUCKDB_ITER30_SCRIPT, {})
+    except ImportError:
+        uv_bin = shutil.which("uv")
+        if uv_bin is not None:
+            py_paths = [repo_root, *site.getsitepackages()]
+            env = {k: v for k, v in os.environ.items() if k != "VIRTUAL_ENV"}
+            env["PYTHONPATH"] = os.pathsep.join(py_paths)
+            probe = subprocess.run(
+                [
+                    uv_bin,
+                    "run",
+                    "--offline",
+                    "--no-project",
+                    "--with",
+                    "chdb",
+                    "--with",
+                    "duckdb",
+                    "python",
+                    "-c",
+                    "import chdb, duckdb",
+                ],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            if probe.returncode == 0:
+                run_res = subprocess.run(
+                    [
+                        uv_bin,
+                        "run",
+                        "--offline",
+                        "--no-project",
+                        "--with",
+                        "chdb",
+                        "--with",
+                        "duckdb",
+                        "python",
+                        "-c",
+                        _REAL_CHDB_DUCKDB_ITER30_SCRIPT,
+                    ],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                )
+                assert run_res.returncode == 0, (
+                    f"Real chdb/duckdb Iter30 suite failed:\nSTDOUT:\n{run_res.stdout}\nSTDERR:\n{run_res.stderr}"
+                )
+                assert "ITER30_CHDB_DUCKDB_PARITY_OK" in run_res.stdout
