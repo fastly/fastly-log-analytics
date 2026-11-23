@@ -241,9 +241,9 @@ export function NetworkLeaderboardsSection({
   const asnCols = React.useMemo(() => asnColumns(rollup), [rollup])
   const metroCols = React.useMemo(() => metroColumns(rollup), [rollup])
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 [contain-intrinsic-size:420px]">
       <AnalyticsCard
-        title="ASN Performance Leaderboard" className="flex flex-col min-h-[420px]"
+        title="ASN Performance Leaderboard" className="flex flex-col min-h-[420px] [contain-intrinsic-size:420px]"
         contentClassName="p-0 flex-1" helpTitle="ASN Performance Leaderboard" helpContent={<AsnLeaderboardHelp />}
         isFetching={isFetching} error={error as AnalyticsCardError | null} loadingMessage="Compiling ASN leaderboard..."
       >
@@ -258,7 +258,7 @@ export function NetworkLeaderboardsSection({
 
       {data?.has_metro && (
         <AnalyticsCard
-          title="Metro / Region Leaderboard" className="flex flex-col min-h-[420px]"
+          title="Metro / Region Leaderboard" className="flex flex-col min-h-[420px] [contain-intrinsic-size:420px]"
           contentClassName="p-0 flex-1" helpTitle="Metro / Region Leaderboard" helpContent={<MetroLeaderboardHelp />}
           isFetching={isFetching} error={error as AnalyticsCardError | null} loadingMessage="Compiling Metro leaderboard..."
         >
@@ -313,7 +313,7 @@ export function NetworkQualitySection({
   ]
 
   return (
-    <div className="space-y-4 min-h-[400px]">
+    <div className="space-y-4 min-h-[400px] [contain-intrinsic-size:400px]">
       <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">Network Quality</h2>
       {isQualityLoadingInitial ? (
         <SkeletonGrid count={4} height="180px" className="rounded-xl" />

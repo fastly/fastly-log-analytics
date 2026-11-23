@@ -60,11 +60,9 @@ fn col_has_cmcd_value(col: &ArrayRef) -> bool {
 pub fn batches_have_cmcd(batches: &[&RecordBatch]) -> bool {
     const MARKERS: [&str; 4] = ["cmcd_sid", "cmcd_br", "cmcd_bl", "cmcd_ot"];
     batches.iter().any(|batch| {
-        MARKERS.iter().any(|name| {
-            batch
-                .column_by_name(name)
-                .is_some_and(col_has_cmcd_value)
-        })
+        MARKERS
+            .iter()
+            .any(|name| batch.column_by_name(name).is_some_and(col_has_cmcd_value))
     })
 }
 

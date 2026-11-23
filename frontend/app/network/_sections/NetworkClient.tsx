@@ -262,7 +262,7 @@ function NetworkBody({ startTime, endTime, activeServiceId, filterPayload }: Rep
 
       <TransportSection activeServiceId={activeServiceId} startTime={startTime} endTime={endTime} filterPayload={filterPayload} />
 
-      <div className="my-6 min-h-[280px]">
+      <div className="my-6 min-h-[280px] [contain-intrinsic-size:280px]">
         {activeServiceId && <PopHealthHeatmap serviceId={activeServiceId} startTime={startTime} endTime={endTime} />}
       </div>
 
@@ -270,6 +270,7 @@ function NetworkBody({ startTime, endTime, activeServiceId, filterPayload }: Rep
         <AnalyticsCard
           title="ASN Health Score over Time" helpTitle="ASN Health Score over Time" helpContent={<HeatmapHelp />}
           isFetching={coreQuery.isFetching} error={coreQuery.error as AnalyticsCardError | null}
+          className="[contain-intrinsic-size:380px]"
         >
           <PlotlyChart
             data={heatmapTrace}
