@@ -15,7 +15,7 @@ import { parquetWriteBuffer } from "hyparquet-writer";
 import { cloudRumAnalytics, cloudRumLiveEvents, cloudRumUsage } from "./rum-wire";
 import { executePerformanceAggregates } from "./performance";
 import { handleCloudAnalyticalRequest } from "./adapter";
-import { handleInsightAvailability } from "./insights";
+import { handleInsightAvailability, INSIGHT_DEFINITIONS } from "./insights";
 import * as sqlBuilder from "../sqlBuilder";
 import { insightsBaselineFromRollup } from "./insights-rollup";
 import { mergeRollups } from "./dashboard/rollup-query";
@@ -549,6 +549,30 @@ describe("Cloud first-page analytical range loading", () => {
     }
     expect(source.fetchRange).toHaveBeenCalledTimes(entries.length);
     expect([...await getDuckDBEngine().getPresentColumns()]).toEqual([]);
+  });
+
+  it("stops reading Insights availability footers once the newest file has every required field", async () => {
+    const required = [...new Set(INSIGHT_DEFINITIONS.flatMap((d) => d.required_fields))];
+    const full = parquetWriteBuffer({ columnData: [
+      { name: "timestamp", type: "TIMESTAMP", data: [new Date("2026-11-05T14:00:01Z")] },
+      ...required.filter((name) => name !== "timestamp").map((name) => ({ name, type: "STRING" as const, data: ["x"] })),
+    ] });
+    const older = Array.from({ length: 4 }, (_, i) => {
+      const bytes = wideFile(i);
+      return { ...file, key: `processed/request/old${i}.parquet`, start: `2026-11-05T1${i}:00:00Z`,
+        end: `2026-11-05T1${i}:30:00Z`, size: bytes.byteLength, bytes };
+    });
+    const newest = { ...file, key: "processed/request/newest.parquet", start: "2026-11-05T14:00:00Z",
+      end: "2026-11-05T14:30:00Z", size: full.byteLength, bytes: full };
+    await analyticalFiles([...older, newest]);
+    const response = await handleCloudAnalyticalRequest(new Request("http://localhost/api/insight-availability", {
+      headers: { "x-service-id": "fixture-service" },
+    }));
+    expect(response?.status).toBe(200);
+    const expected = handleInsightAvailability("fixture-service", ["timestamp", "ts_ms", "ua", "referer", ...required]);
+    expect(await response!.json()).toEqual(JSON.parse(JSON.stringify(expected)));
+    const read = (source.fetchRange.mock.calls as [ManifestFile][]).map(([entry]) => entry.key);
+    expect(read).toEqual([newest.key]);
   });
 
   it("keeps a Performance half-open window invariant under valid Parquet regrouping", async () => {

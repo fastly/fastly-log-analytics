@@ -20,6 +20,7 @@ import { dashboardCacheIdentity, parseVcpuMsHeader } from "./dashboard/sources";
 import { customCards, type CardField, type CustomField } from "./dashboard/summaries";
 import {
   handleInsightAvailability,
+  INSIGHT_REQUIRED_FIELDS,
   type CacheCollapseDetailRequest,
   type InsightsRequest,
 } from "./insights";
@@ -966,6 +967,7 @@ async function cloudInsightAvailability(request: Request, entryMetaEpoch: number
   const columns = await cloudRangePresentColumns(start, end, request.signal, {
     serviceId: serviceId ? decodeUriStrict(String(serviceId)) : undefined,
     isCurrent: () => assertAdapterEpoch(request, entryMetaEpoch),
+    wanted: INSIGHT_REQUIRED_FIELDS,
   });
   assertAdapterEpoch(request, entryMetaEpoch);
   return jsonResponse(handleInsightAvailability(serviceId ? String(serviceId) : undefined, columns), request);

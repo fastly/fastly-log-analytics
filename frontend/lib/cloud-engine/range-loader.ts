@@ -119,12 +119,16 @@ async function readPersistedFooter(
  * reports, without downloading column data or touching DuckDB. Insights
  * availability needs only this, and under steady ingest a 24 h projection of
  * even two columns covers most of every compacted file.
+ *
+ * With `wanted`, the newest file's footer is read first and the rest only if
+ * some wanted column is still missing; the result is then exact for
+ * membership of `wanted` columns, not a full column list.
  */
 export async function cloudRangePresentColumns(
   from: string,
   to: string,
   signal: AbortSignal,
-  options: { serviceId?: string; isCurrent?: () => void } = {},
+  options: { serviceId?: string; isCurrent?: () => void; wanted?: ReadonlySet<string> } = {},
 ): Promise<Set<string>> {
   const check = () => {
     options.isCurrent?.();
@@ -153,10 +157,15 @@ export async function cloudRangePresentColumns(
     loading.update({ stage: "files", progress: { ...progress } });
     try {
       const columns = new Set<string>();
+      const wanted = options.wanted;
+      const files = wanted
+        ? [...manifest.files].sort((a, b) => Date.parse(b.end) - Date.parse(a.end) || Date.parse(b.start) - Date.parse(a.start))
+        : manifest.files;
+      const satisfied = () => wanted !== undefined && [...wanted].every((field) => columns.has(field));
       let next = 0;
-      const worker = async () => {
-        while (next < manifest.files.length) {
-          const file = manifest.files[next++];
+      const worker = async (limit = files.length) => {
+        while (next < Math.min(limit, files.length) && !satisfied()) {
+          const file = files[next++];
           const footerKey = JSON.stringify([...fileIdentity(scope, options.serviceId, "request", file), "footer"]);
           const footer = await readPersistedFooter(fileSource, { key: file.key, size: file.size, footerKey },
             (start, end) => fetchLanes.run("raw", () => {
@@ -174,7 +183,9 @@ export async function cloudRangePresentColumns(
           loading.update({ progress: { ...progress } });
         }
       };
-      await Promise.all(Array.from({ length: Math.min(RANGE_CONCURRENCY, manifest.files.length) }, worker));
+      // Schemas only grow, so the newest footer usually settles every wanted column alone.
+      if (wanted) await worker(1);
+      await Promise.all(Array.from({ length: Math.min(RANGE_CONCURRENCY, files.length - next) }, () => worker()));
       check();
       if (manifest.files.length > 0) {
         columns.add("timestamp");
