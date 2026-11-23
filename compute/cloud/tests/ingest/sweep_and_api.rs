@@ -819,6 +819,135 @@ fn storage_reconcile_sums_bytes_and_objects_per_dataset_across_resumed_steps() {
 }
 
 #[test]
+fn storage_reconcile_writes_complete_per_object_inventory_snapshot() {
+    let fake = Fake::new(BASE);
+    put_processed(&fake, "processed/request/", BASE, "1-2-a-n1");
+    fake.bucket.borrow_mut().insert(
+        "raw/request/year=2027/month=01/day=15/hour=08/minute=00/a.zst".into(),
+        vec![0; 5],
+    );
+    fake.bucket
+        .borrow_mut()
+        .insert("unrelated/other/bucket-object.bin".into(), vec![0; 99]);
+    fake.new_request();
+    assert!(ingest::retention::request_storage_reconcile(&fake, "admin").unwrap());
+    let mut rows = Vec::new();
+    loop {
+        fake.new_request();
+        let report = ingest::retention::storage_reconcile_step(&store(&fake, &service()), 0)
+            .unwrap()
+            .unwrap();
+        rows.extend(report.inventory_rows);
+        if report.snapshot.is_some() {
+            break;
+        }
+    }
+    let snapshot_id = rows
+        .first()
+        .and_then(|row| row["snapshot_id"].as_str())
+        .expect("snapshot_id present");
+    assert!(!snapshot_id.is_empty());
+    assert!(rows.iter().all(|row| row["snapshot_id"] == snapshot_id));
+    assert!(rows.iter().any(|row| row["dataset"] == "pq_request"
+        && row["size"] == 10
+        && row["complete"] == false));
+    assert!(rows.iter().any(|row| {
+        row["dataset"] == "raw_request"
+            && row["key"]
+                .as_str()
+                .is_some_and(|k| k.starts_with("raw/request/"))
+            && row["size"] == 5
+            && row["last_modified"]
+                .as_str()
+                .is_some_and(|ts| ts.contains('T') && ts.ends_with('Z'))
+            && row["complete"] == false
+    }));
+    assert!(rows.iter().all(|row| {
+        row["key"]
+            .as_str()
+            .is_none_or(|k| !k.starts_with("unrelated/"))
+    }));
+    assert_eq!(rows.iter().filter(|row| row["complete"] == true).count(), 1);
+}
+
+#[test]
+fn storage_reconcile_publishes_inventory_manifest_once_after_all_prefixes() {
+    let fake = Fake::new(BASE);
+    put_processed(&fake, "processed/request/", BASE, "1-2-a-n1");
+    fake.new_request();
+    assert!(ingest::retention::request_storage_reconcile(&fake, "admin").unwrap());
+    let mut terminal = Vec::new();
+    for _ in 0..8 {
+        fake.new_request();
+        fake.calls.set(BUDGET - 4);
+        let report = ingest::retention::storage_reconcile_step(&store(&fake, &service()), 0)
+            .unwrap()
+            .unwrap();
+        terminal.extend(
+            report
+                .inventory_rows
+                .into_iter()
+                .filter(|row| row["complete"] == true),
+        );
+        if report.snapshot.is_some() {
+            break;
+        }
+    }
+    assert_eq!(terminal.len(), 1);
+}
+
+#[test]
+fn storage_reconcile_paginates_over_1000_objects_into_inventory_snapshot() {
+    let fake = Fake::new(BASE);
+    for i in 0..1050 {
+        fake.bucket.borrow_mut().insert(
+            format!("raw/request/year=2027/month=01/day=15/hour=08/minute=00/obj-{i:04}.zst"),
+            vec![0; 7],
+        );
+    }
+    put_processed(&fake, "processed/request/", BASE, "1-2-a-n1");
+    fake.new_request();
+    assert!(ingest::retention::request_storage_reconcile(&fake, "admin").unwrap());
+    let mut rows = Vec::new();
+    for _ in 0..16 {
+        fake.new_request();
+        fake.calls.set(BUDGET - 4);
+        let report = ingest::retention::storage_reconcile_step(&store(&fake, &service()), 0)
+            .unwrap()
+            .unwrap();
+        rows.extend(report.inventory_rows);
+        if report.snapshot.is_some() {
+            break;
+        }
+    }
+    let raw_rows: Vec<_> = rows
+        .iter()
+        .filter(|row| row["dataset"] == "raw_request" && row["complete"] == false)
+        .collect();
+    let pq_rows: Vec<_> = rows
+        .iter()
+        .filter(|row| row["dataset"] == "pq_request" && row["complete"] == false)
+        .collect();
+    assert_eq!(raw_rows.len(), 1050);
+    assert_eq!(pq_rows.len(), 1);
+    let unique_keys: std::collections::BTreeSet<&str> = raw_rows
+        .iter()
+        .chain(pq_rows.iter())
+        .map(|row| row["key"].as_str().unwrap())
+        .collect();
+    assert_eq!(unique_keys.len(), 1051);
+    let snapshot_id = rows[0]["snapshot_id"].as_str().unwrap();
+    assert!(rows.iter().all(|row| row["snapshot_id"] == snapshot_id));
+    assert!(raw_rows.iter().all(|row| {
+        row["size"] == 7
+            && row["last_modified"]
+                .as_str()
+                .is_some_and(|ts| ts.contains('T') && ts.ends_with('Z'))
+    }));
+    assert_eq!(rows.iter().filter(|row| row["complete"] == true).count(), 1);
+}
+
+#[test]
 fn operational_settings_patch_merges_validates_persists_and_reports_changes() {
     let fake = Fake::new(BASE);
     let (saved, changed) = patch_settings(
@@ -1574,6 +1703,12 @@ fn sweep_and_reconcile_endpoints_run_on_demand_and_are_audited() {
         serde_json::from_str(reconcile[0]["details_json"].as_str().unwrap()).unwrap();
     assert_eq!(details["datasets"]["pq_request"]["objects"], 0, "{details}");
     assert!(fake.kv.borrow().get("storage:reconcile").is_none());
+    let inv = rows(&fake, LogKind::StorageInventory);
+    assert_eq!(
+        inv.iter().filter(|r| r["complete"] == true).count(),
+        1,
+        "reconcile_stage must write terminal storage_inventory row: {inv:?}"
+    );
 }
 
 #[test]

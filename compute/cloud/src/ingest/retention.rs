@@ -950,11 +950,14 @@ const RECONCILE_LIST: &[(&str, &str)] = &[
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct ReconcileReport {
     pub snapshot: Option<Value>,
+    pub inventory_rows: Vec<Value>,
     pub backend_calls: u32,
 }
 
 #[derive(Serialize, Deserialize, Default)]
 struct ReconcileState {
+    #[serde(default)]
+    snapshot_id: String,
     requested_at: u64,
     actor: String,
     index: usize,
@@ -963,13 +966,22 @@ struct ReconcileState {
     by_kind: std::collections::BTreeMap<String, (u64, u64)>,
 }
 
+fn new_snapshot_id(runtime: &impl Runtime, requested_at: u64) -> String {
+    match runtime.random() {
+        Ok(bytes) => format!("snap-{requested_at}-{}", hex::encode(&bytes[..8])),
+        Err(_) => format!("snap-{requested_at}"),
+    }
+}
+
 /// Starts a storage reconcile unless one is already running. Returns whether it started.
 pub fn request_storage_reconcile(runtime: &impl Runtime, actor: &str) -> Result<bool, String> {
     if runtime.admin_get(RECONCILE_KEY)?.is_some() {
         return Ok(false);
     }
+    let requested_at = runtime.now();
     let state = ReconcileState {
-        requested_at: runtime.now(),
+        snapshot_id: new_snapshot_id(runtime, requested_at),
+        requested_at,
         actor: actor.into(),
         totals: vec![(0, 0); RECONCILE_LIST.len()],
         ..Default::default()
@@ -992,24 +1004,36 @@ pub fn storage_reconcile_step<R: Runtime>(
     };
     let mut state: ReconcileState =
         serde_json::from_value(record.value).map_err(|_| "reconcile_state_invalid".to_string())?;
+    if state.snapshot_id.is_empty() {
+        state.snapshot_id = format!("snap-{}", state.requested_at);
+    }
     state.totals.resize(RECONCILE_LIST.len(), (0, 0));
     let scope = scope(store.service);
     let room = |need: u32| store.within_wall() && runtime.admin_remaining_calls() >= reserve + need;
     let mut listed = false;
+    let mut inventory_rows = Vec::new();
     // One LIST per page, and one call kept for the single cursor write below.
     while state.index < RECONCILE_LIST.len() {
         if !room(2) {
             break;
         }
         listed = true;
-        let (_, folder) = RECONCILE_LIST[state.index];
+        let (dataset, folder) = RECONCILE_LIST[state.index];
         let prefix = format!("{scope}{folder}");
         let page = store.list(&prefix, None, state.token.as_deref(), 1000, None)?;
         for object in &page.objects {
             let total = &mut state.totals[state.index];
             total.0 += object.size;
             total.1 += 1;
-            if RECONCILE_LIST[state.index].0 == "pq_ops" {
+            inventory_rows.push(json!({
+                "snapshot_id": state.snapshot_id,
+                "dataset": dataset,
+                "key": object.key,
+                "size": object.size,
+                "last_modified": object.last_modified,
+                "complete": false,
+            }));
+            if dataset == "pq_ops" {
                 if let Some(kind) = object
                     .key
                     .strip_prefix(&prefix)
@@ -1045,8 +1069,19 @@ pub fn storage_reconcile_step<R: Runtime>(
             return Err("reconcile_state_conflict".into());
         }
     }
-    let mut report = ReconcileReport::default();
+    let mut report = ReconcileReport {
+        inventory_rows,
+        ..Default::default()
+    };
     if state.index >= RECONCILE_LIST.len() {
+        report.inventory_rows.push(json!({
+            "snapshot_id": state.snapshot_id,
+            "dataset": Value::Null,
+            "key": Value::Null,
+            "size": 0,
+            "last_modified": Value::Null,
+            "complete": true,
+        }));
         let mut datasets = serde_json::Map::new();
         for (index, (name, _)) in RECONCILE_LIST.iter().enumerate() {
             let (mut bytes, mut objects) = state.totals[index];
@@ -1068,6 +1103,7 @@ pub fn storage_reconcile_step<R: Runtime>(
             datasets.insert((*name).into(), entry);
         }
         report.snapshot = Some(json!({
+            "snapshot_id": state.snapshot_id,
             "datasets": datasets,
             "requested_at": state.requested_at,
             "completed_at": runtime.now(),
