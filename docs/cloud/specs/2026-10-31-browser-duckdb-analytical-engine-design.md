@@ -120,6 +120,7 @@ export type FileRollup = {
 ```
 - `FileSource` in [`engine.ts`](../../../frontend/lib/cloud-engine/dashboard/engine.ts#L133) gains optional `readRollup?: (key: string) => Promise<FileRollup | null>` and `writeRollup?: (key: string, rollup: FileRollup) => Promise<void>`.
 - [`browserSource`](../../../frontend/lib/cloud-engine/dashboard/sources.ts#L458) implements `readRollup` and `writeRollup` using a fast in-memory `Map<string, FileRollup>` backed by `CacheStorage` (`flp-parquet-rollup-v1`), and deletes matching entries in `evict(key)`.
+- Persisted caches survive reloads and new tabs. A tab's first `setDashboardCacheIdentity` adopts the stored identity without clearing when it matches the target and `localStorage["flp-dashboard-cache-ready"]` records that a clear for that identity completed; any other identity change, or a missing ready marker (a tab closed mid-transition), clears every request-log cache first.
 - [`Aggregator`](../../../frontend/lib/cloud-engine/dashboard/engine.ts#L388) gains `mergeRollup(rollup: FileRollup)` which adds `rollup.totalRequests`, ORs `rollup.hasBytes`, sums each `MinuteBucket` into `this.buckets`, and sums each field's `nonNull` and `[Scalar, number]` entries into `this.nonNull` and `this.counts`.
 
 ### 5.2 Interior vs. Boundary File Classification

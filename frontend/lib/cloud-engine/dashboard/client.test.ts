@@ -77,3 +77,65 @@ describe("persistent storage", () => {
     await Promise.resolve();
   });
 });
+
+describe("tab cache identity", () => {
+  const stubCaches = () => {
+    const buckets = new Map<string, Map<string, Response>>();
+    vi.stubGlobal("caches", {
+      async open(name: string) {
+        const bucket = buckets.get(name) ?? new Map<string, Response>();
+        buckets.set(name, bucket);
+        return {
+          async match(key: RequestInfo | URL) { return bucket.get(String(key))?.clone(); },
+          async put(key: RequestInfo | URL, value: Response) { bucket.set(String(key), value.clone()); },
+          async delete(key: RequestInfo | URL) { return bucket.delete(String(key)); },
+          async keys() { return [...bucket.keys()].map((url) => new Request(url)); },
+        };
+      },
+      async keys() { return [...buckets.keys()]; },
+      async delete(name: string) { return buckets.delete(name); },
+    });
+    return buckets;
+  };
+  // A new tab or reload is a fresh module instance sharing localStorage and CacheStorage.
+  const freshTab = async () => {
+    vi.resetModules();
+    const client = await import("./client");
+    const sources = await import("./sources");
+    // sources also exports a storage-only setDashboardCacheIdentity; the tab uses client's.
+    return { ...sources, ...client };
+  };
+  const seed = async () => {
+    const tab = await freshTab();
+    await tab.setDashboardCacheIdentity("alice:admin");
+    await (await caches.open(tab.CACHE_NAME)).put("http://localhost/fos/a.parquet", new Response("bytes"));
+    return tab.dashboardCacheScope();
+  };
+
+  it("keeps a new tab of the same identity on the persisted files and scope", async () => {
+    localStorage.clear();
+    const buckets = stubCaches();
+    const scope = await seed();
+
+    const tab = await freshTab();
+    await tab.setDashboardCacheIdentity("alice:admin");
+    expect(buckets.get(tab.CACHE_NAME)?.has("http://localhost/fos/a.parquet")).toBe(true);
+    expect(tab.dashboardCacheScope()).toBe(scope);
+  });
+
+  it("clears for a new tab of another identity, or after an unfinished transition", async () => {
+    localStorage.clear();
+    const buckets = stubCaches();
+    await seed();
+    const bob = await freshTab();
+    await bob.setDashboardCacheIdentity("bob:analyst");
+    expect(buckets.get(bob.CACHE_NAME)?.size ?? 0).toBe(0);
+
+    await seed();
+    // A tab closed mid-clear leaves the identity written but not the ready marker.
+    localStorage.removeItem("flp-dashboard-cache-ready");
+    const tab = await freshTab();
+    await tab.setDashboardCacheIdentity("alice:admin");
+    expect(buckets.get(tab.CACHE_NAME)?.size ?? 0).toBe(0);
+  });
+});

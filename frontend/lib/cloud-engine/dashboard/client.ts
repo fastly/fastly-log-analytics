@@ -29,6 +29,7 @@ import { clearManifestCache, type Manifest } from "./manifest";
 import { clearRollupQueryCache } from "./rollup-query";
 import {
   IDENTITY_CACHE_KEY,
+  READY_CACHE_KEY,
   SESSION_CACHE_KEY,
   browserSource,
   clearRequestLogCaches,
@@ -445,6 +446,15 @@ type QueuedIdentityTransition = {
 };
 
 let appliedTabIdentity: string | null = null;
+let tabTransitioned = false;
+
+function readyCacheIdentity(): string | null {
+  try {
+    return typeof localStorage === "undefined" ? null : localStorage.getItem(READY_CACHE_KEY);
+  } catch {
+    return null;
+  }
+}
 let activeIdentityTransition: Promise<void> | null = null;
 let queuedIdentityTransition: QueuedIdentityTransition | null = null;
 let inFlightIdentityTransition: Promise<void> | null = null;
@@ -454,6 +464,7 @@ async function executeIdentityTransition(
   target: IdentityTransitionTarget,
 ): Promise<void> {
   appliedTabIdentity = null;
+  tabTransitioned = true;
   rpcClient?.terminate();
   rpcClient = null;
   resetOpsLogsClient();
@@ -483,6 +494,14 @@ async function executeIdentityTransition(
     throw failed.reason;
   }
   appliedTabIdentity = target.kind === "clear" ? null : target.identity;
+  if (target.kind === "set" && target.syncStorage && target.identity !== null
+    && dashboardCacheIdentity() === target.identity) {
+    try {
+      localStorage.setItem(READY_CACHE_KEY, target.identity);
+    } catch {
+      /* Without the marker a new tab clears again, which is only slower. */
+    }
+  }
 }
 
 function runIdentityTransition(
@@ -497,6 +516,20 @@ function runIdentityTransition(
       appliedTabIdentity === target.identity &&
       (!target.syncStorage || dashboardCacheIdentity() === target.identity)
     ) {
+      return Promise.resolve();
+    }
+    // A new tab or reload holds nothing in memory yet. When the stored identity is the
+    // target and the transition that set it finished clearing, the persisted caches are
+    // already that identity's, so the tab adopts them instead of wiping them.
+    if (
+      target.kind === "set" &&
+      target.identity !== null &&
+      !tabTransitioned &&
+      dashboardCacheIdentity() === target.identity &&
+      readyCacheIdentity() === target.identity
+    ) {
+      tabTransitioned = true;
+      appliedTabIdentity = target.identity;
       return Promise.resolve();
     }
     const current = executeIdentityTransition(target);

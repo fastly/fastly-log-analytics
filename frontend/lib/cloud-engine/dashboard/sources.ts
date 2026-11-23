@@ -40,6 +40,8 @@ export { getStoreStats, keyWindowMs };
 
 export const SESSION_CACHE_KEY = "flp-dashboard-cache-session";
 export const IDENTITY_CACHE_KEY = "flp-dashboard-cache-identity";
+/** The identity whose caches a finished transition cleared; a new tab of it reuses them. */
+export const READY_CACHE_KEY = "flp-dashboard-cache-ready";
 let volatileCacheScope: string | undefined;
 let volatileCacheIdentity: string | null = null;
 
@@ -161,6 +163,7 @@ export function updateDashboardCacheIdentity(
   if (options.syncStorage === false) return;
   try {
     if (typeof localStorage !== "undefined") {
+      localStorage.removeItem(READY_CACHE_KEY);
       localStorage.removeItem(SESSION_CACHE_KEY);
       if (identity === null) localStorage.removeItem(IDENTITY_CACHE_KEY);
       else localStorage.setItem(IDENTITY_CACHE_KEY, identity);
