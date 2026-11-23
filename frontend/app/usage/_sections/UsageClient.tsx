@@ -230,6 +230,9 @@ export function UsagePageContent({
     provenance?: string[]
   }) | undefined
   const localStorageGbHours = storageWithMeta?.total_billed_gb_hours ?? null
+  const localStoragePeriodHours = startTime && endTime
+    ? (Date.parse(endTime) - Date.parse(startTime)) / 3_600_000
+    : null
 
   // One Platform Metrics read per range, shared by the cost card and both Compute charts.
   const {
@@ -360,12 +363,14 @@ export function UsagePageContent({
               prefillData={cloudPrefill}
               rates={prefillRates}
               localStorageGbHours={localStorageGbHours}
+              localStoragePeriodHours={localStoragePeriodHours}
             />
           ) : (
             <CostCalculator
               prefillData={prefill ?? undefined}
               prefillNote={prefillNote}
               localStorageGbHours={localStorageGbHours}
+              localStoragePeriodHours={localStoragePeriodHours}
             />
           )}
         </AnalyticsCard>

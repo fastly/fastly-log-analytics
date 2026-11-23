@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import { measuredStorageGbMonths } from './measuredStorage'
 import { Switch } from '@/components/ui/switch'
 import { formatUSD } from '@/lib/utils'
 import {
@@ -41,10 +42,11 @@ const RATE_ROWS: [keyof EstimateRates, string][] = [
   ['secret_rate_per_month', 'Secret Store ($/secret-month)'],
 ]
 
-export function CloudCostCalculator({ prefillData, rates: configuredRates, localStorageGbHours }: {
+export function CloudCostCalculator({ prefillData, rates: configuredRates, localStorageGbHours, localStoragePeriodHours }: {
   prefillData?: Partial<MeasuredEstimate>
   rates?: Partial<Record<keyof EstimateRates, number | null>>
   localStorageGbHours?: number | null
+  localStoragePeriodHours?: number | null
 }) {
   const [edits, setEdits] = useState<Partial<EstimateInputs>>({})
   const inputs = { ...DEFAULT_INPUTS, ...prefillData?.inputs, ...edits }
@@ -58,9 +60,7 @@ export function CloudCostCalculator({ prefillData, rates: configuredRates, local
   const result = estimateMonthly(inputs, units, rates, prefillData?.compaction, {
     relay: prefillData?.relay ?? 0,
   })
-  const localStorageGbMonths = localStorageGbHours == null
-    ? null
-    : localStorageGbHours / 720
+  const localStorageGbMonths = measuredStorageGbMonths(localStorageGbHours, localStoragePeriodHours)
   const localStorageCost = localStorageGbMonths == null
     ? null
     : localStorageGbMonths * rates.storage_rate_per_gb_month

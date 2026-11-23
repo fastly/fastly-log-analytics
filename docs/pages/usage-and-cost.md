@@ -46,6 +46,8 @@ Incurred Class A/B operations in `/api/usage/operations` use the service-local u
 
 Service-local selected-period storage (`total_billed_gb_hours`, labeled `Measured · this install`) is authoritative for Storage Impact, Estimated Incurred Cost, and both Cost Estimators. Fastly Platform Object Storage metrics remain visible on the separately labeled `Account-wide · Fastly Platform` informational card and never override local storage costs.
 
+The Cost Estimators turn that measurement into a month at the range's average size: billed GB-hours divided by the range's hours is the average stored GB, shown as that many GB-months (for example 24 GB-hours over a 1-day range is 1 GB-month). Dividing by 720 instead would price only the hours in the range.
+
 Cloud's measured Compute figures appear only in the cost card's Compute row and the two Compute charts; the top Platform and Traffic Geography cards were removed. Unavailable metrics do not replace real zero values with modeled data or make the rest of the page fail.
 
 High-Scale estimator traffic comes from the selected monitored logging service, not the separate archive-delivery CDN service. Missing Fastly edge-request counters remain unavailable; an explicit zero remains measured zero.

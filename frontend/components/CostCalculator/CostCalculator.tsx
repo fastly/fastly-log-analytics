@@ -12,6 +12,7 @@ import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { Table, TableBody, TableCell, TableRow } from '@/components/ui/table'
 import { LabelWithInfo } from '@/components/ui/confirm-dialog'
+import { measuredStorageGbMonths } from './measuredStorage'
 import {
   Tooltip,
   TooltipContent,
@@ -389,12 +390,11 @@ interface ResultsProps {
   s: CalcState
   r: CalcResults
   localStorageGbHours?: number | null
+  localStoragePeriodHours?: number | null
 }
 
-export function Results({ s, r, localStorageGbHours }: ResultsProps) {
-  const localStorageGbMonths = localStorageGbHours == null
-    ? null
-    : localStorageGbHours / 720
+export function Results({ s, r, localStorageGbHours, localStoragePeriodHours }: ResultsProps) {
+  const localStorageGbMonths = measuredStorageGbMonths(localStorageGbHours, localStoragePeriodHours)
   const localStorageCost = localStorageGbMonths == null
     ? null
     : localStorageGbMonths * s.rateStorage
@@ -495,9 +495,10 @@ interface CostCalculatorProps {
   prefillData?: PrefillResponse
   prefillNote?: string
   localStorageGbHours?: number | null
+  localStoragePeriodHours?: number | null
 }
 
-export function CostCalculator({ prefillData, prefillNote, localStorageGbHours }: CostCalculatorProps) {
+export function CostCalculator({ prefillData, prefillNote, localStorageGbHours, localStoragePeriodHours }: CostCalculatorProps) {
   const [s, dispatch] = useReducer(reducer, DEFAULTS)
 
   useEffect(() => {
@@ -525,7 +526,7 @@ export function CostCalculator({ prefillData, prefillNote, localStorageGbHours }
         </div>
       </div>
 
-      <Results s={s} r={r} localStorageGbHours={localStorageGbHours} />
+      <Results s={s} r={r} localStorageGbHours={localStorageGbHours} localStoragePeriodHours={localStoragePeriodHours} />
 
       <p className='text-xs text-muted-foreground leading-relaxed'>
         * Estimates assume ~{RAW_LOG_COMPRESSION_RATIO}× ZSTD compression for raw JSON logs (.zst), ~4× compression of log JSON to Parquet (ZSTD), and client-side RUM beacon batching. Consolidated FOS archive flushes and DR state snapshots (meta/dr_state.json) run on the configured snapshot interval, keeping raw logs in FOS for snapshot interval + 15m grace before auto-delete. Storage is billed in GB-hours;

@@ -191,7 +191,7 @@ describe('observed Platform usage', () => {
   it('replaces estimator storage cost and total with local measured storage', () => {
     const { rerender } = render(<CostCalculator />)
     const reference = screen.getByText('Total Estimated Monthly Cost').parentElement?.nextElementSibling?.textContent
-    rerender(<CostCalculator localStorageGbHours={720} />)
+    rerender(<CostCalculator localStorageGbHours={24} localStoragePeriodHours={24} />)
 
     expect(screen.getByText(/Measured · this install: 1\.000 GB-mo/)).toBeInTheDocument()
     expect(screen.getByText('Measured · this install')).toBeInTheDocument()
@@ -201,7 +201,7 @@ describe('observed Platform usage', () => {
   })
 
   it('keeps an authoritative zero local storage value visible', () => {
-    render(<CostCalculator localStorageGbHours={0} />)
+    render(<CostCalculator localStorageGbHours={0} localStoragePeriodHours={24} />)
 
     expect(screen.getByText(/Measured · this install: 0\.000 GB-mo/)).toBeInTheDocument()
     expect(screen.queryByText(/Measured · this install: 0\.001 GB-mo/)).not.toBeInTheDocument()
@@ -210,7 +210,7 @@ describe('observed Platform usage', () => {
   it('replaces only the Cloud Object Storage line and total with local measured storage', () => {
     const { rerender } = render(<CloudCostCalculator />)
     const reference = screen.getByText('Total Estimated Monthly Cost').parentElement?.nextElementSibling?.textContent
-    rerender(<CloudCostCalculator localStorageGbHours={720} />)
+    rerender(<CloudCostCalculator localStorageGbHours={720} localStoragePeriodHours={720} />)
 
     expect(screen.getByText(/Measured · this install · 1\.00 GB-months/)).toBeInTheDocument()
     expect(screen.queryByText(/Fastly Platform \(account-wide\)/)).not.toBeInTheDocument()
