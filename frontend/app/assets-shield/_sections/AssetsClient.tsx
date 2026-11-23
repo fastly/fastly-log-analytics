@@ -5,6 +5,7 @@ import { AlertTriangle, Layers } from 'lucide-react'
 import { useInViewOnce } from '@/components/AnalyticsCard'
 import { ReportLayout } from '@/components/ReportLayout'
 import { RawWindowNote, readRawWindow, readRollupMeta, RollupDataThroughSlot } from '@/components/network/rollupLabels'
+import { useActiveLogFields } from '@/hooks/useBootstrap'
 import { useAnalyticsReportQuery, useReportRangeAnchor } from '@/hooks/useReportPageState'
 import { client, unwrapClient } from '@/lib/api'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
@@ -63,6 +64,9 @@ export {
   type CachePerformanceRow,
   type CompressionPerformanceRow,
 }
+
+/** Optional log fields the asset panels read; the service's log field settings decide which are on. */
+const ASSET_LOG_FIELDS = ['ttl', 'resp_header_content_encoding'] as const
 
 export interface AssetsReportContentProps extends Pick<RangeWireArgs, 'relativeRange' | 'isAutoRange' | 'anchor'> {
   startTime: string | null
@@ -137,6 +141,7 @@ export function AssetsReportContent({
   const getFilterQueryString = React.useCallback((assetType: string) => buildAssetFilterQueryString(assetType), [])
 
   const [activeHelp, setActiveHelp] = React.useState<AssetHelpContent | null>(null)
+  const logFields = useActiveLogFields()
 
   if (error) {
     return (
@@ -154,7 +159,7 @@ export function AssetsReportContent({
   const largeUncompressed = data?.large_uncompressed_assets || []
   const lowTtl = data?.low_ttl_assets || []
   const urlFilterHrefPrefix = `/dashboard?service=${activeServiceId}${getTimeQueryString()}&filter_url=`
-  const missingFields = data?.missing_fields || []
+  const missingFields = ASSET_LOG_FIELDS.filter((field) => logFields.ready && !logFields.isFieldActive(field))
 
   return (
     <div className={cn('space-y-8 py-6 transition-opacity duration-150', isFetching && !isLoading && 'opacity-60 pointer-events-none')}>

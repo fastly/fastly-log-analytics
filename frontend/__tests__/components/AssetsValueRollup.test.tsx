@@ -39,13 +39,14 @@ const meta = {
 
 const never = () => new Promise<never>(() => {})
 
-function renderBootstrapped(ui: React.ReactElement, _opts?: unknown) {
+function renderBootstrapped(ui: React.ReactElement, _opts?: unknown, bootstrap: Record<string, unknown> = {}) {
   const queryClient = createTestQueryClient({ queries: { retry: false } })
   queryClient.setQueryData(queryKeys.bootstrap(), {
     runtime_mode: 'cloud',
     active_service_id: 'svc-1',
     services: [{ service_id: 'svc-1', name: 'Demo' }],
     settings: {},
+    ...bootstrap,
   })
   return renderWithQuery(ui, { queryClient, withNuqs: true })
 }
@@ -115,6 +116,19 @@ describe('AssetsClient on Cloud', () => {
     expect(container.querySelector('.opacity-60')).toBeNull()
     answerTables({ large_uncompressed_assets: [], low_ttl_assets: [] })
     expect(await screen.findByText('No uncompressed static assets detected! Nice work.')).toBeInTheDocument()
+  })
+
+  it('names the asset fields the service log settings leave off, whatever the response says', async () => {
+    setCloudModeRuntime(true)
+    recordPosts('/api/assets/aggregates', (asked) => asked?.includes('summary') ? { ...assetsSummary, rollup: meta } : never())
+    const { unmount } = renderBootstrapped(<AssetsClient />, { withNuqs: true }, { active_log_field_ids: ['url', 'cache', 'status'] })
+    const banner = await screen.findByTestId('missing-asset-fields-banner')
+    expect(banner).toHaveTextContent('ttl, resp_header_content_encoding')
+    unmount()
+
+    renderBootstrapped(<AssetsClient />, { withNuqs: true }, { active_log_field_ids: ['url', 'ttl', 'resp_header_content_encoding'] })
+    expect(await screen.findByText('4,321 reqs')).toBeInTheDocument()
+    expect(screen.queryByTestId('missing-asset-fields-banner')).not.toBeInTheDocument()
   })
 
   it('splits a cache-status filter too, but keeps one raw read for any other filter', async () => {

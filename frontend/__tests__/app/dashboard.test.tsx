@@ -459,7 +459,10 @@ describe('Assets & Shield page', () => {
     unmount()
 
     queryClient.clear()
-    mockPost.mockResolvedValue({ data: { ...MOCK_ASSETS_DATA, missing_fields: ['resp_header_content_encoding', 'ttl'] } })
+    useSecurityActiveFields = true
+    securityActiveFields.clear()
+    securityActiveFields.add('url')
+    mockPost.mockResolvedValue({ data: MOCK_ASSETS_DATA })
     const { unmount: unmount2 } = renderWithQuery(<AssetsClient />, { queryClient })
     expect(await screen.findByText('/static/bundle-huge.js')).toBeInTheDocument()
     expect(screen.getByText('/feed.json')).toBeInTheDocument()
@@ -470,7 +473,7 @@ describe('Assets & Shield page', () => {
     }
     expect(screen.getByText('60.0s')).toBeInTheDocument()
     const banner = await screen.findByTestId('missing-asset-fields-banner')
-    expect(within(banner).getByText(/resp_header_content_encoding, ttl/i)).toBeInTheDocument()
+    expect(within(banner).getByText(/ttl, resp_header_content_encoding/i)).toBeInTheDocument()
     expect(within(banner).getByRole('link', { name: /Configure Service Log Fields/i }).getAttribute('href')).toContain('/admin')
     unmount2()
 

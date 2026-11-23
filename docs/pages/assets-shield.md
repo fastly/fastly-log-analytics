@@ -10,7 +10,7 @@ Source: [`frontend/app/assets-shield/`](../../frontend/app/assets-shield/): `pag
 - Cache Efficiency by Asset Type: stacked cache states (HIT, MISS, PASS, ...) per type.
 - Payload Compression Efficiency per type (`br`, `gzip`, uncompressed).
 - Large Uncompressed Assets and Low TTL Assets tables.
-- If the response lists `missing_fields` (for example the content-encoding or TTL log fields), a banner names them. With no data the page shows "No Asset Metrics Yet"; a failed query shows "Error Loading Assets Data".
+- If the service's log field settings (`active_log_field_ids` from bootstrap) leave off `ttl` or `resp_header_content_encoding`, a banner names them. The response's `missing_fields` is not used. With no data the page shows "No Asset Metrics Yet"; a failed query shows "Error Loading Assets Data".
 - Each card has an info button explaining how its numbers are computed.
 
 ## Roles
