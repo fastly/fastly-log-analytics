@@ -89,6 +89,11 @@ export type Rollup = {
   series: Map<string, Map<string, Map<number, RollupAgg>>>;
   /** The coarsest series bucket merged: 5 minutes, or an hour once a day bundle is in. */
   seriesStepMs: number;
+  /**
+   * `series1` rows, like `series` per minute: `origin` only. Window summaries and hour bundles
+   * carry them, day bundles don't: check `present` (`series1/origin`) before reading them.
+   */
+  series1?: Map<string, Map<string, Map<number, RollupAgg>>>;
   /** `all_fields` rows: field → value → row count; null values are not counted, '' is. */
   fields: Map<string, Map<string, number>>;
   /**
@@ -452,6 +457,7 @@ function guard(rollup: Rollup, loaded: ReadonlySet<string> | undefined): Rollup 
   unloaded("overview", "overview");
   unloaded("assets", "assets");
   unloaded("samples", "sample");
+  unloaded("series1", "series1");
   unloaded("value", "value");
   unloaded("valueTotals", "value", "dim_totals");
   return rollup;
@@ -549,11 +555,13 @@ export async function decodeRollup(
         else values.set(key, readAgg(i));
         break;
       }
-      case "series5": {
+      case "series5":
+      case "series1": {
         const t = bucketMs(bucket[i]);
         if (t === null) return null;
-        const values = rollup.series.get(name) ?? new Map();
-        rollup.series.set(name, values);
+        const series = group[i] === "series5" ? rollup.series : (rollup.series1 ??= new Map());
+        const values = series.get(name) ?? new Map();
+        series.set(name, values);
         const key = String(value[i] ?? "");
         const buckets: Map<number, RollupAgg> = values.get(key) ?? new Map();
         values.set(key, buckets);
@@ -726,10 +734,20 @@ function mergeKept(
       addAgg(into, agg);
     }
   }
-  for (const [field, values] of has(rollup, "series5") ? rollup.series : []) {
-    if (!keep(`series5/${field}`)) continue;
-    const target = out.series.get(field) ?? new Map();
-    out.series.set(field, target);
+  if (has(rollup, "series5")) addSeries(out.series, rollup.series, (field) => keep(`series5/${field}`));
+  const series1 = own(rollup, "series1");
+  if (series1) addSeries((out.series1 ??= new Map()), series1, (field) => keep(`series1/${field}`));
+}
+
+function addSeries(
+  out: Map<string, Map<string, Map<number, RollupAgg>>>,
+  series: Map<string, Map<string, Map<number, RollupAgg>>>,
+  keep: (field: string) => boolean,
+) {
+  for (const [field, values] of series) {
+    if (!keep(field)) continue;
+    const target = out.get(field) ?? new Map();
+    out.set(field, target);
     for (const [value, buckets] of values) {
       const byBucket: Map<number, RollupAgg> = target.get(value) ?? new Map();
       target.set(value, byBucket);
@@ -743,18 +761,20 @@ function mergeKept(
 }
 
 /**
- * Sums one `series5` field into `bucketMs` buckets aligned to the epoch, as the
- * raw queries' `floor(ts_ms / bucketMs)` does, or returns null when `bucketMs`
+ * Sums one `series5` (or per-minute `series1`) field into `bucketMs` buckets aligned to the
+ * epoch, as the raw queries' `floor(ts_ms / bucketMs)` does, or returns null when `bucketMs`
  * is not a whole number of the rollup's steps (raw rows must answer then).
  */
 export function rebucketSeries(
   rollup: Rollup,
   field: string,
   bucketMs: number,
+  group: "series5" | "series1" = "series5",
 ): Map<string, Map<number, RollupAgg>> | null {
-  if (bucketMs % rollup.seriesStepMs !== 0) return null;
+  const minutes = group === "series1";
+  if (bucketMs % (minutes ? 60_000 : rollup.seriesStepMs) !== 0) return null;
   const out = new Map<string, Map<number, RollupAgg>>();
-  for (const [value, buckets] of rollup.series.get(field) ?? []) {
+  for (const [value, buckets] of (minutes ? rollup.series1 : rollup.series)?.get(field) ?? []) {
     const target = new Map<number, RollupAgg>();
     out.set(value, target);
     for (const [t, agg] of buckets) {

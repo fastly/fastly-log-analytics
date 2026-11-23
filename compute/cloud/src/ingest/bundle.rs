@@ -30,15 +30,17 @@
 //! bundle keeps the top [`HOUR_TOP_K`]/[`DAY_TOP_K`] values per field by `(count desc, value
 //! asc)`; `field_totals.truncated` marks any field that lost values.
 //!
-//! v3 groups (`dims`, `series5`, `bins`, `assets`, `transport`, `origin`, `urls`, `quality`) sum per
-//! value, histograms add bucket-wise,
-//! and `series5`/`bins` buckets floor to 5 minutes (hour) or an hour (day). Folding keeps 4x
+//! v3 groups (`dims`, `series5`, `series1`, `bins`, `assets`, `transport`, `origin`, `urls`,
+//! `quality`) sum per value, histograms add bucket-wise,
+//! and `series5`/`bins` buckets floor to 5 minutes (hour) or an hour (day). `series1` (/origin's
+//! per-minute series) keeps minutes in an hour bundle and is left out of a day bundle. Folding keeps 4x
 //! candidates (`DIM_K`, `summary::SERIES_ASN_K`, `summary::SERIES_CITY_K`) by summed requests.
 //! An hour bundle writes all of them, because day bundles fold hour bundles; a day bundle writes
 //! its top [`DAY_TOP_K`] ([`SERIES_ASN_TOP_K`] for `series5` ASNs, [`SERIES_CITY_TOP_K`] for
 //! `series5` cities). `dim_totals.truncated` marks a group field that
 //! lost values, whose counts are then lower bounds. Fields added after version 3 shipped
-//! (`transport`, `origin`, `urls`, `quality` and `series5` `origin` and `city`) are written only
+//! (`transport`, `origin`, `urls`, `quality`, `series1` and `series5` `origin` and `city`) are
+//! written only
 //! when every source
 //! carried their `dim_totals` row, so a bundle over older windows lacks them and readers fall
 //! back to raw. The /security and /fastly-value groups (`header_ip` keeps the max per IP,
@@ -795,7 +797,17 @@ struct Group {
     gated: &'static [&'static str],
 }
 
-const GROUPS: [Group; 20] = [
+/// The group of per-minute /origin rows: kept at minutes in hour bundles and dropped from day
+/// bundles, which no sub-five-minute series reads.
+const MINUTE_GROUP: &str = "series1";
+
+const ORIGIN_SERIES_COLS: &[(C, Op)] = &[
+    (C::Requests, Sum),
+    (C::TtfbHist, Merge),
+    (C::OttlbHist, Merge),
+];
+
+const GROUPS: [Group; 21] = [
     Group {
         name: "dims",
         cols: DIM_COLS,
@@ -809,6 +821,13 @@ const GROUPS: [Group; 20] = [
         timed: true,
         fields: &["overall", "proto", "asn", "city", "origin"],
         gated: &["origin", "city"],
+    },
+    Group {
+        name: MINUTE_GROUP,
+        cols: ORIGIN_SERIES_COLS,
+        timed: true,
+        fields: &["origin"],
+        gated: &["origin"],
     },
     Group {
         name: "bins",
@@ -1352,7 +1371,7 @@ impl Acc {
                 }
                 if cols.s(C::Bundle, i) == Some("dim_totals") {
                     let g = cols.s(C::Value, i).unwrap_or_default();
-                    if let Some(g) = GROUPS.iter().position(|x| x.name == g) {
+                    if let Some(g) = GROUPS.iter().position(|x| x.name == g && self.holds(x)) {
                         seen_groups
                             .insert((g, cols.s(C::FieldName, i).unwrap_or_default().to_owned()));
                     }
@@ -1377,6 +1396,11 @@ impl Acc {
     }
 
     /// A gated field (see [`Group::gated`]) that some source lacks is left out.
+    /// False for [`MINUTE_GROUP`] in a day bundle.
+    fn holds(&self, group: &Group) -> bool {
+        group.name != MINUTE_GROUP || self.step == summary::SERIES_STEP_MS
+    }
+
     fn group_covered(&self, group: &Group, field: &str, acc: &GroupAcc) -> bool {
         !group.gated.contains(&field) || acc.sources >= self.sources
     }
@@ -1495,7 +1519,7 @@ impl Acc {
                 }
             }
             Some("dim_totals") => {
-                let Some(g) = GROUPS.iter().position(|g| g.name == v_str) else {
+                let Some(g) = GROUPS.iter().position(|g| g.name == v_str && self.holds(g)) else {
                     return;
                 };
                 let acc = self.group_acc(g, f_str);
@@ -1577,12 +1601,16 @@ impl Acc {
                 ));
             }
             Some(name) => {
-                let Some(g) = GROUPS.iter().position(|g| g.name == name) else {
+                let Some(g) = GROUPS.iter().position(|g| g.name == name && self.holds(g)) else {
                     return;
                 };
                 let group = &GROUPS[g];
                 let bucket = if group.timed {
-                    let step = self.step;
+                    let step = if group.name == MINUTE_GROUP {
+                        summary::MINUTE_MS
+                    } else {
+                        self.step
+                    };
                     cols.i(C::Bucket, i).unwrap_or_default().div_euclid(step) * step
                 } else {
                     0
@@ -2366,6 +2394,9 @@ impl Acc {
             match group.name {
                 "dims" => flush_group(&mut out, &["dims"], &mut groups_out, &mut layout_rg)?,
                 "series5" => flush_group(&mut out, &["series5"], &mut groups_out, &mut layout_rg)?,
+                MINUTE_GROUP => {
+                    flush_group(&mut out, &[MINUTE_GROUP], &mut groups_out, &mut layout_rg)?
+                }
                 "origin" => flush_group(
                     &mut out,
                     &["bins", "assets", "transport", "origin"],
@@ -4352,7 +4383,7 @@ mod tests {
         let bundle = acc.write(1_800_000_000, Some(Unit::Hour), "hour").unwrap();
         assert_eq!(
             hex::encode(Sha256::digest(&bundle)),
-            "d085362f0b9b80b2a6ef1e2a0baab630eab50227459895e300f1958bcbcb7924"
+            "798a6935e3102df38c17d7398405396d5b40a3ee27086836afbeff30a2c8223f"
         );
         let resumed = Acc::decode_partial(&acc.encode_partial(), Unit::Hour).unwrap();
         assert_eq!(

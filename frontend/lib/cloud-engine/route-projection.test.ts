@@ -168,6 +168,18 @@ describe("Cloud route column projections", () => {
     expect(originScanColumns("/api/origin/aggregates", {
       filters: { host_2: { mode: "include", values: ["a"] } }, custom_filters: { team: { mode: "exclude", values: ["x"] } },
     })).toEqual(expect.arrayContaining(["host", "team"]));
+    // A sub-hour series is the page's only raw read when unfiltered; it loads just its own columns.
+    const rawSeries = { ...page, bucket_minutes: 1, sections: ["timeseries"] };
+    expect([...originScanColumns("/api/origin/aggregates", rawSeries)!].sort())
+      .toEqual(["ottfb", "timestamp", "ts_ms", "ttfb"]);
+    await guard([
+      origin("/api/origin/aggregates", rawSeries),
+      origin("/api/origin/aggregates", { ...rawSeries, timeseries_metric: "ttlb", split_by_leg: true }),
+      origin("/api/origin/timeseries", { metric: "ttlb" }),
+      ...page.sections.map((section) => origin("/api/origin/aggregates", { ...page, sections: [section] })),
+      ...["summary", "slow-urls", "status-codes", "path-breakdown", "pop-latency", "ip-health"].map((route) =>
+        origin(`/api/origin/${route}`, {})),
+    ]);
     expect(originScanColumns("/api/origin/aggregates", { filters: [{ field: "host" }] })).toBeNull();
     expect(originScanColumns("/api/origin/aggregates", { custom_filters: "host" })).toBeNull();
     expect(originScanColumns("/api/origin/unknown", {})).toBeNull();

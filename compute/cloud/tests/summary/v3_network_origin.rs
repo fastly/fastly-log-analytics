@@ -485,6 +485,39 @@ fn transport_origin_and_url_rows_match_a_brute_force_computation() {
             hist_of(group.iter().filter_map(|r| i(r, "ottlb")))
         );
     }
+
+    // series1 origin: the same per leg and minute, for /origin's sub-five-minute series.
+    let minute = |r: &Value| {
+        let at = time::OffsetDateTime::parse(
+            s(r, "timestamp").unwrap(),
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        (at.unix_timestamp() * 1000).div_euclid(60_000) * 60_000
+    };
+    let cells = groups_by(&rows, |r| Some(format!("{}|{}", minute(r), leg_of(r))));
+    assert!(cells.len() > legs.len());
+    let (_, total) = group_rows(&out, "series1", "origin");
+    assert_eq!(total["requests"], rows.len() as i64);
+    assert_eq!(total["truncated"], false);
+    let series: Vec<_> = bundle(&out, "series1");
+    assert_eq!(series.len(), cells.len());
+    for row in series {
+        assert_eq!(row["field"], "origin");
+        let key = format!("{}|{}", row["bucket"], row["value"].as_str().unwrap());
+        let group = &cells[&key];
+        assert_eq!(row["requests"], group.len() as i64, "{key}");
+        assert_eq!(
+            hist_cell(row, "ttfb_hist"),
+            hist_of(group.iter().filter_map(|r| origin_us(r))),
+            "{key}"
+        );
+        assert_eq!(
+            hist_cell(row, "ottlb_hist"),
+            hist_of(group.iter().filter_map(|r| i(r, "ottlb"))),
+            "{key}"
+        );
+    }
 }
 
 #[test]
@@ -503,6 +536,7 @@ fn new_groups_mark_presence_without_data_and_cut_urls_to_the_top_k() {
         ("origin", "pop"),
         ("urls", "asn"),
         ("series5", "origin"),
+        ("series1", "origin"),
         ("header_ip", "ip"),
         ("bot_ua", "ua"),
         ("tls_fp", "fp"),
@@ -513,9 +547,10 @@ fn new_groups_mark_presence_without_data_and_cut_urls_to_the_top_k() {
     ] {
         let (_, total) = group_rows(&out, group, field);
         let want = match (group, field) {
-            ("transport", _) | ("urls", "url") | ("series5", _) | ("value", "cache") => {
-                rows.len() as i64
-            }
+            ("transport", _)
+            | ("urls", "url")
+            | ("series5" | "series1", _)
+            | ("value", "cache") => rows.len() as i64,
             _ => 0,
         };
         assert_eq!(total["requests"], want, "{group}/{field}");
@@ -743,6 +778,7 @@ fn without_new_rows(bytes: &[u8]) -> Vec<u8> {
                     | "value"
                     | "proxy"
             ) || (g == "series5" && matches!(f, Some("origin" | "city")))
+                || g == "series1"
                 || f == Some(summary::REF_STEM)
         };
         let mut start = None;
@@ -797,6 +833,7 @@ fn bundles_drop_new_rows_unless_every_source_has_them() {
                         | "value"
                         | "proxy"
                 ) || (g == "series5" && matches!(f.as_str(), "origin" | "city"))
+                    || g == "series1"
             })
             .collect()
     };
@@ -808,7 +845,7 @@ fn bundles_drop_new_rows_unless_every_source_has_them() {
             .count()
     };
     let both = read(&bundles::merge(&[&w1, &w2], BASE, Unit::Hour).unwrap());
-    assert_eq!(new_fields(&both).len(), 24);
+    assert_eq!(new_fields(&both).len(), 25);
     assert!(stems(&both) > 1);
 
     let mixed_bytes = bundles::merge(&[&old, &w2], BASE, Unit::Hour).unwrap();
@@ -828,6 +865,7 @@ fn bundles_drop_new_rows_unless_every_source_has_them() {
     ] {
         assert!(bundle(&mixed, name).is_empty(), "{name}");
     }
+    assert!(bundle(&mixed, "series1").is_empty());
     assert!(!bundle(&mixed, "series5")
         .iter()
         .any(|r| r["field"] == "origin" || r["field"] == "city"));
@@ -939,6 +977,7 @@ fn hour_bundles_merge_v3_rows_like_one_window_over_all_rows() {
     for name in [
         "dims",
         "series5",
+        "series1",
         "bins",
         "assets",
         "transport",
@@ -1010,4 +1049,10 @@ fn hour_bundles_merge_v3_rows_like_one_window_over_all_rows() {
     );
     assert_eq!(hist_cell(overall[0], "ttfb_hist"), Some(both));
     assert_eq!(sample(&day), sample(&hour));
+    // Minute rows stay in hour bundles: a day is never read at minute buckets.
+    assert!(!bundle(&hour, "series1").is_empty());
+    assert!(bundle(&day, "series1").is_empty());
+    assert!(!bundle(&day, "dim_totals")
+        .iter()
+        .any(|r| r["value"] == "series1"));
 }
