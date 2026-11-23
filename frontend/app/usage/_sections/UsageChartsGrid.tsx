@@ -53,6 +53,14 @@ export const FosOperationsHelp = ({ note }: { note?: string }) => (
   </div>
 )
 
+/** Choose enough decimal places on the Estimated Cost y-axis so small ranges don't repeat `$0.00`. */
+export function costAxisTickFormat(maxCost: number): string {
+  if (!Number.isFinite(maxCost) || maxCost <= 0 || maxCost >= 0.05) return '.2f'
+  if (maxCost >= 0.005) return '.3f'
+  if (maxCost >= 0.0005) return '.4f'
+  return '.5f'
+}
+
 export function UsageChartsGrid({
   ops,
   loadingOps,
@@ -316,6 +324,11 @@ export function UsageChartsGrid({
     bwByTime[t] = (bwBytes[i] / 1e9) * rateEgress
   })
   const costEgressY = opsDates.map((t: string) => bwByTime[t] ?? 0)
+  const maxStackedCost = opsDates.reduce(
+    (max: number, _: string, i: number) => Math.max(max, (costOpsY[i] ?? 0) + (costEgressY[i] ?? 0)),
+    0,
+  )
+  const costTickFormat = costAxisTickFormat(maxStackedCost)
 
   const costChartData = useMemo(
     () => [
@@ -325,7 +338,7 @@ export function UsageChartsGrid({
         x: opsDates,
         y: costOpsY,
         marker: { color: accent },
-        hovertemplate: '$%{y:.2f}<extra></extra>',
+        hovertemplate: `$%{y:${costTickFormat}}<extra></extra>`,
       },
       {
         type: 'bar',
@@ -333,10 +346,10 @@ export function UsageChartsGrid({
         x: opsDates,
         y: costEgressY,
         marker: { color: CHART_COLORS.warning },
-        hovertemplate: '$%{y:.2f}<extra></extra>',
+        hovertemplate: `$%{y:${costTickFormat}}<extra></extra>`,
       },
     ],
-    [opsDates, costOpsY, costEgressY, accent],
+    [opsDates, costOpsY, costEgressY, accent, costTickFormat],
   )
   const costLayout = useMemo(
     () => ({
@@ -344,13 +357,14 @@ export function UsageChartsGrid({
       barmode: 'stack' as const,
       yaxis: {
         tickprefix: '$',
-        tickformat: '.2f',
+        tickformat: costTickFormat,
+        rangemode: 'tozero' as const,
         gridcolor: gridColor,
         zerolinecolor: gridColor,
         showspikes: false,
       },
     }),
-    [baseLayout, gridColor],
+    [baseLayout, gridColor, costTickFormat],
   )
 
   // ── Compute charts (Cloud: Platform Metrics, app + worker services) ──────
@@ -413,10 +427,18 @@ export function UsageChartsGrid({
     [baseLayout, gridColor],
   )
 
+  const gridHeightClass =
+    showCompute && isRumEnabled
+      ? 'min-h-[1512px] [contain-intrinsic-size:1512px]'
+      : showCompute || isRumEnabled
+        ? 'min-h-[1128px] [contain-intrinsic-size:1128px]'
+        : 'min-h-[744px] [contain-intrinsic-size:744px]'
+
   return (
     <div
       className={cn(
-        'grid grid-cols-1 lg:grid-cols-2 gap-6 transition-opacity duration-100 min-h-[740px] [contain-intrinsic-size:740px] [content-visibility:auto]',
+        'grid grid-cols-1 lg:grid-cols-2 gap-6 transition-opacity duration-100 [content-visibility:auto]',
+        gridHeightClass,
         isFetchingAny && !isLoadingInitial && 'opacity-40 pointer-events-none',
       )}
     >
@@ -516,6 +538,7 @@ export function UsageChartsGrid({
           isFetching={fetchingRumBreakdown}
           error={errorRumBreakdown as AnalyticsCardError | null}
           isEmpty={!rumBreakdown?.data || rumBreakdown.data.length === 0}
+          className="min-h-[360px]"
         >
           <div className="space-y-4 p-4">
             {!rumBreakdown ? null : rumBreakdown.total_beacons === 0 ? (

@@ -120,6 +120,7 @@ export function UsageStatCards({
   storageBillingProvenance,
   operationsSource,
   operationsComplete,
+  cloudMode = false,
 }: {
   storage: StorageUsageData | undefined
   loadingStorage: boolean
@@ -147,6 +148,7 @@ export function UsageStatCards({
   storageBillingProvenance?: string[]
   operationsSource?: string
   operationsComplete?: boolean
+  cloudMode?: boolean
 }) {
   const deletedBytesComplete = storage?.deleted_bytes_complete
   const deletedBytesProvenance = storage?.deleted_bytes_provenance
@@ -438,10 +440,15 @@ export function UsageStatCards({
     ],
   )
 
+  const useCloudHeight = cloudMode || Boolean(storage?.incurred?.lines?.length)
+
   return (
     <div
       className={cn(
-        'grid grid-cols-2 lg:grid-cols-4 gap-4 transition-opacity duration-100 min-h-[140px] [contain-intrinsic-size:140px] [content-visibility:auto]',
+        'grid grid-cols-2 lg:grid-cols-4 gap-4 transition-opacity duration-100 [content-visibility:auto]',
+        useCloudHeight
+          ? 'min-h-[420px] [contain-intrinsic-size:420px]'
+          : 'min-h-[180px] [contain-intrinsic-size:180px]',
         isFetchingAny && !isLoadingInitial && 'opacity-40 pointer-events-none',
       )}
     >
@@ -543,7 +550,7 @@ export function UsageStatCards({
         title="Estimated Incurred Cost"
         value={fmtUSD(roughTotal)}
         sub={
-          <div className="min-h-[96px]">
+          <div className={useCloudHeight ? 'min-h-[320px]' : 'min-h-[96px]'}>
             {loadingOps || loadingStorage || loadingBw ? (
               <div className="flex flex-col gap-1.5 mt-2">
                 <Skeleton className="h-3 w-full" />

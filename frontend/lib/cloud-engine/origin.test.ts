@@ -426,4 +426,60 @@ describe("origin cloud-engine module (F18)", () => {
     const unrelated = await handleOriginRequest(new Request("https://example.test/api/other"));
     expect(unrelated).toBeNull();
   });
+
+  it("excludes empty-string URLs from slow_urls and counts only 500..599 in ip_health and drilldown", async () => {
+    const engine = getDuckDBEngine();
+    try {
+      await engine.executeSql(`
+        INSERT INTO requests (scoped_key, ts_ms, "timestamp", cache, ottfb, ost, oip, url, host)
+        SELECT 'origin-parity', 1700000000000, epoch_ms(1700000000000), 'MISS', 50000, 200, '146.75.77.51', '/ok', 'example.test'
+        FROM range(99)
+      `);
+      await engine.executeSql(`
+        INSERT INTO requests (scoped_key, ts_ms, "timestamp", cache, ottfb, ost, oip, url, host)
+        VALUES ('origin-parity', 1700000000000, epoch_ms(1700000000000), 'MISS', 60000, 502, '146.75.77.51', '/err', 'example.test')
+      `);
+      // Non-standard 6xx status (e.g. Fastly synthetic/custom code) and empty URLs
+      await engine.executeSql(`
+        INSERT INTO requests (scoped_key, ts_ms, "timestamp", cache, ottfb, ost, oip, url, host)
+        SELECT 'origin-parity', 1700000000000, epoch_ms(1700000000000), 'MISS', 900000, 601, '146.75.77.51', '', 'example.test'
+        FROM range(10)
+      `);
+
+      const aggRes = await handleOriginRequest(
+        new Request("https://example.test/api/origin/aggregates", {
+          method: "POST",
+          body: JSON.stringify({
+            start_time: "2023-11-14T22:00:00Z",
+            end_time: "2023-11-14T23:00:00Z",
+            sections: ["summary", "slow_urls", "ip_health", "status_codes"],
+            slow_urls_min_requests: 1,
+          }),
+        }),
+      );
+      const agg = await aggRes!.json();
+
+      // Empty-string URL must be excluded from slow_urls
+      expect(agg.slow_urls.rows.map((r: { url: string }) => r.url)).not.toContain("");
+      // 1 HTTP 502 out of 110 total rows with ost: 0.9% (NOT 11/110 = 10.0% from counting ost=601)
+      expect(agg.summary.origin_error_rate).toBeCloseTo(1 / 110, 4);
+      expect(agg.ip_health.rows[0].oip).toBe("146.75.77.51");
+      expect(agg.ip_health.rows[0].error_pct).toBe(0.9);
+
+      const drillRes = await handleOriginRequest(
+        new Request("https://example.test/api/origin/drilldown", {
+          method: "POST",
+          body: JSON.stringify({
+            start_time: "2023-11-14T22:00:00Z",
+            end_time: "2023-11-14T23:00:00Z",
+            dimension: "host",
+          }),
+        }),
+      );
+      const drill = await drillRes!.json();
+      expect(drill.rows[0].error_rate).toBe(0.91);
+    } finally {
+      await engine.reset();
+    }
+  });
 });

@@ -495,4 +495,29 @@ describe("Feature F23 — RUM & Web Vitals cloud-engine", () => {
       await engine.reset();
     }
   });
+
+  it("excludes empty-string session_id and error_message from DISTINCT counts", async () => {
+    const engine = new DuckDBAnalyticalEngine();
+    try {
+      await engine.executeSql(`INSERT INTO client_vitals
+        (scoped_key, ts_ms, metric_name, metric_value, session_id)
+        VALUES ('v', 1700000000000, 'LCP', 1500, 's1'),
+               ('v', 1700000001000, 'LCP', 1600, ''),
+               ('v', 1700000002000, 'LCP', 1700, NULL)`);
+      await engine.executeSql(`INSERT INTO client_errors
+        (scoped_key, ts_ms, error_message, message, filename, session_id)
+        VALUES ('e', 1700000000000, 'TypeError', NULL, 'app.js', 's1'),
+               ('e', 1700000001000, 'TypeError', NULL, 'app.js', ''),
+               ('e', 1700000002000, '', '', 'app.js', '')`);
+
+      const data = await queryRumAnalytics({ engine });
+      expect(data.summary.unique_sessions).toBe(1);
+      expect(data.error_summary.affected_sessions).toBe(1);
+      expect(data.error_summary.unique_error_messages).toBe(1);
+      const typeErr = data.top_errors.find((e) => e.message === "TypeError");
+      expect(typeErr?.affected_sessions).toBe(1);
+    } finally {
+      await engine.reset();
+    }
+  });
 });

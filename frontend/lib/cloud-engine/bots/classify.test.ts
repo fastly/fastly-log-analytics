@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { classifyUserAgentCounts } from "./classify";
+import { summarizeBotEfficiencyRows } from "./summarize";
 import { WELL_KNOWN_BOTS } from "./well-known-bots.generated";
 
 const GOOGLEBOT = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)";
@@ -100,5 +101,45 @@ describe("well-known bots browser copy", () => {
       }),
     );
     expect(bad).toEqual([]);
+  });
+});
+
+describe("summarizeBotEfficiencyRows deduplication and naming", () => {
+  it("does not misname generic AdsBot as duplicate Google Adsbot Mobile or generic 'bot' as Google Crawler", async () => {
+    const rows: [string, string, number, number][] = [
+      ["site", "", 10000, 10_000_000],
+      ["ua", "Mozilla/5.0 (Linux; Android 5.0) AdsBot-Google-Mobile (+http://www.google.com/mobile/adsbot.html)", 3677, 4_000_000],
+      ["ua", "Mozilla/5.0 (compatible; AdsBot/1.0)", 3445, 3_500_000],
+      ["ua", "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)", 548, 600_000],
+      ["ua", "Mozilla/5.0 (compatible; Googlebot; +http://www.google.com/bot.html)", 100, 100_000],
+      ["ua", "Mozilla/5.0 (compatible; bot)", 3594, 3_600_000],
+    ];
+    const result = await summarizeBotEfficiencyRows(rows);
+    const names = result.map((r) => r.bot_name);
+
+    // No duplicate bot names
+    expect(new Set(names).size).toBe(names.length);
+
+    // Google Adsbot Mobile appears once, under Google, with only mobile requests
+    const adsbotMobile = result.filter((r) => r.bot_name === "Google Adsbot Mobile");
+    expect(adsbotMobile).toHaveLength(1);
+    expect(adsbotMobile[0]).toMatchObject({ category: "Google", request_count: 3677 });
+
+    // Generic AdsBot token is not misnamed as Google Adsbot Mobile
+    expect(result.find((r) => r.bot_name === "Adsbot")).toMatchObject({
+      category: "General Bot",
+      request_count: 3445,
+    });
+
+    // Googlebot/2.1 and slashless Googlebot merge into ONE Google Crawler row under Google
+    const googleCrawler = result.filter((r) => r.bot_name === "Google Crawler");
+    expect(googleCrawler).toHaveLength(1);
+    expect(googleCrawler[0]).toMatchObject({ category: "Google", request_count: 648 });
+
+    // Generic "bot" token is NOT misclassified as Google Crawler
+    expect(result.find((r) => r.bot_name === "Bot")).toMatchObject({
+      category: "General Bot",
+      request_count: 3594,
+    });
   });
 });

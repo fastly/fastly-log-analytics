@@ -184,4 +184,13 @@ describe("cloud-engine insights module", () => {
     );
     expect(env.insights).toEqual([]);
   });
+
+  it("excludes empty-string URLs from coalesced url and ip_security aggregates", () => {
+    const urlSql = _coalesced_url_aggregates();
+    expect(urlSql).toMatch(/NULLIF\("url", ''\) IS NOT NULL|"url" IS NOT NULL AND "url" != ''/);
+
+    const ipSql = _coalesced_ip_security_aggregates();
+    expect(ipSql).toContain(`COUNT(DISTINCT NULLIF("url", '')) FILTER (WHERE is_w AND is_auth) AS ce_w_paths`);
+    expect(ipSql).toContain(`COUNT(DISTINCT NULLIF("url", '')) FILTER (WHERE is_w AND status = 404) AS cd_distinct_404`);
+  });
 });

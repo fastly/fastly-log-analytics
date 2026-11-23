@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { UsageStatCards, type StorageUsageData } from '@/app/usage/_sections/UsageStatCards'
+import { costAxisTickFormat, UsageChartsGrid } from '@/app/usage/_sections/UsageChartsGrid'
 import { CostCalculator } from '@/components/CostCalculator/CostCalculator'
 import { CloudCostCalculator } from '@/components/CostCalculator/CloudCostCalculator'
 
@@ -232,5 +233,59 @@ describe('observed Platform usage', () => {
     expect(screen.getByText('DR state snapshots / month').nextElementSibling?.textContent).toBe('720')
     const total1h = screen.getByText('Total Estimated Monthly Cost').parentElement?.nextElementSibling?.textContent
     expect(total1h).not.toBe(total5m)
+  })
+
+  it('increases Estimated Cost y-axis precision when max cost is tiny to avoid duplicate $0.00 ticks', () => {
+    expect(costAxisTickFormat(0)).toBe('.2f')
+    expect(costAxisTickFormat(0.15)).toBe('.2f')
+    expect(costAxisTickFormat(0.05)).toBe('.2f')
+    expect(costAxisTickFormat(0.008)).toBe('.3f')
+    expect(costAxisTickFormat(0.002)).toBe('.4f')
+    expect(costAxisTickFormat(0.0002)).toBe('.5f')
+  })
+
+  it('reserves full chart-grid height in Cloud mode and Cloud stat-card height to prevent CLS', () => {
+    const { container: gridContainer } = render(
+      <UsageChartsGrid
+        ops={undefined}
+        loadingOps={true}
+        fetchingOps={false}
+        errorOps={null}
+        bw={undefined}
+        loadingBw={true}
+        fetchingBw={false}
+        errorBw={null}
+        logActivity={undefined}
+        loadingActivity={true}
+        fetchingActivity={false}
+        errorActivity={null}
+        rumBreakdown={undefined}
+        loadingRumBreakdown={false}
+        fetchingRumBreakdown={false}
+        errorRumBreakdown={null}
+        isRumEnabled={false}
+        isFetchingAny={false}
+        isLoadingInitial={true}
+        isDark={false}
+        rateA={0.005}
+        rateB={0.001}
+        rateEgress={0.12}
+        effectiveInterval="1 day"
+        setChartInterval={() => {}}
+        showCompute={true}
+        compute={undefined}
+        loadingCompute={true}
+      />,
+    )
+    const grid = gridContainer.firstElementChild as HTMLElement
+    expect(grid.className).toContain('min-h-[1128px]')
+    expect(grid.className).toContain('[contain-intrinsic-size:1128px]')
+
+    const { container: statsContainer } = render(
+      <UsageStatCards {...statProps} loadingStorage={true} cloudMode={true} />,
+    )
+    const statsGrid = statsContainer.firstElementChild as HTMLElement
+    expect(statsGrid.className).toContain('min-h-[420px]')
+    expect(statsGrid.className).toContain('[contain-intrinsic-size:420px]')
   })
 })

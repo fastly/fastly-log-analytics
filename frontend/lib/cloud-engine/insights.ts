@@ -178,7 +178,7 @@ export function _coalesced_url_aggregates(
         (timestamp < CAST('${wEsc}' AS TIMESTAMPTZ)) AS is_b,
         (timestamp >= CAST('${wEsc}' AS TIMESTAMPTZ)) AS is_w
       FROM ${tbl}
-      WHERE "url" IS NOT NULL
+      WHERE "url" IS NOT NULL AND "url" != ''
     )
     SELECT "url",
       COUNT(*) FILTER (WHERE is_w) AS w_total,
@@ -232,11 +232,11 @@ export function _coalesced_ip_security_aggregates(
       COUNT(*) FILTER (WHERE is_w AND is_auth AND status IN (401, 403)) AS ce_w_denied,
       COUNT(*) FILTER (WHERE is_b AND is_auth AND status IN (401, 403)) AS ce_b_denied,
       COUNT(*) FILTER (WHERE is_w AND is_auth) AS ce_w_attempts,
-      COUNT(DISTINCT "url") FILTER (WHERE is_w AND is_auth) AS ce_w_paths,
+      COUNT(DISTINCT NULLIF("url", '')) FILTER (WHERE is_w AND is_auth) AS ce_w_paths,
       COUNT(*) FILTER (WHERE is_w) AS w_total,
       COUNT(*) FILTER (WHERE is_w AND status = 404) AS cd_w_404,
       COUNT(*) FILTER (WHERE is_b AND status = 404) AS cd_b_404,
-      COUNT(DISTINCT "url") FILTER (WHERE is_w AND status = 404) AS cd_distinct_404
+      COUNT(DISTINCT NULLIF("url", '')) FILTER (WHERE is_w AND status = 404) AS cd_distinct_404
     FROM base
     GROUP BY "ip"
     HAVING COUNT(*) FILTER (WHERE is_w) >= 5

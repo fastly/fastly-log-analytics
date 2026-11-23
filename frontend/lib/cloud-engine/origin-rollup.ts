@@ -154,6 +154,7 @@ function slowUrls(result: RollupResult, body: OriginRollupBody): OriginSlowUrlsS
   const urls = rollupGroup(result.rollup, "urls", "url");
   if (!urls) return null;
   const all = [...urls].flatMap(([url, agg]) => {
+    if (!url) return [];
     const requests = agg.hists.ttfb?.count() ?? 0;
     return requests ? [{ url, requests, hist: agg.hists.ttfb }] : [];
   });

@@ -83,26 +83,24 @@ function stemsMatch(botStem: string, refStem: string): boolean {
   return botStem.length >= 3 && refStem.length >= 3 && (refStem.includes(botStem) || botStem.includes(refStem));
 }
 
-type DisplayIndex = { exact: Map<string, string>; substrings: [pattern: string, name: string][] };
+type DisplayIndex = { exact: Map<string, WellKnownBot> };
 
 function buildDisplayIndex(all: readonly WellKnownBot[]): DisplayIndex {
-  const exact = new Map<string, string>();
-  const substrings: [string, string][] = [];
+  const exact = new Map<string, WellKnownBot>();
   for (const bot of all) {
     if (!bot.id) continue;
     for (const key of [bot.id, ...bot.aliases]) {
       const low = key.toLowerCase();
-      if (!exact.has(low)) exact.set(low, bot.name);
+      if (!exact.has(low)) exact.set(low, bot);
     }
-    for (const pattern of bot.patternTexts) substrings.push([pattern.toLowerCase(), bot.name]);
   }
-  return { exact, substrings };
+  return { exact };
 }
 
-/** Cloud port of backend resolve_bot_display_name for a bot token the catalog did not match. */
-function resolveBotDisplayName(all: readonly WellKnownBot[], index: () => DisplayIndex, token: string): string {
+/** Resolve a generic bot token to a well-known catalog entry when probes or exact alias match. */
+function resolveCatalogBot(all: readonly WellKnownBot[], index: () => DisplayIndex, token: string): WellKnownBot | null {
   const raw = token.trim();
-  if (!raw) return "Other Bot";
+  if (!raw) return null;
   const probes = [
     raw,
     `Mozilla/5.0 (compatible; ${raw}/2.0)`,
@@ -112,16 +110,19 @@ function resolveBotDisplayName(all: readonly WellKnownBot[], index: () => Displa
   ];
   for (const probe of probes) {
     const matches = matchWellKnownBots(all, probe);
-    if (matches.length) return matches[0].name;
+    if (matches.length) return matches[0];
   }
   const rawLow = stripChars(raw.toLowerCase(), "/._- ");
   if (rawLow) {
-    const { exact, substrings } = index();
-    const name = exact.get(rawLow) ?? substrings.find(([pattern]) => pattern.includes(rawLow))?.[1];
-    if (name) return name;
+    const exactMatch = index().exact.get(rawLow);
+    if (exactMatch) return exactMatch;
   }
-  const cleaned = stripChars(raw, "/._- ");
-  return cleaned ? titleCase(cleaned.replace(/_/g, " ")) : "Other Bot";
+  return null;
+}
+
+function formatGenericBotName(token: string): string {
+  const cleaned = stripChars(token.trim(), "/._- ");
+  return cleaned ? titleCase(cleaned.replace(/[_-]+/g, " ")) : "Other Bot";
 }
 
 /**
@@ -156,24 +157,29 @@ export async function summarizeBotEfficiencyRows(
   type Bucket = { bot_name: string; category: string; request_count: number; resp_bytes: number; stems: Set<string> };
   const buckets = new Map<string, Bucket>();
   for (const [ua, count, bytes] of uaRows) {
-    const matched = matchWellKnownBots(all, ua)[0];
+    let catalogBot: WellKnownBot | null = matchWellKnownBots(all, ua)[0] ?? null;
+    let genericToken: string | null = null;
+    if (!catalogBot) {
+      const m = GENERIC_BOT_RE.exec(ua.toLowerCase());
+      if (!m) continue;
+      genericToken = m[1];
+      catalogBot = resolveCatalogBot(all, index, genericToken);
+    }
     let botId: string;
     let botName: string;
     let category: string;
     let stems: Iterable<string>;
-    if (matched) {
-      botId = matched.id;
-      botName = matched.name;
-      category = titleCase(matched.category);
-      const vendor = matched.id.split("-")[0].toLowerCase();
-      stems = [...matched.referralStems, ...(vendorStems.get(vendor) ?? [])];
+    if (catalogBot) {
+      botId = catalogBot.id;
+      botName = catalogBot.name;
+      category = titleCase(catalogBot.category);
+      const vendor = catalogBot.id.split("-")[0].toLowerCase();
+      stems = [...catalogBot.referralStems, ...(vendorStems.get(vendor) ?? [])];
     } else {
-      const m = GENERIC_BOT_RE.exec(ua.toLowerCase());
-      if (!m) continue;
-      botId = m[1];
-      botName = resolveBotDisplayName(all, index, m[1]);
+      botName = formatGenericBotName(genericToken!);
+      botId = `generic:${botName.toLowerCase()}`;
       category = "General Bot";
-      const stem = stripChars(m[1].replace(BOT_TOKEN_SUFFIX_RE, ""), "-_.");
+      const stem = stripChars(genericToken!.replace(BOT_TOKEN_SUFFIX_RE, ""), "-_.");
       stems = stem.length >= 3 ? [stem] : [];
     }
     let bucket = buckets.get(botId);

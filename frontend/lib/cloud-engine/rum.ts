@@ -223,7 +223,7 @@ export async function queryRumAnalytics(params: RumQueryParams = {}) {
   }>(
     `SELECT
       COUNT(*)::BIGINT AS vitals_cnt,
-      COUNT(DISTINCT session_id)::BIGINT AS sessions_cnt
+      COUNT(DISTINCT NULLIF(session_id, ''))::BIGINT AS sessions_cnt
     FROM client_vitals
     WHERE ${where}`,
     [],
@@ -236,8 +236,8 @@ export async function queryRumAnalytics(params: RumQueryParams = {}) {
   }>(
     `SELECT
       COUNT(*)::BIGINT AS errors_cnt,
-      COUNT(DISTINCT session_id)::BIGINT AS affected_sessions,
-      COUNT(DISTINCT COALESCE(error_message, message))::BIGINT AS unique_msgs
+      COUNT(DISTINCT NULLIF(session_id, ''))::BIGINT AS affected_sessions,
+      COUNT(DISTINCT COALESCE(NULLIF(error_message, ''), NULLIF(message, '')))::BIGINT AS unique_msgs
     FROM client_errors
     WHERE ${errorWhere}`,
     [],
@@ -378,12 +378,12 @@ export async function queryRumAnalytics(params: RumQueryParams = {}) {
 
   const topErrorRows = await engine.executeSql<Record<string, unknown>>(
     `SELECT
-      COALESCE(error_message, message, 'Unknown Error') AS message,
+      COALESCE(NULLIF(error_message, ''), NULLIF(message, ''), 'Unknown Error') AS message,
       COALESCE(filename, source, '') AS source,
       COUNT(*)::BIGINT AS count,
       MIN(lineno)::BIGINT AS lineno,
       MIN(colno)::BIGINT AS colno,
-      COUNT(DISTINCT session_id)::BIGINT AS affected_sessions,
+      COUNT(DISTINCT NULLIF(session_id, ''))::BIGINT AS affected_sessions,
       MAX(ts_ms)::BIGINT AS last_seen_ms
     FROM client_errors
     WHERE ${errorWhere}

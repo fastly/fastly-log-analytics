@@ -308,6 +308,7 @@ export function UsagePageContent({
         storageBillingProvenance={storageWithMeta?.storage_billing_provenance}
         operationsSource={opsWithMeta?.source}
         operationsComplete={opsWithMeta?.complete}
+        cloudMode={cloudMode}
       />
 
       <UsageChartsGrid
@@ -345,7 +346,11 @@ export function UsagePageContent({
 
       <div
         ref={estimatorRef}
-        className="min-h-[420px] [contain-intrinsic-size:420px] [content-visibility:auto]"
+        className={
+          cloudMode
+            ? 'min-h-[920px] [contain-intrinsic-size:920px] [content-visibility:auto]'
+            : 'min-h-[680px] [contain-intrinsic-size:680px] [content-visibility:auto]'
+        }
       >
         <AnalyticsCard
           title="Cost Estimator"
@@ -354,7 +359,7 @@ export function UsagePageContent({
             : 'Estimate your monthly FOS cost based on your configuration and contract rates. Pre-filled from your active service and rate settings.'}
         >
           {loadingPrefill || (estimatorVisible && loadingPrefillFull) ? (
-            <div className="space-y-3">
+            <div className={cloudMode ? 'space-y-3 min-h-[820px]' : 'space-y-3 min-h-[580px]'}>
               <SkeletonGrid count={4} height="36px" className="rounded-md" />
             </div>
           ) : cloudMode ? (

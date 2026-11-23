@@ -1221,7 +1221,7 @@ impl<'a> Dim<'a> {
         }
         if let Some(ost) = n.ost {
             self.ost += 1;
-            self.ost5 += i64::from(ost >= 500);
+            self.ost5 += i64::from((500..600).contains(&ost));
         }
         if let Some(r) = n.rtt {
             self.rtt.0 += r;
@@ -1295,7 +1295,7 @@ impl FilteredAgg {
         }
         if let Some(ost) = n.ost {
             self.ost += 1;
-            self.ost5 += i64::from(ost >= 500);
+            self.ost5 += i64::from((500..600).contains(&ost));
         }
         if let Some(r) = n.rtt {
             self.rtt.0 += r;

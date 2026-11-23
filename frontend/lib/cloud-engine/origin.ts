@@ -414,7 +414,7 @@ export function buildOriginSlowUrlsSql(
     WITH base AS (
       SELECT "url", ${latVal} AS _lat_val
       FROM ${table}
-      WHERE ${where} AND (${latVal} IS NOT NULL) AND "url" IS NOT NULL
+      WHERE ${where} AND (${latVal} IS NOT NULL) AND "url" IS NOT NULL AND "url" != ''
     ),
     qualified AS (
       SELECT "url"
@@ -614,7 +614,7 @@ export function buildOriginIpHealthSql(
       COUNT(*) AS requests,
       QUANTILE_CONT(${latVal}, [0.5, 0.95])[1] / 1000.0 AS p50_ms,
       QUANTILE_CONT(${latVal}, [0.5, 0.95])[2] / 1000.0 AS p95_ms,
-      ROUND(COUNT(*) FILTER (WHERE "ost" >= 500) * 100.0 / NULLIF(COUNT(*), 0), 1) AS error_pct
+      ROUND(COUNT(*) FILTER (WHERE "ost" >= 500 AND "ost" < 600) * 100.0 / NULLIF(COUNT(*), 0), 1) AS error_pct
     FROM ${table}
     WHERE ${where} AND "oip" IS NOT NULL AND "oip" != '' AND "oip" != '-' AND "ost" IS NOT NULL
     GROUP BY "oip"
@@ -765,9 +765,9 @@ export function buildOriginDrilldownSql(
   if (!latVal) return null;
 
   const errorExpr = actualCols.has("ost")
-    ? `"ost" >= 500`
+    ? `"ost" >= 500 AND "ost" < 600`
     : actualCols.has("status")
-      ? `"status" >= 500`
+      ? `"status" >= 500 AND "status" < 600`
       : "FALSE";
   const bytesExpr = actualCols.has("obytes")
     ? `SUM("obytes")`
