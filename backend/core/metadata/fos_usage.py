@@ -541,6 +541,52 @@ def cloud_copy_deleted_bytes_in_billing_window(service_id: str) -> int:
     return int(row[0]) if row and row[0] is not None else 0
 
 
+def cloud_copy_deletion_records_in_window(
+    service_id: str,
+    start: datetime,
+    end: datetime,
+    minimum_days: int = _FOS_MIN_BILLING_DAYS,
+) -> list[dict[str, Any]]:
+    """Return conservative minimum-billing intervals for local cloud-copy deletions overlapping [start, end)."""
+    start_utc = start.astimezone(UTC) if start.tzinfo is not None else start.replace(tzinfo=UTC)
+    end_utc = end.astimezone(UTC) if end.tzinfo is not None else end.replace(tzinfo=UTC)
+    min_days = max(0, int(minimum_days))
+    min_window_ms = min_days * 86_400_000
+    cutoff = iso_z(start_utc - timedelta(days=min_days))
+    upper = iso_z(end_utc)
+    con = _ul(service_id)
+    rows = con.execute(
+        "SELECT deleted_at, bytes, objects FROM cloud_copy_deletions "
+        "WHERE service_id = ? AND deleted_at >= ? AND deleted_at < ? ORDER BY deleted_at",
+        (service_id, cutoff, upper),
+    ).fetchall()
+    intervals: list[dict[str, Any]] = []
+    for idx, row in enumerate(rows):
+        deleted_at_str = row[0]
+        deleted_bytes = int(row[1] or 0)
+        if deleted_bytes <= 0:
+            continue
+        dt = parse_iso_utc(str(deleted_at_str))
+        if dt is None:
+            continue
+        deleted_ms = int(dt.timestamp() * 1000)
+        intervals.append(
+            {
+                "id": f"high-scale:cloud-copy:{deleted_at_str}:{idx}",
+                "dataset": "cloud_copy",
+                "kind": "minimum_billed",
+                "bytes": deleted_bytes,
+                "created_at": None,
+                "deleted_at": deleted_ms,
+                "billed_from": deleted_ms,
+                "billed_until": deleted_ms + min_window_ms,
+                "complete": False,
+                "provenance": "high-scale:cloud_copy_deletions",
+            }
+        )
+    return intervals
+
+
 def clear_usage_log(service_id: str) -> None:
     con = _ul(service_id)
     con.execute("DELETE FROM usage_log WHERE service_id = ?", (service_id,))

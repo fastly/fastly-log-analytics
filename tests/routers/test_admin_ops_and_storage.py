@@ -1667,6 +1667,134 @@ def test_current_storage_reads_high_scale_source_and_rum_bytes_from_the_source_l
     assert r_err.status_code >= 400, "a failed ledger read must surface, not render as zero bytes"
 
 
+@pytest.mark.no_postgres
+def test_current_storage_uses_local_high_scale_intervals_and_ignores_platform(client):
+    """High-Scale /api/usage/current-storage integrates selected-period intervals and never calls Fastly Platform."""
+    from backend.routers.usage import _STORAGE_INSPECTION_CACHE
+
+    svc = "svc-hs-billing-intervals"
+    src = {"name": svc, "service_id": svc, "bucket": "b", "prefix": ""}
+    _STORAGE_INSPECTION_CACHE[(svc, "b", "")] = (1000, 1, 0, 0)
+    app.dependency_overrides[get_source] = lambda: src
+    gib = 1024**3
+    t_start = datetime(2026, 11, 20, 10, 0, tzinfo=UTC)
+    t_end = datetime(2026, 11, 20, 14, 0, tzinfo=UTC)
+    s_ms = int(t_start.timestamp() * 1000)
+    e_ms = int(t_end.timestamp() * 1000)
+    hour_ms = 3_600_000
+    intervals = [
+        {
+            "id": "high-scale:source:obj-1",
+            "dataset": "raw_request",
+            "kind": "live",
+            "bytes": gib,
+            "created_at": s_ms - hour_ms,
+            "deleted_at": None,
+            "billed_from": s_ms - hour_ms,
+            "billed_until": e_ms,
+            "complete": True,
+            "provenance": "high-scale:source_objects",
+        },
+        {
+            "id": "high-scale:archive:man-1:min",
+            "dataset": "archive_request",
+            "kind": "minimum_billed",
+            "bytes": 2 * gib,
+            "created_at": s_ms - 2 * hour_ms,
+            "deleted_at": s_ms + hour_ms,
+            "billed_from": s_ms + hour_ms,
+            "billed_until": s_ms + 3 * hour_ms,
+            "complete": True,
+            "provenance": "high-scale:archive_manifests",
+        },
+    ]
+    try:
+        with (
+            patch("backend.routers.usage._get_storage_stats", return_value={"total_files": 1, "total_bytes": gib}),
+            patch("backend.config.load_config", return_value={}),
+            patch("backend.routers.usage.get_high_scale_service_registry") as registry,
+            patch("backend.core.metadata.usage_log.cloud_copy_deleted_bytes_in_billing_window", return_value=0),
+            patch(
+                "backend.core.metadata.fos_usage.cloud_copy_deletion_records_in_window",
+                return_value=[],
+            ),
+            patch("backend.high_scale.postgres_control.PostgresControlPlane") as control_plane,
+            patch("backend.routers.usage._fastly_api") as platform_api,
+        ):
+            registry.return_value.resolve.return_value = object()
+            control_plane.return_value.archive_storage_summary.return_value = {
+                "live_bytes": 0,
+                "live_objects": 0,
+                "expired_30d_bytes": 0,
+            }
+            control_plane.return_value.storage_billing_intervals.return_value = (
+                intervals,
+                True,
+                ["high-scale:archive_manifests", "high-scale:source_objects"],
+            )
+            resp = client.get(
+                "/api/usage/current-storage",
+                params={"start": "2026-11-20T10:00:00Z", "end": "2026-11-20T14:00:00Z"},
+                headers={"x-fastly-service-id": svc},
+            )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["storage_billing_complete"] is True
+        assert body["storage_billing_provenance"] == ["high-scale:archive_manifests", "high-scale:source_objects"]
+        assert body["live_billed_gb_hours"] == pytest.approx(4.0)
+        assert body["deleted_billed_gb_hours"] == pytest.approx(0.0)
+        assert body["minimum_billed_gb_hours"] == pytest.approx(4.0)
+        assert body["total_billed_gb_hours"] == pytest.approx(8.0)
+        assert len(body["storage_intervals"]) == 2
+        assert body["observed_at"] is not None
+        platform_api.assert_not_called()
+    finally:
+        app.dependency_overrides.pop(get_source, None)
+        _STORAGE_INSPECTION_CACHE.pop((svc, "b", ""), None)
+
+
+@pytest.mark.no_postgres
+def test_current_storage_marks_postgres_lifecycle_failure_incomplete(client):
+    """A Postgres storage_billing_intervals failure must return storage_billing_complete=False, never Platform fallback."""
+    from backend.routers.usage import _STORAGE_INSPECTION_CACHE
+
+    svc = "svc-hs-lifecycle-err"
+    src = {"name": svc, "service_id": svc, "bucket": "b", "prefix": ""}
+    _STORAGE_INSPECTION_CACHE[(svc, "b", "")] = (1000, 1, 0, 0)
+    app.dependency_overrides[get_source] = lambda: src
+    try:
+        with (
+            patch("backend.routers.usage._get_storage_stats", return_value={"total_files": 0, "total_bytes": 0}),
+            patch("backend.config.load_config", return_value={}),
+            patch("backend.routers.usage.get_high_scale_service_registry") as registry,
+            patch("backend.core.metadata.usage_log.cloud_copy_deleted_bytes_in_billing_window", return_value=0),
+            patch("backend.core.metadata.fos_usage.cloud_copy_deletion_records_in_window", return_value=[]),
+            patch("backend.high_scale.postgres_control.PostgresControlPlane") as control_plane,
+            patch("backend.routers.usage._fastly_api") as platform_api,
+        ):
+            registry.return_value.resolve.return_value = object()
+            control_plane.return_value.archive_storage_summary.return_value = {
+                "live_bytes": 0,
+                "live_objects": 0,
+                "expired_30d_bytes": 0,
+            }
+            control_plane.return_value.storage_billing_intervals.side_effect = RuntimeError("pg down")
+            resp = client.get(
+                "/api/usage/current-storage",
+                params={"start": "2026-11-20T10:00:00Z", "end": "2026-11-20T14:00:00Z"},
+                headers={"x-fastly-service-id": svc},
+            )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["storage_billing_complete"] is False
+        assert "high-scale:postgres_unavailable" in body["storage_billing_provenance"]
+        assert body["storage_intervals"] == []
+        platform_api.assert_not_called()
+    finally:
+        app.dependency_overrides.pop(get_source, None)
+        _STORAGE_INSPECTION_CACHE.pop((svc, "b", ""), None)
+
+
 def test_prefill_rates_skips_metadata_averages_and_current_storage_reads_rum_bytes_from_metadata(client):
     from backend.routers.usage import (
         _PREFILL_META_CACHE,

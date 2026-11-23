@@ -553,10 +553,16 @@ def usage_current_storage(
     if not src.get("bucket"):
         raise HTTPException(status_code=400, detail={"error": "Fastly Object Storage bucket not configured."})
 
-    from backend.utils.date_utils import parse_date_window
+    from backend.core.storage_billing import StorageBillingInterval, calculate_storage_billing
+    from backend.utils.date_utils import iso_z, parse_date_window, parse_window_str_to_dt
 
     now = datetime.now(UTC)
+    observed_at = iso_z(now)
     start_str, end_str = parse_date_window(start, end)
+    start_dt = parse_window_str_to_dt(start_str)
+    end_dt = parse_window_str_to_dt(end_str)
+    start_ms = int(start_dt.timestamp() * 1000)
+    end_ms = int(end_dt.timestamp() * 1000)
 
     try:
         from backend import config as svcconfig
@@ -686,6 +692,67 @@ def usage_current_storage(
         billed_gb = billed_bytes / (1024 * 1024 * 1024)
         gb_hours = billed_gb * (MIN_BILLING_DAYS * 24)
 
+        live_billed_gb_hours = 0.0
+        deleted_billed_gb_hours = 0.0
+        minimum_billed_gb_hours = 0.0
+        storage_billing_complete = False
+        storage_billing_provenance: list[str] = []
+        storage_intervals: list[StorageBillingInterval] = []
+
+        if high_scale_service is not None:
+            pg_intervals: list[dict[str, Any]] = []
+            pg_complete = False
+            pg_provenance: list[str] = []
+            try:
+                from backend.high_scale.postgres_control import PostgresControlPlane
+
+                pg_intervals, pg_complete, pg_provenance = PostgresControlPlane().storage_billing_intervals(
+                    service_id, start_dt, end_dt, minimum_days=MIN_BILLING_DAYS
+                )
+            except Exception:
+                pg_complete = False
+                pg_provenance = ["high-scale:postgres_unavailable"]
+                logger.debug("usage_current_storage: storage_billing_intervals failed", exc_info=True)
+
+            cloud_copy_intervals: list[dict[str, Any]] = []
+            cloud_copy_intervals_ok = True
+            try:
+                from backend.core.metadata.fos_usage import cloud_copy_deletion_records_in_window
+
+                cloud_copy_intervals = cloud_copy_deletion_records_in_window(
+                    src["name"], start_dt, end_dt, minimum_days=MIN_BILLING_DAYS
+                )
+            except Exception:
+                cloud_copy_intervals_ok = False
+                cloud_copy_deleted_bytes_complete = False
+                logger.debug("usage_current_storage: cloud copy deletion records failed", exc_info=True)
+
+            all_intervals = [*pg_intervals, *cloud_copy_intervals]
+            if end_ms >= start_ms:
+                billing_summary = calculate_storage_billing(all_intervals, start_ms, end_ms)
+                live_billed_gb_hours = billing_summary.live_gb_hours
+                deleted_billed_gb_hours = billing_summary.deleted_gb_hours
+                minimum_billed_gb_hours = billing_summary.minimum_billed_gb_hours
+                gb_hours = billing_summary.total_gb_hours
+                storage_billing_complete = (
+                    pg_complete
+                    and billing_summary.complete
+                    and archive_storage_complete
+                    and cloud_copy_deleted_bytes_complete
+                    and cloud_copy_intervals_ok
+                )
+                storage_billing_provenance = sorted(set(pg_provenance) | set(billing_summary.provenance))
+                storage_intervals = [StorageBillingInterval.model_validate(item) for item in all_intervals]
+            else:
+                gb_hours = 0.0
+                storage_billing_complete = False
+                storage_billing_provenance = sorted(set(pg_provenance))
+        else:
+            storage_billing_complete = archive_storage_complete and cloud_copy_deleted_bytes_complete
+            storage_billing_provenance = (
+                ["metadata_ledgers"] if storage_billing_complete else ["metadata_ledgers_incomplete"]
+            )
+
         resp: CurrentStorageResponse = CurrentStorageResponse.with_telemetry(
             debug_queries=debug_queries,
             live_bytes=live_bytes,
@@ -700,6 +767,13 @@ def usage_current_storage(
             quarantine_bytes=quarantine_bytes,
             total_billed_bytes=billed_bytes,
             total_billed_gb_hours=gb_hours,
+            storage_billing_complete=storage_billing_complete,
+            storage_billing_provenance=storage_billing_provenance,
+            live_billed_gb_hours=live_billed_gb_hours,
+            deleted_billed_gb_hours=deleted_billed_gb_hours,
+            minimum_billed_gb_hours=minimum_billed_gb_hours,
+            storage_intervals=storage_intervals,
+            observed_at=observed_at,
             archive_bytes=archive_bytes,
             archive_objects=archive_objects,
             archive_expired_bytes=archive_expired_bytes,
