@@ -163,6 +163,10 @@ export class ParquetBindingStore {
     this.check(generation);
     if (!this.initialized) {
       await backend.query(`SET memory_limit = ${literal(this.config.memoryLimit)}`);
+      // A read runs several statements over each registered file; without the
+      // cache each one re-parses a compact's footer (~250 KB of thrift). File
+      // names are never reused, so a cached footer can't outlive its bytes.
+      await backend.query("SET parquet_metadata_cache = true");
       this.check(generation);
       await this.publish(backend, this.snapshot([]));
       this.check(generation);

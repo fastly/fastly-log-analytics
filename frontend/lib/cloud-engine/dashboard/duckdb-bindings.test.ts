@@ -555,6 +555,16 @@ describe("bounded complete Parquet bindings", () => {
     await engine.reset();
   });
 
+  it("parses each registered file's footer once for all of a read's statements", async () => {
+    const engine = new DuckDBAnalyticalEngine({ backendFactory: createNodeBackend });
+    await engine.prewarm();
+    const [setting] = await engine.executeSql<{ on: boolean }>(
+      "SELECT current_setting('parquet_metadata_cache') AS on",
+    );
+    expect(setting.on).toBe(true);
+    await engine.reset();
+  });
+
   it("keeps a raw card with empty-string values exact", async () => {
     const engine = new DuckDBAnalyticalEngine({ backendFactory: createNodeBackend });
     const t = 1700000000000;
