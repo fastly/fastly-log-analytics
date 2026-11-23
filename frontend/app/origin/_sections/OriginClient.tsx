@@ -21,7 +21,7 @@ import {
 } from '@/hooks/useReportPageState'
 import { useActiveLogFields } from '@/hooks/useBootstrap'
 import { ReportLayout, type ReportLayoutRenderProps } from '@/components/ReportLayout'
-import { approxMark, boundMark, readRollupMeta, RollupDataThroughSlot } from '@/components/network/rollupLabels'
+import { approxMark, boundMark, RawWindowNote, readRawWindow, readRollupMeta, RollupDataThroughSlot } from '@/components/network/rollupLabels'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { hasFilterValues, originRollupSections } from '@/lib/cloud-engine/rollup-sections'
 import {
@@ -276,6 +276,7 @@ function OriginReportContent({
   return (
     <>
       <RollupDataThroughSlot reserve={rollupSections.length > 0} meta={rollup} className="mb-4" />
+      <RawWindowNote window={readRawWindow(bundle.data)} className="mb-4" />
       <Aggregates summary={summary} />
       <Timeseries
         originTs={originTs}

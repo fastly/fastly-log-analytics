@@ -313,6 +313,15 @@ Where raw reads remain:
   of a rolling 1h range);
 - filters on fields other than pivots, and ranges under an hour.
 
+/origin has no slices: a filtered /origin reads every section raw (only a
+summary-only request with one low-cardinality include comes from
+`filtered_rollups`). Its column projection may load up to 96 MiB, the
+projected ceiling Insights uses. When a range needs more, the adapter
+narrows the read to the widest newest window that fits (1h, then 4× wider,
+like `/api/query`), answers exactly over that window and adds
+`raw_window: { data_from, data_through }`, which the page shows as a note.
+Only when even the newest hour is over budget does it return 413.
+
 A summary or bundle the listing names but storage answers with 404 (a
 catalog entry that outlived its object) never fails a page. Its read throws
 `MissingCloudFileError`, and each reader covers its rows exactly another way:

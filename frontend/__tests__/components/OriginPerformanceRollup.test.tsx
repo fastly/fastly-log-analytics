@@ -131,6 +131,20 @@ describe('OriginClient on Cloud', () => {
     expect(screen.queryByText(/Data through/)).not.toBeInTheDocument()
     expect(screen.queryByTestId('rollup-data-through-slot')).not.toBeInTheDocument()
   })
+
+  it('says when the raw read covered only the newest part of the range', async () => {
+    setCloudModeRuntime(true)
+    layout.filterPayload = { status: { mode: 'include', values: ['200'] } }
+    recordPosts('/api/origin/aggregates', () => ({
+      ...originRaw,
+      raw_window: { data_from: '2027-01-15T09:00:00.000Z', data_through: '2027-01-15T10:00:00.000Z' },
+    }))
+    renderWithQuery(<OriginClient />, { withNuqs: true })
+
+    const note = await screen.findByTestId('raw-window-note')
+    expect(note).toHaveTextContent(/Showing 09:00–10:00 only/)
+    expect(note).toHaveTextContent(/browser scan budget/)
+  })
 })
 
 const waterfall = { avg: { edge_processing: 1.5, origin_wait: 40, origin_download: 3, client_download: 7 } }

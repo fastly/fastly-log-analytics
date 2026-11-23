@@ -1110,6 +1110,73 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       "but the browser scan budget is 256 files; choose a shorter time range");
   });
 
+  describe("/origin raw scans over the browser budget", () => {
+    const MiB = 1024 * 1024;
+    const windows: string[][] = [];
+    const sql: string[] = [];
+    const overAbove = (hours: number) => vi.mocked(ensureCloudRange).mockImplementation(async (from, to) => {
+      windows.push([String(from), String(to)]);
+      if ((Date.parse(String(to)) - Date.parse(String(from))) / 3_600_000 > hours) {
+        throw new CloudBudgetError("over", { unit: "bytes", needed: 100 * MiB, limit: 96 * MiB });
+      }
+      return getDuckDBEngine().readContext();
+    });
+    const origin = () => handleCloudAnalyticalRequest(new Request("http://localhost/api/origin/aggregates", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        sections: ["summary", "slow_urls"], filters: { status: { mode: "include", values: ["200"] } },
+        start_time: "2026-11-05T00:00:00Z", end_time: "2026-11-06T00:00:00Z",
+      }),
+    }));
+    beforeEach(() => {
+      windows.length = 0;
+      sql.length = 0;
+      setOriginSqlExecutor({
+        tableName: "requests",
+        getColumns: async () => new Set(["ts_ms", "ottfb", "ost", "status", "url"]),
+        query: async (text) => { sql.push(text); return []; },
+      });
+    });
+    afterEach(() => { vi.mocked(ensureCloudRange).mockReset().mockImplementation(async () => getDuckDBEngine().readContext()); });
+
+    it("answers exactly over the widest newest window that fits, and says which", async () => {
+      overAbove(5);
+      const res = await origin();
+      expect(res?.status).toBe(200);
+      expect(windows.map(([from]) => from)).toEqual([
+        "2026-11-05T00:00:00Z", "2026-11-05T08:00:00.000Z", "2026-11-05T20:00:00.000Z",
+      ]);
+      expect((await res!.json()).raw_window).toEqual({
+        data_from: "2026-11-05T20:00:00.000Z", data_through: "2026-11-06T00:00:00.000Z",
+      });
+      expect(sql.length).toBeGreaterThan(0);
+      for (const text of sql) {
+        expect(text).toContain(`"ts_ms" >= ${Date.parse("2026-11-05T20:00:00Z")}`);
+        expect(text).not.toContain(`"ts_ms" >= ${Date.parse("2026-11-05T00:00:00Z")}`);
+      }
+    });
+
+    it("answers the whole range without a window note when it fits", async () => {
+      overAbove(48);
+      const res = await origin();
+      expect(windows).toHaveLength(1);
+      expect(await res!.json()).not.toHaveProperty("raw_window");
+    });
+
+    it("still refuses when even the newest hour is over budget", async () => {
+      overAbove(0.5);
+      const res = await origin();
+      expect(res?.status).toBe(413);
+      expect(windows.at(-1)?.[0]).toBe("2026-11-05T23:00:00.000Z");
+    });
+
+    it("budgets /origin projections like other projected scans", async () => {
+      vi.mocked(ensureCloudRange).mockClear();
+      await origin();
+      expect(vi.mocked(ensureCloudRange).mock.calls[0]?.[4]?.projection?.maxBytes).toBe(96 * MiB);
+    });
+  });
+
   it("answers unfiltered /network reads from summaries before any raw scan, over the scan's range and service", async () => {
     vi.mocked(ensureCloudRange).mockClear();
     vi.mocked(networkFromRollup).mockClear().mockResolvedValueOnce({ served: "rollup" } as never);
@@ -1574,12 +1641,14 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       return vi.mocked(ensureCloudRange).mock.calls[0]?.[4]?.projection;
     };
     const filters = { host_1: { mode: "include", values: ["example.com"] } };
+    const maxBytes = 96 * 1024 * 1024;
     expect(await options("/api/origin/aggregates", { filters, sections: ["summary"] }))
-      .toEqual({ columns: [...ORIGIN_SCAN_COLUMNS.aggregates, "host"] });
-    expect(await options("/api/origin/slow-urls")).toEqual({ columns: [...ORIGIN_SCAN_COLUMNS.aggregates] });
+      .toEqual({ columns: [...ORIGIN_SCAN_COLUMNS.aggregates, "host"], maxBytes });
+    expect(await options("/api/origin/slow-urls")).toEqual({ columns: [...ORIGIN_SCAN_COLUMNS.aggregates], maxBytes });
     expect(await options("/api/origin/shielding-analysis", {}))
-      .toEqual({ columns: [...ORIGIN_SCAN_COLUMNS["shielding-analysis"]] });
-    expect(await options("/api/origin/drilldown", { dimension: "pop" })).toEqual({ columns: [...ORIGIN_SCAN_COLUMNS.drilldown] });
+      .toEqual({ columns: [...ORIGIN_SCAN_COLUMNS["shielding-analysis"]], maxBytes });
+    expect(await options("/api/origin/drilldown", { dimension: "pop" }))
+      .toEqual({ columns: [...ORIGIN_SCAN_COLUMNS.drilldown], maxBytes });
     const team = { team: { mode: "include", values: ["a"] } };
     const overview = await options("/api/value/summary", { sections: ["overview"], custom_filters: team });
     expect(overview?.columns).toEqual(expect.arrayContaining(["cache", "elapsed", "resp_bytes", "team"]));

@@ -56,3 +56,27 @@ export function RollupDataThroughSlot({ reserve, meta, className }: {
     </div>
   )
 }
+
+/** The newest window Cloud narrowed an over-budget raw read to; absent when the whole range was read. */
+export type RawWindow = { data_from: string; data_through: string }
+
+export function readRawWindow(data: unknown): RawWindow | undefined {
+  return (data as { raw_window?: RawWindow } | null | undefined)?.raw_window
+}
+
+export function RawWindowNote({ window, className }: { window: RawWindow | undefined; className?: string }) {
+  const timezone = useTimezone()
+  if (!window) return null
+  return (
+    <div role="note" data-testid="raw-window-note"
+      className={cn('flex items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs', className)}>
+      <Info className="h-3.5 w-3.5 shrink-0" />
+      <span title={`${formatDate(window.data_from, timezone, 'yyyy-MM-dd HH:mm:ss')} – ${
+        formatDate(window.data_through, timezone, 'yyyy-MM-dd HH:mm:ss')}`}>
+        Showing {formatDate(window.data_from, timezone, 'HH:mm')}–{formatDate(window.data_through, timezone, 'HH:mm')} only:
+        the whole range needs more log data than the browser scan budget allows. Values are exact for this
+        window; choose a shorter range to see all of it.
+      </span>
+    </div>
+  )
+}
