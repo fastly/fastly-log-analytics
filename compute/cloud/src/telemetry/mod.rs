@@ -72,6 +72,7 @@ pub enum LogKind {
     AdminAudit,
     ApiTelemetry,
     PlatformErrors,
+    StorageInventory,
 }
 
 /// Kinds a caller may write. `AdminAudit` is absent on purpose: audit rows are archived from
@@ -84,6 +85,7 @@ pub enum WritableLogKind {
     FosUsage,
     ApiTelemetry,
     PlatformErrors,
+    StorageInventory,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,6 +107,7 @@ impl WritableLogKind {
             LogKind::FosUsage => Self::FosUsage,
             LogKind::ApiTelemetry => Self::ApiTelemetry,
             LogKind::PlatformErrors => Self::PlatformErrors,
+            LogKind::StorageInventory => Self::StorageInventory,
             LogKind::AdminAudit | LogKind::CronTicks => return None,
         })
     }
@@ -118,12 +121,13 @@ impl From<WritableLogKind> for LogKind {
             WritableLogKind::FosUsage => Self::FosUsage,
             WritableLogKind::ApiTelemetry => Self::ApiTelemetry,
             WritableLogKind::PlatformErrors => Self::PlatformErrors,
+            WritableLogKind::StorageInventory => Self::StorageInventory,
         }
     }
 }
 
 impl LogKind {
-    pub const ALL: [LogKind; 7] = [
+    pub const ALL: [LogKind; 8] = [
         Self::CronRuns,
         Self::CronTicks,
         Self::IngestFiles,
@@ -131,6 +135,7 @@ impl LogKind {
         Self::AdminAudit,
         Self::ApiTelemetry,
         Self::PlatformErrors,
+        Self::StorageInventory,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -142,6 +147,7 @@ impl LogKind {
             Self::AdminAudit => "admin_audit",
             Self::ApiTelemetry => "api_telemetry",
             Self::PlatformErrors => "platform_errors",
+            Self::StorageInventory => "storage_inventory",
         }
     }
 
@@ -152,7 +158,7 @@ impl LogKind {
     pub fn tier(self) -> Tier {
         match self {
             Self::AdminAudit => Tier::Audit,
-            Self::CronRuns | Self::IngestFiles => Tier::Outbox,
+            Self::CronRuns | Self::IngestFiles | Self::StorageInventory => Tier::Outbox,
             _ => Tier::Cache,
         }
     }
@@ -164,7 +170,11 @@ impl LogKind {
     pub fn default_retention_days(self) -> u32 {
         match self {
             Self::AdminAudit => 365,
-            Self::CronRuns | Self::IngestFiles | Self::PlatformErrors | Self::FosUsage => 30,
+            Self::CronRuns
+            | Self::IngestFiles
+            | Self::PlatformErrors
+            | Self::FosUsage
+            | Self::StorageInventory => 30,
             Self::ApiTelemetry | Self::CronTicks => 14,
         }
     }

@@ -941,7 +941,7 @@ pub(super) fn maintenance_stage(
             0 => sweep_stage(&store, settings),
             1 => compact_stage(&store, settings),
             2 => history_stage(&store, settings),
-            3 => reconcile_stage(&store),
+            3 => reconcile_stage(&store, &buffer),
             4 => bundle_stage(&store),
             6 => reset::reset_stage(&store),
             _ => unreachable!("MAINT_STAGES has seven entries; request_compact has its own job"),
@@ -1604,7 +1604,7 @@ fn history_stage<R: Runtime>(
     Some(row)
 }
 
-fn reconcile_stage<R: Runtime>(store: &Store<'_, R>) -> Option<StageRow> {
+fn reconcile_stage<R: Runtime>(store: &Store<'_, R>, buffer: &LogBuffer) -> Option<StageRow> {
     let runtime = store.runtime;
     caller(runtime, "cron:storage_reconcile");
     if !enough(runtime, RECONCILE_CALLS) {
@@ -1616,6 +1616,9 @@ fn reconcile_stage<R: Runtime>(store: &Store<'_, R>) -> Option<StageRow> {
     let mut row = StageRow::new("storage_reconcile", runtime.now());
     match retention::storage_reconcile_step(store, TAIL) {
         Ok(Some(report)) => {
+            for inv_row in report.inventory_rows {
+                write_log(runtime, buffer, WritableLogKind::StorageInventory, inv_row);
+            }
             if let Some(snapshot) = report.snapshot {
                 row.outcome = "done";
                 row.details = Some(snapshot);

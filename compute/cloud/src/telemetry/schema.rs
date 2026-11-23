@@ -133,6 +133,14 @@ fn specific(kind: LogKind) -> &'static [(&'static str, Kind)] {
             ("message", Utf8),
             ("sample_json", Utf8),
         ],
+        LogKind::StorageInventory => &[
+            ("snapshot_id", Utf8),
+            ("dataset", Utf8),
+            ("key", Utf8),
+            ("size", Int64),
+            ("last_modified", Utf8),
+            ("complete", Bool),
+        ],
     }
 }
 

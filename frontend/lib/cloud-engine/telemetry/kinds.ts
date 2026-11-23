@@ -6,6 +6,7 @@ export const OPS_KINDS = [
   "admin_audit",
   "api_telemetry",
   "platform_errors",
+  "storage_inventory",
 ] as const;
 
 
@@ -26,6 +27,7 @@ export const CLEARABLE_KINDS = [
 export const OUTBOX_KINDS = [
   "cron_runs",
   "ingest_files",
+  "storage_inventory",
 ] as const satisfies readonly OpsKind[];
 
 export type LogRow = Record<string, unknown> & {
