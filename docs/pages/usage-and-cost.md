@@ -14,7 +14,7 @@ On Cloud, the Estimated Incurred Cost card's **Compute & vCPU** row and the **Co
 
 Cloud uses `CloudCostCalculator.tsx` and the canonical `lib/cloud-engine/usage/estimate.ts` model instead of the High-Scale archive model. It has three parts:
 
-- **Your Traffic & Config:** editable total and edge requests per day, log sample rate, log file period, raw files per period, compressed bytes per line, Parquet bytes per row and log retention, each labelled Measured, Reference or What-if (after an edit); switches for edge-only logging and deleting raw logs after ingest; and RUM pageviews, sample rate and retention when RUM is enabled.
+- **Your Traffic & Config:** editable total requests per day, log sample rate, log period, log line size (uncompressed bytes) and log retention, each labelled Measured, Reference or What-if (after an edit); a switch for edge-only logging; and RUM pageviews, sample rate and retention when RUM is enabled. Everything else is derived: edge requests keep their measured share of total requests, raw files per period stay measured, the zstd raw and Parquet sizes scale with the line size by the install's measured ratios (zstd at 8× when unmeasured), and raw logs are always deleted after ingest. Measured Object Storage replaces the modelled storage only until the first edit; after that the model prices it, so every what-if moves the estimate.
 - **Contract Rates:** the configured rates, read-only, with list-price fallbacks. There is no billing zone selector.
 - **Monthly Estimate Breakdown:** Compute requests and vCPU, KV operations, secrets, CDN requests and delivery, storage, and the model's summary/RUM/compaction/high-RPS lines, each with its monthly quantities under the label, and the total.
 

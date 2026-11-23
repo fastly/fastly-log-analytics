@@ -13,18 +13,36 @@ import {
   type EstimateRates,
 } from '@/lib/cloud-engine/usage/estimate'
 import type { MeasuredEstimate } from '@/lib/cloud-engine/usage/estimatePrefill'
+import { INGEST_LIMITS } from '@/lib/cloud-engine/usage/ingestShape'
 import { NumInput, ReadOnlyValue, ResultRow, Row } from './CostCalculator'
 
+const LINE_SIZE_LABEL = 'Log line size (bytes, uncompressed)'
+
+/** Only what a user knows; edge requests, files per period and stored sizes are derived from these. */
 const INPUT_ROWS: [keyof EstimateInputs, string][] = [
   ['requestsPerDay', 'Total requests per day'],
-  ['edgeRequestsPerDay', 'Edge requests per day'],
   ['samplePct', 'Log sample rate (%)'],
-  ['logPeriodS', 'Log file period (seconds)'],
-  ['filesPerPeriod', 'Raw files per log period'],
-  ['gzBytesPerLine', 'Compressed bytes per log line'],
-  ['parquetBytesPerRow', 'Parquet bytes per row'],
-  ['retentionDays', 'Log retention (days)'],
+  ['logPeriodS', 'Log period (seconds)'],
 ]
+
+/**
+ * The install's measured inputs with the user's what-ifs applied. Edge requests keep their measured share of
+ * total requests, and the zstd raw and Parquet sizes scale with the uncompressed line size; raw logs are always
+ * deleted after ingest.
+ */
+export function applyWhatIfs(base: EstimateInputs, edits: Partial<EstimateInputs>, lineBytes?: number): EstimateInputs {
+  const inputs = { ...base, ...edits, deleteAfter: true }
+  if (edits.requestsPerDay != null && base.requestsPerDay > 0) {
+    inputs.edgeRequestsPerDay = base.edgeRequestsPerDay * (edits.requestsPerDay / base.requestsPerDay)
+  }
+  const baseLineBytes = base.gzBytesPerLine * INGEST_LIMITS.rawBytesPerGzByte
+  if (lineBytes != null && baseLineBytes > 0) {
+    const scale = lineBytes / baseLineBytes
+    inputs.gzBytesPerLine = base.gzBytesPerLine * scale
+    inputs.parquetBytesPerRow = base.parquetBytesPerRow * scale
+  }
+  return inputs
+}
 
 const RATE_ROWS: [keyof EstimateRates, string][] = [
   ['storage_rate_per_gb_month', 'Storage ($/GB-month)'],
@@ -49,7 +67,10 @@ export function CloudCostCalculator({ prefillData, rates: configuredRates, local
   localStoragePeriodHours?: number | null
 }) {
   const [edits, setEdits] = useState<Partial<EstimateInputs>>({})
-  const inputs = { ...DEFAULT_INPUTS, ...prefillData?.inputs, ...edits }
+  const [lineBytes, setLineBytes] = useState<number | undefined>(undefined)
+  const base = { ...DEFAULT_INPUTS, ...prefillData?.inputs }
+  const inputs = applyWhatIfs(base, edits, lineBytes)
+  const edited = lineBytes != null || Object.keys(edits).length > 0
   const units = { ...DEFAULT_UNITS, ...prefillData?.units }
   const rates = { ...LIST_PRICE_RATES }
   for (const key of Object.keys(rates) as (keyof EstimateRates)[]) {
@@ -60,7 +81,8 @@ export function CloudCostCalculator({ prefillData, rates: configuredRates, local
   const result = estimateMonthly(inputs, units, rates, prefillData?.compaction, {
     relay: prefillData?.relay ?? 0,
   })
-  const localStorageGbMonths = measuredStorageGbMonths(localStorageGbHours, localStoragePeriodHours)
+  // Measured storage describes this install as it is; once the user asks "what if", the model prices storage.
+  const localStorageGbMonths = edited ? null : measuredStorageGbMonths(localStorageGbHours, localStoragePeriodHours)
   const localStorageCost = localStorageGbMonths == null
     ? null
     : localStorageGbMonths * rates.storage_rate_per_gb_month
@@ -93,6 +115,21 @@ export function CloudCostCalculator({ prefillData, rates: configuredRates, local
       </div>
     </Row>
   )
+  const lineSizeRow = (
+    <Row key="lineBytes" label={LINE_SIZE_LABEL}>
+      <div className="flex items-center gap-2">
+        <span className="text-xs text-muted-foreground">
+          {lineBytes != null ? 'What-if' : measuredInputs.gzBytesPerLine ? 'Measured' : 'Reference'}
+        </span>
+        <NumInput
+          aria-label={LINE_SIZE_LABEL}
+          value={Math.round(inputs.gzBytesPerLine * INGEST_LIMITS.rawBytesPerGzByte)}
+          onChange={setLineBytes}
+          wide
+        />
+      </div>
+    </Row>
+  )
 
   return (
     <div className="space-y-6">
@@ -105,11 +142,10 @@ export function CloudCostCalculator({ prefillData, rates: configuredRates, local
         <section>
           <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3">Your Traffic &amp; Config</h3>
           {INPUT_ROWS.map(inputRow)}
+          {lineSizeRow}
+          {inputRow(['retentionDays', 'Log retention (days)'])}
           <Row label="Edge-only logging">
             <Switch aria-label="Edge-only logging" checked={inputs.edgeOnly} onCheckedChange={set('edgeOnly')} />
-          </Row>
-          <Row label="Delete raw logs after ingest">
-            <Switch aria-label="Delete raw logs after ingest" checked={inputs.deleteAfter} onCheckedChange={set('deleteAfter')} />
           </Row>
           {prefillData?.rumEnabled && ([
             ['rumPageviewsPerDay', 'RUM pageviews per day'],
