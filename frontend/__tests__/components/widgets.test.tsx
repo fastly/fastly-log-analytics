@@ -2126,6 +2126,52 @@ describe('TimeSeriesChart, ScorerSeries, PlotlyChart, TrafficChart, CardGrid, Fi
       expect(screen.getByText('Failed to load bot data.')).toBeInTheDocument()
       expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument()
     })
+
+    it('reserves a consistent 392px height for skeletons and pending lazy cards to prevent scroll CLS', () => {
+      const { container, rerender } = render(
+        <CardGrid
+          visibleCardList={[]}
+          isReady={false}
+          isFetchingAggs={false}
+          aggregates={undefined}
+          compareAggregates={undefined}
+          compareMode={false}
+          topBotsData={undefined}
+          collapsedSections={new Set()}
+          toggleSectionCollapsed={() => {}}
+          onRowClick={() => {}}
+        />,
+      )
+      const skeleton = container.querySelector('[data-empty-placeholder="true"]')
+      expect(skeleton?.className).toContain('h-[392px]')
+      expect(skeleton?.className).toContain('[contain-intrinsic-size:392px]')
+
+      stubIntersectionObserver()
+      const prevMockTopTen = mocks.mockTopTenTable
+      mocks.mockTopTenTable = false
+      try {
+        rerender(
+          <CardGrid
+            visibleCardList={[{ id: 'status', label: 'Status', inActiveFormat: true }]}
+            isReady={true}
+            isFetchingAggs={false}
+            aggregates={{ data: { status: { total: 10, top: [{ value: '200', count: 10 }] } } }}
+            compareAggregates={undefined}
+            compareMode={false}
+            topBotsData={undefined}
+            collapsedSections={new Set()}
+            toggleSectionCollapsed={() => {}}
+            onRowClick={() => {}}
+          />,
+        )
+        const lazyPanel = container.querySelector('[data-lazy-panel="pending"]') as HTMLElement | null
+        expect(lazyPanel).not.toBeNull()
+        expect(lazyPanel?.style.minHeight).toBe('392px')
+      } finally {
+        mocks.mockTopTenTable = prevMockTopTen
+        vi.unstubAllGlobals()
+      }
+    })
   })
 
   function seedFilters(filters: { column: string; value: string; mode?: 'include' | 'exclude' }[]) {
@@ -2338,6 +2384,18 @@ describe('TimeSeriesChart, ScorerSeries, PlotlyChart, TrafficChart, CardGrid, Fi
       expect(screen.getByLabelText(/no change/i).className).toMatch(/text-muted-foreground/)
       expect(container.querySelector('svg.lucide-trending-up')).not.toBeNull()
       expect(container.querySelector('svg.lucide-trending-down')).not.toBeNull()
+    })
+
+    it('reserves 392px min-height and contain-intrinsic-size in both empty and populated states', () => {
+      const { container, rerender } = render(<TopTenTable title="Status" field="status" data={{ total: 0, top: [] }} />)
+      const emptyCard = container.firstElementChild as HTMLElement
+      expect(emptyCard.className).toContain('min-h-[392px]')
+      expect(emptyCard.className).toContain('[contain-intrinsic-size:392px]')
+
+      rerender(<TopTenTable title="Status" field="status" data={{ total: 5, top: [{ value: '200', count: 5 }] }} />)
+      const populatedCard = container.firstElementChild as HTMLElement
+      expect(populatedCard.className).toContain('min-h-[392px]')
+      expect(populatedCard.className).toContain('[contain-intrinsic-size:392px]')
     })
   })
 
