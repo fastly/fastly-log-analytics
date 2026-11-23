@@ -7,6 +7,7 @@ import { parquetQuerySchema } from "./parquet-projection";
 import { parquetFixture } from "./test-fixtures";
 import { Aggregator } from "./engine";
 import { CARD_FIELDS } from "./summaries";
+import { CloudBudgetError, MAX_REGISTERED_BYTES } from "./budget";
 
 describe("bounded complete Parquet bindings", () => {
   it("answers the complete filtered range without materializing unused wide columns", async () => {
@@ -300,6 +301,17 @@ describe("bounded complete Parquet bindings", () => {
     await engine.reset();
   });
 
+  it("refuses a registration over the compressed byte budget with a typed budget error", async () => {
+    const engine = new DuckDBAnalyticalEngine({ backendFactory: createNodeBackend });
+    const bytes = parquetFixture([{ timestamp: 1700000000000, status: 200, cache: "HIT", resp_bytes: 1 }]);
+    Object.defineProperty(bytes, "byteLength", { value: MAX_REGISTERED_BYTES + 1 });
+    const error = await engine.ingestFile("big", "big.parquet", bytes).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(CloudBudgetError);
+    expect((error as CloudBudgetError).detail).toEqual({ unit: "bytes", needed: MAX_REGISTERED_BYTES + 1, limit: MAX_REGISTERED_BYTES });
+    expect(engine.hasFile("big")).toBe(false);
+    await engine.reset();
+  });
+
   it("does not evict a binding pinned while compressed-budget admission awaits publication", async () => {
     let enter!: () => void, resume!: () => void, delay = false;
     const entered = new Promise<void>((resolve) => { enter = resolve; });
@@ -325,7 +337,7 @@ describe("bounded complete Parquet bindings", () => {
     const old = engine.readContext();
     delay = true;
     const pending = engine.ingestFile("two", "two.parquet", weighted(202));
-    const rejected = expect(pending).rejects.toThrow(/byte budget/);
+    const rejected = expect(pending).rejects.toBeInstanceOf(CloudBudgetError);
     await entered;
     const queued = old.executeSql("SELECT status FROM logs");
     resume();

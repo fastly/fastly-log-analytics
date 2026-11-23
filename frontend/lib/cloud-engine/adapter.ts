@@ -585,9 +585,6 @@ async function catalogCustomFields(
 let analyticalQueue = Promise.resolve();
 /** Needed-column bytes a speculative Insights prefetch may load. */
 const PREFETCH_PROJECTION_BYTES = 32 * 1024 * 1024;
-const INSIGHTS_PROJECTION_BYTES = 96 * 1024 * 1024;
-/** Needed-column bytes an /origin raw scan may load; its projection is as narrow as Insights'. */
-const ORIGIN_PROJECTION_BYTES = 96 * 1024 * 1024;
 
 function isReadOnlyCloudPost(path: string): boolean {
   return (
@@ -1126,17 +1123,13 @@ async function prepareCloudScan(
     serviceId: decodedServiceId, customFields,
     ...insights ? { projection: {
       columns: insightScanColumns(filters, detectors),
-      maxBytes: request.headers.get("x-flp-cloud-prefetch") === "1"
-        ? PREFETCH_PROJECTION_BYTES
-        : INSIGHTS_PROJECTION_BYTES,
+      ...request.headers.get("x-flp-cloud-prefetch") === "1" ? { maxBytes: PREFETCH_PROJECTION_BYTES } : {},
       // A detector follow-up reuses the window its summary pass already loaded with every insight column.
       ...wider ? { wider: {
         from: new Date(Date.parse(end) - Number(params.window_size_hrs ?? 24) * 3_600_000).toISOString(),
         columns: insightScanColumns(filters),
       } } : {},
-    } } : scanColumns ? { projection: {
-      columns: scanColumns, ...originScan ? { maxBytes: ORIGIN_PROJECTION_BYTES } : {},
-    } } : {},
+    } } : scanColumns ? { projection: { columns: scanColumns } } : {},
   });
   // A range over budget is answered exactly over the widest newest window that fits
   // (1h, then 4x wider, as /api/query widens), rather than refused.

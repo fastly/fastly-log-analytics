@@ -1065,7 +1065,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       window_size_hrs: 24, baseline_hours: 168, filters: { host_1: { mode: "include", values: ["example.com"] } },
     }));
     expect(insights?.projection?.columns).toEqual(expect.arrayContaining(["url", "status", "transport", "host"]));
-    expect(insights?.projection?.maxBytes).toBe(96 * 1024 * 1024);
+    expect(insights?.projection?.maxBytes).toBeUndefined();
     // Availability needs only the files' schemas, read from their footers without loading a range.
     expect(await options("/api/insight-availability")).toBeUndefined();
     expect(vi.mocked(cloudRangePresentColumns)).toHaveBeenCalled();
@@ -1130,7 +1130,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     const overAbove = (hours: number) => vi.mocked(ensureCloudRange).mockImplementation(async (from, to) => {
       windows.push([String(from), String(to)]);
       if ((Date.parse(String(to)) - Date.parse(String(from))) / 3_600_000 > hours) {
-        throw new CloudBudgetError("over", { unit: "bytes", needed: 100 * MiB, limit: 96 * MiB });
+        throw new CloudBudgetError("over", { unit: "bytes", needed: 100 * MiB, limit: 64 * MiB });
       }
       return getDuckDBEngine().readContext();
     });
@@ -1186,7 +1186,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     it("budgets /origin projections like other projected scans", async () => {
       vi.mocked(ensureCloudRange).mockClear();
       await origin();
-      expect(vi.mocked(ensureCloudRange).mock.calls[0]?.[4]?.projection?.maxBytes).toBe(96 * MiB);
+      expect(vi.mocked(ensureCloudRange).mock.calls[0]?.[4]?.projection?.maxBytes).toBeUndefined();
     });
 
     const host = { host: { mode: "include", values: ["example.com"] } };
@@ -1518,7 +1518,6 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     // No raw pass loaded that window wide, so the follow-up reads only its own columns.
     expect(vi.mocked(ensureCloudRange).mock.calls[0][4]?.projection).toEqual({
       columns: insightScanColumns([], ["credential_enumeration"]),
-      maxBytes: 96 * 1024 * 1024,
     });
   });
 
@@ -1657,7 +1656,6 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     expect(calls[1][0]).toBe(calls[0][0]);
     expect(calls[1][4]?.projection).toEqual({
       columns: insightScanColumns([], detectors),
-      maxBytes: 96 * 1024 * 1024,
     });
   });
 
@@ -1715,16 +1713,15 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       return vi.mocked(ensureCloudRange).mock.calls[0]?.[4]?.projection;
     };
     const filters = { host_1: { mode: "include", values: ["example.com"] } };
-    const maxBytes = 96 * 1024 * 1024;
     // A section reads only its own columns: the summary needs no URL, POP, origin IP or leg.
     const summaryColumns = ORIGIN_SCAN_COLUMNS.aggregates.filter((c) => !["edge", "url", "pop", "oip"].includes(c));
     expect(await options("/api/origin/aggregates", { filters, sections: ["summary"] }))
-      .toEqual({ columns: [...summaryColumns, "host"], maxBytes });
-    expect(await options("/api/origin/slow-urls")).toEqual({ columns: ["timestamp", "ts_ms", "ottfb", "ttfb", "url"], maxBytes });
+      .toEqual({ columns: [...summaryColumns, "host"] });
+    expect(await options("/api/origin/slow-urls")).toEqual({ columns: ["timestamp", "ts_ms", "ottfb", "ttfb", "url"] });
     expect(await options("/api/origin/shielding-analysis", {}))
-      .toEqual({ columns: [...ORIGIN_SCAN_COLUMNS["shielding-analysis"]], maxBytes });
+      .toEqual({ columns: [...ORIGIN_SCAN_COLUMNS["shielding-analysis"]] });
     expect(await options("/api/origin/drilldown", { dimension: "pop" }))
-      .toEqual({ columns: [...ORIGIN_SCAN_COLUMNS.drilldown], maxBytes });
+      .toEqual({ columns: [...ORIGIN_SCAN_COLUMNS.drilldown] });
     const team = { team: { mode: "include", values: ["a"] } };
     const overview = await options("/api/value/summary", { sections: ["overview"], custom_filters: team });
     expect(overview?.columns).toEqual(expect.arrayContaining(["cache", "elapsed", "resp_bytes", "team"]));

@@ -4,6 +4,7 @@ import type {
   DuckDBReadContext, IngestedFileMeta,
 } from "./duckdb";
 import type { CustomField } from "./summaries";
+import { CloudBudgetError, MAX_REGISTERED_BYTES } from "./budget";
 
 type Table = "requests" | "client_vitals" | "client_errors";
 type Schema = Readonly<Record<string, DuckDBColumnType>>;
@@ -46,8 +47,12 @@ const quoteDuckIdent = (s: string): string => {
 };
 // Pseudo-column naming the file each row came from in a multi-file scan.
 const SOURCE_FILE_COLUMN = "__flp_source_file";
-const MAX_COMPRESSED_BYTES = 64 * 1024 * 1024;
 const CUSTOM_TYPES = { string: "VARCHAR", number: "DOUBLE", boolean: "BOOLEAN" } as const;
+
+function registrationOverBudget(needed: number): CloudBudgetError {
+  return new CloudBudgetError("Cloud query registered compressed files exceed the browser byte budget",
+    { unit: "bytes", needed, limit: MAX_REGISTERED_BYTES });
+}
 
 export class ExpiredDuckDBReadError extends Error {
   constructor() { super("Cloud analytical read generation expired"); this.name = "ExpiredDuckDBReadError"; }
@@ -554,20 +559,21 @@ export class ParquetBindingStore {
         return existing.meta;
       }
       let registeredBytes = [...this.bindings.values(), ...this.retired].reduce((sum, binding) => sum + binding.meta.byteLength, 0);
-      if (registeredBytes + bytes.byteLength > MAX_COMPRESSED_BYTES) {
+      const needed = registeredBytes + bytes.byteLength;
+      if (registeredBytes + bytes.byteLength > MAX_REGISTERED_BYTES) {
         const victims: Binding[] = [];
         for (const binding of this.bindings.values()) {
-          if (registeredBytes + bytes.byteLength <= MAX_COMPRESSED_BYTES) break;
+          if (registeredBytes + bytes.byteLength <= MAX_REGISTERED_BYTES) break;
           if (binding.pins > 0) continue;
           victims.push(binding);
           registeredBytes -= binding.meta.byteLength;
         }
-        if (registeredBytes + bytes.byteLength <= MAX_COMPRESSED_BYTES && victims.length) {
+        if (registeredBytes + bytes.byteLength <= MAX_REGISTERED_BYTES && victims.length) {
           const next = [...this.bindings.values()].filter((binding) => !victims.includes(binding));
           await this.publish(backend, this.snapshot(next));
           this.check(generation, signal);
           if (victims.some((binding) => binding.pins > 0))
-            throw new Error("Cloud query registered compressed files exceed the browser byte budget");
+            throw registrationOverBudget(needed);
           for (const binding of victims) {
             this.bindings.delete(this.key(binding.table, binding.meta.scopedKey));
             binding.retired = true;
@@ -576,11 +582,11 @@ export class ParquetBindingStore {
           await this.dropRetired(backend, generation);
           this.check(generation, signal);
         } else {
-          throw new Error("Cloud query registered compressed files exceed the browser byte budget");
+          throw registrationOverBudget(needed);
         }
       }
-      if (registeredBytes + bytes.byteLength > MAX_COMPRESSED_BYTES)
-        throw new Error("Cloud query registered compressed files exceed the browser byte budget");
+      if (registeredBytes + bytes.byteLength > MAX_REGISTERED_BYTES)
+        throw registrationOverBudget(needed);
       for (const [id] of required) quoteDuckIdent(id);
       for (const id of this.customTypes.keys()) quoteDuckIdent(id);
       const name = `bound_g${generation}_${this.nextFile++}.parquet`;
