@@ -496,6 +496,65 @@ describe("bounded complete Parquet bindings", () => {
     await engine.reset();
   });
 
+  it("reads each card group's columns once for its statistics and values", async () => {
+    const statements: string[] = [];
+    const engine = new DuckDBAnalyticalEngine({ backendFactory: async () => {
+      const backend = await createNodeBackend();
+      return { ...backend, query: (sql, signal) => { statements.push(sql); return backend.query(sql, signal); } };
+    } });
+    const t = 1700000000000;
+    const rows = Array.from({ length: 40 }, (_, i) => ({
+      timestamp: t + i * 1000,
+      status: i % 4 === 0 ? 404 : 200,
+      cache: i % 3 === 0 ? "MISS" : "HIT",
+      resp_bytes: i,
+      host: i % 5 === 0 ? null : `h${i % 2}`,
+      country: i % 7 === 0 ? null : `C${i % 3}`,
+      edge: i % 2 === 0,
+      ttl: i % 6,
+      age: i % 5 === 0 ? -0 : 2,
+    }));
+    const fields = ["status", "cache", "host", "country", "edge", "ttl", "age"];
+    const filters = [{ mode: "include" as const, field: "status", value: "200" }];
+    await engine.prewarm();
+    const aggregator = new Aggregator(t, t + 60_000, fields);
+    statements.length = 0;
+    await engine.queryParquetIntoAggregator(
+      { kind: "buffer", bytes: parquetFixture(rows) }, t, t + 60_000, filters, aggregator,
+      { edgeOnly: false, topK: null },
+    );
+    // DESCRIBE, the minute buckets, then one statement per group of six cards.
+    expect(statements).toHaveLength(2 + Math.ceil(fields.length / 6));
+
+    const kept = rows.filter((row) => row.status === 200);
+    const result = aggregator.result();
+    expect(result.totalRequests).toBe(kept.length);
+    for (const field of fields) {
+      const counts = new Map<unknown, number>();
+      for (const row of kept) {
+        const raw = row[field as keyof typeof row];
+        const value = Object.is(raw, -0) ? 0 : raw;
+        if (value !== null) counts.set(value, (counts.get(value) ?? 0) + 1);
+      }
+      const card = result.cards[field];
+      expect(card.total, field).toBe(kept.filter((row) => row[field as keyof typeof row] !== null).length);
+      expect(card.distinct, field).toBe(counts.size);
+      expect(new Map(card.top.map(({ value, count }) => [value, count])), field).toEqual(counts);
+      expect(card.approximate, field).toBeFalsy();
+    }
+
+    const target = new Aggregator(t, t + 60_000, fields);
+    statements.length = 0;
+    await engine.queryParquetPerFile(
+      [{ access: { kind: "buffer", bytes: parquetFixture(rows) }, target, fromMs: t, toMs: t + 60_000 }],
+      filters,
+      { edgeOnly: false, topK: null },
+    );
+    expect(statements).toHaveLength(2 + Math.ceil(fields.length / 6));
+    expect(target.result()).toEqual(result);
+    await engine.reset();
+  });
+
   it("answers several files in one pass per schema with a separate result for each", async () => {
     let queries = 0;
     const engine = new DuckDBAnalyticalEngine({ backendFactory: async () => {
