@@ -280,6 +280,7 @@ fn bootstrap_service(owner_id: String, input: &RecoverInput, now: u64) -> Servic
         capture: Capture::default(),
         scoring: None,
         cdn_shield: String::new(),
+        stored_log_field_ids: None,
     }
 }
 
@@ -1281,7 +1282,7 @@ pub(super) fn recover(
     }
     let _ = inspected_active;
 
-    let mut svc_value = serialize(&service)?;
+    let mut svc_value = serialize_service(&service)?;
     svc_value["_audit"] = json!({
         "actor": actor,
         "at": now,
@@ -1325,6 +1326,27 @@ mod tests {
     use super::*;
     use crate::ingest::catalog::{Event, Head, Reference};
     use crate::views::SavedView;
+
+    #[test]
+    fn service_records_carry_the_log_field_ids_resolved_when_saved() {
+        let service = sample_service();
+        let resolved = crate::catalog::active_log_field_ids(&service.log_fields);
+        let value = serialize_service(&service).unwrap();
+        assert_eq!(value["active_log_field_ids"], json!(resolved));
+
+        let mut deployed = value.clone();
+        deployed["active_log_field_ids"] = json!(["as_deployed"]);
+        let read: Service = serde_json::from_value(deployed).unwrap();
+        assert_eq!(read.active_log_field_ids(), vec!["as_deployed"]);
+
+        let mut older = value;
+        older
+            .as_object_mut()
+            .unwrap()
+            .remove("active_log_field_ids");
+        let read: Service = serde_json::from_value(older).unwrap();
+        assert_eq!(read.active_log_field_ids(), resolved);
+    }
 
     fn sample_service() -> Service {
         Service {
@@ -1411,6 +1433,7 @@ mod tests {
                 matrix_version: None,
                 last_retrain_at: None,
             }),
+            stored_log_field_ids: None,
             cdn_shield: String::new(),
         }
     }

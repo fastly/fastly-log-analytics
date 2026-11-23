@@ -128,6 +128,13 @@ fn body<T: DeserializeOwned>(request: &Request) -> Result<T, Error> {
 fn serialize(value: &impl Serialize) -> Result<Value, Error> {
     serde_json::to_value(value).map_err(|_| Error::new(500, "state_encoding_failed"))
 }
+/// A service record as stored: its `log_fields` are resolved here, on save, and nowhere on read.
+fn serialize_service(service: &Service) -> Result<Value, Error> {
+    let mut value = serialize(service)?;
+    value["active_log_field_ids"] =
+        json!(crate::catalog::active_log_field_ids(&service.log_fields));
+    Ok(value)
+}
 fn required<'a>(value: &'a Value, key: &str) -> Result<&'a str, Error> {
     value[key]
         .as_str()
@@ -482,8 +489,7 @@ fn services(context: &Context<'_, impl Runtime>) -> Result<Value, Error> {
         match load_service(context, &sid) {
             Ok((record, service)) => {
                 let mut value = service_value(&service, &record.generation);
-                value["active_log_field_ids"] =
-                    json!(crate::catalog::active_log_field_ids(&service.log_fields));
+                value["active_log_field_ids"] = json!(service.active_log_field_ids());
                 result.push(value);
             }
             Err(error) if error.status == 404 => (),
@@ -1225,7 +1231,7 @@ fn save_service_with_limit(
     cap_instead_of_fail: bool,
 ) -> Result<(), Error> {
     context.confirm_with_secret(&service.fastly_token_ref);
-    let mut value = serialize(service)?;
+    let mut value = serialize_service(service)?;
     value["_audit"] = json!({"actor":actor,"at":context.runtime.now(),"event":event,"config_version":service.config_version});
     let mut audit = record.value["_audit_outbox"]
         .as_array()
@@ -1294,7 +1300,7 @@ fn save_job_service_with_limit(
     max_outbox: usize,
 ) -> Result<(), Error> {
     context.confirm_with_secret(&service.fastly_token_ref);
-    let mut value = serialize(service)?;
+    let mut value = serialize_service(service)?;
     value["_audit"] = json!({"actor":job.actor,"at":context.runtime.now(),"event":event,"job_id":job.id,"config_version":service.config_version});
     let mut audit = record.value["_audit_outbox"]
         .as_array()
@@ -1397,6 +1403,7 @@ fn provision(
         capture: input.capture,
         scoring: None,
         cdn_shield: input.cdn_shield.trim().to_owned(),
+        stored_log_field_ids: None,
     };
     let previous: Option<Service> = context
         .get(&format!("svc:{}", input.service_id))?
@@ -1437,7 +1444,7 @@ fn provision(
                     context.cas(
                         &format!("svc:{}", input.service_id),
                         None,
-                        &serialize(&service)?,
+                        &serialize_service(&service)?,
                     )?;
                     service
                 };
@@ -1495,7 +1502,7 @@ fn provision(
     context.cas(
         &format!("svc:{}", input.service_id),
         previous.as_ref().map(|r| r.generation.as_str()),
-        &serialize(&service)?,
+        &serialize_service(&service)?,
     )?;
     let record = context
         .get(&format!("svc:{}", input.service_id))?

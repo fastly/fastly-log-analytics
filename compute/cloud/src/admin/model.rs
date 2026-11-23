@@ -75,6 +75,20 @@ pub struct Service {
     pub scoring: Option<ScoringConfig>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub cdn_shield: String,
+    /// `log_fields` resolved when the record was last saved (see `serialize_service`), so the
+    /// list matches the deployed format even after a release changes the catalog.
+    #[serde(default, skip_serializing, rename = "active_log_field_ids")]
+    pub stored_log_field_ids: Option<Vec<String>>,
+}
+
+impl Service {
+    /// The enabled log field ids stored with the record; records saved before they were stored
+    /// resolve their `log_fields`.
+    pub fn active_log_field_ids(&self) -> Vec<String> {
+        self.stored_log_field_ids
+            .clone()
+            .unwrap_or_else(|| crate::catalog::active_log_field_ids(&self.log_fields))
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -608,7 +622,8 @@ pub fn valid_prefix(value: &str) -> bool {
 pub fn service_value(service: &Service, generation: &str) -> Value {
     let mut value = serde_json::to_value(service).unwrap_or(Value::Null);
     let cmcd_enabled = service.cmcd.enabled
-        || crate::catalog::active_log_field_ids(&service.log_fields)
+        || service
+            .active_log_field_ids()
             .iter()
             .any(|id| id.starts_with("cmcd_"));
     value["generation"] = generation.into();
@@ -755,6 +770,7 @@ mod tests {
                     capture: Capture::Attached,
                     scoring: None,
                     cdn_shield: String::new(),
+                    stored_log_field_ids: None,
                 }
             })
             .unwrap();
