@@ -195,66 +195,50 @@ export function UsageStatCards({
           : null,
     [compute, loggedRequests, storage],
   )
-  const storageBreakdownRows = useMemo<BreakdownRow[]>(
-    () => [
+  const storageBreakdownRows = useMemo<BreakdownRow[]>(() => {
+    const bytes = (value: number | null | undefined) => value ?? 0
+    const rawDeleted = storage?.raw_logs_deleted ?? true
+    const sub = (id: string, label: string, value: number, extra?: React.ReactNode, className?: string) =>
+      value > 0
+        ? [{
+            id,
+            rowClassName: className,
+            label: <span>{`↳ ${label}:`}</span>,
+            value: <strong>{formatBytes(value)}{extra}</strong>,
+          }]
+        : []
+    const rawRows = (suffix: string, className?: string) => [
+      ...sub(`raw-request${suffix}`, `Raw request logs${suffix ? ' (kept)' : ''}`, bytes(storage?.regular_log_bytes), undefined, className),
+      ...sub(`raw-rum${suffix}`, `Raw RUM logs${suffix ? ' (kept)' : ''}`, bytes(storage?.rum_bytes), undefined, className),
+    ]
+    const keptRaw = rawDeleted ? 0 : bytes(storage?.regular_log_bytes) + bytes(storage?.rum_bytes)
+    const other =
+      bytes(storage?.live_bytes) -
+      bytes(storage?.processed_request_bytes) -
+      bytes(storage?.processed_rum_bytes) -
+      bytes(storage?.quarantine_bytes) -
+      keptRaw
+    const objects = bytes(storage?.processed_objects)
+    const deletedTint = 'text-amber-700/80 dark:text-amber-500/80'
+    return [
       {
         id: 'live',
         label: <span>Live Storage:</span>,
-        value: <strong className="text-foreground">{formatBytes(storage?.live_bytes ?? 0)}</strong>,
+        value: <strong className="text-foreground">{formatBytes(bytes(storage?.live_bytes))}</strong>,
       },
-      ...((storage?.rum_bytes ?? 0) > 0
-        ? [
-            {
-              id: 'rum',
-              rowClassName: 'text-blue-700 dark:text-blue-400',
-              label: <span>RUM Logs:</span>,
-              value: <strong>{formatBytes(storage?.rum_bytes ?? 0)}</strong>,
-            },
-          ]
-        : []),
-      ...((storage?.regular_log_bytes ?? 0) > 0
-        ? [
-            {
-              id: 'regular',
-              label: <span>Request Logs:</span>,
-              value: (
-                <strong className="text-foreground">
-                  {formatBytes(storage?.regular_log_bytes ?? 0)}
-                </strong>
-              ),
-            },
-          ]
-        : []),
-      ...((storage?.archive_bytes ?? 0) > 0
-        ? [
-            {
-              id: 'archive',
-              rowClassName: 'text-blue-700 dark:text-blue-400',
-              label: <span>High-Scale Archive:</span>,
-              value: (
-                <strong>
-                  {formatBytes(storage?.archive_bytes ?? 0)}{' '}
-                  <span className="font-normal text-muted-foreground">
-                    ({formatCount(storage?.archive_objects ?? 0)} objects)
-                  </span>
-                </strong>
-              ),
-            },
-          ]
-        : []),
-      ...((storage?.quarantine_bytes ?? 0) > 0
-        ? [
-            {
-              id: 'quarantine',
-              label: <span>Quarantine:</span>,
-              value: (
-                <strong className="text-foreground">
-                  {formatBytes(storage?.quarantine_bytes ?? 0)}
-                </strong>
-              ),
-            },
-          ]
-        : []),
+      ...sub(
+        'processed-request',
+        'Request data',
+        bytes(storage?.processed_request_bytes),
+        objects > 0 ? (
+          <span className="font-normal text-muted-foreground"> ({formatCount(objects)} objects)</span>
+        ) : undefined,
+      ),
+      ...sub('processed-rum', 'RUM data', bytes(storage?.processed_rum_bytes), undefined, 'text-blue-700 dark:text-blue-400'),
+      ...(rawDeleted ? [] : rawRows(' (kept)')),
+      ...sub('quarantine', 'Quarantine', bytes(storage?.quarantine_bytes)),
+      // Telemetry, state and anything else stored that isn't processed log data.
+      ...sub('other', 'Other', other),
       {
         id: 'deleted',
         rowClassName: 'text-amber-700 dark:text-amber-500',
@@ -267,10 +251,9 @@ export function UsageStatCards({
                 </span>
               </TooltipTrigger>
               <TooltipContent side="top" className="max-w-[280px] text-xs">
-                Objects deleted early (raw logs after ingest), data files the cloud copy or
-                compaction removed from Fastly Object Storage, and High-Scale archive artifacts the
-                worker expired in the last 30 days (past the service&apos;s retention). Fastly
-                Object Storage bills every object for a minimum of 30 days.
+                Objects deleted early: raw logs after ingest, data files compaction (or High-Scale&apos;s cloud
+                copy) replaced, and data the retention job expired in the last 30 days. Fastly Object Storage
+                bills every object for a minimum of 30 days.
               </TooltipContent>
             </Tooltip>
           </TooltipProvider>
@@ -279,44 +262,14 @@ export function UsageStatCards({
           deletedBytesComplete === false ? (
             <strong title={`Provenance: ${deletedBytesProvenance}`}>Incomplete</strong>
           ) : (
-            <strong>{formatBytes(storage?.deleted_bytes ?? 0)}</strong>
+            <strong>{formatBytes(bytes(storage?.deleted_bytes))}</strong>
           ),
       },
-      ...((storage?.cloud_copy_deleted_bytes ?? 0) > 0
-        ? [
-            {
-              id: 'deleted-cloud-copy',
-              rowClassName: 'text-amber-700/80 dark:text-amber-500/80',
-              label: <span>↳ Cloud copy &amp; compaction:</span>,
-              value: <strong>{formatBytes(storage?.cloud_copy_deleted_bytes ?? 0)}</strong>,
-            },
-          ]
-        : []),
-      ...((storage?.archive_expired_bytes ?? 0) > 0
-        ? [
-            {
-              id: 'deleted-archive',
-              rowClassName: 'text-amber-700/80 dark:text-amber-500/80',
-              label: <span>↳ Expired archive:</span>,
-              value: <strong>{formatBytes(storage?.archive_expired_bytes ?? 0)}</strong>,
-            },
-          ]
-        : []),
-    ],
-    [
-      storage?.live_bytes,
-      storage?.rum_bytes,
-      storage?.regular_log_bytes,
-      storage?.quarantine_bytes,
-      storage?.deleted_bytes,
-      deletedBytesComplete,
-      deletedBytesProvenance,
-      storage?.cloud_copy_deleted_bytes,
-      storage?.archive_expired_bytes,
-      storage?.archive_bytes,
-      storage?.archive_objects,
-    ],
-  )
+      ...(rawDeleted ? rawRows('', deletedTint) : []),
+      ...sub('deleted-compaction', 'Compaction', bytes(storage?.cloud_copy_deleted_bytes), undefined, deletedTint),
+      ...sub('deleted-retention', 'Expired by retention', bytes(storage?.archive_expired_bytes), undefined, deletedTint),
+    ]
+  }, [storage, deletedBytesComplete, deletedBytesProvenance])
 
   const costBreakdownRows = useMemo<BreakdownRow[]>(
     () => pricedLines ? pricedLines.map((line) => ({

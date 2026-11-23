@@ -7741,6 +7741,26 @@ export interface components {
              * @default 0
              */
             regular_log_bytes: number;
+            /**
+             * Processed Request Bytes
+             * @default 0
+             */
+            processed_request_bytes: number;
+            /**
+             * Processed Rum Bytes
+             * @default 0
+             */
+            processed_rum_bytes: number;
+            /**
+             * Processed Objects
+             * @default 0
+             */
+            processed_objects: number;
+            /**
+             * Raw Logs Deleted
+             * @default true
+             */
+            raw_logs_deleted: boolean;
         };
         /**
          * CustomCard

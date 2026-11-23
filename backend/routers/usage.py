@@ -637,7 +637,7 @@ def usage_current_storage(
                 rum_bytes,
             )
 
-        archive_bytes = archive_objects = archive_expired_bytes = 0
+        archive_bytes = archive_objects = archive_expired_bytes = archive_rum_bytes = 0
         service_id = str(src.get("service_id") or src["name"])
         try:
             high_scale_service = get_high_scale_service_registry().resolve(service_id)
@@ -653,6 +653,7 @@ def usage_current_storage(
                 summary = PostgresControlPlane().archive_storage_summary(service_id)
                 archive_bytes, archive_objects = summary["live_bytes"], summary["live_objects"]
                 archive_expired_bytes = summary["expired_30d_bytes"]
+                archive_rum_bytes = int(summary.get("live_rum_bytes", 0))
                 archive_storage_complete = True
             except Exception:
                 logger.debug("usage_current_storage: archive summary failed (ignored)", exc_info=True)
@@ -783,6 +784,10 @@ def usage_current_storage(
             total_bytes=total_bytes,
             rum_bytes=rum_bytes,
             regular_log_bytes=regular_log_bytes,
+            processed_request_bytes=archive_bytes - archive_rum_bytes,
+            processed_rum_bytes=archive_rum_bytes,
+            processed_objects=archive_objects,
+            raw_logs_deleted=bool(delete_after),
             start=start_str,
             end=end_str,
         )

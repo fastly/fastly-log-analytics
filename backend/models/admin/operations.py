@@ -268,6 +268,12 @@ class CurrentStorageResponse(BaseResponse):
     end: str
     rum_bytes: int = 0
     regular_log_bytes: int = 0
+    # Data kept after processing (High-Scale archive, Cloud Parquet), split by domain.
+    processed_request_bytes: int = 0
+    processed_rum_bytes: int = 0
+    processed_objects: int = 0
+    # True when raw logs are deleted after ingest, so rum_bytes / regular_log_bytes are deleted-but-billed.
+    raw_logs_deleted: bool = True
 
 
 class UsageOperationsPoint(BaseModel):

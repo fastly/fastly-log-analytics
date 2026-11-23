@@ -54364,6 +54364,26 @@
             "type": "integer",
             "title": "Regular Log Bytes",
             "default": 0
+          },
+          "processed_request_bytes": {
+            "type": "integer",
+            "title": "Processed Request Bytes",
+            "default": 0
+          },
+          "processed_rum_bytes": {
+            "type": "integer",
+            "title": "Processed Rum Bytes",
+            "default": 0
+          },
+          "processed_objects": {
+            "type": "integer",
+            "title": "Processed Objects",
+            "default": 0
+          },
+          "raw_logs_deleted": {
+            "type": "boolean",
+            "title": "Raw Logs Deleted",
+            "default": true
           }
         },
         "type": "object",

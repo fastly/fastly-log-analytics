@@ -1631,7 +1631,7 @@ def test_current_storage_counts_the_high_scale_archive_and_recently_expired_arti
     src = {"name": "svc-archive-usage", "service_id": "svc-archive-usage", "bucket": "b", "prefix": ""}
     _STORAGE_INSPECTION_CACHE[("svc-archive-usage", "b", "")] = (1000, 2, 0, 0)
     app.dependency_overrides[get_source] = lambda: src
-    summary = {"live_bytes": 5_000_000, "live_objects": 30, "expired_30d_bytes": 2_000_000}
+    summary = {"live_bytes": 5_000_000, "live_objects": 30, "expired_30d_bytes": 2_000_000, "live_rum_bytes": 1_000_000}
     try:
         with (
             patch("backend.routers.usage._get_storage_stats", return_value={"total_files": 0, "total_bytes": 0}),
@@ -1657,6 +1657,12 @@ def test_current_storage_counts_the_high_scale_archive_and_recently_expired_arti
         assert body["cloud_copy_deleted_bytes"] == 3_000, "cloud-copy deletions stay billed for 30 days"
         assert body["deleted_bytes_complete"] is True
         assert body["deleted_bytes_provenance"] == "metadata_ledgers"
+        assert (body["processed_request_bytes"], body["processed_rum_bytes"], body["processed_objects"]) == (
+            4_000_000,
+            1_000_000,
+            30,
+        ), "the archive splits into kept request and RUM data"
+        assert body["raw_logs_deleted"] is True
     finally:
         app.dependency_overrides.pop(get_source, None)
         _STORAGE_INSPECTION_CACHE.pop(("svc-archive-usage", "b", ""), None)

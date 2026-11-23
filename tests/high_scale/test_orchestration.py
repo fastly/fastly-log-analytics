@@ -3734,17 +3734,17 @@ def test_archive_storage_summary_separates_live_recently_expired_and_old_expired
     control.create_schema()
     sid = "svc-archive-summary"
 
-    def insert(manifest_id, state, size, expired_days_ago=None):
+    def insert(manifest_id, state, size, expired_days_ago=None, domain="request"):
         with control.transaction() as connection:
             connection.execute(
                 "INSERT INTO high_scale_archive_manifests (manifest_id, service_id, domain, source_key, source_checksum, "
                 "source_size, artifact_uri, artifact_checksum, artifact_size, row_count, byte_count, canonical_digest, "
                 "schema_version, transform_version, coverage_start, coverage_end, retention_deadline, "
                 "deletion_authorization_deadline, archive_epoch, owner_epoch, state, archive_expired_at) VALUES "
-                "(%s, %s, 'request', %s, 'c', 1, %s, 'c', %s, 1, 1, 'd', 'v', 'v', clock_timestamp(), clock_timestamp(), "
+                "(%s, %s, %s, %s, 'c', 1, %s, 'c', %s, 1, 1, 'd', 'v', 'v', clock_timestamp(), clock_timestamp(), "
                 "clock_timestamp(), clock_timestamp(), 0, 1, %s, "
                 "CASE WHEN %s::int IS NULL THEN NULL ELSE clock_timestamp() - make_interval(days => %s::int) END)",
-                (manifest_id, sid, f"raw/{manifest_id}", f"s3://a/{manifest_id}.parquet", size, state, expired_days_ago, expired_days_ago),
+                (manifest_id, sid, domain, f"raw/{manifest_id}", f"s3://a/{manifest_id}.parquet", size, state, expired_days_ago, expired_days_ago),
             )
 
     try:
@@ -3752,9 +3752,13 @@ def test_archive_storage_summary_separates_live_recently_expired_and_old_expired
         insert("recent", "source_deleted", 200, expired_days_ago=1)
         insert("old", "source_deleted", 400, expired_days_ago=40)
         insert("uploading", "artifact_uploading", 800)
-        assert control.archive_storage_summary(sid) == {"live_bytes": 100, "live_objects": 3, "expired_30d_bytes": 200}
+        insert("vitals", "source_deleted", 30, domain="rum_vitals")
+        insert("errors", "source_deleted", 20, domain="rum_errors")
+        assert control.archive_storage_summary(sid) == {
+            "live_bytes": 150, "live_objects": 9, "expired_30d_bytes": 200, "live_rum_bytes": 50
+        }  # fmt: skip
         assert control.archive_storage_summary("svc-with-no-archive") == {
-            "live_bytes": 0, "live_objects": 0, "expired_30d_bytes": 0
+            "live_bytes": 0, "live_objects": 0, "expired_30d_bytes": 0, "live_rum_bytes": 0
         }  # fmt: skip
     finally:
         with control.transaction() as connection:

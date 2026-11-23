@@ -536,23 +536,57 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     expect(await screen.findByText(/Partial estimate — storage.*cost excluded\./)).toBeInTheDocument()
   })
 
-  test('storage breakdown itemizes cloud-copy deletions and expired archive inside Deleted (Still Billed)', async () => {
+  test('storage breakdown keeps processed data under Live Storage and raw logs under Deleted (Still Billed)', async () => {
+    const GB = 1024 ** 3
     mockGet.mockImplementation(async (path: string) => {
       if (path === '/api/usage/current-storage') {
         return {
           data: {
-            live_bytes: 0, live_files: 0, quarantine_bytes: 0, total_billed_bytes: 0, total_billed_gb_hours: 0,
+            live_bytes: 10 * GB, live_files: 0, quarantine_bytes: 0, total_billed_bytes: 0, total_billed_gb_hours: 0,
             total_files: 0, total_bytes: 0, start: '', end: '',
-            deleted_bytes: 3 * 1024 ** 3, cloud_copy_deleted_bytes: 2 * 1024 ** 3, archive_expired_bytes: 1024 ** 3,
+            processed_request_bytes: 7 * GB, processed_rum_bytes: 2 * GB, processed_objects: 30,
+            raw_logs_deleted: true, regular_log_bytes: 5 * GB, rum_bytes: 3 * GB,
+            deleted_bytes: 20 * GB, cloud_copy_deleted_bytes: 4 * GB, archive_expired_bytes: 6 * GB,
           },
         } as never
       }
       return undefined
     })
     renderWithQuery(<UsagePage />, { queryClient })
-    expect(await screen.findByText('↳ Cloud copy & compaction:')).toBeInTheDocument()
-    expect(screen.getByText('↳ Expired archive:')).toBeInTheDocument()
-    expect(screen.getByText('2 GB')).toBeInTheDocument()
+    const label = async (text: string) => (await screen.findByText(text)).closest('tr') as HTMLElement
+    const order = ['Live Storage:', '↳ Request data:', '↳ RUM data:', '↳ Other:', 'Deleted (Still Billed):',
+      '↳ Raw request logs:', '↳ Raw RUM logs:', '↳ Compaction:', '↳ Expired by retention:']
+    const rows = await Promise.all(order.map(label))
+    for (let i = 1; i < rows.length; i++) {
+      expect(rows[i - 1].compareDocumentPosition(rows[i]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    }
+    expect(rows[1]).toHaveTextContent('7 GB')
+    expect(rows[1]).toHaveTextContent('30 objects')
+    expect(rows[3]).toHaveTextContent('1 GB')
+    expect(rows[5]).toHaveTextContent('5 GB')
+    expect(screen.queryByText('↳ Cloud copy & compaction:')).toBeNull()
+  })
+
+  test('storage breakdown lists kept raw logs under Live Storage when raw deletion is off', async () => {
+    const GB = 1024 ** 3
+    mockGet.mockImplementation(async (path: string) => {
+      if (path === '/api/usage/current-storage') {
+        return {
+          data: {
+            live_bytes: 9 * GB, live_files: 0, quarantine_bytes: 0, total_billed_bytes: 0, total_billed_gb_hours: 0,
+            total_files: 0, total_bytes: 0, start: '', end: '',
+            processed_request_bytes: 4 * GB, processed_rum_bytes: 0, processed_objects: 3,
+            raw_logs_deleted: false, regular_log_bytes: 5 * GB, rum_bytes: 0, deleted_bytes: 0,
+          },
+        } as never
+      }
+      return undefined
+    })
+    renderWithQuery(<UsagePage />, { queryClient })
+    const kept = (await screen.findByText('↳ Raw request logs (kept):')).closest('tr') as HTMLElement
+    const deleted = screen.getByText('Deleted (Still Billed):').closest('tr') as HTMLElement
+    expect(kept.compareDocumentPosition(deleted) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(screen.queryByText('↳ Other:')).toBeNull()
   })
 
   test('UsagePage keeps local selected-period storage authoritative when Platform storage is present and flags incomplete operations', async () => {

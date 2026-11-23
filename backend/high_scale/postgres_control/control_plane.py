@@ -1185,11 +1185,17 @@ class PostgresControlPlane:
                 "SELECT "
                 "coalesce(sum(artifact_size) FILTER (WHERE archive_expired_at IS NULL), 0), "
                 "count(*) FILTER (WHERE archive_expired_at IS NULL), "
-                "coalesce(sum(artifact_size) FILTER (WHERE archive_expired_at > statement_timestamp() - interval '30 days'), 0) "
+                "coalesce(sum(artifact_size) FILTER (WHERE archive_expired_at > statement_timestamp() - interval '30 days'), 0), "
+                "coalesce(sum(artifact_size) FILTER (WHERE archive_expired_at IS NULL AND domain LIKE 'rum%%'), 0) "
                 "FROM high_scale_archive_manifests WHERE service_id = %s AND state <> 'artifact_uploading'",
                 (service_id,),
             ).fetchone()
-        return {"live_bytes": int(row[0]), "live_objects": int(row[1]) * 3, "expired_30d_bytes": int(row[2])}
+        return {
+            "live_bytes": int(row[0]),
+            "live_objects": int(row[1]) * 3,
+            "expired_30d_bytes": int(row[2]),
+            "live_rum_bytes": int(row[3]),
+        }
 
     def storage_billing_intervals(
         self,

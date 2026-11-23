@@ -32,6 +32,10 @@ const storage: StorageUsageData = {
   total_bytes: 1024 ** 3,
   rum_bytes: 0,
   regular_log_bytes: 1024 ** 3,
+  processed_request_bytes: 0,
+  processed_rum_bytes: 0,
+  processed_objects: 0,
+  raw_logs_deleted: true,
   start: '2026-11-01T00:00:00Z',
   end: '2026-11-02T00:00:00Z',
 }

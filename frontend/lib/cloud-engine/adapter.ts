@@ -121,6 +121,7 @@ import {
   type StorageBillingInterval,
   type StorageBillingSummary,
 } from "./usage/storageBilling";
+import { storageImpactBreakdown, type StorageImpactBreakdown } from "./usage/storageImpact";
 import {
   buildSevenLineCostTable,
   deletedBytesAccountingSince,
@@ -169,6 +170,7 @@ type CloudStorageBillingResult = {
   deletedBytes: number;
   deletedBytesComplete: boolean;
   deletedBytesProvenance: string;
+  impact: StorageImpactBreakdown;
 };
 
 /**
@@ -314,6 +316,12 @@ async function storageBillingIntervals(
     deletedBytes,
     deletedBytesComplete,
     deletedBytesProvenance,
+    impact: storageImpactBreakdown({
+      live: liveIntervals,
+      ingestDeleted: ingest.intervals,
+      fosRows: fosSource.rows,
+      window: deletionWindow,
+    }),
   };
 }
 
@@ -2384,12 +2392,16 @@ async function dispatchCloudRequest(
           deleted_bytes: storageBilling.deletedBytes,
           deleted_bytes_complete: storageBilling.deletedBytesComplete,
           deleted_bytes_provenance: storageBilling.deletedBytesProvenance,
-          regular_log_bytes:
-            summary.storage.datasets.find((d) => d.dataset === "pq_request")
-              ?.bytes ?? 0,
-          rum_bytes:
-            summary.storage.datasets.find((d) => d.dataset === "pq_rum")
-              ?.bytes ?? 0,
+          // Same rows as High-Scale: raw logs deleted after ingest but still billed, the Parquet kept,
+          // and what compaction and retention deleted inside the minimum-billing window.
+          regular_log_bytes: storageBilling.impact.requestLogBytes,
+          rum_bytes: storageBilling.impact.rumLogBytes,
+          raw_logs_deleted: storageBilling.impact.rawLogsDeleted,
+          processed_request_bytes: storageBilling.impact.processedRequestBytes,
+          processed_rum_bytes: storageBilling.impact.processedRumBytes,
+          processed_objects: storageBilling.impact.processedObjects,
+          cloud_copy_deleted_bytes: storageBilling.impact.compactionDeletedBytes,
+          archive_expired_bytes: storageBilling.impact.retentionDeletedBytes,
           compute_requests: summary.computeRequests,
           compute_vcpu_ms: summary.computeVcpuMs,
           compute_billed_vcpu_ms: summary.computeBilledVcpuMs ?? 0,
