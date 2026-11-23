@@ -101,7 +101,9 @@ export function CloudScoringOverview() {
         <Alert><AlertDescription>No active service selected.</AlertDescription></Alert>
       ) : !data ? (
         <Alert role="status"><AlertDescription>
-          Session scoring is not configured in the retained logs for this range. No scoring metrics are available.
+          {analytics.data && 'reason' in analytics.data && analytics.data.reason === 'no_scored_rows'
+            ? 'No scored requests have been logged in this range yet.'
+            : "Session scoring is off in this service's log field settings."} No scoring metrics are available.
         </AlertDescription></Alert>
       ) : (
         <>

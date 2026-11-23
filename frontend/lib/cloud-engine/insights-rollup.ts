@@ -400,7 +400,12 @@ export function rollupInsightsBaseline(result: RollupResult, rows: InsightScanRo
   };
 }
 
-export type InsightsRollupRequest = InsightsRequest & { mask_ips?: boolean; earliest_log_at?: string | null };
+export type InsightsRollupRequest = InsightsRequest & {
+  mask_ips?: boolean;
+  earliest_log_at?: string | null;
+  /** The service's enabled log field ids, resolved on the main thread (this may run in a worker). */
+  enabled_log_fields?: readonly string[];
+};
 
 const ROLLUP_INSIGHT_COLUMNS = new Set(
   INSIGHT_DEFINITIONS.filter((d) => CLOUD_INSIGHT_DETECTORS.has(d.id)).flatMap((d) => d.required_fields),
@@ -623,7 +628,10 @@ export async function insightsFromRollup(
     (RATIO_DETECTORS.has(id) ? approximate : lowerBound).add(id);
   }
 
-  const availability = handleInsightAvailability(body.service_id, ROLLUP_INSIGHT_COLUMNS);
+  // Summaries hold every supported detector's fields; the log field settings decide which run.
+  const enabled = new Set(body.enabled_log_fields ?? []);
+  const availableColumns = new Set([...ROLLUP_INSIGHT_COLUMNS].filter((field) => enabled.has(field)));
+  const availability = handleInsightAvailability(body.service_id, availableColumns);
   const earliestLogMs = body.earliest_log_at ? Date.parse(body.earliest_log_at) : Number.NaN;
   const effectiveFirstMs = baselineRequests > 0 && Number.isFinite(earliestLogMs)
     ? Math.min(baselineResult.dataFromMs, earliestLogMs)
@@ -632,7 +640,7 @@ export async function insightsFromRollup(
   const envelope = await handleInsights(body, {
     now: new Date(end),
     maskIps: Boolean(body.mask_ips),
-    availableColumns: ROLLUP_INSIGHT_COLUMNS,
+    availableColumns,
     availableHistoryHours: historyHours,
     urlAggregateRows: url,
     ipSecurityRows: [],

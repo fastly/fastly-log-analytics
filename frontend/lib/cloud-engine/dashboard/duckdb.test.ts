@@ -4,7 +4,17 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { parquetWriteBuffer } from "hyparquet-writer";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+// Builders that ask which log fields are enabled get every field the checks below need.
+vi.mock("../active-log-fields", async () => {
+  const { INSIGHT_DEFINITIONS } = await import("../insights");
+  return {
+    cloudActiveLogFieldIds: async () => new Set([
+      ...INSIGHT_DEFINITIONS.flatMap((d) => d.required_fields), "edge", "rid", "prid", "pop", "ttfb", "ottfb", "edge_score",
+    ]),
+  };
+});
 import {
   DUCKDB_WASM_VERSION,
   DuckDBAnalyticalEngine,

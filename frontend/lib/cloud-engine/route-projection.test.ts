@@ -1,5 +1,10 @@
 // @vitest-environment node
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+
+// Projection checks read every column, so every log field counts as enabled.
+vi.mock("./active-log-fields", () => ({
+  cloudActiveLogFieldIds: async () => ({ has: () => true }) as unknown as Set<string>,
+}));
 import { ALL_TABLE_FIELDS, createNodeBackend, FIELD_DUCKDB_TYPES, type DuckDBReadContext } from "./dashboard/duckdb";
 import { assetsScanColumns, handleAssetsRequest } from "./assets";
 import { handleOriginRequest, originScanColumns } from "./origin";

@@ -1,5 +1,10 @@
 // @vitest-environment node
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+const settings = vi.hoisted(() => ({ off: new Set<string>() }));
+vi.mock("./active-log-fields", () => ({
+  cloudActiveLogFieldIds: async () => ({ has: (id: string) => !settings.off.has(id) }) as unknown as Set<string>,
+}));
 import { parquetWriteBuffer } from "hyparquet-writer";
 import {
   ALL_TABLE_FIELDS, createNodeBackend, DuckDBAnalyticalEngine as ParquetEngine, FIELD_DUCKDB_TYPES, type DuckDBReadContext,
@@ -50,17 +55,17 @@ describe("Feature F21 — Network cloud-engine", () => {
     }
   });
 
-  it("reports missing shielding inputs, and joins retained edge/shield requests when present", async () => {
+  it("names shielding inputs the log field settings leave off, and joins retained edge/shield requests", async () => {
     const engine = new DuckDBAnalyticalEngine();
     try {
       await engine.executeSql(`INSERT INTO requests
         (scoped_key, ts_ms, edge, rid, prid, pop, ttfb, country)
-        VALUES ('native', 1700000100000, true, 'edge-request', NULL, 'IAD', 0.1, 'US')`);
+        VALUES ('native', 1700000100000, true, 'edge-request', NULL, 'IAD', 0.1, 'US'),
+          ('native', 1700000100001, false, 'shield-request', 'edge-request', 'LHR', 0.04, 'GB')`);
+      settings.off = new Set(["prid"]);
       const missing = await handleNetworkRequest("/api/network-health", { engine, sections: ["shielding_analysis"] });
-      expect(missing).toHaveProperty("shielding_analysis.requires_fields", expect.arrayContaining(["prid"]));
-      await engine.executeSql(`INSERT INTO requests
-        (scoped_key, ts_ms, edge, rid, prid, pop, ttfb, country)
-        VALUES ('native', 1700000100001, false, 'shield-request', 'edge-request', 'LHR', 0.04, 'GB')`);
+      expect(missing).toHaveProperty("shielding_analysis.requires_fields", ["prid"]);
+      settings.off = new Set();
       const data = await handleNetworkRequest("/api/network-health", {
         engine, sections: ["shielding_analysis"], filters: { country: { mode: "include", values: ["US"] } },
       });

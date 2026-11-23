@@ -20,6 +20,7 @@ import {
   type InsightsRequest,
   type CacheCollapseDetailRequest,
 } from "./insights";
+import { cloudActiveLogFieldIds } from "./active-log-fields";
 import { formatBudgetAmount, type CloudBudgetDetail } from "./range-loader";
 import type { RollupResult } from "./dashboard/rollup-query";
 import { INSIGHTS_DEFERRED, insightsDeferredDetectors, rollupInsightsBaseline } from "./insights-rollup";
@@ -94,14 +95,15 @@ export async function queryCloudInsights(
   const scope = `WITH cloud_insight_scope AS (
     SELECT * FROM requests WHERE ts_ms >= ${scanFrom} AND ts_ms < ${end} AND (${filters || "TRUE"})
   )`;
-  const [availableColumns, totals] = await Promise.all([
-    engine.getPresentColumns(),
+  // The log field settings decide which detectors run; every built-in column exists in the files.
+  const [enabledFields, totals] = await Promise.all([
+    cloudActiveLogFieldIds(body.service_id, options.signal ?? new AbortController().signal),
     engine.executeSql(`${scope} SELECT COUNT(*) FILTER (WHERE ts_ms >= ${windowStartMs}) AS requests,
       COUNT(*) FILTER (WHERE ts_ms < ${windowStartMs}) AS baseline_requests,
       MIN(ts_ms) FILTER (WHERE ts_ms < ${windowStartMs}) AS first_ms
       FROM cloud_insight_scope`, [], options.signal),
   ]);
-  const availability = handleInsightAvailability(body.service_id, availableColumns);
+  const availability = handleInsightAvailability(body.service_id, enabledFields);
   const availableIds = new Set(availability.insights.filter((d) => d.available).map((d) => d.id));
   const baselineReqs = options.baseline ? null : Number(totals[0]?.baseline_requests ?? 0);
   const firstMs = options.baseline ? options.baseline.dataFromMs : totals[0]?.first_ms;
@@ -130,7 +132,7 @@ export async function queryCloudInsights(
   const envelope = await handleInsights(body, {
     now: new Date(end),
     maskIps: options.maskIps,
-    availableColumns,
+    availableColumns: enabledFields,
     availableHistoryHours: historyHours,
     urlAggregateRows: summarized?.rows.url ?? urlRows,
     ipSecurityRows: summarized?.rows.ip ?? ipRows,

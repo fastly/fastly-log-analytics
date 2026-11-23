@@ -11,6 +11,14 @@ import { escapeSqlLiteral } from "./sql-validator";
 
 const tableRows = (table: unknown) => (table as { toArray(): Record<string, unknown>[] }).toArray();
 
+const settings = vi.hoisted(() => ({ ids: new Set<string>() }));
+vi.mock("./active-log-fields", () => ({ cloudActiveLogFieldIds: vi.fn(async () => settings.ids) }));
+// The fields `seedRichHistory` logs, as the service's log field settings would enable them.
+const SEEDED_FIELDS = [
+  "timestamp", "url", "ip", "status", "cache", "elapsed", "city", "region", "country", "asn", "p_type", "pop", "ua",
+  "referer", "method", "transport",
+];
+
 const engine = getDuckDBEngine();
 const end = "2026-01-03T00:00:00.000Z";
 const endMs = Date.parse(end);
@@ -21,6 +29,7 @@ const options = { signal, maskIps: false, filters: [] };
 beforeEach(async () => {
   await engine.reset();
   engine.setPresentColumnsOverride(null);
+  settings.ids = new Set(SEEDED_FIELDS);
 });
 
 async function seedRichHistory(nonAuth403 = false) {
@@ -69,7 +78,7 @@ describe("local Parquet insight scans", () => {
       .toMatchObject({ label: "192.0.2.2", current_val: 120 });
     expect(result.unsupported_detectors).toHaveLength(29);
     expect(result.unsupported_detectors.every((d) => d.reason === "cloud_detector_unsupported")).toBe(true);
-    const availability = handleInsightAvailability("example", await engine.getPresentColumns());
+    const availability = handleInsightAvailability("example", settings.ids);
     expect(availability.insights.filter((d) => d.available).map((d) => d.id).sort())
       .toEqual(result.insights.map((card) => card.id).sort());
   });
@@ -86,10 +95,14 @@ describe("local Parquet insight scans", () => {
     expect(allCountries.insights.find((card) => card.id === "credential_enumeration")?.severity).toBe("clean");
   });
 
-  it("reports absent schema and insufficient history without inventing clean findings", async () => {
+  it("runs only what the log field settings enable, whatever the files hold, and flags insufficient history", async () => {
+    await seedRichHistory();
+    settings.ids = new Set();
     const empty = await queryCloudInsights(body, options);
     expect(empty.insights).toEqual([]);
     expect(empty.unavailable_detectors).toHaveLength(INSIGHT_DEFINITIONS.length);
+    await engine.reset();
+    settings.ids = new Set(["timestamp", "url", "cache"]);
     const current = endMs - 1800_000;
     await engine.executeSql(`INSERT INTO requests (scoped_key, timestamp, ts_ms, url, cache)
       VALUES ('current', epoch_ms(${current}), ${current}, '/only-current', 'MISS')`);

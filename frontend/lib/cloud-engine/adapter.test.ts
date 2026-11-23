@@ -10,7 +10,8 @@ import * as storageBilling from "./usage/storageBilling";
 import { fixtureUsageInput } from "./usage/fixtures";
 import { resetComputeBillingCache } from "./usage/computeUsage";
 import * as ops from "./telemetry/client";
-import { CloudBudgetError, cloudRangePresentColumns, ensureCloudRange } from "./range-loader";
+import { CloudBudgetError, ensureCloudRange } from "./range-loader";
+import { cloudActiveLogFieldIds } from "./active-log-fields";
 import { insightScanColumns } from "./insight-scans";
 import { NETWORK_SCAN_COLUMNS, networkScanColumns } from "./network";
 import { VALUE_SCAN_COLUMNS } from "./value";
@@ -27,8 +28,9 @@ import { mergeRollups } from "./dashboard/rollup-query";
 vi.mock("./range-loader", async (importOriginal) => ({
   ...await importOriginal<typeof import("./range-loader")>(),
   ensureCloudRange: vi.fn(async () => getDuckDBEngine().readContext()),
-  cloudRangePresentColumns: vi.fn(async () => new Set<string>()),
 }));
+
+vi.mock("./active-log-fields", () => ({ cloudActiveLogFieldIds: vi.fn(async () => new Set<string>()) }));
 
 vi.mock("./network-rollup", async (importOriginal) => ({
   ...await importOriginal<typeof import("./network-rollup")>(),
@@ -1443,9 +1445,9 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     }));
     expect(insights?.projection?.columns).toEqual(expect.arrayContaining(["url", "status", "transport", "host"]));
     expect(insights?.projection?.maxBytes).toBeUndefined();
-    // Availability needs only the files' schemas, read from their footers without loading a range.
+    // Availability needs only the log field settings, so it loads no range.
     expect(await options("/api/insight-availability")).toBeUndefined();
-    expect(vi.mocked(cloudRangePresentColumns)).toHaveBeenCalled();
+    expect(vi.mocked(cloudActiveLogFieldIds)).toHaveBeenCalled();
     expect((await options("/api/insights/cache-collapse-detail", post({ url: "/a", window_size_hrs: 24, baseline_hours: 168 })))
       ?.projection?.columns).toEqual(insightScanColumns([]));
     expect((await options("/api/insights", post({ window_size_hrs: 24, baseline_hours: 720 }, { "x-flp-cloud-prefetch": "1" })))

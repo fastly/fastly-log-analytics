@@ -1,6 +1,11 @@
 // @vitest-environment node
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getDuckDBEngine } from "./dashboard/test-fixtures";
+
+// The log field settings enable what the fixture rows log.
+vi.mock("./active-log-fields", () => ({
+  cloudActiveLogFieldIds: async () => new Set(["timestamp", "url", "ip", "status", "cache"]),
+}));
 import { CLOUD_INSIGHT_DETECTORS, queryCloudCacheCollapse, queryCloudInsights } from "./insight-scans";
 import { cloudRumAnalytics, cloudRumLiveEvents } from "./rum-wire";
 

@@ -1,3 +1,4 @@
+import { cloudActiveLogFieldIds } from "./active-log-fields";
 import { cloudReadContext } from "./range-loader";
 import { computeRocAuc } from "./scoring-train";
 import { buildScoringSourceSql } from "./sessions";
@@ -39,10 +40,16 @@ function bounded(value: string | null, fallback: number, max: number): number {
 }
 
 export async function queryCloudScoring(request: Request, route: string) {
+  const url = new URL(request.url);
+  const serviceId = decodeURIComponent(url.pathname.split("/")[3] ?? "") || undefined;
+  // The log field settings say whether scoring is on; the column check only keeps the SQL off
+  // files written before edge_score was logged.
+  if (!(await cloudActiveLogFieldIds(serviceId, request.signal)).has("edge_score")) {
+    return unavailable("scoring_fields_not_present");
+  }
   const engine = cloudReadContext(request);
   const cols = await engine.getPresentColumns();
-  if (!cols.has("edge_score")) return unavailable("scoring_fields_not_present");
-  const url = new URL(request.url);
+  if (!cols.has("edge_score")) return { supported: true as const, available: false as const, reason: "no_scored_rows" };
   const maskIps = request.headers.get("x-mask-ips") === "1" ||
     request.headers.get("x-session-role") === "analyst-no-pii" ||
     ["1", "true"].includes(url.searchParams.get("mask_ips") ?? "") ||

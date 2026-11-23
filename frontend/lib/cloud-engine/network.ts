@@ -5,6 +5,7 @@ import {
   type DuckDBReadContext,
 } from "./dashboard/duckdb";
 import type { FiltersPayload } from "@/types/api";
+import { cloudActiveLogFieldIds } from "./active-log-fields";
 import { buildOriginShieldingAnalysisSql, enrichShieldingRouteWithPopDistance } from "./origin";
 import { parseEpochMs, roundTo } from "./engine-utils";
 import { analyticsFiltersToSql, rangeServiceSql } from "./query-params";
@@ -489,9 +490,9 @@ async function queryNetworkShielding(
   where: string,
   engine: Pick<DuckDBAnalyticalEngine, "executeSql" | "getPresentColumns">,
 ) {
-  const present = await engine.getPresentColumns();
-  const missing = ["edge", "rid", "prid", "pop"].filter((field) => !present.has(field));
-  if (!present.has("ottfb") && !present.has("ttfb")) missing.push("ttfb");
+  const enabled = await cloudActiveLogFieldIds(params.service_id, params.signal ?? new AbortController().signal);
+  const missing = ["edge", "rid", "prid", "pop"].filter((field) => !enabled.has(field));
+  if (!enabled.has("ottfb") && !enabled.has("ttfb")) missing.push("ttfb");
   if (missing.length) {
     return { has_data: false, requires_fields: missing, rows: [], total_routes: 0, truncated: false };
   }

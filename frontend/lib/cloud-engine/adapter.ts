@@ -20,7 +20,6 @@ import { dashboardCacheIdentity, parseVcpuMsHeader } from "./dashboard/sources";
 import { customCards, type CardField, type CustomField } from "./dashboard/summaries";
 import {
   handleInsightAvailability,
-  INSIGHT_REQUIRED_FIELDS,
   type CacheCollapseDetailRequest,
   type InsightsRequest,
 } from "./insights";
@@ -65,9 +64,10 @@ import { cloudTeardown } from "./teardown";
 import { cloudProvisionExecute } from "./provision";
 import { cloudLogAccounting, cloudQuarantine } from "./admin-reads";
 import { cloudAdminWire } from "./admin-wire";
+import { cloudActiveLogFieldIds } from "./active-log-fields";
 import { beginCloudLoading, type LoadingStage } from "./loading-progress";
 import {
-  bindCloudReadContext, CloudBudgetError, cloudFileSource, cloudRangePresentColumns, cloudReadContext, ensureCloudRange,
+  bindCloudReadContext, CloudBudgetError, cloudFileSource, cloudReadContext, ensureCloudRange,
   formatBudgetAmount,
 } from "./range-loader";
 import {
@@ -992,12 +992,15 @@ async function cloudInsightsRollup(
   const maskIps = Boolean(body.mask_ips) || request.headers.get("x-mask-ips") === "1" ||
     headerRole === "analyst-no-pii" || useSessionRoleStore.getState().isRemoteAnalyst;
   try {
+    const enabledLogFields = [...await cloudActiveLogFieldIds(serviceId, request.signal)];
+    assertAdapterEpoch(request, entryMetaEpoch);
     const answer = await rollupAnswer("/api/insights/rollup", {
       ...body,
       clamp_end: end,
       ...(earliestLogAt ? { earliest_log_at: earliestLogAt } : {}),
       ...(serviceId ? { service_id: serviceId } : {}),
       mask_ips: maskIps,
+      enabled_log_fields: enabledLogFields,
     }, serviceId, request.signal);
     assertAdapterEpoch(request, entryMetaEpoch);
     if (!answer) return null;
@@ -1061,35 +1064,14 @@ async function cloudInsightsBaseline(
   }
 }
 
-/**
- * Insights availability from the last 24 h of raw files' footers. It needs
- * only their schemas, so it neither downloads column data nor waits for the
- * analytical queue the Insights scans hold.
- */
+/** Insights availability from the service's log field settings; no raw file is read. */
 async function cloudInsightAvailability(request: Request, entryMetaEpoch: number): Promise<Response> {
   const params = await readRequestParams(request);
   assertAdapterEpoch(request, entryMetaEpoch);
   const serviceId = params.service_id ?? request.headers.get("x-service-id") ?? undefined;
-  let end = String(params.end_time ?? params.end ?? "");
-  if (!end) {
-    const response = await withLoading("range", () => fetchCloudMetadata("/api/log-extents", request.signal));
-    assertAdapterEpoch(request, entryMetaEpoch);
-    if (!response.ok) throw new Error(`Cloud range discovery failed (${response.status})`);
-    const extents = await response.json() as { latest_log_at?: string | null };
-    assertAdapterEpoch(request, entryMetaEpoch);
-    end = extents.latest_log_at ?? new Date().toISOString();
-  }
-  const start = String(params.start_time ?? params.start ?? new Date(Date.parse(end) - 24 * 3_600_000).toISOString());
-  if (!Number.isFinite(Date.parse(start)) || !Number.isFinite(Date.parse(end)) || Date.parse(start) >= Date.parse(end)) {
-    throw new Error("Invalid Cloud query time range");
-  }
-  const columns = await cloudRangePresentColumns(start, end, request.signal, {
-    serviceId: serviceId ? decodeUriStrict(String(serviceId)) : undefined,
-    isCurrent: () => assertAdapterEpoch(request, entryMetaEpoch),
-    wanted: INSIGHT_REQUIRED_FIELDS,
-  });
+  const enabled = await cloudActiveLogFieldIds(serviceId ? decodeUriStrict(String(serviceId)) : undefined, request.signal);
   assertAdapterEpoch(request, entryMetaEpoch);
-  return jsonResponse(handleInsightAvailability(serviceId ? String(serviceId) : undefined, columns), request);
+  return jsonResponse(handleInsightAvailability(serviceId ? String(serviceId) : undefined, enabled), request);
 }
 
 async function prepareCloudScan(

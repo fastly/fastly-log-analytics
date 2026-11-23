@@ -1,5 +1,18 @@
 // @vitest-environment node
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+
+const settings = vi.hoisted(() => ({ off: new Set<string>() }));
+// What the adapter resolves on the main thread and sends with a summaries read.
+const withSettings = <T extends object>(request: T) => ({
+  ...request,
+  enabled_log_fields: [...new Set(INSIGHT_DEFINITIONS.flatMap((d) => d.required_fields))]
+    .filter((field) => !settings.off.has(field)),
+});
+vi.mock("./active-log-fields", async () => {
+  const { INSIGHT_DEFINITIONS } = await import("./insights");
+  const every = INSIGHT_DEFINITIONS.flatMap((d) => d.required_fields);
+  return { cloudActiveLogFieldIds: async () => new Set(every.filter((field) => !settings.off.has(field))) };
+});
 import { DuckDBAnalyticalEngine as ParquetEngine, type DuckDBReadContext } from "./dashboard/duckdb";
 import { BOUNDS, Histogram } from "./dashboard/histogram";
 import { decodeRollup, emptyAgg, mergeRollups, type RollupResult } from "./dashboard/rollup-query";
@@ -21,7 +34,7 @@ import {
 import { INSIGHTS_RESIDUAL_FIELDS } from "./insights-residual";
 import { insightsBaselineFromRollup, insightsBaselineRollup, insightsDeferredDetectors, insightsFromRollup, ipDetectorsRuledOut, rollupInsightsBaseline } from "./insights-rollup";
 import { parquetWriteBuffer } from "hyparquet-writer";
-import { _coalesced_ip_security_aggregates } from "./insights";
+import { _coalesced_ip_security_aggregates, INSIGHT_DEFINITIONS } from "./insights";
 import type { Rollup } from "./dashboard/rollup-query";
 
 const HOUR = 3_600_000;
@@ -534,13 +547,30 @@ describe("insights baseline from summaries vs raw DuckDB over the same rows", ()
     expect(rows.map((r) => Number(r.ce_w_denied))).toEqual([2]);
   });
 
+  it("serves from summaries only the detectors the log field settings enable, as the raw path does", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: T1 });
+    settings.off = new Set(["url"]);
+    try {
+      const src = fixtureSource([fixturePage(RAW)], BUFFERS, { json: [], files: [] }, [fixturePage(fixtureFiles("window"))]);
+      const [raw, rolled] = await Promise.all([
+        queryCloudInsights(body, { signal, maskIps: false, filters: [], engine: read }),
+        insightsFromRollup(withSettings(body), [], src, signal),
+      ]);
+      expect(raw.insights.map((c) => c.id)).not.toContain("error_spikes");
+      expect(rolled!.insights.map((c) => c.id)).toEqual(raw.insights.map((c) => c.id));
+    } finally {
+      settings.off = new Set();
+      vi.useRealTimers();
+    }
+  });
+
   it("answers window and baseline from v3 summaries without raw Parquet, deferring only IP detectors", async () => {
     vi.useFakeTimers({ toFake: ["Date"], now: T1 });
     try {
       const src = fixtureSource([fixturePage(RAW)], BUFFERS, { json: [], files: [] }, [fixturePage(fixtureFiles("window"))]);
       const [raw, rolled] = await Promise.all([
         queryCloudInsights(body, { signal, maskIps: false, filters: [], engine: read }),
-        insightsFromRollup(body, [], src, signal),
+        insightsFromRollup(withSettings(body), [], src, signal),
       ]);
       expect(rolled).not.toBeNull();
       expect(rolled!.rollup).toMatchObject({
@@ -591,7 +621,7 @@ describe("insights baseline from summaries vs raw DuckDB over the same rows", ()
       );
       const [raw, rolled] = await Promise.all([
         queryCloudInsights(cut, { signal, maskIps: false, filters: [], engine: read }),
-        insightsFromRollup(cut, [], src, signal),
+        insightsFromRollup(withSettings(cut), [], src, signal),
       ]);
       expect(plain.fetchRange).toBeUndefined();
       expect(rolled).not.toBeNull();
@@ -705,7 +735,7 @@ describe("IP detectors from the window's ins_ip", () => {
     const src = fixtureSource([page], Object.fromEntries(files.map((f) => [f.key, f.bytes])), { json: [], files: [] }, []);
     vi.useFakeTimers({ toFake: ["Date"], now: END });
     try {
-      return (await insightsFromRollup({ ...body, clamp_end: new Date(END).toISOString() }, [], src, signal))!;
+      return (await insightsFromRollup(withSettings({ ...body, clamp_end: new Date(END).toISOString() }), [], src, signal))!;
     } finally {
       vi.useRealTimers();
     }

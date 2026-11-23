@@ -122,10 +122,6 @@ export const INSIGHT_DEFINITIONS: readonly InsightDefinitionMeta[] = [
 
 export const INSIGHT_CARDS = INSIGHT_DEFINITIONS;
 
-/** Every column `handleInsightAvailability` checks; its answer depends on no other. */
-export const INSIGHT_REQUIRED_FIELDS: ReadonlySet<string> =
-  new Set(INSIGHT_DEFINITIONS.flatMap((d) => d.required_fields));
-
 export const CLOUD_INSIGHT_DETECTORS: ReadonlySet<string> = new Set([
   "error_spikes", "credential_enumeration", "content_discovery",
   "city_surges", "city_error_spikes", "city_latency_regressions", "new_city_traffic",

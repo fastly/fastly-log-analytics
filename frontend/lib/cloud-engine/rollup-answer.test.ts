@@ -20,6 +20,7 @@ import { performanceFromRollup } from "./performance-rollup";
 import { answerFromRollup } from "./rollup-answer";
 import { SECURITY_ROLLUP_SECTIONS } from "./rollup-sections";
 import { securityFromRollup } from "./security-rollup";
+import { INSIGHT_DEFINITIONS } from "./insights";
 
 vi.mock("./dashboard/sources", async (importOriginal) => ({
   ...await importOriginal<typeof import("./dashboard/sources")>(),
@@ -37,7 +38,11 @@ const origin = { ...range, bucket_minutes: 60, timeseries_metric: "ttlb", timese
   ip_health_limit: 30, sections: ["ip_health", "timeseries"] };
 const performance = { ...range, sections: ["ttl_dist", "waterfall"] };
 const security = { ...range, bucket_seconds: 3600, sections: [...SECURITY_ROLLUP_SECTIONS] };
-const insights = { service_id: "example", window_size_hrs: 1, baseline_hours: 1, clamp_end: range.end_time };
+// The adapter sends the service's enabled log fields with a summaries read; here every insight field is on.
+const insights = {
+  service_id: "example", window_size_hrs: 1, baseline_hours: 1, clamp_end: range.end_time,
+  enabled_log_fields: [...new Set(INSIGHT_DEFINITIONS.flatMap((d) => d.required_fields))],
+};
 
 const source = (
   buffers: Record<string, ArrayBuffer> = SUMMARY_FIXTURE_BUFFERS,

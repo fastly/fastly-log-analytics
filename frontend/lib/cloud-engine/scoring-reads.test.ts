@@ -5,6 +5,14 @@ import { getDuckDBEngine } from "./dashboard/duckdb";
 import { parquetFixture } from "./dashboard/test-fixtures";
 import { cloudScoringRead, queryCloudScoring } from "./scoring-reads";
 
+const settings = vi.hoisted(() => ({ ids: new Set(["edge_score"]), asked: [] as (string | undefined)[] }));
+vi.mock("./active-log-fields", () => ({
+  cloudActiveLogFieldIds: vi.fn(async (serviceId: string | undefined) => {
+    settings.asked.push(serviceId);
+    return settings.ids;
+  }),
+}));
+
 const engine = getDuckDBEngine();
 const end = "2026-11-02T00:00:00Z";
 const at = Date.parse(end) - 1000;
@@ -12,7 +20,11 @@ const request = (route: string) => new Request(
   `http://localhost/api/services/fixture-service/scoring/${route}${route.includes("?") ? "&" : "?"}end_time=${end}`,
 );
 
-beforeEach(async () => { await engine.reset(); });
+beforeEach(async () => {
+  await engine.reset();
+  settings.ids = new Set(["edge_score"]);
+  settings.asked = [];
+});
 afterEach(() => { vi.unstubAllGlobals(); });
 
 function scoringFixture(optional = false) {
@@ -42,12 +54,21 @@ describe("Cloud scoring reads", () => {
     expect(preview).toMatchObject({ threshold: 50, total_scored: 2, flagged_count: 1, flagged_pct: 50 });
   });
 
-  it("does not turn a dataset with no scoring fields into successful empty analytics", async () => {
+  it("reports scoring off when the service's log field settings leave edge_score off, whatever the files hold", async () => {
+    settings.ids = new Set(["status"]);
+    await engine.syncWindow([{ key: "scored", bytes: scoringFixture() }]);
+    expect(await queryCloudScoring(request("analytics"), "analytics")).toEqual({
+      supported: false, available: false, reason: "scoring_fields_not_present",
+    });
+    expect(settings.asked).toEqual(["fixture-service"]);
+  });
+
+  it("does not turn enabled scoring with no scored rows yet into successful empty analytics", async () => {
     await engine.syncWindow([{ key: "unscored", bytes: parquetFixture([
       { timestamp: at, status: 200, cache: "HIT", resp_bytes: 100 },
     ]) }]);
     expect(await queryCloudScoring(request("analytics"), "analytics")).toEqual({
-      supported: false, available: false, reason: "scoring_fields_not_present",
+      supported: true, available: false, reason: "no_scored_rows",
     });
   });
 

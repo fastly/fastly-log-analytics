@@ -41,9 +41,18 @@ afterEach(() => {
 })
 
 describe('Cloud scoring capability views', () => {
+  it('says scoring is waiting for scored requests when the settings enable it but none are logged yet', async () => {
+    vi.mocked(adminFetch).mockImplementation(async (input) => {
+      if (String(input) === '/api/services') return Response.json({ services: [{ service_id: 'fixture-service' }] })
+      return Response.json({ supported: true, available: false, reason: 'no_scored_rows' })
+    })
+    render(<CloudScoringOverview />, { wrapper })
+    await screen.findByText(/No scored requests have been logged in this range yet/)
+  })
+
   it('shows not-configured analytics without mounting control-plane reads or actions', async () => {
     render(<CloudScoringOverview />, { wrapper })
-    await screen.findByText(/Session scoring is not configured in the retained logs/)
+    await screen.findByText(/Session scoring is off in this service's log field settings/)
     expect(screen.getByText(/Labels, trained matrices, evaluation curves/)).toBeInTheDocument()
     expect(screen.getByText(/Labels, trained matrices, evaluation curves/).closest('[role]')).toHaveAttribute('role', 'status')
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()

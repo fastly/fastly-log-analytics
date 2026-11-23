@@ -15,6 +15,14 @@ import { parquetWriteBuffer } from "hyparquet-writer";
 import { cloudRumAnalytics, cloudRumLiveEvents, cloudRumUsage } from "./rum-wire";
 import { executePerformanceAggregates } from "./performance";
 import { handleCloudAnalyticalRequest } from "./adapter";
+
+const settings = vi.hoisted(() => ({ ids: new Set<string>(), asked: [] as (string | undefined)[] }));
+vi.mock("./active-log-fields", () => ({
+  cloudActiveLogFieldIds: vi.fn(async (serviceId: string | undefined) => {
+    settings.asked.push(serviceId);
+    return settings.ids;
+  }),
+}));
 import { handleInsightAvailability, INSIGHT_DEFINITIONS } from "./insights";
 import * as sqlBuilder from "../sqlBuilder";
 import { insightsBaselineFromRollup } from "./insights-rollup";
@@ -67,6 +75,10 @@ const signal = new AbortController().signal;
 const file = { key: "processed/request/fixture.parquet", start: from, end: to, size: 100, rows: 1 };
 
 beforeEach(async () => {
+  settings.ids = new Set([
+    ...INSIGHT_DEFINITIONS.flatMap((d) => d.required_fields), "edge", "rid", "prid", "pop", "ttfb", "ottfb", "edge_score",
+  ]);
+  settings.asked = [];
   // Fixtures are small closed-hour files, so tests of footer-planned ranges opt out of whole reads.
   Object.assign(wholeReadLimits, { anyUpToBytes: 0, closedHourUpToBytes: 0 });
   scopeState.value = "fixture-session";
@@ -554,51 +566,25 @@ describe("Cloud first-page analytical range loading", () => {
     expect(reads(baselineFile.key)).toBeGreaterThan(0);
   });
 
-  it("answers Insights availability from the files' footers alone, without loading DuckDB", async () => {
+  it("answers Insights availability from the log field settings, reading no files", async () => {
     const entries = Array.from({ length: 3 }, (_, i) => {
       const bytes = wideFile(i);
       return { ...file, key: `processed/request/a${i}.parquet`, start: "2026-11-05T12:00:00Z",
         end: "2026-11-05T13:00:00Z", size: bytes.byteLength, bytes };
     });
     await analyticalFiles(entries);
-    const response = await handleCloudAnalyticalRequest(new Request("http://localhost/api/insight-availability", {
-      headers: { "x-service-id": "fixture-service" },
-    }));
-    expect(response?.status).toBe(200);
-    const expected = handleInsightAvailability("fixture-service", ["timestamp", "ts_ms", "ua", "status", "cache", "referer"]);
-    expect(await response!.json()).toEqual(JSON.parse(JSON.stringify(expected)));
-    expect(source.fetchFile).not.toHaveBeenCalled();
-    // Only the 64 KiB tail probes: no column chunk is read.
-    for (const [entry, start, end] of source.fetchRange.mock.calls as [ManifestFile, number, number][]) {
-      expect(end).toBe(entry.size);
-      expect(start).toBe(Math.max(0, entry.size - 64 * 1024));
-    }
-    expect(source.fetchRange).toHaveBeenCalledTimes(entries.length);
-    expect([...await getDuckDBEngine().getPresentColumns()]).toEqual([]);
-  });
-
-  it("stops reading Insights availability footers once the newest file has every required field", async () => {
     const required = [...new Set(INSIGHT_DEFINITIONS.flatMap((d) => d.required_fields))];
-    const full = parquetWriteBuffer({ columnData: [
-      { name: "timestamp", type: "TIMESTAMP", data: [new Date("2026-11-05T14:00:01Z")] },
-      ...required.filter((name) => name !== "timestamp").map((name) => ({ name, type: "STRING" as const, data: ["x"] })),
-    ] });
-    const older = Array.from({ length: 4 }, (_, i) => {
-      const bytes = wideFile(i);
-      return { ...file, key: `processed/request/old${i}.parquet`, start: `2026-11-05T1${i}:00:00Z`,
-        end: `2026-11-05T1${i}:30:00Z`, size: bytes.byteLength, bytes };
-    });
-    const newest = { ...file, key: "processed/request/newest.parquet", start: "2026-11-05T14:00:00Z",
-      end: "2026-11-05T14:30:00Z", size: full.byteLength, bytes: full };
-    await analyticalFiles([...older, newest]);
+    settings.ids = new Set(required.filter((name) => name !== "referer"));
     const response = await handleCloudAnalyticalRequest(new Request("http://localhost/api/insight-availability", {
       headers: { "x-service-id": "fixture-service" },
     }));
     expect(response?.status).toBe(200);
-    const expected = handleInsightAvailability("fixture-service", ["timestamp", "ts_ms", "ua", "referer", ...required]);
+    const expected = handleInsightAvailability("fixture-service", settings.ids);
     expect(await response!.json()).toEqual(JSON.parse(JSON.stringify(expected)));
-    const read = (source.fetchRange.mock.calls as [ManifestFile][]).map(([entry]) => entry.key);
-    expect(read).toEqual([newest.key]);
+    expect(expected.insights.some((d) => d.missing_fields?.includes("referer"))).toBe(true);
+    expect(settings.asked).toEqual(["fixture-service"]);
+    expect(source.fetchFile).not.toHaveBeenCalled();
+    expect(source.fetchRange).not.toHaveBeenCalled();
   });
 
   it("keeps a Performance half-open window invariant under valid Parquet regrouping", async () => {
