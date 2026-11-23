@@ -22,6 +22,7 @@ One document per route. Each describes what the page shows, the backend endpoint
 | `/logs` | [logs.md](logs.md) | Data management: crons, audit, ingestion, storage, schema |
 | `/alerts` | [alerts.md](alerts.md) | Alert rules and notifications |
 | `/usage` | [usage-and-cost.md](usage-and-cost.md) | Storage and API usage, cost estimator |
+| `/cache` | [browser-cache.md](browser-cache.md) | Cloud browser Parquet/CacheStorage usage and clear controls |
 | `/control-room` | [control-room.md](control-room.md) | Real-time metrics and recent errors |
 | `/high-scale/request-facts` | [high-scale-request-facts.md](high-scale-request-facts.md) | Paged request-fact explorer |
 | `/share-login` | [share-login.md](share-login.md) | Analyst sign-in and terms gate |
