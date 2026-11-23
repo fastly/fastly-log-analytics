@@ -1385,6 +1385,10 @@ describe("incurredCost", () => {
     // Fastly bills every front request and byte, health probes included: 10 GB front + 5 GB Compute egress
     // = 15 GB, and 1e6 front requests (not the 15,000 logged file deliveries).
     expect(usd.delivery).toBeCloseTo(15 * 0.12 + 100 * 0.01);
+    const delivery = lines.find((l) => l.id === "delivery")!;
+    expect(delivery.parts?.map((p) => p.label)).toEqual(["Egress", "Requests"]);
+    expect(delivery.parts?.[0].usd).toBeCloseTo(15 * 0.12);
+    expect(delivery.parts?.[1].usd).toBeCloseTo(100 * 0.01);
     // 10e6 ms across 2e6 requests is 5 ms/req, within the 20 ms/req contract free allowance ($0 excess CPU).
     expect(usd.compute).toBeCloseTo(2 * 0.5);
     expect(usd.kv).toBeCloseTo(6.5 + 2 * 0.55);

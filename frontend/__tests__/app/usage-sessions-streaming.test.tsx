@@ -446,7 +446,7 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
               lines: [
                 line('storage', 'Object Storage', 0.0012, '43.20 GB-hrs', 'logged'),
                 line('ops', 'Storage operations', 0.08, 'A 15,000 · B 97,800', 'logged'),
-                line('delivery', 'CDN delivery', 9.2, '0.75 GB · 9,100,000 front reqs'),
+                { ...line('delivery', 'CDN delivery', 9.2, '0.75 GB · 9,100,000 front reqs'), parts: [{ label: 'Egress', usd: 0.09 }, { label: 'Requests', usd: 9.11 }] },
                 line('compute', 'Compute (app + worker)', 0.31, '141,195 reqs · 5,160,000 vCPU ms'),
                 line('kv', 'KV Store operations', null, 'Admin only (Fastly stats)', 'none'),
                 line('secrets', 'Secret Store', 0.83, '5 secrets × 1.0 days'),
@@ -471,6 +471,9 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
       const row = within(card as HTMLElement).getByText(label).closest('tr') as HTMLElement
       expect(within(row).getByText(usd)).toBeInTheDocument()
     }
+    const deliveryRow = within(card as HTMLElement).getByText('CDN delivery:').closest('tr') as HTMLElement
+    expect(within(deliveryRow).getByText('Egress $0.09')).toBeInTheDocument()
+    expect(within(deliveryRow).getByText('Requests $9.11')).toBeInTheDocument()
     const kvRow = within(card as HTMLElement).getByText('KV Store operations:').closest('tr') as HTMLElement
     expect(within(kvRow).getByText('n/a')).toBeInTheDocument()
     expect(within(card as HTMLElement).getByText(/KV Store operations cost excluded/)).toBeInTheDocument()

@@ -2057,6 +2057,8 @@ export interface IncurredLine {
   detail: string;
   /** "fastly" when the quantity comes from Fastly's Stats/API; "logged" from this app's telemetry. */
   source: "fastly" | "logged" | "none";
+  /** The line's priced components, shown under its total (CDN delivery: egress and requests). */
+  parts?: Array<{ label: string; usd: number }>;
 }
 
 export interface IncurredInput {
@@ -2207,15 +2209,19 @@ export function incurredCost(input: IncurredInput): {
           )
         : billedVcpuForExecutions(billing.executionTimeMs, billing.requests, r)
             .usd;
+    const egressUsd = gb(bytes) * r.cdn_egress_rate_per_gb;
+    const requestsUsd = (requests / 10000) * r.cdn_request_rate_per_10k;
     lines.push(
       {
         id: "delivery",
         label: "CDN delivery",
-        usd:
-          gb(bytes) * r.cdn_egress_rate_per_gb +
-          (requests / 10000) * r.cdn_request_rate_per_10k,
+        usd: egressUsd + requestsUsd,
         detail: `${gb(bytes).toFixed(2)} GB · ${fmt(requests)} front reqs${frontRead ? "" : " (logged)"}`,
         source: frontRead ? "fastly" : "logged",
+        parts: [
+          { label: "Egress", usd: egressUsd },
+          { label: "Requests", usd: requestsUsd },
+        ],
       },
       {
         id: "compute",
@@ -2256,6 +2262,9 @@ export function incurredCost(input: IncurredInput): {
         usd: gb(input.loggedCdnBytes) * r.cdn_egress_rate_per_gb,
         detail: `${gb(input.loggedCdnBytes).toFixed(2)} GB read; requests not logged`,
         source: "logged",
+        parts: [
+          { label: "Egress", usd: gb(input.loggedCdnBytes) * r.cdn_egress_rate_per_gb },
+        ],
       },
       {
         id: "compute",

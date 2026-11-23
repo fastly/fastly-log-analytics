@@ -46,6 +46,8 @@ export type IncurredCostLine = {
   usd: number | null
   detail: string
   source: 'fastly' | 'logged' | 'none'
+  /** Priced components shown under the line's total (CDN delivery: egress and requests). */
+  parts?: Array<{ label: string; usd: number }>
 }
 
 const INCURRED_SOURCE_LABEL: Record<IncurredCostLine['source'], string> = {
@@ -325,6 +327,11 @@ export function UsageStatCards({
           ) : (
             <strong className="text-foreground">{fmtUSD(line.usd)}</strong>
           )}
+          {line.usd !== null && line.parts?.map((part) => (
+            <span key={part.label} className="text-[10px] text-muted-foreground">
+              {`${part.label} ${fmtUSD(part.usd)}`}
+            </span>
+          ))}
           <span className="text-[9px] uppercase tracking-tighter text-muted-foreground">{line.detail}</span>
           <span className="text-[9px] uppercase tracking-tighter text-muted-foreground">
             {INCURRED_SOURCE_LABEL[line.source]}
