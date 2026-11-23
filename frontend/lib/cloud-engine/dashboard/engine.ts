@@ -2599,8 +2599,14 @@ async function collectAggregator(
     if (isCdnHit(cdn)) stats.cdnHits++;
     finishFile();
   };
-  // The open hour changes most and is read first; older hours then fill in.
+  // A compact straddling the range start has the longest footer, range and
+  // query chain, so it starts first. The open hour changes most and is read
+  // next; older hours then fill in.
+  const straddlesEdge = (entry: PendingFile) =>
+    !entry.summary && readEdge !== null && !insideRange(entry.file) &&
+    spansRowGroups(entry.file);
   const newestFirst = (a: PendingFile, b: PendingFile) =>
+    Number(straddlesEdge(b)) - Number(straddlesEdge(a)) ||
     Date.parse(b.file.end) - Date.parse(a.file.end);
   await Promise.all([
     runPool(pending.filter(cacheReady), readPending),
