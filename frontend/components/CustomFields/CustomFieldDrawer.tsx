@@ -5,7 +5,7 @@ import { z } from 'zod'
 import { useDebounce } from '@/hooks/useDashboardCards'
 import { useOpenGeneration } from '@/hooks/useSSE'
 import { downloadBlob } from '@/lib/utils'
-import { queryKeys, extractApiError, customFieldsApi, type CustomField, type VclLintResult } from "@/lib/api";
+import { invalidateLogFieldQueries, extractApiError, customFieldsApi, type CustomField, type VclLintResult } from "@/lib/api";
 import {
   Dialog,
   DialogContent,
@@ -42,8 +42,7 @@ export function CustomFieldsManager({ serviceId }: { serviceId: string }) {
   const deleteMutation = useMutation({
     mutationFn: (fieldName: string) => customFieldsApi.deleteCustomField(serviceId, fieldName),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['custom-fields', serviceId] })
-      queryClient.invalidateQueries({ queryKey: queryKeys.logFieldsCatalog(serviceId) })
+      invalidateLogFieldQueries(queryClient, serviceId)
     }
   })
 
@@ -80,8 +79,7 @@ export function CustomFieldsManager({ serviceId }: { serviceId: string }) {
       const json = JSON.parse(text)
       if (json.custom_fields && Array.isArray(json.custom_fields)) {
         await customFieldsApi.importCustomFields(serviceId, json.custom_fields)
-        queryClient.invalidateQueries({ queryKey: ['custom-fields', serviceId] })
-        queryClient.invalidateQueries({ queryKey: queryKeys.logFieldsCatalog(serviceId) })
+        invalidateLogFieldQueries(queryClient, serviceId)
         alert(`Successfully imported custom fields.`)
       } else {
         alert("Invalid export file format.")
@@ -198,8 +196,7 @@ export function CustomFieldsManager({ serviceId }: { serviceId: string }) {
         open={drawerOpen}
         onOpenChange={setDrawerOpen}
         onSave={() => {
-            queryClient.invalidateQueries({ queryKey: ['custom-fields', serviceId] })
-            queryClient.invalidateQueries({ queryKey: queryKeys.logFieldsCatalog(serviceId) })
+            invalidateLogFieldQueries(queryClient, serviceId)
             setDrawerOpen(false)
         }}
       />

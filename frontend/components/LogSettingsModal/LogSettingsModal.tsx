@@ -8,7 +8,7 @@ import { z } from 'zod'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useOpenGeneration, useSSE } from '@/hooks/useSSE'
 import {
-  client, unwrapClient, queryKeys, estimateLogFieldBytesPerLine,
+  client, unwrapClient, invalidateLogFieldQueries, estimateLogFieldBytesPerLine,
   isLogFieldPresetActive, toggleLogFieldGroup, toggleLogFieldOverride,
   toggleLogFieldPreset, updateLogFieldLimit,
 } from '@/lib/api'
@@ -93,7 +93,7 @@ function LogSettingsModalBody({ service, open, onOpenChange }: LogSettingsModalP
     mutationFn: async (cfg: LogFieldsConfig) =>
       unwrapClient(client.POST('/api/services/{service_id}/log-fields', { params: { path: { service_id: service!.service_id } }, body: { log_fields: cfg } })),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.services() })
+      invalidateLogFieldQueries(queryClient, service!.service_id)
       const encodedCond = encodeURIComponent(customCondition)
       start(`/api/services/${service!.service_id}/logging-settings/update?update_format=true&period=${period}&sample_rate=${sampleRate}&edge_only=${edgeOnly}&custom_condition=${encodedCond}&cmcd_enabled=${cmcdEnabled}&cmcd_mode=${cmcdMode}&cmcd_version=${cmcdVersion}`, {})
     },

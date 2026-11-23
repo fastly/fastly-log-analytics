@@ -124,6 +124,24 @@ export interface BootstrapCacheSeedSource {
   } | null;
 }
 
+/**
+ * Log field settings change only when a user saves them, so everything derived from them
+ * (bootstrap's `active_log_field_ids` included) is refreshed on that save and not otherwise.
+ */
+export function invalidateLogFieldQueries(
+  queryClient: { invalidateQueries: (filters: { queryKey: readonly unknown[] }) => unknown },
+  serviceId: string,
+): void {
+  for (const queryKey of [
+    queryKeys.bootstrap(),
+    queryKeys.services(),
+    ['custom-fields', serviceId],
+    queryKeys.logFieldsCatalog(serviceId),
+  ]) {
+    void queryClient.invalidateQueries({ queryKey })
+  }
+}
+
 export function seedBootstrapDependentCaches(
   queryClient: { setQueryData: (queryKey: readonly unknown[], updater: unknown) => unknown },
   data: BootstrapCacheSeedSource | null | undefined,
