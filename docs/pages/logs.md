@@ -18,7 +18,7 @@ Import Logs (manual `log_discovery`), Backfill Logs (opens a date-range dialog),
 
 ## Tabs
 
-1. **Cron Runs**: collapsible schedule overview plus the `cron_runs` table filterable by task and status, a live elapsed counter for running jobs, and Purge History.
+1. **Cron Runs**: collapsible schedule overview plus the `cron_runs` table filterable by task and status, a live elapsed counter for running jobs, and Purge History. On Cloud the heading also says how often the clock ticks and which log period sets it, e.g. "Clock ticks every 15 s (¼ of the 60 s request log period)": the front service's clock health checks probe at a quarter of the shortest of the request and RUM log periods, 1–30 s, set by every reconcile (`clock` on `/api/cron-runs` and `/api/cron-schedule`).
 2. **Service History**: configuration and lifecycle audit events (`audit_logs`).
 3. **Ingestion History**: filterable list of `ingested_files` (read-only).
 4. **Metadata Storage**: PostgreSQL table sizes and row counts, retention windows and a Run Cleanup Now action (lazy-mounted).

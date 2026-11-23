@@ -3773,6 +3773,18 @@ pub struct CronAuditSnapshot {
     pub service_audit: Vec<Value>,
     pub last_ingest_at: Option<String>,
     pub schedules: Vec<Value>,
+    /// The front clock: its probe interval (what reconcile sets from these log periods) and the
+    /// log periods behind it; null without an installed service.
+    pub clock: Value,
+}
+
+impl CronAuditSnapshot {
+    /// The probe interval in whole seconds, or the 1 s floor without an installed service.
+    pub fn clock_interval_s(&self) -> u64 {
+        self.clock["probe_interval_s"]
+            .as_f64()
+            .map_or(CLOCK_INTERVAL_S, |s| s.ceil() as u64)
+    }
 }
 
 pub fn cron_audit_snapshot(runtime: &impl Runtime) -> CronAuditSnapshot {
@@ -3787,6 +3799,13 @@ pub fn cron_audit_snapshot(runtime: &impl Runtime) -> CronAuditSnapshot {
         .map(|(rec, svc, _)| (rec, svc))
         .unwrap_or((None, None));
     let schedules = schedule::task_schedules(runtime, &cron_state, active_service.as_ref());
+    let clock = active_service.as_ref().map_or(Value::Null, |svc| {
+        json!({
+            "probe_interval_s": reconcile::clock_interval_ms(svc) as f64 / 1000.0,
+            "log_period_s": svc.log_period,
+            "rum_log_period_s": svc.rum.enabled.then_some(svc.rum.log_period),
+        })
+    });
     let active_service_id = active_service.map(|svc| svc.service_id);
     let last_ingest_at = active_service_id
         .as_deref()
@@ -3808,6 +3827,7 @@ pub fn cron_audit_snapshot(runtime: &impl Runtime) -> CronAuditSnapshot {
         service_audit,
         last_ingest_at,
         schedules,
+        clock,
     }
 }
 

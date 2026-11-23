@@ -121,4 +121,29 @@ describe('Cloud cron schedule evidence', () => {
     expect(screen.getByRole('option', { name: 'Telemetry Flush' })).toBeInTheDocument()
     expect(screen.queryByRole('option', { name: 'Log Discovery' })).not.toBeInTheDocument()
   })
+
+  it('says how often the Cloud clock ticks and which log period sets it', () => {
+    const noop = () => {}
+    const tab = (clock: React.ComponentProps<typeof CronTab>['clock']) => (
+      <QueryClientProvider client={new QueryClient()}>
+        <CronTab
+          cronColumns={[]} cronLogs={undefined} isLoadingCron={false} isFetchingCron={false}
+          orderedSchedules={[{ task: 'request_ingest', activeJob: undefined, schedule: { task: 'request_ingest', next_run_time: null } }]}
+          taskFilter="all" setTaskFilter={noop} statusFilter="all" setStatusFilter={noop}
+          status={undefined} activeServiceId="fixture-service"
+          setDisplayedJobs={noop} setSelectedConsoleJobId={noop} setConsoleOpen={noop}
+          isPurgeOpen={false} setIsPurgeOpen={noop} purgeMutation={{ isPending: false, mutate: noop }}
+          clock={clock}
+        />
+      </QueryClientProvider>
+    )
+    const { rerender } = render(tab({ probe_interval_s: 15, log_period_s: 60, rum_log_period_s: null }))
+    expect(screen.getByTestId('cron-clock')).toHaveTextContent('Clock ticks every 15 s (¼ of the 60 s request log period)')
+    rerender(tab({ probe_interval_s: 5, log_period_s: 60, rum_log_period_s: 20 }))
+    expect(screen.getByTestId('cron-clock')).toHaveTextContent('Clock ticks every 5 s (¼ of the 20 s RUM log period)')
+    rerender(tab({ probe_interval_s: 30, log_period_s: 300, rum_log_period_s: null }))
+    expect(screen.getByTestId('cron-clock')).toHaveTextContent('Clock ticks every 30 s (the 30 s maximum; 300 s request log period)')
+    rerender(tab(null))
+    expect(screen.queryByTestId('cron-clock')).not.toBeInTheDocument()
+  })
 })

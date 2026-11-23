@@ -35,6 +35,20 @@ export {
   FloatingOperationsDock,
 }
 
+export type CronClock = { probe_interval_s: number; log_period_s: number; rum_log_period_s: number | null }
+
+/** "Clock ticks every 15 s (¼ of the 60 s request log period)", naming the cap or floor when one applies. */
+export function describeClock(clock: CronClock): string {
+  const rum = clock.rum_log_period_s
+  const [period, kind] = rum != null && Math.max(rum, 5) < clock.log_period_s
+    ? [Math.max(rum, 5), 'RUM']
+    : [clock.log_period_s, 'request']
+  const every = `Clock ticks every ${clock.probe_interval_s} s`
+  if (Math.abs(period / 4 - clock.probe_interval_s) < 0.001) return `${every} (¼ of the ${period} s ${kind} log period)`
+  const bound = clock.probe_interval_s >= 30 ? 'the 30 s maximum' : 'the 1 s minimum'
+  return `${every} (${bound}; ${period} s ${kind} log period)`
+}
+
 export function CronTab({
   cronColumns,
   cronLogs,
@@ -53,6 +67,7 @@ export function CronTab({
   isPurgeOpen,
   setIsPurgeOpen,
   purgeMutation,
+  clock = null,
 }: {
   cronColumns: ColumnDef<CronRun>[]
   cronLogs: components['schemas']['CronRunsResponse'] | undefined
@@ -72,6 +87,8 @@ export function CronTab({
   isPurgeOpen: boolean
   setIsPurgeOpen: (open: boolean) => void
   purgeMutation: { isPending: boolean; mutate: () => void }
+  /** Cloud: how often the front clock health checks probe, and the log periods that set it. */
+  clock?: CronClock | null
 }) {
   const queryClient = useQueryClient()
   const [isHelpOpen, setIsHelpOpen] = React.useState(false)
@@ -112,6 +129,15 @@ export function CronTab({
               <div className="p-4 border-b bg-muted/10 space-y-5">
                 <div className="flex items-center gap-2">
                   <h3 className="text-sm font-medium">Cron Jobs</h3>
+                  {clock && (
+                    <span
+                      data-testid="cron-clock"
+                      className="text-xs text-muted-foreground"
+                      title="Fastly health checks on the front service probe the clock at this interval. Every reconcile (a log settings change, or a deploy) sets it from the log periods."
+                    >
+                      {describeClock(clock)}
+                    </span>
+                  )}
                   <button
                     onClick={() => setIsHelpOpen(true)}
                     aria-label="About background cron jobs"

@@ -116,6 +116,7 @@ describe("Cloud administrative wire parity", () => {
         { task: "log_flush", next_run_time: null, interval_s: 60 },
         { task: "cloud_ingest_clock", next_run_time: "2026-01-01T00:00:01Z", interval_s: 1 },
       ],
+      clock: { probe_interval_s: 15, log_period_s: 60, rum_log_period_s: null },
       runs: [{ id: "native-run", service_id: "fixture-service", started_at: "2026-01-01T00:00:00Z",
         finished_at: "2026-01-01T00:00:01Z", duration_ms: 1000, outcome: "idle" }],
     });
@@ -166,6 +167,7 @@ describe("Cloud administrative wire parity", () => {
     cronEvidence();
     const data = await (await cloudAdminWire(request(`/api/cron-schedule?${cronRange}`)))!.json();
     expect(data.schedules).toHaveLength(6);
+    expect(data.clock).toEqual({ probe_interval_s: 15, log_period_s: 60, rum_log_period_s: null });
     expect(data.schedules).toContainEqual(expect.objectContaining({
       task: "rum_ingest", next_run_time: null, disabled_reason: "RUM is disabled", last_run_time: null,
     }));

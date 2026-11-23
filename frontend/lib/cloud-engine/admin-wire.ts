@@ -220,7 +220,7 @@ async function cron(
         return { ...schedule, last_run_time: observed && (!recorded || Date.parse(observed) > Date.parse(recorded)) ? observed : recorded };
       });
       if (widest || schedules.every((schedule) => typeof schedule.last_run_time === "string")) {
-        return Response.json({ schedules, ...history });
+        return Response.json({ schedules, ...history, clock: page.clock ?? null });
       }
       continue;
     }

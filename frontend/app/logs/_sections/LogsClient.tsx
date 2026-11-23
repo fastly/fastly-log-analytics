@@ -126,6 +126,7 @@ export default function LogsClient({ initialTab }: { initialTab?: string } = {})
             isFetchingCron={s.isFetchingCron}
             orderedSchedules={s.orderedSchedules}
             isLoadingSchedule={s.isLoadingSchedule}
+            clock={s.cronClock}
             taskFilter={s.taskFilter}
             setTaskFilter={s.setTaskFilter}
             statusFilter={s.statusFilter}

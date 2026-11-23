@@ -525,7 +525,8 @@ pub fn task_schedules(
             "cloud_ingest_clock",
             state.last_tick,
             next_tick_at(runtime, state.last_tick),
-            Some(super::CLOCK_INTERVAL_S),
+            // The front clock health checks probe at this interval (whole seconds, rounded up).
+            Some(super::reconcile::clock_interval_ms(service).div_ceil(1000)),
             "coordinator",
         ),
     ];

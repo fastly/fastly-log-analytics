@@ -57,6 +57,9 @@ fn cron_schedule_projects_due_jobs_without_claiming_or_fabricating_stage_history
             .unwrap()
     };
     assert_eq!(find("request_ingest")["interval_s"], 5);
+    // The clock probes at a quarter of the 5 s log period (1.25 s); the schedule rounds up.
+    assert_eq!(snapshot.clock["probe_interval_s"], 1.25);
+    assert_eq!(find("cloud_ingest_clock")["interval_s"], 2);
     assert_eq!(find("request_ingest")["next_run_time"], time(now + 30));
     assert!(find("raw_delete")["next_run_time"].is_null());
     assert_eq!(
@@ -618,7 +621,8 @@ fn shield_ticks_manual_trigger_fos_manifest_and_audit_logs_end_to_end() {
         let body: Value = serde_json::from_slice(&get_resp.body).unwrap();
         if path == "/api/sync-status" {
             assert_eq!(body["configured"], true);
-            assert_eq!(body["clock_interval_s"], 1);
+            // A quarter of the fixture's 60 s log period: the front clock health check interval.
+            assert_eq!(body["clock_interval_s"], 15);
             assert!(body["last_tick_at"].is_string());
             assert_eq!(body["request"]["last_sync_at"], body["last_tick_at"]);
             assert_eq!(body["cron_runs"].as_array().unwrap().len(), 3);
@@ -635,6 +639,11 @@ fn shield_ticks_manual_trigger_fos_manifest_and_audit_logs_end_to_end() {
             assert_eq!(body["configured"], true);
             assert_eq!(body["service_id"], "fixtureService");
             assert_eq!(body["runs"].as_array().unwrap().len(), 3);
+            assert_eq!(body["clock_interval_s"], 15);
+            assert_eq!(
+                body["clock"],
+                json!({"probe_interval_s": 15.0, "log_period_s": 60, "rum_log_period_s": null})
+            );
         }
     }
 }

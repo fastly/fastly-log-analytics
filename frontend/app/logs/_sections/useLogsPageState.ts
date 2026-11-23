@@ -8,6 +8,7 @@ import { showToastWithAction, formatCount } from '@/lib/utils'
 import { useSSE, useSyncStatus } from '@/hooks/useSSE'
 import { useEffectiveServiceId, useLogFieldsCatalog } from '@/hooks/useBootstrap'
 import type { components } from '@/types/api.generated'
+import type { CronClock } from './LogsCronTab'
 
 export type CronRun = components['schemas']['CronRunEntry']
 
@@ -354,6 +355,8 @@ export function useLogsPageState(initialTab?: string) {
     recentCrons,
     orderedSchedules,
     isLoadingSchedule,
+    // Cloud only: the front clock probe interval and the log periods behind it.
+    cronClock: (cronSchedule as { clock?: CronClock | null } | undefined)?.clock ?? null,
     catalogMaps,
     auditLogs,
     isLoadingAudit,

@@ -1260,6 +1260,7 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
             _ => (false, None),
         };
         let snapshot = crate::admin::cron_audit_snapshot(self.runtime);
+        let clock_interval_s = snapshot.clock_interval_s();
         let cron_runs = snapshot.runs;
         let audit_logs = crate::admin::service_history(snapshot.service_audit);
         let (last_tick_at, next_tick_at) =
@@ -1289,13 +1290,14 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
             "local_rows":total_rows,"request":request,"rum":rum,"storage_mode":null,
             "latest_ingested_file_at":snapshot.last_ingest_at,"latest_available_file_at":null,
             "duckdb_size_bytes":null,"duckdb_exists":null,"active_run":null,
-            "last_tick_at":last_tick_at,"next_tick_at":next_tick_at,"clock_interval_s":crate::admin::CLOCK_INTERVAL_S,
+            "last_tick_at":last_tick_at,"next_tick_at":next_tick_at,"clock_interval_s":clock_interval_s,
             "cron_runs":cron_runs,"audit_logs":audit_logs,
         })
     }
 
     fn cron_runs(&self) -> Value {
         let snapshot = crate::admin::cron_audit_snapshot(self.runtime);
+        let clock_interval_s = snapshot.clock_interval_s();
         let service_id = snapshot.service_id;
         let (last_tick_at, next_tick_at) =
             crate::admin::tick_timestamps_for(self.runtime, snapshot.last_tick);
@@ -1304,7 +1306,8 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
             "service_id": service_id,
             "last_tick_at": last_tick_at,
             "next_tick_at": next_tick_at,
-            "clock_interval_s": crate::admin::CLOCK_INTERVAL_S,
+            "clock_interval_s": clock_interval_s,
+            "clock": snapshot.clock,
             "last_ingest_at": snapshot.last_ingest_at,
             "runs": snapshot.runs,
             "schedules": snapshot.schedules,
