@@ -21,6 +21,7 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import { formatBytes, showToast } from '@/lib/utils'
+import { formatCount, formatLocalDateTime } from '@/lib/format'
 import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
 import {
   clearAllBrowserCaches,
@@ -61,10 +62,24 @@ export function CacheClient() {
   }, [])
 
   useEffect(() => {
-    if (IS_CLOUD_MODE) {
-      void refresh()
+    if (!IS_CLOUD_MODE) return
+    let cancelled = false
+    inspectBrowserCaches()
+      .then((next) => {
+        if (!cancelled) setSnapshot(next)
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : 'Failed to inspect browser cache')
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
     }
-  }, [refresh])
+  }, [])
 
   const handleClear = async () => {
     setClearing(true)
@@ -187,7 +202,7 @@ export function CacheClient() {
                   <div className="text-xs text-muted-foreground">
                     File: <span className="font-mono">{snapshot.lastError.key}</span> ·{' '}
                     {formatBytes(snapshot.lastError.bytes)} ·{' '}
-                    {new Date(snapshot.lastError.at).toLocaleString()}
+                    {formatLocalDateTime(snapshot.lastError.at)}
                   </div>
                 </div>
               </div>
@@ -209,7 +224,7 @@ export function CacheClient() {
                 </CardHeader>
                 <CardContent className="text-xs text-muted-foreground tabular-nums">
                   {snapshot
-                    ? `${snapshot.totalCachedEntries.toLocaleString()} cached ${snapshot.totalCachedEntries === 1 ? 'item' : 'items'}`
+                    ? `${formatCount(snapshot.totalCachedEntries)} cached ${snapshot.totalCachedEntries === 1 ? 'item' : 'items'}`
                     : 'Measuring…'}
                 </CardContent>
               </Card>
@@ -269,7 +284,7 @@ export function CacheClient() {
                 <CardContent className="text-xs text-muted-foreground tabular-nums">
                   {snapshot
                     ? snapshot.opfs.available
-                      ? `${snapshot.opfs.files.toLocaleString()} ${snapshot.opfs.files === 1 ? 'file' : 'files'} in ${OPFS_DIRECTORY}`
+                      ? `${formatCount(snapshot.opfs.files)} ${snapshot.opfs.files === 1 ? 'file' : 'files'} in ${OPFS_DIRECTORY}`
                       : 'Origin Private File System not supported in this browser'
                     : 'Measuring…'}
                 </CardContent>
@@ -290,7 +305,7 @@ export function CacheClient() {
                 </CardHeader>
                 <CardContent className="text-xs text-muted-foreground tabular-nums">
                   {snapshot
-                    ? `${cacheStorageEntries.toLocaleString()} ${cacheStorageEntries === 1 ? 'entry' : 'entries'} across ${snapshot.caches.length} ${snapshot.caches.length === 1 ? 'bucket' : 'buckets'}`
+                    ? `${formatCount(cacheStorageEntries)} ${cacheStorageEntries === 1 ? 'entry' : 'entries'} across ${snapshot.caches.length} ${snapshot.caches.length === 1 ? 'bucket' : 'buckets'}`
                     : 'Measuring…'}
                 </CardContent>
               </Card>
@@ -333,7 +348,7 @@ export function CacheClient() {
                               {OPFS_DIRECTORY}
                             </td>
                             <td className="py-2.5 pr-4 text-right tabular-nums">
-                              {snapshot.opfs.files.toLocaleString()}
+                              {formatCount(snapshot.opfs.files)}
                             </td>
                             <td className="py-2.5 text-right font-mono text-xs tabular-nums">
                               {formatBytes(snapshot.opfs.bytes)}
@@ -347,7 +362,7 @@ export function CacheClient() {
                               {bucket.name}
                             </td>
                             <td className="py-2.5 pr-4 text-right tabular-nums">
-                              {bucket.entries.toLocaleString()}
+                              {formatCount(bucket.entries)}
                             </td>
                             <td className="py-2.5 text-right font-mono text-xs tabular-nums">
                               {formatBytes(bucket.bytes)}

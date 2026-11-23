@@ -68,9 +68,11 @@ describe('CacheClient', () => {
 
     render(<CacheClient />)
 
-    expect(await screen.findByTestId('browser-cache-total-bytes')).toHaveTextContent(
-      '4 MB',
-    )
+    await waitFor(() => {
+      expect(screen.getByTestId('browser-cache-total-bytes')).toHaveTextContent(
+        '4 MB',
+      )
+    })
     expect(screen.getByTestId('browser-cache-opfs-bytes')).toHaveTextContent('3 MB')
     expect(screen.getByTestId('browser-cache-storage-bytes')).toHaveTextContent('1 MB')
     expect(screen.getByTestId('browser-cache-last-error')).toHaveTextContent(
@@ -109,18 +111,20 @@ describe('CacheClient', () => {
     })
 
     render(<CacheClient />)
-    expect(await screen.findByTestId('browser-cache-total-bytes')).toHaveTextContent(
-      '2 MB',
-    )
+    await waitFor(() => {
+      expect(screen.getByTestId('browser-cache-total-bytes')).toHaveTextContent(
+        '2 MB',
+      )
+    })
 
     fireEvent.click(screen.getByTestId('clear-browser-cache-btn'))
 
     await waitFor(() => {
       expect(mockClear).toHaveBeenCalledTimes(1)
+      expect(screen.getByTestId('browser-cache-total-bytes')).toHaveTextContent(
+        '0 B',
+      )
     })
-    expect(await screen.findByTestId('browser-cache-total-bytes')).toHaveTextContent(
-      '0 B',
-    )
     expect(mockShowToast).toHaveBeenCalledWith('Browser cache cleared', 'success')
   })
 })
