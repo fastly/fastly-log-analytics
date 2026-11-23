@@ -71,6 +71,7 @@ fn specific(kind: LogKind) -> &'static [(&'static str, Kind)] {
             ("rows", Int64),
             ("lines_read", Int64),
             ("bad_lines", Int64),
+            ("raw_bytes", Int64),
             ("output_keys_json", Utf8),
             ("raw_deleted", Bool),
             ("raw_deleted_at", TimestampMs),

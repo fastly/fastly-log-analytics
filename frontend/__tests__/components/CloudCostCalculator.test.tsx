@@ -97,4 +97,18 @@ describe('Cloud cost calculator', () => {
     })
     expect(total?.textContent).not.toBe(before)
   })
+  it('converts the line size with the install\'s measured compression ratio', () => {
+    const { rerender } = render(<CloudCostCalculator prefillData={{
+      inputs: { ...DEFAULT_INPUTS, gzBytesPerLine: 100, rawBytesPerGzByte: 12 },
+      measuredInputs: { gzBytesPerLine: true, rawBytesPerGzByte: true },
+    }} />)
+    const field = () => screen.getByRole('spinbutton', { name: 'Log line size (bytes, uncompressed)' })
+    expect(field()).toHaveValue(1200)
+    expect(field().parentElement).toHaveTextContent('Measured')
+    rerender(<CloudCostCalculator key="unmeasured" prefillData={{
+      inputs: { ...DEFAULT_INPUTS, gzBytesPerLine: 100 },
+      measuredInputs: { gzBytesPerLine: true },
+    }} />)
+    expect(field().parentElement).toHaveTextContent('Reference')
+  })
 })

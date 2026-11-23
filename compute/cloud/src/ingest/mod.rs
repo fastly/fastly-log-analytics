@@ -794,7 +794,7 @@ fn finish<R: Runtime>(
                 }
                 json!({
                     "status": "converted", "rows": rows.rows, "lines_read": rows.lines_read,
-                    "bad_lines": rows.bad_lines,
+                    "bad_lines": rows.bad_lines, "raw_bytes": rows.decompressed,
                     "output_keys_json": json!(rows.windows.iter().map(|(start, batch)| {
                         let (key, bytes) = &outputs_by_window[start];
                         json!({"key": key, "rows": batch.num_rows(), "bytes": bytes})

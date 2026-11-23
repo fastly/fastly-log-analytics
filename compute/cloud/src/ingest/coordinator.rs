@@ -2176,6 +2176,7 @@ fn merged_objects(plan: &Plan) -> Vec<ObjectResult> {
                     into.bad_sample.clone_from(&object.bad_sample);
                 }
                 into.outputs.extend(object.outputs.iter().cloned());
+                into.decompressed = into.decompressed.max(object.decompressed);
             }
             (true, false) => *into = object.clone(),
             (false, _) => {}
@@ -2484,7 +2485,7 @@ fn object_rows<R: Runtime>(ctx: &mut Ctx<'_, '_, R>, plan: &Plan, object: &Objec
         }
         json!({
             "status": "converted", "rows": object.rows, "lines_read": object.lines_read,
-            "bad_lines": object.bad_lines,
+            "bad_lines": object.bad_lines, "raw_bytes": object.decompressed,
             "output_keys_json": json!(object.outputs.iter().map(|o| {
                 json!({"key": o.key, "rows": o.rows, "bytes": o.bytes})
             }).collect::<Vec<_>>()).to_string(),

@@ -555,6 +555,18 @@ const base: EstimateMeasurements = {
 };
 
 describe("measureEstimate", () => {
+  it("measures the real compression ratio from decompressed and stored raw bytes", () => {
+    const files = base.files.map((file) =>
+      file.status === "failed" ? file : { ...file, raw_bytes: file.raw_size * 12 },
+    );
+    const measured = measureEstimate({ ...base, files });
+    expect(measured.inputs.rawBytesPerGzByte).toBeCloseTo(12);
+    expect(measured.measuredInputs.rawBytesPerGzByte).toBe(true);
+    const unmeasured = measureEstimate(base);
+    expect(unmeasured.inputs.rawBytesPerGzByte).toBe(DEFAULT_INPUTS.rawBytesPerGzByte);
+    expect(unmeasured.measuredInputs.rawBytesPerGzByte).toBeUndefined();
+  });
+
   it("keeps unavailable edge traffic unmeasured instead of turning it into zero", () => {
     const measured = measureEstimate({ ...base, traffic: [{ requests: 1000 }] });
     expect(measured.inputs.requestsPerDay).toBe(1000);

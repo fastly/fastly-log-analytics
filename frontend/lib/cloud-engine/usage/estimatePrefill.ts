@@ -103,6 +103,7 @@ export async function fetchEstimatePrefill(
         timestamp: number(row.timestamp),
         status: String(row.status ?? ""),
         raw_size: number(row.raw_size),
+        raw_bytes: row.raw_bytes == null ? undefined : number(row.raw_bytes),
         rows: number(row.rows),
       })),
     parquet: {

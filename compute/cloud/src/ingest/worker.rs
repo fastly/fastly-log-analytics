@@ -117,6 +117,10 @@ pub struct ObjectResult {
     pub bad_sample: Option<String>,
     #[serde(default)]
     pub outputs: Vec<Output>,
+    /// Decompressed bytes read; with `gz_size` it gives the install's real compression ratio. For a
+    /// segment it is how far the read reached, so the largest segment value is the whole object.
+    #[serde(default)]
+    pub decompressed: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -651,6 +655,7 @@ fn convert_shard<R: Runtime>(
                 lines_read: rows.lines_read,
                 bad_lines: rows.bad_lines,
                 bad_sample: rows.bad_sample.as_deref().map(truncate),
+                decompressed: rows.decompressed,
                 outputs: windows
                     .iter()
                     .map(|(start, rows)| Output {

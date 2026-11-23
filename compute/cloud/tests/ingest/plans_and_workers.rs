@@ -440,6 +440,11 @@ fn worker_ingest_authenticates_validates_and_reports_schema_mismatch() {
     assert_eq!(reply["status"], "ok");
     assert!(reply["calls"].as_u64().unwrap() <= u64::from(BUDGET));
     assert_eq!(reply["result"]["objects"][0]["status"], "converted");
+    assert_eq!(
+        reply["result"]["objects"][0]["decompressed"],
+        line(BASE, "a").len() + 1,
+        "the worker reports the object's decompressed size for the compression ratio"
+    );
     let summary = reply["summary_vcpu_ms"].as_u64().unwrap();
     assert!(summary > 0 && summary < reply["vcpu_ms"].as_u64().unwrap());
     assert!(fake.kv.borrow().is_empty(), "the worker writes no KV");

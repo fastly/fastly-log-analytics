@@ -1526,6 +1526,14 @@ fn ingest_files_rows_are_one_per_raw_object_in_one_outbox_key() {
     assert_eq!(converted["rows"], 2);
     assert_eq!(converted["bad_lines"], 1);
     assert_eq!(converted["lines_read"], 3);
+    let text = [line(BASE + 60, "g"), "{oops".into(), line(BASE + 60, "h")]
+        .join("\n")
+        .len()
+        + 1;
+    assert_eq!(
+        converted["raw_bytes"], text,
+        "decompressed bytes, beside raw_size, give the real ratio"
+    );
     let outputs: Value =
         serde_json::from_str(converted["output_keys_json"].as_str().unwrap()).unwrap();
     assert_eq!(outputs.as_array().unwrap().len(), 1);

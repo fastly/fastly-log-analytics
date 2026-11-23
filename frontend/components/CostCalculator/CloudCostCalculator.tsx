@@ -13,7 +13,6 @@ import {
   type EstimateRates,
 } from '@/lib/cloud-engine/usage/estimate'
 import type { MeasuredEstimate } from '@/lib/cloud-engine/usage/estimatePrefill'
-import { INGEST_LIMITS } from '@/lib/cloud-engine/usage/ingestShape'
 import { NumInput, ReadOnlyValue, ResultRow, Row } from './CostCalculator'
 
 const LINE_SIZE_LABEL = 'Log line size (bytes, uncompressed)'
@@ -27,7 +26,8 @@ const INPUT_ROWS: [keyof EstimateInputs, string][] = [
 
 /**
  * The install's measured inputs with the user's what-ifs applied. Edge requests keep their measured share of
- * total requests, and the zstd raw and Parquet sizes scale with the uncompressed line size; raw logs are always
+ * total requests, and the zstd raw and Parquet sizes scale with the uncompressed line size at the install's measured
+ * compression ratio (`rawBytesPerGzByte`); raw logs are always
  * deleted after ingest.
  */
 export function applyWhatIfs(base: EstimateInputs, edits: Partial<EstimateInputs>, lineBytes?: number): EstimateInputs {
@@ -35,7 +35,7 @@ export function applyWhatIfs(base: EstimateInputs, edits: Partial<EstimateInputs
   if (edits.requestsPerDay != null && base.requestsPerDay > 0) {
     inputs.edgeRequestsPerDay = base.edgeRequestsPerDay * (edits.requestsPerDay / base.requestsPerDay)
   }
-  const baseLineBytes = base.gzBytesPerLine * INGEST_LIMITS.rawBytesPerGzByte
+  const baseLineBytes = base.gzBytesPerLine * base.rawBytesPerGzByte
   if (lineBytes != null && baseLineBytes > 0) {
     const scale = lineBytes / baseLineBytes
     inputs.gzBytesPerLine = base.gzBytesPerLine * scale
@@ -119,11 +119,13 @@ export function CloudCostCalculator({ prefillData, rates: configuredRates, local
     <Row key="lineBytes" label={LINE_SIZE_LABEL}>
       <div className="flex items-center gap-2">
         <span className="text-xs text-muted-foreground">
-          {lineBytes != null ? 'What-if' : measuredInputs.gzBytesPerLine ? 'Measured' : 'Reference'}
+          {lineBytes != null
+            ? 'What-if'
+            : measuredInputs.gzBytesPerLine && measuredInputs.rawBytesPerGzByte ? 'Measured' : 'Reference'}
         </span>
         <NumInput
           aria-label={LINE_SIZE_LABEL}
-          value={Math.round(inputs.gzBytesPerLine * INGEST_LIMITS.rawBytesPerGzByte)}
+          value={Math.round(inputs.gzBytesPerLine * inputs.rawBytesPerGzByte)}
           onChange={setLineBytes}
           wide
         />

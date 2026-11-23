@@ -28,6 +28,8 @@ export interface EstimateInputs {
   /** Raw files Fastly writes per log period, about one per POP node with traffic. */
   filesPerPeriod: number;
   gzBytesPerLine: number;
+  /** Decompressed ÷ stored raw bytes (zstd); measured from `ingest_files.raw_bytes` when present. */
+  rawBytesPerGzByte: number;
   parquetBytesPerRow: number;
   retentionDays: number;
   /** Raw files are deleted after conversion and billed only for the minimum days. */
@@ -164,6 +166,7 @@ export const DEFAULT_INPUTS: EstimateInputs = {
   logPeriodS: 300,
   filesPerPeriod: 109,
   gzBytesPerLine: COMPACT_GZ_BYTES_PER_LINE,
+  rawBytesPerGzByte: INGEST_LIMITS.rawBytesPerGzByte,
   parquetBytesPerRow: 88,
   retentionDays: 30,
   deleteAfter: true,
@@ -839,6 +842,8 @@ export interface IngestFileRow {
   timestamp: number;
   status: string;
   raw_size: number;
+  /** Decompressed bytes; absent on rows written before ingest recorded it. */
+  raw_bytes?: number;
   rows: number;
 }
 
@@ -964,6 +969,14 @@ export function measureEstimate(m: EstimateMeasurements): EstimatePrefill {
   const lines = converted.reduce((sum, file) => sum + file.rows, 0);
   const rawBytes = converted.reduce((sum, file) => sum + file.raw_size, 0);
   if (lines > 0) setInput("gzBytesPerLine", rawBytes / lines);
+  const sized = converted.filter((file) => (file.raw_bytes ?? 0) > 0 && file.raw_size > 0);
+  if (sized.length > 0) {
+    setInput(
+      "rawBytesPerGzByte",
+      sized.reduce((sum, file) => sum + (file.raw_bytes ?? 0), 0) /
+        sized.reduce((sum, file) => sum + file.raw_size, 0),
+    );
+  }
   if (m.parquet.rows > 0) {
     setInput("parquetBytesPerRow", m.parquet.bytes / m.parquet.rows);
   }
