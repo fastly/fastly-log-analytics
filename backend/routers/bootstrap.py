@@ -288,9 +288,7 @@ def _bootstrap_sync(
         custom_dashboard_cards = [
             {"id": f["id"], "label": f["label"]} for f in catalog_entries if f.get("show_in_dashboard")
         ]
-        active_log_field_ids = sorted(_lf.resolve_enabled_fields(lf_config)) + [
-            cf["name"] for cf in lf_config.get("custom_fields", []) if cf.get("enabled", True)
-        ]
+        active_log_field_ids = svcconfig.active_log_field_ids(active_cfg)
 
     timer.call("custom_fields_catalog", _resolve_custom_fields)
 

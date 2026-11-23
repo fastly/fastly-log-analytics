@@ -468,6 +468,12 @@ def _save_config_unlocked(service_id: str, cfg: dict, *, allow_cid_salt_change: 
             rum = {}
             cfg["rum"] = rum
         rum["cid_salt"] = secrets.token_hex(32)
+    from backend.core import catalog
+
+    cfg["active_log_fields"] = {
+        "catalog": catalog.CATALOG_FINGERPRINT,
+        "ids": catalog.resolve_active_log_field_ids(catalog.get_lf_config(cfg)),
+    }
     try:
         _atomic_write_json(config_path(service_id), cfg)
     except (OSError, PermissionError) as e:
@@ -486,6 +492,16 @@ def _save_config_unlocked(service_id: str, cfg: dict, *, allow_cid_salt_change: 
         _config_cache.pop(service_id, None)
     _cdn_service_id_map = None
     _invalidate_service_ids_cache()
+
+
+def active_log_field_ids(cfg: dict) -> list[str]:
+    """The service's enabled log field ids, as stored by the last save of its log field settings."""
+    from backend.core import catalog
+
+    stored = cfg.get("active_log_fields")
+    if isinstance(stored, dict) and stored.get("catalog") == catalog.CATALOG_FINGERPRINT:
+        return list(stored.get("ids") or [])
+    return catalog.resolve_active_log_field_ids(catalog.get_lf_config(cfg))
 
 
 def save_config(service_id: str, cfg: dict):
