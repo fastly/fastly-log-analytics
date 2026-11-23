@@ -56,9 +56,14 @@ function FilterBarPlaceholder({ compact = false }: { compact?: boolean }) {
   )
 }
 
+function FilterBarDynamicLoading() {
+  const pathname = usePathname()
+  return <FilterBarPlaceholder compact={pathname === '/usage' || pathname.startsWith('/usage/')} />
+}
+
 const FilterBar = dynamic(
   () => import('@/components/FilterBar/FilterBar').then(m => ({ default: m.FilterBar })),
-  { loading: () => <FilterBarPlaceholder /> },
+  { loading: () => <FilterBarDynamicLoading /> },
 )
 const ActiveFiltersBanner = dynamic(() => import('@/components/FilterBar/FilterBar').then(m => ({ default: m.ActiveFiltersBanner })), { ssr: false })
 const DebugPanel = dynamic(() => import('@/components/DebugPanel').then(m => ({ default: m.DebugPanel })), { ssr: false })
