@@ -54271,7 +54271,53 @@
           },
           "total_billed_gb_hours": {
             "type": "number",
-            "title": "Total Billed Gb Hours"
+            "title": "Total Billed Gb Hours",
+            "default": 0.0
+          },
+          "storage_billing_complete": {
+            "type": "boolean",
+            "title": "Storage Billing Complete",
+            "default": false
+          },
+          "storage_billing_provenance": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Storage Billing Provenance"
+          },
+          "live_billed_gb_hours": {
+            "type": "number",
+            "title": "Live Billed Gb Hours",
+            "default": 0.0
+          },
+          "deleted_billed_gb_hours": {
+            "type": "number",
+            "title": "Deleted Billed Gb Hours",
+            "default": 0.0
+          },
+          "minimum_billed_gb_hours": {
+            "type": "number",
+            "title": "Minimum Billed Gb Hours",
+            "default": 0.0
+          },
+          "storage_intervals": {
+            "items": {
+              "$ref": "#/components/schemas/StorageBillingInterval"
+            },
+            "type": "array",
+            "title": "Storage Intervals"
+          },
+          "observed_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed At"
           },
           "archive_bytes": {
             "type": "integer",
@@ -54326,7 +54372,6 @@
           "live_files",
           "deleted_bytes",
           "total_billed_bytes",
-          "total_billed_gb_hours",
           "total_files",
           "total_bytes",
           "start",
@@ -85744,6 +85789,82 @@
         ],
         "title": "StaleBrowserVersionMeta"
       },
+      "StorageBillingInterval": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "dataset": {
+            "type": "string",
+            "title": "Dataset"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "live",
+              "deleted",
+              "minimum_billed"
+            ],
+            "title": "Kind"
+          },
+          "bytes": {
+            "type": "integer",
+            "title": "Bytes"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "deleted_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deleted At"
+          },
+          "billed_from": {
+            "type": "integer",
+            "title": "Billed From"
+          },
+          "billed_until": {
+            "type": "integer",
+            "title": "Billed Until"
+          },
+          "complete": {
+            "type": "boolean",
+            "title": "Complete"
+          },
+          "provenance": {
+            "type": "string",
+            "title": "Provenance"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "dataset",
+          "kind",
+          "bytes",
+          "billed_from",
+          "billed_until",
+          "complete",
+          "provenance"
+        ],
+        "title": "StorageBillingInterval",
+        "description": "One billable object interval in epoch milliseconds."
+      },
       "StreamMetrics": {
         "properties": {
           "latest_log_at": {
@@ -88216,6 +88337,27 @@
             },
             "type": "array",
             "title": "Fos Fields Found"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "local",
+              "fastly"
+            ],
+            "title": "Source",
+            "default": "local"
+          },
+          "complete": {
+            "type": "boolean",
+            "title": "Complete",
+            "default": true
+          },
+          "provenance": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Provenance"
           }
         },
         "type": "object",

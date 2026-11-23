@@ -47,6 +47,11 @@ const platform: PlatformUsage = {
 
 const storage: StorageUsageData = {
   _is_cached: false,
+  storage_billing_complete: true,
+  storage_billing_provenance: ['cloud:inventory'],
+  live_billed_gb_hours: 720,
+  deleted_billed_gb_hours: 0,
+  minimum_billed_gb_hours: 0,
   total_billed_gb_hours: 720,
   live_bytes: 1024 ** 3,
   live_files: 1,

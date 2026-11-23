@@ -319,3 +319,46 @@ def test_postgres_control_plane_missing_creation_timestamp_marks_incomplete() ->
     assert summary.minimum_billed_gb_hours == pytest.approx(2.0)
     assert summary.deleted_gb_hours == 0.0
     assert intervals[0]["created_at"] is None
+
+
+def test_python_matches_typescript_shared_storage_billing_fixtures() -> None:
+    """Python and TypeScript calculators produce identical results on every shared fixture."""
+    import json
+    from pathlib import Path
+
+    fixture_path = (
+        Path(__file__).resolve().parents[2]
+        / "frontend"
+        / "lib"
+        / "cloud-engine"
+        / "usage"
+        / "storageBilling.fixtures.json"
+    )
+    payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+    cases = payload["cases"]
+    assert len(cases) >= 7
+
+    for case in cases:
+        py_intervals = [
+            {
+                "id": item["id"],
+                "dataset": item["dataset"],
+                "kind": item["kind"],
+                "bytes": item["bytes"],
+                "created_at": item.get("createdAt"),
+                "deleted_at": item.get("deletedAt"),
+                "billed_from": item["billedFrom"],
+                "billed_until": item["billedUntil"],
+                "complete": item["complete"],
+                "provenance": item["provenance"],
+            }
+            for item in case["intervals"]
+        ]
+        summary = calculate_storage_billing(py_intervals, case["from"], case["to"])
+        expected = case["expected"]
+        assert summary.live_gb_hours == pytest.approx(expected["liveGbHours"]), case["name"]
+        assert summary.deleted_gb_hours == pytest.approx(expected["deletedGbHours"]), case["name"]
+        assert summary.minimum_billed_gb_hours == pytest.approx(expected["minimumBilledGbHours"]), case["name"]
+        assert summary.total_gb_hours == pytest.approx(expected["totalGbHours"]), case["name"]
+        assert summary.complete is expected["complete"], case["name"]
+        assert summary.provenance == expected["provenance"], case["name"]

@@ -7672,8 +7672,37 @@ export interface components {
             quarantine_bytes: number;
             /** Total Billed Bytes */
             total_billed_bytes: number;
-            /** Total Billed Gb Hours */
+            /**
+             * Total Billed Gb Hours
+             * @default 0
+             */
             total_billed_gb_hours: number;
+            /**
+             * Storage Billing Complete
+             * @default false
+             */
+            storage_billing_complete: boolean;
+            /** Storage Billing Provenance */
+            storage_billing_provenance?: string[];
+            /**
+             * Live Billed Gb Hours
+             * @default 0
+             */
+            live_billed_gb_hours: number;
+            /**
+             * Deleted Billed Gb Hours
+             * @default 0
+             */
+            deleted_billed_gb_hours: number;
+            /**
+             * Minimum Billed Gb Hours
+             * @default 0
+             */
+            minimum_billed_gb_hours: number;
+            /** Storage Intervals */
+            storage_intervals?: components["schemas"]["StorageBillingInterval"][];
+            /** Observed At */
+            observed_at?: string | null;
             /**
              * Archive Bytes
              * @default 0
@@ -18281,6 +18310,35 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /**
+         * StorageBillingInterval
+         * @description One billable object interval in epoch milliseconds.
+         */
+        StorageBillingInterval: {
+            /** Id */
+            id: string;
+            /** Dataset */
+            dataset: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "live" | "deleted" | "minimum_billed";
+            /** Bytes */
+            bytes: number;
+            /** Created At */
+            created_at?: number | null;
+            /** Deleted At */
+            deleted_at?: number | null;
+            /** Billed From */
+            billed_from: number;
+            /** Billed Until */
+            billed_until: number;
+            /** Complete */
+            complete: boolean;
+            /** Provenance */
+            provenance: string;
+        };
         /** StreamMetrics */
         StreamMetrics: {
             /** Latest Log At */
@@ -19146,6 +19204,19 @@ export interface components {
             note: string;
             /** Fos Fields Found */
             fos_fields_found: string[];
+            /**
+             * Source
+             * @default local
+             * @enum {string}
+             */
+            source: "local" | "fastly";
+            /**
+             * Complete
+             * @default true
+             */
+            complete: boolean;
+            /** Provenance */
+            provenance?: string[];
         };
         /** UsageRumBreakdownResponse */
         UsageRumBreakdownResponse: {
