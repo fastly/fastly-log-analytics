@@ -60,6 +60,8 @@ struct Fake {
     /// Window summaries fetched to fold, and bundle or partial files encoded.
     folds: Cell<u64>,
     encodes: Cell<u64>,
+    /// vCPU charged for backend calls, folds and encodes across every run (startup excluded).
+    work: Cell<u64>,
 }
 
 impl Fake {
@@ -74,6 +76,7 @@ impl Fake {
         }
         self.calls.set(self.calls.get() + 1);
         self.vcpu.set(self.vcpu.get() + CALL_MS + vcpu);
+        self.work.set(self.work.get() + CALL_MS + vcpu);
         Ok(())
     }
 
@@ -580,8 +583,15 @@ fn bundling_keeps_up_with_windows_arriving_at_the_live_rate() {
         "{} GETs for {windows} windows in {runs} runs",
         fake.gets.get()
     );
-    // Each run folds a batch: about one write per 12 windows, never one per window.
-    assert!(fake.puts.get() * 12 <= windows, "{} PUTs", fake.puts.get());
+    // Each run folds a batch and writes its state and the open snapshot: about two writes per
+    // 16 windows, never one per window.
+    eprintln!(
+        "live rate: {} PUTs for {windows} windows, {} ms a run, {} ms of work",
+        fake.puts.get(),
+        busy / runs,
+        fake.work.get()
+    );
+    assert!(fake.puts.get() * 8 <= windows, "{} PUTs", fake.puts.get());
     assert!(busy / runs <= VCPU_BUDGET_MS, "{} ms a run", busy / runs);
 }
 
@@ -747,11 +757,18 @@ fn a_day_of_60s_windows_converges_to_catalog_hour_bundles() {
         assert_eq!(covered(&fake, &head.hour_bundles[&hour]), windows);
     }
     eprintln!(
-        "day: vCPU mean {} over {runs} runs; {} folds for {} windows, {} writes",
+        "day: vCPU mean {} over {runs} runs; {} folds for {} windows, {} writes, {} ms of work",
         busy / runs as u64,
         fake.folds.get(),
         windows * 24,
-        fake.encodes.get()
+        fake.encodes.get(),
+        fake.work.get()
+    );
+    assert!(
+        fake.folds.get() as usize <= windows * 24 * 11 / 10,
+        "{} folds for {} windows",
+        fake.folds.get(),
+        windows * 24
     );
     assert!(
         busy / runs as u64 <= VCPU_BUDGET_MS,
@@ -842,6 +859,28 @@ fn commit_runs(
     panic!("commit made no progress");
 }
 
+/// Open bundles the catalog lists that are not byte-for-byte a one-shot merge of the windows
+/// they claim to cover, in file-name order; `checked` skips the ones already compared.
+fn inexact_open_bundles(
+    fake: &Fake,
+    checked: &mut std::collections::BTreeSet<String>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for (hour, reference) in catalog_head(fake).open_bundles {
+        if !checked.insert(reference.key.clone()) {
+            continue;
+        }
+        let bucket = fake.bucket.borrow();
+        let coverage = catalog::bundles::parse(&bucket[&reference.key]).unwrap();
+        let bodies: Vec<&[u8]> = coverage.windows.iter().map(|k| &bucket[k][..]).collect();
+        let expected = bundle::merge(&bodies, hour, bundle::Unit::Hour).unwrap();
+        if bucket[&coverage.file.key] != expected {
+            out.push(format!("{}: {} windows", coverage.file.key, bodies.len()));
+        }
+    }
+    out
+}
+
 /// The files a summary listing hands a browser for the open hour: its published open bundle
 /// plus every committed window the bundle does not cover, else every window.
 fn open_hour_files(
@@ -877,6 +916,7 @@ fn the_open_hour_stays_a_handful_of_files_while_late_runs_keep_arriving() {
     let mut committed: BTreeMap<i64, std::collections::BTreeSet<String>> = BTreeMap::new();
     let (mut slots, mut runs, mut busy, mut peak) = (0u32, 0usize, 0u64, 0u64);
     let mut samples: Vec<(i64, usize)> = Vec::new();
+    let mut checked = std::collections::BTreeSet::new();
     let mut now = start;
     while now < end {
         fake.now.set(now);
@@ -935,6 +975,8 @@ fn the_open_hour_stays_a_handful_of_files_while_late_runs_keep_arriving() {
                 .map_or(0, |windows| open_hour_files(&fake, hour, windows));
             samples.push((now - start, files));
         }
+        let inexact = inexact_open_bundles(&fake, &mut checked);
+        assert!(inexact.is_empty(), "+{}s: {inexact:?}", now - start);
         now += 10;
     }
     let worst = samples.iter().map(|(_, n)| *n).max().unwrap();
@@ -957,11 +999,20 @@ fn the_open_hour_stays_a_handful_of_files_while_late_runs_keep_arriving() {
         busy / runs as u64
     );
     assert!(peak <= 1000, "{peak} ms peak");
+    // Open bundles grow from the settled windows already folded into a partial, so each window
+    // is folded about once, not again for every snapshot taken while it was still recent.
+    let windows: usize = committed.values().map(|w| w.len()).sum();
+    assert!(
+        fake.folds.get() as usize <= windows * 11 / 10,
+        "{} folds for {windows} windows",
+        fake.folds.get()
+    );
     eprintln!(
-        "open hour files: mean {mean}, worst {worst}; vCPU mean {} peak {peak}; {} folds, {} writes",
+        "open hour files: mean {mean}, worst {worst}; vCPU mean {} peak {peak}; {} folds, {} writes, {} ms of work",
         busy / runs as u64,
         fake.folds.get(),
-        fake.encodes.get()
+        fake.encodes.get(),
+        fake.work.get()
     );
 }
 

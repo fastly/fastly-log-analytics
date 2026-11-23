@@ -84,8 +84,8 @@ pub const SERIES_ASN_TOP_K: usize = 30;
 pub const SERIES_CITY_TOP_K: usize = 50;
 /// Sources folded per execution, which bounds heap and time per build step.
 pub const MAX_SOURCES: usize = 24;
-/// Minimum unfolded settled window summaries in an open hour before pre-folding a `partial=`
-/// batch: small enough that a snapshot turn can fold the rest of the hour after it.
+/// Folds an open-hour turn reserves backend calls for before it starts; it folds on while
+/// calls and vCPU allow.
 const OPEN_BATCH_SOURCES: usize = 8;
 /// Minimum new closed windows in an open hour before writing an `open_bundle=` Parquet snapshot.
 const OPEN_BUNDLE_MIN: usize = 6;
@@ -2846,8 +2846,9 @@ impl<R: Runtime> Ctx<'_, '_, R> {
     }
 
     /// Folds what the job's best partial and its remaining sources allow this execution, then
-    /// writes the bundle or a partial to resume from (and for open hours, an `open_bundle=`
-    /// Parquet snapshot every [`OPEN_BUNDLE_MIN`] new closed windows).
+    /// writes the bundle or a partial to resume from. An open hour folds only its settled
+    /// windows into the partial and, once [`OPEN_BUNDLE_MIN`] more have settled, writes an
+    /// `open_bundle=` Parquet snapshot of the same prefix in the same turn.
     fn build<A: Fold>(&mut self, job: Job<'_>, mut open: Option<Open<'_>>) -> Result<Step, String> {
         let mut sources = job.sources;
         sources.sort_unstable_by(|a, b| file_name(a).cmp(file_name(b)));
@@ -2877,27 +2878,19 @@ impl<R: Runtime> Ctx<'_, '_, R> {
             .collect();
         candidates.sort_unstable_by(|a, b| b.cmp(a));
         let covered = candidates.first().map_or(0, |(count, _)| *count);
-        // A snapshot is due once one execution can fold everything past the partial: under a
-        // burst, folding a tail no partial keeps would refetch it every execution.
-        let need_open = sources.len().saturating_sub(covered) <= MAX_SOURCES
-            && open
-                .as_ref()
-                .is_some_and(|o| sources.len().saturating_sub(o.covered) >= OPEN_BUNDLE_MIN);
-        // One encode fits an execution's vCPU, so an open hour advances its partial or its
-        // snapshot, never both: the snapshot first while it covers no more than the partial.
-        let need_partial = job.final_key.is_none()
-            && foldable.saturating_sub(covered) >= OPEN_BATCH_SOURCES
-            && !(need_open && open.as_ref().is_some_and(|o| o.covered <= covered));
-        if job.final_key.is_none() {
-            if !need_partial && !need_open {
+        // An open hour grows incrementally: the partial and the snapshot both cover the settled
+        // prefix, so each turn folds only the windows settled since, and a window still being
+        // written is never folded (readers fetch those as windows).
+        let open_from = open
+            .as_ref()
+            .filter(|_| job.final_key.is_none())
+            .map(|o| o.covered);
+        if let Some(open_covered) = open_from {
+            if foldable.max(covered).saturating_sub(open_covered) < OPEN_BUNDLE_MIN {
                 return Ok(Step::Done);
             }
-            let need = if need_partial {
-                OPEN_BATCH_SOURCES as u32 + 3
-            } else {
-                // The folds stop on their own when calls run out; a snapshot needs only a few.
-                (sources.len().saturating_sub(covered)).min(OPEN_BATCH_SOURCES) as u32 + 4
-            };
+            // The folds stop on their own when calls run out; the writes need only a few.
+            let need = foldable.saturating_sub(covered).min(OPEN_BATCH_SOURCES) as u32 + 4;
             if !self.room(need) {
                 return Ok(Step::Pending);
             }
@@ -2947,20 +2940,14 @@ impl<R: Runtime> Ctx<'_, '_, R> {
             }
         }
         let resumed = done;
-        let tail = if partials.is_empty() { 3 } else { 4 }
-            + extra as u32
-            + u32::from(open.is_some() && !need_partial);
-        // Only a partial stops at the settled prefix.
-        let limit = if need_partial {
+        let tail =
+            if partials.is_empty() { 3 } else { 4 } + extra as u32 + u32::from(open_from.is_some());
+        let limit = if open_from.is_some() {
             foldable
         } else {
             sources.len()
         };
-        let snapshot_from = open
-            .as_ref()
-            .filter(|_| job.final_key.is_none() && !need_partial)
-            .map(|o| o.covered);
-        let (mut fold_ms, mut fold_from, mut reserved) = (0, None, false);
+        let (mut fold_ms, mut fold_from) = (0, None);
         while done < limit {
             if done - resumed >= MAX_SOURCES || self.stop() {
                 break;
@@ -2968,25 +2955,13 @@ impl<R: Runtime> Ctx<'_, '_, R> {
             if let Some(from) = fold_from {
                 fold_ms = self.vcpu_seen.saturating_sub(from);
             }
-            // A Wasm fold is ~50 ms: one started just under the fold stop ends past the write
-            // gate and the snapshot it was for is never written, so stop a fold early instead.
-            if snapshot_from.is_some_and(|covered| done.saturating_sub(covered) >= OPEN_BUNDLE_MIN)
-                && self.vcpu_seen + fold_ms >= WRITE_VCPU_STOP_MS
+            // A Wasm fold is ~50 ms: one started just under the fold stop, then the partial
+            // write (about two folds' worth), would end past the write gate and the snapshot
+            // would wait a turn, so stop folding early instead.
+            if open_from.is_some_and(|covered| done.saturating_sub(covered) >= OPEN_BUNDLE_MIN)
+                && self.vcpu_seen + 3 * fold_ms >= WRITE_VCPU_STOP_MS
             {
-                reserved = true;
                 break;
-            }
-            // Past the settled prefix nothing can be kept but a snapshot: when this execution
-            // cannot fold far enough for one, keep the settled folds as a partial instead.
-            if let Some(covered) = snapshot_from {
-                let short = (covered + OPEN_BUNDLE_MIN).saturating_sub(done) as u64;
-                if done == foldable
-                    && short > 0
-                    && fold_ms > 0
-                    && self.vcpu_seen + short * fold_ms >= WRITE_VCPU_STOP_MS
-                {
-                    break;
-                }
             }
             fold_from = Some(self.vcpu_seen);
             if !self.room(tail) {
@@ -3015,13 +2990,6 @@ impl<R: Runtime> Ctx<'_, '_, R> {
         if defer_final && self.report.stopped.is_none() {
             self.report.stopped = Some("vcpu");
         }
-        // A snapshot cut short by the limits keeps its settled folds as a partial, so a backlog
-        // larger than one execution's folds still advances instead of refolding every time.
-        let snapshot_cut = job.final_key.is_none()
-            && !need_partial
-            && !reserved
-            && done < sources.len()
-            && done <= foldable;
         let mut wrote_partial = false;
         let (key, mut objects, is_final) = match job
             .final_key
@@ -3031,7 +2999,7 @@ impl<R: Runtime> Ctx<'_, '_, R> {
                 let body = acc.finish(job.start, job.unit)?;
                 (Some(final_key.to_owned()), vec![body], true)
             }
-            None if (job.final_key.is_some() || need_partial || snapshot_cut) && done > resumed => {
+            None if done > resumed => {
                 let objects = pack_partial(&acc.encode()?, CDN_READ_LIMIT)?;
                 if !self.room(objects.len() as u32) {
                     return Ok(Step::Pending);
@@ -3102,12 +3070,12 @@ impl<R: Runtime> Ctx<'_, '_, R> {
             ..
         }) = open.as_mut()
         {
-            if !wrote_partial
-                && done.saturating_sub(*open_covered) >= OPEN_BUNDLE_MIN
+            let due = done.saturating_sub(*open_covered) >= OPEN_BUNDLE_MIN;
+            let write = due
                 && !self.write_stop()
                 // The PUT, then the state write.
-                && self.room(2)
-            {
+                && self.room(2);
+            if write {
                 let end_ms = sources[..done]
                     .iter()
                     .filter_map(|k| super::catalog::file_bounds(k))
@@ -3147,7 +3115,8 @@ impl<R: Runtime> Ctx<'_, '_, R> {
                     self.retire(state, old, Some(&open_key));
                 }
             }
-            if self.publication.is_some() || wrote_partial || (need_open && done < sources.len()) {
+            // The publication lands next execution; folds or a snapshot left over wait for it.
+            if self.publication.is_some() || done < foldable || (due && !write) {
                 Ok(Step::Pending)
             } else {
                 Ok(Step::Done)
