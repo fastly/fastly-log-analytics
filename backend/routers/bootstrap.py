@@ -854,25 +854,19 @@ def insight_availability(
     request: Request,
     source: dict = Depends(get_source),
 ):
-    # Cross-tenant guard: insight availability discloses which fields are
-    # populated (presence/absence of optional columns), so it needs the
-    # same scope check as the schema endpoint.
+    # Cross-tenant guard: insight availability discloses which log fields the
+    # service enables, so it needs the same scope check as the schema endpoint.
     require_service_in_scope(request, source.get("name"))
 
-    # Prefer the cached schema snapshot maintained by the status-refresh
-    # cron — same source of truth the /schema endpoint and /bootstrap
-    # already use. Saves ~300 ms per /insight-availability call because
-    # we skip the per-service lock + parquet glob that get_schema would
-    # otherwise pay on cold cache, especially when /insights is in
-    # flight concurrently.
-    actual_cols = {col["name"] for col in _resolve_schema_for_source(request, source, stats=False)}
+    from backend import config as svcconfig
     from backend.core.log_fields import INSIGHT_DEFINITIONS
 
+    enabled = set(svcconfig.active_log_field_ids(svcconfig.load_config(source.get("name")) or {}))
     result = []
     for d in INSIGHT_DEFINITIONS:
         req_cols = d.get("required_fields", [])
-        available = all(c in actual_cols for c in req_cols)
-        missing_fields = [c for c in req_cols if c not in actual_cols]
+        available = all(c in enabled for c in req_cols)
+        missing_fields = [c for c in req_cols if c not in enabled]
         result.append({**d, "available": available, "missing_fields": missing_fields if not available else None})
     unavailable = [i for i in result if not i["available"]]
     return {"insights": result, "unavailable": unavailable, "available": True}

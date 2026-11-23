@@ -1391,6 +1391,15 @@ def get_pop_health(
     )
 
 
+def _with_transport_settings(service_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Name the transport fields the service's log field settings leave off; outside the memo so an edit shows at once."""
+    from backend import config as svcconfig
+
+    enabled = set(svcconfig.active_log_field_ids(svcconfig.load_config(service_id) or {}))
+    missing = [f for f in _TRANSPORT_FIELDS if f not in enabled]
+    return {**payload, "missing_fields": missing, "has_transport_data": len(missing) < len(_TRANSPORT_FIELDS)}
+
+
 def get_transport_metrics(
     service: HighScaleService, start_time: str | None, end_time: str | None, filters: Any = None
 ) -> TransportMetrics:
@@ -1411,7 +1420,7 @@ def get_transport_metrics(
             {"name": service.service_id, "service_id": service.service_id},
         )
         if (cached := _network_memo.get_with_telemetry(memo_key)) is not None:
-            return TransportMetrics(**cached)
+            return TransportMetrics(**_with_transport_settings(service.service_id, cached))
 
     def _compute_transport() -> dict[str, Any]:
         if memo_key is not None and (cached_inner := _network_memo.get_with_telemetry(memo_key)) is not None:
@@ -1419,7 +1428,6 @@ def get_transport_metrics(
         filter_sql, filter_params = _filter_clause(filters)
         params = {"service_id": service.service_id, "start": start, "end": end, **filter_params}
         base_where = f"{_BASE_WHERE}{filter_sql}"
-        seen_select = ", ".join(f"countIf(custom_fields['{f}'] != '') AS seen_{f}" for f in _TRANSPORT_FIELDS)
         proto_clean_expr = (
             "caseWithExpression(custom_fields['proto'], '3.0', 'HTTP/3', '3', 'HTTP/3', '2.0', 'HTTP/2', '2', 'HTTP/2', "
             "'1.1', 'HTTP/1.1', '1.0', 'HTTP/1.0', if(empty(custom_fields['proto']), 'Other', custom_fields['proto']))"
@@ -1434,7 +1442,7 @@ def get_transport_metrics(
                 f"SELECT count() AS total_reqs, sum(toInt64OrZero(custom_fields['resp_bytes'])) AS total_bytes, "
                 f"quantiles(0.50, 0.90, 0.95, 0.99)({_RTT}) AS rtt_quants, "
                 f"avg(toFloat64OrNull(custom_fields['retrans'])) AS avg_retrans, avg({_PLOSS}) * 100.0 AS avg_ploss_pct, "
-                f"avg(toFloat64OrNull(custom_fields['delivery_rate'])) * 8.0 / 1e6 AS avg_del_rate_mbps, {seen_select}, "
+                f"avg(toFloat64OrNull(custom_fields['delivery_rate'])) * 8.0 / 1e6 AS avg_del_rate_mbps, "
                 f"sumMap([{proto_clean_expr}], [toUInt64(1)]) AS proto_map "
                 f"FROM request_facts PREWHERE {base_where}{min_slice_clause}"
             )
@@ -1479,7 +1487,7 @@ def get_transport_metrics(
                 f"quantile(0.50)({_RTT}) / 1000.0 AS rtt_p50, quantile(0.90)({_RTT}) / 1000.0 AS rtt_p90, "
                 f"quantile(0.95)({_RTT}) / 1000.0 AS rtt_p95, quantile(0.99)({_RTT}) / 1000.0 AS rtt_p99, "
                 f"avg(toFloat64OrNull(custom_fields['retrans'])) AS avg_retrans, avg({_PLOSS}) * 100.0 AS avg_ploss_pct, "
-                f"avg(toFloat64OrNull(custom_fields['delivery_rate'])) * 8.0 / 1e6 AS avg_del_rate_mbps, {seen_select}",
+                f"avg(toFloat64OrNull(custom_fields['delivery_rate'])) * 8.0 / 1e6 AS avg_del_rate_mbps",
                 base_where,
             )
             proto_sql = _ch_fact_query(
@@ -1500,13 +1508,9 @@ def get_transport_metrics(
             rows, p_rows = q_res["summary"], q_res["protocols"]
             r = rows[0] if rows else {}
         total_requests = int(r.get("total_reqs") or 0)
-        missing_fields = (
-            [f for f in _TRANSPORT_FIELDS if not int(r.get(f"seen_{f}") or 0)] if total_requests > 0 else []
-        )
         _transport_vals: dict[str, Any] = {attr: _flt(r.get(col), nd) for attr, col, nd in _TRANSPORT_ROUND_SPECS}
         payload = {
             "section_timings": [SectionTimingEntry.model_validate(t) for t in trace.timings()],
-            "has_transport_data": len(missing_fields) < len(_TRANSPORT_FIELDS),
             **_transport_vals,
             "bandwidth_bytes": int(r.get("total_bytes") or 0),
             "total_requests": total_requests,
@@ -1517,17 +1521,17 @@ def get_transport_metrics(
                     total_requests=total_requests,
                 )
             ],
-            "missing_fields": missing_fields,
         }
         if memo_key is not None:
             _network_memo.put(memo_key, dict(payload))
         return payload
 
     if memo_key is not None:
-        return TransportMetrics(**_network_memo.coalesce(f"hs_transport_metrics:{memo_key}", _compute_transport))
+        computed = _network_memo.coalesce(f"hs_transport_metrics:{memo_key}", _compute_transport)
+        return TransportMetrics(**_with_transport_settings(service.service_id, computed))
     return TransportMetrics(
         **cache_result({}, state="bypass", prewarmer=False),
-        **_compute_transport(),
+        **_with_transport_settings(service.service_id, _compute_transport()),
     )
 
 

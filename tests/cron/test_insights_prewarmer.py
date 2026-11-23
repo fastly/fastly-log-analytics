@@ -957,6 +957,8 @@ def test_contract_cache_warming_and_reuse_across_subsequent_dashboard_queries(mo
     hs_svc = MagicMock(spec=HighScaleService, service_id="svc-1", client=mock_client)
     stub_cron_run["hs_reg"].return_value.resolve.return_value = hs_svc
 
+    from backend import config as svcconfig
+
     cache_key = (
         "svc-1",
         id(mock_client),
@@ -966,6 +968,7 @@ def test_contract_cache_warming_and_reuse_across_subsequent_dashboard_queries(mo
         0,
         "",
         (),
+        tuple(sorted(svcconfig.active_log_field_ids(svcconfig.load_config("svc-1") or {}))),
     )
     _INSIGHTS_CACHE.clear()
 

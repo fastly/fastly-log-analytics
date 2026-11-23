@@ -489,20 +489,15 @@ def test_network_bundle_post_get_selective_and_debug(client, monkeypatch):
     assert any("/api/network/bundle".startswith(prefix) for prefix in _ANALYST_ALLOWED_WRITE_PREFIXES)
 
 
-def test_network_bundle_missing_optional_fields_fallback(client, monkeypatch):
+def test_network_bundle_names_transport_fields_the_settings_leave_off(client, monkeypatch):
+    from backend import config as svcconfig
+
     def _exec(sql: str, params: dict | None = None, settings: dict | None = None):
         if "count() AS total_reqs" in str(sql):
-            return [
-                {
-                    "total_reqs": 5,
-                    "total_bytes": 1000,
-                    "seen_tcp_rtt": 0,
-                    "seen_retrans": 0,
-                    "seen_ploss": 0,
-                    "seen_delivery_rate": 0,
-                }
-            ]
+            return [{"total_reqs": 5, "total_bytes": 1000}]
         return []
+
+    monkeypatch.setattr(svcconfig, "active_log_field_ids", lambda _cfg: ["status", "tcp_rtt"])
 
     svc = SimpleNamespace(service_id=MOCK_SERVICE_ID, client=SimpleNamespace(execute=_exec), watermark=lambda: None)
     monkeypatch.setattr(
@@ -515,8 +510,15 @@ def test_network_bundle_missing_optional_fields_fallback(client, monkeypatch):
     )
     assert resp.status_code == 200
     transport = resp.json()["transport"]
-    assert (transport["total_requests"], transport["has_transport_data"]) == (5, False)
-    assert len(transport["missing_fields"]) == 4 and "tcp_rtt" in transport["missing_fields"]
+    assert (transport["total_requests"], transport["has_transport_data"]) == (5, True)
+    assert transport["missing_fields"] == ["retrans", "ploss", "delivery_rate"]
+
+    monkeypatch.setattr(svcconfig, "active_log_field_ids", lambda _cfg: ["status"])
+    resp = client.post(
+        "/api/network/bundle", headers=_SVC_HEADERS, json={"start_time": st, "end_time": et, "sections": ["transport"]}
+    )
+    transport = resp.json()["transport"]
+    assert (transport["has_transport_data"], len(transport["missing_fields"])) == (False, 4)
 
 
 # ── Origin Router Tests ──

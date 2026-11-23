@@ -18,6 +18,7 @@ import httpx
 import pytest
 
 from backend.config import ClickHouseConfig
+from backend.core.catalog import LOG_FIELD_CATALOG
 from backend.core.clickhouse import ClickHouseClient
 from backend.high_scale._common import (
     LEGACY_ROLLUP_BATCH_UUID,
@@ -664,6 +665,7 @@ def _evaluated_spans(client: ClickHouseClient) -> dict[str, tuple[datetime, date
         False,
         "",
         {},
+        frozenset(f["id"] for f in LOG_FIELD_CATALOG),
     )
     assert not partial and payload["insights"]
     return seen
@@ -687,6 +689,7 @@ def test_evaluator_cards_are_identical_with_and_without_the_rollup(
             False,
             "",
             {},
+            frozenset(f["id"] for f in LOG_FIELD_CATALOG),
         )
         assert not partial
         return [

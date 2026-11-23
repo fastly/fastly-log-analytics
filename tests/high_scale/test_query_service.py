@@ -1225,10 +1225,12 @@ def test_transport_and_bundle_queries():
     t_row = {
         "total_reqs": 100, "total_bytes": 10, "rtt_p50": 10.0, "rtt_p90": 20.0, "rtt_p95": 30.0, "rtt_p99": 40.0,
         "avg_retrans": None, "avg_ploss_pct": 0.5, "avg_del_rate_mbps": None,
-        "seen_tcp_rtt": 100, "seen_retrans": 0, "seen_ploss": 80, "seen_delivery_rate": 0,
     }  # fmt: skip
-    service, client = _net_service(lambda sql, p: [t_row] if "seen_tcp_rtt" in sql else [])
-    resp = get_transport_metrics(service, _NET_START_S, _NET_END_S, {"pop": FilterSpec(mode="include", values=["SJC"])})
+    service, client = _net_service(lambda sql, p: [t_row] if "avg_del_rate_mbps" in sql else [])
+    with patch("backend.config.active_log_field_ids", return_value=["status", "tcp_rtt", "ploss"]):
+        resp = get_transport_metrics(
+            service, _NET_START_S, _NET_END_S, {"pop": FilterSpec(mode="include", values=["SJC"])}
+        )
     assert (
         resp.missing_fields == ["retrans", "delivery_rate"]
         and resp.has_transport_data is True
@@ -1238,10 +1240,10 @@ def test_transport_and_bundle_queries():
         assert "custom_fields[{filter_k0:String}] IN ({filter_0_0:String})" in sql
         assert params["filter_k0"] == "pop" and params["filter_0_0"] == "SJC"
 
-    empty_t = {"total_reqs": 5, "seen_tcp_rtt": 0, "seen_retrans": 0, "seen_ploss": 0, "seen_delivery_rate": 0}
-    resp_empty = get_transport_metrics(
-        _net_service(lambda sql, p: [empty_t] if "seen_tcp_rtt" in sql else [])[0], _NET_START_S, _NET_END_S
-    )
+    with patch("backend.config.active_log_field_ids", return_value=["status"]):
+        resp_empty = get_transport_metrics(
+            _net_service(lambda sql, p: [t_row] if "avg_del_rate_mbps" in sql else [])[0], _NET_START_S, _NET_END_S
+        )
     assert resp_empty.has_transport_data is False and resp_empty.missing_fields == [
         "tcp_rtt",
         "retrans",
@@ -1267,7 +1269,7 @@ def test_transport_and_bundle_queries():
     )
     assert b_resp.pop_health and b_resp.pop_health[0].pop == "SJC" and b_resp.quality.scatter[0].cache == "MISS"
     assert b_resp.transport is not None and b_resp.health is not None
-    for _, params in b_client.matching("AS cache_state") + b_client.matching("seen_tcp_rtt"):
+    for _, params in b_client.matching("AS cache_state") + b_client.matching("avg_del_rate_mbps"):
         assert params["filter_0_0"] == "US"
     assert "filter_0_0" not in b_client.matching("AS bandwidth_bytes")[0][1]
 
@@ -2247,6 +2249,13 @@ def _pop_coordinates(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+@pytest.fixture(autouse=True)
+def _every_log_field_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    from backend.core.catalog import LOG_FIELD_CATALOG
+
+    monkeypatch.setattr("backend.config.active_log_field_ids", lambda _cfg: [f["id"] for f in LOG_FIELD_CATALOG])
+
+
 class _InsightsClient:
     def __init__(
         self,
@@ -2290,6 +2299,25 @@ def _run_insights(
 
 def _insight_cards(response) -> dict[str, dict]:
     return {card["id"]: card for card in json.loads(response.model_dump_json(by_alias=True))["insights"]}
+
+
+def test_insights_run_only_when_the_log_field_settings_enable_their_fields(monkeypatch) -> None:
+    from backend.core.catalog import LOG_FIELD_CATALOG
+
+    definition = next(d for d in registry.get_all() if d.id == "error_spikes")
+    left_off = definition.required_fields[-1]
+    monkeypatch.setattr(
+        "backend.config.active_log_field_ids",
+        lambda _cfg: [f["id"] for f in LOG_FIELD_CATALOG if f["id"] != left_off],
+    )
+    client = _InsightsClient()
+    _run_insights(client)
+    assert "error_spikes" not in client.queries()
+
+    every = _InsightsClient()
+    monkeypatch.setattr("backend.config.active_log_field_ids", lambda _cfg: [f["id"] for f in LOG_FIELD_CATALOG])
+    _run_insights(every)
+    assert "error_spikes" in every.queries()
 
 
 def test_detections_registry_and_investigate_cards() -> None:
@@ -2853,8 +2881,14 @@ def test_insufficient_history_and_missing_fields_or_pop_coords(monkeypatch: pyte
         "impossible_distance",
     }  # type: ignore[union-attr]
 
-    # Omitted latency fields
-    client_no_lat = _InsightsClient(fields=[n for n in ALL_FIELDS if n not in {"elapsed", "ottfb"}])
+    # Latency fields left off in the log field settings
+    from backend.core.catalog import LOG_FIELD_CATALOG
+
+    monkeypatch.setattr(
+        "backend.config.active_log_field_ids",
+        lambda _cfg: [f["id"] for f in LOG_FIELD_CATALOG if f["id"] not in {"elapsed", "ottfb"}],
+    )
+    client_no_lat = _InsightsClient()
     cards_no_lat = _insight_cards(_run_insights(client_no_lat))
     for omitted in ("latency_regression", "tail_latency", "pop_latency_regression", "origin_latency_spike"):
         assert omitted not in cards_no_lat and omitted not in client_no_lat.queries()

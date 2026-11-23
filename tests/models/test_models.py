@@ -603,7 +603,10 @@ class TestWireInsights:
 
         service = type("Svc", (), {"client": _Client(), "service_id": "svc"})()
         req = type("Req", (), {"window_size_hrs": 24.0, "baseline_hours": 168.0})()
-        res = hs_insights_endpoint(service, req, None, None)  # type: ignore[arg-type]
+        from backend.core.catalog import LOG_FIELD_CATALOG
+
+        with patch("backend.config.active_log_field_ids", return_value=[f["id"] for f in LOG_FIELD_CATALOG]):
+            res = hs_insights_endpoint(service, req, None, None)  # type: ignore[arg-type]
         cards = {card["id"]: card for card in json.loads(res.model_dump_json(by_alias=True))["insights"]}
         assert "high_scale_5xx" not in cards
         card = cards["error_spikes"]

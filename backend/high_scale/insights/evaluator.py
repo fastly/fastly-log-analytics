@@ -161,9 +161,14 @@ def _evaluate(
     mask_ips: bool,
     filter_clause: str,
     filter_params: dict[str, Any],
+    enabled_fields: frozenset[str],
     on_meta: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[dict[str, Any], bool]:
-    """Run every detection once; returns the envelope and whether any card is an error card."""
+    """Run every detection once; returns the envelope and whether any card is an error card.
+
+    The log field settings (``enabled_fields``) decide which insights run; the sampled ``present``
+    columns only shape each detection's SQL, so rows logged before a field was enabled can't break it.
+    """
     trace = HighScaleSections(service.service_id, "insights")
     baseline_start, window_start, now = _window(window_hours, baseline_hours, clamp_start, clamp_end)
     scope = " AND ".join(visible_fact_clauses("request"))
@@ -295,7 +300,7 @@ def _evaluate(
     candidates: list[tuple[InsightDefinition, Detection]] = []
     for definition in registry.get_all():
         detection = _detection_for(definition.id, present)
-        if detection is not None and all(column in present for column in definition.required_fields):
+        if detection is not None and all(column in enabled_fields for column in definition.required_fields):
             candidates.append((definition, detection))
     if on_meta is not None:
         pending_cards = [
@@ -450,6 +455,9 @@ def insights_endpoint(
     req_filters = getattr(req, "filters", None)
     filter_clause, filter_params = build_clickhouse_filters(req_filters) if req_filters else ("", {})
     key_clamp = resolve_clamp_cache_key(clamp_start, clamp_end, clamp_cache_key)
+    from backend import config as svcconfig
+
+    enabled_fields = frozenset(svcconfig.active_log_field_ids(svcconfig.load_config(service.service_id) or {}))
     cache_key = (
         service.service_id,
         id(service.client),
@@ -459,6 +467,7 @@ def insights_endpoint(
         int(mask_ips),
         filter_clause,
         tuple(sorted((k, str(v)) for k, v in filter_params.items())),
+        tuple(sorted(enabled_fields)),
     )
     from backend.high_scale.ingest_controller import HighScaleService
 
@@ -472,6 +481,7 @@ def insights_endpoint(
             mask_ips,
             filter_clause,
             filter_params,
+            enabled_fields,
             on_meta,
         )
 

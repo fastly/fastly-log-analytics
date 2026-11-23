@@ -333,18 +333,25 @@ def test_log_fields_catalog_500s_on_exception(client):
         assert client.get("/api/log-fields/catalog").status_code == 500
 
 
-def test_insight_availability_500s_on_schema_failure(client):
-    with patch("backend.routers.bootstrap._resolve_schema_for_source", side_effect=RuntimeError("schema gone")):
-        assert client.get("/api/insight-availability", headers=_SVC_HDR).status_code == 500
+def test_insight_availability_follows_the_log_field_settings_not_the_stored_columns(client, test_service_source):
+    from backend.core.log_fields import INSIGHT_DEFINITIONS
 
+    every_required = sorted({c for d in INSIGHT_DEFINITIONS for c in d.get("required_fields", [])})
+    stored_columns = [{"name": c, "type": "VARCHAR"} for c in every_required]
+    insight = next(d for d in INSIGHT_DEFINITIONS if len(d.get("required_fields", [])) > 1)
+    left_off = insight["required_fields"][-1]
 
-def test_insight_availability_marks_unavailable_when_required_cols_missing(client, test_service_source):
-    with patch(
-        "backend.routers.bootstrap._resolve_schema_for_source",
-        return_value=[{"name": "timestamp", "type": "TIMESTAMP"}, {"name": "status", "type": "INTEGER"}],
-    ):
-        resp = client.get("/api/insight-availability", headers=_SVC_HDR)
-    assert resp.status_code == 200 and any(not i["available"] for i in resp.json()["insights"])
+    def settings(ids):
+        return patch.object(svcconfig, "active_log_field_ids", return_value=ids)
+
+    with patch("backend.routers.bootstrap._resolve_schema_for_source", return_value=stored_columns):
+        with settings([c for c in every_required if c != left_off]):
+            partial = client.get("/api/insight-availability", headers=_SVC_HDR).json()["insights"]
+        with settings(every_required):
+            full = client.get("/api/insight-availability", headers=_SVC_HDR).json()["insights"]
+    got = next(i for i in partial if i["id"] == insight["id"])
+    assert got["available"] is False and got["missing_fields"] == [left_off]
+    assert all(i["available"] for i in full)
 
 
 def test_bootstrap_remote_unauth_stub_omits_section_timings():
