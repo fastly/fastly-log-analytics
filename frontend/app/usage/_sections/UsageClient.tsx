@@ -32,8 +32,6 @@ import {
   type BreakdownRow,
   type StorageUsageData,
 } from './UsageStatCards'
-import { PlatformUsageCards } from './PlatformUsageCards'
-import { GeographyCard } from './GeographyCard'
 
 export {
   FosOperationsHelp,
@@ -225,22 +223,6 @@ export function UsagePageContent({
 
   const cloudMode = isCloudMode()
 
-  const {
-    data: platform,
-    isLoading: loadingPlatform,
-  } = useQuery({
-    queryKey: ['usage', 'platform', activeServiceId, startTime, endTime],
-    queryFn: async ({ signal }) => {
-      return unwrapClient(
-        client.GET('/api/usage/platform', {
-          signal,
-          params: { query: { start: startTime ?? undefined, end: endTime ?? undefined } },
-        }),
-      )
-    },
-    enabled: isReady,
-    staleTime: 60_000,
-  })
   const storageWithMeta = storage as StorageUsageData | undefined
   const opsWithMeta = ops as (typeof ops & {
     source?: string
@@ -297,15 +279,6 @@ export function UsagePageContent({
 
   return (
     <>
-      <PlatformUsageCards data={platform} loading={loadingPlatform} cloudMode={cloudMode} />
-
-      <GeographyCard
-        activeServiceId={activeServiceId}
-        startTime={startTime}
-        endTime={endTime}
-        enabled={isReady}
-      />
-
       <UsageStatCards
         storage={storageWithMeta}
         loadingStorage={loadingStorage}

@@ -276,7 +276,7 @@ test.describe('Alerts & Notifications Page Contract (/alerts)', () => {
     const statusFilter = page.locator('[data-testid="alerts-status-filter"]:visible')
     await expect(statusFilter).toHaveCount(1, { timeout: 15_000 })
     for (const status of ['all', 'alerting', 'ok', 'muted']) await expect(statusFilter.getByTestId(`alerts-filter-${status}`)).toBeVisible({ timeout: 5_000 })
-    if (/Admin View/i.test(await page.locator('footer').innerText())) await expect(alertsRoot.getByTestId('alerts-create-btn')).toBeVisible({ timeout: 10_000 })
+    if (/Admin View/i.test(await page.locator('footer').innerText())) await expect(page.locator('[data-testid="alerts-create-btn"]:visible')).toBeVisible({ timeout: 10_000 })
   })
 
   test('4. Admin rule lifecycle (Create, Update, Toggle, Test Webhook, Evaluate & Delete) and telemetry attribution', async ({ page }) => {

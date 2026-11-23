@@ -364,7 +364,7 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     })
     mockGet.mockImplementation(async (path: string) => {
       if (path === '/api/usage/rum-breakdown') throw new Error('rum unavailable')
-      return { data: undefined }
+      return { data: {} }
     })
 
     renderWithQuery(<UsagePage />, { queryClient })
@@ -594,12 +594,16 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
 
     expect(await screen.findByText('720.00 GB-hrs')).toBeInTheDocument()
     expect(screen.queryByText('48.00 GB-hrs')).not.toBeInTheDocument()
-    expect(screen.getByText('48.00 GB-hours · 3 buckets')).toBeInTheDocument()
+    expect(screen.queryByText('48.00 GB-hours · 3 buckets')).not.toBeInTheDocument()
+    expect(screen.queryByText('NGWAF Outcomes')).not.toBeInTheDocument()
+    expect(screen.queryByText('Traffic Geography')).not.toBeInTheDocument()
     expect(screen.getAllByText('Measured · this install').length).toBeGreaterThan(0)
     expect(screen.queryByText('Measured · Fastly Platform (account-wide)')).not.toBeInTheDocument()
     expect(screen.getByTestId('cost-calculator')).toHaveAttribute('data-local-storage-gb-hours', '720')
     expect(screen.getAllByText('Unavailable').length).toBeGreaterThanOrEqual(2)
     expect(screen.getByText(/Partial estimate.*operations.*excluded/)).toBeInTheDocument()
+    expect(mockGet).not.toHaveBeenCalledWith('/api/usage/platform', expect.anything())
+    expect(mockGet).not.toHaveBeenCalledWith('/api/usage/geography', expect.anything())
     expect(mockGet).toHaveBeenCalledWith(
       '/api/usage/current-storage',
       expect.objectContaining({
