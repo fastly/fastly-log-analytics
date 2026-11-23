@@ -35,7 +35,24 @@ export type StorageUsageData =
     live_billed_gb_hours?: number
     deleted_billed_gb_hours?: number
     minimum_billed_gb_hours?: number
+    /** Cloud: every product the install uses, priced at the service's configured rates (`incurredCost`). */
+    incurred?: { total: number; lines: IncurredCostLine[] }
   }
+
+export type IncurredCostLine = {
+  id: string
+  label: string
+  /** USD, or null when the quantity is unavailable. */
+  usd: number | null
+  detail: string
+  source: 'fastly' | 'logged' | 'none'
+}
+
+const INCURRED_SOURCE_LABEL: Record<IncurredCostLine['source'], string> = {
+  fastly: 'Fastly stats',
+  logged: 'Measured · this install',
+  none: 'Unavailable',
+}
 
 export type BreakdownRow = {
   id: string
@@ -141,12 +158,21 @@ export function UsageStatCards({
   const roughCostB = opsUnavailable ? 0 : (totalClassB / 1000) * rateB
   const roughStorage = errorStorage ? 0 : (billedGbHours / 720) * rateStorage
   const roughBandwidth = errorBw ? 0 : totalBwGB * rateEgress
-  const roughTotal = roughCostA + roughCostB + roughStorage + roughBandwidth
-  const excludedCosts = [
-    errorStorage ? 'storage' : null,
-    opsUnavailable ? 'operations' : null,
-    errorBw ? 'CDN egress' : null,
-  ].filter((cost): cost is string => Boolean(cost))
+  // Cloud prices every product (storage, operations, delivery, Compute, KV, secrets) in one table;
+  // operations still follow this card's own availability.
+  const pricedLines = errorStorage
+    ? null
+    : storage?.incurred?.lines.map((line) => (line.id === 'ops' && opsUnavailable ? { ...line, usd: null } : line)) ?? null
+  const roughTotal = pricedLines
+    ? pricedLines.reduce((sum, line) => sum + (line.usd ?? 0), 0)
+    : roughCostA + roughCostB + roughStorage + roughBandwidth
+  const excludedCosts = pricedLines
+    ? pricedLines.filter((line) => line.usd === null).map((line) => line.label)
+    : [
+        errorStorage ? 'storage' : null,
+        opsUnavailable ? 'operations' : null,
+        errorBw ? 'CDN egress' : null,
+      ].filter((cost): cost is string => Boolean(cost))
   const hasPartialCost = excludedCosts.length > 0
   const fmtUSD = (n: number) => formatUSD(n, { subDollarDigits: 2 })
 
@@ -289,7 +315,23 @@ export function UsageStatCards({
   )
 
   const costBreakdownRows = useMemo<BreakdownRow[]>(
-    () => [
+    () => pricedLines ? pricedLines.map((line) => ({
+      id: line.id,
+      label: <span>{line.label}:</span>,
+      value: (
+        <div className="flex flex-col items-end">
+          {line.usd === null ? (
+            <strong className="text-muted-foreground">n/a</strong>
+          ) : (
+            <strong className="text-foreground">{fmtUSD(line.usd)}</strong>
+          )}
+          <span className="text-[9px] uppercase tracking-tighter text-muted-foreground">{line.detail}</span>
+          <span className="text-[9px] uppercase tracking-tighter text-muted-foreground">
+            {INCURRED_SOURCE_LABEL[line.source]}
+          </span>
+        </div>
+      ),
+    })) : [
       {
         id: 'storage',
         label: <span>Storage:</span>,
@@ -385,6 +427,7 @@ export function UsageStatCards({
       rateEgress,
       storage,
       computeRow,
+      pricedLines,
     ],
   )
 
@@ -525,7 +568,9 @@ export function UsageStatCards({
         }
         icon={DollarSign}
         loading={loadingOps || loadingStorage || loadingBw}
-        tooltip="Total estimated cost incurred for the selected period (service-local Storage, Ops, and Egress)."
+        tooltip={pricedLines
+          ? 'Estimated cost for the selected period of every product this install uses, at the service\'s configured rates. Account free tiers are not subtracted.'
+          : 'Total estimated cost incurred for the selected period (service-local Storage, Ops, and Egress).'}
       />
     </div>
   )

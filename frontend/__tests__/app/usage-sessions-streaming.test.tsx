@@ -1,4 +1,4 @@
-import { fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, renderHook, screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw/http'
 import { describe, expect, it, test, vi, beforeAll, beforeEach, afterEach } from 'vitest'
 import { UsageLogClient } from '@/app/admin/usage-log/page'
@@ -429,6 +429,51 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     const vcpuTraces = plotlyMock.mock.calls.map(([props]) => props.data as Array<{ name?: string; y?: number[]; hovertemplate?: string }>)
       .findLast((traces) => traces.some((t) => t.hovertemplate?.includes(' s<extra>')))
     expect(vcpuTraces?.map((t) => [t.name, t.y])).toEqual([['App service', [2]], ['Worker service', [0.5]]])
+  })
+
+  test('Cloud cost card prices every product the install uses, not only storage, operations and egress', async () => {
+    setCloudModeRuntime(true)
+    useMockAdminFetch = true
+    const line = (id: string, label: string, usd: number | null, detail: string, source = 'fastly') => ({ id, label, usd, detail, source })
+    mockGet.mockImplementation(async (path: string) => {
+      if (path === '/api/usage/current-storage') {
+        return {
+          data: {
+            total_billed_gb_hours: 43.2, storage_billing_complete: true, compute_requests: 7, compute_vcpu_ms: 3, kv_ops: 2,
+            incurred: {
+              total: 10.4212,
+              telemetryUsd: 0,
+              lines: [
+                line('storage', 'Object Storage', 0.0012, '43.20 GB-hrs', 'logged'),
+                line('ops', 'Storage operations', 0.08, 'A 15,000 · B 97,800', 'logged'),
+                line('delivery', 'CDN delivery', 9.2, '0.75 GB · 9,100,000 front reqs'),
+                line('compute', 'Compute (app + worker)', 0.31, '141,195 reqs · 5,160,000 vCPU ms'),
+                line('kv', 'KV Store operations', null, 'Admin only (Fastly stats)', 'none'),
+                line('secrets', 'Secret Store', 0.83, '5 secrets × 1.0 days'),
+                line('config', 'Config Store', 0, 'No usage charge'),
+              ],
+            },
+          } as never,
+        }
+      }
+      if (path === '/api/usage/operations') {
+        return { data: { source: 'local', complete: true, provenance: ['fos_usage'], total_class_a: 15_000, total_class_b: 97_800, data: [] } as never }
+      }
+      return undefined
+    })
+    mockAdminFetch.mockImplementation(async () => Response.json({ source: 'unavailable', reason: 'stats_unavailable' }))
+
+    renderWithQuery(<UsagePage />, { queryClient })
+
+    const card = (await screen.findByText('Compute (app + worker):')).closest('[data-testid="stat-card"]') ?? document.body
+    expect(within(card as HTMLElement).getByText('$10.42')).toBeInTheDocument()
+    for (const [label, usd] of [['CDN delivery:', '$9.20'], ['Secret Store:', '$0.83'], ['Compute (app + worker):', '$0.31']]) {
+      const row = within(card as HTMLElement).getByText(label).closest('tr') as HTMLElement
+      expect(within(row).getByText(usd)).toBeInTheDocument()
+    }
+    const kvRow = within(card as HTMLElement).getByText('KV Store operations:').closest('tr') as HTMLElement
+    expect(within(kvRow).getByText('n/a')).toBeInTheDocument()
+    expect(within(card as HTMLElement).getByText(/KV Store operations cost excluded/)).toBeInTheDocument()
   })
 
   test('Cloud cost card falls back to logged Compute figures when Platform Metrics is unavailable', async () => {
