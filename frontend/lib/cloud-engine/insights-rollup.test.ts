@@ -660,6 +660,14 @@ describe("IP detectors from the window's ins_ip", () => {
       .toEqual(["content_discovery"]);
   });
 
+  it("rules both out over an uncut empty ins_ip once all_fields shows ip values", () => {
+    // Most windows have no 404 or auth-path denial at all: no IP can reach 20.
+    expect(ruledOut(withIpCounts(ipRollup([]), [["1.1.1.1", 500]]))).toEqual(IP_IDS);
+    expect(ruledOut(withIpCounts(ipRollup([], { truncated: new Set(["ins_ip/ip"]) }), [["1.1.1.1", 500]]))).toEqual([]);
+    expect(ruledOut(withIpCounts(ipRollup([], { present: new Set(["ins_url/url"]) }), [["1.1.1.1", 500]]))).toEqual([]);
+    expect(ruledOut(withIpCounts(ipRollup([]), []))).toEqual([]);
+  });
+
   it("never rules out over cut, missing or empty ins_ip, which can't show the ip column exists", () => {
     expect(ruledOut(ipRollup([["1.1.1.1", 1, 1]], { truncated: new Set(["ins_ip/ip"]) }))).toEqual([]);
     expect(ruledOut(ipRollup([["1.1.1.1", 1, 1]], { present: new Set(["ins_url/url"]) }))).toEqual([]);
@@ -703,8 +711,8 @@ describe("IP detectors from the window's ins_ip", () => {
     }
   };
 
-  it("evaluates them clean without the raw follow-up when no IP reaches 20", async () => {
-    const result = await answer(19);
+  it.each([19, 0])("evaluates them clean without the raw follow-up when no IP reaches 20 (%i 404s)", async (n404) => {
+    const result = await answer(n404);
     expect(result.deferred_detectors).toEqual([]);
     for (const id of ["credential_enumeration", "content_discovery"]) {
       const card = result.insights.find((c) => c.id === id)!;

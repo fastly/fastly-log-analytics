@@ -61,8 +61,10 @@ export function insightsDeferredDetectors(rollup: Rollup): ReadonlySet<string> {
 /**
  * The IP detectors the summaries prove can't fire, so the raw follow-up can skip
  * them. The window's `ins_ip` must be uncut, so it lists every IP with a 404 or
- * an auth-path 401/403 with exact counts; a non-empty `ins_ip` and `ins_url`
- * also show the `ip`, `status` and `url` columns exist. Then, for every IP:
+ * an auth-path 401/403 with exact counts; a non-empty `ins_url` and either a
+ * non-empty `ins_ip` or `all_fields/ip` values show the columns exist. An empty
+ * uncut `ins_ip` (the usual window: no 404 or denial at all) rules both out.
+ * Otherwise, for every IP:
  * - credential_enumeration needs `IP_DETECTOR_MIN_HITS` denials above 3x its
  *   scaled baseline denials + 5. The baseline `ins_ip` count is the one the
  *   follow-up uses and never above the true count.
@@ -77,9 +79,10 @@ export function ipDetectorsRuledOut(
   baselineHours: number,
 ): ReadonlySet<string> {
   const ips = rollupGroup(window, "ins_ip", "ip");
-  if (!ips?.size || window.truncated.has("ins_ip/ip") || !rollupGroup(window, "ins_url", "url")?.size) return new Set();
-  const baselineIps = rollupGroup(baseline, "ins_ip", "ip");
   const requests = window.fields.get("ip");
+  if (!ips || (!ips.size && !requests?.size) || window.truncated.has("ins_ip/ip")
+    || !rollupGroup(window, "ins_url", "url")?.size) return new Set();
+  const baselineIps = rollupGroup(baseline, "ins_ip", "ip");
   // insights.ts `scaled` and `pct`, in the same operation order.
   const scaled = (count: number) => count * windowHours / baselineHours;
   let credential = true;
