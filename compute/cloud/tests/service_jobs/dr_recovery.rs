@@ -3569,6 +3569,7 @@ fn bug_cloud_dr_10_coexistence_and_shared_bucket_path_scope_protects_primary_ins
         json!({"generation": p_1f1.service()["generation"]}),
     )["job"]
         .clone();
+    let rec_1f1_job = p_1f1.until(rec_1f1_job, "discover");
     let rec_1f1_step = p_1f1.json(
         "POST",
         &format!(
@@ -4168,6 +4169,7 @@ fn bug_cloud_dr_12_13_14_coexistence_scoring_teardown_minimal_attached_and_cold_
             json!({"generation": p_dr12_wedged.service()["generation"]}),
         )["job"]
             .clone();
+        let rec_w = p_dr12_wedged.until(rec_w, "discover");
         let rec_w_step = p_dr12_wedged.json(
             "POST",
             &format!("/api/admin/jobs/{}/step", rec_w["id"].as_str().unwrap()),

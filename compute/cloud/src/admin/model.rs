@@ -651,6 +651,8 @@ pub fn public_job(job: &Job) -> Value {
         "step":job.step,"completed_steps":job.completed_steps,"error":job.error,
         "draft_version":job.draft_version,"changes":job.changes.iter().map(|change|
             json!({"resource":change.resource,"name":change.name,"action":change.action})).collect::<Vec<_>>(),
+        "front_changes":job.front_changes.iter().map(|change|
+            json!({"resource":change.resource,"name":change.name,"action":change.action})).collect::<Vec<_>>(),
         "created_at":job.created_at,"updated_at":job.updated_at,
         "retry_at":job.retry.as_ref().and_then(|retry|(retry.at>0).then_some(retry.at)),
         "retry_attempt":job.retry.as_ref().map_or(0,|retry|retry.attempt),

@@ -1298,14 +1298,72 @@ fn upsert(
     }
 }
 
+/// The front clock health checks' interval (`flp_clock` on `/_tick`, `flp_flush` on `/_flush`):
+/// a quarter of the shortest log period the clock serves (request, and RUM when enabled, whose
+/// ingest runs at least every 5 s), between 1 s and 30 s. Every Fastly POP sends both probes at
+/// this interval and each is a billed front request, so a 1 s clock costs ~9M requests a day.
+pub fn clock_interval_ms(service: &Service) -> u64 {
+    clock_interval_ms_for(
+        service.log_period,
+        service.rum.enabled.then_some(service.rum.log_period),
+    )
+}
+
+fn clock_interval_ms_for(log_period_s: u32, rum_log_period_s: Option<u32>) -> u64 {
+    let mut period = u64::from(log_period_s.max(1));
+    if let Some(rum) = rum_log_period_s {
+        period = period.min(u64::from(rum.max(5)));
+    }
+    (period * 1000 / 4).clamp(1000, 30_000)
+}
+
+/// Clock health check changes that bring the front's existing checks to `clock_interval_ms`.
+/// Missing checks are left to the provisioner, which creates them with their host and path.
+fn clock_changes(
+    context: &Context<'_, impl Runtime>,
+    sid: &str,
+    active: u64,
+    token: &str,
+    service: &Service,
+) -> Result<Vec<Change>, Error> {
+    let interval = clock_interval_ms(service);
+    let checks = context.api(
+        "GET",
+        &format!("/service/{sid}/version/{active}/healthcheck"),
+        token,
+        None,
+    )?;
+    let checks = list(&checks)?;
+    Ok(["flp_clock", "flp_flush"]
+        .into_iter()
+        .filter_map(|name| {
+            let found = checks.iter().find(|v| v["name"] == name)?;
+            let current = found["check_interval"]
+                .as_u64()
+                .or_else(|| found["check_interval"].as_str()?.parse().ok());
+            (current != Some(interval)).then(|| Change {
+                resource: "healthcheck".into(),
+                name: name.into(),
+                action: "upsert".into(),
+                body: json!({"check_interval": interval}),
+            })
+        })
+        .collect())
+}
+
+/// Brings the front service in line: the FOS region backend and dictionaries (provision), or with
+/// `clock_only` just the clock health checks, which every reconcile (and so every deploy) checks.
 pub fn front(
     context: &Context<'_, impl Runtime>,
     job: &mut Job,
     service: &Service,
     token: &str,
     remove: bool,
+    clock_only: bool,
 ) -> Result<(), Error> {
     let sid = config(context.runtime, "front_service_id")?;
+    // Past activation: the dictionaries (cursor 6..=9) are provision-only.
+    let done = if clock_only { 10 } else { 6 };
     if remove {
         let (dictionary, key) = match job.front_cursor {
             0 => ("buckets_dictionary_id", service.service_id.clone()),
@@ -1359,7 +1417,7 @@ pub fn front(
                 },
             ];
             let mut changes = Vec::new();
-            for change in desired {
+            for change in desired.into_iter().filter(|_| !clock_only) {
                 let values = context.api(
                     "GET",
                     &format!("/service/{sid}/version/{active}/{}", change.resource),
@@ -1381,9 +1439,15 @@ pub fn front(
                     changes.push(change);
                 }
             }
+            changes.extend(clock_changes(context, &sid, active, token, service)?);
             job.front_source_version = Some(active);
             job.front_changes = changes;
-            job.front_cursor = if job.front_changes.is_empty() { 6 } else { 1 };
+            // A dry run only reports what it would change.
+            job.front_cursor = if job.front_changes.is_empty() || (clock_only && job.dry_run) {
+                done
+            } else {
+                1
+            };
         }
         1 => {
             let source = job
@@ -1444,17 +1508,17 @@ pub fn front(
             }
         }
         2 | 3 => {
-            let index = job.front_cursor - 2;
-            if let Some(change) = job.front_changes.get(index) {
-                upsert(
-                    context,
-                    &sid,
-                    job.front_draft_version
-                        .ok_or_else(|| Error::new(409, "front_draft_missing"))?,
-                    token,
-                    change,
-                    &change.body,
-                )?;
+            // Cursor 2 applies the first change, cursor 3 the rest (two calls each).
+            let draft = job
+                .front_draft_version
+                .ok_or_else(|| Error::new(409, "front_draft_missing"))?;
+            let range = if job.front_cursor == 2 {
+                0..1
+            } else {
+                1..job.front_changes.len()
+            };
+            for change in job.front_changes.get(range).unwrap_or_default() {
+                upsert(context, &sid, draft, token, change, &change.body)?;
             }
             job.front_cursor += 1;
         }
@@ -1491,9 +1555,9 @@ pub fn front(
                     None,
                 )?;
             }
-            job.front_cursor = 6;
+            job.front_cursor = done;
         }
-        6..=9 => {
+        6..=9 if !clock_only => {
             let (dictionary, key, value) = match job.front_cursor {
                 6 => (
                     "buckets_dictionary_id",
@@ -1547,4 +1611,19 @@ pub(super) fn activation_generation(
         return Err(Error::new(409, "service_changed_rerun"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod clock_tests {
+    use super::clock_interval_ms_for;
+
+    #[test]
+    fn the_clock_runs_at_a_quarter_of_the_shortest_log_period_between_1_and_30_s() {
+        assert_eq!(clock_interval_ms_for(60, None), 15_000);
+        assert_eq!(clock_interval_ms_for(300, None), 30_000);
+        assert_eq!(clock_interval_ms_for(2, None), 1_000);
+        assert_eq!(clock_interval_ms_for(60, Some(20)), 5_000);
+        // RUM ingest runs at least every 5 s, so a shorter RUM period still clocks at 1.25 s.
+        assert_eq!(clock_interval_ms_for(60, Some(1)), 1_250);
+    }
 }

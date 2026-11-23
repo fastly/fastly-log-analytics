@@ -1004,6 +1004,14 @@ fn api(state: &mut State, request: &ApiRequest<'_>) -> Result<(u16, Value), Stri
                     if resource=="dictionary" && body["id"].as_str().is_none() {
                         body["id"]=format!("dict-{sid}-{name}").into();
                     }
+                    // Like Fastly: a PUT to a health check updates only the fields it sends.
+                    if resource=="healthcheck" && method=="PUT" {
+                        if let (Some(existing),Some(sent))=(values.get(&name).and_then(Value::as_object),body.as_object()) {
+                            let mut merged=existing.clone();
+                            merged.extend(sent.clone());
+                            body=Value::Object(merged);
+                        }
+                    }
                     // Like Fastly: a condition keeps its priority (a numeric string, "0" when new) unless one is sent.
                     if resource=="condition" {
                         let priority=match &body["priority"] {

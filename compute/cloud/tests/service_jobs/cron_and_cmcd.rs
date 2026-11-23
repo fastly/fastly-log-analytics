@@ -999,6 +999,7 @@ fn cmcd_capture_never_adopts_an_existing_extraction_snippet_or_local_variable() 
     let job=platform.json("POST","/api/admin/services/fixtureService/reconcile",json!({
         "generation":current["generation"],"cmcd":{"enabled":true,"mode":"query_string","version":1}
     }))["job"].clone();
+    let job = platform.until(job, "discover");
     let failed = platform.json(
         "POST",
         &format!("/api/admin/jobs/{}/step", job["id"].as_str().unwrap()),

@@ -381,10 +381,29 @@ pub fn run_checks(
             "Reduce configured regional backends or check the remaining backends separately.",
         );
     }
-    // The IAD record sees every 1 s probe; off the shield only the durable last run is
-    // readable, which a configured install refreshes at least every maintenance interval.
+    // The IAD record sees every probe, sent at the front clock health check's interval (reconcile
+    // sets it from the log periods); off the shield only the durable last run is readable, which a
+    // configured install refreshes at least every maintenance interval.
+    let probe_interval_s = front_version
+        .and_then(|version| {
+            report.json(
+                api,
+                &format!(
+                    "/service/{}/version/{version}/healthcheck/flp_clock",
+                    env.front_service_id
+                ),
+            )
+        })
+        .and_then(|check| {
+            check["check_interval"]
+                .as_u64()
+                .or_else(|| check["check_interval"].as_str()?.parse().ok())
+        })
+        .map_or(env.clock_interval_s, |ms| {
+            env.clock_interval_s.max(ms.div_ceil(1000))
+        });
     let limit = if env.last_tick_cached {
-        env.clock_interval_s.saturating_mul(2).max(10)
+        probe_interval_s.saturating_mul(2).max(10)
     } else {
         DURABLE_CLOCK_LIMIT_S
     };
@@ -563,6 +582,24 @@ mod tests {
         let report = run_checks(&mut api, &mut Probe(403), &environment());
         assert_eq!(status(&report, "dictionary_credentials"), CheckStatus::Fail);
         assert!(!serde_json::to_string(&report).unwrap().contains("SECRET"));
+    }
+
+    #[test]
+    fn clock_allows_two_intervals_of_the_front_clock_health_check() {
+        let mut env = environment();
+        let mut api = api();
+        api.0.insert(
+            "/service/front/version/4/healthcheck/flp_clock".into(),
+            Ok((200, json!({"name": "flp_clock", "check_interval": 15000}))),
+        );
+        for (age, expected) in [(29, CheckStatus::Pass), (30, CheckStatus::Fail)] {
+            env.last_tick = Some(env.now - age);
+            assert_eq!(
+                status(&run_checks(&mut api, &mut Probe(403), &env), "clock"),
+                expected,
+                "{age}"
+            );
+        }
     }
 
     #[test]

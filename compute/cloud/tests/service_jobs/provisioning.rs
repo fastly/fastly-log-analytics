@@ -866,6 +866,89 @@ fn empty_reconcile_does_not_clone_and_ip_reset_precedes_capture() {
 }
 
 #[test]
+fn reconcile_sets_the_front_clock_health_checks_from_the_log_periods() {
+    let platform = Platform::new();
+    platform.drain(platform.provision()["job"].clone());
+    for (name, path) in [("flp_clock", "/_tick"), ("flp_flush", "/_flush")] {
+        platform.adapter.seed_resource(
+            "fixtureFront",
+            "healthcheck",
+            json!({"name": name, "path": path, "method": "GET", "check_interval": 1000}),
+        );
+    }
+    let service = platform.service();
+    let record = &service["service"];
+    let mut period = record["log_period"].as_u64().unwrap();
+    if record["rum"]["enabled"] == true {
+        period = period.min(record["rum"]["log_period"].as_u64().unwrap().max(5));
+    }
+    let want = (period * 1000 / 4).clamp(1000, 30_000);
+    assert_ne!(want, 1000, "fixture log period should need a slower clock");
+    let intervals = || {
+        platform
+            .adapter
+            .resources("fixtureFront", "healthcheck")
+            .iter()
+            .map(|h| {
+                (
+                    h["name"].as_str().unwrap().to_owned(),
+                    h["check_interval"].as_u64(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let dry = platform.json(
+        "POST",
+        "/api/admin/services/fixtureService/reconcile",
+        json!({"generation": service["generation"], "dry_run": true}),
+    );
+    let dry = platform.drain(dry["job"].clone());
+    assert_eq!(
+        dry["front_changes"],
+        json!([
+            {"resource": "healthcheck", "name": "flp_clock", "action": "upsert"},
+            {"resource": "healthcheck", "name": "flp_flush", "action": "upsert"},
+        ])
+    );
+    assert!(
+        intervals().iter().all(|(_, ms)| *ms == Some(1000)),
+        "dry run changed {:?}",
+        intervals()
+    );
+
+    let service = platform.service();
+    let job = platform.json(
+        "POST",
+        "/api/admin/services/fixtureService/reconcile",
+        json!({"generation": service["generation"]}),
+    );
+    platform.drain(job["job"].clone());
+    assert_eq!(
+        intervals(),
+        vec![
+            ("flp_clock".to_owned(), Some(want)),
+            ("flp_flush".to_owned(), Some(want))
+        ]
+    );
+
+    platform.adapter.clear_calls();
+    let service = platform.service();
+    let again = platform.json(
+        "POST",
+        "/api/admin/services/fixtureService/reconcile",
+        json!({"generation": service["generation"]}),
+    );
+    let again = platform.drain(again["job"].clone());
+    assert_eq!(again["front_changes"], json!([]));
+    assert!(!platform
+        .adapter
+        .calls()
+        .iter()
+        .any(|(_, p)| p.contains("fixtureFront") && p.ends_with("/clone")));
+}
+
+#[test]
 fn reconcile_step_confirms_a_stale_cached_service_record_instead_of_failing() {
     let platform = Platform::new();
     platform.drain(platform.provision()["job"].clone());
@@ -1245,6 +1328,7 @@ fn endpoint_rename_removes_old_owned_name_and_never_adopts_customer_endpoint() {
             "/api/admin/services/fixtureService/reconcile",
             json!({"generation":saved["generation"]}),
         );
+        let job = json!({"job": platform.until(job["job"].clone(), "discover")});
         let failed = platform.json(
             "POST",
             &format!(

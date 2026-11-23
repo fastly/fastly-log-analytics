@@ -1092,10 +1092,11 @@ fn new_job(
         service_id: service.service_id.clone(),
         kind: kind.into(),
         status: "pending".into(),
-        step: if kind == "provision" {
-            "bucket"
-        } else {
-            "discover"
+        // Every reconcile (deploys run one too) first brings the front clock in line.
+        step: match kind {
+            "provision" => "bucket",
+            "reconcile" => "front_clock",
+            _ => "discover",
         }
         .into(),
         completed_steps: vec![],
@@ -2025,11 +2026,16 @@ fn run_step(
             advance(job, "front");
             Ok(())
         }
-        "front" => reconcile::front(context, job, &service, &token, false),
+        "front" => reconcile::front(context, job, &service, &token, false, false),
+        // The front service belongs to the install, whose token may differ from the logged service's.
+        "front_clock" => {
+            let install = context.secret("fastly_token")?;
+            reconcile::front(context, job, &service, &install, false, true)
+        }
         "discover" | "clone" | "apply" | "validate" | "activate" | "sync_rum" => {
             reconcile::run(context, job, &service, &token)
         }
-        "remove_front" => reconcile::front(context, job, &service, &token, true),
+        "remove_front" => reconcile::front(context, job, &service, &token, true, false),
         "delete_objects" | "delete_page" | "delete_bucket" => {
             fos::delete(context, job, &service, &token)
         }
