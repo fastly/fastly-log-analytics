@@ -507,9 +507,13 @@ describe("measureEstimate", () => {
     expect(units.appVcpuMsPerDay).toBe(300_000);
     expect(units.workerRequestsPerFile).toBe(0.5);
     expect(units.vcpuMsPer1kLines + units.summaryVcpuMsPer1kLines).toBe(40_000);
-    expect(units.frontRequestsPerDay).toBe(DEFAULT_UNITS.frontRequestsPerDay);
-    // 1 GB Compute bandwidth over 7 days (front VCL healthcheck probe bandwidth is ignored).
-    expect(units.deliveryGbPerDay).toBeCloseTo(1 / 7);
+    // Fastly bills every front request, health probes included: 70,100 billed less one per file
+    // over 100 files leaves 70,000 fixed requests over 7 days.
+    expect(units.frontRequestsPerDay).toBe(10_000);
+    expect(units.frontRequestsPerFile).toBe(DEFAULT_UNITS.frontRequestsPerFile);
+    // 7 GB billed front bandwidth less the 1 MB of raw files the model delivers per file, plus
+    // 1 GB Compute bandwidth, over 7 days.
+    expect(units.deliveryGbPerDay).toBeCloseTo((7 - 0.001) / 7 + 1 / 7);
     expect(units.kvClassAPerDay).toBe(1_000);
     expect(units.kvClassBPerDay).toBe(10_000);
     expect(units.secrets).toBe(9);
@@ -535,7 +539,8 @@ describe("measureEstimate", () => {
     expect(units.appRequestsPerDay).toBe(350_000);
     expect(units.workerRequestsPerFile).toBe(0.5);
     expect(units.vcpuMsPer1kLines + units.summaryVcpuMsPer1kLines).toBe(40_000);
-    expect(units.deliveryGbPerDay).toBeCloseTo(1 / 2);
+    // Billed front bandwidth less the in-window files' raw bytes, plus Compute, over the 2 reported days.
+    expect(units.deliveryGbPerDay).toBeCloseTo((7 - 0.001) / 2 + 1 / 2);
   });
 
   it("prices worker summaries once and keeps bundle maintenance in the billed app total", () => {

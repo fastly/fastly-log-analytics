@@ -1361,7 +1361,7 @@ describe("incurredCost", () => {
     loggedComputeVcpuMs: 1e6,
   };
 
-  it("prices every Fastly product the install uses from Fastly's figures while ignoring front healthcheck stats", () => {
+  it("prices every Fastly product the install uses from Fastly's billed figures, front-service requests and bytes included", () => {
     const { total, lines } = incurredCost({
       ...base,
       cdnHits: 5_000,
@@ -1382,14 +1382,29 @@ describe("incurredCost", () => {
     const usd = Object.fromEntries(lines.map((l) => [l.id, l.usd]));
     expect(usd.storage).toBeCloseTo(0.02);
     expect(usd.ops).toBeCloseTo(0.0025 + 0.004);
-    // 2 GB logged CDN + 5 GB Compute egress = 7 GB; 10,000 Class B + 5,000 CDN hits = 15,000 front reqs.
-    expect(usd.delivery).toBeCloseTo(7 * 0.12 + 1.5 * 0.01);
+    // Fastly bills every front request and byte, health probes included: 10 GB front + 5 GB Compute egress
+    // = 15 GB, and 1e6 front requests (not the 15,000 logged file deliveries).
+    expect(usd.delivery).toBeCloseTo(15 * 0.12 + 100 * 0.01);
     // 10e6 ms across 2e6 requests is 5 ms/req, within the 20 ms/req contract free allowance ($0 excess CPU).
     expect(usd.compute).toBeCloseTo(2 * 0.5);
     expect(usd.kv).toBeCloseTo(6.5 + 2 * 0.55);
     expect(usd.secrets).toBeCloseTo(50);
     expect(usd.config).toBe(0);
-    expect(total).toBeCloseTo(0.0265 + 0.855 + 1.0 + 7.6 + 50);
+    expect(total).toBeCloseTo(0.0265 + 2.8 + 1.0 + 7.6 + 50);
+  });
+
+  it("prices logged file deliveries when Fastly read no front service", () => {
+    const { lines } = incurredCost({
+      ...base,
+      cdnHits: 5_000,
+      billing: {
+        requests: 0, executionTimeMs: 0, billedTimeMs: 0, coveredFrom: null, coveredTo: null,
+        computeBandwidthBytes: 5e9, cdnRequests: null, kvClassA: 0, kvClassB: 0, secrets: null,
+      },
+    });
+    const delivery = lines.find((l) => l.id === "delivery")!;
+    // 2 GB logged CDN + 5 GB Compute egress; 10,000 Class B + 5,000 CDN hits.
+    expect(delivery.usd).toBeCloseTo(7 * 0.12 + 1.5 * 0.01);
   });
 
   it("falls back to logged Compute and egress and leaves KV and secrets unpriced without Fastly figures", () => {

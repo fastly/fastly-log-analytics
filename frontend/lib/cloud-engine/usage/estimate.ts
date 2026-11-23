@@ -1002,6 +1002,17 @@ export function measureEstimate(m: EstimateMeasurements): EstimatePrefill {
       setUnit("frontRequestsPerFile", fileFrontReqs / F);
     }
   }
+  // Fastly bills every front-service request and byte, its own health probes included. The
+  // logged file reads above only set the per-file share; the billed rest is a fixed daily part.
+  if (b && b.cdnRequests !== null) {
+    split(b.cdnRequests, "frontRequestsPerDay", "frontRequestsPerFile");
+    const rawGb = (billedLines * inputs.gzBytesPerLine) / 1e9;
+    setUnit(
+      "deliveryGbPerDay",
+      Math.max(0, (b.cdnBandwidthBytes ?? 0) / 1e9 - rawGb) / W +
+        b.computeBandwidthBytes / 1e9 / W,
+    );
+  }
   if (m.fixedStoredBytes !== null) {
     setUnit("fixedStoredGb", m.fixedStoredBytes / 1e9);
   }

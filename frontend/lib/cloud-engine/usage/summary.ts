@@ -2185,10 +2185,16 @@ export function incurredCost(input: IncurredInput): {
     },
   ];
   if (billing) {
-    // Front VCL Platform Metrics totals are dominated by 1s self-healthcheck probes (`/_tick`, `/_flush`).
-    // Price actual logged `/fos/...` CDN file delivery plus Compute egress on app and worker.
-    const bytes = input.loggedCdnBytes + billing.computeBandwidthBytes;
-    const requests = input.classB + (input.cdnHits ?? 0);
+    // Fastly bills every request and byte on the front VCL service, its own health probes
+    // (`/_tick`, `/_flush`) included, so price its Platform Metrics totals plus Compute egress on
+    // app and worker. Logged `/fos/...` file deliveries stand in only when the front wasn't read.
+    const frontRead = billing.cdnRequests !== null;
+    const bytes =
+      (frontRead ? (billing.cdnBandwidthBytes ?? 0) : input.loggedCdnBytes) +
+      billing.computeBandwidthBytes;
+    const requests = frontRead
+      ? (billing.cdnRequests ?? 0)
+      : input.classB + (input.cdnHits ?? 0);
     const roleEntries = Object.entries(billing.byRole ?? {}).filter(
       ([role, v]) => role !== "front" && (v.requests > 0 || v.vcpuMs > 0),
     );
@@ -2208,8 +2214,8 @@ export function incurredCost(input: IncurredInput): {
         usd:
           gb(bytes) * r.cdn_egress_rate_per_gb +
           (requests / 10000) * r.cdn_request_rate_per_10k,
-        detail: `${gb(bytes).toFixed(2)} GB · ${fmt(requests)} front reqs`,
-        source: "fastly",
+        detail: `${gb(bytes).toFixed(2)} GB · ${fmt(requests)} front reqs${frontRead ? "" : " (logged)"}`,
+        source: frontRead ? "fastly" : "logged",
       },
       {
         id: "compute",
