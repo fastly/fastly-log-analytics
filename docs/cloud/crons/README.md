@@ -1,6 +1,6 @@
 # Crons
 
-`flp`'s tick-driven background jobs. Two health-check probes reach Compute about once a second each. On `/_tick` a dispatcher decides from a Core Cache schedule whether ingest, raw delete or a maintenance stage on `flp-worker` is due; on `/_flush` it decides whether the operational-log flush is due. Idle probes do nothing and write nothing.
+`flp`'s tick-driven background jobs. Two health-check probes run from every Fastly POP at the clock interval: half the shortest log period, 1–30 s, so 30 s for every Cloud install (log periods are at least 60 s). The IAD shield lets about one probe a second through to Compute, and a turn that stops with work left starts the next one itself. On `/_tick` a dispatcher decides from a Core Cache schedule whether ingest, raw delete or a maintenance stage on `flp-worker` is due; on `/_flush` it decides whether the operational-log flush is due. Idle probes do nothing and write nothing.
 
 This directory documents the code under `compute/cloud/` at `540813619`, not the plans. Each file cites `file:line`; bare paths such as `admin/mod.rs` are relative to `compute/cloud/src/`.
 
@@ -15,7 +15,7 @@ Compute only runs when a request arrives. The front VCL service supplies that re
 ## How it works
 
 The clock and the tick orchestration are documented in [clock.md](clock.md). In summary:
-- A VCL health check probes `/_tick` every second; VCL caches the answer at the IAD shield for 1 s, or for the sleep TTL Compute returns while nothing is due (up to 60 s), so at most one probe a second reaches Compute. Compute answers 200 at once, then calls `crate::admin::record_tick` (`compute/cloud/src/shell.rs:633-642`).
+- A VCL health check probes `/_tick` from every POP at the clock interval (30 s on Cloud), which every reconcile sets on both clock checks (`clock_interval_ms`, `compute/cloud/src/admin/reconcile.rs`); VCL caches the answer at the IAD shield for 1 s, or for the sleep TTL Compute returns while nothing is due (up to 60 s), so at most about one probe a second reaches Compute. Compute answers 200 at once, then calls `crate::admin::record_tick` (`compute/cloud/src/shell.rs:633-642`). A turn that leaves work starts the next one by calling its own `/_tick` with the CDN key, which the front passes past its cache (up to 20 in a row; [clock.md](clock.md)).
 - `record_tick` claims the Core Cache schedule record `flp-sched-v1` with one atomic replace (`compute/cloud/src/admin/schedule.rs`). Off-shield, idle and busy ticks stop there with no backend call. A due tick takes a 55 s lease and runs request_ingest (whose dispatch batch can carry one maintenance stage request) → raw_delete → rows → `cron:state` save → lease release.
 - Ingest is due once per log period (`max(5, log_period)` s; settings hold `log_period` to at least 60 s) as soon as the period closes, with no grace (`INGEST_GRACE_S` is 0), and on every tick while a backlog remains. RUM ingest waits `max(rum log_period, 60) + 120` s past its period's close. Maintenance is due every 120 s (30 s while `summary_bundle` has work), and request compaction is its own job every 30 s (10 s while behind). The Config Store keys `grace_s` and `run_interval_s` are written at provisioning but ignored. Durable per-job state is in KV `cron:state.jobs`; the cache record mirrors it and is rebuilt after an eviction.
 - The maintenance stage runs on `flp-worker` (`/_internal/stage`): a pending Delete Data job first, then the first of retention_sweep → log_compact → delete_history → storage_reconcile → summary_bundle → request_compact (always skipped; it has its own job) → delete_data, from `cron:state.maint_next`, that has work ([stage-worker.md](stage-worker.md)).
@@ -27,7 +27,7 @@ The clock and the tick orchestration are documented in [clock.md](clock.md). In 
 
 | Cron | `cron_kind` | Runs when | File |
 |---|---|---|---|
-| The clock (`/_tick`) | none (idle ticks counted on the next `cron_runs` row) | Every second at the IAD shield; decides what is due | [clock.md](clock.md) |
+| The clock (`/_tick`) | none (idle ticks counted on the next `cron_runs` row) | Probes every 30 s from each POP, about once a second at the IAD shield, and at once after a turn that left work; decides what is due | [clock.md](clock.md) |
 | Request ingest | `request_ingest` | Once per log period after its grace, and every tick while a backlog remains | [request-ingest.md](request-ingest.md) |
 | Ingest worker (`/_internal/ingest`) | none (reported by request_ingest) | Per ingest shard, dispatched by the coordinator to `flp-worker` | [ingest-worker.md](ingest-worker.md) |
 | Raw delete | `raw_delete` | After a successful ingest, and every tick while deletes remain queued | [raw-delete.md](raw-delete.md) |
@@ -43,7 +43,7 @@ Provisioning, reconcile and teardown jobs (`job:<id>`) are not tick stages. They
 
 ## Roles and permissions
 
-`/_tick` and `/_flush` carry only the front service key; they are limited to GET on the exact path, cached for 1 s and run only on the shield. `/_internal/stage` needs the worker peer key. Every manual control is admin-only. Details are in [clock.md](clock.md) and each cron file.
+`/_tick` and `/_flush` carry only the front service key; they are limited to GET on the exact path, cached for 1 s (unless a continuation carries the CDN key) and run only on the shield. `/_internal/stage` needs the worker peer key. Every manual control is admin-only. Details are in [clock.md](clock.md) and each cron file.
 
 ## Manual triggers and admin controls
 

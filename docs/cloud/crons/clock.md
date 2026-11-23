@@ -1,6 +1,6 @@
 # clock (`/_tick`)
 
-The clock behind every background job. A health-check probe reaches Compute at most once a second at the IAD shield (less often while nothing is due, because the shield caches the answer for the sleep TTL Compute returns, up to 60 s), and a dispatcher decides, from a Core Cache schedule record, whether any job is due. Most ticks are idle: they make no backend call and write nothing. A tick that is due runs ingest and raw delete, and dispatches one maintenance stage to `flp-worker`. A second probe, `/_flush`, runs the operational-log flush in its own execution ([log-flush.md](log-flush.md)).
+The clock behind every background job. Every Fastly POP sends a health-check probe at the clock interval (half the shortest log period, 1–30 s; 30 s for every saved Cloud service, whose log periods are at least 60 s), and the IAD shield lets at most about one a second reach Compute (less often while nothing is due, because the shield caches the answer for the sleep TTL Compute returns, up to 60 s). A turn that stops with work left starts the next one itself instead of waiting for a probe. A dispatcher decides, from a Core Cache schedule record, whether any job is due. Most ticks are idle: they make no backend call and write nothing. A tick that is due runs ingest and raw delete, and dispatches one maintenance stage to `flp-worker`. A second probe, `/_flush`, runs the operational-log flush in its own execution ([log-flush.md](log-flush.md)).
 
 ## Purpose
 
@@ -14,19 +14,21 @@ It records only the jobs that ran. It is not a page. `/admin` and `/logs` displa
 
 ## Why it exists
 
-Compute runs only when a request arrives, and there is no server, scheduler process or memory that survives between requests. The front VCL service generates that request itself, so ingestion and housekeeping need no outside infrastructure. Health checks are not billed; the Compute executions they cause are.
+Compute runs only when a request arrives, and there is no server, scheduler process or memory that survives between requests. The front VCL service generates that request itself, so ingestion and housekeeping need no outside infrastructure. Every probe is a billed front request (2 checks × each probing POP × 86,400 ÷ the interval: about 9.1M a day at 1 s, about 305K at 30 s), and so is every Compute execution it causes.
 
 ## How it works
 
 **Trigger**
-1. The health check `flp_clock` sends `GET /_tick` every 1,000 ms and expects 200 (`compute/cloud/infra/provision.py:232-245`, `345-346`).
+1. The health check `flp_clock` sends `GET /_tick` at `check_interval` and expects 200 (`clock_healthcheck` in `compute/cloud/infra/provision.py`). Provisioning creates it at 1,000 ms; the first reconcile job, and every one after (a log settings save, or a deploy's reconcile), sets `check_interval` on both clock checks to `clock_interval_ms` (`compute/cloud/src/admin/reconcile.rs`): half the shortest of the request and RUM log periods (RUM counted at no less than 5 s), between 1 and 30 s. The reconcile's `front_clock` step clones, updates, validates and activates the front service only when the interval differs, using the install's own token; a dry run reports it as `front_changes`.
    - It is attached to a dummy backend that no request selects; its condition `flp_clock_never` is `"false"` (`provision.py:338-341`, `933`).
 2. `main.vcl:171-179` allows only GET (anything else gets 405), drops the query string, marks the request `x-flp-tick` and removes cookies.
 3. `main.vcl:299-323` strips cookies and security headers and caches the response with no grace or stale serving: for 1 s, or, when a 200 carries `x-flp-tick-ttl`, for that sleep TTL minus the response's `Age`.
-4. `flp_tick` is shielded at `iad-va-us` (`provision.py:219-220`, `334-336`), so at most about one probe a second reaches Compute.
+4. `flp_tick` is shielded at `iad-va-us` (`provision.py:219-220`, `334-336`). The POPs probe out of step, so even at a 30 s interval probes reach the shield several times a second, and its 1 s cache lets at most about one a second reach Compute.
+   - **Continuation:** a request that carries `x-flp-continue` and the CDN key in `x-fastly-key` (checked with `digest.secure_is_equal`) is passed past the cache on every hop (`x-flp-tick-pass`, `main.vcl`). Only `flp` holds that key; a client-sent `x-flp-tick-pass` is stripped.
 5. The `/_flush` probe (`flp_flush` on backend `flp_flush_clock`) takes the same VCL path with its own key; see [log-flush.md](log-flush.md).
 6. **Early answer.** `main.rs` is an undecorated `main` (`Request::from_client`/`send_to_client`). For a front-authorized `GET /_tick` or `/_flush` on `flp`, `Shell::clock_ack` (`shell.rs:422-429`) returns 200 `public, max-age=<ttl>` with `x-flp-tick-ttl: <ttl>`, which is sent before any work runs. The TTL is `clock_ttl_s` (`admin/mod.rs:1571-1589`, via `schedule::next_ttl_s`, `schedule.rs:277-297`): 1 s off the shield, with no cached record, while a lease is held or while work is wanted; otherwise the seconds until the next wake, capped at `REFRESH_S` (60 s). The execution then runs the handler, and logs its status as `work_status` on the `request.end` line. A health check therefore never waits on a long job.
 7. `shell.rs:633-642` accepts only the exact path `/_tick` (anything else gets 403) and calls `record_tick(runtime, "clock", "clock")`.
+8. **Continue.** After the turn, `Shell::continue_clock` checks `schedule::clock_continue_wanted`: on the shield, the record still wants a run and no lease is held. Then it sends `GET /_tick` through `flp_front` with the CDN key and `x-flp-continue: <depth>` (`FastlyRuntime::continue_clock`, 10 s timeout, logged as `clock.continue`), so the next turn starts at once instead of at the next probe. Depth stops at `MAX_CLOCK_CONTINUATIONS` (20); a failed continuation leaves the next probe to start the turn. `/_flush` continues the same way.
 
 **Dispatch** (`record_tick`, `compute/cloud/src/admin/mod.rs:2083-2222`; `schedule.rs`)
 1. Refuse to run on the worker service, or on anything that is not `flp`: `worker_tick_forbidden`, which becomes 403.
@@ -69,37 +71,37 @@ Compute runs only when a request arrives, and there is no server, scheduler proc
 
 ## Roles and permissions
 
-- `/_tick` and `/_flush` need the front service's key (`front_authorized`), like every request. They are bounded by VCL (GET only, cached for at least 1 s), by the exact-path check, by the shield check and by the service-id check.
+- `/_tick` and `/_flush` need the front service's key (`front_authorized`), like every request. They are bounded by VCL (GET only, cached for at least 1 s unless a continuation carries the CDN key), by the exact-path check, by the shield check and by the service-id check.
 - `GET /api/cron-runs`, `POST /api/cron-runs/trigger` and `GET /api/sync-status` are admin-only (`authorize_admin`).
 
 ## Manual triggers and admin controls
 
 - `POST /api/cron-runs/trigger` (empty body) runs `record_tick` with `trigger = "manual"` (`shell.rs:979-1000`). It forces the claim, treats ingest, raw delete and (on the shield) maintenance as due, and writes the FOS manifest. It returns 409 `cron_busy` while a scheduled run holds the lease, and 409 when no service is installed. It does not flush; use `POST /api/admin/logs/flush` for that.
   - The web callers are in the Cloud adapter (`frontend/lib/cloud-engine/adapter.ts:944-955`, `2046-2050`): it maps a `POST /api/admin/ingest-logs` with no time range, and `/api/provision/ingest`, onto this trigger.
-- `GET /api/cron-runs` returns `cron:state.runs` plus `last_tick_at`, `next_tick_at` and `clock_interval_s` (1). `last_tick_at` is the schedule record's `last_seen` on the shield, else the last run in KV.
+- `GET /api/cron-runs` returns `cron:state.runs` plus `last_tick_at`, `next_tick_at`, `clock_interval_s` (the probe interval in whole seconds, rounded up) and `clock` (`probe_interval_s`, `log_period_s`, `rum_log_period_s`), which `/logs` shows as "Each POP probes every 30 s (½ of the 60 s request log period)". `last_tick_at` is the schedule record's `last_seen` on the shield, else the last run in KV.
 - The per-stage endpoints (flush, sweep, delete-history, clear-cache, reconcile) are documented in each cron file.
 
 ## Telemetry
 
 - **Idle ticks write nothing.** They are counted in the schedule record and handed to the next run, which writes them as `idle_ticks` and `idle_vcpu_ms` on its first `cron_runs` row. `/usage` adds them to Compute requests and vCPU, together with one request per distinct clock `run_id` and each row's `worker_executions`. If the record is evicted, the counts since the last run are lost; the run rows are not.
 - **`cron_runs`:** one row per stage that ran (`StageRow::json`), including vCPU, calls used, `cache_lookups` (Core Cache operations), `more_pending` and the idle counters. Durable, held in the KV `logq_{sid}_{bucket}` outbox batch keys. The stage worker writes the maintenance stage's row itself; `/_flush` writes the flush row.
-- **`cron_ticks`** is retired: nothing writes it since the 1 s dispatcher. Older rows stay readable on `/logs` until retention removes them.
+- **`cron_ticks`** is retired: nothing writes it since the dispatcher replaced it. Older rows stay readable on `/logs` until retention removes them.
 - **`cron:state.runs`:** the last 50 runs in KV (`MAX_HISTORY_ENTRIES`).
 - **Other:** `cron.tick` and `cron.schedule_unavailable` admin events; manual ticks write the FOS manifest.
 
 ## Constraints and gotchas
 
 - **No memory between ticks:** every resume point is a KV record. The Core Cache record is an accelerator, not a source of truth.
-- **Executions:** each probe that reaches Compute is one billed execution, idle or not. At one probe a second, `/_tick` would be about 86,400 a day, 2.6 M a month, and `/_flush` doubles that; the sleep TTL cuts this while nothing is due. See the cost note in [recommendation.md](../recommendation.md#1-s-clock-executions).
+- **Executions:** each probe that reaches Compute is one billed execution, idle or not, and each continuation adds one front request and one execution while a backlog lasts. At one execution a second, `/_tick` would be about 86,400 a day, 2.6 M a month, and `/_flush` doubles that; the sleep TTL cuts this while nothing is due. The probes themselves are billed front requests whatever reaches Compute; the Cost Estimator models them from the log period (`clockIntervalS`, [cost-methodology.md](../cost-methodology.md)). See the cost note in [recommendation.md](../recommendation.md#1-s-clock-executions).
 - **Wall time:** the limits assume the 60 s trial limit and a documented 50 ms CPU per execution. Every guard measures from the start of the execution. Nothing enforces 50 ms CPU except the compaction stop.
 - **KV writes:** repeated writes to one key within an execution are spaced at least 1.1 s apart (`transport.rs:49-52`).
-- **Cadence:** the probe interval is `check_interval` 1000 ms in provisioning, with `clock_interval_s = 1` (`provision.py:353`) and `CLOCK_INTERVAL_S` (`admin/mod.rs:1545`). The ingest cadence comes from `log_period` (at least 60 s); the maintenance cadence is `MAINT_INTERVAL_S`. The Config Store keys `grace_s` and `run_interval_s` are legacy: provisioning still writes them (180 and 120) and the setup check still requires them, but nothing reads them, so changing them has no effect. Log rows and the outbox still use 120 s buckets (`ROW_BUCKET_S`).
+- **Cadence:** the probe interval is the clock checks' `check_interval`: 1000 ms at provisioning, then `clock_interval_ms` from every reconcile. `CLOCK_INTERVAL_S` (1) remains the shield cache's minimum TTL and the fallback without an installed service. The ingest cadence comes from `log_period` (at least 60 s); the maintenance cadence is `MAINT_INTERVAL_S`. The Config Store keys `grace_s` and `run_interval_s` are legacy: provisioning still writes them (180 and 120) and the setup check still requires them, but nothing reads them, so changing them has no effect. Log rows and the outbox still use 120 s buckets (`ROW_BUCKET_S`).
 - **Off-shield probes** return `off_shield`. A POP that cannot reach the shield runs nothing, by design.
 - **Stage order:** ingest (with the maintenance stage in its dispatch batch) → raw_delete → rows → state save → release. `TICK_STAGES` is `["request_ingest", "rum_ingest", "raw_delete"]` (`admin/mod.rs:1687`).
 
 ## Failure modes and recovery
 
-- **The clock stops:** nothing runs. The "Ingestion clock" system check (`checks.rs:384-400`) reads the schedule record on the shield and fails when no tick arrived within two probe intervals (at least 10 s). It uses `schedule::check_seen`, not the raw `last_seen`: while no lease is held, the clock counts as seen up to the record's next scheduled wake (capped at `last_seen + REFRESH_S`), because that is exactly how long the shield serves the cached sleep answer without a probe reaching Compute. Once that wake passes with no probe, freshness stays pinned to it, so the check fails about 10 s after a missed wake. While a lease is held, Compute answers with a 1 s TTL, so probes keep refreshing `last_seen`. Off the shield it falls back to `cron:state.last_tick` with a 300 s limit (`DURABLE_CLOCK_LIMIT_S`) and warns. Use the manual trigger until the clock is fixed.
+- **The clock stops:** nothing runs. The "Ingestion clock" system check (`checks.rs:384-400`) reads the schedule record on the shield and fails when no tick arrived within two probe intervals (at least 10 s), reading the interval from the front's `flp_clock` health check. It uses `schedule::check_seen`, not the raw `last_seen`: while no lease is held, the clock counts as seen up to the record's next scheduled wake (capped at `last_seen + REFRESH_S`), because that is exactly how long the shield serves the cached sleep answer without a probe reaching Compute. Once that wake passes with no probe, freshness stays pinned to it, so the check fails about 10 s after a missed wake. While a lease is held, Compute answers with a 1 s TTL, so probes keep refreshing `last_seen`. Off the shield it falls back to `cron:state.last_tick` with a 300 s limit (`DURABLE_CLOCK_LIMIT_S`) and warns. Use the manual trigger until the clock is fixed.
 - **Core Cache evicted or unavailable:** the next tick finds no record, takes the lease and rebuilds the mirror from KV; nothing reruns, because the durable job state already records the last runs. If the claim errors, every tick reads KV until the cache recovers.
 - **A holder dies mid-run:** its lease expires after 55 s and the next tick takes over. The jobs' own fences stop duplicate work.
 - **No service or control plane:** the tick stores an unconfigured mirror and does nothing until the next refresh.
@@ -109,10 +111,11 @@ Compute runs only when a request arrives, and there is no server, scheduler proc
 
 1. "Ingestion clock" passes, and `last_tick_at` on `/api/cron-runs` is seconds old.
 2. `request_ingest` rows appear about once per log period, each carrying `idle_ticks` close to the seconds since the previous run.
-3. `more_pending` on `cron_runs` clears within a few ticks after load stops.
-4. No `logq_depth_high` warning.
-5. The `ingest:watermark` minute advances and the raw backlog drains.
-6. A manual trigger writes a manifest under `meta/cron-runs/` and an audit row.
+3. `more_pending` on `cron_runs` clears within a few ticks after load stops, with `clock.continue` log events between the turns of a backlog.
+4. Both clock health checks on the front service show `check_interval` equal to `clock_interval_ms` for the current log periods.
+5. No `logq_depth_high` warning.
+6. The `ingest:watermark` minute advances and the raw backlog drains.
+7. A manual trigger writes a manifest under `meta/cron-runs/` and an audit row.
 
 ## Tests
 
@@ -126,7 +129,11 @@ Native tests only; none is live evidence.
   - `idle_ticks_and_flush_probes_run_an_overdue_flush_sweep_and_reconcile_within_a_bounded_window` (3566)
   - `simulation::*` (from 8564): two simulated days of 1 s `/_tick` and `/_flush` probes at 52 raw files per 60 s log period, with per-execution call and cache-op budgets, exact-row checks and ingest latency
 - `compute/cloud/tests/service_jobs.rs`: `shield_ticks_manual_trigger_fos_manifest_and_audit_logs_end_to_end`
-- `compute/cloud/src/shell.rs`: `worker_compute_service_rejects_tick_while_coordinator_accepts_it` (early ack)
+- `compute/cloud/src/shell.rs`: `worker_compute_service_rejects_tick_while_coordinator_accepts_it` (early ack), `a_finished_turn_with_work_left_on_the_shield_starts_the_next_turn`, `a_clock_turn_continues_one_level_deeper_up_to_the_cap`
+- `compute/cloud/src/admin/schedule.rs`: `a_turn_continues_only_while_the_clock_record_wants_a_run_and_no_lease_is_held`
+- `compute/cloud/src/admin/reconcile.rs`: `the_clock_runs_at_half_the_shortest_log_period_between_1_and_30_s`; `compute/cloud/tests/service_jobs/provisioning.rs`: `reconcile_sets_the_front_clock_health_checks_from_the_log_periods`
+- `compute/cloud/src/checks.rs`: `clock_allows_two_intervals_of_the_front_clock_health_check`
+- `compute/cloud/vcl/front/tests/front.test.vcl`: `clock_continue_with_the_cdn_key_skips_the_cache`, `clock_continue_without_the_cdn_key_stays_cached`, `clock_ignores_a_client_sent_pass_marker`
 - `compute/cloud/tests/route_auth.rs`: `tick_requires_exact_path`
 - `compute/cloud/vcl/front/tests/front.test.vcl`: the 1 s TTL with zero grace, Compute's sleep TTL and header stripping, the shield `Age` subtraction, the 1 s floor and cached failures (279-364)
 

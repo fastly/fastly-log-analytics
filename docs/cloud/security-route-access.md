@@ -19,7 +19,7 @@ HMAC-checked and the role is reloaded from the store on every request.
 | No-PII denied | `/api/file` | 401 | 403 | yes | yes |
 | Admin | `/api/sync-status`, `/api/cron-runs*`, `/api/admin/*` (including `/api/admin/operational-logging`, `/api/admin/logs/*`, `/api/admin/usage/*`), `/api/logs/:kind/live`, `/api/provision/*` | 401 | 403 | 403 | yes |
 | Front key | `/fos/<service>/<key>` | needs `x-fastly-key` | n/a | n/a | n/a |
-| Tick | `/_tick`, `/_flush` (exact paths only; `/_tick/` and `/_flush/` return 403) | VCL-bucketed | n/a | n/a | n/a |
+| Tick | `/_tick`, `/_flush` (exact paths only; `/_tick/` and `/_flush/` return 403) | VCL-bucketed; a continuation with the CDN key (`x-flp-continue` + `x-fastly-key`, which only `flp` holds) passes the cache | n/a | n/a | n/a |
 
 `/api/admin/audit-logs` and `/api/sync-status` `audit_logs` return Service History only (service and infrastructure changes). User and admin actions are read from `/api/logs/admin_audit/live` and the archived `admin_audit` dataset.
 
