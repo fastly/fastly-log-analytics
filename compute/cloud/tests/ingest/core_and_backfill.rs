@@ -2555,6 +2555,22 @@ fn stages_run_in_budget_order_and_admit_only_when_everything_fits() {
 }
 
 #[test]
+fn maintenance_takes_a_storage_snapshot_without_an_admin_request() {
+    let fake = Fake::new(BASE + 40 * DAY);
+    tick_runtime(&fake);
+    for _ in 0..12 {
+        fake.now.set(fake.now.get() + 120);
+        run_tick(&fake);
+    }
+    let kinds = cron_runs(&fake)
+        .iter()
+        .map(|r| r["cron_kind"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert!(kinds.contains(&"storage_reconcile".to_owned()), "{kinds:?}");
+    assert!(fake.kv.borrow()["storage:reconcile"].1["completed_at"].is_u64());
+}
+
+#[test]
 fn idle_ticks_and_flush_probes_run_an_overdue_flush_sweep_and_reconcile_within_a_bounded_window() {
     let fake = Fake::new(BASE + 40 * DAY);
     tick_runtime(&fake);

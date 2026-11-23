@@ -194,7 +194,9 @@ fn patch_settings(runtime: &impl Runtime, request: &Request) -> Outcome {
 
 fn status(runtime: &impl Runtime) -> Outcome {
     let get = |key: &str| runtime.admin_get(key).ok().flatten().map(|r| r.value);
+    // Only a running reconcile; the completed record stays behind for the hourly schedule.
     let reconcile = get("storage:reconcile")
+        .filter(|state| state["completed_at"].is_null())
         .map(|state| json!({"requested_at": state["requested_at"], "actor": state["actor"]}));
     done(
         json!({
@@ -1616,6 +1618,14 @@ fn reconcile_stage<R: Runtime>(store: &Store<'_, R>, buffer: &LogBuffer) -> Opti
     let span = VcpuSpan::start(runtime);
     let before = runtime.admin_remaining_calls();
     let mut row = StageRow::new("storage_reconcile", runtime.now());
+    // Usage needs a recent complete inventory snapshot for live storage; one is taken on its own
+    // every `RECONCILE_INTERVAL_S` (the retention sweep's 6 hours).
+    if let Err(error) = retention::request_scheduled_reconcile(runtime) {
+        row.outcome = "error";
+        row.error = Some(error);
+        finish_row(runtime, &mut row, before, began, &span);
+        return Some(row);
+    }
     match retention::storage_reconcile_step(store, TAIL) {
         Ok(Some(report)) => {
             for inv_row in report.inventory_rows {

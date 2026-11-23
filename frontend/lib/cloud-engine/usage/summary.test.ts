@@ -203,39 +203,59 @@ describe("fetchCloudStorageInventory", () => {
     ]);
   });
 
-  it("marks inventory incomplete when the newest snapshot lacks a terminal marker", async () => {
+  const snapshotRows = (completedAt: string, inProgressAt?: string) => [
+    {
+      snapshot_id: "snap-1",
+      dataset: "pq_request",
+      key: "processed/request/a.parquet",
+      size: 1024,
+      last_modified: "2026-11-21T06:00:00.000Z",
+      complete: false,
+      timestamp: Date.parse(completedAt) - 5_000,
+    },
+    {
+      snapshot_id: "snap-1",
+      dataset: null,
+      key: null,
+      size: 0,
+      last_modified: null,
+      complete: true,
+      timestamp: Date.parse(completedAt),
+    },
+    ...(inProgressAt
+      ? [
+          {
+            snapshot_id: "snap-2-in-progress",
+            dataset: "pq_request",
+            key: "processed/request/b.parquet",
+            size: 4096,
+            last_modified: "2026-11-21T06:00:00.000Z",
+            complete: false,
+            timestamp: Date.parse(inProgressAt),
+          },
+        ]
+      : []),
+  ];
+
+  it("keeps the last complete snapshot authoritative while the next one is still listing", async () => {
     const now = Date.parse("2026-11-22T12:00:00.000Z");
-    const modified = "2026-11-21T06:00:00.000Z";
     const read = vi.fn(async () => ({
-      rows: [
-        {
-          snapshot_id: "snap-1",
-          dataset: "pq_request",
-          key: "processed/request/a.parquet",
-          size: 1024,
-          last_modified: modified,
-          complete: false,
-          timestamp: Date.parse("2026-11-21T07:00:00.000Z"),
-        },
-        {
-          snapshot_id: "snap-1",
-          dataset: null,
-          key: null,
-          size: 0,
-          last_modified: null,
-          complete: true,
-          timestamp: Date.parse("2026-11-21T07:00:05.000Z"),
-        },
-        {
-          snapshot_id: "snap-2-in-progress",
-          dataset: "pq_request",
-          key: "processed/request/b.parquet",
-          size: 4096,
-          last_modified: modified,
-          complete: false,
-          timestamp: Date.parse("2026-11-22T11:59:00.000Z"),
-        },
-      ],
+      rows: snapshotRows("2026-11-22T11:10:00.000Z", "2026-11-22T11:59:00.000Z"),
+      liveTruncated: false,
+    }));
+
+    const result = await fetchCloudStorageInventory({ now, identity, read });
+
+    expect(result.snapshotId).toBe("snap-1");
+    expect(result.complete).toBe(true);
+    expect(result.provenance).toBe("cloud:inventory");
+    expect(result.intervals.map((i) => i.id)).toEqual(["pq_request:processed/request/a.parquet"]);
+  });
+
+  it("flags a complete snapshot older than two 6-hour snapshot intervals as stale", async () => {
+    const now = Date.parse("2026-11-22T12:00:00.000Z");
+    const read = vi.fn(async () => ({
+      rows: snapshotRows("2026-11-21T07:00:05.000Z"),
       liveTruncated: false,
     }));
 
@@ -243,9 +263,8 @@ describe("fetchCloudStorageInventory", () => {
 
     expect(result.snapshotId).toBe("snap-1");
     expect(result.complete).toBe(false);
-    expect(result.provenance).toBe("cloud:inventory_incomplete");
+    expect(result.provenance).toBe("cloud:inventory_stale");
     expect(result.intervals).toHaveLength(1);
-    expect(result.intervals[0].id).toBe("pq_request:processed/request/a.parquet");
   });
 
   it("returns empty incomplete result when no snapshot has a terminal marker", async () => {
@@ -279,6 +298,26 @@ describe("fetchCloudStorageInventory", () => {
 
 describe("fetchIngestDeletedIntervals", () => {
   const identity = { user: "admin", role: "admin" };
+
+  it("collects the Parquet files each converted raw file produced, once per key", async () => {
+    const outputs = (keys: [string, number][]) =>
+      JSON.stringify(keys.map(([key, bytes]) => ({ key, rows: 1, bytes })));
+    const read = vi.fn(async () => ({
+      rows: [
+        { timestamp: 10, raw_key: "a", raw_size: 1, state_version: 1, status: "converted",
+          output_keys_json: outputs([["processed/request/w1.parquet", 300]]) },
+        { timestamp: 20, raw_key: "b", raw_size: 1, state_version: 1, status: "converted",
+          output_keys_json: outputs([["processed/request/w1.parquet", 300], ["processed/rum/w2.parquet", 40]]) },
+        { timestamp: 30, raw_key: "c", raw_size: 1, state_version: 1, status: "failed", output_keys_json: "[]" },
+      ],
+      liveTruncated: false,
+    }));
+    const result = await fetchIngestDeletedIntervals({ from: 0, to: 100 }, identity, read);
+    expect(result.outputs).toEqual([
+      { key: "processed/request/w1.parquet", bytes: 300, createdAt: 10 },
+      { key: "processed/rum/w2.parquet", bytes: 40, createdAt: 20 },
+    ]);
+  });
 
   it("builds an exact billed interval from the first and deleted ingest_file states", async () => {
     const read = vi.fn(async () => ({

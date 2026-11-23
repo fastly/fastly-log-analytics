@@ -60,7 +60,7 @@ export interface CloudStorageInventoryResult {
   complete: boolean;
   snapshotId: string | null;
   observedAt: number | null;
-  provenance: "cloud:inventory" | "cloud:inventory_incomplete";
+  provenance: "cloud:inventory" | "cloud:inventory_incomplete" | "cloud:inventory_stale";
 }
 
 export async function fetchCloudStorageInventory(
@@ -184,8 +184,9 @@ export async function fetchCloudStorageInventory(
     };
   }
 
-  const newestIsIncomplete =
-    newestOverall !== null && newestOverall.id !== newestComplete.id;
+  // The schedule retakes the snapshot every 6 hours; a newer one still listing doesn't make this one
+  // wrong, but a complete snapshot older than two runs means the schedule stopped.
+  const stale = now - newestComplete.terminalTs > INVENTORY_STALE_MS;
   const intervals: StorageBillingInterval[] = [];
   for (const [id, obj] of newestComplete.objects) {
     const rowComplete = obj.lastModifiedMs !== null;
@@ -205,20 +206,33 @@ export async function fetchCloudStorageInventory(
   }
 
   const complete =
-    result.liveTruncated !== true &&
-    !newestIsIncomplete &&
-    !newestComplete.hasIncompleteRow;
+    result.liveTruncated !== true && !stale && !newestComplete.hasIncompleteRow;
   return {
     intervals,
     complete,
     snapshotId: newestComplete.id,
     observedAt: newestComplete.terminalTs,
-    provenance: complete ? "cloud:inventory" : "cloud:inventory_incomplete",
+    provenance: complete
+      ? "cloud:inventory"
+      : stale
+        ? "cloud:inventory_stale"
+        : "cloud:inventory_incomplete",
   };
+}
+
+/** Two of the server's 6-hour snapshot intervals (`retention::RECONCILE_INTERVAL_S`). */
+const INVENTORY_STALE_MS = 2 * 6 * 3_600_000;
+
+export interface IngestOutput {
+  key: string;
+  bytes: number;
+  createdAt: number;
 }
 
 export interface IngestDeletedIntervalsResult {
   intervals: StorageBillingInterval[];
+  /** Parquet files converted raw files produced (`output_keys_json`), first write per key. */
+  outputs: IngestOutput[];
   bytes: number;
   complete: boolean;
   provenance: "cloud:ingest_files" | "cloud:ingest_files_incomplete";
@@ -257,7 +271,23 @@ export async function fetchIngestDeletedIntervals(
   };
 
   const lifecycles = new Map<string, RawLifecycle>();
+  const outputs = new Map<string, IngestOutput>();
   for (const row of result.rows) {
+    if (row.status === "converted" && typeof row.output_keys_json === "string") {
+      const at = parseTimestampMs(row.timestamp);
+      let written: unknown = [];
+      try {
+        written = JSON.parse(row.output_keys_json);
+      } catch {
+        written = [];
+      }
+      for (const output of Array.isArray(written) ? written : []) {
+        const key = typeof output?.key === "string" ? output.key : "";
+        const bytes = Number(output?.bytes);
+        if (!key || !Number.isFinite(bytes) || at === null || outputs.has(key)) continue;
+        outputs.set(key, { key, bytes, createdAt: at });
+      }
+    }
     const rawKey = typeof row.raw_key === "string" ? row.raw_key : "";
     if (!rawKey) continue;
     const rawSize = row.raw_size;
@@ -349,6 +379,7 @@ export async function fetchIngestDeletedIntervals(
 
   return {
     intervals,
+    outputs: [...outputs.values()],
     bytes,
     complete,
     provenance: complete

@@ -715,6 +715,37 @@ fn storage_reconcile_does_nothing_until_requested() {
 }
 
 #[test]
+fn storage_reconcile_is_requested_on_its_own_every_interval() {
+    let fake = Fake::new(BASE);
+    put_processed(&fake, "processed/request/", BASE, "1-2-a-n1");
+    fake.new_request();
+    assert!(
+        ingest::retention::request_scheduled_reconcile(&fake).unwrap(),
+        "an install that never took a snapshot takes one"
+    );
+    let mut done = false;
+    for _ in 0..8 {
+        if reconcile(&fake).and_then(|r| r.snapshot).is_some() {
+            done = true;
+            break;
+        }
+    }
+    assert!(done);
+    fake.new_request();
+    assert!(
+        !ingest::retention::request_scheduled_reconcile(&fake).unwrap(),
+        "not again within the interval"
+    );
+    fake.now
+        .set(fake.now.get() + ingest::retention::RECONCILE_INTERVAL_S);
+    fake.new_request();
+    assert!(
+        ingest::retention::request_scheduled_reconcile(&fake).unwrap(),
+        "due again an interval later"
+    );
+}
+
+#[test]
 fn storage_reconcile_folds_excess_ops_kind_folders_into_other() {
     let fake = Fake::new(BASE);
     let total = ingest::retention::MAX_RECONCILE_KINDS + 5;
@@ -814,8 +845,15 @@ fn storage_reconcile_sums_bytes_and_objects_per_dataset_across_resumed_steps() {
         snapshot["datasets"]["raw_rum"],
         json!({"bytes": 0, "objects": 0})
     );
-    assert!(fake.kv.borrow().get("storage:reconcile").is_none());
-    assert!(reconcile(&fake).is_none());
+    let kept = fake.kv.borrow()["storage:reconcile"].1.clone();
+    assert!(
+        kept["completed_at"].is_u64(),
+        "the completed record stays for the hourly schedule"
+    );
+    assert!(
+        reconcile(&fake).is_none(),
+        "a completed record is not stepped again"
+    );
 }
 
 #[test]

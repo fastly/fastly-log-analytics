@@ -1,6 +1,6 @@
 # storage_reconcile
 
-An admin-requested, resumable job that LISTs every dataset with object sizes and records a byte/object snapshot. That snapshot anchors the estimated storage ledger.
+A resumable job that LISTs every dataset with object sizes and records a byte/object snapshot plus a per-object `storage_inventory` snapshot. It runs on its own every 6 hours (`RECONCILE_INTERVAL_S`, the retention sweep's cadence), and an admin can also request one. That snapshot anchors the storage ledger.
 
 ## Purpose
 
@@ -22,7 +22,12 @@ Spec D13 (lines 268, 272, 342) rules out a recursive storage-tree walk on every 
 **Request** (`POST /api/admin/usage/reconcile-storage`, `admin/logs.rs:668-676`)
 - `request_storage_reconcile` (`retention.rs:945-957`) Add-CASes KV `storage:reconcile`:
   - `{requested_at, actor, index: 0, token: null, totals: [(0,0)×7], by_kind: {}}`
-- It returns `{started: false}` if a reconcile already exists. Only one runs at a time.
+- It returns `{started: false}` if a reconcile is already running. Only one runs at a time.
+
+**Schedule** (`request_scheduled_reconcile`, `retention.rs`)
+- On the stage's maintenance turn, `reconcile_stage` first starts a reconcile (actor `system:schedule`) when none is running and the last one completed at least `RECONCILE_INTERVAL_S` (6 h) ago, or never.
+- A full listing costs one Class A LIST per 1,000 objects, so about $0.30 a month per million objects at this cadence.
+- The retention sweep can't double as the inventory: it lists only folders past retention and stops at the first live one.
 
 **Step** (`storage_reconcile_step`, `retention.rs:962-1057`)
 1. Read `storage:reconcile`. If it is absent, return `None` (no row).
@@ -31,13 +36,18 @@ Spec D13 (lines 268, 272, 342) rules out a recursive storage-tree walk on every 
 4. Advance `token`, or move to the next dataset. CAS the state after each page. A lost CAS returns `reconcile_state_conflict`.
 5. After the last dataset:
    - build `{datasets: {name: {bytes, objects[, by_kind]}}, requested_at, completed_at}`;
-   - `kv_delete storage:reconcile`.
+   - keep `storage:reconcile` with `completed_at` set (one CAS on the generation read at the start of the step, as no cursor was written in it). The schedule reads this record; the logs status reports a reconcile only while `completed_at` is unset.
 
 ****Tick wiring** (`admin/logs.rs:736-808`)
 - The step runs on its round-robin turn in the stage worker ([stage-worker.md](stage-worker.md)), when `enough(RECONCILE_CALLS)` holds (`reconcile_stage`, `admin/logs.rs:1383-1415`).
 - It runs with reserve `TAIL`.
 
-**Output:** the snapshot is stored only as `details_json` on a `cron_runs` row with `outcome = done`. No KV or FOS object keeps it.
+**Output:** the totals are stored as `details_json` on a `cron_runs` row with `outcome = done`, and every object is written as a `storage_inventory` row ending in a `complete` marker.
+
+**How usage reads it** (`fetchCloudStorageInventory`, `frontend/lib/cloud-engine/usage/summary.ts`)
+- Live objects come from the newest complete snapshot. A newer snapshot still listing doesn't invalidate it.
+- A complete snapshot older than 12 hours (two runs) is flagged `cloud:inventory_stale`, so a stopped schedule shows as a partial storage cost.
+- Between snapshots, Parquet files that ingest wrote after the snapshot (`ingest_files.output_keys_json`) are added as live (`liveSinceSnapshot`), so live storage stays current without listing more often. Objects compaction or retention deleted since the snapshot stay counted as live until the next one, at most 6 hours of overlap with their deleted-but-billed interval.
 
 ## Roles and permissions
 

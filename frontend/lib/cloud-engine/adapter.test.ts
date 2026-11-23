@@ -323,6 +323,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
         provenance: "cloud:inventory",
       });
       vi.spyOn(usage, "fetchIngestDeletedIntervals").mockResolvedValue({
+        outputs: [],
         intervals: [],
         bytes: 0,
         complete: true,
@@ -513,6 +514,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       provenance: "cloud:inventory",
     });
     vi.spyOn(usage, "fetchIngestDeletedIntervals").mockResolvedValue({
+      outputs: [],
       intervals: [],
       bytes: 0,
       complete: true,
@@ -573,6 +575,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       provenance: "cloud:inventory_incomplete",
     });
     vi.spyOn(usage, "fetchIngestDeletedIntervals").mockResolvedValue({
+      outputs: [],
       intervals: [],
       bytes: 0,
       complete: false,
@@ -620,6 +623,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     vi.spyOn(usage, "fetchIngestDeletedIntervals").mockImplementation(async () => {
       if (!summaryDone) startedEarly.push("ingest_files");
       return {
+        outputs: [],
         intervals: [
           {
             id: "raw_request:raw/a.zst",
@@ -685,6 +689,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       complete: true,
     });
     vi.spyOn(usage, "fetchIngestDeletedIntervals").mockResolvedValue({
+      outputs: [],
       intervals: [
         {
           id: "raw_request:raw/a.zst",
@@ -745,6 +750,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       complete: false,
     });
     vi.spyOn(usage, "fetchIngestDeletedIntervals").mockResolvedValue({
+      outputs: [],
       intervals: [
         {
           id: "raw_request:raw/b.zst",
@@ -831,6 +837,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
         provenance: "cloud:inventory",
       });
       vi.spyOn(usage, "fetchIngestDeletedIntervals").mockResolvedValue({
+        outputs: [],
         intervals: [
           {
             id: "raw_request:raw/request/deleted.zst",
@@ -906,6 +913,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
         provenance: "cloud:inventory",
       });
       vi.spyOn(usage, "fetchIngestDeletedIntervals").mockResolvedValue({
+        outputs: [],
         intervals: [],
         bytes: 0,
         complete: true,
@@ -3523,7 +3531,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     let seenIngestIdentity: { user: string; role: string } | null = null;
     vi.spyOn(usage, "fetchIngestDeletedIntervals").mockImplementation(async (_range, identity) => {
       seenIngestIdentity = identity;
-      return { intervals: [], bytes: 1234, complete: true, provenance: "cloud:ingest_files" };
+      return { outputs: [], intervals: [], bytes: 1234, complete: true, provenance: "cloud:ingest_files" };
     });
     const storageRes = await handleCloudAnalyticalRequest(
       new Request("http://localhost/api/usage/current-storage"),
@@ -3537,7 +3545,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       await new Promise<void>((r) => {
         releaseIngestDel = r;
       });
-      return { intervals: [], bytes: 9999, complete: true, provenance: "cloud:ingest_files" };
+      return { outputs: [], intervals: [], bytes: 9999, complete: true, provenance: "cloud:ingest_files" };
     });
     const inFlightStorage = handleCloudAnalyticalRequest(
       new Request("http://localhost/api/usage/current-storage"),
@@ -3560,7 +3568,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       await new Promise<void>((r) => {
         releaseIngestOpsOnly = r;
       });
-      return { intervals: [], bytes: 5555, complete: true, provenance: "cloud:ingest_files" };
+      return { outputs: [], intervals: [], bytes: 5555, complete: true, provenance: "cloud:ingest_files" };
     });
     const metaBeforeOpsOnly = currentStoreMetaEpoch();
     const opsBeforeOpsOnly = currentOpsCacheEpoch();

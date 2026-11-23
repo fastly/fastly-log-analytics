@@ -36,7 +36,7 @@ The clock and the tick orchestration are documented in [clock.md](clock.md). In 
 | Request and RUM compaction | `request_compact`, `rum_compact` | Every 30 s on its own `flp-worker` execution when the `compaction` setting is on. RUM tables (`client_vitals`, `client_errors`) each keep their own state (`ingest:compact_state:rum:{table}`), take passes after request compaction in the same execution, and are listed at most every 5 min once caught up | `compute/cloud/src/ingest/compaction.rs` |
 | Log compact | `log_compact` | Its round-robin turn on the stage worker, when a day has work | [log-compact.md](log-compact.md) |
 | Retention sweep | `retention_sweep` | Its turn, every 6 h and every turn until a sweep completes | [retention-sweep.md](retention-sweep.md) |
-| Storage reconcile | `storage_reconcile` | Its turn, only after an admin request | [storage-reconcile.md](storage-reconcile.md) |
+| Storage reconcile | `storage_reconcile` | Its turn, every 6 hours on its own or after an admin request | [storage-reconcile.md](storage-reconcile.md) |
 | Delete history | `delete_history` | Its turn, while an admin-started job is incomplete | [delete-history.md](delete-history.md) |
 
 Provisioning, reconcile and teardown jobs (`job:<id>`) are not tick stages. They advance only through admin calls to `POST /api/admin/jobs/{id}/step` (`admin/mod.rs:278-281`).

@@ -543,6 +543,14 @@ pub fn task_schedules(
                 Some(COMPACT_INTERVAL_S),
                 "dispatcher",
             )
+        } else if task == "storage_reconcile" {
+            entry(
+                task,
+                None,
+                None,
+                Some(crate::ingest::retention::RECONCILE_INTERVAL_S),
+                "maintenance_turn",
+            )
         } else {
             entry(task, None, None, None, "maintenance_turn")
         };

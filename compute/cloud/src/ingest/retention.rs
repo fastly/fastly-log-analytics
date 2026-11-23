@@ -932,7 +932,12 @@ fn sweep_dataset<R: Runtime>(
     Ok(finished)
 }
 
+/// The running reconcile's cursor, or, once it finishes, the completed record (`completed_at`) the
+/// scheduler reads to take the next snapshot `RECONCILE_INTERVAL_S` later without an admin asking.
 const RECONCILE_KEY: &str = "storage:reconcile";
+/// Usage reads the live inventory from the newest complete snapshot and adds the Parquet files
+/// ingest wrote since, so a full listing on the retention sweep's 6-hour cadence keeps it current.
+pub const RECONCILE_INTERVAL_S: u64 = SWEEP_INTERVAL_S;
 /// Distinct `by_kind` keys kept in reconcile state; further folders fold into `other`.
 pub const MAX_RECONCILE_KINDS: usize = 32;
 const RECONCILE_LIST: &[(&str, &str)] = &[
@@ -964,6 +969,8 @@ struct ReconcileState {
     token: Option<String>,
     totals: Vec<(u64, u64)>,
     by_kind: std::collections::BTreeMap<String, (u64, u64)>,
+    #[serde(default)]
+    completed_at: Option<u64>,
 }
 
 fn new_snapshot_id(runtime: &impl Runtime, requested_at: u64) -> String {
@@ -973,11 +980,27 @@ fn new_snapshot_id(runtime: &impl Runtime, requested_at: u64) -> String {
     }
 }
 
+fn completed_at(value: &Value) -> Option<u64> {
+    value["completed_at"].as_u64()
+}
+
 /// Starts a storage reconcile unless one is already running. Returns whether it started.
 pub fn request_storage_reconcile(runtime: &impl Runtime, actor: &str) -> Result<bool, String> {
-    if runtime.admin_get(RECONCILE_KEY)?.is_some() {
+    let record = runtime.admin_get(RECONCILE_KEY)?;
+    if record
+        .as_ref()
+        .is_some_and(|r| completed_at(&r.value).is_none())
+    {
         return Ok(false);
     }
+    start_reconcile(runtime, actor, record.map(|r| r.generation).as_deref())
+}
+
+fn start_reconcile(
+    runtime: &impl Runtime,
+    actor: &str,
+    generation: Option<&str>,
+) -> Result<bool, String> {
     let requested_at = runtime.now();
     let state = ReconcileState {
         snapshot_id: new_snapshot_id(runtime, requested_at),
@@ -987,7 +1010,26 @@ pub fn request_storage_reconcile(runtime: &impl Runtime, actor: &str) -> Result<
         ..Default::default()
     };
     let value = serde_json::to_value(&state).map_err(|_| "state_encoding_failed".to_string())?;
-    runtime.admin_cas(RECONCILE_KEY, None, &value)
+    runtime.admin_cas(RECONCILE_KEY, generation, &value)
+}
+
+/// Starts a reconcile when none is running and the last snapshot completed at least
+/// `RECONCILE_INTERVAL_S` ago (or never). Returns whether it started.
+pub fn request_scheduled_reconcile(runtime: &impl Runtime) -> Result<bool, String> {
+    let record = runtime.admin_get(RECONCILE_KEY)?;
+    let due = match record.as_ref().map(|r| completed_at(&r.value)) {
+        None => true,
+        Some(None) => false,
+        Some(Some(at)) => runtime.now().saturating_sub(at) >= RECONCILE_INTERVAL_S,
+    };
+    if !due {
+        return Ok(false);
+    }
+    start_reconcile(
+        runtime,
+        "system:schedule",
+        record.map(|r| r.generation).as_deref(),
+    )
 }
 
 /// Advances a requested reconcile by as many LIST pages as the budget allows, then persists the
@@ -1004,6 +1046,9 @@ pub fn storage_reconcile_step<R: Runtime>(
     };
     let mut state: ReconcileState =
         serde_json::from_value(record.value).map_err(|_| "reconcile_state_invalid".to_string())?;
+    if state.completed_at.is_some() {
+        return Ok(None);
+    }
     if state.snapshot_id.is_empty() {
         state.snapshot_id = format!("snap-{}", state.requested_at);
     }
@@ -1108,7 +1153,15 @@ pub fn storage_reconcile_step<R: Runtime>(
             "requested_at": state.requested_at,
             "completed_at": runtime.now(),
         }));
-        runtime.kv_delete(RECONCILE_KEY)?;
+        // Kept, not deleted: the completed record is what the hourly schedule reads. No cursor
+        // was written in this step, so the generation read at its start is still current.
+        state.completed_at = Some(runtime.now());
+        state.token = None;
+        let value =
+            serde_json::to_value(&state).map_err(|_| "state_encoding_failed".to_string())?;
+        if !runtime.admin_cas(RECONCILE_KEY, Some(&record.generation), &value)? {
+            return Err("reconcile_state_conflict".into());
+        }
     }
     report.backend_calls = started_with.saturating_sub(runtime.admin_remaining_calls());
     Ok(Some(report))

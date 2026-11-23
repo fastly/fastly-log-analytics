@@ -121,7 +121,11 @@ import {
   type StorageBillingInterval,
   type StorageBillingSummary,
 } from "./usage/storageBilling";
-import { storageImpactBreakdown, type StorageImpactBreakdown } from "./usage/storageImpact";
+import {
+  liveSinceSnapshot,
+  storageImpactBreakdown,
+  type StorageImpactBreakdown,
+} from "./usage/storageImpact";
 import {
   buildSevenLineCostTable,
   deletedBytesAccountingSince,
@@ -232,9 +236,14 @@ async function storageBillingIntervals(
   checkUsageEpoch();
 
   const deletedIds = new Set(ingest.intervals.map((interval) => interval.id));
-  const liveIntervals = inventory.intervals.filter(
+  const snapshotLive = inventory.intervals.filter(
     (interval) => !deletedIds.has(interval.id),
   );
+  // Between 6-hourly snapshots, Parquet that ingest wrote since the last one is live too.
+  const liveIntervals = [
+    ...snapshotLive,
+    ...liveSinceSnapshot(ingest.outputs, snapshotLive, inventory.observedAt, toMs),
+  ];
 
   const fosAccounting = deletedBytesAccountingSince(
     fosSource.rows,

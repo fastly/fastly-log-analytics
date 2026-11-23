@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { StorageBillingInterval } from "./storageBilling";
-import { storageImpactBreakdown } from "./storageImpact";
+import { liveSinceSnapshot, storageImpactBreakdown } from "./storageImpact";
 import type { FosUsageRow } from "./summary";
 
 const DAY = 86_400_000;
@@ -78,5 +78,27 @@ describe("storageImpactBreakdown", () => {
       window,
     });
     expect(out).toMatchObject({ rawLogsDeleted: false, requestLogBytes: 500, rumLogBytes: 40 });
+  });
+});
+
+describe("liveSinceSnapshot", () => {
+  it("adds Parquet files ingest wrote after the snapshot that it doesn't already hold", () => {
+    const snapshot = [live("pq_request", 5)].map((i) => ({ ...i, id: "pq_request:processed/request/old.parquet" }));
+    const out = liveSinceSnapshot(
+      [
+        { key: "processed/request/old.parquet", bytes: 5, createdAt: now - 2 * DAY },
+        { key: "processed/request/before.parquet", bytes: 7, createdAt: now - 3 * 3_600_000 },
+        { key: "processed/request/new.parquet", bytes: 9, createdAt: now - 3_600_000 },
+        { key: "processed/rum/new.parquet", bytes: 2, createdAt: now - 60_000 },
+      ],
+      snapshot,
+      now - 2 * 3_600_000,
+      now,
+    );
+    expect(out.map((i) => [i.id, i.bytes, i.billedFrom, i.billedUntil])).toEqual([
+      ["pq_request:processed/request/new.parquet", 9, now - 3_600_000, now],
+      ["pq_rum:processed/rum/new.parquet", 2, now - 60_000, now],
+    ]);
+    expect(out.every((i) => i.kind === "live" && i.provenance === "cloud:ingest_outputs")).toBe(true);
   });
 });

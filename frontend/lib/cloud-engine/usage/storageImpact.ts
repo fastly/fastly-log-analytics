@@ -1,5 +1,5 @@
 import type { StorageBillingInterval } from "./storageBilling";
-import type { FosUsageRow } from "./summary";
+import type { FosUsageRow, IngestOutput } from "./summary";
 
 /** The Storage Impact card's rows, read the way High-Scale reads them. */
 export interface StorageImpactBreakdown {
@@ -69,4 +69,34 @@ export function storageImpactBreakdown(input: {
     retentionDeletedBytes: sum(deletions.filter((row) => row.caller === "cron:retention")),
     rawLogsDeleted,
   };
+}
+
+/**
+ * Live intervals for Parquet files ingest wrote after the inventory snapshot completed and that the
+ * snapshot doesn't already hold, so live storage stays current between the 6-hourly snapshots.
+ */
+export function liveSinceSnapshot(
+  outputs: IngestOutput[],
+  snapshot: StorageBillingInterval[],
+  observedAt: number | null,
+  now: number,
+): StorageBillingInterval[] {
+  const held = new Set(snapshot.map((interval) => interval.id));
+  return outputs.flatMap((output) => {
+    const dataset = output.key.includes("processed/rum/") ? "pq_rum" : "pq_request";
+    const id = `${dataset}:${output.key}`;
+    if (held.has(id) || (observedAt !== null && output.createdAt <= observedAt)) return [];
+    return [{
+      id,
+      dataset,
+      kind: "live" as const,
+      bytes: output.bytes,
+      createdAt: output.createdAt,
+      deletedAt: null,
+      billedFrom: output.createdAt,
+      billedUntil: now,
+      complete: true,
+      provenance: "cloud:ingest_outputs",
+    }];
+  });
 }
