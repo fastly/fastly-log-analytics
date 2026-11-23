@@ -789,7 +789,9 @@ fn build_next_cursor(cursor: &Cursor, manifest: &Manifest, now: u64) -> Cursor {
     if let Some(max_seq) = manifest.auth_keys.iter().filter_map(|k| auth_seq(k)).max() {
         next.audit_seq = Some(max_seq.max(next.audit_seq.unwrap_or(0)));
     }
-    next.svc_outbox_archived = next.svc_outbox_archived.max(manifest.svc_range.1);
+    if manifest.svc_range.0 < manifest.svc_range.1 {
+        next.svc_outbox_archived = manifest.svc_range.1;
+    }
     next.txn_id = manifest.txn_id.clone();
     next.last_flush_s = now;
     next.expired = 0;
@@ -887,6 +889,7 @@ fn collect(
             .saturating_sub(after(groups, deletes, svc))
     };
     let mut svc = None;
+    let mut svc_effective_archived = cursor.svc_outbox_archived;
     let mut queues: [std::collections::VecDeque<SourceId>; CLASSES] = Default::default();
     queues[0].extend(buckets.into_iter().map(SourceId::Bucket));
     queues[1].extend(outbox.into_iter().map(SourceId::Outbox));
@@ -896,8 +899,14 @@ fn collect(
             let base = record.value["_audit_outbox_base"].as_u64().unwrap_or(0);
             let entries = record.value["_audit_outbox"].as_array();
             let len = entries.map_or(0, Vec::len) as u64;
-            let end = (base + len).min(cursor.svc_outbox_archived.max(base) + MAX_SVC_ENTRIES);
-            let mut seg_start = cursor.svc_outbox_archived.max(base);
+            let total = base + len;
+            svc_effective_archived = if cursor.svc_outbox_archived > total {
+                base
+            } else {
+                cursor.svc_outbox_archived.max(base)
+            };
+            let end = total.min(svc_effective_archived + MAX_SVC_ENTRIES);
+            let mut seg_start = svc_effective_archived;
             while seg_start < end {
                 let hour_of = |idx: u64| -> u64 {
                     entries
@@ -1025,7 +1034,7 @@ fn collect(
         value["_audit_outbox_base"].as_u64().unwrap_or(0)
             + value["_audit_outbox"].as_array().map_or(0, Vec::len) as u64
     });
-    left |= truncated || manifest.svc_range.1.max(cursor.svc_outbox_archived) < svc_end;
+    left |= truncated || manifest.svc_range.1.max(svc_effective_archived) < svc_end;
     Ok(Collected {
         manifest,
         rows,

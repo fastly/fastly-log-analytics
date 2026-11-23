@@ -41,11 +41,86 @@ const MESSAGE_LIMIT = 200;
 const SECRET_WORD = String.raw`(?:\w+[_-])?(?:token|key|secret|passw(?:or)?d|authorization|auth|bearer|cookie|signature|sig|credentials?)`;
 const DOLLAR_QUOTE_TAG_RE = /^\$([A-Za-z_\u0080-\uffff][A-Za-z0-9_\u0080-\uffff]*)?\$/;
 const WORD_CHAR_RE = /[\p{L}\p{N}_]/u;
+const LETTER_CHAR_RE = /\p{L}/u;
+const SQL_PREFIX_CHAR_RE = /^[EeBbXxUuNnRr]$/;
 const QUOTE_DELIM_AFTER_RE = /[\s,.;:!?)\]}]/;
 const CONTRACTION_SUFFIX_RE = /^(?:s|t|d|m|re|ve|ll)(?=$|[\s,.;:!?)\]}])/iu;
-const IPV4_LITERAL_RE = /\b(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\b/g;
+const NAME_APOSTROPHE_AFTER_RE = /^(\p{L}{2,}(?:'s)?)(?=$|[\s,.;:!?)\]}])/iu;
+const PLURAL_POSSESSIVE_STEM_RE = /\p{Ll}s$/u;
+const ADJACENT_SQL_OP_QUOTE_RE = /^(?:!=|<>|<=|>=|\|\||[=<>])\s*'/;
+const DUCKDB_CONVERT_STRING_RE = /(Could not convert string )'[^\r\n]*'( to [A-Z][A-Z0-9_]*)/g;
+const IPV4_OCTET = String.raw`(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)`;
+const IPV4_BODY = String.raw`(?:${IPV4_OCTET}\.){3}${IPV4_OCTET}`;
+const IPV4_LITERAL_RE = new RegExp(String.raw`\b${IPV4_BODY}\b`, "g");
+const IPV6_LITERAL_RE = new RegExp(
+  String.raw`(?<![\p{L}\p{N}_:])(?:` +
+    String.raw`(?:[0-9a-fA-F]{1,4}:){6}${IPV4_BODY}` +
+    String.raw`|::(?:[0-9a-fA-F]{1,4}:){0,5}${IPV4_BODY}` +
+    String.raw`|(?:[0-9a-fA-F]{1,4}:){1,5}:(?:[0-9a-fA-F]{1,4}:){0,4}${IPV4_BODY}` +
+    String.raw`|(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}` +
+    String.raw`|(?:[0-9a-fA-F]{1,4}:){1,7}:` +
+    String.raw`|:(?::[0-9a-fA-F]{1,4}){1,7}` +
+    String.raw`|(?:[0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}` +
+    String.raw`|(?:[0-9a-fA-F]{1,4}:){1,5}(?::[0-9a-fA-F]{1,4}){1,2}` +
+    String.raw`|(?:[0-9a-fA-F]{1,4}:){1,4}(?::[0-9a-fA-F]{1,4}){1,3}` +
+    String.raw`|(?:[0-9a-fA-F]{1,4}:){1,3}(?::[0-9a-fA-F]{1,4}){1,4}` +
+    String.raw`|(?:[0-9a-fA-F]{1,4}:){1,2}(?::[0-9a-fA-F]{1,4}){1,5}` +
+    String.raw`|[0-9a-fA-F]{1,4}:(?::[0-9a-fA-F]{1,4}){1,6}` +
+    String.raw`)(?![\p{L}\p{N}_:])`,
+  "gu",
+);
+const SQL_KEYWORD_NO_APOSTROPHE = new Set([
+  "SELECT", "WHERE", "AS", "VALUES", "LIKE", "ILIKE", "SIMILAR", "IS", "IN", "EXISTS",
+  "AND", "OR", "NOT", "XOR", "FROM", "JOIN", "ON", "USING", "BY", "CASE", "WHEN",
+  "THEN", "ELSE", "END", "HAVING", "LIMIT", "OFFSET", "CAST", "TRY_CAST", "SET",
+  "INTO", "WITH", "UNION", "EXCEPT", "INTERSECT", "ALL", "ANY", "DISTINCT", "GROUP",
+  "ORDER", "BETWEEN", "NULL", "TRUE", "FALSE", "OVER", "FILTER", "QUALIFY", "WINDOW",
+  "ESCAPE",
+]);
 
-function redactQuotedLiterals(input: string): string {
+function extractPrevWordToken(text: string, idx: number): string {
+  let start = idx;
+  while (start > 0 && WORD_CHAR_RE.test(text[start - 1])) {
+    start -= 1;
+  }
+  return text.slice(start, idx);
+}
+
+function isMidWordLetterApostrophe(line: string, pos: number): boolean {
+  if (pos <= 0 || pos + 1 >= line.length) return false;
+  if (!LETTER_CHAR_RE.test(line[pos - 1]) || !LETTER_CHAR_RE.test(line[pos + 1])) return false;
+  const stem = extractPrevWordToken(line, pos);
+  if (!stem || SQL_KEYWORD_NO_APOSTROPHE.has(stem.toUpperCase())) return false;
+  if (stem.length === 1 && SQL_PREFIX_CHAR_RE.test(stem)) return false;
+  const after = line.slice(pos + 1);
+  return CONTRACTION_SUFFIX_RE.test(after) || NAME_APOSTROPHE_AFTER_RE.test(after);
+}
+
+function countRemainingNonApostropheQuotes(line: string, fromIdx: number): number {
+  let count = 0;
+  let j = fromIdx;
+  while (j < line.length) {
+    if (line[j] === "\\" && j + 1 < line.length && line[j + 1] === "\\") {
+      j += 2;
+      continue;
+    }
+    if (line[j] === "'") {
+      if (j + 1 < line.length && line[j + 1] === "'") {
+        count += 2;
+        j += 2;
+        continue;
+      }
+      if (!isMidWordLetterApostrophe(line, j)) {
+        count += 1;
+      }
+    }
+    j += 1;
+  }
+  return count;
+}
+
+function redactQuotedLiterals(rawInput: string): string {
+  const input = rawInput.replace(DUCKDB_CONVERT_STRING_RE, "$1[redacted]$2");
   let out = "";
   let i = 0;
   const len = input.length;
@@ -61,19 +136,41 @@ function redactQuotedLiterals(input: string): string {
         continue;
       }
     }
-    const prevWord = i > 0 && WORD_CHAR_RE.test(input[i - 1]);
+    const prevToken = extractPrevWordToken(input, i);
+    const prevWord = prevToken.length > 0;
     const typedSingleLen = prevWord
       ? 0
       : (ch === "U" || ch === "u") && input[i + 1] === "&" && input[i + 2] === "'"
         ? 3
-        : /^[EeBbXxUuNnRr]$/.test(ch) && input[i + 1] === "'"
+        : SQL_PREFIX_CHAR_RE.test(ch) && input[i + 1] === "'"
           ? 2
           : 0;
-    const isApostrophe =
+    let isApostrophe = false;
+    if (
       ch === "'" &&
       prevWord &&
-      (((input[i - 1] === "s" || input[i - 1] === "S") && (i + 1 >= len || QUOTE_DELIM_AFTER_RE.test(input[i + 1]))) ||
-        (i + 1 < len && CONTRACTION_SUFFIX_RE.test(input.slice(i + 1))));
+      !SQL_KEYWORD_NO_APOSTROPHE.has(prevToken.toUpperCase()) &&
+      !(prevToken.length === 1 && SQL_PREFIX_CHAR_RE.test(prevToken))
+    ) {
+      const nl = input.indexOf("\n", i);
+      const lineEnd = nl === -1 ? len : nl;
+      const lineStart = input.lastIndexOf("\n", i - 1) + 1;
+      const line = input.slice(lineStart, lineEnd);
+      const linePos = i - lineStart;
+      const afterOnLine = line.slice(linePos + 1);
+      const nameMatch = /^\p{L}+$/u.test(prevToken) ? NAME_APOSTROPHE_AFTER_RE.exec(afterOnLine) : null;
+      if (CONTRACTION_SUFFIX_RE.test(afterOnLine)) {
+        isApostrophe = countRemainingNonApostropheQuotes(line, linePos + 1) % 2 === 0;
+      } else if (nameMatch) {
+        isApostrophe = countRemainingNonApostropheQuotes(line, linePos + 1 + nameMatch[1].length) % 2 === 0;
+      } else if (
+        prevToken.length >= 2 &&
+        PLURAL_POSSESSIVE_STEM_RE.test(prevToken) &&
+        (i + 1 >= lineEnd || /\s/.test(input[i + 1]))
+      ) {
+        isApostrophe = countRemainingNonApostropheQuotes(line, linePos + 1) % 2 === 0;
+      }
+    }
     if (typedSingleLen > 0 || (ch === "'" && !isApostrophe)) {
       const isEscapeSingle = typedSingleLen > 0 && (ch === "E" || ch === "e" || ch === "U" || ch === "u");
       out += "[redacted]";
@@ -92,12 +189,15 @@ function redactQuotedLiterals(input: string): string {
             i += 2;
             continue;
           }
-          if (i + 1 < len && !QUOTE_DELIM_AFTER_RE.test(input[i + 1])) {
+          if (i + 1 < len && input[i + 1] !== "\n" && input[i + 1] !== "\r") {
             const nl = input.indexOf("\n", i + 1);
             const restOfLine = input.slice(i + 1, nl === -1 ? len : nl);
-            if (restOfLine.includes("'")) {
-              i += 1;
-              continue;
+            if (!ADJACENT_SQL_OP_QUOTE_RE.test(restOfLine)) {
+              const remQuotes = countRemainingNonApostropheQuotes(restOfLine, 0);
+              if (remQuotes % 2 === 1 || (!QUOTE_DELIM_AFTER_RE.test(input[i + 1]) && remQuotes > 0)) {
+                i += 1;
+                continue;
+              }
             }
           }
           i += 1;
@@ -141,6 +241,7 @@ function redactedMessage(message: string): string {
   const text = (preRedacted.split(/\r?\n/, 1)[0] ?? "")
     .replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s'"`]+/gi, "[url]")
     .replace(/\S+@\S+/g, "[redacted]")
+    .replace(IPV6_LITERAL_RE, "[redacted]")
     .replace(IPV4_LITERAL_RE, "[redacted]")
     .replace(
       new RegExp(

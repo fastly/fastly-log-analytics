@@ -271,3 +271,101 @@ it("BUG-T5-ITER27-01: redacts real @duckdb/duckdb-wasm runtime conversion errors
     await backend.dispose();
   }
 });
+
+it("BUG-T5-ITER28-FE-01 & BUG-T5-ITER28-02: redacts internal apostrophe+delimiter URLs, unspaced SQL keyword quotes, name apostrophes, adjacent quotes, and IPv6 literals", async () => {
+  const { createNodeBackend } = await import("./dashboard/duckdb");
+  const backend = await createNodeBackend();
+  setCloudModeRuntime(true);
+  const events: { state?: string; error?: string }[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    for (const [tbl, rawUrl, forbidden] of [
+      [
+        "t_iter28_plural_url",
+        "/search?q=users'' profile&cid=SecCid99&ip6=2001:db8::42",
+        ["SecCid99", "2001:db8::42", "profile", "users"],
+      ],
+      [
+        "t_iter28_sqli_url",
+        "/login?u=admin'';&sid=SecSid88&ip=198.51.100.42",
+        ["SecSid88", "198.51.100.42", "admin"],
+      ],
+    ] as const) {
+      await backend.query(`CREATE OR REPLACE TABLE ${tbl} AS SELECT '${rawUrl}' AS url`);
+      await expect(
+        measureCloudQuery("query.console", () => backend.query(`SELECT CAST(url AS INT) FROM ${tbl}`)),
+      ).rejects.toThrow();
+      const gotReal = events.at(-1)?.error ?? "";
+      expect(gotReal).toContain("Could not convert string [redacted]");
+      for (const frag of forbidden) {
+        expect(gotReal).not.toContain(frag);
+      }
+    }
+
+    for (const [msg, forbidden, expectedExact] of [
+      [
+        "Conversion Error: Could not convert string 'Mozilla/5.0 (users', AliceLaptop)' to INT32",
+        ["AliceLaptop", "Mozilla"],
+        "Error: Conversion Error: Could not convert string [redacted] to INT32",
+      ],
+      [
+        "Conversion Error: invalid string '/docs/users' SecRowTok99' in column",
+        ["SecRowTok99", "users"],
+        "Error: Conversion Error: invalid string [redacted] in column",
+      ],
+      [
+        "Parser Error: syntax error near VALUES' SecVal99'",
+        ["SecVal99"],
+        "Error: Parser Error: syntax error near VALUES[redacted]",
+      ],
+      [
+        "Parser Error: syntax error near SELECT 1 AS' SecretRow99'",
+        ["SecretRow99"],
+        "Error: Parser Error: syntax error near SELECT 1 AS[redacted]",
+      ],
+      [
+        "Parser Error: syntax error near SELECT's SecretRow99'",
+        ["SecretRow99"],
+        "Error: Parser Error: syntax error near SELECT[redacted]",
+      ],
+      [
+        "Parser Error: syntax error near WHERE't SecretRow99'",
+        ["SecretRow99"],
+        "Error: Parser Error: syntax error near WHERE[redacted]",
+      ],
+      [
+        "Binder Error: d'Artagnan filter '.SecDotTok99' and ' SecSpaceTok88'",
+        ["SecDotTok99", "SecSpaceTok88"],
+        "Error: Binder Error: d'Artagnan filter [redacted] and [redacted]",
+      ],
+      [
+        "Binder Error: O'Brien filter '?cid=SecQmark77' failed",
+        ["SecQmark77"],
+        "Error: Binder Error: O'Brien filter [redacted] failed",
+      ],
+      [
+        "Parser Error: syntax error in 'foo'='SecAdjUnclosed33",
+        ["SecAdjUnclosed33", "foo"],
+        "Error: Parser Error: syntax error in [redacted]=[redacted]",
+      ],
+      [
+        "Runtime Error: DB::Exception at 12:34:56 for client 2001:db8:85a3::8a2e:370:7334 or 2001:db8::42 or ::ffff:198.51.100.42",
+        ["2001:db8", "8a2e", "198.51.100.42"],
+        "Error: Runtime Error: DB::Exception at 12:34:56 for client [redacted] or [redacted] or [redacted]",
+      ],
+    ] as const) {
+      const err = new Error(msg);
+      const before = events.length;
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+      const got = events[before + 1]?.error ?? "";
+      for (const frag of forbidden) {
+        expect(got).not.toContain(frag);
+      }
+      expect(got).toBe(expectedExact);
+    }
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+    await backend.dispose();
+  }
+});

@@ -7032,9 +7032,13 @@ fn bug_cloud_dr_27b_paused_prepare_manifest_not_dangling_and_gen_sorted_manifest
 
     let head = catalog::head(&next_wm).unwrap();
     let m_key = head.manifest.as_ref().unwrap();
+    let expected_rev_g1 = format!(
+        "processed/_catalog/manifest-s-fixtureService-rev-{:020}-",
+        u64::MAX - 1
+    );
     assert!(
-        m_key.starts_with("processed/_catalog/manifest-00000000000000000001-"),
-        "manifest key must carry zero-padded generation prefix: {m_key}"
+        m_key.starts_with(&expected_rev_g1),
+        "manifest key must carry service-scoped reverse-generation prefix: {m_key}"
     );
     let bucket_objs = p.adapter.bucket_objects(&svc.fos_bucket);
     let m_val: Value = serde_json::from_slice(&bucket_objs[m_key]).unwrap();
@@ -7206,13 +7210,17 @@ fn bug_cloud_dr_27a_summary_bundle_publish_and_drop_missing_preserve_manifest_da
             .unwrap()
             .expect("drop_missing head");
     assert_eq!(dropped_head.generation, 9);
+    let expected_rev_g9 = format!(
+        "processed/_catalog/manifest-s-fixtureService-rev-{:020}-",
+        u64::MAX - 9
+    );
     assert!(
         dropped_head
             .manifest
             .as_deref()
             .unwrap()
-            .starts_with("processed/_catalog/manifest-00000000000000000009-"),
-        "bundles::drop_missing must write generation-prefixed manifest: {:?}",
+            .starts_with(&expected_rev_g9),
+        "bundles::drop_missing must write service-scoped reverse-generation manifest: {:?}",
         dropped_head.manifest
     );
     let _ = Unit::Hour;
@@ -8007,4 +8015,1090 @@ fn bug_cloud_budget_27e_provision_and_scoring_propagate_503_backend_budget() {
             String::from_utf8_lossy(&resp.body)
         );
     }
+}
+
+#[test]
+fn bug_cloud_dr_28ac_reverse_manifest_keys_scale_past_1000_hex_and_foreign_manifests() {
+    use fastly_log_analytics::ingest;
+    use std::collections::BTreeSet;
+    use std::sync::atomic::Ordering;
+
+    struct RichGuard;
+    impl Drop for RichGuard {
+        fn drop(&mut self) {
+            RICH_FOS.with(|r| r.set(false));
+            MTIMES.with(|m| m.borrow_mut().clear());
+        }
+    }
+    let _guard = RichGuard;
+    RICH_FOS.with(|r| r.set(true));
+    MTIMES.with(|m| m.borrow_mut().clear());
+
+    // 1. Seed >1,000 {64-hex}.json objects + pre-reset ingest + stale dr_state + Delete Data reset manifest:
+    let p_hex = Platform::new();
+    let prov = p_hex.provision();
+    p_hex.drain(prov["job"].clone());
+    let svc: Service =
+        serde_json::from_value(p_hex.adapter.records()["svc:fixtureService"].value.clone())
+            .unwrap();
+    let base_day = 1_800_000_000i64 - (1_800_000_000i64 % 86_400);
+    p_hex.clock.store((base_day + 120) as u64, Ordering::SeqCst);
+    commit_real_catalog_batch(&p_hex, &svc, "pre-reset-hex", base_day + 60, 1010);
+    p_hex
+        .adapter
+        .cas(
+            &ingest::watermark_key("rum"),
+            None,
+            &json!({"rum_stats": {"earliest": base_day as u64, "latest": (base_day + 60) as u64, "total_rows": 777u64, "at": base_day + 120}}),
+        )
+        .unwrap();
+    CALLS.with(|c| c.set(0));
+    SECRETS.with(|s| s.borrow_mut().clear());
+    dr::sync_best_effort(&p_hex, &svc);
+    let stale_dr_bytes =
+        p_hex.adapter.bucket_objects(&svc.fos_bucket)["meta/cloud_dr_state.json"].clone();
+
+    // Seed 1,005 hex catalog objects ([0-9a-f] < 'm') so Page 1 of processed/_catalog/ has 0 manifests:
+    for idx in 0..1005u32 {
+        let hex_key = format!("processed/_catalog/{idx:064x}.json");
+        p_hex
+            .adapter
+            .seed_object_bytes(&svc.fos_bucket, &hex_key, b"{\"stub\":1}".to_vec());
+        MTIMES.with(|m| m.borrow_mut().insert(hex_key, 1_800_000_100));
+    }
+
+    // Run Delete Data (reset.rs writes service-scoped reverse-gen reset manifest at Gen 2):
+    p_hex.clock.store((base_day + 600) as u64, Ordering::SeqCst);
+    {
+        let dd_gen = p_hex.adapter.records()["svc:fixtureService"]
+            .generation
+            .clone();
+        let dd_start = p_hex.json(
+            "POST",
+            "/api/admin/services/fixtureService/delete-data",
+            json!({"confirm_service_id": "fixtureService", "generation": dd_gen}),
+        );
+        assert_eq!(dd_start["job"]["status"], "fencing");
+        p_hex.clock.fetch_add(
+            fastly_log_analytics::admin::reset::FENCE_WAIT_S + 5,
+            Ordering::SeqCst,
+        );
+        for _ in 0..25 {
+            let recs = p_hex.adapter.records();
+            if recs["svc:fixtureService"]
+                .value
+                .get("data_reset")
+                .is_none_or(Value::is_null)
+            {
+                break;
+            }
+            let cur_svc: Service =
+                serde_json::from_value(recs["svc:fixtureService"].value.clone()).unwrap();
+            let (ak_d, sk_d) =
+                fastly_log_analytics::admin::fos_credentials(&p_hex, &cur_svc).unwrap();
+            CALLS.with(|c| c.set(0));
+            SECRETS.with(|s| s.borrow_mut().clear());
+            ELAPSED_MS.with(|e| e.set(0));
+            let store_d = ingest::storage::Store {
+                runtime: &p_hex,
+                service: &cur_svc,
+                access_key: ak_d,
+                secret_key: sk_d,
+                started: std::time::Instant::now(),
+                vcpu_start: 0,
+            };
+            let Some(step_res) = fastly_log_analytics::admin::reset::advance(&store_d) else {
+                break;
+            };
+            step_res.unwrap();
+            p_hex.clock.fetch_add(450, Ordering::SeqCst);
+        }
+    }
+    let post_dd_objs = p_hex.adapter.bucket_objects(&svc.fos_bucket);
+    let post_dd_mtimes = MTIMES.with(|m| m.borrow().clone());
+
+    // 1A. Stale dr_state (Gen 1, 1010 rows, rum_stats=777) + 1,005 hex objects + Gen 2 reset manifest:
+    let p_stale = Platform::new();
+    p_stale.clock.store(p_hex.now() + 60, Ordering::SeqCst);
+    MTIMES.with(|m| *m.borrow_mut() = post_dd_mtimes.clone());
+    for (k, v) in &post_dd_objs {
+        p_stale
+            .adapter
+            .seed_object_bytes(&svc.fos_bucket, k, v.clone());
+    }
+    p_stale
+        .adapter
+        .seed_object_bytes(&svc.fos_bucket, "meta/cloud_dr_state.json", stale_dr_bytes);
+    let stale_rec = p_stale.json(
+        "POST",
+        "/api/admin/provision/recover",
+        json!({
+            "token": "fixture-token",
+            "service_id": "fixtureService",
+            "fos_bucket": "fos-fixture-logs",
+            "fos_region": "us-east-1"
+        }),
+    );
+    assert_eq!(stale_rec["ok"], true);
+    assert_eq!(
+        stale_rec["catalog_generation"], 2,
+        "BUG-CLOUD-DR-28A: stale dr_state with >1,000 hex objects missed Gen 2 reset manifest: {stale_rec}"
+    );
+    let stale_head =
+        catalog::head(&p_stale.adapter.records()[ingest::WATERMARK_KEY].value).unwrap();
+    assert_eq!(
+        stale_head.statistics.values().map(|s| s.rows).sum::<u64>(),
+        0,
+        "BUG-CLOUD-DR-28A: pre-reset rows resurrected!"
+    );
+    let rum_wm = &p_stale.adapter.records()[&ingest::watermark_key("rum")].value;
+    assert!(
+        rum_wm.get("rum_stats").is_none(),
+        "BUG-CLOUD-DR-28A: pre-reset rum_stats resurrected: {rum_wm}"
+    );
+
+    // 1B. Cold-start catalog_scan at remaining = 24 with 1,005 hex objects must achieve front_synced == true and Gen 2:
+    let p_cold24 = Platform::new();
+    p_cold24.clock.store(p_hex.now() + 60, Ordering::SeqCst);
+    p_cold24.adapter.seed_resource(
+        "fixtureService",
+        "snippet",
+        json!({"name": "flp-owner-fixtureApp", "type": "recv", "priority": "0", "content": "# flp-owner:fixtureApp:fixtureService"}),
+    );
+    MTIMES.with(|m| *m.borrow_mut() = post_dd_mtimes.clone());
+    for (k, v) in &post_dd_objs {
+        if k != "meta/cloud_dr_state.json" {
+            p_cold24
+                .adapter
+                .seed_object_bytes(&svc.fos_bucket, k, v.clone());
+        }
+    }
+    ELAPSED_MS.with(|e| e.set(0));
+    CALLS.with(|c| c.set(32 - 24));
+    SECRETS.with(|s| *s.borrow_mut() = BTreeSet::from(["front_key".into(), "session_key".into()]));
+    let cold24_resp = fastly_log_analytics::admin::handle(
+        &p_cold24,
+        "fixtureAdmin",
+        &fastly_log_analytics::http::Request {
+            method: "POST".into(),
+            path: "/api/admin/provision/recover".into(),
+            headers: BTreeMap::new(),
+            body: json!({
+                "token": "fixture-token",
+                "service_id": "fixtureService",
+                "fos_bucket": "fos-fixture-logs",
+                "fos_region": "us-east-1"
+            })
+            .to_string()
+            .into_bytes(),
+        },
+    );
+    assert_eq!(cold24_resp.status, 200);
+    let cold24_body: Value = serde_json::from_slice(&cold24_resp.body).unwrap();
+    assert_eq!(cold24_body["catalog_generation"], 2);
+    assert_eq!(cold24_body["front_synced"], true, "{cold24_body}");
+
+    // 2. >1,000 manifests (both service-scoped reverse-gen AND pre-Iter29 ascending manifest-{:020}-):
+    for use_legacy_keys in [false, true] {
+        let p_m1005 = Platform::new();
+        p_m1005.adapter.seed_resource(
+            "fixtureService",
+            "snippet",
+            json!({"name": "flp-owner-fixtureApp", "type": "recv", "priority": "0", "content": "# flp-owner:fixtureApp:fixtureService"}),
+        );
+        MTIMES.with(|m| m.borrow_mut().clear());
+        for g in 1..=1005u64 {
+            let is_reset = g == 1005;
+            let mut m_json = json!({
+                "version": VERSION,
+                "service_id": "fixtureService",
+                "generation": g,
+                "batch": if is_reset { "reset" } else { "ingest" },
+                "schema": "v2",
+                "committed_at": "2027-01-15T00:00:00Z",
+                "previous": null,
+                "files": [],
+                "summaries": [],
+                "sources": [],
+                "replaces": [],
+                "bytes": 0,
+                "rows": if is_reset { 0 } else { 1000 },
+                "parents": {},
+                "head_days": {},
+                "head_statistics": {},
+            });
+            if is_reset {
+                m_json["reset_generation"] = json!(1005);
+                m_json["reset_at"] = json!(base_day + 900);
+            }
+            let key = if use_legacy_keys {
+                format!("processed/_catalog/manifest-{g:020}-d{g:04}.json")
+            } else {
+                format!(
+                    "processed/_catalog/manifest-s-fixtureService-rev-{:020}-d{g:04}.json",
+                    u64::MAX - g
+                )
+            };
+            p_m1005.adapter.seed_object_bytes(
+                "fos-fixture-logs",
+                &key,
+                serde_json::to_vec(&m_json).unwrap(),
+            );
+            MTIMES.with(|m| m.borrow_mut().insert(key, 1_800_000_500));
+        }
+        let rec_1005 = p_m1005.json(
+            "POST",
+            "/api/admin/provision/recover",
+            json!({
+                "token": "fixture-token",
+                "service_id": "fixtureService",
+                "fos_bucket": "fos-fixture-logs",
+                "fos_region": "us-east-1"
+            }),
+        );
+        assert_eq!(
+            rec_1005["catalog_generation"], 1005,
+            "BUG-CLOUD-DR-28A (legacy={use_legacy_keys}): >1,000 manifests missed Gen 1005: {rec_1005}"
+        );
+    }
+
+    // 3. BUG-CLOUD-DR-28C: Shared bucket with 35 higher-generation foreign legacy manifests + foreign rev manifests
+    // must NOT starve own catalog manifest OR own Delete Data reset manifest:
+    let p_shared = Platform::new();
+    p_shared.clock.store(p_hex.now() + 60, Ordering::SeqCst);
+    p_shared.adapter.seed_resource(
+        "fixtureService",
+        "snippet",
+        json!({"name": "flp-owner-fixtureApp", "type": "recv", "priority": "0", "content": "# flp-owner:fixtureApp:fixtureService"}),
+    );
+    MTIMES.with(|m| *m.borrow_mut() = post_dd_mtimes);
+    for (k, v) in &post_dd_objs {
+        if k != "meta/cloud_dr_state.json" {
+            p_shared
+                .adapter
+                .seed_object_bytes(&svc.fos_bucket, k, v.clone());
+        }
+    }
+    for f in 1..=35u64 {
+        let f_gen = 900_000 + f;
+        let f_body = serde_json::to_vec(&json!({
+            "version": VERSION,
+            "service_id": "foreignService22Chars0",
+            "generation": f_gen,
+            "batch": "foreign",
+            "schema": "v2",
+            "committed_at": "2027-01-15T01:00:00Z",
+            "previous": null,
+            "files": [], "summaries": [], "sources": [], "replaces": [],
+            "bytes": 0, "rows": 9999, "parents": {}, "head_days": {}, "head_statistics": {}
+        }))
+        .unwrap();
+        let leg_f_key = format!("processed/_catalog/manifest-{f_gen:020}-foreign.json");
+        let rev_f_key = format!(
+            "processed/_catalog/manifest-s-foreignService22Chars0-rev-{:020}-foreign.json",
+            u64::MAX - f_gen
+        );
+        p_shared
+            .adapter
+            .seed_object_bytes(&svc.fos_bucket, &leg_f_key, f_body.clone());
+        p_shared
+            .adapter
+            .seed_object_bytes(&svc.fos_bucket, &rev_f_key, f_body);
+    }
+    let shared_rec = p_shared.json(
+        "POST",
+        "/api/admin/provision/recover",
+        json!({
+            "token": "fixture-token",
+            "service_id": "fixtureService",
+            "fos_bucket": "fos-fixture-logs",
+            "fos_region": "us-east-1"
+        }),
+    );
+    assert_eq!(shared_rec["ok"], true);
+    assert_eq!(
+        shared_rec["catalog_generation"], 2,
+        "BUG-CLOUD-DR-28C: foreign higher-gen manifests starved own reset manifest recovery: {shared_rec}"
+    );
+    assert_eq!(shared_rec["front_synced"], true);
+    let shared_head =
+        catalog::head(&p_shared.adapter.records()[ingest::WATERMARK_KEY].value).unwrap();
+    assert_eq!(
+        shared_head.statistics.values().map(|s| s.rows).sum::<u64>(),
+        0
+    );
+}
+
+#[test]
+fn bug_cloud_dr_28b_legacy_day_verifies_all_blocks_avoids_clobber_and_filters_retention() {
+    use fastly_log_analytics::ingest;
+
+    struct RichGuard;
+    impl Drop for RichGuard {
+        fn drop(&mut self) {
+            RICH_FOS.with(|r| r.set(false));
+            MTIMES.with(|m| m.borrow_mut().clear());
+        }
+    }
+    let _guard = RichGuard;
+    RICH_FOS.with(|r| r.set(true));
+    MTIMES.with(|m| m.borrow_mut().clear());
+
+    let active_day = 1_800_000_000i64 - (1_800_000_000i64 % 86_400);
+
+    // 1. Multi-hour spliced legacy unattributed Day (hour 0 = own Block, hour 1 = foreign Block) MUST be rejected:
+    let p_splice = Platform::new();
+    p_splice.adapter.seed_resource(
+        "fixtureService",
+        "snippet",
+        json!({"name": "flp-owner-fixtureApp", "type": "recv", "priority": "0", "content": "# flp-owner:fixtureApp:fixtureService"}),
+    );
+    let own_b =
+        "processed/_catalog/0000000000000000000000000000000000000000000000000000000000000001.json";
+    let for_b =
+        "processed/_catalog/0000000000000000000000000000000000000000000000000000000000000002.json";
+    let spliced_d =
+        "processed/_catalog/0000000000000000000000000000000000000000000000000000000000000003.json";
+    p_splice.adapter.seed_object_bytes(
+        "fos-fixture-logs",
+        own_b,
+        serde_json::to_vec(&json!({
+            "version": VERSION, "service_id": "fixtureService", "generation": 1,
+            "hour": active_day, "previous": null, "files": [], "summaries": [], "replaces": [], "committed_at": {}
+        }))
+        .unwrap(),
+    );
+    p_splice.adapter.seed_object_bytes(
+        "fos-fixture-logs",
+        for_b,
+        serde_json::to_vec(&json!({
+            "version": VERSION, "service_id": "foreignService22Chars0", "generation": 5,
+            "hour": active_day + 3600, "previous": null, "files": [], "summaries": [], "replaces": [], "committed_at": {}
+        }))
+        .unwrap(),
+    );
+    p_splice.adapter.seed_object_bytes(
+        "fos-fixture-logs",
+        spliced_d,
+        serde_json::to_vec(&Day {
+            version: VERSION,
+            service_id: None,
+            hours: BTreeMap::from([
+                (
+                    active_day,
+                    Reference {
+                        key: own_b.into(),
+                        generation: 1,
+                    },
+                ),
+                (
+                    active_day + 3600,
+                    Reference {
+                        key: for_b.into(),
+                        generation: 5,
+                    },
+                ),
+            ]),
+            statistics: Statistics {
+                earliest: Some(active_day),
+                latest: Some(active_day + 7199),
+                rows: 500,
+                ..Default::default()
+            },
+            ..Day::default()
+        })
+        .unwrap(),
+    );
+    let splice_rec = p_splice.json(
+        "POST",
+        "/api/admin/provision/recover",
+        json!({
+            "token": "fixture-token",
+            "service_id": "fixtureService",
+            "fos_bucket": "fos-fixture-logs",
+            "fos_region": "us-east-1"
+        }),
+    );
+    assert_eq!(
+        splice_rec["source"], "minimal",
+        "BUG-CLOUD-DR-28B: spliced multi-hour legacy Day with foreign block must be rejected: {splice_rec}"
+    );
+    assert!(splice_rec["catalog_generation"].is_null());
+
+    // 2. Same-day higher-gen foreign legacy Day must NOT clobber lower-gen own legacy Day,
+    // AND dr_state log_retention_days = 7 must filter expired legacy Days:
+    let p_clob = Platform::new();
+    let expired_day = active_day - 20 * 86_400;
+    let own_b2 =
+        "processed/_catalog/1000000000000000000000000000000000000000000000000000000000000001.json";
+    let exp_b2 =
+        "processed/_catalog/1000000000000000000000000000000000000000000000000000000000000002.json";
+    let for_b2 =
+        "processed/_catalog/1000000000000000000000000000000000000000000000000000000000000003.json";
+    let own_d2 =
+        "processed/_catalog/1000000000000000000000000000000000000000000000000000000000000004.json";
+    let exp_d2 =
+        "processed/_catalog/1000000000000000000000000000000000000000000000000000000000000005.json";
+    let for_d2 =
+        "processed/_catalog/1000000000000000000000000000000000000000000000000000000000000006.json";
+    for (k, sid_b, gen_b, hr) in [
+        (own_b2, "fixtureService", 2u64, active_day),
+        (exp_b2, "fixtureService", 1u64, expired_day),
+        (for_b2, "foreignService22Chars0", 9u64, active_day),
+    ] {
+        p_clob.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            k,
+            serde_json::to_vec(&json!({
+                "version": VERSION, "service_id": sid_b, "generation": gen_b,
+                "hour": hr, "previous": null, "files": [], "summaries": [], "replaces": [], "committed_at": {}
+            }))
+            .unwrap(),
+        );
+    }
+    for (dk, bk, gen_d, dts, rows_d) in [
+        (own_d2, own_b2, 2u64, active_day, 10u64),
+        (exp_d2, exp_b2, 1u64, expired_day, 99u64),
+        (for_d2, for_b2, 9u64, active_day, 5000u64),
+    ] {
+        p_clob.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            dk,
+            serde_json::to_vec(&Day {
+                version: VERSION,
+                service_id: None,
+                hours: BTreeMap::from([(
+                    dts,
+                    Reference {
+                        key: bk.into(),
+                        generation: gen_d,
+                    },
+                )]),
+                statistics: Statistics {
+                    earliest: Some(dts),
+                    latest: Some(dts + 3599),
+                    rows: rows_d,
+                    ..Default::default()
+                },
+                ..Day::default()
+            })
+            .unwrap(),
+        );
+    }
+    p_clob.adapter.seed_object_bytes(
+        "fos-fixture-logs",
+        "meta/cloud_dr_state.json",
+        serde_json::to_vec(&CloudDrState {
+            schema_version: SCHEMA_VERSION,
+            updated_at: active_day as u64 + 100,
+            service_id: "fixtureService".into(),
+            service: json!({"log_retention_days": 7}),
+            views: vec![],
+            catalog_head: None,
+            floor_key: None,
+            rum_stats: None,
+        })
+        .unwrap(),
+    );
+    ELAPSED_MS.with(|e| e.set(0));
+    CALLS.with(|c| c.set(0));
+    SECRETS.with(|s| {
+        *s.borrow_mut() =
+            std::collections::BTreeSet::from(["front_key".into(), "session_key".into()])
+    });
+    let clob_resp = fastly_log_analytics::admin::handle(
+        &p_clob,
+        "fixtureAdmin",
+        &fastly_log_analytics::http::Request {
+            method: "POST".into(),
+            path: "/api/admin/provision/recover".into(),
+            headers: BTreeMap::new(),
+            body: json!({
+                "token": "fixture-token",
+                "service_id": "fixtureService",
+                "fos_bucket": "fos-fixture-logs",
+                "fos_region": "us-east-1"
+            })
+            .to_string()
+            .into_bytes(),
+        },
+    );
+    assert_eq!(clob_resp.status, 200);
+    assert!(CALLS.with(std::cell::Cell::get) <= 32);
+    let clob_rec: Value = serde_json::from_slice(&clob_resp.body).unwrap();
+    assert_eq!(clob_rec["ok"], true);
+    assert!(
+        clob_rec["catalog_generation"].is_number(),
+        "BUG-CLOUD-DR-28B: p_clob failed to recover catalog_head: {clob_rec}"
+    );
+    let clob_head = catalog::head(&p_clob.adapter.records()[ingest::WATERMARK_KEY].value).unwrap();
+    assert_eq!(
+        clob_head.days.get(&active_day).map(String::as_str),
+        Some(own_d2),
+        "BUG-CLOUD-DR-28B: higher-gen foreign legacy Day clobbered own legacy Day: {:?}",
+        clob_head.days
+    );
+    assert!(
+        !clob_head.days.contains_key(&expired_day),
+        "expired legacy Day beyond log_retention_days=7 should be filtered: {:?}",
+        clob_head.days
+    );
+    assert_eq!(
+        clob_head.statistics.values().map(|s| s.rows).sum::<u64>(),
+        10
+    );
+}
+
+#[test]
+fn bug_cloud_outbox_dr_28d_recover_and_reprovision_preserve_audit_outbox_and_flush_continuity() {
+    use fastly_log_analytics::telemetry::{
+        flush::{log_flush, FlushStatus, FlushTarget},
+        schema::from_parquet,
+        LogKind, OperationalLogSettings,
+    };
+    use std::sync::atomic::Ordering;
+
+    for mode in ["recover", "reprovision"] {
+        let p = Platform::new();
+        let prov = p.provision();
+        p.drain(prov["job"].clone());
+
+        // Generate > SVC_OUTBOX_KEEP (50) service audit entries via PATCH:
+        for i in 1..=55u64 {
+            p.clock.store(1_800_000_000 + i, Ordering::SeqCst);
+            let g = p.service()["generation"].clone();
+            p.json(
+                "PATCH",
+                "/api/admin/services/fixtureService",
+                json!({"generation": g, "sample_rate": (i % 90) + 10}),
+            );
+        }
+
+        let svc_before: Service =
+            serde_json::from_value(p.adapter.records()["svc:fixtureService"].value.clone())
+                .unwrap();
+        let (ak, sk) = fastly_log_analytics::admin::fos_credentials(&p, &svc_before).unwrap();
+        let ops_prefix = "processed/ops/";
+        let target = FlushTarget {
+            region: &svc_before.fos_region,
+            bucket: &svc_before.fos_bucket,
+            access_key: &ak,
+            secret_key: &sk,
+            ops_prefix,
+        };
+        p.clock.store(1_800_000_200, Ordering::SeqCst);
+        CALLS.with(|c| c.set(0));
+        fastly_log_analytics::telemetry::append_outbox(
+            &p,
+            "fixtureService",
+            "f1",
+            "{\"kind\":\"cron_ticks\",\"row\":{\"timestamp\":1800000200000,\"outcome\":\"ok\",\"trigger\":\"cron\"}}\n",
+        )
+        .unwrap();
+        p.clock.store(1_800_001_200, Ordering::SeqCst);
+        CALLS.with(|c| c.set(0));
+        SECRETS.with(|s| s.borrow_mut().clear());
+        let rep1 = log_flush(
+            &p,
+            "fixtureService",
+            Some(&target),
+            &OperationalLogSettings::default(),
+            true,
+            std::time::Instant::now(),
+        )
+        .unwrap();
+        assert_eq!(rep1.status, FlushStatus::Committed);
+        let pre_base = p.adapter.records()["svc:fixtureService"].value["_audit_outbox_base"]
+            .as_u64()
+            .unwrap_or(0);
+        assert!(
+            pre_base > 0,
+            "trim_svc_outbox must have advanced _audit_outbox_base > 0"
+        );
+
+        // Teardown leaves 2+ unarchived teardown audit entries in svc:fixtureService:
+        let td_gen = p.service()["generation"].clone();
+        let td = p.json(
+            "POST",
+            "/api/admin/provision/teardown",
+            json!({
+                "service_id": "fixtureService",
+                "confirm_service_id": "fixtureService",
+                "generation": td_gen,
+                "remove_logging": false,
+                "remove_snippets": false,
+                "delete_fos_keys": false
+            }),
+        );
+        p.drain(td["job"].clone());
+
+        let count_audit_rows = |plat: &Platform| -> usize {
+            plat.adapter
+                .bucket_objects("fos-fixture-logs")
+                .into_iter()
+                .filter(|(k, _)| k.starts_with("processed/ops/admin_audit/"))
+                .map(|(_, bytes)| from_parquet(LogKind::AdminAudit, bytes).unwrap().len())
+                .sum()
+        };
+        let archived_before = count_audit_rows(&p);
+
+        p.clock.store(1_800_001_500, Ordering::SeqCst);
+        let td_job_id = td["job"]["id"].as_str().unwrap().to_owned();
+        let mut reprov_job_id = String::new();
+        if mode == "recover" {
+            let rec = p.json(
+                "POST",
+                "/api/admin/provision/recover",
+                json!({
+                    "token": "fixture-token",
+                    "service_id": "fixtureService",
+                    "fos_bucket": "fos-fixture-logs",
+                    "fos_region": "us-east-1"
+                }),
+            );
+            assert_eq!(rec["ok"], true);
+        } else {
+            let reprov = p.provision();
+            reprov_job_id = reprov["job"]["id"].as_str().unwrap().to_owned();
+            p.drain(reprov["job"].clone());
+        }
+
+        let post_svc = &p.adapter.records()["svc:fixtureService"].value;
+        assert!(
+            post_svc["_audit_outbox_base"].as_u64().unwrap_or(0) >= pre_base,
+            "BUG-CLOUD-OUTBOX-DR-28D ({mode}): _audit_outbox_base was wiped: {post_svc}"
+        );
+        let outbox_arr = post_svc["_audit_outbox"]
+            .as_array()
+            .expect("_audit_outbox array");
+        let outbox_events: Vec<&str> = outbox_arr
+            .iter()
+            .filter_map(|e| e["event"].as_str())
+            .collect();
+        assert!(
+            outbox_arr.iter().any(|e| {
+                e["event"].as_str() == Some("job.completed")
+                    && e["job_id"].as_str() == Some(td_job_id.as_str())
+            }),
+            "BUG-CLOUD-OUTBOX-DR-28D ({mode}): unarchived teardown audit entries were wiped: {outbox_arr:?}"
+        );
+        if mode == "recover" {
+            assert!(outbox_events.contains(&"service.recovered"));
+        } else {
+            assert!(
+                outbox_arr.iter().any(|e| {
+                    e["event"].as_str() == Some("job.started")
+                        && e["job_id"].as_str() == Some(reprov_job_id.as_str())
+                }),
+                "BUG-CLOUD-OUTBOX-DR-28D (reprovision): job.started provision entry missing: {outbox_arr:?}"
+            );
+        }
+
+        // Flush post-recovery/post-reprovision and confirm new audit rows ARE archived immediately (0 blackhole!):
+        p.clock.store(1_800_001_600, Ordering::SeqCst);
+        CALLS.with(|c| c.set(0));
+        fastly_log_analytics::telemetry::append_outbox(
+            &p,
+            "fixtureService",
+            "f2",
+            "{\"kind\":\"cron_ticks\",\"row\":{\"timestamp\":1800001600000,\"outcome\":\"ok\",\"trigger\":\"cron\"}}\n",
+        )
+        .unwrap();
+        p.clock.store(1_800_002_600, Ordering::SeqCst);
+        CALLS.with(|c| c.set(0));
+        SECRETS.with(|s| s.borrow_mut().clear());
+        let (ak2, sk2) = fastly_log_analytics::admin::fos_credentials(
+            &p,
+            &serde_json::from_value(p.adapter.records()["svc:fixtureService"].value.clone())
+                .unwrap(),
+        )
+        .unwrap();
+        let target2 = FlushTarget {
+            region: "us-east-1",
+            bucket: "fos-fixture-logs",
+            access_key: &ak2,
+            secret_key: &sk2,
+            ops_prefix,
+        };
+        let rep2 = log_flush(
+            &p,
+            "fixtureService",
+            Some(&target2),
+            &OperationalLogSettings::default(),
+            true,
+            std::time::Instant::now(),
+        )
+        .unwrap();
+        assert_eq!(rep2.status, FlushStatus::Committed);
+        let archived_after = count_audit_rows(&p);
+        assert!(
+            archived_after >= archived_before + 3,
+            "BUG-CLOUD-OUTBOX-DR-28D ({mode}): post-{mode} log_flush blackholed admin_audit rows ({archived_before} -> {archived_after})"
+        );
+    }
+
+    // Cold-start DR (no existing svc:fixtureService) must also populate _audit_outbox with service.recovered:
+    let p_cold = Platform::new();
+    p_cold.adapter.seed_resource(
+        "fixtureService",
+        "snippet",
+        json!({"name": "flp-owner-fixtureApp", "type": "recv", "priority": "0", "content": "# flp-owner:fixtureApp:fixtureService"}),
+    );
+    let cold_rec = p_cold.json(
+        "POST",
+        "/api/admin/provision/recover",
+        json!({
+            "token": "fixture-token",
+            "service_id": "fixtureService",
+            "fos_bucket": "fos-fixture-logs",
+            "fos_region": "us-east-1"
+        }),
+    );
+    assert_eq!(cold_rec["ok"], true);
+    let cold_outbox = p_cold.adapter.records()["svc:fixtureService"].value["_audit_outbox"]
+        .as_array()
+        .expect("cold DR _audit_outbox array")
+        .clone();
+    assert_eq!(cold_outbox.len(), 1);
+    assert_eq!(cold_outbox[0]["event"], "service.recovered");
+}
+
+#[test]
+fn bug_cloud_budget_28e_scorer_store_5xx_and_teardown_503_propagation() {
+    use fastly_log_analytics::{admin, http::Request};
+    use std::collections::BTreeSet;
+
+    // 1. Non-destructive teardown (remove_logging=false, remove_snippets=false) must propagate 503 backend_budget
+    // across budget = 1..=10 and 502 on upstream 502 from /enabled-products/v1/object_storage (never 400):
+    let p_td = Platform::new();
+    let prov = p_td.provision();
+    p_td.drain(prov["job"].clone());
+    let td_gen = p_td.service()["generation"].as_str().unwrap().to_owned();
+    for budget in 1..=8u32 {
+        ELAPSED_MS.with(|e| e.set(0));
+        CALLS.with(|c| c.set(32 - budget));
+        SECRETS
+            .with(|s| *s.borrow_mut() = BTreeSet::from(["front_key".into(), "session_key".into()]));
+        let resp = admin::handle(
+            &p_td,
+            "fixtureAdmin",
+            &Request {
+                method: "POST".into(),
+                path: "/api/admin/provision/teardown".into(),
+                headers: BTreeMap::new(),
+                body: json!({
+                    "service_id": "fixtureService",
+                    "confirm_service_id": "fixtureService",
+                    "generation": td_gen,
+                    "remove_logging": false,
+                    "remove_snippets": false,
+                    "delete_fos_keys": false
+                })
+                .to_string()
+                .into_bytes(),
+            },
+        );
+        assert!(
+            matches!(resp.status, 200 | 503),
+            "BUG-CLOUD-BUDGET-28A/28B: non-destructive teardown at budget={budget} returned {} instead of 200/503: {}",
+            resp.status,
+            String::from_utf8_lossy(&resp.body)
+        );
+        if resp.status == 200 {
+            break;
+        }
+    }
+
+    let p_td502 = Platform::new();
+    let prov2 = p_td502.provision();
+    p_td502.drain(prov2["job"].clone());
+    let td_gen2 = p_td502.service()["generation"].as_str().unwrap().to_owned();
+    for _ in 0..4 {
+        p_td502.api_faults.lock().unwrap().push(ApiFault {
+            method: "GET",
+            path: "/enabled-products/v1/object_storage",
+            name: None,
+            status: 502,
+            retry_after: None,
+        });
+    }
+    let resp502 = p_td502.call(
+        "POST",
+        "/api/admin/provision/teardown",
+        json!({
+            "service_id": "fixtureService",
+            "confirm_service_id": "fixtureService",
+            "generation": td_gen2,
+            "remove_logging": false,
+            "remove_snippets": false,
+            "delete_fos_keys": false
+        }),
+    );
+    assert_eq!(
+        resp502.status, 502,
+        "upstream 502 on /enabled-products/v1/object_storage in teardown must return 502, got {}: {}",
+        resp502.status,
+        String::from_utf8_lossy(&resp502.body)
+    );
+
+    // 2. Scorer store lookup 502 on GET /resources/stores/config and GET /resources/stores/kv must NOT create duplicate stores:
+    for fault_path in ["/resources/stores/config", "/resources/stores/kv"] {
+        let p_sc = Platform::new();
+        let prov_sc = p_sc.provision();
+        p_sc.drain(prov_sc["job"].clone());
+        let g = p_sc.service()["generation"].clone();
+        let en = p_sc.json(
+            "POST",
+            "/api/admin/services/fixtureService/scoring/enable",
+            json!({"generation": g}),
+        );
+        // Advance until `scorer_stores` so `scoring_service_id` is populated, then pre-seed existing stores:
+        let job = p_sc.until(en["job"].clone(), "scorer_stores");
+        assert_eq!(job["step"], "scorer_stores");
+        let scorer_sid = p_sc.adapter.records()["svc:fixtureService"].value["scoring"]
+            ["scoring_service_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let (_, orig_keys) = p_sc
+            .adapter
+            .api(fastly_log_analytics::admin::ApiRequest {
+                method: "POST",
+                path: "/resources/stores/config",
+                token: "fixture-token",
+                body: Some(json!({"name": format!("scoring_keys_{scorer_sid}")})),
+                timeout: std::time::Duration::from_secs(5),
+                query: "",
+            })
+            .unwrap();
+        let orig_keys_id = orig_keys["id"].as_str().unwrap().to_owned();
+        let (_, orig_cfg) = p_sc
+            .adapter
+            .api(fastly_log_analytics::admin::ApiRequest {
+                method: "POST",
+                path: "/resources/stores/config",
+                token: "fixture-token",
+                body: Some(json!({"name": format!("scoring_config_{scorer_sid}")})),
+                timeout: std::time::Duration::from_secs(5),
+                query: "",
+            })
+            .unwrap();
+        let orig_cfg_id = orig_cfg["id"].as_str().unwrap().to_owned();
+        let (_, orig_mat) = p_sc
+            .adapter
+            .api(fastly_log_analytics::admin::ApiRequest {
+                method: "POST",
+                path: "/resources/stores/kv",
+                token: "fixture-token",
+                body: Some(json!({"name": format!("scoring_matrix_{scorer_sid}")})),
+                timeout: std::time::Duration::from_secs(5),
+                query: "",
+            })
+            .unwrap();
+        let orig_mat_id = orig_mat["id"].as_str().unwrap().to_owned();
+
+        // Inject upstream 5xx (520 CDN/gateway error, which api_status returns directly as Ok((520, {})))
+        // on fault_path — before BUG-CLOUD-BUDGET-28E fix, scoring.rs treated non-2xx as an empty store list
+        // and created duplicate stores!
+        p_sc.api_faults.lock().unwrap().push(ApiFault {
+            method: "GET",
+            path: fault_path,
+            name: None,
+            status: 520,
+            retry_after: None,
+        });
+        let step_5xx = p_sc.json(
+            "POST",
+            &format!("/api/admin/jobs/{}/step", job["id"].as_str().unwrap()),
+            json!({}),
+        );
+        assert_eq!(
+            step_5xx["job"]["status"], "failed",
+            "BUG-CLOUD-BUDGET-28E: scorer_stores treated 520 on {fault_path} as empty store list and created duplicates: {step_5xx}"
+        );
+        assert_eq!(step_5xx["job"]["error"], "store_lookup_failed");
+        assert_eq!(step_5xx["job"]["step"], "scorer_stores");
+
+        // Once 5xx clears, retrying and advancing past `scorer_stores` must adopt the ORIGINAL stores (zero duplicates created!):
+        p_sc.api_faults.lock().unwrap().clear();
+        let resumed = p_sc.retry(&step_5xx["job"]);
+        p_sc.until(resumed, "scorer_store_keys");
+        let final_sc = &p_sc.adapter.records()["svc:fixtureService"].value["scoring"];
+        assert_eq!(
+            final_sc["scoring_keys_store_id"], orig_keys_id,
+            "BUG-CLOUD-BUDGET-28E ({fault_path}): orphaned original scoring_keys store!"
+        );
+        assert_eq!(final_sc["scoring_config_store_id"], orig_cfg_id);
+        assert_eq!(
+            final_sc["scoring_matrix_store_id"], orig_mat_id,
+            "BUG-CLOUD-BUDGET-28E ({fault_path}): orphaned original scoring_matrix store!"
+        );
+    }
+}
+
+#[test]
+fn bug_cloud_catalog_28f_paused_prepare_reserving_preserves_exact_pre_batch_parents() {
+    use fastly_log_analytics::ingest::{self, storage::Store};
+    use std::sync::atomic::Ordering;
+
+    let day1 = 1_795_132_800i64;
+    let day2 = day1 + 86_400;
+
+    let run_two_commits = |pause_gen2: bool| -> (Manifest, Head) {
+        let p = Platform::new();
+        let prov = p.provision();
+        p.drain(prov["job"].clone());
+        let svc: Service =
+            serde_json::from_value(p.adapter.records()["svc:fixtureService"].value.clone())
+                .unwrap();
+        let (ak, sk) = fastly_log_analytics::admin::fos_credentials(&p, &svc).unwrap();
+
+        // Commit Generation 1 across day1 and day2:
+        let g1_f1 = ingest::processed_key("processed/request/", day1 + 60, day1 + 120, "g1a", 5);
+        let g1_f2 = ingest::processed_key("processed/request/", day2 + 60, day2 + 120, "g1b", 5);
+        p.adapter
+            .seed_object_bytes(&svc.fos_bucket, &g1_f1, b"PAR1".to_vec());
+        p.adapter
+            .seed_object_bytes(&svc.fos_bucket, &g1_f2, b"PAR1".to_vec());
+        let g1_out = [
+            ingest::worker::Output {
+                key: g1_f1,
+                bytes: 64,
+                rows: 5,
+                ..Default::default()
+            },
+            ingest::worker::Output {
+                key: g1_f2,
+                bytes: 64,
+                rows: 5,
+                ..Default::default()
+            },
+        ];
+        p.clock.store((day2 + 180) as u64, Ordering::SeqCst);
+        CALLS.with(|c| c.set(0));
+        let store1 = Store {
+            runtime: &p,
+            service: &svc,
+            access_key: ak.clone(),
+            secret_key: sk.clone(),
+            started: std::time::Instant::now(),
+            vcpu_start: 0,
+        };
+        let wm1 = ingest::catalog::prepare_reserving(
+            &store1,
+            &Value::Null,
+            "gen1",
+            "v2",
+            &g1_out,
+            &[],
+            &[],
+            &[],
+            0,
+        )
+        .unwrap();
+        p.adapter.cas(ingest::WATERMARK_KEY, None, &wm1).unwrap();
+
+        // Commit Generation 2 touching the SAME hours on day1 and day2:
+        let g2_f1 = ingest::processed_key("processed/request/", day1 + 120, day1 + 180, "g2a", 7);
+        let g2_f2 = ingest::processed_key("processed/request/", day2 + 120, day2 + 180, "g2b", 9);
+        p.adapter
+            .seed_object_bytes(&svc.fos_bucket, &g2_f1, b"PAR1".to_vec());
+        p.adapter
+            .seed_object_bytes(&svc.fos_bucket, &g2_f2, b"PAR1".to_vec());
+        let g2_out = [
+            ingest::worker::Output {
+                key: g2_f1,
+                bytes: 64,
+                rows: 7,
+                ..Default::default()
+            },
+            ingest::worker::Output {
+                key: g2_f2,
+                bytes: 64,
+                rows: 9,
+                ..Default::default()
+            },
+        ];
+        p.clock.store((day2 + 300) as u64, Ordering::SeqCst);
+        let wm2 = if pause_gen2 {
+            // Allow Day 1 upload to succeed, then pause right before Day 2 / manifest upload:
+            let mut cur_wm: Option<Value> = None;
+            let mut pauses = 0u32;
+            for _ in 0..8u32 {
+                ELAPSED_MS.with(|e| e.set(0));
+                CALLS.with(|c| c.set(32 - 6));
+                let st = Store {
+                    runtime: &p,
+                    service: &svc,
+                    access_key: ak.clone(),
+                    secret_key: sk.clone(),
+                    started: std::time::Instant::now(),
+                    vcpu_start: 0,
+                };
+                match ingest::catalog::prepare_reserving(
+                    &st,
+                    &wm1,
+                    "gen2",
+                    "v2",
+                    &g2_out,
+                    &[],
+                    &[],
+                    &[],
+                    1,
+                ) {
+                    Ok(done) => {
+                        cur_wm = Some(done);
+                        break;
+                    }
+                    Err(e) => {
+                        assert_eq!(e, "catalog_prepare_pending");
+                        pauses += 1;
+                    }
+                }
+            }
+            assert!(
+                pauses >= 1,
+                "expected at least 1 pause across multi-day Gen 2 prepare"
+            );
+            cur_wm.expect("Gen 2 prepare must complete across ticks")
+        } else {
+            CALLS.with(|c| c.set(0));
+            let st = Store {
+                runtime: &p,
+                service: &svc,
+                access_key: ak,
+                secret_key: sk,
+                started: std::time::Instant::now(),
+                vcpu_start: 0,
+            };
+            ingest::catalog::prepare_reserving(&st, &wm1, "gen2", "v2", &g2_out, &[], &[], &[], 0)
+                .unwrap()
+        };
+        let h2 = catalog::head(&wm2).unwrap();
+        let m2_key = h2.manifest.as_ref().unwrap();
+        let m2: Manifest =
+            serde_json::from_slice(&p.adapter.bucket_objects(&svc.fos_bucket)[m2_key]).unwrap();
+        (m2, h2)
+    };
+
+    let (unpaused_m, unpaused_h) = run_two_commits(false);
+    let (paused_m, paused_h) = run_two_commits(true);
+    assert_eq!(paused_m.parents.len(), 2);
+    for (hr, parent_ref) in &paused_m.parents {
+        assert_eq!(
+            parent_ref.generation, 1,
+            "BUG-CLOUD-CATALOG-28F: hour {hr} self-parented to Generation {} instead of Generation 1!",
+            parent_ref.generation
+        );
+    }
+    assert_eq!(
+        serde_json::to_value(&paused_m).unwrap(),
+        serde_json::to_value(&unpaused_m).unwrap(),
+        "paused vs unpaused prepare_reserving must produce identical Manifest!"
+    );
+    assert_eq!(paused_h.days, unpaused_h.days);
+    assert_eq!(
+        serde_json::to_value(&paused_h.statistics).unwrap(),
+        serde_json::to_value(&unpaused_h.statistics).unwrap()
+    );
 }

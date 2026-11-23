@@ -768,9 +768,10 @@ fn put_reset_manifest<R: Runtime>(
     }
     let digest = hex::encode(Sha256::digest(&body));
     let key = format!(
-        "{}processed/_catalog/manifest-{:020}-{digest}.json",
+        "{}processed/_catalog/manifest-s-{}-rev-{:020}-{digest}.json",
         scope(store.service),
-        manifest.generation
+        manifest.service_id,
+        u64::MAX - manifest.generation
     );
     store.put_verified(&key, body)?;
     Ok(key)

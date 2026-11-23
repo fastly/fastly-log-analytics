@@ -378,7 +378,11 @@ pub(crate) fn put_manifest<R: Runtime>(
             );
         }
     }
-    let prefix_tag = format!("manifest-{:020}-", manifest.generation);
+    let prefix_tag = format!(
+        "manifest-s-{}-rev-{:020}-",
+        manifest.service_id,
+        u64::MAX - manifest.generation
+    );
     let (key, body) = encode_catalog_object(&scope(store.service), &prefix_tag, &val, limit)?;
     store.put_verified(&key, body)?;
     Ok(key)
@@ -410,6 +414,8 @@ struct Preparing {
     touched: u64,
     days: BTreeMap<i64, Day>,
     published: BTreeMap<i64, String>,
+    #[serde(default)]
+    published_statistics: BTreeMap<i64, Statistics>,
     manifest: Option<String>,
     #[serde(default)]
     proofs: BTreeMap<i64, Proof>,
@@ -512,6 +518,7 @@ pub fn prepare_reserving<R: Runtime>(
             touched: runtime.now(),
             days: BTreeMap::new(),
             published: BTreeMap::new(),
+            published_statistics: BTreeMap::new(),
             manifest: None,
             proofs: BTreeMap::new(),
             blocks: BTreeMap::new(),
@@ -832,7 +839,12 @@ pub fn prepare_reserving<R: Runtime>(
             computed_days.insert(*day, (index, day_key, day_body));
         } else {
             preview_days.insert(*day, work.published[day].clone());
-            preview_stats.insert(*day, index.statistics.clone());
+            let stats = work
+                .published_statistics
+                .get(day)
+                .cloned()
+                .unwrap_or_else(|| index.statistics.clone());
+            preview_stats.insert(*day, stats);
         }
     }
     for day in &days {
@@ -847,7 +859,7 @@ pub fn prepare_reserving<R: Runtime>(
             .ok_or("catalog_preparation_invalid")?;
         store.put_verified(&day_key, day_body)?;
         work.published.insert(*day, day_key);
-        work.days.insert(*day, index);
+        work.published_statistics.insert(*day, index.statistics);
     }
     if work.manifest.is_none() {
         if runtime.admin_remaining_calls() <= reserve + 1 || !admitted(store) {
@@ -864,8 +876,9 @@ pub fn prepare_reserving<R: Runtime>(
     }
     let key = work.manifest.clone().ok_or("catalog_preparation_invalid")?;
     for day in &days {
-        head.statistics
-            .insert(*day, work.days[day].statistics.clone());
+        if let Some(stats) = preview_stats.get(day) {
+            head.statistics.insert(*day, stats.clone());
+        }
     }
     head.days.extend(work.published);
     head.version = VERSION;

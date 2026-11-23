@@ -1443,3 +1443,68 @@ fn a_closed_outbox_bucket_is_due_once_the_interval_floor_passes_not_only_at_max_
     assert!(!check_due(&recent, &outbox, "svc", now, &settings, false).due);
     assert!(!check_due(&cursor, &[], "svc", now, &settings, false).due);
 }
+
+#[test]
+fn bug_cloud_outbox_dr_28d_reanchors_svc_outbox_cursor_after_external_kv_reset() {
+    let rt = Rt::new();
+    // Simulate a surviving logs:cursor:svc1 with svc_outbox_archived = 57 while svc:svc1 was reset to base = 0:
+    rt.put_kv(
+        &cursor_key(SID),
+        json!({
+            "scan_min": NOW_MIN - 2,
+            "cache_min": NOW_MIN - 2,
+            "svc_outbox_archived": 57,
+            "last_flush_s": NOW_S - 600,
+        }),
+    );
+    rt.put_kv(
+        "svc:svc1",
+        json!({
+            "service_id": SID,
+            "_audit_outbox": [
+                {"actor": "admin", "at": NOW_S - 20, "event": "service.recovered", "config_version": 1},
+                {"actor": "admin", "at": NOW_S - 10, "event": "service.updated", "config_version": 2},
+            ]
+        }),
+    );
+    rt.put_kv(
+        &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("r1")),
+        cron_line("tick1"),
+    );
+
+    rt.budget.set(rt.calls.get() + 32);
+    let first = run(&rt, false);
+    assert_eq!(first.status, FlushStatus::Committed);
+    assert_eq!(
+        string_rows(&rt, "admin_audit").len(),
+        2,
+        "BUG-CLOUD-OUTBOX-DR-28D: post-reset svc outbox entries must not be blackholed when cursor.svc_outbox_archived > base + len"
+    );
+    assert_eq!(
+        rt.cursor().svc_outbox_archived,
+        2,
+        "cursor.svc_outbox_archived must re-anchor to 2 so subsequent flushes neither duplicate nor blackhole"
+    );
+
+    // Append one more entry (len = 3) and confirm the next flush archives ONLY the 1 new entry (total = 3):
+    rt.put_kv(
+        "svc:svc1",
+        json!({
+            "service_id": SID,
+            "_audit_outbox": [
+                {"actor": "admin", "at": NOW_S - 20, "event": "service.recovered", "config_version": 1},
+                {"actor": "admin", "at": NOW_S - 10, "event": "service.updated", "config_version": 2},
+                {"actor": "admin", "at": NOW_S - 5, "event": "service.updated", "config_version": 3},
+            ]
+        }),
+    );
+    rt.put_kv(
+        &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 39, Some("r2")),
+        cron_line("tick2"),
+    );
+    rt.budget.set(rt.calls.get() + 32);
+    let second = run(&rt, true);
+    assert_eq!(second.status, FlushStatus::Committed);
+    assert_eq!(string_rows(&rt, "admin_audit").len(), 3);
+    assert_eq!(rt.cursor().svc_outbox_archived, 3);
+}

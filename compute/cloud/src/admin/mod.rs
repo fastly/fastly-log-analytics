@@ -1504,10 +1504,38 @@ fn provision(
     job.service_snapshot = Some(service.clone());
     context.cas(&format!("job:{}", job.id), None, &serialize(&job)?)?;
     let previous = context.get(&format!("svc:{}", input.service_id))?;
+    let mut svc_val = serialize_service(&service)?;
+    let prov_audit = json!({
+        "actor": actor,
+        "at": context.runtime.now(),
+        "event": "job.started",
+        "job_id": job.id,
+        "config_version": service.config_version,
+    });
+    svc_val["_audit"] = prov_audit.clone();
+    if let Some(ref prev_rec) = previous {
+        let mut outbox = prev_rec.value["_audit_outbox"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let mut base = prev_rec.value["_audit_outbox_base"].as_u64().unwrap_or(0);
+        outbox.push(prov_audit);
+        if outbox.len() > JOB_CHECKPOINT_OUTBOX_LIMIT {
+            let drop_n = outbox.len() - JOB_CHECKPOINT_OUTBOX_LIMIT;
+            outbox.drain(..drop_n);
+            base += drop_n as u64;
+        }
+        svc_val["_audit_outbox"] = Value::Array(outbox);
+        if base > 0 || prev_rec.value.get("_audit_outbox_base").is_some() {
+            svc_val["_audit_outbox_base"] = json!(base);
+        }
+    } else {
+        svc_val["_audit_outbox"] = json!([prov_audit]);
+    }
     context.cas(
         &format!("svc:{}", input.service_id),
         previous.as_ref().map(|r| r.generation.as_str()),
-        &serialize_service(&service)?,
+        &svc_val,
     )?;
     let record = context
         .get(&format!("svc:{}", input.service_id))?
@@ -1570,9 +1598,14 @@ fn teardown(
         if remote_svc["type"] != "vcl" {
             return Err(Error::new(400, "vcl_service_required"));
         }
-        context
-            .api("GET", "/enabled-products/v1/object_storage", &token, None)
-            .map_err(|_| Error::new(400, "object_storage_required"))?;
+        let (os_status, os_body) =
+            context.api_status("GET", "/enabled-products/v1/object_storage", &token, None)?;
+        if os_status >= 500 {
+            return Err(Error::new(502, "fastly_api_rejected"));
+        }
+        if !(200..300).contains(&os_status) || os_body["enabled"].as_bool() == Some(false) {
+            return Err(Error::new(400, "object_storage_required"));
+        }
         let (_, reservation) = install(context)?;
         if reservation.service_id.as_deref().is_some_and(|v| v != sid) {
             return Err(Error::new(409, "install_already_reserved"));

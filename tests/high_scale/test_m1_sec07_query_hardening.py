@@ -1105,3 +1105,288 @@ def test_bug_t5_iter27_02_and_03_console_col_lists_unsafe_fn_guard_and_derived_p
                 assert forb not in emitted, f"Unexpected {forb!r} in emitted SQL for {sql!r}:\n{emitted}"
     finally:
         ch_client.close()
+
+
+_REAL_CHDB_DUCKDB_PARITY_SCRIPT = r"""
+import json
+import os
+import tempfile
+from types import SimpleNamespace
+
+import chdb
+from chdb import session as chdb_session
+import duckdb
+
+from backend.high_scale import query as hs_query
+from backend.high_scale.postgres_control import console_access
+from backend.models.analytics import QueryRequest as DashboardQueryRequest
+
+with tempfile.TemporaryDirectory(prefix="fla_iter29_chdb_") as tmpdir:
+    sess = chdb_session.Session(tmpdir)
+    sess.query(
+        "CREATE TABLE high_scale_batch_publications ("
+        "service_id String, domain String, batch_id String, publication_state String"
+        ") ENGINE = ReplacingMergeTree() ORDER BY (service_id, domain, batch_id)"
+    )
+    sess.query(
+        "CREATE TABLE request_facts ("
+        "service_id String, batch_id String, publication_state String, "
+        "event_timestamp DateTime64(6, 'UTC'), line_ordinal UInt32, "
+        "url String, client_ip String, req_id String, response_size UInt64, "
+        "custom_fields Map(String, String)"
+        ") ENGINE = MergeTree() ORDER BY (service_id, event_timestamp, line_ordinal)"
+    )
+    sess.query("CREATE TABLE rum_vitals_facts (service_id String, batch_id String, publication_state String, event_timestamp DateTime64(6, 'UTC')) ENGINE = MergeTree() ORDER BY (service_id, event_timestamp)")
+    sess.query("CREATE TABLE rum_error_facts (service_id String, batch_id String, publication_state String, event_timestamp DateTime64(6, 'UTC')) ENGINE = MergeTree() ORDER BY (service_id, event_timestamp)")
+
+    sess.query(
+        "INSERT INTO high_scale_batch_publications VALUES "
+        "('svc_alpha', 'request', 'b1', 'visible'), "
+        "('svc_other', 'request', 'b2', 'visible')"
+    )
+    sess.query(
+        "INSERT INTO request_facts VALUES "
+        "('svc_alpha', 'b1', 'visible', '2026-11-19 00:10:00.000000', 1, '/alpha/hit', '198.51.100.10', 'req-1', 512, {'status': '200', 'edge': '1', 'pop': 'DEN'}), "
+        "('svc_alpha', 'b1', 'visible', '2026-11-19 00:15:00.000000', 2, '/alpha/miss', '198.51.100.11', 'req-2', 256, {'status': '404', 'edge': '0', 'pop': 'SJC'}), "
+        "('svc_other', 'b2', 'visible', '2026-11-19 00:10:00.000000', 1, '/foreign/leak', '198.51.100.99', 'req-f', 128, {'status': '200', 'edge': '1', 'pop': 'LAX'})"
+    )
+
+    desc_rows = json.loads(sess.query("DESCRIBE TABLE default.request_facts", "JSON").bytes())["data"]
+    cols = [(r["name"], r["type"]) for r in desc_rows if str(r.get("default_type") or "").upper() not in ("MATERIALIZED", "ALIAS")]
+    for masked in (False, True):
+        v_map = console_access.console_tables("svc_alpha", masked=masked)
+        v_sql = console_access._view_select("default", "request_facts", cols, "svc_alpha", masked=masked)
+        sess.query(f"CREATE VIEW `{v_map['request_facts']}` AS {v_sql}")
+
+    class _ChdbClient:
+        def execute(self, sql, settings=None, rewrite_cf=False):
+            s_parts = []
+            for k, v in (settings or {}).items():
+                val_esc = str(v).replace("\\", "\\\\").replace("'", "\\'")
+                s_parts.append(f"{k} = '{val_esc}'")
+            full_sql = f"{sql} SETTINGS {', '.join(s_parts)}" if s_parts else sql
+            raw = sess.query(full_sql, "JSON").bytes()
+            return json.loads(raw.decode("utf-8"))["data"] if raw else []
+
+    duck = duckdb.connect(":memory:")
+    duck.execute(
+        "CREATE TABLE logs (timestamp TIMESTAMPTZ, line_ordinal INT, url VARCHAR, ip VARCHAR, req_id VARCHAR, response_size BIGINT, status INT, edge BOOLEAN, pop VARCHAR)"
+    )
+    duck.execute(
+        "INSERT INTO logs VALUES "
+        "('2026-11-19T00:10:00Z', 1, '/alpha/hit', '198.51.100.10', 'req-1', 512, 200, true, 'DEN'), "
+        "('2026-11-19T00:15:00Z', 2, '/alpha/miss', '198.51.100.11', 'req-2', 256, 404, false, 'SJC')"
+    )
+
+    svc = SimpleNamespace(service_id="svc_alpha", client=_ChdbClient())
+    roles = [
+        ("admin", False, None),
+        ("raw_analyst", False, console_access.console_tables("svc_alpha", masked=False)),
+        ("masked_analyst", True, console_access.console_tables("svc_alpha", masked=True)),
+    ]
+    parity_queries = [
+        "WITH q AS (SELECT url, status FROM logs) SELECT t.u FROM q AS t(u, st) WHERE t.st = 200 ORDER BY t.u",
+        "WITH q AS (SELECT url, status FROM logs) SELECT t.u FROM q t(u, st) WHERE t.st = 200 ORDER BY t.u",
+        "WITH q AS (SELECT url, status FROM logs) SELECT t.u FROM logs l JOIN q AS t(u, st) ON l.url = t.u WHERE t.st = 200 ORDER BY t.u",
+        "WITH q AS (SELECT url, status FROM logs) SELECT t.u FROM logs l JOIN q t(u, st) ON l.url = t.u WHERE t.st = 200 ORDER BY t.u",
+        "WITH q1 AS (SELECT url, status AS x, edge AS flag FROM logs), q2 AS (SELECT url, pop, 200 AS x, true AS flag FROM logs) SELECT q1.url FROM q1 JOIN q2 ON q1.url = q2.url WHERE q1.x = 200 AND q2.x = 200 AND q1.flag = true AND q2.flag = true ORDER BY q1.url",
+        "SELECT q1.url FROM (SELECT url, status AS x, edge AS flag FROM logs) AS q1 JOIN (SELECT url, pop, 200 AS x, true AS flag FROM logs) AS q2 ON q1.url = q2.url WHERE q1.x = 200 AND q2.x = 200 AND q1.flag = true AND q2.flag = true ORDER BY q1.url",
+        "SELECT a.u FROM logs l JOIN (SELECT url FROM logs) AS a(u) ON l.url = a.u, (SELECT url, status FROM logs) AS b(u2, st2) WHERE a.u = b.u2 AND b.st2 = 200 ORDER BY a.u",
+    ]
+    for q_sql in parity_queries:
+        duck_rows = [list(r) for r in duck.execute(q_sql).fetchall()]
+        assert duck_rows == [["/alpha/hit"]], f"Unexpected duckdb baseline for {q_sql}: {duck_rows}"
+        for role_name, mask_ips, tbls in roles:
+            res = hs_query.query_endpoint(
+                svc,
+                DashboardQueryRequest(sql=q_sql, max_rows=10),
+                "2026-11-19T00:00:00Z",
+                "2026-11-19T01:00:00Z",
+                mask_ips=mask_ips,
+                tables=tbls,
+            )
+            ch_rows = [[row[col] for col in res["columns"]] for row in res["data"]]
+            assert ch_rows == duck_rows, f"Mismatch on {role_name} for {q_sql}: ch={ch_rows} vs duck={duck_rows}"
+    print("ITER29_CHDB_DUCKDB_PARITY_OK")
+"""
+
+
+@pytest.mark.security_regression
+def test_bug_t5_iter28_01_sec01_hs01_hs02_sql_console_allowlist_and_chdb_alias_parity() -> None:
+    """ITER28 remediation: function-allowlist parser-differential hardening and real chdb/duckdb CTE/derived alias parity."""
+    import os
+    import shutil
+    import site
+    import subprocess
+    from pathlib import Path
+
+    from backend.high_scale.postgres_control import console_access
+
+    # 1. Standalone comment-separated unsafe functions must fail directly in _reject_unsafe_functions (BUG-T5-ITER28-HS-02c):
+    for comment_sql in (
+        "SELECT * FROM file /* c */ ('etc/passwd', 'CSV')",
+        "SELECT * FROM url -- line\n('http://169.254.169.254/', 'CSV')",
+    ):
+        with pytest.raises(PermissionError):
+            hs_query._reject_unsafe_functions(comment_sql)
+
+    # 2. All Wave-28 allowlist bypasses (TRIM(FROM ...), FROM-first SELECT comma, [LEFT] ARRAY JOIN keyword confusion)
+    # must raise PermissionError in both _reject_unsafe_functions AND query_endpoint across Admin & Masked Analyst:
+    captured_queries: list[str] = []
+
+    def _ch_handler(req: httpx.Request) -> httpx.Response:
+        body_text = req.content.decode("utf-8", errors="replace")
+        if "SELECT 1" in body_text and "additional_table_filters" in str(req.url):
+            return httpx.Response(200, json={"data": [{"1": 1}]})
+        captured_queries.append(body_text)
+        return httpx.Response(200, json={"data": [{"u": "/alpha/hit", "url": "/alpha/hit"}]})
+
+    ch_client = ClickHouseClient(
+        svcconfig.ClickHouseConfig(host="localhost", port=8123, database="default", user="default", password=""),
+        transport=httpx.MockTransport(_ch_handler),
+    )
+    ch_client._enable_cf_rewrite_in_tests = True
+    ch_client._table_filters_verified = True  # type: ignore[attr-defined]
+    try:
+        svc = SimpleNamespace(service_id="svc_alpha", client=ch_client)
+        masked_tables = console_access.console_tables("svc_alpha", masked=True)
+
+        bypass_payloads = (
+            "SELECT trim(FROM CASE file(url) WHEN '' THEN 'a' ELSE 'b' END) AS x FROM logs",
+            "SELECT trim(FROM NOT sleepEachRow(line_ordinal)) AS x FROM logs",
+            "SELECT substring(url FROM CASE file(url) WHEN '' THEN 1 ELSE 2 END FOR 3) AS x FROM logs",
+            "SELECT * FROM (FROM logs SELECT 1 AS a, NOT sleepEachRow(line_ordinal) AS b)",
+            "SELECT * FROM (FROM logs SELECT 1 AS a, CASE file(url) WHEN '' THEN 'x' ELSE 'y' END AS b)",
+            "WITH case AS (SELECT 1 FROM logs), p AS (SELECT 0.05 AS s FROM logs) SELECT x FROM p ARRAY JOIN case sleepEachRow(s) WHEN 99 THEN [0] ELSE [1] END AS x",
+            "WITH case AS (SELECT 1 FROM logs), p AS (SELECT 'secret.txt' AS fp FROM logs) SELECT x FROM p ARRAY JOIN case file(fp, NULL) WHEN 'x' THEN ['a'] ELSE ['b'] END AS x",
+            "WITH case AS (SELECT 1 FROM logs), p AS (SELECT 0.05 AS s FROM logs) SELECT x FROM p LEFT ARRAY JOIN [1] AS y, case sleepEachRow(s) WHEN 99 THEN [0] ELSE [1] END AS x",
+        )
+        for atk_sql in bypass_payloads:
+            with pytest.raises(PermissionError):
+                hs_query._reject_unsafe_functions(atk_sql)
+            for mask_ips, tbls in ((False, None), (True, masked_tables)):
+                captured_queries.clear()
+                with pytest.raises(PermissionError):
+                    hs_query.query_endpoint(
+                        svc,
+                        DashboardQueryRequest(sql=atk_sql, max_rows=10),
+                        "2026-11-19T00:00:00Z",
+                        "2026-11-19T01:00:00Z",
+                        mask_ips=mask_ips,
+                        tables=tbls,
+                    )
+                assert captured_queries == []
+
+        # 3. Structural emitted-SQL checks for CTE/table column-list wrapping, shadowed qualifier schemas, and comma-joins:
+        for wrap_sql in (
+            "WITH q AS (SELECT url, status FROM logs) SELECT t.u FROM q AS t(u, st) WHERE t.st = 200 ORDER BY t.u",
+            "WITH q AS (SELECT url, status FROM logs) SELECT t.u FROM q t(u, st) WHERE t.st = 200 ORDER BY t.u",
+            "WITH q AS (SELECT url, status FROM logs) SELECT t.u FROM logs l JOIN q AS t(u, st) ON l.url = t.u WHERE t.st = 200 ORDER BY t.u",
+            "WITH q AS (SELECT url, status FROM logs) SELECT t.u FROM logs l JOIN q t(u, st) ON l.url = t.u WHERE t.st = 200 ORDER BY t.u",
+        ):
+            captured_queries.clear()
+            hs_query.query_endpoint(
+                svc,
+                DashboardQueryRequest(sql=wrap_sql, max_rows=10),
+                "2026-11-19T00:00:00Z",
+                "2026-11-19T01:00:00Z",
+                mask_ips=False,
+                tables=None,
+            )
+            assert "(SELECT * FROM q) AS t(u, st)" in captured_queries[0]
+            assert "t.st = '200'" in captured_queries[0]
+
+        shadow_sql = (
+            "WITH q1 AS (SELECT url, status AS x, edge AS flag FROM logs), "
+            "q2 AS (SELECT url, pop, 200 AS x, true AS flag FROM logs) "
+            "SELECT q1.url FROM q1 JOIN q2 ON q1.url = q2.url "
+            "WHERE q1.x = 200 AND q2.x = 200 AND q1.flag = true AND q2.flag = true ORDER BY q1.url"
+        )
+        captured_queries.clear()
+        hs_query.query_endpoint(
+            svc,
+            DashboardQueryRequest(sql=shadow_sql, max_rows=10),
+            "2026-11-19T00:00:00Z",
+            "2026-11-19T01:00:00Z",
+            mask_ips=False,
+            tables=None,
+        )
+        emitted_shadow = captured_queries[0]
+        assert "q1.x = '200'" in emitted_shadow
+        assert "q2.x = 200" in emitted_shadow
+        assert "lower(q1.flag) IN ('true', '1')" in emitted_shadow
+        assert "lower(q2.flag)" not in emitted_shadow
+
+        comma_join_sql = (
+            "SELECT a.u FROM logs l JOIN (SELECT url FROM logs) AS a(u) ON l.url = a.u, "
+            "(SELECT url, status FROM logs) AS b(u2, st2) WHERE a.u = b.u2 AND b.st2 = 200 ORDER BY a.u"
+        )
+        captured_queries.clear()
+        hs_query.query_endpoint(
+            svc,
+            DashboardQueryRequest(sql=comma_join_sql, max_rows=10),
+            "2026-11-19T00:00:00Z",
+            "2026-11-19T01:00:00Z",
+            mask_ips=False,
+            tables=None,
+        )
+        assert "b.st2 = '200'" in captured_queries[0]
+    finally:
+        ch_client.close()
+
+    # 4. Real chdb + duckdb end-to-end differential execution (in-process if installed, else offline uv cache):
+    repo_root = str(Path(hs_query.__file__).resolve().parents[2])
+    try:
+        import chdb as _chdb  # noqa: F401
+        import duckdb as _duckdb  # noqa: F401
+
+        exec(_REAL_CHDB_DUCKDB_PARITY_SCRIPT, {})
+    except ImportError:
+        uv_bin = shutil.which("uv")
+        if uv_bin is not None:
+            py_paths = [repo_root, *site.getsitepackages()]
+            env = {k: v for k, v in os.environ.items() if k != "VIRTUAL_ENV"}
+            env["PYTHONPATH"] = os.pathsep.join(py_paths)
+            probe = subprocess.run(
+                [
+                    uv_bin,
+                    "run",
+                    "--offline",
+                    "--no-project",
+                    "--with",
+                    "chdb",
+                    "--with",
+                    "duckdb",
+                    "python",
+                    "-c",
+                    "import chdb, duckdb",
+                ],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            if probe.returncode == 0:
+                run_res = subprocess.run(
+                    [
+                        uv_bin,
+                        "run",
+                        "--offline",
+                        "--no-project",
+                        "--with",
+                        "chdb",
+                        "--with",
+                        "duckdb",
+                        "python",
+                        "-c",
+                        _REAL_CHDB_DUCKDB_PARITY_SCRIPT,
+                    ],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                )
+                assert run_res.returncode == 0, (
+                    f"Real chdb/duckdb parity failed:\nSTDOUT:\n{run_res.stdout}\nSTDERR:\n{run_res.stderr}"
+                )
+                assert "ITER29_CHDB_DUCKDB_PARITY_OK" in run_res.stdout
