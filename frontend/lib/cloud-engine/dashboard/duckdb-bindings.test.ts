@@ -1,7 +1,9 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from "vitest";
+import { parquetMetadata, type SchemaElement } from "hyparquet";
 import { parquetWriteBuffer } from "hyparquet-writer";
 import { createNodeBackend, DuckDBAnalyticalEngine, FIELD_DUCKDB_TYPES } from "./duckdb";
+import { parquetQuerySchema } from "./parquet-projection";
 import { parquetFixture } from "./test-fixtures";
 import { Aggregator } from "./engine";
 import { CARD_FIELDS } from "./summaries";
@@ -562,6 +564,87 @@ describe("bounded complete Parquet bindings", () => {
       "SELECT current_setting('parquet_metadata_cache') AS on",
     );
     expect(setting.on).toBe(true);
+    await engine.reset();
+  });
+
+  it("takes each file's schema from its footer instead of describing it, with the same results", async () => {
+    const statements: string[] = [];
+    const engine = new DuckDBAnalyticalEngine({ backendFactory: async () => {
+      const backend = await createNodeBackend();
+      return { ...backend, query: (sql, signal) => { statements.push(sql); return backend.query(sql, signal); } };
+    } });
+    const t = 1700000000000;
+    // Live compacts store timestamp as a logical UTC millisecond TIMESTAMP.
+    const liveLike = (offset: number, withEdge = true) => {
+      const rows = Array.from({ length: 30 }, (_, i) => ({
+        timestamp: new Date(t + (offset + i) * 1000),
+        status: i % 4 === 0 ? 503 : 200,
+        cache: i % 3 === 0 ? "MISS" : "HIT",
+        resp_bytes: BigInt(i),
+        host: i % 5 === 0 ? null : `h${(i + offset) % 3}`,
+        edge: i % 2 === 0,
+      }));
+      const columns = [
+        ["timestamp", { type: "INT64", logical_type: { type: "TIMESTAMP", isAdjustedToUTC: true, unit: "MILLIS" } }],
+        ["status", { type: "INT32" }],
+        ["cache", { type: "BYTE_ARRAY", logical_type: { type: "STRING" } }],
+        ["resp_bytes", { type: "INT64" }],
+        ["host", { type: "BYTE_ARRAY", logical_type: { type: "STRING" } }],
+        ...(withEdge ? [["edge", { type: "BOOLEAN" }]] : []),
+      ] as [keyof (typeof rows)[number], object][];
+      const bytes = parquetWriteBuffer({
+        schema: [
+          { name: "root", num_children: columns.length },
+          ...columns.map(([name, type]) => ({ name, repetition_type: "OPTIONAL", ...type })),
+        ] as SchemaElement[],
+        columnData: columns.map(([name]) => ({ name, data: rows.map((row) => row[name]) })),
+      });
+      return { bytes, schema: parquetQuerySchema(parquetMetadata(bytes).schema)! };
+    };
+    const files = [liveLike(0), liveLike(30), liveLike(60, false)];
+    expect(files.every((file) => file.schema)).toBe(true);
+    const fields = ["status", "cache", "host"];
+    const filters = [{ mode: "include" as const, field: "status", value: "200" }];
+    const options = { edgeOnly: true, topK: null };
+    const described = (sql: string) => /DESCRIBE|parquet_schema/i.test(sql);
+    await engine.prewarm();
+
+    const single = async (schema?: typeof files[number]["schema"]) => {
+      const aggregator = new Aggregator(t, t + 120_000, fields);
+      statements.length = 0;
+      await engine.queryParquetIntoAggregator(
+        { kind: "buffer", bytes: files[0].bytes, schema }, t, t + 120_000, filters, aggregator, options,
+      );
+      return { result: aggregator.result(), statements: [...statements] };
+    };
+    const describedSingle = await single();
+    const footerSingle = await single(files[0].schema);
+    expect(describedSingle.statements.filter(described)).toHaveLength(1);
+    expect(footerSingle.statements.filter(described)).toEqual([]);
+    expect(footerSingle.statements).toHaveLength(1 + Math.ceil(fields.length / 6));
+    expect(footerSingle.result).toEqual(describedSingle.result);
+    expect(footerSingle.result.totalRequests).toBe(7);
+
+    const perFile = async (withSchema: boolean) => {
+      const targets = files.map(() => new Aggregator(t, t + 120_000, fields));
+      statements.length = 0;
+      await engine.queryParquetPerFile(
+        files.map((file, i) => ({
+          access: { kind: "buffer" as const, bytes: file.bytes, ...(withSchema ? { schema: file.schema } : {}) },
+          target: targets[i], fromMs: t, toMs: t + 120_000,
+        })),
+        filters,
+        options,
+      );
+      return { results: targets.map((target) => target.result()), statements: [...statements] };
+    };
+    const describedFiles = await perFile(false);
+    const footerFiles = await perFile(true);
+    expect(describedFiles.statements.filter(described)).toHaveLength(3);
+    expect(footerFiles.statements.filter(described)).toEqual([]);
+    expect(footerFiles.statements.length).toBe(describedFiles.statements.length - 3);
+    expect(footerFiles.results).toEqual(describedFiles.results);
+    expect(footerFiles.results.map((result) => result.totalRequests)).toEqual([7, 7, 22]);
     await engine.reset();
   });
 

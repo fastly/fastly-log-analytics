@@ -25,6 +25,7 @@ import {
 import type { FilteredFileResult } from "./filtered-cache";
 import { Hll } from "./hll";
 import { readColumns } from "./parquet";
+import type { ParquetQuerySchema } from "./parquet-projection";
 import { dashboardScanColumns, projectedReader } from "./projected-read";
 import {
   CARD_FIELDS,
@@ -2362,7 +2363,7 @@ async function collectAggregator(
         const held = projected ? projected.bytes : file.size;
         await acquireWhole(held);
         wholeBytes = held;
-        let whole: { bytes: ArrayBuffer; cached: boolean; downloaded?: number };
+        let whole: { bytes: ArrayBuffer; cached: boolean; downloaded?: number; schema?: ParquetQuerySchema | null };
         try {
           assertActive();
           whole = projected
@@ -2381,7 +2382,7 @@ async function collectAggregator(
           stats.bytes += whole.downloaded ?? whole.bytes.byteLength;
           progress.downloadedBytes += whole.downloaded ?? whole.bytes.byteLength;
         }
-        access = { kind: "buffer", bytes: whole.bytes, cached: whole.cached };
+        access = { kind: "buffer", bytes: whole.bytes, cached: whole.cached, schema: whole.schema };
       }
       let released = false;
       try {

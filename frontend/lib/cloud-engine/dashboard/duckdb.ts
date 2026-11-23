@@ -9,6 +9,7 @@ import type {
 } from "./engine";
 import { numericFilterValue, type DashboardFilter } from "./filters";
 import { fetchManifest, filesOverlapping, type ManifestFile } from "./manifest";
+import type { ParquetQuerySchema } from "./parquet-projection";
 import { CARD_FIELDS, type CustomField } from "./summaries";
 import {
   boundedDuckDBCleanup,
@@ -256,7 +257,12 @@ export type ParquetAccess = (
       fallbackUrl?: string;
       onPersistenceError?: (error: unknown) => Promise<void>;
     }
-  | { kind: "buffer"; bytes: ArrayBuffer }
+  | {
+      kind: "buffer";
+      bytes: ArrayBuffer;
+      /** The file's schema from its footer; without one the read describes the file. */
+      schema?: ParquetQuerySchema | null;
+    }
 ) & {
   cached?: boolean;
   release?: () => void;
@@ -1000,7 +1006,7 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
           backend,
           relation,
           selectiveWhere(group, filters, options, customTypes),
-          group.typeByCol.has("resp_bytes"),
+          group.columns.has("resp_bytes"),
           customTypes,
           aggregator,
           options,
@@ -1055,7 +1061,7 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
             backend,
             relation,
             selectiveWhere(group, filters, options, customTypes),
-            group.typeByCol.has("resp_bytes"),
+            group.columns.has("resp_bytes"),
             customTypes,
             targets,
             options,
@@ -1095,8 +1101,9 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
           registered.push(name);
           signal?.throwIfAborted();
         }
-        const groups: ParquetGroup[] = [];
-        for (const names of await parquetSchemaGroups(backend, registered, signal)) {
+        const footerGroups = footerSchemaGroups(accesses, registered);
+        const groups: ParquetGroup[] = footerGroups ?? [];
+        for (const names of footerGroups ? [] : await parquetSchemaGroups(backend, registered, signal)) {
           const schema = await backend.query(
             `DESCRIBE SELECT * FROM read_parquet([${names.map(sqlString).join(", ")}])`,
             signal,
@@ -1105,12 +1112,9 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
             (schema.getChild("column_name")?.toJSON() as string[]) ?? [];
           const types =
             (schema.getChild("column_type")?.toJSON() as string[]) ?? [];
-          const typeByCol = new Map(
-            columnNames.map((field, i) => [field, types[i].toUpperCase()]),
-          );
-          const tsType = typeByCol.get("timestamp");
+          const tsType = types[columnNames.indexOf("timestamp")]?.toUpperCase();
           if (!tsType) throw new Error("Parquet file has no timestamp column");
-          groups.push({ names, typeByCol, tsType });
+          groups.push({ names, columns: new Set(columnNames), tsType });
         }
         await run(backend, groups, registered);
       } catch (error) {
@@ -1515,7 +1519,7 @@ export type PerFileQuery = {
 
 type ParquetGroup = {
   names: string[];
-  typeByCol: Map<string, string>;
+  columns: ReadonlySet<string>;
   tsType: string;
 };
 
@@ -1629,7 +1633,7 @@ function parquetRelation(
   fields: readonly string[],
   customTypes: CustomTypes,
 ): string {
-  const { typeByCol, tsType } = group;
+  const { tsType } = group;
   const tsExpr = tsType.startsWith("TIMESTAMP")
     ? `epoch_ms("timestamp")::BIGINT`
     : tsType.includes("CHAR")
@@ -1642,7 +1646,7 @@ function parquetRelation(
     const col = sqlIdent(field);
     const cast = `CAST(${col} AS ${type})`;
     return [
-      !typeByCol.has(field)
+      !group.columns.has(field)
         ? `NULL::${type} AS ${col}`
         : type === "DOUBLE"
           ? `CASE WHEN isnan(${cast}) THEN NULL ELSE ${cast} END AS ${col}`
@@ -1716,7 +1720,7 @@ function selectiveWhere(
 ): string {
   return [
     "ts_ms IS NOT NULL",
-    `(${compileFiltersToSql(filters, Boolean(options.edgeOnly && group.typeByCol.has("edge")), [], customTypes)})`,
+    `(${compileFiltersToSql(filters, Boolean(options.edgeOnly && group.columns.has("edge")), [], customTypes)})`,
   ].join(" AND ");
 }
 
@@ -1727,6 +1731,22 @@ function isParquetAccessList(
 }
 
 /** Groups registered Parquet files whose schemas match exactly, in input order. */
+/**
+ * Groups the files by the schemas their footers settled, or null when any
+ * file's schema is unknown and the read must describe them.
+ */
+function footerSchemaGroups(accesses: readonly ParquetAccess[], names: readonly string[]): ParquetGroup[] | null {
+  const groups = new Map<string, ParquetGroup>();
+  for (const [i, access] of accesses.entries()) {
+    const schema = access.kind === "buffer" ? access.schema : null;
+    if (!schema) return null;
+    const group = groups.get(schema.signature);
+    if (group) group.names.push(names[i]);
+    else groups.set(schema.signature, { names: [names[i]], columns: new Set(schema.columns), tsType: schema.timestampType });
+  }
+  return [...groups.values()];
+}
+
 async function parquetSchemaGroups(
   backend: DuckDBBackend,
   names: readonly string[],

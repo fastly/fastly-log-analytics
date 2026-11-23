@@ -216,19 +216,12 @@ export async function fetchProjectedRanges(plan: ParquetProjection, fetchRange: 
   }));
 }
 
-/**
- * A standalone Parquet file holding only the planned column chunks, byte for
- * byte, under a footer rewritten for their new offsets, with the planned row
- * groups and the original key-value metadata. Statistics, page indexes and
- * bloom filters are dropped because they point into the original.
- */
-export function assembleProjectedParquet(plan: ParquetProjection, rangeBytes: readonly ArrayBuffer[]): ArrayBuffer {
-  if (rangeBytes.length !== plan.ranges.length) throw new Error("Projected Parquet ranges are incomplete");
+/** The schema of the file `assembleProjectedParquet` builds from this plan. */
+export function projectedSchema(plan: ParquetProjection): SchemaElement[] {
   const { metadata } = plan.footer;
-  const fields = topLevel(metadata.schema);
   const schema: SchemaElement[] = [{ ...metadata.schema[0], num_children: 0 }];
   let index = 1;
-  for (const field of fields) {
+  for (const field of topLevel(metadata.schema)) {
     const subtree = [] as SchemaElement[];
     const take = (): void => {
       const element = metadata.schema[index++];
@@ -240,6 +233,63 @@ export function assembleProjectedParquet(plan: ParquetProjection, rangeBytes: re
     schema.push(...subtree);
     schema[0].num_children!++;
   }
+  return schema;
+}
+
+/** What a dashboard query needs to know of a Parquet file's DuckDB schema. */
+export type ParquetQuerySchema = {
+  /** Top-level column names, in file order. */
+  columns: string[];
+  /** DuckDB's type for the `timestamp` column. */
+  timestampType: string;
+  /** Equal for files DuckDB reads with the same schema. */
+  signature: string;
+};
+
+/**
+ * The query schema DuckDB would DESCRIBE for a file with this footer schema, or
+ * null when the footer alone doesn't settle `timestamp`'s DuckDB type: only a
+ * millisecond or microsecond INT64 with a logical TIMESTAMP type does.
+ */
+export function parquetQuerySchema(schema: readonly SchemaElement[]): ParquetQuerySchema | null {
+  const fields = topLevel(schema);
+  let index = 1;
+  let timestamp: SchemaElement | undefined;
+  for (const field of fields) {
+    if (field.name === "timestamp") timestamp = schema[index];
+    index += countElements(schema, index);
+  }
+  const logical = timestamp?.logical_type;
+  if (timestamp?.type !== "INT64" || logical?.type !== "TIMESTAMP" || timestamp.num_children
+    || (logical.unit !== "MILLIS" && logical.unit !== "MICROS")) return null;
+  const signature = JSON.stringify(schema.slice(1).map((element) => [
+    element.name, element.type ?? null, element.type_length ?? null, element.repetition_type ?? null,
+    element.converted_type ?? null, element.scale ?? null, element.precision ?? null,
+    element.logical_type ?? null, element.num_children ?? null,
+  ]));
+  return {
+    columns: fields.map((field) => field.name),
+    timestampType: logical.isAdjustedToUTC ? "TIMESTAMP WITH TIME ZONE" : "TIMESTAMP",
+    signature,
+  };
+}
+
+function countElements(schema: readonly SchemaElement[], at: number): number {
+  let count = 1;
+  for (let i = 0; i < (schema[at]?.num_children ?? 0); i++) count += countElements(schema, at + count);
+  return count;
+}
+
+/**
+ * A standalone Parquet file holding only the planned column chunks, byte for
+ * byte, under a footer rewritten for their new offsets, with the planned row
+ * groups and the original key-value metadata. Statistics, page indexes and
+ * bloom filters are dropped because they point into the original.
+ */
+export function assembleProjectedParquet(plan: ParquetProjection, rangeBytes: readonly ArrayBuffer[]): ArrayBuffer {
+  if (rangeBytes.length !== plan.ranges.length) throw new Error("Projected Parquet ranges are incomplete");
+  const { metadata } = plan.footer;
+  const schema = projectedSchema(plan);
   const writer = new ByteWriter();
   writer.appendUint32(MAGIC);
   const byGroup = new Map<number, Chunk[]>();

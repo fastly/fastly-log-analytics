@@ -1,10 +1,10 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
-import { parquetMetadata } from "hyparquet";
+import { parquetMetadata, type SchemaElement } from "hyparquet";
 import { parquetWriteBuffer } from "hyparquet-writer";
 import { createNodeBackend } from "./duckdb";
 import {
-  assembleProjectedParquet, fetchProjectedRanges, FOOTER_PROBE_BYTES, planParquetProjection, readParquetFooter,
+  assembleProjectedParquet, fetchProjectedRanges, FOOTER_PROBE_BYTES, parquetQuerySchema, planParquetProjection, readParquetFooter,
   RANGE_MERGE_GAP, RANGE_REQUEST_COST_BYTES,
 } from "./parquet-projection";
 import { projectedReader } from "./projected-read";
@@ -303,5 +303,71 @@ describe("whole-file reads of small finished-hour files", () => {
     await (await read(entry(bytes, Date.now() + 60_000))).read();
     expect(calls.files).toBe(0);
     expect(calls.ranges).toBeGreaterThan(1);
+  });
+});
+
+describe("query schemas from footers", () => {
+  const typed = (timestamp: Record<string, unknown>, n = 1) => parquetWriteBuffer({
+    rowGroupSize: 100,
+    schema: [
+      { name: "root", num_children: 3 },
+      { name: "timestamp", repetition_type: "OPTIONAL", ...timestamp },
+      { name: "status", type: "INT32", repetition_type: "OPTIONAL" },
+      { name: "wide", type: "BYTE_ARRAY", repetition_type: "OPTIONAL", logical_type: { type: "STRING" } },
+    ] as SchemaElement[],
+    columnData: [
+      { name: "timestamp", data: Array.from({ length: n }, (_, i) => timestamp.type === "BYTE_ARRAY" ? `t${i}`
+        : timestamp.logical_type ? new Date(1700000000000 + i * 1000) : BigInt(1700000000000 + i * 1000)) },
+      { name: "status", data: Array.from({ length: n }, (_, i) => (i % 5 ? 200 : 503)) },
+      { name: "wide", data: Array.from({ length: n }, () => noise(300)) },
+    ],
+  });
+  const describeFile = async (bytes: ArrayBuffer) =>
+    (await query({ "f.parquet": bytes }, "DESCRIBE SELECT * FROM read_parquet('f.parquet')"))
+      .map((row) => [row.column_name, row.column_type]);
+
+  it("names DuckDB's timestamp type when the footer settles it, and nothing otherwise", async () => {
+    const logical = (isAdjustedToUTC: boolean, unit: string) =>
+      ({ type: "INT64", logical_type: { type: "TIMESTAMP", isAdjustedToUTC, unit } });
+    for (const timestamp of [logical(true, "MILLIS"), logical(false, "MILLIS"), logical(true, "MICROS"), logical(false, "MICROS")]) {
+      const bytes = typed(timestamp);
+      const described = await describeFile(bytes);
+      const schema = parquetQuerySchema(parquetMetadata(bytes).schema);
+      expect(schema?.columns).toEqual(described.map(([name]) => name));
+      expect(schema?.timestampType, JSON.stringify(timestamp)).toBe(described[0][1]);
+    }
+    for (const timestamp of [
+      logical(true, "NANOS"),
+      { type: "INT64", converted_type: "TIMESTAMP_MILLIS" },
+      { type: "INT64" },
+      { type: "BYTE_ARRAY", logical_type: { type: "STRING" } },
+    ]) {
+      expect(parquetQuerySchema(parquetMetadata(typed(timestamp)).schema), JSON.stringify(timestamp)).toBeNull();
+    }
+    const utc = parquetQuerySchema(parquetMetadata(typed(logical(true, "MILLIS"))).schema)!;
+    expect(parquetQuerySchema(parquetMetadata(typed(logical(true, "MILLIS"), 3)).schema)!.signature).toBe(utc.signature);
+    expect(parquetQuerySchema(parquetMetadata(typed(logical(true, "MICROS"))).schema)!.signature).not.toBe(utc.signature);
+  });
+
+  it("describes the file a projected read rebuilds, by ranges or from a whole read", async () => {
+    const bytes = typed({ type: "INT64", logical_type: { type: "TIMESTAMP", isAdjustedToUTC: true, unit: "MILLIS" } }, 2000);
+    expect(bytes.byteLength).toBeGreaterThan(256 * 1024);
+    const read = projectedReader({
+      cacheScope: "t",
+      fetchRange: async (_file, start, end) => bytes.slice(start, end),
+      fetchFile: async () => ({ bytes: bytes.slice(0), cached: false }),
+    }, ["timestamp", "status"]);
+    for (const endMs of [Date.now() - 2 * 3_600_000, Date.now() + 60_000]) {
+      const projected = await (await read({
+        key: "processed/request/f.parquet",
+        start: new Date(endMs - 600_000).toISOString(),
+        end: new Date(endMs).toISOString(),
+        size: bytes.byteLength,
+        rows: 2000,
+      })).read();
+      expect(projected.schema).toEqual(parquetQuerySchema(parquetMetadata(projected.bytes).schema));
+      expect(projected.schema?.columns).toEqual(["timestamp", "status"]);
+      expect(projected.schema?.timestampType).toBe("TIMESTAMP WITH TIME ZONE");
+    }
   });
 });
