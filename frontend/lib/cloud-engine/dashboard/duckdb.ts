@@ -1326,7 +1326,7 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
       }
       for (const part of parts.values()) {
         for (const aggregate of Object.values(part.fields)) {
-          aggregate.complete = aggregate.entries.length === aggregate.distinct;
+          aggregate.complete = keptDistinct(aggregate) === aggregate.distinct;
           aggregate.approximate = !aggregate.complete;
         }
       }
@@ -1488,7 +1488,7 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
       }
       if (bounded) {
         for (const aggregate of Object.values(fieldAggregates)) {
-          aggregate.complete = aggregate.entries.length === aggregate.distinct;
+          aggregate.complete = keptDistinct(aggregate) === aggregate.distinct;
           aggregate.approximate = !aggregate.complete;
         }
       }
@@ -1600,6 +1600,13 @@ function fieldValuesSql(
       return `SELECT ${file ? `${FILE_COLUMN} AS file, ` : ""}${i} AS field_idx, ${values}, COUNT(*)::BIGINT AS cnt FROM base WHERE ${f} IS NOT NULL${where} GROUP BY ${file ? `${FILE_COLUMN}, ` : ""}${f}${q ? ` QUALIFY ${q}` : ""}`;
     })
     .join(" UNION ALL ");
+}
+
+/** Entries that count as distinct values: `d` leaves out the empty string. */
+function keptDistinct(aggregate: FieldAggregate): number {
+  let kept = 0;
+  for (const [value] of aggregate.entries) if (value !== "") kept++;
+  return kept;
 }
 
 /** The bounded-mode cap: the top candidates whose keys fit the field's byte share. */

@@ -555,6 +555,45 @@ describe("bounded complete Parquet bindings", () => {
     await engine.reset();
   });
 
+  it("keeps a raw card with empty-string values exact", async () => {
+    const engine = new DuckDBAnalyticalEngine({ backendFactory: createNodeBackend });
+    const t = 1700000000000;
+    const rows = (offset: number) => Array.from({ length: 12 }, (_, i) => ({
+      timestamp: t + (offset + i) * 1000,
+      status: 200,
+      cache: "HIT",
+      resp_bytes: i,
+      host: i % 3 === 0 ? "" : `h${i % 2}`,
+    }));
+    const expectExact = (result: ReturnType<Aggregator["result"]>, kept: ReturnType<typeof rows>) => {
+      const counts = new Map<string, number>();
+      for (const { host } of kept) if (host !== "") counts.set(host, (counts.get(host) ?? 0) + 1);
+      const card = result.cards.host;
+      expect(card.approximate).toBeFalsy();
+      expect(card.distinct).toBe(counts.size);
+      expect(new Map(card.top.map(({ value, count }) => [value, count]))).toEqual(counts);
+    };
+    const options = { edgeOnly: false, topK: null };
+    const aggregator = new Aggregator(t, t + 60_000, ["host"]);
+    await engine.queryParquetIntoAggregator(
+      { kind: "buffer", bytes: parquetFixture(rows(0)) }, t, t + 60_000, [], aggregator, options,
+    );
+    expectExact(aggregator.result(), rows(0));
+
+    const targets = [0, 20].map(() => new Aggregator(t, t + 60_000, ["host"]));
+    await engine.queryParquetPerFile(
+      [0, 20].map((offset, i) => ({
+        access: { kind: "buffer" as const, bytes: parquetFixture(rows(offset)) },
+        target: targets[i], fromMs: t, toMs: t + 60_000,
+      })),
+      [],
+      options,
+    );
+    expectExact(targets[0].result(), rows(0));
+    expectExact(targets[1].result(), rows(20));
+    await engine.reset();
+  });
+
   it("answers several files in one pass per schema with a separate result for each", async () => {
     let queries = 0;
     const engine = new DuckDBAnalyticalEngine({ backendFactory: async () => {
