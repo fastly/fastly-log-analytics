@@ -1787,6 +1787,115 @@ mod summary_bundles {
         assert_eq!(fake.bucket.borrow()[&key], want);
     }
 
+    /// The hour's window file names in the order a build folds them.
+    fn window_names(fake: &Fake, hour_dir: &str) -> Vec<String> {
+        let mut names: Vec<String> = fake
+            .keys(WINDOWS)
+            .iter()
+            .filter(|k| k.contains(hour_dir))
+            .map(|k| k.rsplit('/').next().unwrap().to_owned())
+            .filter(|n| !n.starts_with("partial="))
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
+    fn one_shot(fake: &Fake, hour_dir: &str) -> Vec<u8> {
+        let sources: Vec<Vec<u8>> = fake
+            .keys(WINDOWS)
+            .iter()
+            .filter(|k| k.contains(hour_dir) && !k.contains("partial="))
+            .map(|k| fake.bucket.borrow()[k].clone())
+            .collect();
+        let refs: Vec<&[u8]> = sources.iter().map(Vec::as_slice).collect();
+        let start = if hour_dir.contains("hour=08") {
+            BASE
+        } else {
+            BASE + HOUR
+        };
+        bundle::merge(&refs, start, bundle::Unit::Hour).unwrap()
+    }
+
+    #[test]
+    fn an_undecodable_partial_is_dropped_without_an_error_and_the_hour_rebuilds_exactly() {
+        let fake = Fake::new(BASE + 3 * HOUR);
+        watermark(&fake, BASE + 3 * HOUR);
+        seed_hour(&fake, BASE, 50);
+        assert!(run(&fake).more_pending);
+        let partial = fake
+            .keys(WINDOWS)
+            .into_iter()
+            .find(|k| k.contains("/hour=08/partial=c") && !k.contains("-p"))
+            .expect("an unfinished hour leaves a partial");
+        // Same key, bytes this build cannot decode (a truncated or foreign body).
+        let mut body = b"FLPB\x04".to_vec();
+        body.extend_from_slice(&1u32.to_le_bytes());
+        body.extend_from_slice(&64u64.to_le_bytes());
+        body.extend_from_slice(b"not zstd");
+        fake.bucket.borrow_mut().insert(partial.clone(), body);
+
+        let mut errors = Vec::new();
+        let mut discarded = 0;
+        for _ in 0..40 {
+            let report = run(&fake);
+            errors.extend(report.errors);
+            discarded += report.discarded;
+            if !report.more_pending {
+                break;
+            }
+        }
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(discarded, 1);
+        assert!(!fake.bucket.borrow().contains_key(&partial));
+        let key = one_of(&fake, "hour_bundle=");
+        assert_eq!(fake.bucket.borrow()[&key], one_shot(&fake, "/hour=08/"));
+    }
+
+    #[test]
+    fn a_partial_named_under_an_older_layout_is_never_resumed() {
+        let fake = Fake::new(BASE + 3 * HOUR);
+        watermark(&fake, BASE + 3 * HOUR);
+        seed_hour(&fake, BASE, 50);
+        seed_hour(&fake, BASE + HOUR, 50);
+        assert!(run(&fake).more_pending);
+        let partial = fake
+            .keys(WINDOWS)
+            .into_iter()
+            .find(|k| k.contains("/hour=08/partial=c") && !k.contains("-p"))
+            .expect("an unfinished hour leaves a partial");
+        assert!(fake
+            .keys(WINDOWS)
+            .iter()
+            .all(|k| !k.contains("/hour=09/partial=")));
+        // A binary with another group layout named its partials by the windows alone, so the
+        // same name now holds state this build would misread: here, another hour's state.
+        let count = bundle::parse_name(&partial).unwrap().count;
+        let names = window_names(&fake, "/hour=09/");
+        let stale = format!(
+            "{WINDOWS}year=2027/month=01/day=15/hour=09/partial=c{count}-n1-h{:016x}.parquet",
+            bundle::fingerprint(names[..count].iter().map(String::as_str))
+        );
+        let body = fake.bucket.borrow()[&partial].clone();
+        assert!(body.starts_with(b"FLPB"));
+        fake.bucket.borrow_mut().insert(stale.clone(), body);
+
+        let mut errors = Vec::new();
+        for _ in 0..40 {
+            let report = run(&fake);
+            errors.extend(report.errors);
+            if !report.more_pending {
+                break;
+            }
+        }
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(!fake.bucket.borrow().contains_key(&stale));
+        let hour9 = of(&fake, "hour_bundle=")
+            .into_iter()
+            .find(|k| k.contains("hour_bundle=09"))
+            .unwrap();
+        assert_eq!(fake.bucket.borrow()[&hour9], one_shot(&fake, "/hour=09/"));
+    }
+
     #[test]
     fn a_day_partial_past_the_read_limit_is_reported_and_the_day_rebuilds_without_it() {
         let fake = Fake::new(BASE + 17 * HOUR);
@@ -1804,7 +1913,7 @@ mod summary_bundles {
         // An unpacked partial that grew past the 8 MiB CDN read limit, so every resume failed.
         let stuck = format!(
             "{BUNDLES}year=2027/month=01/day=15/partial=c1-n1-h{:016x}.parquet",
-            bundle::fingerprint([hours[0].as_str()])
+            bundle::partial_fingerprint([hours[0].as_str()])
         );
         let mut body = b"FLPB\x03".to_vec();
         body.resize(9 << 20, 0);
