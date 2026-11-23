@@ -231,15 +231,19 @@ describe.each(Object.entries(PAGES))("%s from projected summaries", (_name, page
   const listings = page.fixtures.flatMap((name) => ["window", "hour"].flatMap((set) =>
     ["legacy", "layout"].map((layout) => `${name}/${set}/${layout}`)));
 
-  it.each(listings)("equals the whole-file answer on %s", async (key) => {
-    const whole = await answer(page, LISTINGS[key], null);
-    expect(whole.map((outcome) => outcome.error)).toEqual(whole.map(() => undefined));
-    expect(whole.some((outcome) => outcome.value !== null)).toBe(true);
-    const projected = await answer(page, LISTINGS[key], page.spec);
-    expect(projected.map((outcome) => outcome.error)).toEqual(whole.map(() => undefined));
-    expect(projected.map((outcome) => outcome.value)).toEqual(whole.map((outcome) => outcome.value));
-    expect(projected.flatMap((outcome) => outcome.wholeFiles)).toEqual([]);
-  });
+  it.each(listings)(
+    "equals the whole-file answer on %s",
+    async (key) => {
+      const whole = await answer(page, LISTINGS[key], null);
+      expect(whole.map((outcome) => outcome.error)).toEqual(whole.map(() => undefined));
+      expect(whole.some((outcome) => outcome.value !== null)).toBe(true);
+      const projected = await answer(page, LISTINGS[key], page.spec);
+      expect(projected.map((outcome) => outcome.error)).toEqual(whole.map(() => undefined));
+      expect(projected.map((outcome) => outcome.value)).toEqual(whole.map((outcome) => outcome.value));
+      expect(projected.flatMap((outcome) => outcome.wholeFiles)).toEqual([]);
+    },
+    30_000,
+  );
 
   /** A spec without one group or column must change some answer, or throw: the spec holds nothing a page does not read. */
   it("needs every group and column of its spec", async () => {

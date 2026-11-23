@@ -1740,7 +1740,11 @@ fn sweep_and_reconcile_endpoints_run_on_demand_and_are_audited() {
     let details: Value =
         serde_json::from_str(reconcile[0]["details_json"].as_str().unwrap()).unwrap();
     assert_eq!(details["datasets"]["pq_request"]["objects"], 0, "{details}");
-    assert!(fake.kv.borrow().get("storage:reconcile").is_none());
+    let kept = fake.kv.borrow()["storage:reconcile"].1.clone();
+    assert!(
+        kept["completed_at"].is_u64(),
+        "the completed record stays for the hourly schedule"
+    );
     let inv = rows(&fake, LogKind::StorageInventory);
     assert_eq!(
         inv.iter().filter(|r| r["complete"] == true).count(),
