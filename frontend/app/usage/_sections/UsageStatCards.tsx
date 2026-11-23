@@ -504,12 +504,15 @@ export function UsageStatCards({
               <div>
                 <BreakdownTable rows={costBreakdownRows} />
                 {hasPartialCost && (
-                  <div role="alert" className="text-[10px] text-destructive mt-0.5">
+                  <div
+                    role={errorStorage || errorOps || errorBw ? 'alert' : 'status'}
+                    className="text-[10px] text-destructive mt-0.5"
+                  >
                     Partial estimate — {excludedCosts.join(excludedCosts.length > 2 ? ', ' : ' and ')} cost excluded.
                   </div>
                 )}
                 {storageIncomplete && (
-                  <div role="alert" className="text-[10px] text-amber-700 dark:text-amber-500 mt-0.5">
+                  <div role="status" className="text-[10px] text-amber-700 dark:text-amber-500 mt-0.5">
                     Partial storage cost — incomplete lifecycle data
                     {storageProvenance && storageProvenance.length > 0
                       ? ` (${storageProvenance.join(', ')})`

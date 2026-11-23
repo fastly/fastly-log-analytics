@@ -209,6 +209,29 @@ describe('observed Platform usage', () => {
     expect(screen.getAllByText('Unavailable').length).toBeGreaterThanOrEqual(2)
     expect(screen.queryByText('$0.00')).not.toBeInTheDocument()
     expect(screen.getByText(/Partial estimate.*operations.*excluded/)).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('uses role="status" for incomplete storage/ops provenance and role="alert" only for API errors', () => {
+    const { rerender } = render(
+      <UsageStatCards
+        {...statProps}
+        storage={{ ...storage, storage_billing_complete: false, storage_billing_provenance: ['cloud:inventory_missing'] }}
+        operationsComplete={false}
+      />,
+    )
+
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.getAllByRole('status').length).toBeGreaterThanOrEqual(2)
+
+    rerender(
+      <UsageStatCards
+        {...statProps}
+        errorStorage={new Error('boom')}
+      />,
+    )
+
+    expect(screen.getAllByRole('alert').length).toBeGreaterThanOrEqual(1)
   })
 
   it('preserves authoritative zero Compute usage instead of falling back to logged values', () => {

@@ -700,19 +700,23 @@ def usage_current_storage(
         storage_intervals: list[StorageBillingInterval] = []
 
         if high_scale_service is not None:
-            pg_intervals: list[dict[str, Any]] = []
+            pg_live = 0.0
+            pg_deleted = 0.0
+            pg_min = 0.0
             pg_complete = False
             pg_provenance: list[str] = []
             try:
                 from backend.high_scale.postgres_control import PostgresControlPlane
 
-                pg_intervals, pg_complete, pg_provenance = PostgresControlPlane().storage_billing_intervals(
-                    service_id, start_dt, end_dt, minimum_days=MIN_BILLING_DAYS
+                pg_live, pg_deleted, pg_min, pg_complete, pg_provenance = (
+                    PostgresControlPlane().storage_billing_summary(
+                        service_id, start_dt, end_dt, minimum_days=MIN_BILLING_DAYS
+                    )
                 )
             except Exception:
                 pg_complete = False
                 pg_provenance = ["high-scale:postgres_unavailable"]
-                logger.debug("usage_current_storage: storage_billing_intervals failed", exc_info=True)
+                logger.debug("usage_current_storage: storage_billing_summary failed", exc_info=True)
 
             cloud_copy_intervals: list[dict[str, Any]] = []
             cloud_copy_intervals_ok = True
@@ -724,25 +728,22 @@ def usage_current_storage(
                 )
             except Exception:
                 cloud_copy_intervals_ok = False
-                cloud_copy_deleted_bytes_complete = False
                 logger.debug("usage_current_storage: cloud copy deletion records failed", exc_info=True)
 
-            all_intervals = [*pg_intervals, *cloud_copy_intervals]
             if end_ms >= start_ms:
-                billing_summary = calculate_storage_billing(all_intervals, start_ms, end_ms)
-                live_billed_gb_hours = billing_summary.live_gb_hours
-                deleted_billed_gb_hours = billing_summary.deleted_gb_hours
-                minimum_billed_gb_hours = billing_summary.minimum_billed_gb_hours
-                gb_hours = billing_summary.total_gb_hours
+                cc_summary = calculate_storage_billing(cloud_copy_intervals, start_ms, end_ms)
+                live_billed_gb_hours = pg_live + cc_summary.live_gb_hours
+                deleted_billed_gb_hours = pg_deleted + cc_summary.deleted_gb_hours
+                minimum_billed_gb_hours = pg_min + cc_summary.minimum_billed_gb_hours
+                gb_hours = live_billed_gb_hours + deleted_billed_gb_hours + minimum_billed_gb_hours
                 storage_billing_complete = (
                     pg_complete
-                    and billing_summary.complete
+                    and cc_summary.complete
                     and archive_storage_complete
                     and cloud_copy_deleted_bytes_complete
                     and cloud_copy_intervals_ok
                 )
-                storage_billing_provenance = sorted(set(pg_provenance) | set(billing_summary.provenance))
-                storage_intervals = [StorageBillingInterval.model_validate(item) for item in all_intervals]
+                storage_billing_provenance = sorted(set(pg_provenance) | set(cc_summary.provenance))
             else:
                 gb_hours = 0.0
                 storage_billing_complete = False

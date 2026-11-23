@@ -1864,8 +1864,10 @@ def test_current_storage_uses_local_high_scale_intervals_and_ignores_platform(cl
                 "live_objects": 0,
                 "expired_30d_bytes": 0,
             }
-            control_plane.return_value.storage_billing_intervals.return_value = (
-                intervals,
+            control_plane.return_value.storage_billing_summary.return_value = (
+                4.0,
+                0.0,
+                4.0,
                 True,
                 ["high-scale:archive_manifests", "high-scale:source_objects"],
             )
@@ -1882,7 +1884,7 @@ def test_current_storage_uses_local_high_scale_intervals_and_ignores_platform(cl
         assert body["deleted_billed_gb_hours"] == pytest.approx(0.0)
         assert body["minimum_billed_gb_hours"] == pytest.approx(4.0)
         assert body["total_billed_gb_hours"] == pytest.approx(8.0)
-        assert len(body["storage_intervals"]) == 2
+        assert body["storage_intervals"] == []
         assert body["observed_at"] is not None
         platform_api.assert_not_called()
     finally:
@@ -1892,7 +1894,7 @@ def test_current_storage_uses_local_high_scale_intervals_and_ignores_platform(cl
 
 @pytest.mark.no_postgres
 def test_current_storage_marks_postgres_lifecycle_failure_incomplete(client):
-    """A Postgres storage_billing_intervals failure must return storage_billing_complete=False, never Platform fallback."""
+    """A Postgres storage_billing_summary failure must return storage_billing_complete=False, never Platform fallback."""
     from backend.routers.usage import _STORAGE_INSPECTION_CACHE
 
     svc = "svc-hs-lifecycle-err"
@@ -1915,7 +1917,7 @@ def test_current_storage_marks_postgres_lifecycle_failure_incomplete(client):
                 "live_objects": 0,
                 "expired_30d_bytes": 0,
             }
-            control_plane.return_value.storage_billing_intervals.side_effect = RuntimeError("pg down")
+            control_plane.return_value.storage_billing_summary.side_effect = RuntimeError("pg down")
             resp = client.get(
                 "/api/usage/current-storage",
                 params={"start": "2026-11-20T10:00:00Z", "end": "2026-11-20T14:00:00Z"},

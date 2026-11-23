@@ -1417,6 +1417,149 @@ class PostgresControlPlane:
 
         return intervals, complete, ["high-scale:archive_manifests", "high-scale:source_objects"]
 
+    def storage_billing_summary(
+        self,
+        service_id: str,
+        start: datetime,
+        end: datetime,
+        *,
+        minimum_days: int = 30,
+    ) -> tuple[float, float, float, bool, list[str]]:
+        """Aggregate selected-period GB-hours directly in SQL across source objects and archive manifests."""
+        _require_text(service_id, "service_id")
+        start_utc = _observed_utc(start)
+        end_utc = _observed_utc(end)
+        if end_utc <= start_utc:
+            return 0.0, 0.0, 0.0, True, ["high-scale:archive_manifests", "high-scale:source_objects"]
+        min_days = max(int(minimum_days), 1)
+        gb_hour_denom = 1073741824.0 * 3600.0
+
+        with self.transaction(read_only=True) as connection:
+            src_row = connection.execute(
+                "SELECT "
+                "COALESCE(SUM(CASE WHEN status NOT IN ('source_deleted', 'source_missing') THEN "
+                "GREATEST(size_bytes, 0)::double precision * GREATEST(0.0, EXTRACT(EPOCH FROM ("
+                "%s::timestamptz - GREATEST(COALESCE(discovered_at, %s::timestamptz), %s::timestamptz)"
+                "))) / %s ELSE 0.0 END), 0.0), "
+                "COALESCE(SUM(CASE WHEN status IN ('source_deleted', 'source_missing') "
+                "AND discovered_at IS NOT NULL AND updated_at IS NOT NULL AND updated_at > discovered_at THEN "
+                "GREATEST(size_bytes, 0)::double precision * GREATEST(0.0, EXTRACT(EPOCH FROM ("
+                "LEAST(updated_at, %s::timestamptz) - GREATEST(discovered_at, %s::timestamptz)"
+                "))) / %s ELSE 0.0 END), 0.0), "
+                "COALESCE(SUM(CASE "
+                "WHEN status IN ('source_deleted', 'source_missing') AND updated_at IS NULL THEN "
+                "GREATEST(size_bytes, 0)::double precision * GREATEST(0.0, EXTRACT(EPOCH FROM ("
+                "%s::timestamptz - GREATEST(COALESCE(discovered_at, %s::timestamptz), %s::timestamptz)"
+                "))) / %s "
+                "WHEN status IN ('source_deleted', 'source_missing') AND discovered_at IS NULL THEN "
+                "GREATEST(size_bytes, 0)::double precision * GREATEST(0.0, EXTRACT(EPOCH FROM ("
+                "LEAST(updated_at + make_interval(days => %s), %s::timestamptz) - GREATEST(updated_at, %s::timestamptz)"
+                "))) / %s "
+                "WHEN status IN ('source_deleted', 'source_missing') "
+                "AND discovered_at + make_interval(days => %s) > updated_at THEN "
+                "GREATEST(size_bytes, 0)::double precision * GREATEST(0.0, EXTRACT(EPOCH FROM ("
+                "LEAST(discovered_at + make_interval(days => %s), %s::timestamptz) - GREATEST(updated_at, %s::timestamptz)"
+                "))) / %s "
+                "ELSE 0.0 END), 0.0), "
+                "COALESCE(SUM(CASE WHEN discovered_at IS NULL OR status = 'source_missing' "
+                "OR (status IN ('source_deleted', 'source_missing') AND updated_at IS NULL) THEN 1 ELSE 0 END), 0) "
+                "FROM high_scale_source_objects "
+                "WHERE service_id = %s "
+                "AND (discovered_at IS NULL OR discovered_at < %s) "
+                "AND (status NOT IN ('source_deleted', 'source_missing') "
+                "OR GREATEST(updated_at, COALESCE(discovered_at, updated_at) + make_interval(days => %s)) > %s)",
+                (
+                    end_utc,
+                    start_utc,
+                    start_utc,
+                    gb_hour_denom,
+                    end_utc,
+                    start_utc,
+                    gb_hour_denom,
+                    end_utc,
+                    start_utc,
+                    start_utc,
+                    gb_hour_denom,
+                    min_days,
+                    end_utc,
+                    start_utc,
+                    gb_hour_denom,
+                    min_days,
+                    min_days,
+                    end_utc,
+                    start_utc,
+                    gb_hour_denom,
+                    service_id,
+                    end_utc,
+                    min_days,
+                    start_utc,
+                ),
+            ).fetchone()
+            arc_row = connection.execute(
+                "SELECT "
+                "COALESCE(SUM(CASE WHEN archive_expired_at IS NULL THEN "
+                "GREATEST(artifact_size, 0)::double precision * GREATEST(0.0, EXTRACT(EPOCH FROM ("
+                "%s::timestamptz - GREATEST(COALESCE(created_at, %s::timestamptz), %s::timestamptz)"
+                "))) / %s ELSE 0.0 END), 0.0), "
+                "COALESCE(SUM(CASE WHEN archive_expired_at IS NOT NULL "
+                "AND created_at IS NOT NULL AND archive_expired_at > created_at THEN "
+                "GREATEST(artifact_size, 0)::double precision * GREATEST(0.0, EXTRACT(EPOCH FROM ("
+                "LEAST(archive_expired_at, %s::timestamptz) - GREATEST(created_at, %s::timestamptz)"
+                "))) / %s ELSE 0.0 END), 0.0), "
+                "COALESCE(SUM(CASE "
+                "WHEN archive_expired_at IS NOT NULL AND created_at IS NULL THEN "
+                "GREATEST(artifact_size, 0)::double precision * GREATEST(0.0, EXTRACT(EPOCH FROM ("
+                "LEAST(archive_expired_at + make_interval(days => %s), %s::timestamptz) "
+                "- GREATEST(archive_expired_at, %s::timestamptz)"
+                "))) / %s "
+                "WHEN archive_expired_at IS NOT NULL "
+                "AND created_at + make_interval(days => %s) > archive_expired_at THEN "
+                "GREATEST(artifact_size, 0)::double precision * GREATEST(0.0, EXTRACT(EPOCH FROM ("
+                "LEAST(created_at + make_interval(days => %s), %s::timestamptz) "
+                "- GREATEST(archive_expired_at, %s::timestamptz)"
+                "))) / %s "
+                "ELSE 0.0 END), 0.0), "
+                "COALESCE(SUM(CASE WHEN created_at IS NULL THEN 1 ELSE 0 END), 0) "
+                "FROM high_scale_archive_manifests "
+                "WHERE service_id = %s AND state <> 'artifact_uploading' "
+                "AND (created_at IS NULL OR created_at < %s) "
+                "AND (archive_expired_at IS NULL "
+                "OR GREATEST(archive_expired_at, COALESCE(created_at, archive_expired_at) + make_interval(days => %s)) > %s)",
+                (
+                    end_utc,
+                    start_utc,
+                    start_utc,
+                    gb_hour_denom,
+                    end_utc,
+                    start_utc,
+                    gb_hour_denom,
+                    min_days,
+                    end_utc,
+                    start_utc,
+                    gb_hour_denom,
+                    min_days,
+                    min_days,
+                    end_utc,
+                    start_utc,
+                    gb_hour_denom,
+                    service_id,
+                    end_utc,
+                    min_days,
+                    start_utc,
+                ),
+            ).fetchone()
+
+        src_live, src_del, src_min, src_incomplete = src_row or (0.0, 0.0, 0.0, 0)
+        arc_live, arc_del, arc_min, arc_incomplete = arc_row or (0.0, 0.0, 0.0, 0)
+        complete = int(src_incomplete or 0) == 0 and int(arc_incomplete or 0) == 0
+        return (
+            float(src_live or 0.0) + float(arc_live or 0.0),
+            float(src_del or 0.0) + float(arc_del or 0.0),
+            float(src_min or 0.0) + float(arc_min or 0.0),
+            complete,
+            ["high-scale:archive_manifests", "high-scale:source_objects"],
+        )
+
     def source_activity(self, service_id: str, start: datetime, end: datetime, by: str) -> list[tuple[str, int, int]]:
         """``(bucket, accepted_rows, size_bytes)`` of processed source objects by UTC discovery time.
 

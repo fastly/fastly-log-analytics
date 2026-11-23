@@ -10,6 +10,8 @@ from backend.core.storage_billing import (
     calculate_storage_billing,
 )
 
+pytestmark = pytest.mark.no_postgres
+
 GIB = 1024**3
 HOUR_MS = 3_600_000
 
@@ -319,6 +321,59 @@ def test_postgres_control_plane_missing_creation_timestamp_marks_incomplete() ->
     assert summary.minimum_billed_gb_hours == pytest.approx(2.0)
     assert summary.deleted_gb_hours == 0.0
     assert intervals[0]["created_at"] is None
+
+
+def test_postgres_control_plane_storage_billing_summary_aggregates_in_sql() -> None:
+    """High-Scale storage billing summary must aggregate GB-hours in SQL instead of fetching every object row."""
+    from contextlib import contextmanager
+    from datetime import UTC, datetime, timedelta
+
+    from backend.high_scale.postgres_control.control_plane import PostgresControlPlane
+
+    t0 = datetime(2026, 11, 1, 0, 0, tzinfo=UTC)
+    window_start = t0 + timedelta(hours=10)
+    window_end = t0 + timedelta(hours=14)
+
+    class FakeCursor:
+        def __init__(self, row):
+            self._row = row
+
+        def fetchone(self):
+            return self._row
+
+    class FakeConnection:
+        def __init__(self):
+            self.queries: list[str] = []
+
+        def execute(self, sql: str, _params=()):
+            self.queries.append(sql)
+            if "high_scale_source_objects" in sql:
+                return FakeCursor((4.0, 4.0, 6.0, 0))
+            if "high_scale_archive_manifests" in sql:
+                return FakeCursor((8.0, 0.0, 4.0, 1))
+            raise AssertionError(f"unexpected query: {sql}")
+
+    conn = FakeConnection()
+    plane = object.__new__(PostgresControlPlane)
+
+    @contextmanager
+    def _fake_tx(*, read_only: bool = False):
+        assert read_only is True
+        yield conn
+
+    plane.transaction = _fake_tx  # type: ignore[method-assign]
+
+    live_gb_h, deleted_gb_h, min_gb_h, complete, provenance = plane.storage_billing_summary(
+        "svc-hs", window_start, window_end
+    )
+
+    assert len(conn.queries) == 2
+    assert all("SUM(" in q.upper() for q in conn.queries)
+    assert live_gb_h == pytest.approx(12.0)
+    assert deleted_gb_h == pytest.approx(4.0)
+    assert min_gb_h == pytest.approx(10.0)
+    assert complete is False
+    assert provenance == ["high-scale:archive_manifests", "high-scale:source_objects"]
 
 
 def test_python_matches_typescript_shared_storage_billing_fixtures() -> None:
