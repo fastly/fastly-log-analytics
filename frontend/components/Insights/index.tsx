@@ -317,7 +317,7 @@ function InsightsBody({
             isLoading={true}
             renderCards={({ cards, section }) => (
               <div
-                className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 min-h-[300px] [contain-intrinsic-size:300px] [content-visibility:auto]"
+                className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 min-h-[calc(100vh-14rem)] content-start [contain-intrinsic-size:700px] [content-visibility:auto]"
                 data-testid="insights-grid-loading"
               >
                 {cards.map((i) => (
@@ -332,7 +332,7 @@ function InsightsBody({
             )}
           />
         ) : (
-          <div className="text-center py-20 text-sm text-muted-foreground min-h-[300px] flex flex-col items-center justify-center [contain-intrinsic-size:300px] [content-visibility:auto]">
+          <div className="text-center py-20 text-sm text-muted-foreground min-h-[calc(100vh-14rem)] flex flex-col items-center justify-center [contain-intrinsic-size:700px] [content-visibility:auto]">
             <Loader2 className="inline-block animate-spin h-5 w-5 mb-2 text-primary" />
             <span>Evaluating anomaly detector baseline comparisons…</span>
           </div>
@@ -360,7 +360,7 @@ function InsightsBody({
           } : undefined}
           renderCards={({ cards }) => (
             <div
-              className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 min-h-[300px] [contain-intrinsic-size:300px] [content-visibility:auto]"
+              className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 min-h-[calc(100vh-14rem)] content-start [contain-intrinsic-size:700px] [content-visibility:auto]"
               data-testid="insights-grid"
             >
               {cards.map((insight) => isPendingPlaceholder(insight) ? (
