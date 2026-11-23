@@ -4478,7 +4478,13 @@ mod tests {
         let partial = acc.encode_partial();
         let encode = ms(t);
         let t = std::time::Instant::now();
-        let mut acc = Acc::decode_partial(&partial, Unit::Hour).unwrap();
+        let packed = pack_partial(&partial, CDN_READ_LIMIT).unwrap();
+        let pack = ms(t);
+        let t = std::time::Instant::now();
+        let unpacked = unpack_partial(&packed).unwrap();
+        let unpack = ms(t);
+        let t = std::time::Instant::now();
+        let mut acc = Acc::decode_partial(&unpacked, Unit::Hour).unwrap();
         let decode = ms(t);
         let t = std::time::Instant::now();
         for w in &windows[142..] {
@@ -4490,11 +4496,12 @@ mod tests {
         let snapshot = acc.write(1_800_000_000, Some(Unit::Hour), "hour").unwrap();
         let finish = ms(t);
         println!(
-            "window {} B, partial {} B, snapshot {} B: fold {fold_each:.1} ms/window, \
-             decode {decode:.1} ms, encode {encode:.1} ms, 8-window tail {tail:.1} ms, \
-             finish {finish:.1} ms",
+            "window {} B, partial {} B ({} packed), snapshot {} B: fold {fold_each:.1} \
+             ms/window, decode {decode:.1} ms (+{unpack:.1} unpack), encode {encode:.1} ms \
+             (+{pack:.1} pack), 8-window tail {tail:.1} ms, finish {finish:.1} ms",
             windows[0].len(),
             partial.len(),
+            packed.iter().map(Vec::len).sum::<usize>(),
             snapshot.len(),
         );
     }

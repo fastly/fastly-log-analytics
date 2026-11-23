@@ -36,6 +36,9 @@ const CALL_MS: u64 = 3;
 const FOLD_MS: u64 = 30;
 const PARTIAL_FOLD_MS: u64 = 90;
 const ENCODE_MS: u64 = 250;
+/// A `partial=` write: natively its encode and zstd pack take ~1.6 folds and the Parquet
+/// finish ~4 (`open_hour_turn_cost`), so this is charged like a partial read, not a bundle.
+const PARTIAL_ENCODE_MS: u64 = PARTIAL_FOLD_MS;
 /// The deploy-testing `summary_bundle` vCPU budget: the stop gate plus one fold,
 /// encode and call tail must fit under it.
 const VCPU_BUDGET_MS: u64 = 900;
@@ -229,7 +232,17 @@ impl Runtime for Fake {
             "PUT" => {
                 // Catalog JSON is cheap to serialize; parquet bundles and partials are encoded.
                 let encoded = !request.key.contains("/_catalog/");
-                self.charge(if encoded { ENCODE_MS } else { 0 })?;
+                let partial = request
+                    .key
+                    .rsplit('/')
+                    .next()
+                    .unwrap()
+                    .starts_with("partial=");
+                self.charge(match (encoded, partial) {
+                    (false, _) => 0,
+                    (true, true) => PARTIAL_ENCODE_MS,
+                    (true, false) => ENCODE_MS,
+                })?;
                 self.encodes.set(self.encodes.get() + u64::from(encoded));
                 self.puts.set(self.puts.get() + 1);
                 self.bucket
@@ -733,6 +746,13 @@ fn a_day_of_60s_windows_converges_to_catalog_hour_bundles() {
     for hour in (start..end).step_by(HOUR as usize) {
         assert_eq!(covered(&fake, &head.hour_bundles[&hour]), windows);
     }
+    eprintln!(
+        "day: vCPU mean {} over {runs} runs; {} folds for {} windows, {} writes",
+        busy / runs as u64,
+        fake.folds.get(),
+        windows * 24,
+        fake.encodes.get()
+    );
     assert!(
         busy / runs as u64 <= VCPU_BUDGET_MS,
         "{} ms a run",
@@ -938,8 +958,10 @@ fn the_open_hour_stays_a_handful_of_files_while_late_runs_keep_arriving() {
     );
     assert!(peak <= 1000, "{peak} ms peak");
     eprintln!(
-        "open hour files: mean {mean}, worst {worst}; vCPU mean {} peak {peak}",
-        busy / runs as u64
+        "open hour files: mean {mean}, worst {worst}; vCPU mean {} peak {peak}; {} folds, {} writes",
+        busy / runs as u64,
+        fake.folds.get(),
+        fake.encodes.get()
     );
 }
 
