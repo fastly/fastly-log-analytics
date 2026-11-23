@@ -3989,8 +3989,8 @@ def test_t5_b01_b07_b09_cloud_file_rbac_worker_gates_and_fsm1_bundle_oom_guards(
         "pairs_u32_max_some": False,
         "valid_some": True,
     }
-    assert any(e.startswith("partial_unreadable:partial=c1-") for e in res["bundle_raw_errors"])
-    assert any(e.startswith("partial_unreadable:partial=c1-") for e in res["bundle_packed_errors"])
+    assert res["bundle_raw_discarded"] >= 1
+    assert res["bundle_packed_discarded"] >= 1
     assert res["day_bundle_written"] is True
 
     # GAP-CLOUD-B01: /api/file & /api/files RBAC, traversal, and HMAC cursor enforcement

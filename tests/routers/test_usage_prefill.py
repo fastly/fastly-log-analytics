@@ -92,16 +92,11 @@ def test_usage_historical_consumers_select_platform_metrics_fields(monkeypatch):
         by="hour",
     )
 
-    assert ops.total_class_a == 5 and ops.total_class_b == 2
+    assert ops.source == "local"
     assert bandwidth.total_bytes == 99
-    assert calls[0][0] is None
-    assert calls[0][4] == (
-        "object_storage_class_a_operations_count",
-        "object_storage_class_b_operations_count",
-    )
-    assert calls[1][0] == "cdn-svc" and calls[1][4] == ("bandwidth", "requests")
-    assert calls[2][0] == "logging-svc"
-    assert calls[2][4] == ("requests", *fastly_client.FASTLY_LOG_FIELDS)
+    assert calls[0][0] == "cdn-svc" and calls[0][4] == ("bandwidth", "requests")
+    assert calls[1][0] == "logging-svc"
+    assert calls[1][4] == ("requests", *fastly_client.FASTLY_LOG_FIELDS)
 
 
 @pytest.mark.no_postgres

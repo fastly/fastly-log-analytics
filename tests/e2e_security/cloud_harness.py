@@ -1988,7 +1988,7 @@ fn main() {
                 mini.bucket.borrow_mut().insert(hb_key, hb_bytes);
             }
             hour_names.sort();
-            let fp1 = bundle::fingerprint([hour_names[0].as_str()]);
+            let fp1 = bundle::partial_fingerprint([hour_names[0].as_str()]);
 
             // Craft raw FLPB\x09 partial with ses_len = u32::MAX (29 bytes) AND packed FLPB\x04 partial with cells = u32::MAX
             let mut raw_ses_max = b"FLPB\x09".to_vec();
@@ -2046,6 +2046,7 @@ fn main() {
             .unwrap();
 
             let mut bundle_errors = Vec::new();
+            let mut bundle_raw_discarded: u32 = 0;
             mini.kv.borrow_mut().insert(
                 bundle::STATE_KEY.into(),
                 (
@@ -2073,6 +2074,7 @@ fn main() {
                 };
                 let rep = bundle::summary_bundle(&store_ref, "ck", 1).unwrap();
                 bundle_errors.extend(rep.errors);
+                bundle_raw_discarded += rep.discarded;
                 if !rep.more_pending {
                     break;
                 }
@@ -2104,6 +2106,7 @@ fn main() {
             mini.bucket.borrow_mut().retain(|k, _| !k.contains("day_bundle="));
             mini.bucket.borrow_mut().insert(corrupt_key_1.clone(), packed_cells_max);
             let mut packed_errors = Vec::new();
+            let mut bundle_packed_discarded: u32 = 0;
             for _ in 0..8 {
                 mini.calls.set(0);
                 let store_ref = Store {
@@ -2116,6 +2119,7 @@ fn main() {
                 };
                 let rep = bundle::summary_bundle(&store_ref, "ck", 1).unwrap();
                 packed_errors.extend(rep.errors);
+                bundle_packed_discarded += rep.discarded;
                 if !rep.more_pending {
                     break;
                 }
@@ -2374,6 +2378,8 @@ fn main() {
                     "fsm1": fsm1_results,
                     "bundle_raw_errors": bundle_errors,
                     "bundle_packed_errors": packed_errors,
+                    "bundle_raw_discarded": bundle_raw_discarded,
+                    "bundle_packed_discarded": bundle_packed_discarded,
                     "day_bundle_written": day_bundle_written,
                     "worker_gates": {
                         "ingest_missing": w_missing,

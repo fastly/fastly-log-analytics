@@ -1746,7 +1746,9 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
             else:
                 parts.append(t)
         seg_sql = "".join(parts)
-        _single_ident_re = r'(?:[A-Za-z_][A-Za-z0-9_]*|`(?:``|[^`])+`|"(?:""|[^"])+")'
+        from backend.core.sql_validator import SAFE_IDENT_RE
+
+        _single_ident_re = rf'(?:{SAFE_IDENT_RE.pattern}|`(?:``|[^`])+`|"(?:""|[^"])+")'
         _qual_re = rf"(?:{_single_ident_re}\s*\.\s*)*"
         _bool_rules = (
             (r"IN\s*\(\s*'true'\s*\)", "IN ('true', '1')"),
@@ -2935,10 +2937,10 @@ def query_endpoint(
         res = res[:max_rows]
     total_rows = -1 if (truncated and not has_explicit_limit) else fetched_rows
     _t_serialize = time.perf_counter()
-    _cf_col_re = re.compile(r"^arrayElement\(custom_fields,\s*'([A-Za-z0-9_]+)'\)$")
+    _cf_col_re = re.compile(r"arrayElement\(custom_fields,\s*'([A-Za-z0-9_]+)'\)")
 
     def _norm_col(col_key: str) -> str:
-        m = _cf_col_re.match(col_key)
+        m = _cf_col_re.fullmatch(col_key)
         return m.group(1) if m else col_key
 
     data: list[dict[str, Any]] = []

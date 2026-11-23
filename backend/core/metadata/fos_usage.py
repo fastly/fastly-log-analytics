@@ -20,7 +20,7 @@ from backend.core.metadata.pg_pool import (
 from backend.core.metadata.pg_pool import (
     get_con_readonly as open_readonly,
 )
-from backend.utils.date_utils import iso_z, iso_z_now, parse_iso_utc
+from backend.utils.date_utils import iso_z, iso_z_now, parse_hour_key, parse_iso_utc
 
 logger = logging.getLogger(__name__)
 
@@ -666,9 +666,8 @@ def _query_usage_log_aggregate_rollup(
     # match what writers store.
     def _next_hour_start(hour_prefix: str) -> str:
         # "2026-06-04T23" → "2026-06-05T00:00:00.000Z"
-        try:
-            dt = datetime.strptime(hour_prefix, "%Y-%m-%dT%H").replace(tzinfo=UTC)
-        except ValueError:
+        dt = parse_hour_key(hour_prefix)
+        if dt is None:
             return hour_prefix + ":59:59.999Z"
         nxt = dt + timedelta(hours=1)
         return nxt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
@@ -735,9 +734,8 @@ def get_usage_operation_buckets(
     bucket_len = 13 if by == "hour" else 10
 
     def _next_hour_start(hour_prefix: str) -> str:
-        try:
-            dt = datetime.strptime(hour_prefix, "%Y-%m-%dT%H").replace(tzinfo=UTC)
-        except ValueError:
+        dt = parse_hour_key(hour_prefix)
+        if dt is None:
             return hour_prefix + ":59:59.999Z"
         return (dt + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
@@ -807,7 +805,7 @@ def get_usage_operation_buckets(
         try:
             con.close()
         except Exception:
-            pass
+            logger.debug("usage_log: failed to close readonly connection", exc_info=True)
 
     agg: dict[str, dict[str, int]] = {}
     for bucket_raw, op_class, count_val in rows:

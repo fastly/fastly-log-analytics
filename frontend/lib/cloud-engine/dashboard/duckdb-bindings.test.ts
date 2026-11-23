@@ -849,7 +849,7 @@ describe("bounded complete Parquet bindings", () => {
     // A filtered 24h view batches up to 16 fresh window files into one per-file
     // pass. A scan per file inlined into every card branch, and one values
     // statement windowing every card per file, ran the browser's 256 MB out of
-    // memory on a se-demo batch of 16 files of a few hundred rows each.
+    // memory on a demo batch of 16 files of a few hundred rows each.
     const engine = new DuckDBAnalyticalEngine();
     const t = 1700000000000;
     const fields = CARD_FIELDS.filter((field) => field in FIELD_DUCKDB_TYPES);
