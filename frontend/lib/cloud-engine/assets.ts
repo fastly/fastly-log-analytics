@@ -1,4 +1,5 @@
 import {
+  duckSqlString,
   getDuckDBEngine,
   type DuckDBAnalyticalEngine,
   type DuckDBReadContext,
@@ -283,7 +284,7 @@ function buildAssetsWhere(params: AssetsQueryParams): string {
   }
   for (const f of Array.isArray(params.filters) ? params.filters : []) {
     if (!ALLOWED_FILTER_COLS.has(f.column)) continue;
-    const escapedVal = String(f.value ?? "").replaceAll("'", "''");
+    const rawVal = String(f.value ?? "");
     const colExpr =
       f.column === "cache_status"
         ? "UPPER(COALESCE(cache_status, cache, 'OTHER'))"
@@ -292,11 +293,11 @@ function buildAssetsWhere(params: AssetsQueryParams): string {
           : f.column;
     const op = String(f.operator ?? "=").toUpperCase();
     if (op === "=" || op === "EQ") {
-      clauses.push(`${colExpr} = '${escapedVal}'`);
+      clauses.push(`${colExpr} = ${duckSqlString(rawVal)}`);
     } else if (op === "!=" || op === "NEQ") {
-      clauses.push(`${colExpr} != '${escapedVal}'`);
+      clauses.push(`${colExpr} != ${duckSqlString(rawVal)}`);
     } else if (op === "CONTAINS" || op === "LIKE") {
-      clauses.push(`${colExpr} ILIKE '%${escapedVal}%'`);
+      clauses.push(`${colExpr} ILIKE ${duckSqlString(`%${rawVal}%`)}`);
     }
   }
   return clauses.join(" AND ");

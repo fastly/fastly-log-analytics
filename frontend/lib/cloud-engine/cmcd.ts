@@ -1,4 +1,5 @@
 import {
+  duckSqlString,
   getDuckDBEngine,
   type DuckDBAnalyticalEngine,
   type DuckDBReadContext,
@@ -127,20 +128,16 @@ function buildCmcdWhere(params: CmcdQueryParams): string {
     ]),
   ];
   if (params.filter_sf) {
-    const escaped = String(params.filter_sf).replaceAll("'", "''");
-    clauses.push(`cmcd_sf = '${escaped}'`);
+    clauses.push(`cmcd_sf = ${duckSqlString(String(params.filter_sf))}`);
   }
   if (params.filter_ot) {
-    const escaped = String(params.filter_ot).replaceAll("'", "''");
-    clauses.push(`cmcd_ot = '${escaped}'`);
+    clauses.push(`cmcd_ot = ${duckSqlString(String(params.filter_ot))}`);
   }
   if (params.filter_st) {
-    const escaped = String(params.filter_st).replaceAll("'", "''");
-    clauses.push(`cmcd_st = '${escaped}'`);
+    clauses.push(`cmcd_st = ${duckSqlString(String(params.filter_st))}`);
   }
   if (params.filter_cid) {
-    const escaped = String(params.filter_cid).replaceAll("'", "''");
-    clauses.push(`cmcd_cid = '${escaped}'`);
+    clauses.push(`cmcd_cid = ${duckSqlString(String(params.filter_cid))}`);
   }
   clauses.push(analyticsFiltersToSql(params.filters, params.customColumnTypes));
   return clauses.join(" AND ");

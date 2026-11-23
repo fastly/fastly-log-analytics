@@ -2056,7 +2056,7 @@ fn main() {
         cwd=str(cloud_harness.CLOUD_DIR),
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=120,
         check=False,
     )
     assert comp.returncode == 0, comp.stderr
@@ -4257,13 +4257,18 @@ def test_t5_hs01_clickhouse_console_access_ddl_18_masked_keys_and_fail_closed_is
 
     schema_by_table = {
         "request_facts": [
-            {"name": "service_id", "type": "LowCardinality(String)"},
-            {"name": "publication_state", "type": "LowCardinality(String)"},
-            {"name": "batch_id", "type": "String"},
-            {"name": "client_ip", "type": "String"},
-            {"name": "url", "type": "String"},
-            {"name": "custom_fields", "type": "Map(String, String)"},
-            {"name": "cmcd", "type": "Map(String, String)"},
+            {"name": "service_id", "type": "LowCardinality(String)", "default_type": ""},
+            {"name": "publication_state", "type": "LowCardinality(String)", "default_type": ""},
+            {"name": "batch_id", "type": "String", "default_type": ""},
+            {"name": "client_ip", "type": "String", "default_type": ""},
+            {"name": "url", "type": "String", "default_type": ""},
+            {"name": "custom_fields", "type": "Map(String, String)", "default_type": ""},
+            {"name": "cmcd", "type": "Map(String, String)", "default_type": ""},
+            {"name": "_cf_cid", "type": "LowCardinality(String)", "default_type": "MATERIALIZED"},
+            {"name": "_cf_cookie_session", "type": "LowCardinality(String)", "default_type": "MATERIALIZED"},
+            {"name": "_cf_edge_sid", "type": "LowCardinality(String)", "default_type": "MATERIALIZED"},
+            {"name": "_cf_oip", "type": "LowCardinality(String)", "default_type": "MATERIALIZED"},
+            {"name": "_alias_internal", "type": "String", "default_type": "ALIAS"},
         ],
         "rum_vitals_facts": [
             {"name": "service_id", "type": "String"},
@@ -4312,7 +4317,29 @@ def test_t5_hs01_clickhouse_console_access_ddl_18_masked_keys_and_fail_closed_is
         assert f"'{key}'" in create_masked_req
     assert "`custom_fields`) AS `custom_fields`" in create_masked_req
     assert "`cmcd`) AS `cmcd`" in create_masked_req
+    assert "`_cf_" not in create_masked_req
+    assert "_alias_internal" not in create_masked_req
     assert any("REVOKE ALL ON *.*" in s for s in ddl_log)
+
+    # BUG-HS-CONSOLE-CF-PII-01 & BUG-T5-ITER25-05: defense-in-depth _redaction, share_db _cf_* PII, and SQL rewriter
+    from backend.core.share_db import is_saved_view_pii_key
+
+    assert is_saved_view_pii_key("_cf_cookie_session") is True
+    assert is_saved_view_pii_key("_cf_cid") is True
+    assert is_saved_view_pii_key("_cf_edge_sid") is True
+    assert is_saved_view_pii_key("_cf_oip") is True
+    keys_sql = ", ".join(f"'{k}'" for k in console_access._MAP_MASKED_KEYS)
+    assert console_access._redaction("_cf_cookie_session", "LowCardinality(String)", keys_sql) is not None
+    assert console_access._redaction("_cf_oip", "LowCardinality(String)", keys_sql) is not None
+
+    cte_rewritten = hs_query_mod._rewrite_console_sql(
+        "WITH q AS (SELECT url, status FROM logs WHERE edge = true AND bot_score > 50) SELECT url FROM q WHERE status = 200",
+        svc_table=f"`fla`.`{masked_req_view}`",
+        names={"request_facts": f"fla.{masked_req_view}"},
+    )
+    assert "custom_fields['status'] AS status" in cte_rewritten
+    assert "toFloat64OrZero(custom_fields['bot_score']) > 50" in cte_rewritten
+    assert "custom_fields" not in cte_rewritten.split("SELECT url FROM q", 1)[1]
 
     # SEC-T5-ITER24-05: Aliased JOIN predicate coercion wraps qualifier inside lower(...) / toFloat64OrZero(...)
     aliased_join_sql = hs_query_mod._rewrite_console_sql(
@@ -4378,6 +4405,32 @@ def test_t5_hs01_clickhouse_console_access_ddl_18_masked_keys_and_fail_closed_is
         "cmcd['cmcd_sid']" in q and "cmcd['cmcd_cid']" in q and "cmcd['cmcd_session']" in q and "cmcd['cmcd.sid']" in q
         for q in seen_isolation_sql
     )
+
+    # Case C: Direct _cf_* column reference in POST /api/query is rejected with 400 while string literal '_cf_cid' succeeds
+    class _HealthyMaskedCH:
+        _table_filters_verified = True
+
+        def execute(self, sql: str, *_a: Any, **_kw: Any) -> list[dict[str, Any]]:
+            if sql.startswith("DESCRIBE TABLE"):
+                return [{"name": "service_id", "type": "String"}, {"name": "url", "type": "String"}]
+            if "service_id !=" in sql or "client_ip !=" in sql or "client_id !=" in sql or "system.one" in sql:
+                return [{"n": 0}]
+            return [{"sample_lit": "_cf_cid", "url": "/ok"}]
+
+        def close(self) -> None:
+            pass
+
+    healthy_clients = console_access.ConsoleClients(
+        settings=ch_cfg, secret=secret, client_factory=lambda _cfg: _HealthyMaskedCH()
+    )
+    monkeypatch.setattr("backend.high_scale.postgres_control.get_console_clients", lambda: healthy_clients)
+    c3 = _analyst_client(analyst)
+    r_bad_cf = c3.post("/api/query", json={"service_id": "svc-a", "sql": "SELECT _cf_cid FROM logs"})
+    assert r_bad_cf.status_code == 400
+    r_ok_lit = c3.post(
+        "/api/query", json={"service_id": "svc-a", "sql": "SELECT '_cf_cid' AS sample_lit, url FROM logs"}
+    )
+    assert r_ok_lit.status_code == 200 and r_ok_lit.json()["data"][0]["sample_lit"] == "_cf_cid"
 
 
 def test_t5_hs02_production_query_and_request_facts_cache_role_mask_window_tenant_isolation(
@@ -6001,7 +6054,7 @@ console.log('NODE_PROXY_AND_CSV_PARITY_OK');
             "lib/cloud-engine/dashboard/duckdb.test.ts",
             "lib/cloud-engine/adapter.test.ts",
             "-t",
-            "wipes range-loader singleton|aborts in-flight|blocks post-logout OPFS persistFile|blocks multi-step runDashboard|aborts in-flight queryRollup|suppresses pending write|skips CacheStorage and error telemetry|isolates cached service stats|clears decoded SecuritySummary|fences in-flight ops CacheStorage|resets activeOpsUser to null|uses volatile-ops scope|aborts multi-step handleCloudAnalyticalRequest|allows concurrent Compare Mode|allows concurrent same-session writes|fences POST /api/dashboard/bundle|scopes /api/usage/|SEC-T5-ITER23-01|SEC-T5-ITER23-03|SEC-T5-ITER24-03|reports a bounded, redacted error message|keeps urls and ins_lat elapsed histograms clone-safe",
+            "wipes range-loader singleton|aborts in-flight|blocks post-logout OPFS persistFile|blocks multi-step runDashboard|aborts in-flight queryRollup|suppresses pending write|skips CacheStorage and error telemetry|isolates cached service stats|clears decoded SecuritySummary|fences in-flight ops CacheStorage|resets activeOpsUser to null|uses volatile-ops scope|aborts multi-step handleCloudAnalyticalRequest|allows concurrent Compare Mode|allows concurrent same-session writes|fences POST /api/dashboard/bundle|scopes /api/usage/|SEC-T5-ITER23-01|SEC-T5-ITER23-03|SEC-T5-ITER24-03|BUG-T5-ITER25-02|reports a bounded, redacted error message|keeps urls and ins_lat elapsed histograms clone-safe",
         ],
         cwd=str(REPO_ROOT / "frontend"),
         env=cloud_vitest_env,

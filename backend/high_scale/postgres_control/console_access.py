@@ -85,7 +85,12 @@ def _redaction(name: str, type_: str, keys: str) -> str | None:
             f"mapApply((k, v) -> (k, if(lower(k) IN ({keys}) AND NOT (isNull(v) OR v = ''), {redacted}, v)), "
             f"`{name}`) AS `{name}`"
         )
-    if name.lower() in MASKED_KEYS:
+    col_lower = name.lower()
+    if (
+        col_lower in MASKED_KEYS
+        or col_lower in _MAP_MASKED_KEYS
+        or (col_lower.startswith("_cf_") and col_lower.removeprefix("_cf_") in _MAP_MASKED_KEYS)
+    ):
         if "String" not in type_:
             raise RuntimeError(f"cannot redact column {name} of type {type_}")
         return f"if(isNull(`{name}`) OR `{name}` = '', `{name}`, {redacted}) AS `{name}`"
@@ -112,7 +117,11 @@ def provision_console_access(admin: Any, database: str, service_id: str, secret:
         raise ValueError("ClickHouse database must be a simple identifier")
     db = f"`{database}`"
     schemas = {
-        table: [(str(row["name"]), str(row["type"])) for row in admin.execute(f"DESCRIBE TABLE {db}.`{table}`")]
+        table: [
+            (str(row["name"]), str(row["type"]))
+            for row in admin.execute(f"DESCRIBE TABLE {db}.`{table}`")
+            if str(row.get("default_type") or "").upper() not in ("MATERIALIZED", "ALIAS")
+        ]
         for table in FACT_DOMAINS
     }
     for table, columns in schemas.items():
@@ -247,12 +256,21 @@ class ConsoleClients:
             if not rows or int(rows[0].get("n", 1)) != 0:
                 raise RuntimeError(f"console identity for {service_id} failed the row isolation check on {view}")
         if masked:
+            req_view = access.tables["request_facts"]
+            desc_rows = access.client.execute(f"DESCRIBE TABLE {req_view}")
+            if any(str(row.get("name") or "").lower().startswith("_cf_") for row in desc_rows):
+                raise RuntimeError(
+                    f"console identity for {service_id} failed the masking check on {req_view}: "
+                    "materialized _cf_* columns exposed"
+                )
             red = _literal(REDACTED)
             unmasked = {
                 "request_facts": (
                     f"(client_ip != '' AND client_ip != {red}) "
                     f"OR custom_fields['cookie_session'] NOT IN ('', {red}) "
                     f"OR custom_fields['cid'] NOT IN ('', {red}) "
+                    f"OR custom_fields['edge_sid'] NOT IN ('', {red}) "
+                    f"OR custom_fields['oip'] NOT IN ('', {red}) "
                     f"OR custom_fields['cmcd_sid'] NOT IN ('', {red}) "
                     f"OR custom_fields['cmcd_cid'] NOT IN ('', {red}) "
                     f"OR custom_fields['cmcd_session'] NOT IN ('', {red}) "

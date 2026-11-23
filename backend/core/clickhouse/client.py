@@ -173,6 +173,7 @@ _MATERIALIZED_CF_KEYS: frozenset[str] = frozenset(
     }
 )
 _CF_LITERAL_RE = re.compile(r"custom_fields\['([a-zA-Z0-9_]+)'\]")
+_REQUEST_FACTS_WORD_RE = re.compile(r"(?<![A-Za-z0-9_])request_facts(?![A-Za-z0-9_])")
 _CF_PARAM_RE = re.compile(r"custom_fields\[\{([a-zA-Z0-9_]+):String\}\]")
 _PUB_FENCE_RE = re.compile(
     r"batch_id\s+IN\s*\(\s*SELECT\s+batch_id\s+FROM\s+high_scale_batch_publications\s+FINAL\s+WHERE\s+([^()]+?)\)"
@@ -389,7 +390,7 @@ class ClickHouseClient:
             sql = _PUB_FENCE_RE.sub(_replace_fence, sql)
 
         upper_sql = sql.lstrip().upper()
-        is_fact_query = "request_facts" in sql and upper_sql.startswith(("SELECT", "WITH", "/*"))
+        is_fact_query = bool(_REQUEST_FACTS_WORD_RE.search(sql)) and upper_sql.startswith(("SELECT", "WITH", "/*"))
         is_where_fragment = not upper_sql.startswith(
             ("SELECT", "WITH", "/*", "INSERT", "ALTER", "CREATE", "DROP", "OPTIMIZE", "SYSTEM", "TRUNCATE")
         )

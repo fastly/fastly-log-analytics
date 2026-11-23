@@ -18,6 +18,17 @@ export const opsCacheName = (user: string, role: string) =>
 
 export type OpsIdentity = { user: string; role: string };
 
+const KNOWN_IDENTITY_ROLES = new Set([
+  "admin",
+  "admin-no-pii",
+  "analyst",
+  "analyst-no-pii",
+  "analyst_masked",
+]);
+
+const normalizeOpsRole = (role: string): string =>
+  role === "analyst_masked" ? "analyst-no-pii" : role;
+
 let activeUserId: string | null = null;
 let activeUserRole: string | null = null;
 let opsCacheEpoch = 0;
@@ -56,8 +67,13 @@ export function currentOpsIdentity(
   if (dashId && dashId !== "anonymous") {
     const sep = dashId.lastIndexOf(":");
     if (sep > 0) {
-      dashUser = dashId.slice(0, sep);
-      dashRole = dashId.slice(sep + 1) || null;
+      const candidateRole = dashId.slice(sep + 1);
+      if (KNOWN_IDENTITY_ROLES.has(candidateRole)) {
+        dashUser = dashId.slice(0, sep);
+        dashRole = normalizeOpsRole(candidateRole);
+      } else {
+        dashUser = dashId;
+      }
     } else {
       dashUser = dashId;
     }
@@ -72,18 +88,20 @@ export function currentOpsIdentity(
       : null;
   let explicitRole =
     explicit?.role && explicit.role.trim().length > 0
-      ? explicit.role.trim()
+      ? normalizeOpsRole(explicit.role.trim())
       : null;
-  if (explicitUser) {
+  if (explicitUser && explicitRole === null) {
     const sep = explicitUser.lastIndexOf(":");
     if (sep > 0) {
-      const parsedUser = explicitUser.slice(0, sep);
-      const parsedRole = explicitUser.slice(sep + 1) || null;
-      if (parsedUser === "anonymous") {
-        explicitUser = null;
-      } else {
-        explicitUser = parsedUser;
-        explicitRole ??= parsedRole;
+      const parsedRole = explicitUser.slice(sep + 1);
+      if (KNOWN_IDENTITY_ROLES.has(parsedRole)) {
+        const parsedUser = explicitUser.slice(0, sep);
+        if (parsedUser === "anonymous") {
+          explicitUser = null;
+        } else {
+          explicitUser = parsedUser;
+          explicitRole = normalizeOpsRole(parsedRole);
+        }
       }
     }
   }

@@ -1,4 +1,5 @@
 import {
+  duckSqlString,
   getDuckDBEngine,
   type DuckDBAnalyticalEngine,
   type DuckDBReadContext,
@@ -387,8 +388,7 @@ export function networkScanColumns(path: string, params: Record<string, unknown>
 function buildWhereClause(params: NetworkQueryParams): string {
   const clauses: string[] = [rangeServiceSql(params)];
   if (params.filter_country) {
-    const escaped = String(params.filter_country).replaceAll("'", "''");
-    clauses.push(`COALESCE(geo_country, country) = '${escaped}'`);
+    clauses.push(`COALESCE(geo_country, country) = ${duckSqlString(String(params.filter_country))}`);
   }
   if (params.filter_asn !== undefined && params.filter_asn !== "") {
     const asnNum = Number(params.filter_asn);
@@ -397,8 +397,7 @@ function buildWhereClause(params: NetworkQueryParams): string {
     }
   }
   if (params.filter_pop) {
-    const escaped = String(params.filter_pop).replaceAll("'", "''");
-    clauses.push(`COALESCE(fastly_pop, pop) = '${escaped}'`);
+    clauses.push(`COALESCE(fastly_pop, pop) = ${duckSqlString(String(params.filter_pop))}`);
   }
   clauses.push(analyticsFiltersToSql(params.filters, params.customColumnTypes));
   return clauses.join(" AND ");
@@ -774,12 +773,12 @@ async function queryNetworkQualityParts(
     out.throughput = { avg_throughput_mbps: row?.tp == null ? null : Number(row.tp) };
   }
   if (parts.includes("region")) {
-    const regionCountry = String(params.region_country ?? "US").replaceAll("'", "''");
+    const regionCountrySql = duckSqlString(String(params.region_country ?? "US"));
     const rows = await engine.executeSql<Record<string, unknown>>(`SELECT
         COALESCE(geo_region, region, 'Unknown') AS value,
         AVG(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt)) / 1000.0 AS rtt_ms,
         COUNT(*)::BIGINT AS reqs
-      FROM requests WHERE ${where} AND COALESCE(geo_country, country) = '${regionCountry}'
+      FROM requests WHERE ${where} AND COALESCE(geo_country, country) = ${regionCountrySql}
       GROUP BY 1 ORDER BY reqs DESC`, [], params.signal);
     out.region = rows.map((row) => ({
       value: String(row.value), rtt_ms: row.rtt_ms == null ? null : Number(row.rtt_ms),
@@ -810,7 +809,7 @@ export async function queryNetworkQuality(params: NetworkQueryParams = {}) {
   const missingTcpFields = await detectMissingTcpFields(engine);
   const where = buildWhereClause(params);
 
-  const regionCountry = String(params.region_country ?? "US").replaceAll("'", "''");
+  const regionCountrySql = duckSqlString(String(params.region_country ?? "US"));
   // One pass for the summary and every grouped table except the scatter sample.
   const qualityRows = await engine.executeSql<Record<string, unknown>>(
     `WITH scoped AS (
@@ -820,7 +819,7 @@ export async function queryNetworkQuality(params: NetworkQueryParams = {}) {
         COALESCE(as_name, 'AS' || CAST(COALESCE(client_asn, asn, 0) AS VARCHAR)) AS as_name_key,
         COALESCE(protocol, proto, 'Other') AS proto_key,
         COALESCE(fastly_pop, pop) AS pop_key,
-        CASE WHEN COALESCE(geo_country, country) = '${regionCountry}'
+        CASE WHEN COALESCE(geo_country, country) = ${regionCountrySql}
           THEN COALESCE(geo_region, region, 'Unknown') END AS region_key,
         COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt) AS rtt_us,
         client_cwnd, client_tcpi_rttvar, client_ploss,

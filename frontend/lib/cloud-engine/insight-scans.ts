@@ -1,4 +1,4 @@
-import { getDuckDBEngine, compileFiltersToSql, type DuckDBReadContext } from "./dashboard/duckdb";
+import { compileFiltersToSql, duckSqlString, getDuckDBEngine, type DuckDBReadContext } from "./dashboard/duckdb";
 import type { DashboardFilter } from "./dashboard/filters";
 import {
   _coalesced_url_aggregates,
@@ -21,7 +21,6 @@ import {
   type CacheCollapseDetailRequest,
 } from "./insights";
 import { formatBudgetAmount, type CloudBudgetDetail } from "./range-loader";
-import { escapeSqlLiteral } from "./sql-validator";
 import type { RollupResult } from "./dashboard/rollup-query";
 import { INSIGHTS_DEFERRED, insightsDeferredDetectors, rollupInsightsBaseline } from "./insights-rollup";
 
@@ -189,7 +188,7 @@ export async function queryCloudCacheCollapse(
 ) {
   const engine = options.engine ?? getDuckDBEngine().readContext();
   const { end, start, windowStart } = resolveInsightWindow(body);
-  const where = `url = '${escapeSqlLiteral(body.url)}' AND ts_ms >= ${start} AND ts_ms < ${end}`;
+  const where = `url = ${duckSqlString(body.url)} AND ts_ms >= ${start} AND ts_ms < ${end}`;
   const [rates, timelineRows, missRows] = await Promise.all([
     engine.executeSql(`SELECT
       COUNT(*) FILTER (WHERE ts_ms >= ${windowStart}) AS w_total,

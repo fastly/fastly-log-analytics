@@ -1,7 +1,6 @@
-import { sqlEscape } from "@/lib/sqlBuilder";
 import type { components } from "@/types/api";
 import {
-  compileFiltersToSql, getDuckDBEngine, type DuckDBAnalyticalEngine, type DuckDBColumnType,
+  compileFiltersToSql, duckSqlString, getDuckDBEngine, type DuckDBAnalyticalEngine, type DuckDBColumnType,
 } from "./dashboard/duckdb";
 import type { DashboardFilter } from "./dashboard/filters";
 import { roundTo } from "./engine-utils";
@@ -83,7 +82,7 @@ function buildWhereClause(params: ValueQueryParams, types: Map<string, DuckDBCol
   if (startMs !== null) clauses.push(`ts_ms >= ${startMs}`);
   if (endMs !== null) clauses.push(`ts_ms < ${endMs}`);
   if (params.service_id) {
-    clauses.push(`(service_id = '${sqlEscape(params.service_id)}' OR service_id IS NULL)`);
+    clauses.push(`(service_id = ${duckSqlString(String(params.service_id))} OR service_id IS NULL)`);
   }
   const filters: DashboardFilter[] = [];
   for (const source of [params.filters, params.custom_filters]) {

@@ -92,6 +92,29 @@ it("reports a bounded, redacted error message so a failed query can be diagnosed
     const basicAuth = new Error("Header Authorization: Basic YWRtaW46c2VjcmV0 rejected");
     await expect(measureCloudQuery("dashboard.bundle", async () => { throw basicAuth; })).rejects.toBe(basicAuth);
     expect(events[7].error).not.toContain("YWRtaW46c2VjcmV0");
+
+    // BUG-T5-ITER25-03: Multiline quoted strings and unterminated trailing quotes must be redacted,
+    // while contractions like can't / doesn't remain intact:
+    for (const secretErr of [
+      new Error('Failed fetching for user "MyShortPass123\ninvalid"'),
+      new Error("Binder Error: syntax error near 'SecretTok99!\nSELECT 1'"),
+      new Error("Template literal error `BacktickSec88\nline2`"),
+      new Error("Parser Error: unterminated quoted string at or near 'UnclosedSec77"),
+      new Error("Parser Error: unterminated escaped string near E'EscapedSec66"),
+    ]) {
+      const beforeLen = events.length;
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw secretErr; })).rejects.toBe(secretErr);
+      const outErr = events[beforeLen + 1]?.error ?? "";
+      for (const secretFrag of ["MyShortPass123", "SecretTok99", "BacktickSec88", "UnclosedSec77", "EscapedSec66"]) {
+        expect(outErr).not.toContain(secretFrag);
+      }
+      expect(outErr).toContain("[redacted]");
+    }
+
+    const contractionErr = new Error("Backend can't reach cache metadata");
+    const cIdx = events.length;
+    await expect(measureCloudQuery("dashboard.bundle", async () => { throw contractionErr; })).rejects.toBe(contractionErr);
+    expect(events[cIdx + 1]?.error).toBe("Error: Backend can't reach cache metadata");
   } finally {
     window.removeEventListener("fla:cloud-query", listener);
   }

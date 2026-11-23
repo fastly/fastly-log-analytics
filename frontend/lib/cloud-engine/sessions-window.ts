@@ -7,7 +7,8 @@
  * overlap.
  */
 
-import { escapeSqlLiteral, requireSafeIdent } from "./sql-validator";
+import { duckSqlString } from "./dashboard/duckdb";
+import { requireSafeIdent } from "./sql-validator";
 
 export const SESSIONS_GAP_MS = 1_800_000;
 export const SESSIONS_FIRST_SLICE_MS = 15 * 60_000;
@@ -97,7 +98,7 @@ export function buildSessionsEnrichSql(options: {
   urls: boolean;
 }): string {
   const tableName = requireSafeIdent(options.tableName ?? "requests", "tableName");
-  const text = (value: string | null) => value == null ? "CAST(NULL AS VARCHAR)" : `CAST('${escapeSqlLiteral(value)}' AS VARCHAR)`;
+  const text = (value: string | null) => value == null ? "CAST(NULL AS VARCHAR)" : `CAST(${duckSqlString(value)} AS VARCHAR)`;
   const values = options.keys.map((key, i) =>
     `(${i}, ${text(key.ip)}, ${text(key.ja4)}, ${Math.trunc(key.startMs)}::BIGINT, ${Math.trunc(key.endMs)}::BIGINT)`);
   const fromMs = Math.min(...options.keys.map((key) => key.startMs));

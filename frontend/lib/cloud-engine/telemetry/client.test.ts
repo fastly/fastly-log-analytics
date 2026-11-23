@@ -330,10 +330,11 @@ describe("readLogs request sharing", () => {
     );
 
     // 3. Inside Web Worker (where localStorage / dashId is null and activeOpsUser is null),
-    // currentOpsIdentity and browserOpsSource split "alice:admin" cleanly without creating ":alice:admin:admin":
+    // currentOpsIdentity and browserOpsSource split "alice:admin" when role is omitted,
+    // while preserving colon-bearing user.id values ("org:alice", "urn:fastly:user:alice", "org:admin") across hops!
     await clearDashboardData();
     await clientMod.clearOpsCaches();
-    expect(clientMod.currentOpsIdentity({ user: "alice:admin", role: "admin" })).toEqual({
+    expect(clientMod.currentOpsIdentity({ user: "alice:admin" })).toEqual({
       user: "alice",
       role: "admin",
     });
@@ -341,11 +342,71 @@ describe("readLogs request sharing", () => {
       user: "alice",
       role: "analyst-no-pii",
     });
+    expect(clientMod.currentOpsIdentity({ user: "alice:analyst_masked" })).toEqual({
+      user: "alice",
+      role: "analyst-no-pii",
+    });
     const workerSrc = clientMod.browserOpsSource("http://localhost", {
       user: "alice:admin",
-      role: "admin",
-    });
+    } as unknown as { user: string; role: string });
     await workerSrc.fetchFile("processed/ops/audit_log/part-worker.parquet");
     expect([...bucketEntries.keys()]).toEqual(["flp-ops-parquet-v1:alice:admin"]);
+
+    // 4. BUG-T5-ITER25-01: Colon-bearing user.id values must NOT collide, lose segments across hops, or drop -no-pii!
+    bucketEntries.clear();
+    await setDashboardCacheIdentity("org:alice:analyst-no-pii");
+    await clientMod.syncOpsCacheForSession({
+      userId: "org:alice",
+      role: "analyst",
+      maskIps: true,
+      needsLogin: false,
+    });
+    const hop0Alice = clientMod.currentOpsIdentity();
+    expect(hop0Alice).toEqual({ user: "org:alice", role: "analyst-no-pii" });
+    const hop1Alice = clientMod.currentOpsIdentity(hop0Alice);
+    expect(hop1Alice).toEqual({ user: "org:alice", role: "analyst-no-pii" });
+    expect(clientMod.currentOpsIdentity({ user: "org:alice" })).toEqual({
+      user: "org:alice",
+      role: "analyst-no-pii",
+    });
+    const aliceColonSrc = clientMod.browserOpsSource("http://localhost", hop0Alice);
+    await aliceColonSrc.fetchFile("processed/ops/audit_log/part-alice.parquet");
+
+    await setDashboardCacheIdentity("org:bob:analyst-no-pii");
+    await clientMod.syncOpsCacheForSession({
+      userId: "org:bob",
+      role: "analyst",
+      maskIps: true,
+      needsLogin: false,
+    });
+    const bobColonSrc = clientMod.browserOpsSource("http://localhost", clientMod.currentOpsIdentity());
+    await bobColonSrc.fetchFile("processed/ops/audit_log/part-bob.parquet");
+    expect([...bucketEntries.keys()]).toEqual(["flp-ops-parquet-v1:org:bob:analyst-no-pii"]);
+
+    // Multi-colon URN user.id across multiple hops + user-scoped clearOpsCaches leaves 0 orphaned caches:
+    bucketEntries.clear();
+    await setDashboardCacheIdentity("urn:fastly:user:alice:admin");
+    await clientMod.syncOpsCacheForSession({
+      userId: "urn:fastly:user:alice",
+      role: "admin",
+      needsLogin: false,
+    });
+    const urnHop0 = clientMod.currentOpsIdentity();
+    const urnHop1 = clientMod.currentOpsIdentity(urnHop0);
+    const urnHop2 = clientMod.currentOpsIdentity(urnHop1);
+    expect(urnHop2).toEqual({ user: "urn:fastly:user:alice", role: "admin" });
+    const urnSrc = clientMod.browserOpsSource("http://localhost", urnHop2);
+    await urnSrc.fetchFile("processed/ops/audit_log/part-urn.parquet");
+    expect([...bucketEntries.keys()]).toEqual(["flp-ops-parquet-v1:urn:fastly:user:alice:admin"]);
+    await clientMod.clearOpsCaches({ user: "urn:fastly:user:alice" });
+    expect([...bucketEntries.keys()]).toEqual([]);
+
+    // Colon-bearing user whose suffix happens to be "admin" ("org:admin") keeps full user when role is supplied,
+    // and "anonymous:guest1" is NOT treated as anonymous:
+    expect(clientMod.currentOpsIdentity({ user: "org:admin", role: "analyst-no-pii" })).toEqual({
+      user: "org:admin",
+      role: "analyst-no-pii",
+    });
+    expect(clientMod.currentOpsIdentity({ user: "anonymous:guest1" }).user).toBe("anonymous:guest1");
   });
 });

@@ -19,7 +19,8 @@ from urllib.parse import parse_qs, urlparse
 import orjson
 import zstandard as zstd
 
-from backend.core.log_fields import SqlType, try_get
+from backend.core.catalog import _CANONICAL_SYSTEM_FIELD_SPECS
+from backend.core.log_fields import LOG_FIELD_CATALOG, SqlType, try_get
 from backend.core.share_db import apply_pii_policy, is_saved_view_pii_key, mask_ip_values, scrub_ip_text
 from backend.core.sql_validator import SAFE_IDENT_RE, SQLValidationError, validate_user_sql
 from backend.high_scale._common import _FIELD_DIMENSIONS, clickhouse_string_literal
@@ -853,14 +854,173 @@ _ON_OPERATOR_CONTEXT_WORDS = frozenset(
     }
 )
 _FROM_FIRST_SELECT_FN_KEYWORDS = frozenset({"ANY", "ARRAY", "LEFT", "RIGHT", "FORMAT", "SAMPLE", "WINDOW"})
-_REQUEST_CF_FIELDS = frozenset(
-    f for f in _FIELD_DIMENSIONS.values() if f not in {"client_ip", "country", "url", "cmcd", "custom_fields"}
+_REQUEST_TYPED_COLUMNS = frozenset(
+    {
+        "service_id",
+        "event_id",
+        "event_timestamp",
+        "ingest_timestamp",
+        "source_object_key",
+        "source_object_version",
+        "line_ordinal",
+        "transform_version",
+        "batch_id",
+        "publication_state",
+        "country",
+        "client_ip",
+        "url",
+        "custom_fields",
+        "cmcd",
+    }
 )
+_EXTRA_DUCKDB_REQUEST_FIELDS = frozenset(
+    {
+        "_bot_name",
+        "as_name",
+        "asset_type",
+        "bot_category",
+        "bot_score",
+        "bot_verified",
+        "bytes",
+        "cache_control",
+        "cache_status",
+        "cid",
+        "client_asn",
+        "client_cwnd",
+        "client_ploss",
+        "client_rtt_us",
+        "client_tcpi_delta_retrans",
+        "client_tcpi_rcv_space",
+        "client_tcpi_rtt",
+        "client_tcpi_rttvar",
+        "client_tcpi_snd_mss",
+        "cmcd_nor",
+        "cmcd_nrr",
+        "cmcd_pr",
+        "cmcd_v",
+        "content_encoding",
+        "content_type",
+        "cwnd",
+        "ddos_action",
+        "fastly_is_shield",
+        "fastly_pop",
+        "geo_city",
+        "geo_country",
+        "geo_region",
+        "h2_fingerprint",
+        "h2fp",
+        "ifmt",
+        "io_transform",
+        "ipv6",
+        "is_bot",
+        "is_edge",
+        "is_shield",
+        "is_ssl",
+        "ja3_md5",
+        "ngwaf_bot",
+        "ngwaf_bot_category",
+        "ngwaf_bot_name",
+        "ngwaf_decision",
+        "ngwaf_signals",
+        "ngwaf_wellknown_bot",
+        "ofmt",
+        "oh_fingerprint",
+        "ohbytes",
+        "ohfp",
+        "origin_host",
+        "origin_ip",
+        "origin_status",
+        "origin_time_ms",
+        "origin_ttfb_ms",
+        "path",
+        "protocol",
+        "query_string",
+        "req_body_bytes",
+        "req_body_size",
+        "req_id",
+        "resp_body_bytes",
+        "resp_body_size",
+        "resp_header_bytes",
+        "resp_header_content_type",
+        "surrogate_control",
+        "tcpi_delivery_rate",
+        "tcpi_min_rtt",
+        "tcpi_rtt",
+        "tcpi_rtt_var",
+        "tcpi_snd_cwnd",
+        "tcpi_total_retrans",
+        "time_elapsed_usec",
+        "time_to_first_byte_ns",
+        "tls_cipher",
+        "tls_version",
+        "ttfb_ms",
+        "user_agent",
+        "verified_bot",
+        "waf_action",
+        "waf_blocked_rules",
+        "waf_logged_rules",
+        "waf_message",
+        "waf_rule_id",
+        "waf_severity",
+    }
+)
+_REQUEST_CF_FIELDS = (
+    (
+        frozenset(_FIELD_DIMENSIONS.values())
+        | frozenset(
+            str(f["id"]).lower() for f in LOG_FIELD_CATALOG if f.get("group") not in ("METRICS", "VIRTUAL", "INTERNAL")
+        )
+        | frozenset(k.lower() for k, (stg, _) in _CANONICAL_SYSTEM_FIELD_SPECS.items() if stg != "beacon")
+        | _EXTRA_DUCKDB_REQUEST_FIELDS
+    )
+    - (_REQUEST_TYPED_COLUMNS | {"timestamp", "ip"})
+    - _SQL_KEYWORDS
+    - frozenset(
+        w.lower() for w in (_SQL_CLAUSE_STOPWORDS | _ON_EXPR_PREV_WORDS | _ON_EXPR_NEXT_WORDS | _SQL_INTERVAL_UNITS)
+    )
+    - {"asc", "desc", "null", "true", "false", "nulls", "first", "last"}
+)
+_REQUEST_BOOLEAN_CF_FIELDS = frozenset(
+    {
+        "edge",
+        "is_ipv6",
+        "waf",
+        "is_bot",
+        "verified_bot",
+        "bot_verified",
+        "is_ssl",
+        "ipv6",
+        "is_shield",
+        "fastly_is_shield",
+        "is_edge",
+        "cmcd_bs",
+        "cmcd_su",
+    }
+) | frozenset(str(f["id"]).lower() for f in LOG_FIELD_CATALOG if str(f.get("sql_type") or "").upper() == "BOOLEAN")
+
+
+def _unquote_sql_ident(token_text: str) -> str:
+    if len(token_text) >= 2 and token_text[0] == '"' and token_text[-1] == '"':
+        return token_text[1:-1].replace('""', '"')
+    if len(token_text) >= 2 and token_text[0] == "`" and token_text[-1] == "`":
+        return token_text[1:-1].replace("``", "`")
+    return token_text
+
+
+def _reject_internal_cf_identifiers(sql: str) -> None:
+    for m in _CONSOLE_SQL_LEX_RE.finditer(sql):
+        kind = m.lastgroup or "OTHER"
+        tok = m.group(0)
+        if kind == "IDENT" and tok.lower().startswith("_cf_"):
+            raise ValueError(f"internal column {tok!r} is not queryable in console SQL")
+        if kind == "DQUOTE" and _unquote_sql_ident(tok).lower().startswith("_cf_"):
+            raise ValueError(f"internal column {tok!r} is not queryable in console SQL")
 
 
 def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Mapping[str, str]) -> tuple[str, set[str]]:
     import secrets as _secrets
 
+    _reject_internal_cf_identifiers(sql)
     iso_lit_re = re.compile(r"^'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)'$")
     cf_key_lit_re = re.compile(r"^'[A-Za-z0-9_]+'$")
 
@@ -1537,14 +1697,34 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                     return _is_subquery_tokens(cur[sig[0] + 1 : close_first])
         return False
 
-    def _coerce_request_predicates(segment_tokens: list[tuple[str, str]]) -> str:
+    def _coerce_request_predicates(
+        segment_tokens: list[tuple[str, str]],
+        *,
+        touches_request: bool = True,
+        derived_str_cols: frozenset[str] = frozenset(),
+        derived_qualifiers: frozenset[str] = frozenset(),
+        unqualified_derived: bool = False,
+    ) -> str:
         lit_nonce = _secrets.token_hex(8)
         saved_lits: list[str] = []
         parts: list[str] = []
         sig_idxs = _sig_indices(segment_tokens)
         sig_pos_map = {idx: pos for pos, idx in enumerate(sig_idxs)}
         for idx, (k, t) in enumerate(segment_tokens):
-            if k == "STR":
+            if k == "COMMENT":
+                s_idx = len(saved_lits)
+                saved_lits.append(t)
+                parts.append(f"__fla_str_lit_{lit_nonce}_{s_idx}__")
+            elif k == "DQUOTE":
+                s_pos = sig_pos_map.get(idx, -1)
+                next_sig = segment_tokens[sig_idxs[s_pos + 1]] if (s_pos >= 0 and s_pos + 1 < len(sig_idxs)) else None
+                if next_sig == ("OP", "."):
+                    parts.append(t)
+                else:
+                    s_idx = len(saved_lits)
+                    saved_lits.append(t)
+                    parts.append(f"__fla_str_lit_{lit_nonce}_{s_idx}__")
+            elif k == "STR":
                 t_norm = _normalize_iso(t)
                 s_pos = sig_pos_map.get(idx, -1)
                 is_cf_key = (
@@ -1564,41 +1744,95 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
             else:
                 parts.append(t)
         seg_sql = "".join(parts)
-        _qual_re = r"(?:(?:[A-Za-z_][A-Za-z0-9_]*|`[^`]+`)\s*\.\s*)*"
-        for b_field in ("edge", "is_ipv6", "waf"):
+        _single_ident_re = r'(?:[A-Za-z_][A-Za-z0-9_]*|`(?:``|[^`])+`|"(?:""|[^"])+")'
+        _qual_re = rf"(?:{_single_ident_re}\s*\.\s*)*"
+        _bool_rules = (
+            (r"IN\s*\(\s*'true'\s*\)", "IN ('true', '1')"),
+            (r"NOT\s+IN\s*\(\s*'true'\s*\)", "NOT IN ('true', '1')"),
+            (r"IN\s*\(\s*'false'\s*\)", "IN ('false', '0', '')"),
+            (r"=\s*'true'", "IN ('true', '1')"),
+            (r"=\s*'false'", "IN ('false', '0', '')"),
+            (r"=\s*\btrue\b", "IN ('true', '1')"),
+            (r"=\s*\bfalse\b", "IN ('false', '0', '')"),
+        )
+        if touches_request:
+            for b_field in sorted(_REQUEST_BOOLEAN_CF_FIELDS):
+                for pat, repl in _bool_rules:
+                    seg_sql = re.sub(
+                        rf"({_qual_re})custom_fields\['{re.escape(b_field)}'\]\s*{pat}",
+                        rf"lower(\1custom_fields['{b_field}']) {repl}",
+                        seg_sql,
+                        flags=re.IGNORECASE,
+                    )
             for pat, repl in (
-                (r"IN\s*\(\s*'true'\s*\)", "IN ('true', '1')"),
-                (r"NOT\s+IN\s*\(\s*'true'\s*\)", "NOT IN ('true', '1')"),
-                (r"IN\s*\(\s*'false'\s*\)", "IN ('false', '0', '')"),
-                (r"=\s*'true'", "IN ('true', '1')"),
-                (r"=\s*'false'", "IN ('false', '0', '')"),
-                (r"=\s*\btrue\b", "IN ('true', '1')"),
-                (r"=\s*\bfalse\b", "IN ('false', '0', '')"),
+                (
+                    rf"({_qual_re}custom_fields\['[a-zA-Z0-9_]+'\])\s*(=|!=|<>)\s*(-?\d+(?:\.\d+)?)\b",
+                    r"\1 \2 '\3'",
+                ),
+                (
+                    rf"({_qual_re}custom_fields\['[a-zA-Z0-9_]+'\])\s*(<=|>=|<|>)\s*(-?\d+(?:\.\d+)?)\b",
+                    r"toFloat64OrZero(\1) \2 \3",
+                ),
             ):
+                seg_sql = re.sub(pat, repl, seg_sql)
+
+        if derived_str_cols and (unqualified_derived or derived_qualifiers):
+
+            def _qual_matches_derived(raw_qual: str) -> bool:
+                if not raw_qual:
+                    return unqualified_derived
+                q_tok = raw_qual.rstrip()[:-1].strip()
+                return _unquote_sql_ident(q_tok).lower() in derived_qualifiers
+
+            for d_col in sorted(derived_str_cols):
+                col_pat = rf"(?<![A-Za-z0-9_.\"'`])({_single_ident_re}\s*\.\s*)?(\b{re.escape(d_col)}\b)"
+                if d_col in _REQUEST_BOOLEAN_CF_FIELDS:
+                    for b_pat, b_repl in _bool_rules:
+
+                        def _sub_bool(m: re.Match[str], _repl: str = b_repl) -> str:
+                            q_part = m.group(1) or ""
+                            if not _qual_matches_derived(q_part):
+                                return m.group(0)
+                            return f"lower({q_part}{m.group(2)}) {_repl}"
+
+                        seg_sql = re.sub(rf"{col_pat}\s*{b_pat}", _sub_bool, seg_sql, flags=re.IGNORECASE)
+
+                def _sub_eq(m: re.Match[str]) -> str:
+                    q_part = m.group(1) or ""
+                    if not _qual_matches_derived(q_part):
+                        return m.group(0)
+                    return f"{q_part}{m.group(2)} {m.group(3)} '{m.group(4)}'"
+
                 seg_sql = re.sub(
-                    rf"({_qual_re})custom_fields\['{b_field}'\]\s*{pat}",
-                    rf"lower(\1custom_fields['{b_field}']) {repl}",
+                    rf"{col_pat}\s*(=|!=|<>)\s*(-?\d+(?:\.\d+)?)\b",
+                    _sub_eq,
                     seg_sql,
                     flags=re.IGNORECASE,
                 )
-        for pat, repl in (
-            (
-                rf"({_qual_re}custom_fields\['[a-zA-Z0-9_]+'\])\s*(=|!=|<>)\s*(-?\d+(?:\.\d+)?)\b",
-                r"\1 \2 '\3'",
-            ),
-            (
-                rf"({_qual_re}custom_fields\['[a-zA-Z0-9_]+'\])\s*(<=|>=|<|>)\s*(-?\d+(?:\.\d+)?)\b",
-                r"toFloat64OrZero(\1) \2 \3",
-            ),
-        ):
-            seg_sql = re.sub(pat, repl, seg_sql)
+
+                def _sub_cmp(m: re.Match[str]) -> str:
+                    q_part = m.group(1) or ""
+                    if not _qual_matches_derived(q_part):
+                        return m.group(0)
+                    return f"toFloat64OrZero({q_part}{m.group(2)}) {m.group(3)} {m.group(4)}"
+
+                seg_sql = re.sub(
+                    rf"{col_pat}\s*(<=|>=|<|>)\s*(-?\d+(?:\.\d+)?)\b",
+                    _sub_cmp,
+                    seg_sql,
+                    flags=re.IGNORECASE,
+                )
+
         if saved_lits:
             seg_sql = re.sub(rf"__fla_str_lit_{lit_nonce}_(\d+)__", lambda m: saved_lits[int(m.group(1))], seg_sql)
         return seg_sql
 
     def _rewrite_tokens(
-        tokens: list[tuple[str, str]], inherited_ctes: dict[str, set[str]]
-    ) -> tuple[str, set[str], set[str]]:
+        tokens: list[tuple[str, str]],
+        inherited_ctes: dict[str, tuple[set[str], frozenset[str]]],
+        *,
+        is_subquery: bool = False,
+    ) -> tuple[str, set[str], set[str], frozenset[str]]:
         prefix_wrap: list[str] = []
         suffix_wrap: list[str] = []
         while (enc := _has_enclosing_parens(tokens)) is not None:
@@ -1616,7 +1850,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
         all_canonicals: set[str] = set()
         sig = _sig_indices(tokens)
         if not sig:
-            return _wrap("".join(t for _, t in tokens)), set(), set()
+            return _wrap("".join(t for _, t in tokens)), set(), set(), frozenset()
 
         out_prefix = ""
         if tokens[sig[0]][0] == "IDENT" and tokens[sig[0]][1].upper() == "WITH":
@@ -1636,16 +1870,26 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 p = i_tok
                 while p < len(tokens) and tokens[p][0] in ("WS", "COMMENT"):
                     p += 1
-                if p >= len(tokens) or tokens[p][0] != "IDENT" or tokens[p][1].upper() == "SELECT":
+                if (
+                    p >= len(tokens)
+                    or tokens[p][0] not in ("IDENT", "DQUOTE")
+                    or (tokens[p][0] == "IDENT" and tokens[p][1].upper() == "SELECT")
+                ):
                     break
-                cte_name = tokens[p][1]
+                cte_name = _unquote_sql_ident(tokens[p][1])
                 p2 = p + 1
                 while p2 < len(tokens) and tokens[p2][0] in ("WS", "COMMENT"):
                     p2 += 1
+                explicit_cte_cols: list[str] | None = None
                 if p2 < len(tokens) and tokens[p2] == ("OP", "("):
                     rp_cols = _find_matching_paren(tokens, p2)
                     if not _is_valid_lex_ident_list(tokens[p2 + 1 : rp_cols]):
                         break
+                    explicit_cte_cols = [
+                        _unquote_sql_ident(tk).lower()
+                        for kd, tk in tokens[p2 + 1 : rp_cols]
+                        if kd in ("IDENT", "DQUOTE")
+                    ]
                     p2 = rp_cols + 1
                     while p2 < len(tokens) and tokens[p2][0] in ("WS", "COMMENT"):
                         p2 += 1
@@ -1669,8 +1913,12 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 close_idx = _find_matching_paren(tokens, p2)
                 if not _is_subquery_tokens(tokens[p2 + 1 : close_idx]):
                     break
-                inner_sql, inner_domains, inner_canonicals = _rewrite_tokens(tokens[p2 + 1 : close_idx], ctes)
-                ctes[cte_name.lower()] = inner_domains
+                inner_sql, inner_domains, inner_canonicals, inner_str_cf = _rewrite_tokens(
+                    tokens[p2 + 1 : close_idx], ctes, is_subquery=True
+                )
+                if explicit_cte_cols is not None:
+                    inner_str_cf = inner_str_cf & frozenset(explicit_cte_cols)
+                ctes[cte_name.lower()] = (inner_domains, inner_str_cf)
                 all_canonicals |= inner_canonicals
                 buf.extend(tk for _, tk in tokens[i_tok : p2 + 1])
                 buf.append(inner_sql)
@@ -1691,7 +1939,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 out_prefix = "".join(buf)
                 tokens = tokens[i_tok:]
                 if not tokens:
-                    return _wrap(out_prefix), set(), all_canonicals
+                    return _wrap(out_prefix), set(), all_canonicals, frozenset()
 
         top_sig = _sig_indices(tokens)
         top_sig_pos = {idx: pos for pos, idx in enumerate(top_sig)}
@@ -1814,27 +2062,37 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
         branches.append((cur_branch, []))
 
         all_domains: set[str] = set()
+        all_str_cf_cols: set[str] = set()
         rendered_parts: list[str] = [out_prefix]
         for b_tokens, sep_tokens in branches:
             if _has_enclosing_parens(b_tokens) is not None:
-                b_sql, b_domains, b_canonicals = _rewrite_tokens(b_tokens, ctes)
+                b_sql, b_domains, b_canonicals, b_str_cf = _rewrite_tokens(b_tokens, ctes, is_subquery=is_subquery)
             else:
-                b_sql, b_domains, b_canonicals = _rewrite_single_branch(b_tokens, ctes)
+                b_sql, b_domains, b_canonicals, b_str_cf = _rewrite_single_branch(
+                    b_tokens, ctes, is_subquery=is_subquery
+                )
             all_domains |= b_domains
             all_canonicals |= b_canonicals
+            all_str_cf_cols |= b_str_cf
             rendered_parts.append(b_sql)
             rendered_parts.extend(tk for _, tk in sep_tokens)
-        return _wrap("".join(rendered_parts)), all_domains, all_canonicals
+        return _wrap("".join(rendered_parts)), all_domains, all_canonicals, frozenset(all_str_cf_cols)
 
     def _rewrite_single_branch(
-        tokens: list[tuple[str, str]], ctes: dict[str, set[str]]
-    ) -> tuple[str, set[str], set[str]]:
+        tokens: list[tuple[str, str]],
+        ctes: dict[str, tuple[set[str], frozenset[str]]],
+        *,
+        is_subquery: bool = False,
+    ) -> tuple[str, set[str], set[str], frozenset[str]]:
         domains: set[str] = set()
         branch_canonicals: set[str] = set()
         alias_domains: dict[str, set[str]] = {}
+        alias_str_cf: dict[str, frozenset[str]] = {}
+        branch_inherited_str_cf: set[str] = set()
         processed: list[tuple[str, str]] = []
         subquery_placeholders: dict[str, str] = {}
         subquery_domains: dict[str, set[str]] = {}
+        subquery_str_cf: dict[str, frozenset[str]] = {}
         sub_nonce = _secrets.token_hex(6)
 
         i = 0
@@ -1857,11 +2115,12 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                     and inner[inner_sig[0]][1].upper() == "FROM"
                 )
                 if not is_trim_from and _is_subquery_tokens(inner):
-                    sub_sql, sub_doms, sub_canons = _rewrite_tokens(inner, ctes)
+                    sub_sql, sub_doms, sub_canons, sub_str_cf = _rewrite_tokens(inner, ctes, is_subquery=True)
                     branch_canonicals |= sub_canons
                     ph = f"__fla_subq_{sub_nonce}_{len(subquery_placeholders)}__"
                     subquery_placeholders[ph] = f"({sub_sql})"
                     subquery_domains[ph] = sub_doms
+                    subquery_str_cf[ph] = sub_str_cf
                     processed.append(("SUBQ", ph))
                     i = close_idx + 1
                     continue
@@ -1905,9 +2164,19 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 or (after[0] == "IDENT" and after[1].upper() in _SQL_CLAUSE_STOPWORDS)
             )
 
+        def _record_table_alias(a_idx: int, item_doms: set[str], item_str_cf: frozenset[str]) -> None:
+            table_alias_idxs.add(a_idx)
+            raw_alias = processed[a_idx][1]
+            unq_low = _unquote_sql_ident(raw_alias).lower()
+            alias_domains[raw_alias.lower()] = item_doms
+            alias_domains[unq_low] = item_doms
+            alias_str_cf[raw_alias.lower()] = item_str_cf
+            alias_str_cf[unq_low] = item_str_cf
+
         table_token_idxs: dict[int, str] = {}
         table_alias_idxs: set[int] = set()
         func_stack: list[str] = []
+        top_from_s_pos: int | None = None
         in_from = False
         expect_table = False
         in_sample_clause = False
@@ -1965,6 +2234,8 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                     s_pos += 1
                     continue
                 if (wu == "FROM" and not _is_lex_distinct_from(processed, s_pos, sig_idxs)) or wu == "JOIN":
+                    if wu == "FROM" and top_from_s_pos is None:
+                        top_from_s_pos = s_pos
                     in_from = True
                     expect_table = True
                     in_sample_clause = False
@@ -1995,6 +2266,8 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 if (wu in _FROM_EXIT_KEYWORDS or (in_from and wu == "SELECT")) and _can_exit_from_lex(
                     processed, s_pos, sig_idxs, in_on_clause=in_on_clause
                 ):
+                    if top_from_s_pos is None:
+                        top_from_s_pos = s_pos
                     in_from = False
                     expect_table = False
                     in_sample_clause = False
@@ -2026,7 +2299,9 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                     continue
                 if k == "SUBQ":
                     sub_doms = subquery_domains.get(t, set())
+                    sub_scf = subquery_str_cf.get(t, frozenset())
                     domains |= sub_doms
+                    branch_inherited_str_cf |= sub_scf
                     a_pos = s_pos + 1
                     if (
                         a_pos < len(sig_idxs)
@@ -2034,42 +2309,43 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                         and processed[sig_idxs[a_pos]][1].upper() == "AS"
                     ):
                         a_pos += 1
-                        if a_pos < len(sig_idxs) and processed[sig_idxs[a_pos]][0] == "IDENT":
-                            a_idx = sig_idxs[a_pos]
-                            table_alias_idxs.add(a_idx)
-                            alias_domains[processed[a_idx][1].lower()] = sub_doms
+                        if a_pos < len(sig_idxs) and processed[sig_idxs[a_pos]][0] in ("IDENT", "DQUOTE"):
+                            _record_table_alias(sig_idxs[a_pos], sub_doms, sub_scf)
                             expect_table = False
                             s_pos = a_pos + 1
                             continue
-                    elif (
-                        a_pos < len(sig_idxs)
-                        and processed[sig_idxs[a_pos]][0] == "IDENT"
-                        and (
-                            processed[sig_idxs[a_pos]][1].upper() not in _SQL_CLAUSE_STOPWORDS
-                            or _is_bare_clause_alias_at(a_pos)
+                    elif a_pos < len(sig_idxs) and (
+                        processed[sig_idxs[a_pos]][0] == "DQUOTE"
+                        or (
+                            processed[sig_idxs[a_pos]][0] == "IDENT"
+                            and (
+                                processed[sig_idxs[a_pos]][1].upper() not in _SQL_CLAUSE_STOPWORDS
+                                or _is_bare_clause_alias_at(a_pos)
+                            )
                         )
                     ):
-                        a_idx = sig_idxs[a_pos]
-                        table_alias_idxs.add(a_idx)
-                        alias_domains[processed[a_idx][1].lower()] = sub_doms
+                        _record_table_alias(sig_idxs[a_pos], sub_doms, sub_scf)
                         expect_table = False
                         s_pos = a_pos + 1
                         continue
                     expect_table = False
                     s_pos += 1
                     continue
-                if k == "IDENT":
-                    if s_pos + 1 < len(sig_idxs) and processed[sig_idxs[s_pos + 1]] == ("OP", "("):
+                if k in ("IDENT", "DQUOTE"):
+                    if k == "IDENT" and s_pos + 1 < len(sig_idxs) and processed[sig_idxs[s_pos + 1]] == ("OP", "("):
                         expect_table = False
                         s_pos += 1
                         continue
-                    low_tbl = t.lower()
+                    low_tbl = _unquote_sql_ident(t).lower()
                     item_doms: set[str] = set()
+                    item_str_cf: frozenset[str] = frozenset()
                     if low_tbl in ctes:
-                        item_doms = ctes[low_tbl]
+                        item_doms, item_str_cf = ctes[low_tbl]
                         domains |= item_doms
+                        branch_inherited_str_cf |= item_str_cf
                         alias_domains[low_tbl] = item_doms
-                    elif low_tbl in table_map:
+                        alias_str_cf[low_tbl] = item_str_cf
+                    elif k == "IDENT" and low_tbl in table_map:
                         mapped_name, dom, canonical_name = table_map[low_tbl]
                         table_token_idxs[idx] = mapped_name
                         item_doms = {dom}
@@ -2077,7 +2353,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                         branch_canonicals.add(canonical_name)
                         alias_domains[low_tbl] = item_doms
                         alias_domains[mapped_name.lower()] = item_doms
-                    elif low_tbl == "as" and not _is_non_kw_lex_pos(processed, idx):
+                    elif k == "IDENT" and low_tbl == "as" and not _is_non_kw_lex_pos(processed, idx):
                         raise PermissionError("SQL parse error: expected table reference")
                     a_pos = s_pos + 1
                     if (
@@ -2086,24 +2362,22 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                         and processed[sig_idxs[a_pos]][1].upper() == "AS"
                     ):
                         a_pos += 1
-                        if a_pos < len(sig_idxs) and processed[sig_idxs[a_pos]][0] == "IDENT":
-                            a_idx = sig_idxs[a_pos]
-                            table_alias_idxs.add(a_idx)
-                            alias_domains[processed[a_idx][1].lower()] = item_doms
+                        if a_pos < len(sig_idxs) and processed[sig_idxs[a_pos]][0] in ("IDENT", "DQUOTE"):
+                            _record_table_alias(sig_idxs[a_pos], item_doms, item_str_cf)
                             expect_table = False
                             s_pos = a_pos + 1
                             continue
-                    elif (
-                        a_pos < len(sig_idxs)
-                        and processed[sig_idxs[a_pos]][0] == "IDENT"
-                        and (
-                            processed[sig_idxs[a_pos]][1].upper() not in _SQL_CLAUSE_STOPWORDS
-                            or _is_bare_clause_alias_at(a_pos)
+                    elif a_pos < len(sig_idxs) and (
+                        processed[sig_idxs[a_pos]][0] == "DQUOTE"
+                        or (
+                            processed[sig_idxs[a_pos]][0] == "IDENT"
+                            and (
+                                processed[sig_idxs[a_pos]][1].upper() not in _SQL_CLAUSE_STOPWORDS
+                                or _is_bare_clause_alias_at(a_pos)
+                            )
                         )
                     ):
-                        a_idx = sig_idxs[a_pos]
-                        table_alias_idxs.add(a_idx)
-                        alias_domains[processed[a_idx][1].lower()] = item_doms
+                        _record_table_alias(sig_idxs[a_pos], item_doms, item_str_cf)
                         expect_table = False
                         s_pos = a_pos + 1
                         continue
@@ -2114,8 +2388,140 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
 
             s_pos += 1
 
+        raw_fact_domains = frozenset(_FACT_DOMAINS.values())
         touches_request = "request" in domains
-        touches_any_fact = bool(domains)
+        touches_any_fact = bool(domains & raw_fact_domains)
+
+        # Analyze SELECT projection list for *-propagation, subquery AS <col> aliasing, and string-CF tracking:
+        projects_star = False
+        auto_alias_after_idx: dict[int, str] = {}
+        out_str_cf_cols: set[str] = set()
+        if sig_idxs and processed[sig_idxs[0]][0] == "IDENT" and processed[sig_idxs[0]][1].upper() == "SELECT":
+            sel_end = top_from_s_pos if top_from_s_pos is not None else len(sig_idxs)
+            sel_start = 1
+            if sel_start < sel_end and processed[sig_idxs[sel_start]][0] == "IDENT":
+                mod_u = processed[sig_idxs[sel_start]][1].upper()
+                if mod_u in ("DISTINCT", "ALL"):
+                    sel_start += 1
+                    if (
+                        mod_u == "DISTINCT"
+                        and sel_start + 1 < sel_end
+                        and processed[sig_idxs[sel_start]][0] == "IDENT"
+                        and processed[sig_idxs[sel_start]][1].upper() == "ON"
+                        and processed[sig_idxs[sel_start + 1]] == ("OP", "(")
+                    ):
+                        on_close = _find_matching_paren(processed, sig_idxs[sel_start + 1])
+                        while sel_start < sel_end and sig_idxs[sel_start] <= on_close:
+                            sel_start += 1
+            proj_items: list[list[int]] = []
+            cur_item: list[int] = []
+            p_depth = 0
+            for sp in range(sel_start, sel_end):
+                p_idx = sig_idxs[sp]
+                pk, pt = processed[p_idx]
+                if pk == "OP" and pt in ("(", "[", "{"):
+                    p_depth += 1
+                elif pk == "OP" and pt in (")", "]", "}"):
+                    p_depth = max(0, p_depth - 1)
+                elif p_depth == 0 and pk == "OP" and pt == ",":
+                    if cur_item:
+                        proj_items.append(cur_item)
+                        cur_item = []
+                    continue
+                cur_item.append(p_idx)
+            if cur_item:
+                proj_items.append(cur_item)
+
+            for it_idxs in proj_items:
+                if len(it_idxs) == 1 and processed[it_idxs[0]] == ("OP", "*"):
+                    projects_star = True
+                    out_str_cf_cols |= branch_inherited_str_cf
+                elif (
+                    len(it_idxs) == 3
+                    and processed[it_idxs[0]][0] in ("IDENT", "DQUOTE")
+                    and processed[it_idxs[1]] == ("OP", ".")
+                    and processed[it_idxs[2]] == ("OP", "*")
+                ):
+                    q_nm = _unquote_sql_ident(processed[it_idxs[0]][1]).lower()
+                    q_dom = alias_domains.get(q_nm, domains)
+                    if q_dom & raw_fact_domains:
+                        projects_star = True
+                    out_str_cf_cols |= alias_str_cf.get(q_nm, frozenset())
+                elif len(it_idxs) == 1 and processed[it_idxs[0]][0] == "IDENT":
+                    col_i = it_idxs[0]
+                    col_raw = processed[col_i][1]
+                    col_low = col_raw.lower()
+                    if col_low == "custom_fields" and touches_request:
+                        projects_star = True
+                    elif (
+                        (col_low == "timestamp" and touches_any_fact)
+                        or (col_low == "ip" and touches_request)
+                        or (col_low in _REQUEST_CF_FIELDS and touches_request)
+                    ):
+                        if is_subquery:
+                            auto_alias_after_idx[col_i] = col_raw
+                        if col_low in _REQUEST_CF_FIELDS and touches_request:
+                            out_str_cf_cols.add(col_low)
+                    elif col_low in branch_inherited_str_cf:
+                        out_str_cf_cols.add(col_low)
+                elif (
+                    len(it_idxs) == 3
+                    and processed[it_idxs[0]][0] in ("IDENT", "DQUOTE")
+                    and processed[it_idxs[1]] == ("OP", ".")
+                    and processed[it_idxs[2]][0] == "IDENT"
+                ):
+                    q_nm = _unquote_sql_ident(processed[it_idxs[0]][1]).lower()
+                    q_dom = alias_domains.get(q_nm, domains)
+                    q_scf = alias_str_cf.get(q_nm, branch_inherited_str_cf)
+                    col_i = it_idxs[2]
+                    col_raw = processed[col_i][1]
+                    col_low = col_raw.lower()
+                    if col_low == "custom_fields" and "request" in q_dom:
+                        projects_star = True
+                    elif (
+                        (col_low == "timestamp" and bool(q_dom & raw_fact_domains))
+                        or (col_low == "ip" and "request" in q_dom)
+                        or (col_low in _REQUEST_CF_FIELDS and "request" in q_dom)
+                    ):
+                        if is_subquery:
+                            auto_alias_after_idx[col_i] = col_raw
+                        if col_low in _REQUEST_CF_FIELDS and "request" in q_dom:
+                            out_str_cf_cols.add(col_low)
+                    elif col_low in q_scf:
+                        out_str_cf_cols.add(col_low)
+                elif (
+                    len(it_idxs) >= 3
+                    and processed[it_idxs[-2]][0] == "IDENT"
+                    and processed[it_idxs[-2]][1].upper() == "AS"
+                    and processed[it_idxs[-1]][0] in ("IDENT", "DQUOTE")
+                ):
+                    alias_low = _unquote_sql_ident(processed[it_idxs[-1]][1]).lower()
+                    expr_i = it_idxs[:-2]
+                    if len(expr_i) == 1 and processed[expr_i[0]][0] == "IDENT":
+                        e_low = processed[expr_i[0]][1].lower()
+                        if (e_low in _REQUEST_CF_FIELDS and touches_request) or e_low in branch_inherited_str_cf:
+                            out_str_cf_cols.add(alias_low)
+                    elif (
+                        len(expr_i) == 3
+                        and processed[expr_i[0]][0] in ("IDENT", "DQUOTE")
+                        and processed[expr_i[1]] == ("OP", ".")
+                        and processed[expr_i[2]][0] == "IDENT"
+                    ):
+                        q_nm = _unquote_sql_ident(processed[expr_i[0]][1]).lower()
+                        q_dom = alias_domains.get(q_nm, domains)
+                        q_scf = alias_str_cf.get(q_nm, branch_inherited_str_cf)
+                        e_low = processed[expr_i[2]][1].lower()
+                        if (e_low in _REQUEST_CF_FIELDS and "request" in q_dom) or e_low in q_scf:
+                            out_str_cf_cols.add(alias_low)
+                    elif (
+                        len(expr_i) == 4
+                        and processed[expr_i[0]][0] == "IDENT"
+                        and processed[expr_i[0]][1].lower() == "custom_fields"
+                        and processed[expr_i[1]] == ("OP", "[")
+                        and processed[expr_i[3]] == ("OP", "]")
+                    ):
+                        out_str_cf_cols.add(alias_low)
+
         rewritten_tokens: list[tuple[str, str]] = []
         sig_pos_by_idx = {idx: pos for pos, idx in enumerate(sig_idxs)}
         for idx, (k, t) in enumerate(processed):
@@ -2149,40 +2555,59 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
             if prev_tok == ("OP", "."):
                 qual_tok = processed[sig_idxs[s_pos - 2]] if s_pos >= 2 else None
                 q_domains = (
-                    alias_domains.get(qual_tok[1].lower(), domains)
-                    if (qual_tok and qual_tok[0] == "IDENT")
+                    alias_domains.get(_unquote_sql_ident(qual_tok[1]).lower(), domains)
+                    if (qual_tok and qual_tok[0] in ("IDENT", "DQUOTE"))
                     else domains
                 )
                 low_c = t.lower()
-                if low_c == "timestamp" and q_domains:
-                    rewritten_tokens.append(("IDENT", "event_timestamp"))
+                alias_suffix = f" AS {auto_alias_after_idx[idx]}" if idx in auto_alias_after_idx else ""
+                if low_c == "timestamp" and bool(q_domains & raw_fact_domains):
+                    rewritten_tokens.append(("IDENT", f"event_timestamp{alias_suffix}"))
                 elif low_c == "ip" and "request" in q_domains:
-                    rewritten_tokens.append(("IDENT", "client_ip"))
+                    rewritten_tokens.append(("IDENT", f"client_ip{alias_suffix}"))
                 elif low_c in _REQUEST_CF_FIELDS and "request" in q_domains:
-                    rewritten_tokens.append(("IDENT", f"custom_fields['{low_c}']"))
+                    rewritten_tokens.append(("IDENT", f"custom_fields['{low_c}']{alias_suffix}"))
                 else:
                     rewritten_tokens.append((k, t))
                 continue
             low_ident = t.lower()
+            alias_suffix = f" AS {auto_alias_after_idx[idx]}" if idx in auto_alias_after_idx else ""
             if low_ident == "timestamp" and touches_any_fact:
-                rewritten_tokens.append(("IDENT", "event_timestamp"))
+                rewritten_tokens.append(("IDENT", f"event_timestamp{alias_suffix}"))
             elif low_ident == "ip" and touches_request:
-                rewritten_tokens.append(("IDENT", "client_ip"))
+                rewritten_tokens.append(("IDENT", f"client_ip{alias_suffix}"))
             elif low_ident in _REQUEST_CF_FIELDS and touches_request:
-                rewritten_tokens.append(("IDENT", f"custom_fields['{low_ident}']"))
+                rewritten_tokens.append(("IDENT", f"custom_fields['{low_ident}']{alias_suffix}"))
             else:
                 rewritten_tokens.append((k, t))
 
-        if touches_request:
-            branch_sql = _coerce_request_predicates(rewritten_tokens)
+        derived_qualifiers = frozenset(q for q, scf in alias_str_cf.items() if scf)
+        has_derived_str_cf = bool(branch_inherited_str_cf)
+        if touches_request or has_derived_str_cf:
+            branch_sql = _coerce_request_predicates(
+                rewritten_tokens,
+                touches_request=touches_request,
+                derived_str_cols=frozenset(branch_inherited_str_cf),
+                derived_qualifiers=derived_qualifiers,
+                unqualified_derived=has_derived_str_cf and not touches_request,
+            )
         else:
             branch_sql = "".join(_normalize_iso(tk) if kd == "STR" else tk for kd, tk in rewritten_tokens)
         for ph, sub_rendered in subquery_placeholders.items():
             branch_sql = branch_sql.replace(ph, sub_rendered)
-        return branch_sql, domains, branch_canonicals
+
+        if projects_star:
+            exposed_domains = set(domains)
+        else:
+            exposed_domains = set()
+            if "request" in domains or "request_derived" in domains:
+                exposed_domains.add("request_derived")
+            if domains & {"rum_vitals", "rum_errors", "rum_derived"}:
+                exposed_domains.add("rum_derived")
+        return branch_sql, exposed_domains, branch_canonicals, frozenset(out_str_cf_cols)
 
     tokens = [(m.lastgroup or "OTHER", m.group(0)) for m in _CONSOLE_SQL_LEX_RE.finditer(sql)]
-    rewritten, _, canonicals = _rewrite_tokens(tokens, {})
+    rewritten, _, canonicals, _ = _rewrite_tokens(tokens, {}, is_subquery=False)
     return rewritten, canonicals
 
 
@@ -2239,6 +2664,7 @@ def query_endpoint(
         }
     )
     _t_val = time.perf_counter()
+    _reject_internal_cf_identifiers(raw_sql)
     _reject_ambiguous_syntax(raw_sql, allowed_tables | frozenset(names.values()))
     try:
         validate_user_sql(

@@ -6,9 +6,9 @@
  * - `GET|POST|PUT|PATCH|DELETE /api/services/{id}/scoring/*`
  */
 
-import { escapeSqlLiteral, requireSafeIdent } from "./sql-validator";
+import { requireSafeIdent } from "./sql-validator";
 import { redactQueryRowsForPii } from "./query";
-import { compileFiltersToSql, type DuckDBColumnType } from "./dashboard/duckdb";
+import { compileFiltersToSql, duckSqlString, type DuckDBColumnType } from "./dashboard/duckdb";
 import {
   buildSessionsEnrichSql,
   SESSIONS_ENRICH_COLUMNS,
@@ -794,9 +794,9 @@ export async function handleSessionsDetail(
   const useJa4Only = maskIps && !body.session_token && (!targetIp || targetIp === "0.0.0.0") && Boolean(targetJa4);
   const ja4Clause =
     targetJa4 != null && targetJa4 !== ""
-      ? `${useJa4Only ? "" : " AND "}"ja4" = '${escapeSqlLiteral(targetJa4)}'`
+      ? `${useJa4Only ? "" : " AND "}"ja4" = ${duckSqlString(targetJa4)}`
       : "";
-  const ipWherePrefix = useJa4Only ? "" : `"ip" = '${escapeSqlLiteral(targetIp)}' AND `;
+  const ipWherePrefix = useJa4Only ? "" : `"ip" = ${duckSqlString(targetIp)} AND `;
   const timestampSql = ctx.availableColumns?.has("ts_ms")
     ? 'EPOCH_MS(CAST("ts_ms" AS BIGINT))'
     : 'EPOCH_MS(EPOCH_MS("timestamp"))';

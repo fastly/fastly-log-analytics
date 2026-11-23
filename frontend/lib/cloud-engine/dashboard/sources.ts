@@ -107,6 +107,7 @@ const pendingSourceClosures = new Set<ActiveSourceClosure>();
 // re-plan around it without another request. Keys are content-named, so one that reappears
 // is a new publish; the TTL only bounds a transient miss right after publication.
 const MISSING_FILE_TTL_MS = 5 * 60_000;
+const MAX_KNOWN_MISSING_FILES = 2048;
 const knownMissingFiles = new Map<string, number>();
 let knownMissingEpoch = 0;
 
@@ -120,6 +121,10 @@ function knownMissing(scopeKey: string): boolean {
 
 function rememberMissing(scopeKey: string, epoch: number): void {
   if (epoch !== knownMissingEpoch) return;
+  if (!knownMissingFiles.has(scopeKey) && knownMissingFiles.size >= MAX_KNOWN_MISSING_FILES) {
+    const oldest = knownMissingFiles.keys().next().value;
+    if (oldest !== undefined) knownMissingFiles.delete(oldest);
+  }
   knownMissingFiles.set(scopeKey, Date.now() + MISSING_FILE_TTL_MS);
 }
 
@@ -1077,7 +1082,7 @@ export function browserSource(
   const missingScopeKey = (
     options: BrowserSourceOptions | undefined,
     key: string,
-  ) => JSON.stringify([baseUrl, fileOwnerScope(options) ?? null, key]);
+  ) => JSON.stringify([baseUrl, fileScope(options) ?? null, key]);
   const fileMemoryIdentity = (
     options: BrowserSourceOptions | undefined,
     identity?: string,

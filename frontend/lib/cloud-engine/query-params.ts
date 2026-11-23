@@ -1,5 +1,5 @@
 import type { FiltersPayload } from "@/types/api";
-import { compileFiltersToSql, type DuckDBColumnType } from "./dashboard/duckdb";
+import { compileFiltersToSql, duckSqlString, type DuckDBColumnType } from "./dashboard/duckdb";
 import type { DashboardFilter } from "./dashboard/filters";
 import { parseEpochMs } from "./engine-utils";
 
@@ -68,7 +68,7 @@ export function rangeServiceSql(
   if (startMs !== null) clauses.push(`ts_ms >= ${startMs}`);
   if (endMs !== null) clauses.push(`ts_ms < ${endMs}`);
   if (params.service_id) {
-    clauses.push(`(service_id = '${sqlString(params.service_id)}' OR service_id IS NULL)`);
+    clauses.push(`(service_id = ${duckSqlString(String(params.service_id))} OR service_id IS NULL)`);
   }
   return clauses.join(" AND ");
 }
