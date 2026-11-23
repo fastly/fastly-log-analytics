@@ -975,4 +975,116 @@ describe("Feature F24 — CMCD Streaming Media cloud-engine", () => {
     expect(res?.rebuffer_by_asn).toHaveLength(1);
     expect(res?.rebuffer_by_asn[0]).toMatchObject({ asn: 15169, rebuffer_rate: 0 });
   });
+
+  it("zero-fills idle buckets in sessions_ts and nulls quality metrics across gaps (raw DuckDB and cmcdFromRollup)", async () => {
+    const t0 = 1_800_000_000_000;
+    const t1 = t0 + 300_000;
+    const t2 = t0 + 600_000;
+    const t3 = t0 + 900_000;
+
+    // Raw DuckDB path: traffic at t0 and t2, idle at t1
+    const engine = new DuckDBAnalyticalEngine();
+    try {
+      await engine.executeSql(`INSERT INTO requests
+        (scoped_key, ts_ms, cmcd_sid, cmcd_ot, cmcd_br, cmcd_bl, cmcd_mtp)
+        VALUES
+          ('native', ${t0 + 1000}, 's1', 'v', 2500, 4000, 12000),
+          ('native', ${t0 + 2000}, 's2', 'v', 2500, 4000, 12000),
+          ('native', ${t2 + 1000}, 's3', 'v', 3000, 5000, 14000)`);
+      const raw = await queryCmcdAggregates({
+        engine,
+        start_time: new Date(t0).toISOString(),
+        end_time: new Date(t3).toISOString(),
+        bucket_seconds: 300,
+      });
+      expect(raw.sessions_ts.map((b) => b.concurrent_sessions)).toEqual([2, 0, 1]);
+      expect(raw.sessions_ts.map((b) => b.new_sessions)).toEqual([2, 0, 1]);
+      expect(raw.buffer_health_ts.map((b) => b.p50_buffer)).toEqual([4000, null, 5000]);
+      expect(raw.bitrate_ts.map((b) => b.avg_bitrate)).toEqual([2500, null, 3000]);
+    } finally {
+      await engine.reset();
+    }
+
+    // Rollup path: bucket at t0 and t2, idle at t1
+    const hllOf = (items: string[]) => {
+      const h = new Hll();
+      for (const item of items) h.add(item);
+      return h.toBytes();
+    };
+    const key = "processed/request/cmcd_summary/window=gap.parquet";
+    const bytes = parquetWriteBuffer({
+      columnData: [
+        { name: "kind", type: "STRING", data: ["bucket", "bucket"] },
+        { name: "bucket", type: "INT64", data: [BigInt(t0), BigInt(t2)] },
+        { name: "key", type: "STRING", data: [null, null] },
+        { name: "label", type: "STRING", data: [null, null] },
+        { name: "truncated", type: "BOOLEAN", data: [false, false] },
+        { name: "reqs", type: "INT64", data: [BigInt(2), BigInt(1)] },
+        { name: "sid_hll", type: "BYTE_ARRAY", data: [hllOf(["s1", "s2"]), hllOf(["s3"])] },
+        { name: "rebuffer_events", type: "INT64", data: [BigInt(0), BigInt(0)] },
+        { name: "rebuffer_sid_hll", type: "BYTE_ARRAY", data: [null, null] },
+        { name: "has_bs", type: "INT64", data: [BigInt(0), BigInt(0)] },
+        { name: "has_su", type: "INT64", data: [BigInt(0), BigInt(0)] },
+        { name: "has_ot", type: "INT64", data: [BigInt(2), BigInt(1)] },
+        { name: "has_bl", type: "INT64", data: [BigInt(2), BigInt(1)] },
+        { name: "has_br", type: "INT64", data: [BigInt(2), BigInt(1)] },
+        { name: "has_mtp", type: "INT64", data: [BigInt(0), BigInt(0)] },
+        { name: "has_cid", type: "INT64", data: [BigInt(0), BigInt(0)] },
+        { name: "br_sum", type: "DOUBLE", data: [5000, 3000] },
+        { name: "br_n", type: "INT64", data: [BigInt(2), BigInt(1)] },
+        { name: "tb_sum", type: "DOUBLE", data: [null, null] },
+        { name: "tb_n", type: "INT64", data: [BigInt(0), BigInt(0)] },
+        { name: "bl_sum", type: "DOUBLE", data: [8000, 5000] },
+        { name: "bl_n", type: "INT64", data: [BigInt(2), BigInt(1)] },
+        { name: "mtp_sum", type: "DOUBLE", data: [null, null] },
+        { name: "mtp_n", type: "INT64", data: [BigInt(0), BigInt(0)] },
+        { name: "v_br_sum", type: "DOUBLE", data: [5000, 3000] },
+        { name: "v_br_n", type: "INT64", data: [BigInt(2), BigInt(1)] },
+        { name: "v_tb_sum", type: "DOUBLE", data: [null, null] },
+        { name: "v_tb_n", type: "INT64", data: [BigInt(0), BigInt(0)] },
+        { name: "v_bl_sum", type: "DOUBLE", data: [8000, 5000] },
+        { name: "v_bl_n", type: "INT64", data: [BigInt(2), BigInt(1)] },
+        { name: "util_sum", type: "DOUBLE", data: [null, null] },
+        { name: "util_n", type: "INT64", data: [BigInt(0), BigInt(0)] },
+        { name: "util_all_sum", type: "DOUBLE", data: [null, null] },
+        { name: "util_all_n", type: "INT64", data: [BigInt(0), BigInt(0)] },
+        { name: "startup_requests", type: "INT64", data: [BigInt(0), BigInt(0)] },
+        { name: "su_bl_sum", type: "DOUBLE", data: [null, null] },
+        { name: "su_bl_n", type: "INT64", data: [BigInt(0), BigInt(0)] },
+        { name: "su_ttfb_sum", type: "DOUBLE", data: [null, null] },
+        { name: "su_ttfb_n", type: "INT64", data: [BigInt(0), BigInt(0)] },
+        { name: "v_bl_hist", type: "BYTE_ARRAY", data: [null, null] },
+        { name: "bl_hist", type: "BYTE_ARRAY", data: [null, null] },
+        { name: "v_mtp_hist", type: "BYTE_ARRAY", data: [null, null] },
+        { name: "mtp_hist", type: "BYTE_ARRAY", data: [null, null] },
+        { name: "min_ts", type: "INT64", data: [BigInt(t0 + 1000), BigInt(t2 + 1000)] },
+        { name: "max_ts", type: "INT64", data: [BigInt(t0 + 2000), BigInt(t2 + 1000)] },
+        { name: "first_ts", type: "INT64", data: [null, null] },
+        { name: "last_ts", type: "INT64", data: [null, null] },
+      ],
+    });
+    const rollup = await cmcdFromRollup(
+      {
+        start_time: new Date(t0).toISOString(),
+        end_time: new Date(t3).toISOString(),
+        bucket_seconds: 300,
+      },
+      {
+        async fetchJson() {
+          return {
+            files: [{ key, start: new Date(t0).toISOString(), end: new Date(t3).toISOString(), size: bytes.byteLength, rows: 2 }],
+            next_cursor: null,
+            complete: true,
+          };
+        },
+        async fetchFile() {
+          return { bytes, cached: false };
+        },
+      },
+    );
+    expect(rollup).not.toBeNull();
+    expect(rollup?.sessions_ts.map((b) => b.concurrent_sessions)).toEqual([2, 0, 1]);
+    expect(rollup?.sessions_ts[1]?.bucket).toBe(new Date(t1).toISOString());
+    expect(rollup?.bitrate_ts.map((b) => b.avg_bitrate)).toEqual([2500, null, 3000]);
+  });
 });

@@ -1,5 +1,5 @@
 import type { CmcdQueryParams } from "./cmcd";
-import { classifySessionDurationBucket, CMCD_SESSION_DURATION_BUCKETS, emptyCmcdAggregates } from "./cmcd";
+import { classifySessionDurationBucket, CMCD_SESSION_DURATION_BUCKETS, emptyCmcdAggregates, padCmcdTimeseries } from "./cmcd";
 import type { FileSource } from "./dashboard/engine";
 import { Histogram } from "./dashboard/histogram";
 import { MissingCloudFileError } from "./dashboard/file-errors";
@@ -889,11 +889,18 @@ async function cmcdFromFiles(
       avg_session_duration: avgSessionDuration,
       utilization_ratio: utilizationRatio,
     },
-    sessions_ts,
-    buffer_health_ts: has("hasBl") ? buffer_health_ts : [],
-    bitrate_ts: has("hasBr") ? bitrate_ts : [],
-    throughput_ts: has("hasMtp") ? throughput_ts : [],
-    startup_ts: hasSu ? startup_ts : [],
+    ...padCmcdTimeseries(
+      {
+        sessions_ts,
+        buffer_health_ts: has("hasBl") ? buffer_health_ts : [],
+        bitrate_ts: has("hasBr") ? bitrate_ts : [],
+        throughput_ts: has("hasMtp") ? throughput_ts : [],
+        startup_ts: hasSu ? startup_ts : [],
+      },
+      params.start_time,
+      params.end_time,
+      bucketMs,
+    ),
     top_content,
     rebuffer_by_country,
     rebuffer_by_asn,

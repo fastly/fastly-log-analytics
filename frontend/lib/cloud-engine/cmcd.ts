@@ -5,7 +5,7 @@ import {
   type DuckDBReadContext,
 } from "./dashboard/duckdb";
 import type { FiltersPayload } from "@/types/api";
-import { roundTo } from "./engine-utils";
+import { parseEpochMs, roundTo } from "./engine-utils";
 import { cmcdFromRollup, cmcdRollupEligible, type CmcdRollupSource } from "./cmcd-rollup";
 import { analyticsFiltersToSql, rangeServiceSql } from "./query-params";
 
@@ -83,6 +83,100 @@ export function classifySessionDurationBucket(durationSeconds: number): string {
   if (durationSeconds < 1800) return "10–30m";
   if (durationSeconds < 3600) return "30m–1h";
   return ">1h";
+}
+
+const MAX_PADDED_BUCKETS = 2000;
+
+function padSeries(
+  rows: Record<string, unknown>[],
+  fromMs: number | null,
+  toMs: number | null,
+  bucketMs: number,
+  emptyRow: (tsIso: string) => Record<string, unknown>,
+): Record<string, unknown>[] {
+  if (rows.length === 0 || bucketMs <= 0 || fromMs == null || toMs == null || toMs <= fromMs) {
+    return rows;
+  }
+  const stAligned = Math.floor(fromMs / bucketMs) * bucketMs;
+  const etAligned = Math.floor((toMs - 1) / bucketMs) * bucketMs;
+  if (etAligned < stAligned || Math.floor((etAligned - stAligned) / bucketMs) + 1 > MAX_PADDED_BUCKETS) {
+    return rows;
+  }
+  const byBucket = new Map<string, Record<string, unknown>>();
+  for (const row of rows) {
+    if (typeof row.bucket === "string") byBucket.set(row.bucket, row);
+  }
+  const out: Record<string, unknown>[] = [];
+  for (let ts = stAligned; ts <= etAligned; ts += bucketMs) {
+    const tsIso = new Date(ts).toISOString();
+    out.push(byBucket.get(tsIso) ?? emptyRow(tsIso));
+  }
+  return out;
+}
+
+export function padCmcdTimeseries(
+  series: {
+    sessions_ts: Record<string, unknown>[];
+    buffer_health_ts: Record<string, unknown>[];
+    bitrate_ts: Record<string, unknown>[];
+    throughput_ts: Record<string, unknown>[];
+    startup_ts: Record<string, unknown>[];
+  },
+  startTime: string | number | undefined,
+  endTime: string | number | undefined,
+  bucketMs: number,
+) {
+  const fromMs = parseEpochMs(startTime);
+  const toMs = parseEpochMs(endTime);
+  return {
+    sessions_ts: padSeries(series.sessions_ts, fromMs, toMs, bucketMs, (tsIso) => ({
+      bucket: tsIso,
+      concurrent_sessions: 0,
+      new_sessions: 0,
+      rebuffer_session_pct: null,
+      timestamp: tsIso,
+      active_sessions: 0,
+      rebuffer_events: 0,
+      rebuffer_rate: 0,
+    })),
+    buffer_health_ts: padSeries(series.buffer_health_ts, fromMs, toMs, bucketMs, (tsIso) => ({
+      bucket: tsIso,
+      p50_buffer: null,
+      p95_buffer: null,
+      starvation_rate: null,
+      timestamp: tsIso,
+      avg_buffer_ms: 0,
+      p10_buffer_ms: 0,
+      p50_buffer_ms: 0,
+      rebuffer_events: 0,
+    })),
+    bitrate_ts: padSeries(series.bitrate_ts, fromMs, toMs, bucketMs, (tsIso) => ({
+      bucket: tsIso,
+      avg_bitrate: null,
+      timestamp: tsIso,
+      avg_encoded_bitrate: 0,
+      avg_top_bitrate: 0,
+      utilization_ratio: null,
+    })),
+    throughput_ts: padSeries(series.throughput_ts, fromMs, toMs, bucketMs, (tsIso) => ({
+      bucket: tsIso,
+      p50: null,
+      p95: null,
+      p99: null,
+      timestamp: tsIso,
+      avg_throughput_kbps: 0,
+      avg_bitrate_kbps: 0,
+      headroom_ratio: 0,
+    })),
+    startup_ts: padSeries(series.startup_ts, fromMs, toMs, bucketMs, (tsIso) => ({
+      bucket: tsIso,
+      startup_ratio: null,
+      timestamp: tsIso,
+      startup_requests: 0,
+      avg_startup_buffer_ms: 0,
+      avg_startup_ttfb_ms: 0,
+    })),
+  };
 }
 
 export function emptyCmcdAggregates() {
@@ -469,11 +563,18 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
       avg_session_duration: avgSessionDuration,
       utilization_ratio: utilizationRatio,
     },
-    sessions_ts,
-    buffer_health_ts: has("bl") ? buffer_health_ts : [],
-    bitrate_ts: has("br") ? bitrate_ts : [],
-    throughput_ts: has("mtp") ? throughput_ts : [],
-    startup_ts: hasSu ? startup_ts : [],
+    ...padCmcdTimeseries(
+      {
+        sessions_ts,
+        buffer_health_ts: has("bl") ? buffer_health_ts : [],
+        bitrate_ts: has("br") ? bitrate_ts : [],
+        throughput_ts: has("mtp") ? throughput_ts : [],
+        startup_ts: hasSu ? startup_ts : [],
+      },
+      params.start_time,
+      params.end_time,
+      bucketMs,
+    ),
     top_content: !has("cid") ? [] : topContentRows.map((r) => ({
       content_id: String(r.content_id ?? "Unknown"),
       sessions: Number(r.sessions ?? 0),
