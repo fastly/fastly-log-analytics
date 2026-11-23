@@ -400,7 +400,7 @@ describe('ShareLogin & Sessions Pages', () => {
       expect(inviteError).not.toBeInTheDocument()
       resolveLogin()
       const loginError = await screen.findByText('Invalid email or passcode.')
-      expect(loginError.closest('[role="alert"]')).toHaveFocus()
+      await waitFor(() => expect(loginError.closest('[role="alert"]')).toHaveFocus())
       expect(screen.queryByText(/this invitation link has expired/i)).not.toBeInTheDocument()
     })
 
