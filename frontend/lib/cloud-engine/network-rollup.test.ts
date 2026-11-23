@@ -136,10 +136,12 @@ describe("network rollup vs raw DuckDB over the same rows", () => {
 
     const asns = byKey(health.by_asn, (r) => String(r.asn));
     expect([...asns.keys()].toSorted()).toEqual(raw.by_asn.map((r) => String(r.asn)).toSorted());
-    expect(asns.has("0")).toBe(true);
+    expect(asns.has("0")).toBe(false);
     for (const row of raw.by_asn) {
       const got = asns.get(String(row.asn))!;
       expect([...exact(got), got.as_name], String(row.asn)).toEqual([...exact(row), row.as_name]);
+      if (row.p95_rtt_us != null) expect(got.p95_rtt_us, String(row.asn)).toEqual(expect.any(Number));
+      if (row.p99_rtt_us != null) expect(got.p99_rtt_us, String(row.asn)).toEqual(expect.any(Number));
     }
     expect(health.leaderboard.map((r) => [r.asn, r.total_reqs]).toSorted())
       .toEqual(raw.leaderboard.map((r) => [r.asn, r.total_reqs]).toSorted());

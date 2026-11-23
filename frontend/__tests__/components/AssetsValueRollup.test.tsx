@@ -118,6 +118,32 @@ describe('AssetsClient on Cloud', () => {
     expect(await screen.findByText('No uncompressed static assets detected! Nice work.')).toBeInTheDocument()
   })
 
+  it('observes hotspots against the nearest overflow-auto scroll container so rootMargin works inside AppLayout main', async () => {
+    setCloudModeRuntime(true)
+    const observedRoots: Array<Element | Document | null | undefined> = []
+    class RecordingObserver {
+      constructor(_cb: IntersectionObserverCallback, options?: IntersectionObserverInit) {
+        observedRoots.push(options?.root)
+      }
+      observe() {}
+      disconnect() {}
+      unobserve() {}
+    }
+    vi.stubGlobal('IntersectionObserver', RecordingObserver)
+    recordPosts('/api/assets/aggregates', (asked) => asked?.includes('summary') ? { ...assetsSummary, rollup: meta } : never())
+
+    const { container } = renderBootstrapped(
+      <main id="main" style={{ overflow: 'auto', height: '600px' }}>
+        <AssetsClient />
+      </main>,
+      { withNuqs: true },
+    )
+    expect(await screen.findByText('4,321 reqs')).toBeInTheDocument()
+    const mainEl = container.querySelector('main#main')
+    expect(mainEl).not.toBeNull()
+    expect(observedRoots).toContain(mainEl)
+  })
+
   it('names the asset fields the service log settings leave off, whatever the response says', async () => {
     setCloudModeRuntime(true)
     recordPosts('/api/assets/aggregates', (asked) => asked?.includes('summary') ? { ...assetsSummary, rollup: meta } : never())

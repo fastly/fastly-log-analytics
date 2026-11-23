@@ -262,7 +262,7 @@ function NetworkBody({ startTime, endTime, activeServiceId, filterPayload }: Rep
 
       <TransportSection activeServiceId={activeServiceId} startTime={startTime} endTime={endTime} filterPayload={filterPayload} />
 
-      <div className="my-6 [contain-intrinsic-size:280px] [content-visibility:auto]">
+      <div className="my-6 min-h-[280px]">
         {activeServiceId && <PopHealthHeatmap serviceId={activeServiceId} startTime={startTime} endTime={endTime} />}
       </div>
 
@@ -270,13 +270,17 @@ function NetworkBody({ startTime, endTime, activeServiceId, filterPayload }: Rep
         <AnalyticsCard
           title="ASN Health Score over Time" helpTitle="ASN Health Score over Time" helpContent={<HeatmapHelp />}
           isFetching={coreQuery.isFetching} error={coreQuery.error as AnalyticsCardError | null}
-          className="[contain-intrinsic-size:380px] [content-visibility:auto]"
         >
-          <PlotlyChart data={heatmapTrace} layout={HEATMAP_LAYOUT} height={Math.min(60 + heatmapData.y.length * 28, 600)} />
+          <PlotlyChart
+            data={heatmapTrace}
+            layout={HEATMAP_LAYOUT}
+            height={Math.min(60 + heatmapData.y.length * 28, 600)}
+            a11yTitle="ASN Health Score over Time"
+          />
         </AnalyticsCard>
       )}
 
-      <div ref={shieldingRef}>
+      <div ref={shieldingRef} className={shieldingData || isShieldingLoadingInitial || shieldingQuery.error ? 'min-h-[460px]' : undefined}>
       {(shieldingData || isShieldingLoadingInitial || shieldingQuery.error) && (
         <ShieldingSection
           shieldingData={shieldingData}

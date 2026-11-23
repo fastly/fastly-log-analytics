@@ -161,7 +161,7 @@ export function TransportSection({ activeServiceId, startTime, endTime, filterPa
   const missingFields = transport?.missing_fields ?? []
 
   return (
-    <div className="space-y-4 my-6 [contain-intrinsic-size:240px] [content-visibility:auto]">
+    <div className="space-y-4 my-6">
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide flex items-center gap-2">
@@ -217,7 +217,6 @@ export function TransportSection({ activeServiceId, startTime, endTime, filterPa
         <AnalyticsCard
           title="Transport Protocol Share" helpTitle="Protocol Share"
           helpContent="Proportion of client requests served over modern HTTP protocols (HTTP/3, HTTP/2, HTTP/1.1)."
-          className="[contain-intrinsic-size:120px] [content-visibility:auto]"
         >
           <div className="space-y-3 py-1">
             <div className="flex h-3 w-full rounded-full overflow-hidden bg-muted/40">
@@ -294,7 +293,7 @@ export function ShieldingSection({
   isPridActive,
 }: ShieldingSectionProps) {
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 [contain-intrinsic-size:460px] [content-visibility:auto]">
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
       <AnalyticsCard
         title="Edge → Shield Transit Map" helpTitle="Shielding Analysis" helpContent={<ShieldingHelp />}
         isFetching={isFetching} error={error as AnalyticsCardError | null}

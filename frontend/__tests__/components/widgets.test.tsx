@@ -1893,7 +1893,13 @@ describe('TimeSeriesChart, ScorerSeries, PlotlyChart, TrafficChart, CardGrid, Fi
         expect(tracesToTable(emptyInput)).toMatchObject({ empty: true, rows: [] })
       }
       expect(tracesToTable([], 'My chart').title).toBe('My chart')
-      expect(tracesToTable([{ type: 'heatmap', x: ['t1'], y: ['a'], z: [[1]] }], 'HM').empty).toBe(true)
+      expect(tracesToTable([{ type: 'heatmap', x: ['t1'], y: ['a'], z: [[1]] }], 'HM')).toMatchObject({
+        title: 'HM',
+        columns: ['Series', 't1'],
+        rows: [['a', 1]],
+        empty: false,
+      })
+      expect(tracesToTable([{ type: 'surface', x: ['t1'], y: ['a'], z: [[1]] }], 'SF').empty).toBe(true)
 
       const emptyDom = render(<ChartA11yTable shape={tracesToTable([], 'Empty chart')} />)
       expect(emptyDom.container.querySelector('table')).toBeNull()

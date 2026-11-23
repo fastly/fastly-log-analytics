@@ -89,7 +89,7 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
 
   if (isLoading) {
     return (
-      <Card className="shadow-md [contain-intrinsic-size:280px] [content-visibility:auto]">
+      <Card className="shadow-md min-h-[280px]">
         <CardHeader>
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
             <div className="space-y-1">
@@ -113,7 +113,7 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
 
   if (error) {
     return (
-      <Card className="shadow-md border-destructive/20 bg-destructive/5 [contain-intrinsic-size:280px] [content-visibility:auto]">
+      <Card className="shadow-md border-destructive/20 bg-destructive/5 min-h-[280px]">
         <CardHeader>
           <CardTitle className="text-lg font-bold text-destructive flex items-center gap-2">
             <AlertTriangle className="h-5 w-5" />
@@ -129,7 +129,7 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
 
   if (items.length === 0) {
     return (
-      <Card className="shadow-md [contain-intrinsic-size:280px] [content-visibility:auto]">
+      <Card className="shadow-md min-h-[280px]">
         <CardHeader>
           <CardTitle className="text-lg font-bold flex items-center gap-2">
             <Globe className="h-5 w-5 text-muted-foreground" />
@@ -145,7 +145,7 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
   }
 
   return (
-    <Card className="shadow-md transition-all duration-300 [contain-intrinsic-size:280px] [content-visibility:auto]">
+    <Card className="shadow-md transition-all duration-300 min-h-[280px]">
       <CardHeader className="border-b bg-muted/15">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div className="space-y-1">

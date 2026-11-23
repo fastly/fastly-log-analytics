@@ -295,4 +295,39 @@ describe("Feature F21 — Network cloud-engine", () => {
     expect(viaHandler).toHaveProperty("network_health");
     await engine.reset();
   });
+
+  it("emits p95_rtt_us and p99_rtt_us on leaderboard and excludes AS0 and unknown '?' cities", async () => {
+    const engine = new DuckDBAnalyticalEngine();
+    try {
+      await engine.executeSql(
+        `INSERT INTO requests (
+          scoped_key, ts_ms, "timestamp", status, protocol, geo_country, geo_city,
+          lat, lon, client_asn, as_name, fastly_pop, client_rtt_us, client_ploss, client_cwnd,
+          client_tcpi_rtt, client_tcpi_rttvar, client_tcpi_delta_retrans, resp_body_size, time_elapsed_usec
+        ) VALUES
+          ('k1', 1700000000000, epoch_ms(1700000000000)::TIMESTAMPTZ, 200, 'HTTP/3', 'US', 'New York', 40.71, -74.01, 15169, 'Google', 'IAD', 15000, 0.001, 64, 15000, 2000, 0, 50000, 10000),
+          ('k1', 1700000001000, epoch_ms(1700000001000)::TIMESTAMPTZ, 200, 'HTTP/2', 'US', 'New York', 40.71, -74.01, 15169, 'Google', 'IAD', 45000, 0.002, 48, 45000, 4000, 1, 60000, 12000),
+          ('k1', 1700000002000, epoch_ms(1700000002000)::TIMESTAMPTZ, 200, 'HTTP/2', 'US', '?', 0, 0, 0, 'AS0', 'IAD', 30000, 0.0, 32, 30000, 3000, 0, 20000, 8000)`,
+      );
+
+      const bundle = await queryNetworkBundle({ engine });
+      expect(bundle.network_health.leaderboard).toHaveLength(1);
+      expect(bundle.network_health.leaderboard[0]).toMatchObject({
+        asn: 15169,
+        p95_rtt_us: expect.any(Number),
+        p99_rtt_us: expect.any(Number),
+      });
+      expect(bundle.network_health.leaderboard[0].p95_rtt_us).toBeGreaterThan(15000);
+      expect(bundle.network_health.leaderboard[0].p99_rtt_us).toBeGreaterThanOrEqual(
+        Number(bundle.network_health.leaderboard[0].p95_rtt_us),
+      );
+      expect(bundle.network_health.by_asn.some((r) => r.asn === 0)).toBe(false);
+      expect(bundle.network_health.heatmap.some((r) => r.asn === 0)).toBe(false);
+      expect(bundle.network_quality.by_asn.some((r) => r.asn === 0)).toBe(false);
+      expect(bundle.network_health.metro_leaderboard.some((r) => r.city === "?")).toBe(false);
+      expect(bundle.network_health.cities.some((c) => c.name === "?")).toBe(false);
+    } finally {
+      await engine.reset();
+    }
+  });
 });

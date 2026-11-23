@@ -203,6 +203,19 @@ export interface UseMapDataArgs {
   setTooltip: (t: TooltipInfo | null) => void
 }
 
+type MapBucket = NonNullable<NetworkMapData['map_buckets']>[number]
+
+export function findMapBucket(
+  mapBuckets: NetworkMapData['map_buckets'],
+  bucketIdx: number,
+): MapBucket | undefined {
+  if (!mapBuckets || mapBuckets.length === 0) return undefined
+  if (mapBuckets.some((b) => b.bucket_idx != null)) {
+    return mapBuckets.find((b) => b.bucket_idx === bucketIdx)
+  }
+  return mapBuckets[bucketIdx]
+}
+
 /**
  * Pushes the current bucket's city data into the map's heatmap source and
  * recomputes per-country and per-DMA fill colors.
@@ -231,8 +244,13 @@ export function useMapData({ map, dmaDataRef, data, bucketIdx, metric, isDark, s
       }
 
       setTooltip(null)
-      const bucketData = mapBuckets[bucketIdx]
-      if (!bucketData?.cities) return
+      const bucketData = findMapBucket(mapBuckets, bucketIdx)
+      if (!bucketData?.cities) {
+        const src = map.current.getSource('heatmap') as maplibregl.GeoJSONSource | undefined
+        src?.setData({ type: 'FeatureCollection', features: [] })
+        dmaDataRef.current = {}
+        return
+      }
 
       const resolveCity = (c: MapCity) => {
         const entry = c.city_idx >= 0 && c.city_idx < cityEntries.length ? cityEntries[c.city_idx] : undefined
@@ -325,4 +343,4 @@ export function useMapData({ map, dmaDataRef, data, bucketIdx, metric, isDark, s
   }, [bucketIdx, data, metric, isDark, dmaDataRef, map, setTooltip])
 }
 
-export const MapLayer = { getScoreColor, useMapInit, useMapData }
+export const MapLayer = { getScoreColor, findMapBucket, useMapInit, useMapData }

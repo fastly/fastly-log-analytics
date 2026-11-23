@@ -126,6 +126,12 @@ export function computeNetworkHealthScore(
 }
 
 
+const UNKNOWN_CITY_VALUES = new Set(["", "?", "-", "(none)", "unknown", "n/a", "null"]);
+
+export function isUnknownCity(city: string | null | undefined): boolean {
+  return UNKNOWN_CITY_VALUES.has(String(city ?? "").trim().toLowerCase());
+}
+
 /**
  * Collapses duplicate (city, country) rows in the metro leaderboard by
  * summing request counts and computing request-weighted averages.
@@ -146,7 +152,7 @@ export function deduplicateMetroLeaderboard(
   for (const row of rows) {
     const city = String(row.city ?? row.metro ?? "").trim();
     const country = String(row.country ?? "").trim();
-    if (!city) continue;
+    if (isUnknownCity(city)) continue;
     const key = `${city.toLowerCase()}::${country.toLowerCase()}`;
     const reqs = Math.max(0, Number(row.reqs ?? row.total_reqs ?? 0));
     const existing = byKey.get(key);
@@ -442,8 +448,10 @@ async function queryNetworkBuckets(
     SELECT is_asn, bucket_ms, asn, city, country, map_key, lat, lon, reqs,
       rtt_quantiles[1] AS rtt_med_us, rtt_quantiles[2] AS baseline, avg_ploss, error_pct
     FROM grouped ORDER BY bucket_ms, reqs DESC`, [], params.signal);
-  const asnRows = rows.filter((row) => row.is_asn);
-  const cityRows = rows.filter((row) => !row.is_asn && row.city != null && row.map_key != null);
+  const asnRows = rows.filter((row) => row.is_asn && Number(row.asn ?? 0) > 0);
+  const cityRows = rows.filter(
+    (row) => !row.is_asn && row.city != null && row.map_key != null && !isUnknownCity(String(row.city)),
+  );
   const buckets = [...new Set([...asnRows, ...cityRows].map((row) => new Date(Number(row.bucket_ms)).toISOString()))].sort();
   const bucketIndexes = new Map(buckets.map((value, index) => [value, index]));
   const cell = (row: Record<string, unknown>) => ({
@@ -587,7 +595,7 @@ export async function queryNetworkHealth(params: NetworkQueryParams = {}) {
         country_key, asn_key, as_name_key, city_key,
         COUNT(*)::BIGINT AS reqs,
         AVG(rtt_us)::DOUBLE AS avg_rtt_us,
-        QUANTILE_CONT(rtt_us, [0.5, 0.95, 0.1]) AS rtt_quantiles,
+        QUANTILE_CONT(rtt_us, [0.5, 0.95, 0.99, 0.1]) AS rtt_quantiles,
         AVG(ploss_value)::DOUBLE AS avg_ploss,
         (COUNT(*) FILTER (WHERE status >= 500 AND status < 600) * 100.0 / NULLIF(COUNT(*), 0))::DOUBLE AS error_pct
       FROM scoped
@@ -597,7 +605,8 @@ export async function queryNetworkHealth(params: NetworkQueryParams = {}) {
       grouping_set, country_key, asn_key, as_name_key, city_key, reqs, avg_rtt_us,
       rtt_quantiles[1]::DOUBLE AS med_rtt_us,
       rtt_quantiles[2]::DOUBLE AS p95_rtt_us,
-      rtt_quantiles[3]::DOUBLE AS p10_rtt_us,
+      rtt_quantiles[3]::DOUBLE AS p99_rtt_us,
+      rtt_quantiles[4]::DOUBLE AS p10_rtt_us,
       avg_ploss, error_pct
     FROM grouped
     QUALIFY ROW_NUMBER() OVER (PARTITION BY grouping_set ORDER BY reqs DESC)
@@ -652,9 +661,11 @@ export async function queryNetworkHealth(params: NetworkQueryParams = {}) {
     };
   });
 
-  const byAsnRows = coreSet("asn").map((row): Record<string, unknown> => ({
-    ...row, asn: row.asn_key, as_name: row.as_name_key, rtt_med_us: row.med_rtt_us, rtt_base_us: row.p10_rtt_us,
-  }));
+  const byAsnRows = coreSet("asn")
+    .filter((row) => Number(row.asn_key ?? 0) > 0)
+    .map((row): Record<string, unknown> => ({
+      ...row, asn: row.asn_key, as_name: row.as_name_key, rtt_med_us: row.med_rtt_us, rtt_base_us: row.p10_rtt_us,
+    }));
 
   const by_asn = byAsnRows.map((row) => {
     const rttMedUs = Number(row.rtt_med_us ?? 0);
@@ -667,6 +678,8 @@ export async function queryNetworkHealth(params: NetworkQueryParams = {}) {
       reqs: Number(row.reqs ?? 0),
       rtt_med_us: roundTo(rttMedUs, 1),
       rtt_med_ms: roundTo(rttMedUs / 1000, 2),
+      p95_rtt_us: row.p95_rtt_us == null ? null : roundTo(Number(row.p95_rtt_us), 1),
+      p99_rtt_us: row.p99_rtt_us == null ? null : roundTo(Number(row.p99_rtt_us), 1),
       avg_ploss: roundTo(ploss, 4),
       error_pct: roundTo(errPct, 2),
       health_score: row.rtt_med_us == null ? null : computeNetworkHealthScore(
@@ -879,7 +892,9 @@ export async function queryNetworkQuality(params: NetworkQueryParams = {}) {
     avg_cwnd: roundTo(Number(r.avg_cwnd ?? 0), 1),
   }));
 
-  const byAsnRows = qualitySet("asn").map((row): Record<string, unknown> => ({ ...row, asn: row.asn_key, as_name: row.as_name_key }));
+  const byAsnRows = qualitySet("asn")
+    .filter((row) => Number(row.asn_key ?? 0) > 0)
+    .map((row): Record<string, unknown> => ({ ...row, asn: row.asn_key, as_name: row.as_name_key }));
 
   const by_asn = byAsnRows.map((r) => ({
     asn: Number(r.asn ?? 0),

@@ -175,6 +175,25 @@ describe('NetworkClient on Cloud', () => {
     expect(await screen.findByText('87/100')).toBeInTheDocument()
     expect(screen.queryByTestId('rollup-data-through-slot')).not.toBeInTheDocument()
   })
+
+  it('renders em-dash for 1h Change when health_score_1h_ago is null and displays P95/P99 RTT without content-visibility CLS traps', async () => {
+    setCloudModeRuntime(true)
+    const core = {
+      ...coreResponse(rollup([])),
+      leaderboard: [{
+        asn: 64500, label: 'AS64500', total_reqs: 1234,
+        health_score_now: 51.4, health_score_1h_ago: null,
+        p95_rtt_us: 45_000, p99_rtt_us: 78_000, trend: 'stable',
+      }],
+    }
+    recordNetworkHealth(core)
+    const { container } = renderWithQuery(<NetworkClient />, { withNuqs: true })
+
+    expect(await screen.findByText('45.0ms')).toBeInTheDocument()
+    expect(screen.getByText('78.0ms')).toBeInTheDocument()
+    expect(screen.queryByText('+51.4')).not.toBeInTheDocument()
+    expect(container.querySelector('[class*="content-visibility:auto"]')).toBeNull()
+  })
 })
 
 describe('PopHealthHeatmap', () => {

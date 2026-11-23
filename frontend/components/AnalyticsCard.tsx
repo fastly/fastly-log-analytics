@@ -173,6 +173,18 @@ export function ChartEmptyState({ requires }: { requires?: string }) {
 
 const subscribeNever = () => () => {}
 
+function findScrollContainer(node: Element): Element | null {
+  let el: Element | null = node.parentElement
+  while (el && el !== document.body && el !== document.documentElement) {
+    const style = getComputedStyle(el)
+    if (/(auto|scroll|overlay)/.test(style.overflow + style.overflowX + style.overflowY)) {
+      return el
+    }
+    el = el.parentElement
+  }
+  return null
+}
+
 interface UseInViewOnceOptions<T extends Element> {
   rootMargin?: string
   findRoot?: (node: T) => Element | null
@@ -199,7 +211,7 @@ export function useInViewOnce<T extends Element>(
           observer.disconnect()
         }
       },
-      { root: findRoot ? findRoot(node) : null, rootMargin },
+      { root: findRoot ? findRoot(node) : findScrollContainer(node), rootMargin },
     )
     observer.observe(node)
     return () => observer.disconnect()

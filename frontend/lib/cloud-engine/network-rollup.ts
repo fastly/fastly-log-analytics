@@ -6,6 +6,7 @@ import {
   emptyNetworkHealth,
   emptyNetworkQuality,
   emptyPopHealth,
+  isUnknownCity,
   networkBundle,
   normalizeProtocolBucket,
   parseEpochMs,
@@ -40,7 +41,7 @@ const HEALTH_SECTIONS = new Set(["summary", "leaderboard", "metro_leaderboard", 
 const MAP_SECTIONS = new Set(["cities", "map_buckets"]);
 
 const HEALTH_APPROXIMATE = [
-  "median_rtt_ms", "p95_rtt_ms", "rtt_med_us", "rtt_med_ms", "health_score",
+  "median_rtt_ms", "p95_rtt_ms", "p95_rtt_us", "p99_rtt_us", "rtt_med_us", "rtt_med_ms", "health_score",
   "global_health_score", "health_score_now", "worst_asn", "worst_country",
 ];
 
@@ -85,6 +86,7 @@ type Stats = {
   avgRttUs: number | null;
   medRttUs: number | null;
   p95RttUs: number | null;
+  p99RttUs: number | null;
   p10RttUs: number | null;
   avgPloss: number | null;
   errorPct: number;
@@ -97,6 +99,7 @@ function stats(agg: RollupAgg): Stats {
     avgRttUs: agg.rttCount ? agg.rttSum / agg.rttCount : null,
     medRttUs: rtt?.quantile(0.5) ?? null,
     p95RttUs: rtt?.quantile(0.95) ?? null,
+    p99RttUs: rtt?.quantile(0.99) ?? null,
     p10RttUs: rtt?.quantile(0.1) ?? null,
     avgPloss: agg.plossCount ? agg.plossSum / agg.plossCount : null,
     errorPct: agg.requests ? (agg.status5xx * 100) / agg.requests : 0,
@@ -111,6 +114,8 @@ function scored(s: Stats) {
     reqs: s.reqs,
     rtt_med_us: roundTo(rttMedUs, 1),
     rtt_med_ms: roundTo(rttMedUs / 1000, 2),
+    p95_rtt_us: s.p95RttUs == null ? null : roundTo(s.p95RttUs, 1),
+    p99_rtt_us: s.p99RttUs == null ? null : roundTo(s.p99RttUs, 1),
     avg_ploss: roundTo(ploss, 4),
     avg_ploss_pct: roundTo(ploss <= 1 ? ploss * 100 : ploss, 2),
     error_pct: roundTo(s.errorPct, 2),
@@ -162,10 +167,12 @@ export function networkHealthFromRollup(
     const row = scored(stats(agg));
     return { country, ...row, total_reqs: row.reqs };
   });
-  const by_asn = ranked(rollup.dims.get("asn"), 100).map(([asn, agg]) => {
-    const { avg_ploss_pct: _pct, ...row } = scored(stats(agg));
-    return { asn: Number(asn), as_name: agg.label ?? `AS${asn}`, ...row };
-  });
+  const by_asn = ranked(rollup.dims.get("asn"), 100)
+    .filter(([asn]) => Number(asn) > 0)
+    .map(([asn, agg]) => {
+      const { avg_ploss_pct: _pct, ...row } = scored(stats(agg));
+      return { asn: Number(asn), as_name: agg.label ?? `AS${asn}`, ...row };
+    });
   const metros = ranked(rollup.dims.get("city"), 400).map(([key, agg]): MetroRow => {
     const [country, city] = JSON.parse(key) as [string, string];
     const row = scored(stats(agg));
@@ -175,7 +182,9 @@ export function networkHealthFromRollup(
 
   const buckets = [...overall.get("")?.keys() ?? []].sort((a, b) => a - b);
   const bucketIndexes = new Map(buckets.map((t, index) => [t, index]));
-  const heatmap = [...asnSeries].map(([asn, cells]) => ({
+  const heatmap = [...asnSeries]
+    .filter(([asn]) => Number(asn) > 0)
+    .map(([asn, cells]) => ({
     asn: Number(asn),
     label: `AS${asn}`,
     total_reqs: sumAggs(cells.values()).requests,
@@ -266,6 +275,7 @@ export function mapFromRollup(result: RollupResult, params: Pick<NetworkQueryPar
   const mapBuckets = new Map<number, { bucket: string; bucket_idx: number; cities: Record<string, unknown>[] }>();
   for (const { key, t, agg } of cells) {
     const [country, city] = JSON.parse(key) as [string | null, string];
+    if (isUnknownCity(city)) continue;
     if (!cityIndexes.has(key)) {
       cityIndexes.set(key, cities.length);
       const geo = (sum: number) => (agg.geoCount ? sum / agg.geoCount : null);
@@ -382,7 +392,9 @@ function qualityAnswer(result: RollupResult, regionCountry: string, rollupMeta: 
   const by_country = ranked(rollup.dims.get("country"), 100).map(([country, agg]) => ({
     value: country, label: country, rtt_ms: rttMs(agg), reqs: agg.requests,
   }));
-  const by_asn = ranked(rollup.dims.get("asn"), 100).map(([asn, agg]) => {
+  const by_asn = ranked(rollup.dims.get("asn"), 100)
+    .filter(([asn]) => Number(asn) > 0)
+    .map(([asn, agg]) => {
     const client = asnClient?.get(asn);
     const row = {
       asn: Number(asn),

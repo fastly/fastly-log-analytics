@@ -44,7 +44,10 @@ export type AsnRow = components['schemas']['NetworkLeaderboardRow']
 export type MetroRow = components['schemas']['NetworkMetroRow']
 
 const rttMs = (us: number | null | undefined) => (us != null ? `${(us / 1000).toFixed(1)}ms` : '—')
-const healthDelta = (a: AsnRow) => (a.health_score_now ?? 0) - (a.health_score_1h_ago ?? 0)
+const healthDelta = (a: AsnRow): number | null =>
+  a.health_score_now != null && a.health_score_1h_ago != null
+    ? a.health_score_now - a.health_score_1h_ago
+    : null
 
 const ApproxHealth = ({ mark, score }: { mark: string; score: number | null }) => (
   <span className="block text-right">{mark && <span className="mr-1 text-xs text-muted-foreground">{mark}</span>}<HealthBadge score={score} /></span>
@@ -76,9 +79,12 @@ export const asnColumns = (meta?: NetworkRollupMeta): ColumnDef<AsnRow>[] => [
     cell: ({ row }) => <span className="block text-right font-mono text-xs">{rttMs(row.original.p99_rtt_us)}</span>,
   },
   {
-    id: 'delta', header: '1h Change', accessorFn: healthDelta, size: 110,
+    id: 'delta', header: '1h Change', accessorFn: (a) => healthDelta(a) ?? Number.NEGATIVE_INFINITY, size: 110,
     cell: ({ row }) => {
       const delta = healthDelta(row.original)
+      if (delta == null) {
+        return <span className="block text-right font-mono text-xs text-muted-foreground">—</span>
+      }
       return (
         <span className="block text-right font-mono text-xs">
           <span className={delta > 0 ? 'text-green-500' : delta < 0 ? 'text-red-500' : 'text-muted-foreground'}>
@@ -187,7 +193,7 @@ export function NetworkKpiGrid({
   rollup?: NetworkRollupMeta
 }) {
   return (
-    <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 [contain-intrinsic-size:120px] [content-visibility:auto]">
+    <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
       {[
         {
           title: 'Global Health', icon: Activity, loadingMessage: 'Compiling ASN health matrix...',
@@ -235,9 +241,9 @@ export function NetworkLeaderboardsSection({
   const asnCols = React.useMemo(() => asnColumns(rollup), [rollup])
   const metroCols = React.useMemo(() => metroColumns(rollup), [rollup])
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 [contain-intrinsic-size:420px] [content-visibility:auto]">
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
       <AnalyticsCard
-        title="ASN Performance Leaderboard" className="flex flex-col [contain-intrinsic-size:420px] [content-visibility:auto]"
+        title="ASN Performance Leaderboard" className="flex flex-col min-h-[420px]"
         contentClassName="p-0 flex-1" helpTitle="ASN Performance Leaderboard" helpContent={<AsnLeaderboardHelp />}
         isFetching={isFetching} error={error as AnalyticsCardError | null} loadingMessage="Compiling ASN leaderboard..."
       >
@@ -252,7 +258,7 @@ export function NetworkLeaderboardsSection({
 
       {data?.has_metro && (
         <AnalyticsCard
-          title="Metro / Region Leaderboard" className="flex flex-col [contain-intrinsic-size:420px] [content-visibility:auto]"
+          title="Metro / Region Leaderboard" className="flex flex-col min-h-[420px]"
           contentClassName="p-0 flex-1" helpTitle="Metro / Region Leaderboard" helpContent={<MetroLeaderboardHelp />}
           isFetching={isFetching} error={error as AnalyticsCardError | null} loadingMessage="Compiling Metro leaderboard..."
         >
@@ -307,7 +313,7 @@ export function NetworkQualitySection({
   ]
 
   return (
-    <div className="space-y-4 [contain-intrinsic-size:400px] [content-visibility:auto]">
+    <div className="space-y-4 min-h-[400px]">
       <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">Network Quality</h2>
       {isQualityLoadingInitial ? (
         <SkeletonGrid count={4} height="180px" className="rounded-xl" />
@@ -318,7 +324,7 @@ export function NetworkQualitySection({
               <AnalyticsCard
                 key={b.title} title={b.title} contentClassName="p-0" helpTitle="Network Quality" helpContent={<NetworkQualityHelp />}
                 isFetching={isFetching} error={error as AnalyticsCardError | null}
-                loadingMessage={b.loadingMessage} className="[contain-intrinsic-size:240px] [content-visibility:auto]" headerAction={b.headerAction}
+                loadingMessage={b.loadingMessage} className="min-h-[240px]" headerAction={b.headerAction}
               >
                 <RttBarList rows={b.rows} filterColumn={b.filterColumn} />
               </AnalyticsCard>
@@ -328,7 +334,7 @@ export function NetworkQualitySection({
             <AnalyticsCard
               title="RTT vs TTFB" helpTitle="Network Quality" helpContent={<NetworkQualityHelp />}
               isFetching={isFetching} error={error as AnalyticsCardError | null}
-              loadingMessage="Plotting RTT vs TTFB correlation..." className="[contain-intrinsic-size:380px] [content-visibility:auto]"
+              loadingMessage="Plotting RTT vs TTFB correlation..." className="min-h-[380px]"
             >
               <PlotlyChart data={qualityScatterTrace} layout={QUALITY_SCATTER_LAYOUT} height={360} />
             </AnalyticsCard>
