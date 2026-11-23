@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from backend.core.service_defaults import DEFAULT_SNAPSHOT_INTERVAL_MINUTES
+from backend.core.storage_billing import StorageBillingInterval
 from backend.models.common.base import BaseResponse, PassthroughModel
 
 # ── POP locations admin ────────────────────────────────────────────────────
@@ -249,7 +250,14 @@ class CurrentStorageResponse(BaseResponse):
     deleted_bytes_provenance: str = "unknown"
     quarantine_bytes: int = 0
     total_billed_bytes: int
-    total_billed_gb_hours: float
+    total_billed_gb_hours: float = 0.0
+    storage_billing_complete: bool = False
+    storage_billing_provenance: list[str] = Field(default_factory=list)
+    live_billed_gb_hours: float = 0.0
+    deleted_billed_gb_hours: float = 0.0
+    minimum_billed_gb_hours: float = 0.0
+    storage_intervals: list[StorageBillingInterval] = Field(default_factory=list)
+    observed_at: str | None = None
     archive_bytes: int = 0
     archive_objects: int = 0
     archive_expired_bytes: int = 0
@@ -275,6 +283,9 @@ class UsageOperationsResponse(BaseResponse):
     granularity: str
     note: str
     fos_fields_found: list[str]
+    source: Literal["local", "fastly"] = "local"
+    complete: bool = True
+    provenance: list[str] = Field(default_factory=list)
 
 
 class UsageBandwidthPoint(BaseModel):

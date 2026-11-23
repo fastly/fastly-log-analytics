@@ -1191,6 +1191,232 @@ class PostgresControlPlane:
             ).fetchone()
         return {"live_bytes": int(row[0]), "live_objects": int(row[1]) * 3, "expired_30d_bytes": int(row[2])}
 
+    def storage_billing_intervals(
+        self,
+        service_id: str,
+        start: datetime,
+        end: datetime,
+        minimum_days: int = 30,
+    ) -> tuple[list[dict[str, Any]], bool, list[str]]:
+        """Build selected-period storage billing intervals from Postgres source and archive ledgers."""
+        _require_text(service_id, "service_id")
+        start_utc = start.astimezone(UTC) if start.tzinfo is not None else start.replace(tzinfo=UTC)
+        end_utc = end.astimezone(UTC) if end.tzinfo is not None else end.replace(tzinfo=UTC)
+        if end_utc < start_utc:
+            raise ValueError("end must be >= start")
+
+        start_ms = int(start_utc.timestamp() * 1000)
+        end_ms = int(end_utc.timestamp() * 1000)
+        min_days = max(0, int(minimum_days))
+        min_window_ms = min_days * 86_400_000
+
+        def _to_ms(dt: datetime | None) -> int | None:
+            if dt is None:
+                return None
+            dt_utc = dt.astimezone(UTC) if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+            return int(dt_utc.timestamp() * 1000)
+
+        intervals: list[dict[str, Any]] = []
+        complete = True
+
+        def _append_deleted(
+            *,
+            base_id: str,
+            dataset: str,
+            size_bytes: int,
+            created_ms: int | None,
+            deleted_ms: int | None,
+            provenance: str,
+            exact_deletion: bool,
+        ) -> None:
+            nonlocal complete
+            if deleted_ms is None:
+                complete = False
+                intervals.append(
+                    {
+                        "id": f"{base_id}:min",
+                        "dataset": dataset,
+                        "kind": "minimum_billed",
+                        "bytes": size_bytes,
+                        "created_at": created_ms,
+                        "deleted_at": None,
+                        "billed_from": created_ms if created_ms is not None else start_ms,
+                        "billed_until": end_ms,
+                        "complete": False,
+                        "provenance": provenance,
+                    }
+                )
+                return
+            if created_ms is None:
+                complete = False
+                intervals.append(
+                    {
+                        "id": f"{base_id}:min",
+                        "dataset": dataset,
+                        "kind": "minimum_billed",
+                        "bytes": size_bytes,
+                        "created_at": None,
+                        "deleted_at": deleted_ms,
+                        "billed_from": deleted_ms,
+                        "billed_until": deleted_ms + min_window_ms,
+                        "complete": False,
+                        "provenance": provenance,
+                    }
+                )
+                return
+            is_complete = exact_deletion
+            if not is_complete:
+                complete = False
+            if deleted_ms > created_ms:
+                intervals.append(
+                    {
+                        "id": f"{base_id}:deleted",
+                        "dataset": dataset,
+                        "kind": "deleted",
+                        "bytes": size_bytes,
+                        "created_at": created_ms,
+                        "deleted_at": deleted_ms,
+                        "billed_from": created_ms,
+                        "billed_until": deleted_ms,
+                        "complete": is_complete,
+                        "provenance": provenance,
+                    }
+                )
+            min_until = created_ms + min_window_ms
+            if min_until > deleted_ms:
+                intervals.append(
+                    {
+                        "id": f"{base_id}:min",
+                        "dataset": dataset,
+                        "kind": "minimum_billed",
+                        "bytes": size_bytes,
+                        "created_at": created_ms,
+                        "deleted_at": deleted_ms,
+                        "billed_from": deleted_ms,
+                        "billed_until": min_until,
+                        "complete": is_complete,
+                        "provenance": provenance,
+                    }
+                )
+
+        with self.transaction(read_only=True) as connection:
+            source_rows = connection.execute(
+                "SELECT object_id, domain, size_bytes, status, discovered_at, updated_at "
+                "FROM high_scale_source_objects "
+                "WHERE service_id = %s "
+                "AND (discovered_at IS NULL OR discovered_at < %s) "
+                "AND (status NOT IN ('source_deleted', 'source_missing') "
+                "OR GREATEST(updated_at, COALESCE(discovered_at, updated_at) + make_interval(days => %s)) > %s)",
+                (service_id, end_utc, min_days, start_utc),
+            ).fetchall()
+            archive_rows = connection.execute(
+                "SELECT manifest_id, domain, artifact_size, created_at, archive_expired_at "
+                "FROM high_scale_archive_manifests "
+                "WHERE service_id = %s AND state <> 'artifact_uploading' "
+                "AND (created_at IS NULL OR created_at < %s) "
+                "AND (archive_expired_at IS NULL "
+                "OR GREATEST(archive_expired_at, COALESCE(created_at, archive_expired_at) + make_interval(days => %s)) > %s)",
+                (service_id, end_utc, min_days, start_utc),
+            ).fetchall()
+
+        for object_id, domain, size_bytes, status, discovered_at, updated_at in source_rows:
+            size = int(size_bytes)
+            dataset = f"raw_{domain}"
+            base_id = f"high-scale:source:{object_id}"
+            created_ms = _to_ms(discovered_at)
+            updated_ms = _to_ms(updated_at)
+            if status in ("source_deleted", "source_missing"):
+                _append_deleted(
+                    base_id=base_id,
+                    dataset=dataset,
+                    size_bytes=size,
+                    created_ms=created_ms,
+                    deleted_ms=updated_ms,
+                    provenance="high-scale:source_objects",
+                    exact_deletion=(status == "source_deleted"),
+                )
+            elif created_ms is None:
+                complete = False
+                intervals.append(
+                    {
+                        "id": base_id,
+                        "dataset": dataset,
+                        "kind": "live",
+                        "bytes": size,
+                        "created_at": None,
+                        "deleted_at": None,
+                        "billed_from": start_ms,
+                        "billed_until": end_ms,
+                        "complete": False,
+                        "provenance": "high-scale:source_objects",
+                    }
+                )
+            else:
+                intervals.append(
+                    {
+                        "id": base_id,
+                        "dataset": dataset,
+                        "kind": "live",
+                        "bytes": size,
+                        "created_at": created_ms,
+                        "deleted_at": None,
+                        "billed_from": created_ms,
+                        "billed_until": end_ms,
+                        "complete": True,
+                        "provenance": "high-scale:source_objects",
+                    }
+                )
+
+        for manifest_id, domain, artifact_size, created_at, archive_expired_at in archive_rows:
+            size = int(artifact_size)
+            dataset = f"archive_{domain}"
+            base_id = f"high-scale:archive:{manifest_id}"
+            created_ms = _to_ms(created_at)
+            expired_ms = _to_ms(archive_expired_at)
+            if expired_ms is not None:
+                _append_deleted(
+                    base_id=base_id,
+                    dataset=dataset,
+                    size_bytes=size,
+                    created_ms=created_ms,
+                    deleted_ms=expired_ms,
+                    provenance="high-scale:archive_manifests",
+                    exact_deletion=True,
+                )
+            elif created_ms is None:
+                complete = False
+                intervals.append(
+                    {
+                        "id": base_id,
+                        "dataset": dataset,
+                        "kind": "live",
+                        "bytes": size,
+                        "created_at": None,
+                        "deleted_at": None,
+                        "billed_from": start_ms,
+                        "billed_until": end_ms,
+                        "complete": False,
+                        "provenance": "high-scale:archive_manifests",
+                    }
+                )
+            else:
+                intervals.append(
+                    {
+                        "id": base_id,
+                        "dataset": dataset,
+                        "kind": "live",
+                        "bytes": size,
+                        "created_at": created_ms,
+                        "deleted_at": None,
+                        "billed_from": created_ms,
+                        "billed_until": end_ms,
+                        "complete": True,
+                        "provenance": "high-scale:archive_manifests",
+                    }
+                )
+
+        return intervals, complete, ["high-scale:archive_manifests", "high-scale:source_objects"]
+
     def source_activity(self, service_id: str, start: datetime, end: datetime, by: str) -> list[tuple[str, int, int]]:
         """``(bucket, accepted_rows, size_bytes)`` of processed source objects by UTC discovery time.
 

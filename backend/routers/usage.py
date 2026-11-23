@@ -553,10 +553,16 @@ def usage_current_storage(
     if not src.get("bucket"):
         raise HTTPException(status_code=400, detail={"error": "Fastly Object Storage bucket not configured."})
 
-    from backend.utils.date_utils import parse_date_window
+    from backend.core.storage_billing import StorageBillingInterval, calculate_storage_billing
+    from backend.utils.date_utils import iso_z, parse_date_window, parse_window_str_to_dt
 
     now = datetime.now(UTC)
+    observed_at = iso_z(now)
     start_str, end_str = parse_date_window(start, end)
+    start_dt = parse_window_str_to_dt(start_str)
+    end_dt = parse_window_str_to_dt(end_str)
+    start_ms = int(start_dt.timestamp() * 1000)
+    end_ms = int(end_dt.timestamp() * 1000)
 
     try:
         from backend import config as svcconfig
@@ -686,6 +692,67 @@ def usage_current_storage(
         billed_gb = billed_bytes / (1024 * 1024 * 1024)
         gb_hours = billed_gb * (MIN_BILLING_DAYS * 24)
 
+        live_billed_gb_hours = 0.0
+        deleted_billed_gb_hours = 0.0
+        minimum_billed_gb_hours = 0.0
+        storage_billing_complete = False
+        storage_billing_provenance: list[str] = []
+        storage_intervals: list[StorageBillingInterval] = []
+
+        if high_scale_service is not None:
+            pg_intervals: list[dict[str, Any]] = []
+            pg_complete = False
+            pg_provenance: list[str] = []
+            try:
+                from backend.high_scale.postgres_control import PostgresControlPlane
+
+                pg_intervals, pg_complete, pg_provenance = PostgresControlPlane().storage_billing_intervals(
+                    service_id, start_dt, end_dt, minimum_days=MIN_BILLING_DAYS
+                )
+            except Exception:
+                pg_complete = False
+                pg_provenance = ["high-scale:postgres_unavailable"]
+                logger.debug("usage_current_storage: storage_billing_intervals failed", exc_info=True)
+
+            cloud_copy_intervals: list[dict[str, Any]] = []
+            cloud_copy_intervals_ok = True
+            try:
+                from backend.core.metadata.fos_usage import cloud_copy_deletion_records_in_window
+
+                cloud_copy_intervals = cloud_copy_deletion_records_in_window(
+                    src["name"], start_dt, end_dt, minimum_days=MIN_BILLING_DAYS
+                )
+            except Exception:
+                cloud_copy_intervals_ok = False
+                cloud_copy_deleted_bytes_complete = False
+                logger.debug("usage_current_storage: cloud copy deletion records failed", exc_info=True)
+
+            all_intervals = [*pg_intervals, *cloud_copy_intervals]
+            if end_ms >= start_ms:
+                billing_summary = calculate_storage_billing(all_intervals, start_ms, end_ms)
+                live_billed_gb_hours = billing_summary.live_gb_hours
+                deleted_billed_gb_hours = billing_summary.deleted_gb_hours
+                minimum_billed_gb_hours = billing_summary.minimum_billed_gb_hours
+                gb_hours = billing_summary.total_gb_hours
+                storage_billing_complete = (
+                    pg_complete
+                    and billing_summary.complete
+                    and archive_storage_complete
+                    and cloud_copy_deleted_bytes_complete
+                    and cloud_copy_intervals_ok
+                )
+                storage_billing_provenance = sorted(set(pg_provenance) | set(billing_summary.provenance))
+                storage_intervals = [StorageBillingInterval.model_validate(item) for item in all_intervals]
+            else:
+                gb_hours = 0.0
+                storage_billing_complete = False
+                storage_billing_provenance = sorted(set(pg_provenance))
+        else:
+            storage_billing_complete = archive_storage_complete and cloud_copy_deleted_bytes_complete
+            storage_billing_provenance = (
+                ["metadata_ledgers"] if storage_billing_complete else ["metadata_ledgers_incomplete"]
+            )
+
         resp: CurrentStorageResponse = CurrentStorageResponse.with_telemetry(
             debug_queries=debug_queries,
             live_bytes=live_bytes,
@@ -700,6 +767,13 @@ def usage_current_storage(
             quarantine_bytes=quarantine_bytes,
             total_billed_bytes=billed_bytes,
             total_billed_gb_hours=gb_hours,
+            storage_billing_complete=storage_billing_complete,
+            storage_billing_provenance=storage_billing_provenance,
+            live_billed_gb_hours=live_billed_gb_hours,
+            deleted_billed_gb_hours=deleted_billed_gb_hours,
+            minimum_billed_gb_hours=minimum_billed_gb_hours,
+            storage_intervals=storage_intervals,
+            observed_at=observed_at,
             archive_bytes=archive_bytes,
             archive_objects=archive_objects,
             archive_expired_bytes=archive_expired_bytes,
@@ -902,84 +976,49 @@ def usage_operations(
     by: str = Query(default="day"),
     source: dict[str, Any] = Depends(get_source),
 ) -> UsageOperationsResponse:
+    from typing import Literal, cast
+
+    from backend.core.metadata.fos_usage import get_usage_operation_buckets
+    from backend.utils.date_utils import parse_date_window
+
     requested_by = by
-    if by not in ("hour", "day"):
-        by = "hour"
-    clamped_from_sub_hour = requested_by != by
+    granularity: Literal["hour", "day"] = "day" if by == "day" else "hour"
+    clamped_from_sub_hour = requested_by != granularity
 
     src = source
-    api_key = api_key_or_mock(get_fastly_api_key(src["logging_service_id"]))
-    if not api_key:
-        raise HTTPException(status_code=403, detail={"error": "Fastly API key is not configured."})
-
-    start_str, end_str, from_ts, to_ts = window_to_epoch(start, end)
-
-    agg: dict[str, dict[str, int]] = {}
-    fos_fields_found: set[str] = set()
-
-    def _accumulate(records: list[dict[str, Any]]) -> None:
-        for record in records:
-            ts = record.get("start_time")
-            if ts is None:
-                continue
-            for k in record:
-                if "object_storage" in k:
-                    fos_fields_found.add(k)
-            sub = record.get("object_storage", {})
-            if isinstance(sub, dict):
-                for k in sub:
-                    if "operations" in k or "class" in k:
-                        fos_fields_found.add(f"object_storage.{k}")
-            if by == "minute":
-                fmt = "%Y-%m-%dT%H:%M"
-            elif by == "hour":
-                fmt = "%Y-%m-%dT%H:00"
-            else:
-                fmt = "%Y-%m-%d"
-            date_str = datetime.fromtimestamp(ts, tz=UTC).strftime(fmt)
-            class_a, class_b = _extract_fos_ops(record)
-            if date_str not in agg:
-                agg[date_str] = {"class_a": 0, "class_b": 0}
-            agg[date_str]["class_a"] += class_a
-            agg[date_str]["class_b"] += class_b
+    service_id = str(src.get("service_id") or src["name"])
+    start_str, end_str = parse_date_window(start, end)
 
     try:
-        payload = _fastly_api(
-            None,
-            by,
-            from_ts,
-            to_ts,
-            (
-                "object_storage_class_a_operations_count",
-                "object_storage_class_b_operations_count",
-            ),
-            api_key,
+        local = get_usage_operation_buckets(service_id, start_str, end_str, cast(Literal["hour", "day"], granularity))
+    except Exception:
+        logger.debug("usage_operations: local usage_log query failed", exc_info=True)
+        resp_incomplete: UsageOperationsResponse = UsageOperationsResponse.with_telemetry(
+            data=[],
+            total_class_a=0,
+            total_class_b=0,
+            granularity=granularity,
+            source="local",
+            complete=False,
+            provenance=[],
+            note="Local Object Storage operation ledger is unavailable for this service.",
+            fos_fields_found=[],
         )
-        _accumulate(payload.get("data", []))
-    except Exception as e:
-        raise_internal(logger, e, code="fastly_stats_aggregate_failed", status=502)
+        return resp_incomplete
 
-    points: list[dict[str, Any]] = [{"date": d, **v} for d, v in sorted(agg.items())]
-    total_a = sum(v["class_a"] for v in agg.values())
-    total_b = sum(v["class_b"] for v in agg.values())
-    note = (
-        "Note: Object Storage operations are reported across your entire Fastly account "
-        "and cannot be filtered by service. Estimates may be inflated if other services "
-        "use Object Storage."
-    )
+    note = "Measured from this service's local Object Storage operation ledger."
     if clamped_from_sub_hour:
-        note += (
-            f" The chart interval you selected ({requested_by}) is finer than the Fastly "
-            "Platform Metrics API supports for account-wide queries — granularity is forced to "
-            "hourly minimum (the API is account-wide and prohibitively slow at sub-hour)."
-        )
+        note += f" Granularity '{requested_by}' normalized to '{granularity}'."
     resp: UsageOperationsResponse = UsageOperationsResponse.with_telemetry(
-        data=points,
-        total_class_a=total_a,
-        total_class_b=total_b,
-        granularity=by,
+        data=local["data"],
+        total_class_a=local["total_class_a"],
+        total_class_b=local["total_class_b"],
+        granularity=granularity,
+        source="local",
+        complete=True,
+        provenance=["high-scale:usage_log"],
         note=note,
-        fos_fields_found=sorted(fos_fields_found),
+        fos_fields_found=["usage_log.class_a", "usage_log.class_b"],
     )
     return resp
 

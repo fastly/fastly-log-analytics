@@ -6,7 +6,7 @@ import logging
 import sys
 import threading
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict
 
@@ -541,6 +541,52 @@ def cloud_copy_deleted_bytes_in_billing_window(service_id: str) -> int:
     return int(row[0]) if row and row[0] is not None else 0
 
 
+def cloud_copy_deletion_records_in_window(
+    service_id: str,
+    start: datetime,
+    end: datetime,
+    minimum_days: int = _FOS_MIN_BILLING_DAYS,
+) -> list[dict[str, Any]]:
+    """Return conservative minimum-billing intervals for local cloud-copy deletions overlapping [start, end)."""
+    start_utc = start.astimezone(UTC) if start.tzinfo is not None else start.replace(tzinfo=UTC)
+    end_utc = end.astimezone(UTC) if end.tzinfo is not None else end.replace(tzinfo=UTC)
+    min_days = max(0, int(minimum_days))
+    min_window_ms = min_days * 86_400_000
+    cutoff = iso_z(start_utc - timedelta(days=min_days))
+    upper = iso_z(end_utc)
+    con = _ul(service_id)
+    rows = con.execute(
+        "SELECT deleted_at, bytes, objects FROM cloud_copy_deletions "
+        "WHERE service_id = ? AND deleted_at >= ? AND deleted_at < ? ORDER BY deleted_at",
+        (service_id, cutoff, upper),
+    ).fetchall()
+    intervals: list[dict[str, Any]] = []
+    for idx, row in enumerate(rows):
+        deleted_at_str = row[0]
+        deleted_bytes = int(row[1] or 0)
+        if deleted_bytes <= 0:
+            continue
+        dt = parse_iso_utc(str(deleted_at_str))
+        if dt is None:
+            continue
+        deleted_ms = int(dt.timestamp() * 1000)
+        intervals.append(
+            {
+                "id": f"high-scale:cloud-copy:{deleted_at_str}:{idx}",
+                "dataset": "cloud_copy",
+                "kind": "minimum_billed",
+                "bytes": deleted_bytes,
+                "created_at": None,
+                "deleted_at": deleted_ms,
+                "billed_from": deleted_ms,
+                "billed_until": deleted_ms + min_window_ms,
+                "complete": False,
+                "provenance": "high-scale:cloud_copy_deletions",
+            }
+        )
+    return intervals
+
+
 def clear_usage_log(service_id: str) -> None:
     con = _ul(service_id)
     con.execute("DELETE FROM usage_log WHERE service_id = ?", (service_id,))
@@ -667,6 +713,119 @@ def _query_usage_log_aggregate_rollup(
         + class_params,
     ).fetchall()
     return rows
+
+
+def get_usage_operation_buckets(
+    service_id: str,
+    start: str,
+    end: str,
+    by: Literal["hour", "day"],
+) -> dict[str, Any]:
+    """Aggregate Class A/B FOS operation counts into UTC hour or day buckets from the local usage ledger.
+
+    Uses ``usage_log_hourly_summary`` for fully contained interior hours and raw ``usage_log``
+    for the start and end boundary hours.
+    """
+    if by not in ("hour", "day"):
+        raise ValueError(f"unsupported bucket granularity: {by}")
+
+    start_bound = start[:-1] + ".000Z" if start.endswith("Z") and "." not in start else start
+    start_hour = (start_bound or "")[:13]
+    end_hour = (end or "")[:13]
+    bucket_len = 13 if by == "hour" else 10
+
+    def _next_hour_start(hour_prefix: str) -> str:
+        try:
+            dt = datetime.strptime(hour_prefix, "%Y-%m-%dT%H").replace(tzinfo=UTC)
+        except ValueError:
+            return hour_prefix + ":59:59.999Z"
+        return (dt + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    def _hour_start(hour_prefix: str) -> str:
+        return hour_prefix + ":00:00.000Z"
+
+    con = open_readonly(service_id)
+    try:
+        if start_hour == end_hour:
+            rows = con.execute(
+                f"""
+                SELECT substr(timestamp, 1, {bucket_len}) AS bucket,
+                       operation_class,
+                       SUM(count) AS c
+                FROM usage_log
+                WHERE service_id = ? AND timestamp >= ? AND timestamp <= ?
+                  AND operation_class IN ('A', 'B')
+                GROUP BY bucket, operation_class
+                ORDER BY bucket
+                """,
+                [service_id, start_bound, end],
+            ).fetchall()
+        else:
+            start_hour_end = _next_hour_start(start_hour)
+            end_hour_start = _hour_start(end_hour)
+            rows = con.execute(
+                f"""
+                SELECT bucket, operation_class, SUM(c) AS c
+                FROM (
+                    SELECT substr(hour, 1, {bucket_len}) AS bucket,
+                           operation_class,
+                           count AS c
+                    FROM usage_log_hourly_summary
+                    WHERE service_id = ? AND hour > ? AND hour < ?
+                      AND operation_class IN ('A', 'B')
+                    UNION ALL
+                    SELECT substr(timestamp, 1, {bucket_len}) AS bucket,
+                           operation_class,
+                           count AS c
+                    FROM usage_log
+                    WHERE service_id = ? AND timestamp >= ? AND timestamp < ?
+                      AND operation_class IN ('A', 'B')
+                    UNION ALL
+                    SELECT substr(timestamp, 1, {bucket_len}) AS bucket,
+                           operation_class,
+                           count AS c
+                    FROM usage_log
+                    WHERE service_id = ? AND timestamp >= ? AND timestamp <= ?
+                      AND operation_class IN ('A', 'B')
+                ) AS combined
+                GROUP BY bucket, operation_class
+                ORDER BY bucket
+                """,
+                [
+                    service_id,
+                    start_hour,
+                    end_hour,
+                    service_id,
+                    start_bound,
+                    start_hour_end,
+                    service_id,
+                    end_hour_start,
+                    end,
+                ],
+            ).fetchall()
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+    agg: dict[str, dict[str, int]] = {}
+    for bucket_raw, op_class, count_val in rows:
+        bucket_str = str(bucket_raw)
+        label = f"{bucket_str}:00" if by == "hour" else bucket_str
+        entry = agg.setdefault(label, {"class_a": 0, "class_b": 0})
+        cnt = int(count_val or 0)
+        if op_class == "A":
+            entry["class_a"] += cnt
+        elif op_class == "B":
+            entry["class_b"] += cnt
+
+    points = [{"date": d, **v} for d, v in sorted(agg.items())]
+    return {
+        "data": points,
+        "total_class_a": sum(v["class_a"] for v in agg.values()),
+        "total_class_b": sum(v["class_b"] for v in agg.values()),
+    }
 
 
 def _build_usage_log_where(
