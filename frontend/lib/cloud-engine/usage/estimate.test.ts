@@ -12,6 +12,7 @@ import {
   COMPACT_JOB_INTERVAL_S,
   COMPACT_DISPATCH_VCPU_MS,
   estimateMonthly,
+  clockIntervalS,
   measureEstimate,
   rawFilesPerDay,
   summaryBytes,
@@ -35,6 +36,32 @@ const zeroRates = Object.fromEntries(
 
 const line = (estimate: ReturnType<typeof estimateMonthly>, id: string) =>
   estimate.lines.find((l) => l.id === id)!;
+
+describe("front clock probes", () => {
+  it("ticks at a quarter of the shortest log period, between 1 and 30 s, as reconcile sets it", () => {
+    const off = { ...DEFAULT_INPUTS, rumPageviewsPerDay: 0 };
+    expect(clockIntervalS({ ...off, logPeriodS: 60 })).toBe(15);
+    expect(clockIntervalS({ ...off, logPeriodS: 300 })).toBe(30);
+    expect(clockIntervalS({ ...off, logPeriodS: 2 })).toBe(1);
+    expect(clockIntervalS({ ...off, logPeriodS: 60, rumLogPeriodS: 20 })).toBe(15);
+    expect(clockIntervalS({ ...DEFAULT_INPUTS, rumPageviewsPerDay: 1, logPeriodS: 60, rumLogPeriodS: 20 })).toBe(5);
+    expect(clockIntervalS({ ...DEFAULT_INPUTS, rumPageviewsPerDay: 1, logPeriodS: 60, rumLogPeriodS: 1 })).toBe(1.25);
+  });
+
+  it("prices both health checks from every probing POP as front requests and bytes", () => {
+    const units = { ...zeroUnits, clockProbeSources: 53, clockProbeBytes: 2_000 };
+    const rates = { ...zeroRates, cdn_request_rate_per_10k: 0.01, cdn_egress_rate_per_gb: 0.12 };
+    const quiet = { ...DEFAULT_INPUTS, requestsPerDay: 0, edgeRequestsPerDay: 0, rumPageviewsPerDay: 0 };
+    const delivery = (logPeriodS: number) =>
+      line(estimateMonthly({ ...quiet, logPeriodS }, units, rates), "delivery").usd;
+    // 2 checks × 53 POPs × 86,400 s ÷ 15 s = 610,560 probes a day, 30 days a month, ~2 KB each.
+    const probes = (2 * 53 * 86_400) / 15 * 30;
+    expect(delivery(60)).toBeCloseTo((probes / 10_000) * 0.01 + ((probes * 2_000) / 1e9) * 0.12);
+    expect(delivery(300)).toBeCloseTo(delivery(60) / 2);
+    expect(line(estimateMonthly({ ...quiet, logPeriodS: 60 }, units, rates), "delivery").detail)
+      .toContain("610,560 clock probes/day every 15 s");
+  });
+});
 
 describe("estimateMonthly", () => {
   it("spreads logged lines over the period's writing nodes", () => {
@@ -507,13 +534,11 @@ describe("measureEstimate", () => {
     expect(units.appVcpuMsPerDay).toBe(300_000);
     expect(units.workerRequestsPerFile).toBe(0.5);
     expect(units.vcpuMsPer1kLines + units.summaryVcpuMsPer1kLines).toBe(40_000);
-    // Fastly bills every front request, health probes included: 70,100 billed less one per file
-    // over 100 files leaves 70,000 fixed requests over 7 days.
-    expect(units.frontRequestsPerDay).toBe(10_000);
-    expect(units.frontRequestsPerFile).toBe(DEFAULT_UNITS.frontRequestsPerFile);
-    // 7 GB billed front bandwidth less the 1 MB of raw files the model delivers per file, plus
-    // 1 GB Compute bandwidth, over 7 days.
-    expect(units.deliveryGbPerDay).toBeCloseTo((7 - 0.001) / 7 + 1 / 7);
+    // Billed front totals hold whatever clock the window ran at, so front requests stay the
+    // logged file reads (defaults without fos_usage) and the probes are modelled from the log period.
+    expect(units.frontRequestsPerDay).toBe(DEFAULT_UNITS.frontRequestsPerDay);
+    // 1 GB Compute bandwidth over 7 days.
+    expect(units.deliveryGbPerDay).toBeCloseTo(1 / 7);
     expect(units.kvClassAPerDay).toBe(1_000);
     expect(units.kvClassBPerDay).toBe(10_000);
     expect(units.secrets).toBe(9);
@@ -539,8 +564,7 @@ describe("measureEstimate", () => {
     expect(units.appRequestsPerDay).toBe(350_000);
     expect(units.workerRequestsPerFile).toBe(0.5);
     expect(units.vcpuMsPer1kLines + units.summaryVcpuMsPer1kLines).toBe(40_000);
-    // Billed front bandwidth less the in-window files' raw bytes, plus Compute, over the 2 reported days.
-    expect(units.deliveryGbPerDay).toBeCloseTo((7 - 0.001) / 2 + 1 / 2);
+    expect(units.deliveryGbPerDay).toBeCloseTo(1 / 2);
   });
 
   it("prices worker summaries once and keeps bundle maintenance in the billed app total", () => {

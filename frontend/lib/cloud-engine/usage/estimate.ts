@@ -53,6 +53,10 @@ export interface UnitCosts {
   appVcpuMsPerDay: number;
   frontRequestsPerDay: number;
   deliveryGbPerDay: number;
+  /** Fastly POPs that run the front clock health checks (`flp_clock`, `flp_flush`). */
+  clockProbeSources: number;
+  /** Response bytes per clock probe. */
+  clockProbeBytes: number;
   fosClassAPerDay: number;
   fosClassBPerDay: number;
   kvClassAPerDay: number;
@@ -194,6 +198,10 @@ export const DEFAULT_UNITS: UnitCosts = {
   appRequestsPerDay: 62_000,
   appVcpuMsPerDay: 250_000 + 720 * 795,
   frontRequestsPerDay: 720,
+  // SE-demo, 2026-11-23: 9,136,736 front requests a day at 1 s ≈ 2 checks × 53 POPs × 86,400,
+  // and 18.7 GB ≈ 2 KB a probe.
+  clockProbeSources: 53,
+  clockProbeBytes: 2_000,
   deliveryGbPerDay: (720 * 500_000) / 1e9,
   fosClassAPerDay: 2_000 + 720 * 2,
   fosClassBPerDay: 1_000 + 720,
@@ -386,6 +394,30 @@ const gb = (n: number) =>
   n < 10 ? n.toFixed(2) : Math.round(n).toLocaleString("en-US");
 
 /** Monthly cost: what the install spends at rest plus per-file and per-line work at this traffic. */
+/**
+ * The front clock health checks' interval in seconds, as reconcile sets it
+ * (`clock_interval_ms` in compute/cloud/src/admin/reconcile.rs): a quarter of the shortest log
+ * period the clock serves (request, and RUM when it has pageviews, whose ingest runs at least
+ * every 5 s), between 1 and 30 s.
+ */
+export function clockIntervalS(inputs: Pick<EstimateInputs, "logPeriodS" | "rumLogPeriodS" | "rumPageviewsPerDay">): number {
+  let period = Math.max(1, inputs.logPeriodS);
+  if (inputs.rumPageviewsPerDay > 0) period = Math.min(period, Math.max(5, inputs.rumLogPeriodS));
+  return Math.min(30, Math.max(1, period / 4));
+}
+
+/**
+ * Billed front requests a day from the two clock health checks: every probing POP sends both at
+ * the clock interval. Billed totals can't stand in for this, since they hold whatever interval the
+ * window ran at.
+ */
+export function clockProbesPerDay(
+  inputs: Pick<EstimateInputs, "logPeriodS" | "rumLogPeriodS" | "rumPageviewsPerDay">,
+  units: Pick<UnitCosts, "clockProbeSources">,
+): number {
+  return (2 * units.clockProbeSources * 86_400) / clockIntervalS(inputs);
+}
+
 export function estimateMonthly(
   inputs: EstimateInputs,
   units: UnitCosts,
@@ -411,10 +443,14 @@ export function estimateMonthly(
 
   const classA = month(units.fosClassAPerDay + units.fosClassAPerFile * F);
   const classB = month(units.fosClassBPerDay + units.fosClassBPerFile * F);
+  const probeIntervalS = clockIntervalS(inputs);
+  const probesPerDay = clockProbesPerDay(inputs, units);
   const frontRequests = month(
-    units.frontRequestsPerDay + units.frontRequestsPerFile * F,
+    units.frontRequestsPerDay + units.frontRequestsPerFile * F + probesPerDay,
   );
-  const deliveryGb = month(units.deliveryGbPerDay + rawGbPerDay);
+  const deliveryGb = month(
+    units.deliveryGbPerDay + rawGbPerDay + (probesPerDay * units.clockProbeBytes) / 1e9,
+  );
   const computeRequests = month(
     units.appRequestsPerDay + units.workerRequestsPerFile * F,
   );
@@ -545,7 +581,7 @@ export function estimateMonthly(
     {
       id: "delivery",
       label: "CDN delivery",
-      detail: `${gb(deliveryGb)} GB · ${count(frontRequests)} front reqs`,
+      detail: `${gb(deliveryGb)} GB · ${count(frontRequests)} front reqs, incl. ${count(probesPerDay)} clock probes/day every ${probeIntervalS} s`,
       usd:
         deliveryGb * rates.cdn_egress_rate_per_gb +
         (frontRequests / 10_000) * rates.cdn_request_rate_per_10k,
@@ -1001,17 +1037,6 @@ export function measureEstimate(m: EstimateMeasurements): EstimatePrefill {
       setUnit("fosClassBPerFile", fileB / F);
       setUnit("frontRequestsPerFile", fileFrontReqs / F);
     }
-  }
-  // Fastly bills every front-service request and byte, its own health probes included. The
-  // logged file reads above only set the per-file share; the billed rest is a fixed daily part.
-  if (b && b.cdnRequests !== null) {
-    split(b.cdnRequests, "frontRequestsPerDay", "frontRequestsPerFile");
-    const rawGb = (billedLines * inputs.gzBytesPerLine) / 1e9;
-    setUnit(
-      "deliveryGbPerDay",
-      Math.max(0, (b.cdnBandwidthBytes ?? 0) / 1e9 - rawGb) / W +
-        b.computeBandwidthBytes / 1e9 / W,
-    );
   }
   if (m.fixedStoredBytes !== null) {
     setUnit("fixedStoredGb", m.fixedStoredBytes / 1e9);
