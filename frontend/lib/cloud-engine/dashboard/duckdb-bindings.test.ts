@@ -525,8 +525,10 @@ describe("bounded complete Parquet bindings", () => {
       { kind: "buffer", bytes: parquetFixture(rows) }, t, t + 60_000, filters, aggregator,
       { edgeOnly: false, topK: null },
     );
-    // DESCRIBE, the minute buckets, then one statement per group of six cards.
-    expect(statements).toHaveLength(2 + Math.ceil(fields.length / 6));
+    // The backend's first raw read turns on the footer cache once; then DESCRIBE,
+    // the minute buckets, and one statement per group of six cards.
+    expect(statements[0]).toBe("SET parquet_metadata_cache = true");
+    expect(statements).toHaveLength(3 + Math.ceil(fields.length / 6));
 
     const kept = rows.filter((row) => row.status === 200);
     const result = aggregator.result();
@@ -560,6 +562,17 @@ describe("bounded complete Parquet bindings", () => {
   it("parses each registered file's footer once for all of a read's statements", async () => {
     const engine = new DuckDBAnalyticalEngine({ backendFactory: createNodeBackend });
     await engine.prewarm();
+    // The cache is a Parquet extension setting; starting the engine must not load
+    // the extension, which jsdom can't and a browser would fetch for nothing.
+    const parquetLoaded = async () => (await engine.executeSql<{ loaded: boolean }>(
+      "SELECT loaded FROM duckdb_extensions() WHERE extension_name = 'parquet'",
+    ))[0]?.loaded;
+    expect(await parquetLoaded()).toBe(false);
+    const t = 1700000000000;
+    await engine.queryParquetIntoAggregator(
+      { kind: "buffer", bytes: parquetFixture([{ timestamp: t, status: 200, cache: "HIT", resp_bytes: 1 }]) },
+      t, t + 60_000, [], new Aggregator(t, t + 60_000, ["status"]), { edgeOnly: false, topK: null },
+    );
     const [setting] = await engine.executeSql<{ on: boolean }>(
       "SELECT current_setting('parquet_metadata_cache') AS on",
     );
