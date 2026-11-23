@@ -1515,6 +1515,7 @@ fn bundle_stage<R: Runtime>(store: &Store<'_, R>) -> Option<StageRow> {
                     rows: report.rows + c.rows,
                     bytes_written: report.bytes_written + c.bytes_written,
                     deleted: report.deleted + c.deleted,
+                    discarded: report.discarded + c.discarded,
                     more_pending: report.more_pending || c.more_pending,
                     stopped: report.stopped.or(c.stopped),
                     backend_calls: report.backend_calls + c.backend_calls,
@@ -1531,6 +1532,7 @@ fn bundle_stage<R: Runtime>(store: &Store<'_, R>) -> Option<StageRow> {
                 "hours": report.hours,
                 "days": report.days,
                 "partials": report.partials,
+                "discarded": both.discarded,
                 "stopped": report.stopped,
                 "cmcd_first": cmcd_first,
                 "cmcd": cmcd.as_ref().map(|c| json!({

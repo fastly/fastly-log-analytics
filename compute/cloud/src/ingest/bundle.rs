@@ -11,8 +11,10 @@
 //! - resumable partials (never read by readers): `partial=c{k}-n{rows}-h{fp}.parquet` in the
 //!   hour's window folder (hour builds) or the day's `summary_bundle` folder (day builds). The
 //!   state is zstd-compressed and split so no object passes `CDN_READ_LIMIT`: the head holds the
-//!   first slice, `partial=c{k}-n{rows}-h{fp}-p{i}.parquet` the rest. A partial that cannot be
-//!   read is reported and skipped, and goes with the other stale partials at the next write.
+//!   first slice, `partial=c{k}-n{rows}-h{fp}-p{i}.parquet` the rest. A partial's `fp` also
+//!   covers the fold's state layout ([`partial_fp`]), so one from another layout is never
+//!   resumed; it goes with the other stale partials at the next write. One whose bytes do not
+//!   decode is deleted at once; one that cannot be read is reported and skipped.
 //!
 //! A day's hour and day bundles share one folder, so one LIST resolves a closed day and one
 //! retention dataset covers both.
@@ -191,6 +193,27 @@ fn part_key(head: &str, i: usize) -> String {
 /// A partial that can never be read as it is, so a build skips it rather than retrying it.
 fn unreadable(error: &str) -> bool {
     matches!(error, "cdn_body_too_large" | "get_body_too_large")
+}
+
+/// Bump when [`Acc::encode_partial`] changes outside the group layout [`Fold::layout`] spells out.
+const PARTIAL_VERSION: u32 = 1;
+
+/// The fingerprint a `partial=` name carries: its windows' and the fold's state layout, so a
+/// partial written by a build with another layout is never a candidate. Its decode reads
+/// fields by position and can misread such a partial, or fail on it every execution.
+fn partial_fp<'a>(layout: &str, names: impl IntoIterator<Item = &'a str>) -> u64 {
+    compute_common::crypto::fnv1a64(
+        layout.bytes().chain(*b"\n").chain(
+            names
+                .into_iter()
+                .flat_map(|name| name.bytes().chain(*b"\n")),
+        ),
+    )
+}
+
+/// [`partial_fp`] of a request summary partial.
+pub fn partial_fingerprint<'a>(names: impl IntoIterator<Item = &'a str>) -> u64 {
+    partial_fp(&Acc::layout(), names)
 }
 
 /// `{scope}processed/summary_bundle/{table}/`, holding hour and day bundles.
@@ -2492,6 +2515,8 @@ trait Fold: Sized {
     fn encode(&self) -> Result<Vec<u8>, String>;
     fn decode(raw: &[u8], unit: Unit) -> Result<Self, String>;
     fn finish(&self, start: i64, unit: Unit) -> Result<Vec<u8>, String>;
+    /// What a partial's bytes mean; it names the partial (see [`partial_fp`]).
+    fn layout() -> String;
 }
 
 impl Fold for Acc {
@@ -2512,6 +2537,17 @@ impl Fold for Acc {
     }
     fn finish(&self, start: i64, unit: Unit) -> Result<Vec<u8>, String> {
         self.write(start, Some(unit), unit.label())
+    }
+    fn layout() -> String {
+        let mut layout = format!("request:v{PARTIAL_VERSION}");
+        for group in &GROUPS {
+            layout.push_str(&format!("|{}:{}", group.name, u8::from(group.timed)));
+            for (c, _) in group.cols {
+                layout.push(',');
+                layout.push_str(summary::COLS[*c as usize].0);
+            }
+        }
+        layout
     }
 }
 
@@ -2543,6 +2579,10 @@ impl Fold for cmcd_summary::BundleAcc {
     fn finish(&self, _: i64, _: Unit) -> Result<Vec<u8>, String> {
         self.write()
     }
+    /// The partial is bundle Parquet that folds by column name.
+    fn layout() -> String {
+        "cmcd:v1".into()
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -2558,6 +2598,8 @@ pub struct BundleReport {
     pub bytes_written: u64,
     /// Replaced bundles and finished partials deleted.
     pub deleted: u64,
+    /// Partials that could not be decoded, deleted so their build starts over.
+    pub discarded: u32,
     pub more_pending: bool,
     /// `wall_time` or `vcpu` when a time limit ended the run early.
     pub stopped: Option<&'static str>,
@@ -2810,6 +2852,7 @@ impl<R: Runtime> Ctx<'_, '_, R> {
         let mut sources = job.sources;
         sources.sort_unstable_by(|a, b| file_name(a).cmp(file_name(b)));
         let names: Vec<&str> = sources.iter().map(|k| file_name(k)).collect();
+        let layout = A::layout();
         // Open-hour partials cover only the name-order prefix of settled windows, so the windows
         // late runs still write never land inside one and force a rebuild from scratch.
         let foldable = open.as_ref().map_or(sources.len(), |o| {
@@ -2820,7 +2863,7 @@ impl<R: Runtime> Ctx<'_, '_, R> {
                 })
                 .count()
         });
-        let mut candidates: Vec<(usize, &String)> = job
+        let mut candidates: Vec<(usize, String)> = job
             .partials
             .iter()
             .filter_map(|key| {
@@ -2828,8 +2871,8 @@ impl<R: Runtime> Ctx<'_, '_, R> {
                 (name.kind == NameKind::Partial
                     && name.count > 0
                     && name.count <= names.len()
-                    && fingerprint(names[..name.count].iter().copied()) == name.fp)
-                    .then_some((name.count, key))
+                    && partial_fp(&layout, names[..name.count].iter().copied()) == name.fp)
+                    .then(|| (name.count, key.clone()))
             })
             .collect();
         candidates.sort_unstable_by(|a, b| b.cmp(a));
@@ -2862,7 +2905,9 @@ impl<R: Runtime> Ctx<'_, '_, R> {
         let mut acc = A::fresh(job.unit);
         let mut done = 0;
         let mut extra = 0;
+        let mut partials = job.partials;
         for (count, key) in candidates {
+            let key = key.as_str();
             if !self.room(3) {
                 return Ok(Step::Pending);
             }
@@ -2874,6 +2919,24 @@ impl<R: Runtime> Ctx<'_, '_, R> {
                     self.report.sources += 1;
                     break;
                 }
+                // Bytes that do not decode never will: delete them now, or every execution
+                // would reread them until this build writes, and fold on without them.
+                Some(Err(error)) if error == "partial_unreadable" => {
+                    let parts = format!("{}-p", key.trim_end_matches(".parquet"));
+                    let (gone, kept): (Vec<String>, Vec<String>) = partials
+                        .into_iter()
+                        .partition(|p| p == key || p.starts_with(&parts));
+                    partials = kept;
+                    self.report.discarded += 1;
+                    if self.room(1) {
+                        match self.store.delete_objects(&gone) {
+                            Ok(result) => self.report.deleted += result.deleted.len() as u64,
+                            Err(error) => self.report.errors.push(error),
+                        }
+                    } else {
+                        partials.extend(gone);
+                    }
+                }
                 // A partial that cannot be read is skipped for the next one, or a fresh build,
                 // and deleted with the other stale partials once this build writes.
                 Some(Err(error)) => self
@@ -2884,7 +2947,7 @@ impl<R: Runtime> Ctx<'_, '_, R> {
             }
         }
         let resumed = done;
-        let tail = if job.partials.is_empty() { 3 } else { 4 }
+        let tail = if partials.is_empty() { 3 } else { 4 }
             + extra as u32
             + u32::from(open.is_some() && !need_partial);
         // Only a partial stops at the settled prefix.
@@ -2973,7 +3036,11 @@ impl<R: Runtime> Ctx<'_, '_, R> {
                 if !self.room(objects.len() as u32) {
                     return Ok(Step::Pending);
                 }
-                let key = format!("{}partial={}", job.folder, covering(&names[..done], rows));
+                let key = format!(
+                    "{}partial=c{done}-n{rows}-h{:016x}.parquet",
+                    job.folder,
+                    partial_fp(&layout, names[..done].iter().copied())
+                );
                 wrote_partial = true;
                 (Some(key), objects, false)
             }
@@ -3011,8 +3078,7 @@ impl<R: Runtime> Ctx<'_, '_, R> {
                 self.store.put(&key, body)?;
             }
             let parts = format!("{}-p", key.trim_end_matches(".parquet"));
-            let stale: Vec<String> = job
-                .partials
+            let stale: Vec<String> = partials
                 .into_iter()
                 .filter(|p| *p != key && !p.starts_with(&parts))
                 .collect();
