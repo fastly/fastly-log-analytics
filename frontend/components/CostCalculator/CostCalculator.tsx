@@ -410,34 +410,33 @@ export function Results({ s, r }: ResultsProps) {
   const storageTierDetail = r.storageTiers
     .map((tier) => `${tier.label}: ${Math.max(0.001, tier.gbMonths).toFixed(3)} GB-mo${tier.flagged ? '*' : ''}`)
     .join(' · ')
+  const objectStorageTotal = r.costStorage + r.costA + r.costB
   return (
     <div className='bg-muted/30 border rounded-lg p-5'>
       <h3 className='text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-4'>Monthly Estimate Breakdown</h3>
       <div className='space-y-0'>
         <ResultRow
-          label='Class A Operations (writes, lists)'
-          detail={`${fmtN(Math.round(r.classAPerMonth))} ops @ $${s.rateA}/1k`}
-          cost={formatUSD(r.costA)}
+          label='Object Storage'
+          detail={`${storageTierDetail} · A ${fmtN(Math.round(r.classAPerMonth))} @ $${s.rateA}/1k · B ${fmtN(Math.round(r.classBPerMonth))} @ $${s.rateB}/1k`}
+          cost={formatUSD(objectStorageTotal)}
+          parts={[
+            { label: 'Storage', cost: formatUSD(r.costStorage) },
+            { label: 'Class A', cost: formatUSD(r.costA) },
+            { label: 'Class B', cost: formatUSD(r.costB) },
+          ]}
         />
         <ResultRow
-          label='Class B Operations (reads)'
-          detail={`${fmtN(Math.round(r.classBPerMonth))} ops @ $${s.rateB}/1k`}
-          cost={formatUSD(r.costB)}
-        />
-        <ResultRow
-          label='Storage (GB-months billed)'
-          detail={storageTierDetail}
-          cost={formatUSD(r.costStorage)}
-        />
-        <ResultRow
-          label='CDN Egress'
-          detail={`${r.cdnEgressGB.toFixed(3)} GB`}
+          label='CDN delivery'
+          detail={`${r.cdnEgressGB.toFixed(3)} GB egress @ $${s.rateEgress.toFixed(2)}/GB`}
           cost={formatUSD(r.costEgress)}
+          parts={[
+            { label: 'Egress', cost: formatUSD(r.costEgress) },
+          ]}
         />
         {s.rumBeaconsDay > 0 && (
           <ResultRow
             label='Real User Monitoring (RUM) Cost Portion'
-            detail={`${fmtN(Math.round(r.rumBeaconsMonth))} beacons · ${Math.max(0.001, r.rumParquetGBMonths).toFixed(3)} GB RUM storage (included in Class A & Storage above)`}
+            detail={`${fmtN(Math.round(r.rumBeaconsMonth))} beacons · ${Math.max(0.001, r.rumParquetGBMonths).toFixed(3)} GB RUM storage (included in Object Storage above)`}
             cost={formatUSD(r.costRum)}
           />
         )}

@@ -18,11 +18,14 @@ describe('Cloud cost calculator', () => {
     expect(screen.getByText('Monthly Estimate Breakdown')).toBeInTheDocument()
     expect(screen.getByText('Volume Estimates')).toBeInTheDocument()
 
-    expect(screen.getByText('Class A Operations (writes, lists)')).toBeInTheDocument()
-    expect(screen.getByText('Class B Operations (reads)')).toBeInTheDocument()
-    expect(screen.getByText('Storage (GB-months billed)')).toBeInTheDocument()
-    expect(screen.getByText('CDN Egress')).toBeInTheDocument()
-    expect(screen.getByText('CDN Requests')).toBeInTheDocument()
+    expect(screen.getByText('Object Storage')).toBeInTheDocument()
+    const storage = screen.getByText('Object Storage').closest('[data-estimate-line]') as HTMLElement
+    expect(storage).toHaveTextContent(/Storage\s*\$/)
+    expect(storage).toHaveTextContent(/Class A\s*\$/)
+    expect(storage).toHaveTextContent(/Class B\s*\$/)
+    const delivery = screen.getByText('CDN delivery').closest('[data-estimate-line]') as HTMLElement
+    expect(delivery).toHaveTextContent(/Egress\s*\$/)
+    expect(delivery).toHaveTextContent(/Requests\s*\$/)
     expect(screen.getByText('Compute (app + worker)')).toBeInTheDocument()
     expect(screen.getByText('KV Store')).toBeInTheDocument()
     expect(screen.getByText('Secret Store')).toBeInTheDocument()
@@ -58,18 +61,18 @@ describe('Cloud cost calculator', () => {
     }} />)
     expect(screen.getByRole('spinbutton', { name: 'Total requests per day' })).toHaveValue(250_000)
     expect(screen.getByText(/Pre-filled with this service's live request volume/)).toBeInTheDocument()
-    const egress = screen.getByText('CDN Egress').closest('[data-estimate-line]') as HTMLElement
-    expect(egress).not.toHaveTextContent(/15,0\d\d/)
+    const delivery = screen.getByText('CDN delivery').closest('[data-estimate-line]') as HTMLElement
+    expect(delivery).not.toHaveTextContent(/15,0\d\d GB/)
     expect(screen.getByText('$7.00')).toBeInTheDocument()
     expect(screen.queryByText(/ClickHouse/)).not.toBeInTheDocument()
   })
 
   it('updates egress cost when switching Delivery Billing Zone', () => {
     render(<CloudCostCalculator />)
-    const egress = screen.getByText('CDN Egress').closest('[data-estimate-line]') as HTMLElement
-    const before = egress.textContent
+    const delivery = screen.getByText('CDN delivery').closest('[data-estimate-line]') as HTMLElement
+    const before = delivery.textContent
     fireEvent.click(screen.getByRole('button', { name: 'Global' }))
-    expect(egress.textContent).not.toBe(before)
+    expect(delivery.textContent).not.toBe(before)
   })
 
   it('ignores measured line size and compression overrides in favor of canonical defaults', () => {
@@ -83,7 +86,7 @@ describe('Cloud cost calculator', () => {
 
   it('scales stored bytes with the uncompressed line size', () => {
     render(<CloudCostCalculator />)
-    const storage = () => screen.getByText('Storage (GB-months billed)').closest('[data-estimate-line]')!.textContent
+    const storage = () => screen.getByText('Object Storage').closest('[data-estimate-line]')!.querySelector('li')!.textContent
     const field = screen.getByRole('spinbutton', { name: 'Average bytes per log line' }) as HTMLInputElement
     const before = storage()
     fireEvent.change(field, { target: { value: String(Number(field.value) * 4) } })

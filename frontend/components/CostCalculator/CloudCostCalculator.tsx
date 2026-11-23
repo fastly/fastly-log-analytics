@@ -218,12 +218,6 @@ export function CloudCostCalculator({ prefillData, prefillNote, rates: configure
   const objectsPerDay = result.filesPerDay + result.summaries.windowFilesPerDay + 25
   const objectsBilled = objectsPerDay * inputs.minBilledDays
   const rateBPer1k = rates.class_b_rate_per_10k / 10
-  const classACost = (result.totals.fosA / 1000) * rates.class_a_rate_per_1k
-  const classBCost = (result.totals.fosB / 10_000) * rates.class_b_rate_per_10k
-  const storageCost = result.totals.storageGb * rates.storage_rate_per_gb_month
-  const egressCost = result.totals.egressGb * rates.cdn_egress_rate_per_gb
-  const cdnRequestsCost = (result.totals.frontRequests / 10_000) * rates.cdn_request_rate_per_10k
-  const extraLines = result.lines.filter((line) => line.id !== 'storage' && line.id !== 'delivery')
 
   const bannerText = prefillNote ?? (prefillData?.measuredInputs?.requestsPerDay
     ? `Pre-filled with this service's live request volume (${formatCount(Math.round(base.requestsPerDay))} reqs/day) and logging configuration; all storage, egress, and platform projections use the canonical Cloud model.`
@@ -380,32 +374,7 @@ export function CloudCostCalculator({ prefillData, prefillNote, rates: configure
       <div className="bg-muted/30 border rounded-lg p-5">
         <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-4">Monthly Estimate Breakdown</h3>
         <div className="space-y-0">
-          <ResultRow
-            label="Class A Operations (writes, lists)"
-            detail={`${fmtN(Math.round(result.totals.fosA))} ops @ $${rates.class_a_rate_per_1k}/1k`}
-            cost={formatUSD(classACost)}
-          />
-          <ResultRow
-            label="Class B Operations (reads)"
-            detail={`${fmtN(Math.round(result.totals.fosB))} ops @ $${rateBPer1k}/1k`}
-            cost={formatUSD(classBCost)}
-          />
-          <ResultRow
-            label="Storage (GB-months billed)"
-            detail={`${Math.max(0.001, result.totals.storageGb).toFixed(3)} GB-mo (raw + Parquet + summaries + fixed)`}
-            cost={formatUSD(storageCost)}
-          />
-          <ResultRow
-            label="CDN Egress"
-            detail={`${result.totals.egressGb.toFixed(3)} GB`}
-            cost={formatUSD(egressCost)}
-          />
-          <ResultRow
-            label="CDN Requests"
-            detail={`${fmtN(Math.round(result.totals.frontRequests))} front reqs @ $${rates.cdn_request_rate_per_10k}/10k`}
-            cost={formatUSD(cdnRequestsCost)}
-          />
-          {extraLines.map((line) => (
+          {result.lines.map((line) => (
             <ResultRow
               key={line.id}
               label={line.label}
