@@ -1036,7 +1036,11 @@ fn push_day_summary_files(
                             .is_some_and(|(a, b, _)| a >= from && b <= to)
                     }));
             let view = if inside {
-                bundle::hour_view_marked(marker, *hour, ws, bundles)
+                let view = bundle::hour_view_marked(marker, *hour, ws, bundles);
+                match view.bundle {
+                    Some(_) => view,
+                    None => bundle::open_view_marked(marker, *hour, ws, bundles).unwrap_or(view),
+                }
             } else {
                 bundle::HourView {
                     bundle: None,
@@ -1046,13 +1050,12 @@ fn push_day_summary_files(
             if let Some(key) = &view.bundle {
                 let object = bundles.iter().find(|o| &o.key == key).expect("listed");
                 let name = bundle::parse_name(key).expect("an hour bundle");
+                // An open bundle ends with the last window it covers.
+                let end = name.end_ms.map_or(start + 3600, |ms| {
+                    (ms + 999).div_euclid(1000).min(start + 3600)
+                });
                 files.push(summary_entry(
-                    "hour",
-                    object,
-                    start,
-                    start + 3600,
-                    name.rows,
-                    name.count,
+                    "hour", object, start, end, name.rows, name.count,
                 ));
             }
             for object in ws.iter().filter(|o| view.windows.contains(&o.key)) {
@@ -1114,7 +1117,8 @@ const CMCD_SUMMARIES: SummaryKind = SummaryKind {
 /// `[from, to)` exactly. Per UTC day it lists the day's `summary_bundle` folder and its window
 /// summaries, then returns the day bundle for a whole day inside the range when it covers
 /// exactly that day's windows, else per hour inside the range its valid hour bundle plus the
-/// windows written after it, and every other overlapping window summary. Pages end at hour
+/// windows written after it (or, without one, its valid open bundle plus the windows after its
+/// prefix), and every other overlapping window summary. Pages end at hour
 /// boundaries; `token` in the cursor is the `start-after` key of the next hour to list.
 fn summary_files<R: Runtime>(
     runtime: &R,

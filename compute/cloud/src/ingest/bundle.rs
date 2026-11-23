@@ -389,6 +389,44 @@ pub fn hour_view_marked(
     }
 }
 
+/// Resolves an hour without a valid hour bundle from its `open_bundle=` snapshots: an open
+/// bundle covers the name-order prefix of the hour's windows it was built from, so it is valid
+/// when the first `c` listed window names match its fingerprint; the windows after that prefix
+/// are read on top. The valid snapshot covering the most windows wins.
+pub fn open_view_marked(
+    marker: &str,
+    hour: u32,
+    windows: &[Object],
+    bundles: &[Object],
+) -> Option<HourView> {
+    let mut names: Vec<&str> = windows
+        .iter()
+        .map(|o| file_name(&o.key))
+        .filter(|n| n.starts_with(marker))
+        .collect();
+    names.sort_unstable();
+    let mut candidates: Vec<(usize, &Object)> = bundles
+        .iter()
+        .filter_map(|o| {
+            parse_name(&o.key)
+                .filter(|n| n.kind == NameKind::Open && n.unit == hour && n.count <= names.len())
+                .filter(|n| fingerprint(names[..n.count].iter().copied()) == n.fp)
+                .map(|n| (n.count, o))
+        })
+        .collect();
+    candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| newest_first(a.1, b.1)));
+    let (count, bundle) = candidates.into_iter().next()?;
+    let rest = &names[count..];
+    Some(HourView {
+        bundle: Some(bundle.key.clone()),
+        windows: windows
+            .iter()
+            .filter(|o| rest.binary_search(&file_name(&o.key)).is_ok())
+            .map(|o| o.key.clone())
+            .collect(),
+    })
+}
+
 /// The current hour bundle per hour of a `summary_bundle` day folder listing: the newest by
 /// `LastModified` (a replaced bundle lingers for [`RETIRE_GRACE_S`]).
 pub fn current_hours(listing: &[Object]) -> BTreeMap<u32, Object> {
