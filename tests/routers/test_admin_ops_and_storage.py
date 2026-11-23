@@ -1282,6 +1282,143 @@ def test_usage_prefill_operations_and_rum_breakdown(client, tmp_path, monkeypatc
         app.dependency_overrides.pop(get_source, None)
 
 
+def test_usage_operations_prefers_local_service_log_over_platform(client):
+    svc = "svc-local-ops"
+    con = _meta.get_con(svc)
+    con.execute("DELETE FROM usage_log WHERE service_id = ?", (svc,))
+    con.execute("DELETE FROM usage_log_hourly_summary WHERE service_id = ?", (svc,))
+    con.execute(
+        "INSERT INTO usage_log (timestamp, service_id, operation_class, operation_type, count, bytes) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("2026-11-22T12:15:00.000Z", svc, "A", "PUT", 7, 4096),
+    )
+    con.execute(
+        "INSERT INTO usage_log (timestamp, service_id, operation_class, operation_type, count, bytes) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("2026-11-22T12:45:00.000Z", svc, "B", "GET", 3, 1024),
+    )
+    con.execute(
+        "INSERT INTO usage_log (timestamp, service_id, operation_class, operation_type, count, bytes) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("2026-11-22T12:50:00.000Z", svc, "CDN", "GET", 99, 8192),
+    )
+    con.commit()
+    app.dependency_overrides[get_source] = lambda: {
+        "name": svc,
+        "service_id": svc,
+        "logging_service_id": svc,
+    }
+    try:
+        with patch("backend.routers.usage._fastly_api") as platform:
+            response = client.get(
+                "/api/usage/operations",
+                params={"start": "2026-11-22T12:00:00Z", "end": "2026-11-22T12:59:59Z", "by": "hour"},
+            )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["source"] == "local"
+        assert body["complete"] is True
+        assert body["provenance"] == ["high-scale:usage_log"]
+        assert body["total_class_a"] == 7
+        assert body["total_class_b"] == 3
+        assert body["data"] == [{"date": "2026-11-22T12:00", "class_a": 7, "class_b": 3}]
+        platform.assert_not_called()
+    finally:
+        app.dependency_overrides.pop(get_source, None)
+        con.execute("DELETE FROM usage_log WHERE service_id = ?", (svc,))
+        con.execute("DELETE FROM usage_log_hourly_summary WHERE service_id = ?", (svc,))
+        con.commit()
+
+
+def test_usage_operations_merges_hourly_rollup_and_boundary_rows(client):
+    svc = "svc-local-ops-rollup"
+    con = _meta.get_con(svc)
+    con.execute("DELETE FROM usage_log WHERE service_id = ?", (svc,))
+    con.execute("DELETE FROM usage_log_hourly_summary WHERE service_id = ?", (svc,))
+    # Start boundary hour (2026-11-22T10)
+    con.execute(
+        "INSERT INTO usage_log (timestamp, service_id, operation_class, operation_type, count, bytes) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("2026-11-22T10:30:00.000Z", svc, "A", "PUT", 4, 100),
+    )
+    # Interior hour (2026-11-22T11) in hourly summary rollup
+    con.execute(
+        "INSERT INTO usage_log_hourly_summary (service_id, hour, operation_class, operation_type, count, bytes) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (svc, "2026-11-22T11", "A", "PUT", 10, 200),
+    )
+    con.execute(
+        "INSERT INTO usage_log_hourly_summary (service_id, hour, operation_class, operation_type, count, bytes) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (svc, "2026-11-22T11", "B", "GET", 5, 300),
+    )
+    # End boundary hour (2026-11-22T12)
+    con.execute(
+        "INSERT INTO usage_log (timestamp, service_id, operation_class, operation_type, count, bytes) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("2026-11-22T12:15:00.000Z", svc, "B", "GET", 6, 400),
+    )
+    con.commit()
+    app.dependency_overrides[get_source] = lambda: {"name": svc, "service_id": svc, "logging_service_id": svc}
+    try:
+        with patch("backend.routers.usage._fastly_api") as platform:
+            r_hour = client.get(
+                "/api/usage/operations",
+                params={"start": "2026-11-22T10:15:00Z", "end": "2026-11-22T12:30:00Z", "by": "hour"},
+            )
+            r_day = client.get(
+                "/api/usage/operations",
+                params={"start": "2026-11-22T10:15:00Z", "end": "2026-11-22T12:30:00Z", "by": "day"},
+            )
+        assert r_hour.status_code == 200
+        h_body = r_hour.json()
+        assert h_body["total_class_a"] == 14
+        assert h_body["total_class_b"] == 11
+        assert h_body["data"] == [
+            {"date": "2026-11-22T10:00", "class_a": 4, "class_b": 0},
+            {"date": "2026-11-22T11:00", "class_a": 10, "class_b": 5},
+            {"date": "2026-11-22T12:00", "class_a": 0, "class_b": 6},
+        ]
+        assert r_day.status_code == 200
+        d_body = r_day.json()
+        assert d_body["total_class_a"] == 14
+        assert d_body["total_class_b"] == 11
+        assert d_body["data"] == [{"date": "2026-11-22", "class_a": 14, "class_b": 11}]
+        platform.assert_not_called()
+    finally:
+        app.dependency_overrides.pop(get_source, None)
+        con.execute("DELETE FROM usage_log WHERE service_id = ?", (svc,))
+        con.execute("DELETE FROM usage_log_hourly_summary WHERE service_id = ?", (svc,))
+        con.commit()
+
+
+@pytest.mark.no_postgres
+def test_usage_operations_marks_unavailable_local_ledger_incomplete(client):
+    svc = "svc-local-ops-err"
+    app.dependency_overrides[get_source] = lambda: {"name": svc, "service_id": svc, "logging_service_id": svc}
+    try:
+        with (
+            patch(
+                "backend.core.metadata.fos_usage.get_usage_operation_buckets",
+                side_effect=RuntimeError("usage db unavailable"),
+            ),
+            patch("backend.routers.usage._fastly_api") as platform,
+        ):
+            resp = client.get(
+                "/api/usage/operations",
+                params={"start": "2026-11-22T12:00:00Z", "end": "2026-11-22T12:59:59Z", "by": "hour"},
+            )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["source"] == "local"
+        assert body["complete"] is False
+        assert body["provenance"] == []
+        assert body["data"] == []
+        platform.assert_not_called()
+    finally:
+        app.dependency_overrides.pop(get_source, None)
+
+
 def test_usage_rum_breakdown_counts_high_scale_beacons_in_the_exact_window(client):
     """High-scale ingest never writes ``ingested_files``; the card must read the ClickHouse RUM facts."""
     from backend.high_scale.archive import ServingWatermark

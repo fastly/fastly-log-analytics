@@ -283,6 +283,9 @@ class UsageOperationsResponse(BaseResponse):
     granularity: str
     note: str
     fos_fields_found: list[str]
+    source: Literal["local", "fastly"] = "local"
+    complete: bool = True
+    provenance: list[str] = Field(default_factory=list)
 
 
 class UsageBandwidthPoint(BaseModel):
