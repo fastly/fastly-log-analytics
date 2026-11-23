@@ -24,6 +24,18 @@ Compute selected-period storage GB-hours from service-local lifecycle data:
 Fastly Platform storage remains available as a separately labeled account-wide
 informational card.
 
+The same selected-period authority applies to operations: Estimated Incurred
+Cost uses the service-local FOS operation ledger in both editions. The monthly
+Cost Estimator may continue to model future/reference operation volume, so it
+can differ from incurred operations for the selected day. A missing local
+ledger is unavailable/partial, not an exact zero and not silently replaced by
+an account-wide Platform count.
+
+The complete Usage page should finish within 20 seconds from navigation on the
+normal supported data set. The page must read a locally persisted inventory
+snapshot and apply newer lifecycle deltas; it must not perform an on-demand
+full bucket LIST before rendering storage cost.
+
 ## Shared contract
 
 Add one internal `StorageBillingInterval` model. Every interval carries:
@@ -74,9 +86,9 @@ Platform metrics.
 Build the same intervals from Cloud-owned local state:
 
 - `storage_reconcile` supplies the complete inventory of live owned objects.
-- The reconcile inventory is extended to retain per-object size and storage
-  timestamp needed for byte-time calculation, not just aggregate dataset
-  totals.
+- The background reconcile persists a versioned, per-object inventory snapshot
+  with size and storage timestamp needed for byte-time calculation, not just
+  aggregate dataset totals. The browser reads the latest complete snapshot.
 - `ops:ingest_files` supplies exact raw request object creation/deletion state
   and size.
 - `fos_usage` and the local cloud-copy deletion ledger supply processed and
@@ -108,6 +120,9 @@ The Usage page:
   incomplete;
 - keeps the Platform storage card as `Account-wide · Fastly Platform` for
   visibility, never as an override.
+- uses service-local A/B operation totals and buckets for incurred operations;
+  an unavailable local ledger removes the operation component from the exact
+  total instead of showing `$0.00`.
 
 ## Completeness and errors
 
@@ -119,6 +134,9 @@ The Usage page:
   floating-point account-wide substitute is used.
 - A local inventory can be stale only within a documented reconciliation
   window; the response reports its `observed_at` timestamp.
+- The cold Usage page completes within 20 seconds after the local inventory
+  snapshot is current. A stale/missing snapshot is explicit and may trigger an
+  advisory, never an on-demand full-bucket preflight.
 
 ## Testing
 
