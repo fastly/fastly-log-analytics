@@ -1642,9 +1642,11 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     };
     const filters = { host_1: { mode: "include", values: ["example.com"] } };
     const maxBytes = 96 * 1024 * 1024;
+    // A section reads only its own columns: the summary needs no URL, POP, origin IP or leg.
+    const summaryColumns = ORIGIN_SCAN_COLUMNS.aggregates.filter((c) => !["edge", "url", "pop", "oip"].includes(c));
     expect(await options("/api/origin/aggregates", { filters, sections: ["summary"] }))
-      .toEqual({ columns: [...ORIGIN_SCAN_COLUMNS.aggregates, "host"], maxBytes });
-    expect(await options("/api/origin/slow-urls")).toEqual({ columns: [...ORIGIN_SCAN_COLUMNS.aggregates], maxBytes });
+      .toEqual({ columns: [...summaryColumns, "host"], maxBytes });
+    expect(await options("/api/origin/slow-urls")).toEqual({ columns: ["timestamp", "ts_ms", "ottfb", "ttfb", "url"], maxBytes });
     expect(await options("/api/origin/shielding-analysis", {}))
       .toEqual({ columns: [...ORIGIN_SCAN_COLUMNS["shielding-analysis"]], maxBytes });
     expect(await options("/api/origin/drilldown", { dimension: "pop" }))

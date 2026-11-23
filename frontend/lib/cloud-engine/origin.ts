@@ -905,12 +905,38 @@ function filterFields(filters: unknown): string[] | null {
   return Object.keys(filters).map((key) => key.replace(/_\d+$/, ""));
 }
 
+/** The columns an aggregates read of `sections` needs beyond the time columns. */
+function originSectionColumns(sections: readonly string[], body: Record<string, unknown>, ttlb: boolean): string[] {
+  const latency = ["ottfb", "ttfb"];
+  const columns: Record<string, string[]> = {
+    summary: [...latency, "cache", "ottlb", "elapsed", "ost", "obytes"],
+    timeseries: [...ttlb ? ["ottlb"] : latency, ...body.split_by_leg ? ["edge"] : []],
+    slow_urls: [...latency, "url"],
+    status_codes: ["ost"],
+    path_breakdown: [...latency, "edge"],
+    pop_latency: [...latency, "pop"],
+    ip_health: [...latency, "oip", "ost"],
+  };
+  return sections.flatMap((section) => columns[section] ?? ORIGIN_SCAN_COLUMNS.aggregates);
+}
+
+const ORIGIN_ROUTE_SECTIONS: Record<string, string> = {
+  summary: "summary", timeseries: "timeseries", "slow-urls": "slow_urls", "status-codes": "status_codes",
+  "path-breakdown": "path_breakdown", "pop-latency": "pop_latency", "ip-health": "ip_health",
+};
+
 /** The columns a projected /api/origin load needs, or null when the route or filters can't name theirs. */
 export function originScanColumns(pathname: string, body: Record<string, unknown>): string[] | null {
   const route = pathname.replace(/^\/api\/origin\//, "");
-  const base = ORIGIN_AGGREGATE_ROUTES.has(route)
-    ? ORIGIN_SCAN_COLUMNS.aggregates
-    : ORIGIN_SCAN_COLUMNS[route as keyof typeof ORIGIN_SCAN_COLUMNS];
+  const sections = route === "aggregates"
+    ? Array.isArray(body.sections) && body.sections.length > 0 ? body.sections.map(String) : null
+    : ORIGIN_ROUTE_SECTIONS[route] ? [ORIGIN_ROUTE_SECTIONS[route]] : null;
+  const base = sections
+    ? ["timestamp", "ts_ms", ...originSectionColumns(sections, body,
+      (route === "timeseries" ? body.metric ?? body.timeseries_metric : body.timeseries_metric) === "ttlb")]
+    : ORIGIN_AGGREGATE_ROUTES.has(route)
+      ? ORIGIN_SCAN_COLUMNS.aggregates
+      : ORIGIN_SCAN_COLUMNS[route as keyof typeof ORIGIN_SCAN_COLUMNS];
   const filters = filterFields(body.filters);
   const custom = filterFields(body.custom_filters);
   if (!base || !filters || !custom) return null;
