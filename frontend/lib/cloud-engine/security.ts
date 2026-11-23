@@ -10,8 +10,7 @@
  * - GET `/api/security/proxies/export` (`format=fastly-acl` with `"ip,comment"` and `format=plain`)
  */
 
-import { sqlEscape } from "@/lib/sqlBuilder";
-import { getDuckDBEngine, type DuckDBReadContext, type DuckDBColumnType } from "./dashboard/duckdb";
+import { duckSqlString, getDuckDBEngine, type DuckDBReadContext, type DuckDBColumnType } from "./dashboard/duckdb";
 import {
   BOT_UA_CLASSIFY_LIMIT,
   classifyUserAgentCounts,
@@ -445,7 +444,7 @@ export function buildSecurityWellKnownBotPairsSql(
 ): { sql: string; params: unknown[] } {
   const { whereSql, params } = buildBaseWhere(req, availableColumns);
   const ipCol = securityIpExpr(availableColumns);
-  const inList = botUserAgents.map((ua) => `'${sqlEscape(ua)}'`).join(", ");
+  const inList = botUserAgents.map((ua) => duckSqlString(ua)).join(", ");
   const sql = `
     SELECT CAST(ua AS VARCHAR) AS ua, CAST(${ipCol} AS VARCHAR) AS ip, COUNT(*) AS cnt
     FROM logs

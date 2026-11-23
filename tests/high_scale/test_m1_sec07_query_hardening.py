@@ -602,3 +602,264 @@ def test_sec_t5_iter24_05_console_access_cmcd_alias_masking_and_aliased_predicat
     assert "a.toFloat64OrZero(" not in rewritten
     assert "lower(a.custom_fields['edge']) IN ('true', '1')" in rewritten
     assert "toFloat64OrZero(a.custom_fields['status']) >= 200" in rewritten
+
+
+@pytest.mark.security_regression
+def test_bug_hs_console_cf_pii_01_excludes_materialized_cf_columns_and_redacts_defense_in_depth() -> None:
+    """BUG-HS-CONSOLE-CF-PII-01: Exclude MATERIALIZED/ALIAS _cf_* columns in provision_console_access & defend all layers."""
+    import re
+    from pathlib import Path
+
+    from backend.config import ClickHouseConfig
+    from backend.core.share_db import apply_pii_policy, is_saved_view_pii_key
+    from backend.high_scale.postgres_control import console_access
+
+    assert len(console_access.MASKED_KEYS) == 18
+
+    # Parse real request_schema.sql DESCRIBE TABLE shape (15 physical + 74 MATERIALIZED _cf_* columns):
+    schema_sql = (Path(__file__).resolve().parents[2] / "backend/high_scale/sql/request_schema.sql").read_text(
+        encoding="utf-8"
+    )
+    create_match = re.search(r"CREATE TABLE IF NOT EXISTS request_facts\s*\((.*?)\)\s*ENGINE", schema_sql, re.S)
+    assert create_match is not None
+    describe_rows: list[dict[str, str]] = []
+    depth = 0
+    buf = ""
+    for ch in create_match.group(1):
+        depth += (ch == "(") - (ch == ")")
+        if ch == "," and depth == 0:
+            col_parts = buf.strip().split(None, 1)
+            if len(col_parts) == 2:
+                describe_rows.append({"name": col_parts[0].strip("`"), "type": col_parts[1], "default_type": ""})
+            buf = ""
+        else:
+            buf += ch
+    if buf.strip():
+        col_parts = buf.strip().split(None, 1)
+        if len(col_parts) == 2:
+            describe_rows.append({"name": col_parts[0].strip("`"), "type": col_parts[1], "default_type": ""})
+    for m_mat in re.finditer(
+        r"ADD COLUMN IF NOT EXISTS `(_cf_[a-zA-Z0-9_]+)`\s+([^\s]+(?:\([^)]*\))?)\s+MATERIALIZED",
+        schema_sql,
+    ):
+        describe_rows.append({"name": m_mat.group(1), "type": m_mat.group(2), "default_type": "MATERIALIZED"})
+    describe_rows.append({"name": "_alias_secret", "type": "String", "default_type": "ALIAS"})
+    assert sum(1 for r in describe_rows if r["name"].startswith("_cf_")) == 74
+
+    class _SchemaAdminCH:
+        def __init__(self) -> None:
+            self.statements: list[str] = []
+
+        def execute(self, sql: str, *_a: Any, **_kw: Any) -> list[dict[str, str]]:
+            self.statements.append(sql)
+            if sql.startswith("DESCRIBE TABLE"):
+                if "request_facts" in sql:
+                    return list(describe_rows)
+                return [
+                    {"name": "service_id", "type": "LowCardinality(String)", "default_type": ""},
+                    {"name": "client_id", "type": "String", "default_type": ""},
+                ]
+            if "FROM system.tables" in sql:
+                all_views = [
+                    *console_access.console_tables("svc_a", True).values(),
+                    *console_access.console_tables("svc_a", False).values(),
+                ]
+                return [{"name": v} for v in all_views]
+            return []
+
+    secret = bytes(range(32, 80))
+    admin = _SchemaAdminCH()
+    console_access.provision_console_access(admin, "default", "svc_a", secret)
+    masked_req_view = console_access.console_tables("svc_a", masked=True)["request_facts"]
+    create_masked_stmt = next(s for s in admin.statements if f"CREATE VIEW `default`.`{masked_req_view}`" in s)
+    assert "`_cf_" not in create_masked_stmt
+    assert "_alias_secret" not in create_masked_stmt
+
+    # Defense-in-depth in _redaction: scalar _cf_<pii> and cmcd_<pii> columns are still masked if ever passed:
+    keys_sql = ", ".join(f"'{k}'" for k in console_access._MAP_MASKED_KEYS)
+    for col_name in ("_cf_cookie_session", "_cf_cid", "_cf_edge_sid", "_cf_oip", "_cf_cmcd_sid", "cmcd_sid"):
+        red_expr = console_access._redaction(col_name, "LowCardinality(String)", keys_sql)
+        assert red_expr is not None and "[redacted]" in red_expr, f"Expected scalar redaction for {col_name}"
+    assert console_access._redaction("_cf_pop", "LowCardinality(String)", keys_sql) is None
+
+    # Defense-in-depth in _assert_isolated: fails closed if DESCRIBE TABLE on masked view reveals any _cf_* column:
+    class _LeakyCfViewCH:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def execute(self, sql: str, *_a: Any, **_kw: Any) -> list[dict[str, Any]]:
+            if sql.startswith("DESCRIBE TABLE"):
+                return [
+                    {"name": "service_id", "type": "String"},
+                    {"name": "_cf_cookie_session", "type": "LowCardinality(String)"},
+                ]
+            return [{"n": 0}]
+
+        def close(self) -> None:
+            self.closed = True
+
+    leaky_cf = _LeakyCfViewCH()
+    leaky_mgr = console_access.ConsoleClients(
+        settings=ClickHouseConfig(host="127.0.0.1", port=8123, database="default", user="default", password=""),
+        secret=secret,
+        client_factory=lambda _cfg: leaky_cf,
+    )
+    with pytest.raises(RuntimeError, match="masking"):
+        leaky_mgr.client_for("svc_a", masked=True)
+    assert leaky_cf.closed is True
+
+    # Defense-in-depth in share_db + query_endpoint: _cf_<pii> keys are classified & redacted:
+    for pii_cf in ("_cf_cookie_session", "_cf_cid", "_cf_edge_sid", "_cf_oip", "_cf_cmcd_sid"):
+        assert is_saved_view_pii_key(pii_cf) is True, f"Expected {pii_cf} to be classified as PII"
+    raw_cf_rows = [
+        {
+            "_cf_cookie_session": "SECRET_SESS_TOKEN_999",
+            "_cf_cid": "SECRET_CID_888",
+            "_cf_edge_sid": "SECRET_EDGE_SID_777",
+            "_cf_oip": "198.51.100.77",
+            "_cf_pop": "DEN",
+        }
+    ]
+    assert apply_pii_policy([dict(raw_cf_rows[0])], {"mask_ips": True}) == [
+        {
+            "_cf_cookie_session": "[redacted]",
+            "_cf_cid": "[redacted]",
+            "_cf_edge_sid": "[redacted]",
+            "_cf_oip": "198.51.100.xxx",
+            "_cf_pop": "DEN",
+        }
+    ]
+
+    class _RawCfRowClient:
+        _table_filters_verified = True
+
+        def execute(self, *_a: Any, **_kw: Any) -> list[dict[str, str]]:
+            return [dict(raw_cf_rows[0])]
+
+    ep_res = hs_query.query_endpoint(
+        SimpleNamespace(service_id="svc_alpha", client=_RawCfRowClient()),
+        DashboardQueryRequest(sql="SELECT * FROM logs LIMIT 1", max_rows=10),
+        "2026-11-19T00:00:00Z",
+        "2026-11-19T01:00:00Z",
+        mask_ips=True,
+    )
+    assert ep_res["data"] == [
+        {
+            "_cf_cookie_session": "[redacted]",
+            "_cf_cid": "[redacted]",
+            "_cf_edge_sid": "[redacted]",
+            "_cf_oip": "[redacted]",
+            "_cf_pop": "DEN",
+        }
+    ]
+
+    # Defense-in-depth in query.py: direct _cf_* identifiers raise ValueError (400 on /api/query),
+    # while string literals '_cf_cid' and comments -- _cf_cid / /* _cf_cid */ do not trigger _cf_* rejection:
+    rec = _RecordingConsoleClient()
+    svc = SimpleNamespace(service_id="svc_alpha", client=rec)
+    for bad_cf_sql in (
+        "SELECT _cf_cid FROM logs",
+        "SELECT a._cf_cookie_session FROM logs AS a",
+        "SELECT url FROM logs WHERE _cf_oip != ''",
+    ):
+        with pytest.raises(ValueError, match="_cf_"):
+            hs_query.query_endpoint(
+                svc,
+                DashboardQueryRequest(sql=bad_cf_sql, max_rows=10),
+                "2026-11-19T00:00:00Z",
+                "2026-11-19T01:00:00Z",
+                mask_ips=True,
+            )
+    hs_query.query_endpoint(
+        svc,
+        DashboardQueryRequest(sql="SELECT '_cf_cid' AS sample_lit, url FROM logs", max_rows=10),
+        "2026-11-19T00:00:00Z",
+        "2026-11-19T01:00:00Z",
+        mask_ips=True,
+    )
+    assert "'_cf_cid'" in rec.last_sql
+    comment_rewritten = hs_query._rewrite_console_sql(
+        "SELECT url -- _cf_cid\n/* _cf_cookie_session */ FROM logs",
+        svc_table="svc_alpha",
+        names={"request_facts": "fla_cv_masked"},
+    )
+    assert "FROM fla_cv_masked" in comment_rewritten
+
+    # Defense-in-depth in ClickHouseClient.rewrite_publication_fence: word-bounded request_facts check:
+    ch_client = ClickHouseClient(
+        svcconfig.ClickHouseConfig(host="localhost", port=8123, database="default", user="default", password=""),
+        transport=httpx.MockTransport(lambda _r: httpx.Response(200, json={"data": []})),
+    )
+    ch_client._enable_cf_rewrite_in_tests = True
+    view_query = "SELECT custom_fields['url'], custom_fields['cookie_session'] FROM fla_cv_1234_m_request_facts"
+    assert ch_client.rewrite_publication_fence(view_query) == view_query
+    table_query = "SELECT custom_fields['pop'] FROM request_facts"
+    assert "`_cf_pop`" in ch_client.rewrite_publication_fence(table_query)
+
+
+@pytest.mark.security_regression
+def test_bug_t5_iter25_05_catalog_cf_fields_dquote_aliases_and_cte_subquery_rewriting() -> None:
+    """BUG-T5-ITER25-05: Catalog CF fields, ANSI double-quoted aliases, and CTE/subquery projection & * scoping."""
+    from backend.high_scale.query import _rewrite_console_sql
+
+    names = {"request_facts": "hs_test.v_req_m"}
+
+    # 1. Catalog/DuckDB request fields (bot_score, elapsed, ost, etc.) & boolean fields (is_bot, ipv6, etc.):
+    q_join = _rewrite_console_sql(
+        "SELECT a.url FROM logs AS a JOIN logs AS b ON a.url = b.url "
+        "WHERE a.edge = true AND a.status >= 200 AND a.bot_score > 50 AND a.waf = false AND a.is_bot = true",
+        svc_table="svc_alpha",
+        names=names,
+    )
+    assert "toFloat64OrZero(a.custom_fields['bot_score']) > 50" in q_join
+    assert "lower(a.custom_fields['is_bot']) IN ('true', '1')" in q_join
+
+    # 2. ANSI double-quoted table aliases and double-quoted column alias masking:
+    q_dquote_tbl = _rewrite_console_sql(
+        'SELECT "a".url FROM logs AS "a" WHERE "a".edge = true AND "a".status >= 200',
+        svc_table="svc_alpha",
+        names=names,
+    )
+    assert '"a".lower(' not in q_dquote_tbl
+    assert '"a".toFloat64OrZero(' not in q_dquote_tbl
+    assert "lower(\"a\".custom_fields['edge']) IN ('true', '1')" in q_dquote_tbl
+    assert "toFloat64OrZero(\"a\".custom_fields['status']) >= 200" in q_dquote_tbl
+
+    q_dquote_col = _rewrite_console_sql(
+        "SELECT url AS \"custom_fields['edge'] = true\" FROM logs WHERE edge = true",
+        svc_table="svc_alpha",
+        names=names,
+    )
+    assert "AS \"custom_fields['edge'] = true\"" in q_dquote_col
+    assert "WHERE lower(custom_fields['edge']) IN ('true', '1')" in q_dquote_col
+
+    # 3. CTEs & FROM (...) subqueries: standalone custom fields get AS <col> inside CTE/subquery,
+    # and outer consumers only rewrite to custom_fields[...] when inner query projects *!
+    q_cte = _rewrite_console_sql(
+        "WITH q AS (SELECT url, status FROM logs WHERE edge = true AND is_ipv6 = true) SELECT url FROM q WHERE status = 200",
+        svc_table="svc_alpha",
+        names=names,
+    )
+    assert "custom_fields['status'] AS status" in q_cte
+    outer_cte = q_cte.split("SELECT url FROM q", 1)[1]
+    assert "custom_fields" not in outer_cte
+    assert "status = '200'" in outer_cte
+
+    q_sub = _rewrite_console_sql(
+        "SELECT sub.url FROM (SELECT status, url FROM logs) AS sub WHERE sub.status >= 200",
+        svc_table="svc_alpha",
+        names=names,
+    )
+    assert "custom_fields['status'] AS status" in q_sub
+    outer_sub = q_sub.rsplit("WHERE", 1)[1]
+    assert "custom_fields" not in outer_sub
+    assert "toFloat64OrZero(sub.status) >= 200" in outer_sub
+
+    q_star_cte = _rewrite_console_sql(
+        "WITH q AS (SELECT * FROM logs WHERE edge = true) SELECT q.url, q.bot_score FROM q WHERE q.status = 200",
+        svc_table="svc_alpha",
+        names=names,
+    )
+    outer_star = q_star_cte.split(") SELECT", 1)[1]
+    assert "q.custom_fields['bot_score']" in outer_star
+    assert "q.custom_fields['status'] = '200'" in outer_star

@@ -2637,7 +2637,7 @@ def ensure_cloud_binaries() -> tuple[Path, Path]:
                 env=env,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=120,
                 check=False,
             )
             if rustc_proc.returncode != 0:

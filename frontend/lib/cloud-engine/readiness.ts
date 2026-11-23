@@ -43,8 +43,9 @@ const SECRET_WORD = String.raw`(?:\w+[_-])?(?:token|key|secret|passw(?:or)?d|aut
 // Error messages can carry SQL, URLs, keys or tokens: keep the first line,
 // mask anything that may be private, and bound what is left.
 function redactedMessage(message: string): string {
-  const text = (message.split(/\r?\n/, 1)[0] ?? "")
-    .replace(/'[^']*'|"[^"]*"|`[^`]*`/g, "[redacted]")
+  const preRedacted = message.replace(/'[^']*'|"[^"]*"|`[^`]*`/g, "[redacted]");
+  const text = (preRedacted.split(/\r?\n/, 1)[0] ?? "")
+    .replace(/(?:^|(?<=[^\w]))(?:[EeBbXx]?)(?:'[^']*|"[^"]*|`[^`]*)$/, "[redacted]")
     .replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s'"`]+/gi, "[url]")
     .replace(/\S+@\S+/g, "[redacted]")
     .replace(

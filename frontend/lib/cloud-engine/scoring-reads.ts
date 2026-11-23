@@ -1,7 +1,7 @@
 import { cloudReadContext } from "./range-loader";
 import { computeRocAuc } from "./scoring-train";
 import { buildScoringSourceSql } from "./sessions";
-import { escapeSqlLiteral } from "./sql-validator";
+import { duckSqlString } from "./dashboard/duckdb";
 import { useSessionRoleStore } from "@/stores/filterStore";
 
 export const CLOUD_SCORING_CAPABILITIES = {
@@ -194,7 +194,7 @@ export async function queryCloudScoring(request: Request, route: string) {
     if (hasMinSamples && cols.has("edge_sid")) {
       const sids = labels
         .filter((l) => l.label === "good" || l.label === "bad")
-        .map((l) => `'${escapeSqlLiteral(l.edge_sid)}'`)
+        .map((l) => duckSqlString(l.edge_sid))
         .join(", ");
       const scoreRows = await query(`SELECT edge_sid, MAX(edge_score) AS max_score
         FROM ${source} WHERE ${where} AND edge_sid IN (${sids}) AND edge_score IS NOT NULL
@@ -242,7 +242,7 @@ export async function queryCloudScoring(request: Request, route: string) {
     }
     const rows = await query(`SELECT timestamp::VARCHAR AS ts, edge_score, edge_score_l1,
       edge_score_l2, edge_score_reason, edge_cookie_compliance, url, status FROM ${source}
-      WHERE ${where} AND edge_sid = '${escapeSqlLiteral(sid)}'
+      WHERE ${where} AND edge_sid = ${duckSqlString(sid)}
       ORDER BY timestamp ASC LIMIT 500`);
     return { sid, since_days: sinceDays, event_count: rows.length, events: rows };
   }

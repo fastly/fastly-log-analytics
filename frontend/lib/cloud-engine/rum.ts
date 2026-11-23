@@ -1,4 +1,5 @@
 import {
+  duckSqlString,
   getDuckDBEngine,
   RUM_VITALS_COLUMNS,
   RUM_ERRORS_COLUMNS,
@@ -170,16 +171,13 @@ export function buildRumWhere(
 ): string {
   const clauses: string[] = [rangeServiceSql(params)];
   if (params.device_type) {
-    const escaped = String(params.device_type).replaceAll("'", "''");
-    clauses.push(`device_type = '${escaped}'`);
+    clauses.push(`device_type = ${duckSqlString(String(params.device_type))}`);
   }
   if (params.country) {
-    const escaped = String(params.country).replaceAll("'", "''");
-    clauses.push(`country = '${escaped}'`);
+    clauses.push(`country = ${duckSqlString(String(params.country))}`);
   }
   if (params.page_url) {
-    const escaped = String(params.page_url).replaceAll("'", "''");
-    clauses.push(`COALESCE(page_url, url, path) = '${escaped}'`);
+    clauses.push(`COALESCE(page_url, url, path) = ${duckSqlString(String(params.page_url))}`);
   }
   let filters: FiltersPayload;
   try {

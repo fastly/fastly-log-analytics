@@ -279,13 +279,15 @@ function concatBatches(
   };
 }
 
-function sqlString(value: string): string {
+export function duckSqlString(value: string): string {
   if (!value.includes("\0")) return `'${sqlEscape(value)}'`;
   return `(${value
     .split("\0")
     .map((part) => `'${sqlEscape(part)}'`)
     .join(" || chr(0) || ")})`;
 }
+
+const sqlString = duckSqlString;
 
 const quoteDuckIdent = (s: string): string => {
   if (s.includes("\0")) {
@@ -738,6 +740,32 @@ export function interpolateSqlParams(
   const len = sql.length;
   while (i < len) {
     const ch = sql[i];
+    if (
+      (ch === "E" || ch === "e") &&
+      i + 1 < len &&
+      sql[i + 1] === "'" &&
+      (i === 0 || !/[A-Za-z0-9_$\u0080-\uffff]/.test(sql[i - 1]))
+    ) {
+      let j = i + 2;
+      while (j < len) {
+        if (sql[j] === "\\" && j + 1 < len) {
+          j += 2;
+          continue;
+        }
+        if (sql[j] === "'") {
+          if (j + 1 < len && sql[j + 1] === "'") {
+            j += 2;
+            continue;
+          }
+          j += 1;
+          break;
+        }
+        j += 1;
+      }
+      out += sql.slice(i, j);
+      i = j;
+      continue;
+    }
     if (ch === "'") {
       let j = i + 1;
       while (j < len) {
@@ -800,6 +828,16 @@ export function interpolateSqlParams(
       i = j;
       continue;
     }
+    if (/[A-Za-z_\u0080-\uffff]/.test(ch)) {
+      const identMatch = sql
+        .slice(i)
+        .match(/^[A-Za-z_\u0080-\uffff][A-Za-z0-9_$\u0080-\uffff]*/);
+      if (identMatch) {
+        out += identMatch[0];
+        i += identMatch[0].length;
+        continue;
+      }
+    }
     if (ch === "$") {
       const rest = sql.slice(i);
       const numMatch = rest.match(/^\$([0-9]+)/);
@@ -810,7 +848,9 @@ export function interpolateSqlParams(
         i += numMatch[0].length;
         continue;
       }
-      const tagMatch = rest.match(/^\$([A-Za-z_][A-Za-z0-9_]*)?\$/);
+      const tagMatch = rest.match(
+        /^\$(?:[A-Za-z_\u0080-\uffff][A-Za-z0-9_\u0080-\uffff]*)?\$/,
+      );
       if (tagMatch) {
         const delim = tagMatch[0];
         const endIdx = sql.indexOf(delim, i + delim.length);

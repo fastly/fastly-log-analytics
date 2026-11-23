@@ -5828,3 +5828,353 @@ fn bug_cloud_dr_24d_post_delete_data_dr_recovery_preserves_reset_manifest_floor_
         );
     }
 }
+
+#[test]
+fn bug_cloud_dr_25a_post_delete_data_dr_recovery_handles_none_head_and_post_reset_ingest_batches() {
+    use fastly_log_analytics::ingest::{self, storage::Store};
+    use std::sync::atomic::Ordering;
+
+    struct RichGuard;
+    impl Drop for RichGuard {
+        fn drop(&mut self) {
+            RICH_FOS.with(|r| r.set(false));
+            MTIMES.with(|m| m.borrow_mut().clear());
+        }
+    }
+    let _rich_guard = RichGuard;
+    RICH_FOS.with(|r| r.set(true));
+    MTIMES.with(|m| m.borrow_mut().clear());
+
+    let run_delete_data = |p: &Platform| {
+        let dd_gen = p.adapter.records()["svc:fixtureService"].generation.clone();
+        let dd_start = p.json(
+            "POST",
+            "/api/admin/services/fixtureService/delete-data",
+            json!({"confirm_service_id": "fixtureService", "generation": dd_gen}),
+        );
+        assert_eq!(dd_start["job"]["status"], "fencing");
+        p.clock.fetch_add(
+            fastly_log_analytics::admin::reset::FENCE_WAIT_S + 5,
+            Ordering::SeqCst,
+        );
+        for _ in 0..25 {
+            let recs = p.adapter.records();
+            if recs["svc:fixtureService"]
+                .value
+                .get("data_reset")
+                .is_none_or(Value::is_null)
+            {
+                break;
+            }
+            let cur_svc: Service =
+                serde_json::from_value(recs["svc:fixtureService"].value.clone()).unwrap();
+            let (ak, sk) = fastly_log_analytics::admin::fos_credentials(p, &cur_svc).unwrap();
+            CALLS.with(|c| c.set(0));
+            SECRETS.with(|s| s.borrow_mut().clear());
+            ELAPSED_MS.with(|e| e.set(0));
+            let store = Store {
+                runtime: p,
+                service: &cur_svc,
+                access_key: ak,
+                secret_key: sk,
+                started: std::time::Instant::now(),
+                vcpu_start: 0,
+            };
+            let Some(step_res) = fastly_log_analytics::admin::reset::advance(&store) else {
+                break;
+            };
+            step_res.unwrap();
+            p.clock.fetch_add(450, Ordering::SeqCst);
+        }
+        let post_dd_job = p.json(
+            "GET",
+            "/api/admin/services/fixtureService/delete-data",
+            json!({}),
+        );
+        assert_eq!(post_dd_job["status"], "complete", "{post_dd_job}");
+    };
+
+    // Sub-defect A: Stale pre-reset cloud_dr_state.json where catalog_head == None (0 request commits prior to Delete Data),
+    // pre-reset floor_key, and pre-reset rum_stats (42,000 rows).
+    {
+        let p = Platform::new();
+        let provisioned = p.provision();
+        p.drain(provisioned["job"].clone());
+        p.clock.store(1_799_000_000, Ordering::SeqCst);
+        p.adapter
+            .cas(
+                ingest::WATERMARK_KEY,
+                None,
+                &json!({"floor_key": "raw/request/year=2026/month=11/day=20/hour=00/minute=00/"}),
+            )
+            .unwrap();
+        p.adapter
+            .cas(
+                &ingest::watermark_key("rum"),
+                None,
+                &json!({"rum_stats": {"earliest": 1_763_596_800u64, "latest": 1_763_597_000u64, "total_rows": 42_000u64}}),
+            )
+            .unwrap();
+        let svc_pre: Service =
+            serde_json::from_value(p.adapter.records()["svc:fixtureService"].value.clone())
+                .unwrap();
+        CALLS.with(|c| c.set(0));
+        SECRETS.with(|s| s.borrow_mut().clear());
+        dr::sync_best_effort(&p, &svc_pre);
+        let stale_none_dr_bytes =
+            p.adapter.bucket_objects("fos-fixture-logs")["meta/cloud_dr_state.json"].clone();
+        let stale_none_dr_val: Value = serde_json::from_slice(&stale_none_dr_bytes).unwrap();
+        assert!(
+            stale_none_dr_val["catalog_head"].is_null(),
+            "Pre-reset DR state must have catalog_head == null: {stale_none_dr_val}"
+        );
+        assert!(stale_none_dr_val["rum_stats"].is_object());
+
+        p.clock.store(1_800_000_000, Ordering::SeqCst);
+        run_delete_data(&p);
+        let post_dd_objs = p.adapter.bucket_objects("fos-fixture-logs");
+        let post_dd_wm = p.adapter.records()[ingest::WATERMARK_KEY].value.clone();
+        let post_dd_manifest = post_dd_wm["catalog"]["manifest"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let post_dd_floor = post_dd_wm["floor_key"].as_str().unwrap().to_owned();
+
+        let p_rec = Platform::new();
+        p_rec.clock.store(p.now(), Ordering::SeqCst);
+        p_rec.adapter.seed_resource(
+            "fixtureService",
+            "snippet",
+            json!({"name": "flp-owner-fixtureApp", "type": "recv", "priority": "0", "content": "# flp-owner:fixtureApp:fixtureService"}),
+        );
+        MTIMES.with(|m| m.borrow_mut().clear());
+        for (k, v) in &post_dd_objs {
+            p_rec
+                .adapter
+                .seed_object_bytes("fos-fixture-logs", k, v.clone());
+        }
+        MTIMES.with(|m| {
+            m.borrow_mut()
+                .insert(post_dd_manifest.clone(), 1_800_000_200);
+        });
+        p_rec.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            "meta/cloud_dr_state.json",
+            stale_none_dr_bytes,
+        );
+
+        let rec_res = p_rec.json(
+            "POST",
+            "/api/admin/provision/recover",
+            json!({
+                "token": "fixture-token",
+                "service_id": "fixtureService",
+                "fos_bucket": "fos-fixture-logs",
+                "fos_region": "us-east-1"
+            }),
+        );
+        assert_eq!(rec_res["catalog_generation"], 1, "{rec_res}");
+        let rec_records = p_rec.adapter.records();
+        assert!(
+            rec_records
+                .get(&ingest::watermark_key("rum"))
+                .is_none_or(|r| r.value.get("rum_stats").is_none_or(Value::is_null)),
+            "BUG-CLOUD-DR-25A Sub-defect A: deleted rum_stats must NOT be resurrected when stale cloud_dr_state.json had catalog_head=None"
+        );
+        let restored_floor = rec_records[ingest::WATERMARK_KEY].value["floor_key"]
+            .as_str()
+            .unwrap_or("");
+        assert!(
+            restored_floor >= post_dd_floor.as_str(),
+            "BUG-CLOUD-DR-25A Sub-defect A: floor_key {restored_floor:?} must NOT rewind before post_dd_floor {post_dd_floor:?}"
+        );
+    }
+
+    // Sub-defect B + Auditor Low note: Stale pre-reset cloud_dr_state.json (gen=7) + reset manifest (gen=8 at 08:14:05Z)
+    // + post-reset ingest batch manifest (gen=9 at 08:45:00Z), tested both during DELETE_GRACE_S (in_grace=true)
+    // and after DELETE_GRACE_S (in_grace=false), plus total _catalog/ wipe (dr_manifest_missing && scanned_opt.is_none()).
+    {
+        let p = Platform::new();
+        let provisioned = p.provision();
+        p.drain(provisioned["job"].clone());
+
+        let old_manifest_key = "processed/_catalog/manifest-000007-old.json";
+        let old_manifest = Manifest {
+            version: VERSION,
+            service_id: "fixtureService".into(),
+            generation: 7,
+            batch: "b-old".into(),
+            schema: "v2".into(),
+            committed_at: "2026-11-20T00:00:00Z".into(),
+            previous: None,
+            files: vec![],
+            summaries: vec![],
+            sources: vec![],
+            replaces: vec![],
+            bytes: 0,
+            rows: 0,
+            parents: BTreeMap::new(),
+        };
+        let old_manifest_bytes = serde_json::to_vec(&old_manifest).unwrap();
+        p.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            old_manifest_key,
+            old_manifest_bytes.clone(),
+        );
+        let old_head = Head {
+            version: VERSION,
+            generation: 7,
+            manifest: Some(old_manifest_key.into()),
+            recent: vec![Event {
+                cursor: "fixtureService:7".into(),
+                generation: 7,
+                committed_at: Some("2026-11-20T00:00:00Z".into()),
+                manifest: Some(old_manifest_key.into()),
+            }],
+            ..Head::default()
+        };
+        p.adapter
+            .cas(
+                ingest::WATERMARK_KEY,
+                None,
+                &json!({
+                    "catalog": old_head,
+                    "floor_key": "raw/request/year=2026/month=11/day=20/hour=00/minute=00/"
+                }),
+            )
+            .unwrap();
+        p.adapter
+            .cas(
+                &ingest::watermark_key("rum"),
+                None,
+                &json!({"rum_stats": {"earliest": 1_763_596_800u64, "latest": 1_763_597_000u64, "total_rows": 55_555u64}}),
+            )
+            .unwrap();
+
+        let svc_pre: Service =
+            serde_json::from_value(p.adapter.records()["svc:fixtureService"].value.clone())
+                .unwrap();
+        CALLS.with(|c| c.set(0));
+        SECRETS.with(|s| s.borrow_mut().clear());
+        dr::sync_best_effort(&p, &svc_pre);
+        let stale_gen7_dr_bytes =
+            p.adapter.bucket_objects("fos-fixture-logs")["meta/cloud_dr_state.json"].clone();
+
+        // 2027-01-15T08:14:00Z == 1_800_000_840; reset commits after FENCE_WAIT_S (300s) around 08:19Z:
+        p.clock.store(1_800_000_540, Ordering::SeqCst);
+        run_delete_data(&p);
+        let post_dd_objs = p.adapter.bucket_objects("fos-fixture-logs");
+        let post_dd_wm = p.adapter.records()[ingest::WATERMARK_KEY].value.clone();
+        let reset_manifest_key = post_dd_wm["catalog"]["manifest"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let reset_manifest: Manifest =
+            serde_json::from_slice(&post_dd_objs[&reset_manifest_key]).unwrap();
+        assert_eq!(reset_manifest.generation, 8);
+        assert_eq!(reset_manifest.batch, "reset");
+        let reset_dt = time::OffsetDateTime::parse(
+            &reset_manifest.committed_at,
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        let reset_minute_ts = reset_dt.unix_timestamp() - reset_dt.unix_timestamp().rem_euclid(60);
+        let expected_reset_floor = format!("raw/request/{}", ingest::minute_dir(reset_minute_ts));
+
+        // Seed post-reset ingest batch gen=9 committed 45 minutes AFTER reset:
+        let post_ingest_key = "processed/_catalog/manifest-000009-ingest.json";
+        let post_ingest_dt = reset_dt + time::Duration::minutes(45);
+        let post_ingest_committed = post_ingest_dt
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        let post_ingest_manifest = Manifest {
+            version: VERSION,
+            service_id: "fixtureService".into(),
+            generation: 9,
+            batch: "ingest-post-reset".into(),
+            schema: "v2".into(),
+            committed_at: post_ingest_committed,
+            previous: Some(reset_manifest_key.clone()),
+            files: vec![],
+            summaries: vec![],
+            sources: vec![],
+            replaces: vec![],
+            bytes: 128,
+            rows: 5,
+            parents: BTreeMap::new(),
+        };
+        let post_ingest_bytes = serde_json::to_vec(&post_ingest_manifest).unwrap();
+
+        for in_grace in [true, false] {
+            let p_rec = Platform::new();
+            p_rec.clock.store(p.now() + 2_700, Ordering::SeqCst);
+            p_rec.adapter.seed_resource(
+                "fixtureService",
+                "snippet",
+                json!({"name": "flp-owner-fixtureApp", "type": "recv", "priority": "0", "content": "# flp-owner:fixtureApp:fixtureService"}),
+            );
+            MTIMES.with(|m| m.borrow_mut().clear());
+            for (k, v) in &post_dd_objs {
+                p_rec
+                    .adapter
+                    .seed_object_bytes("fos-fixture-logs", k, v.clone());
+            }
+            if in_grace {
+                p_rec.adapter.seed_object_bytes(
+                    "fos-fixture-logs",
+                    old_manifest_key,
+                    old_manifest_bytes.clone(),
+                );
+                MTIMES.with(|m| {
+                    m.borrow_mut()
+                        .insert(old_manifest_key.into(), 1_763_596_800);
+                });
+            }
+            p_rec.adapter.seed_object_bytes(
+                "fos-fixture-logs",
+                post_ingest_key,
+                post_ingest_bytes.clone(),
+            );
+            p_rec.adapter.seed_object_bytes(
+                "fos-fixture-logs",
+                "meta/cloud_dr_state.json",
+                stale_gen7_dr_bytes.clone(),
+            );
+            MTIMES.with(|m| {
+                m.borrow_mut()
+                    .insert(reset_manifest_key.clone(), reset_dt.unix_timestamp() as u64);
+                m.borrow_mut().insert(
+                    post_ingest_key.into(),
+                    post_ingest_dt.unix_timestamp() as u64,
+                );
+            });
+
+            let rec_res = p_rec.json(
+                "POST",
+                "/api/admin/provision/recover",
+                json!({
+                    "token": "fixture-token",
+                    "service_id": "fixtureService",
+                    "fos_bucket": "fos-fixture-logs",
+                    "fos_region": "us-east-1"
+                }),
+            );
+            assert_eq!(
+                rec_res["catalog_generation"], 9,
+                "BUG-CLOUD-DR-25A [in_grace={in_grace}]: must restore latest gen=9: {rec_res}"
+            );
+            let rec_records = p_rec.adapter.records();
+            assert!(
+                rec_records
+                    .get(&ingest::watermark_key("rum"))
+                    .is_none_or(|r| r.value.get("rum_stats").is_none_or(Value::is_null)),
+                "BUG-CLOUD-DR-25A [in_grace={in_grace}]: deleted rum_stats must NOT be resurrected"
+            );
+            assert_eq!(
+                rec_records[ingest::WATERMARK_KEY].value["floor_key"],
+                expected_reset_floor,
+                "BUG-CLOUD-DR-25A [in_grace={in_grace}]: floor_key must equal gen=8 reset minute (not rewound to 2026-11-20 and not jumped 45m forward to gen=9)"
+            );
+        }
+    }
+}

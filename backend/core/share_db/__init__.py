@@ -485,6 +485,8 @@ def _strip_filter_affixes(val: str) -> str:
         if col.startswith(prefix):
             col = col[len(prefix) :]
             break
+    if col.startswith("_cf_"):
+        col = col[4:]
     return _FILTER_NUM_SUFFIX_RE.sub("", col)
 
 

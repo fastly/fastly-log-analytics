@@ -507,7 +507,32 @@ fn hydrate_service(
 type ScannedHeadPair = (
     crate::ingest::catalog::Head,
     Option<crate::ingest::catalog::Manifest>,
+    Option<crate::ingest::catalog::Manifest>,
 );
+
+fn manifest_unix_ts(m: &crate::ingest::catalog::Manifest) -> Option<u64> {
+    time::OffsetDateTime::parse(
+        &m.committed_at,
+        &time::format_description::well_known::Rfc3339,
+    )
+    .ok()
+    .and_then(|dt| u64::try_from(dt.unix_timestamp()).ok())
+}
+
+fn manifest_floor_key(service: &Service, m: &crate::ingest::catalog::Manifest) -> Option<String> {
+    let dt = time::OffsetDateTime::parse(
+        &m.committed_at,
+        &time::format_description::well_known::Rfc3339,
+    )
+    .ok()?;
+    let ts = dt.unix_timestamp();
+    let minute_ts = ts - ts.rem_euclid(60);
+    Some(format!(
+        "{}{}",
+        crate::ingest::raw_prefix(service),
+        crate::ingest::minute_dir(minute_ts)
+    ))
+}
 
 fn scan_catalog_head(
     context: &Context<'_, impl Runtime>,
@@ -548,6 +573,7 @@ fn scan_catalog_head(
     objects.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
 
     let mut best_manifest: Option<(String, crate::ingest::catalog::Manifest)> = None;
+    let mut latest_reset: Option<crate::ingest::catalog::Manifest> = None;
     let mut saw_foreign_manifest = false;
     let mut days: BTreeMap<i64, (u64, String, crate::ingest::catalog::Statistics)> =
         BTreeMap::new();
@@ -565,6 +591,13 @@ fn scan_catalog_head(
                 continue;
             }
             if manifest.service_id == service.service_id {
+                if manifest.batch == "reset"
+                    && latest_reset
+                        .as_ref()
+                        .is_none_or(|prev| manifest.generation > prev.generation)
+                {
+                    latest_reset = Some(manifest.clone());
+                }
                 if best_manifest
                     .as_ref()
                     .is_none_or(|(_, prev)| manifest.generation > prev.generation)
@@ -628,7 +661,7 @@ fn scan_catalog_head(
 
     let encoded = serialize(&head)?;
     if crate::ingest::catalog::head(&json!({"catalog": encoded})).is_ok() {
-        Ok((Some((head, manifest_obj)), expected_missing))
+        Ok((Some((head, manifest_obj, latest_reset)), expected_missing))
     } else {
         Ok((None, expected_missing))
     }
@@ -984,6 +1017,7 @@ pub(super) fn recover(
         state.schema_version == SCHEMA_VERSION && state.service_id == input.service_id
     });
 
+    let dr_updated_at = parsed_dr.as_ref().map(|d| d.updated_at).unwrap_or(0);
     let (
         mut service,
         views,
@@ -1121,39 +1155,52 @@ pub(super) fn recover(
                 foreign_dr_state,
                 dr_head.manifest.as_deref(),
             )?;
-            if let Some((scanned, scanned_manifest)) = scanned_opt {
-                if dr_manifest_missing || scanned.generation > dr_head.generation {
-                    let reset_occurred = dr_manifest_missing
-                        || scanned_manifest
-                            .as_ref()
-                            .is_some_and(|m| m.batch == "reset");
-                    if reset_occurred {
-                        rum_stats = None;
-                        floor_key = scanned_manifest
-                            .as_ref()
-                            .and_then(|m| {
-                                time::OffsetDateTime::parse(
-                                    &m.committed_at,
-                                    &time::format_description::well_known::Rfc3339,
-                                )
-                                .ok()
-                            })
-                            .map(|dt| {
-                                let ts = dt.unix_timestamp();
-                                let minute_ts = ts - ts.rem_euclid(60);
-                                format!(
-                                    "{}{}",
-                                    crate::ingest::raw_prefix(&service),
-                                    crate::ingest::minute_dir(minute_ts)
-                                )
-                            });
+            if let Some((scanned, scanned_manifest, latest_reset)) = scanned_opt {
+                let reset_occurred = dr_manifest_missing
+                    || latest_reset
+                        .as_ref()
+                        .is_some_and(|r| r.generation > dr_head.generation)
+                    || scanned_manifest
+                        .as_ref()
+                        .is_some_and(|m| m.generation > dr_head.generation && m.batch == "reset");
+                if reset_occurred {
+                    rum_stats = None;
+                    if let Some(rf) = latest_reset
+                        .as_ref()
+                        .or(scanned_manifest.as_ref())
+                        .and_then(|m| manifest_floor_key(&service, m))
+                    {
+                        if floor_key.as_deref().is_none_or(|cur| cur < rf.as_str()) {
+                            floor_key = Some(rf);
+                        }
                     }
+                }
+                if dr_manifest_missing || scanned.generation > dr_head.generation {
                     catalog_head = Some(scanned);
                 }
             }
-        } else if let (Some((scanned, _)), _) =
+        } else if let (Some((scanned, scanned_manifest, latest_reset)), _) =
             scan_catalog_head(context, &service, &creds, reserve, foreign_dr_state, None)?
         {
+            let reset_occurred = latest_reset.as_ref().is_some_and(|r| {
+                source != "dr_state" || manifest_unix_ts(r).is_none_or(|ts| ts >= dr_updated_at)
+            }) || scanned_manifest.as_ref().is_some_and(|m| {
+                m.batch == "reset"
+                    && (source != "dr_state"
+                        || manifest_unix_ts(m).is_none_or(|ts| ts >= dr_updated_at))
+            });
+            if reset_occurred {
+                rum_stats = None;
+                if let Some(rf) = latest_reset
+                    .as_ref()
+                    .or(scanned_manifest.as_ref())
+                    .and_then(|m| manifest_floor_key(&service, m))
+                {
+                    if floor_key.as_deref().is_none_or(|cur| cur < rf.as_str()) {
+                        floor_key = Some(rf);
+                    }
+                }
+            }
             catalog_head = Some(scanned);
             if source != "dr_state" {
                 source = "catalog_scan";
