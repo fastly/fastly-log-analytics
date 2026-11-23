@@ -613,6 +613,10 @@ async function cmcdFromFiles(
   const activeSessions = Math.round(overall.sidHll.count());
   const rebufferSessions = Math.round(overall.rebufferSidHll.count());
   const hasOt = overall.hasOt > 0;
+  const has = (key: keyof Pick<BucketAgg, "hasBs" | "hasSu" | "hasBl" | "hasBr" | "hasMtp" | "hasCid">) =>
+    overall[key] > 0;
+  const hasBsEffective = has("hasBs") || has("hasBl");
+  const hasSu = has("hasSu");
   const rebufferEvents = overall.rebufferEvents;
   const rebufferRate = totalRequests > 0 ? roundTo((rebufferEvents * 100) / totalRequests, 2) : 0;
   const avgBitrate = overall.brN > 0 ? overall.brSum / overall.brN : 0;
@@ -702,7 +706,7 @@ async function cmcdFromFiles(
       bucket: tsIso,
       concurrent_sessions: sess,
       new_sessions: newSessionCounts.get(bMs) ?? 0,
-      rebuffer_session_pct: b.hasBs > 0 && sess > 0 ? roundTo((rebSess * 100) / sess, 2) : null,
+      rebuffer_session_pct: hasBsEffective && sess > 0 ? roundTo((rebSess * 100) / sess, 2) : null,
       timestamp: tsIso,
       active_sessions: sess,
       rebuffer_events: rebuf,
@@ -712,7 +716,7 @@ async function cmcdFromFiles(
       bucket: tsIso,
       p50_buffer: p50Buf,
       p95_buffer: p95Buf,
-      starvation_rate: b.hasBs > 0 ? roundTo((rebuf * 100) / reqs, 2) : null,
+      starvation_rate: hasBsEffective && reqs > 0 ? roundTo((rebuf * 100) / reqs, 2) : null,
       timestamp: tsIso,
       avg_buffer_ms: roundTo(b.blN > 0 ? b.blSum / b.blN : 0, 1),
       p10_buffer_ms: roundTo(p10Buf ?? 0, 1),
@@ -739,7 +743,7 @@ async function cmcdFromFiles(
     });
     startup_ts.push({
       bucket: tsIso,
-      startup_ratio: b.hasSu > 0 ? roundTo((b.startupRequests * 100) / reqs, 2) : null,
+      startup_ratio: hasSu && reqs > 0 ? roundTo((b.startupRequests * 100) / reqs, 2) : null,
       timestamp: tsIso,
       startup_requests: b.startupRequests,
       avg_startup_buffer_ms: roundTo(b.suBlN > 0 ? b.suBlSum / b.suBlN : 0, 1),
@@ -772,9 +776,6 @@ async function cmcdFromFiles(
       };
     });
 
-  const has = (key: keyof Pick<BucketAgg, "hasBs" | "hasSu" | "hasBl" | "hasBr" | "hasMtp" | "hasCid">) =>
-    overall[key] > 0;
-
   const top_content = !has("hasCid")
     ? []
     : [...contents.entries()]
@@ -791,13 +792,13 @@ async function cmcdFromFiles(
             avg_bitrate_kbps: roundTo(brAvg ?? 0, 1),
             avg_bitrate: brAvg,
             avg_buffer_length: blAvg,
-            rebuffer_rate: c.hasBs > 0 && sess > 0 ? (rebSess * 100) / sess : null,
+            rebuffer_rate: hasBsEffective && sess > 0 ? (rebSess * 100) / sess : null,
           };
         })
         .sort((a, b) => b.sessions - a.sessions || a.content_id.localeCompare(b.content_id))
         .slice(0, topN);
 
-  const rebuffer_by_country = !has("hasBs")
+  const rebuffer_by_country = !hasBsEffective
     ? []
     : [...countries.entries()]
         .map(([country, c]) => {
@@ -811,13 +812,13 @@ async function cmcdFromFiles(
             sessions: sess,
             requests: c.reqs,
             rebuffer_events: c.rebufferEvents,
-            rebuffer_rate: c.hasBs > 0 && sess > 0 ? (rebSess * 100) / sess : null,
+            rebuffer_rate: hasBsEffective && sess > 0 ? (rebSess * 100) / sess : null,
           };
         })
         .sort((a, b) => b.sessions - a.sessions || a.country.localeCompare(b.country))
         .slice(0, topN);
 
-  const rebuffer_by_asn = !has("hasBs")
+  const rebuffer_by_asn = !hasBsEffective
     ? []
     : [...asns.entries()]
         .map(([asn, a]) => {
@@ -836,7 +837,7 @@ async function cmcdFromFiles(
             sessions: sess,
             requests: a.reqs,
             rebuffer_events: a.rebufferEvents,
-            rebuffer_rate: a.hasBs > 0 && sess > 0 ? (rebSess * 100) / sess : null,
+            rebuffer_rate: hasBsEffective && sess > 0 ? (rebSess * 100) / sess : null,
             avg_throughput_kbps: roundTo(a.mtpN > 0 ? a.mtpSum / a.mtpN : 0, 1),
           };
         })
@@ -871,7 +872,7 @@ async function cmcdFromFiles(
       avg_session_duration: positiveDurations.length
         ? Math.round(positiveDurations.reduce((sum, d) => sum + d, 0) / positiveDurations.length)
         : null,
-      rebuffer_rate: has("hasBs") && activeSessions ? roundTo((rebufferSessions * 100) / activeSessions, 2) : null,
+      rebuffer_rate: hasBsEffective && activeSessions ? roundTo((rebufferSessions * 100) / activeSessions, 2) : null,
       avg_bitrate: hasOt ? (overall.vBrN > 0 ? overall.vBrSum / overall.vBrN : null) : (overall.brN > 0 ? overall.brSum / overall.brN : null),
       avg_buffer_length: hasOt ? (overall.vBlN > 0 ? overall.vBlSum / overall.vBlN : null) : (overall.blN > 0 ? overall.blSum / overall.blN : null),
       median_throughput: histQuantile(hasOt ? overall.vMtpHist : overall.mtpHist, 0.5),
@@ -892,7 +893,7 @@ async function cmcdFromFiles(
     buffer_health_ts: has("hasBl") ? buffer_health_ts : [],
     bitrate_ts: has("hasBr") ? bitrate_ts : [],
     throughput_ts: has("hasMtp") ? throughput_ts : [],
-    startup_ts: has("hasSu") ? startup_ts : [],
+    startup_ts: hasSu ? startup_ts : [],
     top_content,
     rebuffer_by_country,
     rebuffer_by_asn,

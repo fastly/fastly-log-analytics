@@ -1,4 +1,5 @@
 import React from 'react'
+import { formatCount } from '@/lib/format'
 import type { PlotlyLayout } from '@/types/api'
 
 export const OBJECT_TYPE_LABELS: Record<string, string> = {
@@ -123,43 +124,53 @@ export const STREAMING_INFO = {
 }
 
 export const SESSIONS_LAYOUT: PlotlyLayout = {
-  yaxis: { title: { text: 'Active Viewers' } },
-  yaxis2: { title: { text: 'Rebuffer Rate (%)' }, overlaying: 'y', side: 'right' as const, rangemode: 'tozero' },
+  yaxis: { title: { text: 'Active Viewers' }, rangemode: 'nonnegative' },
+  yaxis2: { title: { text: 'Rebuffer Rate (%)' }, overlaying: 'y', side: 'right' as const, rangemode: 'nonnegative' },
 }
-export const SESSION_STARTS_LAYOUT: PlotlyLayout = { yaxis: { title: { text: 'New Sessions' } }, barcornerradius: 3 }
+export const SESSION_STARTS_LAYOUT: PlotlyLayout = { yaxis: { title: { text: 'New Sessions' }, rangemode: 'nonnegative' }, barcornerradius: 3 }
 export const BUFFER_LAYOUT: PlotlyLayout = {
-  yaxis: { title: { text: 'Buffer Length (ms)' } },
-  yaxis2: { title: { text: 'Starvation Rate (%)' }, overlaying: 'y', side: 'right' as const },
+  yaxis: { title: { text: 'Buffer Length (ms)' }, rangemode: 'nonnegative' },
+  yaxis2: { title: { text: 'Starvation Rate (%)' }, overlaying: 'y', side: 'right' as const, rangemode: 'nonnegative' },
 }
 export const BITRATE_LAYOUT: PlotlyLayout = {
   yaxis: { title: { text: 'Bitrate (kbps)' } },
   yaxis2: { title: { text: 'Utilization Ratio' }, overlaying: 'y', side: 'right' as const },
 }
 export const THROUGHPUT_LAYOUT: PlotlyLayout = { yaxis: { title: { text: 'Throughput (kbps)' } } }
-export const STARTUP_LAYOUT: PlotlyLayout = { yaxis: { title: { text: 'Startup Ratio (%)' } } }
+export const STARTUP_LAYOUT: PlotlyLayout = { yaxis: { title: { text: 'Startup Ratio (%)' }, rangemode: 'nonnegative' } }
 export const DURATION_DIST_LAYOUT: PlotlyLayout = { yaxis: { title: { text: 'Sessions' } }, barcornerradius: 3 }
 export const EMPTY_PLOT_LAYOUT: PlotlyLayout = {}
 export const EMPTY_ROWS: never[] = []
 
+function formatRoundedMetric(value: unknown): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '—'
+  return formatCount(Math.round(value))
+}
+
+function formatRebufferRate(value: unknown): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '—'
+  return `${Number(value.toFixed(2))}%`
+}
+
 export const CONTENT_COLUMNS = [
   { accessorKey: 'content_id', header: 'Content ID' },
   { accessorKey: 'session_count', header: 'Sessions' },
-  { accessorKey: 'rebuffer_rate', header: 'Rebuffer Rate %' },
-  { accessorKey: 'avg_bitrate', header: 'Avg Bitrate (kbps)' },
-  { accessorKey: 'avg_buffer_length', header: 'Avg Buffer (ms)' },
+  { accessorKey: 'rebuffer_rate', header: 'Rebuffer Rate %', cell: ({ getValue }: { getValue: () => unknown }) => formatRebufferRate(getValue()) },
+  { accessorKey: 'avg_bitrate', header: 'Avg Bitrate (kbps)', cell: ({ getValue }: { getValue: () => unknown }) => formatRoundedMetric(getValue()) },
+  { accessorKey: 'avg_buffer_length', header: 'Avg Buffer (ms)', cell: ({ getValue }: { getValue: () => unknown }) => formatRoundedMetric(getValue()) },
 ]
 export const REBUFFER_COUNTRY_COLUMNS = [
   { accessorKey: 'country', header: 'Country' },
-  { accessorKey: 'rebuffer_rate', header: 'Rebuffer Rate %' },
+  { accessorKey: 'rebuffer_rate', header: 'Rebuffer Rate %', cell: ({ getValue }: { getValue: () => unknown }) => formatRebufferRate(getValue()) },
   { accessorKey: 'session_count', header: 'Sessions' },
-  { accessorKey: 'median_throughput', header: 'Median Throughput (kbps)' },
+  { accessorKey: 'median_throughput', header: 'Median Throughput (kbps)', cell: ({ getValue }: { getValue: () => unknown }) => formatRoundedMetric(getValue()) },
 ]
 export const REBUFFER_ASN_COLUMNS = [
   { accessorKey: 'label', header: 'ASN' },
-  { accessorKey: 'rebuffer_rate', header: 'Rebuffer Rate %' },
+  { accessorKey: 'rebuffer_rate', header: 'Rebuffer Rate %', cell: ({ getValue }: { getValue: () => unknown }) => formatRebufferRate(getValue()) },
   { accessorKey: 'session_count', header: 'Sessions' },
-  { accessorKey: 'avg_bitrate', header: 'Avg Bitrate (kbps)' },
-  { accessorKey: 'avg_buffer_length', header: 'Avg Buffer (ms)' },
+  { accessorKey: 'avg_bitrate', header: 'Avg Bitrate (kbps)', cell: ({ getValue }: { getValue: () => unknown }) => formatRoundedMetric(getValue()) },
+  { accessorKey: 'avg_buffer_length', header: 'Avg Buffer (ms)', cell: ({ getValue }: { getValue: () => unknown }) => formatRoundedMetric(getValue()) },
 ]
 export const STREAMING_FORMAT_COLUMNS = [
   { accessorKey: 'streaming_format', header: 'Format' },

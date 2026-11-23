@@ -662,6 +662,36 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     expect(screen.getAllByText('—').length).toBeGreaterThan(0)
   })
 
+  test('formats Top Content metrics cleanly without raw floats, shows em-dash for null rebuffer_rate, and clamps Starvation Rate y-axis non-negative', async () => {
+    useMockDataTable = false
+    const { BUFFER_LAYOUT } = await import('@/app/streaming/_sections/StreamingConstants')
+    expect(BUFFER_LAYOUT.yaxis2?.rangemode).toBe('nonnegative')
+
+    mockPost.mockResolvedValue({
+      data: {
+        ...CMCD_FIXTURE,
+        top_content: [
+          {
+            content_id: 'live-stream-1',
+            session_count: 12,
+            rebuffer_rate: null,
+            avg_bitrate: 2395.9837186584173,
+            avg_buffer_length: 3958.4825789645065,
+          },
+        ],
+      },
+    } as never)
+    renderWithQuery(<StreamingClient />, { queryClient })
+    expect(await screen.findByText('live-stream-1')).toBeInTheDocument()
+    const row = screen.getByText('live-stream-1').closest('tr')
+    expect(row).not.toBeNull()
+    expect(within(row!).getByText('2,396')).toBeInTheDocument()
+    expect(within(row!).getByText('3,958')).toBeInTheDocument()
+    expect(within(row!).getByText('—')).toBeInTheDocument()
+    expect(screen.queryByText(/2395\.9837/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/3958\.4825/)).not.toBeInTheDocument()
+  })
+
   describe('CostCalculator calc logic with RUM', () => {
     test('returns correct calculations for DEFAULTS', () => {
       const results = calculate(DEFAULTS)

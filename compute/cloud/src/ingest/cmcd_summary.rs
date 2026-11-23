@@ -8,8 +8,8 @@ use super::hist::Hist;
 use super::hll::Hll;
 use arrow_array::{
     builder::{BinaryBuilder, BooleanBuilder, Float64Builder, Int64Builder, StringBuilder},
-    Array, ArrayRef, BooleanArray, Float64Array, Int64Array, RecordBatch, StringArray,
-    TimestampMillisecondArray,
+    Array, ArrayRef, BooleanArray, Float64Array, Int64Array, LargeStringArray, RecordBatch,
+    StringArray, StringViewArray, TimestampMillisecondArray,
 };
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use parquet::file::metadata::KeyValue;
@@ -34,15 +34,36 @@ pub fn cmcd_summary_key(prefix: &str, start: i64, end: i64, run_id: &str, rows: 
     super::processed_key(prefix, start, end, run_id, rows)
 }
 
-/// True when any batch carries at least one non-null value in `cmcd_sid`, `cmcd_br`, `cmcd_bl`,
-/// or `cmcd_ot` (the raw CMCD base filter).
+fn col_has_cmcd_value(col: &ArrayRef) -> bool {
+    if col.null_count() >= col.len() {
+        return false;
+    }
+    match col.data_type() {
+        DataType::Utf8 => col
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .is_some_and(|a| (0..a.len()).any(|i| a.is_valid(i) && !a.value(i).is_empty())),
+        DataType::LargeUtf8 => col
+            .as_any()
+            .downcast_ref::<LargeStringArray>()
+            .is_some_and(|a| (0..a.len()).any(|i| a.is_valid(i) && !a.value(i).is_empty())),
+        DataType::Utf8View => col
+            .as_any()
+            .downcast_ref::<StringViewArray>()
+            .is_some_and(|a| (0..a.len()).any(|i| a.is_valid(i) && !a.value(i).is_empty())),
+        _ => true,
+    }
+}
+
+/// True when any batch carries at least one non-null (and for string columns, non-empty) value in
+/// `cmcd_sid`, `cmcd_br`, `cmcd_bl`, or `cmcd_ot` (the raw CMCD base filter).
 pub fn batches_have_cmcd(batches: &[&RecordBatch]) -> bool {
     const MARKERS: [&str; 4] = ["cmcd_sid", "cmcd_br", "cmcd_bl", "cmcd_ot"];
     batches.iter().any(|batch| {
         MARKERS.iter().any(|name| {
             batch
                 .column_by_name(name)
-                .is_some_and(|col| col.null_count() < col.len())
+                .is_some_and(col_has_cmcd_value)
         })
     })
 }
@@ -397,10 +418,10 @@ pub fn write_cmcd_summary(
         let elapsed_col = NumCol::new(batch, "elapsed");
 
         for i in 0..batch.num_rows() {
-            let sid = get_str(sid_col, i);
+            let sid = get_non_empty_str(sid_col, i);
             let br = br_col.as_ref().and_then(|c| c.get(i));
             let bl = bl_col.as_ref().and_then(|c| c.get(i));
-            let ot = get_str(ot_col, i);
+            let ot = get_non_empty_str(ot_col, i);
             if sid.is_none() && br.is_none() && bl.is_none() && ot.is_none() {
                 continue;
             }
@@ -1359,4 +1380,86 @@ pub fn merge_windows(sources: &[&[u8]]) -> Result<Vec<u8>, String> {
         acc.prune();
     }
     acc.write()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow_array::{LargeStringArray, StringViewArray};
+    use arrow_schema::TimeUnit;
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+    fn empty_string_cmcd_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
+                false,
+            ),
+            Field::new("cmcd_sid", DataType::Utf8, true),
+            Field::new("cmcd_ot", DataType::Utf8, true),
+            Field::new("cmcd_br", DataType::Int64, true),
+            Field::new("cmcd_bl", DataType::Int64, true),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(
+                    TimestampMillisecondArray::from(vec![1_800_000_001_000, 1_800_000_002_000])
+                        .with_timezone("UTC"),
+                ),
+                Arc::new(StringArray::from(vec![Some(""), Some("")])),
+                Arc::new(StringArray::from(vec![Some(""), Some("")])),
+                Arc::new(Int64Array::from(vec![None, None])),
+                Arc::new(Int64Array::from(vec![None, None])),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn empty_string_cmcd_sid_and_ot_are_not_cmcd() {
+        let batch = empty_string_cmcd_batch();
+        assert!(!batches_have_cmcd(&[&batch]));
+
+        let large_schema = Arc::new(Schema::new(vec![
+            Field::new("cmcd_sid", DataType::LargeUtf8, true),
+            Field::new("cmcd_ot", DataType::Utf8View, true),
+        ]));
+        let large_batch = RecordBatch::try_new(
+            large_schema,
+            vec![
+                Arc::new(LargeStringArray::from(vec![Some(""), None])),
+                Arc::new(StringViewArray::from(vec![Some(""), Some("")])),
+            ],
+        )
+        .unwrap();
+        assert!(!batches_have_cmcd(&[&large_batch]));
+    }
+
+    #[test]
+    fn write_cmcd_summary_skips_empty_string_non_cmcd_rows() {
+        let batch = empty_string_cmcd_batch();
+        let bytes = write_cmcd_summary(&[&batch], 1_800_000_000).unwrap();
+        let reader = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(bytes))
+            .unwrap()
+            .build()
+            .unwrap();
+        let mut non_totals_rows = 0usize;
+        for out_batch in reader {
+            let out_batch = out_batch.unwrap();
+            let kind = out_batch
+                .column_by_name("kind")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            for i in 0..out_batch.num_rows() {
+                if kind.value(i) != "totals" {
+                    non_totals_rows += 1;
+                }
+            }
+        }
+        assert_eq!(non_totals_rows, 0);
+    }
 }

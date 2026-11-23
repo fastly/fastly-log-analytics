@@ -809,4 +809,170 @@ describe("Feature F24 — CMCD Streaming Media cloud-engine", () => {
     expect(res?.has_data).toBe(false);
     expect(res?.sessions_ts).toEqual([]);
   });
+
+  it("excludes non-CMCD rows with empty-string cmcd_sid and cmcd_ot so they do not count as active viewers", async () => {
+    const engine = new DuckDBAnalyticalEngine();
+    try {
+      await engine.executeSql(`INSERT INTO requests (scoped_key, ts_ms, cmcd_sid, cmcd_ot)
+        VALUES ('native', 1700000100000, '', ''),
+          ('native', 1700000160000, '', '')`);
+      const empty = await queryCmcdAggregates({ engine });
+      expect(empty.has_data).toBe(false);
+      expect(empty.overview.active_sessions).toBe(0);
+
+      // Even when a real CMCD row has cmcd_br set and cmcd_sid = '', '' must never count as a session.
+      await engine.executeSql(`INSERT INTO requests (scoped_key, ts_ms, cmcd_sid, cmcd_ot, cmcd_br, cmcd_bl)
+        VALUES ('native', 1700000220000, '', 'v', 2000, 4000),
+          ('native', 1700000280000, 'real-sess', 'v', 3000, 5000)`);
+      const mixed = await queryCmcdAggregates({ engine, bucket_seconds: 300 });
+      expect(mixed.has_data).toBe(true);
+      expect(mixed.overview.active_sessions).toBe(1);
+      expect(mixed.summary.total_requests).toBe(2);
+    } finally {
+      await engine.reset();
+    }
+  });
+
+  it("reports zero rebuffer metrics when cmcd_bl is present and sparse cmcd_bs is NULL (raw DuckDB)", async () => {
+    const engine = new DuckDBAnalyticalEngine();
+    try {
+      await engine.executeSql(`INSERT INTO requests
+        (scoped_key, ts_ms, geo_country, client_asn, as_name, cmcd_sid, cmcd_cid, cmcd_br, cmcd_bl, cmcd_bs, cmcd_mtp, cmcd_ot, cmcd_su)
+        VALUES
+          ('native', 1700000100000, 'US', 15169, 'Google', 'sess-1', 'live-1', 2500, 4000, NULL, 12000, 'v', TRUE),
+          ('native', 1700000400000, 'US', 15169, 'Google', 'sess-1', 'live-1', 2500, 5000, NULL, 14000, 'v', NULL)`);
+      const data = await queryCmcdAggregates({ engine, bucket_seconds: 300 });
+      expect(data.overview.rebuffer_rate).toBe(0);
+      expect(data.sessions_ts).toHaveLength(2);
+      expect(data.sessions_ts.map((b) => b.rebuffer_session_pct)).toEqual([0, 0]);
+      expect(data.buffer_health_ts.map((b) => b.starvation_rate)).toEqual([0, 0]);
+      expect(data.startup_ts.map((b) => b.startup_ratio)).toEqual([100, 0]);
+      expect(data.top_content[0]).toMatchObject({ content_id: "live-1", rebuffer_rate: 0 });
+      expect(data.rebuffer_by_country).toHaveLength(1);
+      expect(data.rebuffer_by_country[0]).toMatchObject({ country: "US", rebuffer_rate: 0 });
+      expect(data.rebuffer_by_asn).toHaveLength(1);
+      expect(data.rebuffer_by_asn[0]).toMatchObject({ asn: 15169, rebuffer_rate: 0 });
+    } finally {
+      await engine.reset();
+    }
+  });
+
+  it("reports zero rebuffer metrics when has_bl > 0 and sparse has_bs = 0 (cmcdFromRollup)", async () => {
+    const hllOf = (items: string[]) => {
+      const h = new Hll();
+      for (const item of items) h.add(item);
+      return h.toBytes();
+    };
+    const t0 = 1_800_000_000_000;
+    const t1 = t0 + 300_000;
+    const t2 = t0 + 600_000;
+    const rows: Array<Record<string, unknown>> = [
+      {
+        kind: "bucket", bucket: t0, reqs: 2, sid_hll: hllOf(["s1"]),
+        rebuffer_events: 0, has_bs: 0, has_su: 1, has_ot: 2, has_bl: 2, has_br: 2, has_mtp: 2, has_cid: 2,
+        br_sum: 5000, br_n: 2, bl_sum: 8000, bl_n: 2, mtp_sum: 20000, mtp_n: 2,
+        v_br_sum: 5000, v_br_n: 2, v_bl_sum: 8000, v_bl_n: 2,
+        startup_requests: 1, min_ts: t0 + 1000, max_ts: t0 + 2000,
+      },
+      {
+        kind: "bucket", bucket: t1, reqs: 1, sid_hll: hllOf(["s1"]),
+        rebuffer_events: 0, has_bs: 0, has_su: 0, has_ot: 1, has_bl: 1, has_br: 1, has_mtp: 1, has_cid: 1,
+        br_sum: 2500, br_n: 1, bl_sum: 5000, bl_n: 1, mtp_sum: 12000, mtp_n: 1,
+        v_br_sum: 2500, v_br_n: 1, v_bl_sum: 5000, v_bl_n: 1,
+        startup_requests: 0, min_ts: t1 + 1000, max_ts: t1 + 1000,
+      },
+      { kind: "session", key: "s1", reqs: 3, first_ts: t0 + 1000, last_ts: t1 + 1000 },
+      { kind: "content", key: "live-1", reqs: 3, sid_hll: hllOf(["s1"]), has_bs: 0, v_br_sum: 7500, v_br_n: 3, br_sum: 7500, br_n: 3, v_bl_sum: 13000, v_bl_n: 3, bl_sum: 13000, bl_n: 3 },
+      { kind: "country", key: "US", reqs: 3, sid_hll: hllOf(["s1"]), rebuffer_events: 0, has_bs: 0 },
+      { kind: "asn", key: "15169", label: "Google", reqs: 3, sid_hll: hllOf(["s1"]), rebuffer_events: 0, has_bs: 0, v_br_sum: 7500, v_br_n: 3, br_sum: 7500, br_n: 3, v_bl_sum: 13000, v_bl_n: 3, bl_sum: 13000, bl_n: 3, mtp_sum: 32000, mtp_n: 3 },
+      { kind: "ot", key: "v", reqs: 3 },
+    ];
+    const str = (k: string) => rows.map((r) => (r[k] as string | undefined) ?? null);
+    const i64 = (k: string) => rows.map((r) => (r[k] == null ? null : BigInt(r[k] as number)));
+    const f64 = (k: string) => rows.map((r) => (r[k] as number | undefined) ?? null);
+    const bool = (k: string) => rows.map((r) => (r[k] as boolean | undefined) ?? null);
+    const bin = (k: string) => rows.map((r) => (r[k] as Uint8Array | undefined) ?? null);
+    const bytes = parquetWriteBuffer({
+      codec: "SNAPPY",
+      columnData: [
+        { name: "kind", type: "STRING", data: str("kind") },
+        { name: "bucket", type: "INT64", data: i64("bucket") },
+        { name: "key", type: "STRING", data: str("key") },
+        { name: "label", type: "STRING", data: str("label") },
+        { name: "truncated", type: "BOOLEAN", data: bool("truncated") },
+        { name: "reqs", type: "INT64", data: i64("reqs") },
+        { name: "sid_hll", type: "BYTE_ARRAY", data: bin("sid_hll") },
+        { name: "rebuffer_events", type: "INT64", data: i64("rebuffer_events") },
+        { name: "rebuffer_sid_hll", type: "BYTE_ARRAY", data: bin("rebuffer_sid_hll") },
+        { name: "has_bs", type: "INT64", data: i64("has_bs") },
+        { name: "has_su", type: "INT64", data: i64("has_su") },
+        { name: "has_ot", type: "INT64", data: i64("has_ot") },
+        { name: "has_bl", type: "INT64", data: i64("has_bl") },
+        { name: "has_br", type: "INT64", data: i64("has_br") },
+        { name: "has_mtp", type: "INT64", data: i64("has_mtp") },
+        { name: "has_cid", type: "INT64", data: i64("has_cid") },
+        { name: "br_sum", type: "DOUBLE", data: f64("br_sum") },
+        { name: "br_n", type: "INT64", data: i64("br_n") },
+        { name: "tb_sum", type: "DOUBLE", data: f64("tb_sum") },
+        { name: "tb_n", type: "INT64", data: i64("tb_n") },
+        { name: "bl_sum", type: "DOUBLE", data: f64("bl_sum") },
+        { name: "bl_n", type: "INT64", data: i64("bl_n") },
+        { name: "mtp_sum", type: "DOUBLE", data: f64("mtp_sum") },
+        { name: "mtp_n", type: "INT64", data: i64("mtp_n") },
+        { name: "v_br_sum", type: "DOUBLE", data: f64("v_br_sum") },
+        { name: "v_br_n", type: "INT64", data: i64("v_br_n") },
+        { name: "v_tb_sum", type: "DOUBLE", data: f64("v_tb_sum") },
+        { name: "v_tb_n", type: "INT64", data: i64("v_tb_n") },
+        { name: "v_bl_sum", type: "DOUBLE", data: f64("v_bl_sum") },
+        { name: "v_bl_n", type: "INT64", data: i64("v_bl_n") },
+        { name: "util_sum", type: "DOUBLE", data: f64("util_sum") },
+        { name: "util_n", type: "INT64", data: i64("util_n") },
+        { name: "util_all_sum", type: "DOUBLE", data: f64("util_all_sum") },
+        { name: "util_all_n", type: "INT64", data: i64("util_all_n") },
+        { name: "startup_requests", type: "INT64", data: i64("startup_requests") },
+        { name: "su_bl_sum", type: "DOUBLE", data: f64("su_bl_sum") },
+        { name: "su_bl_n", type: "INT64", data: i64("su_bl_n") },
+        { name: "su_ttfb_sum", type: "DOUBLE", data: f64("su_ttfb_sum") },
+        { name: "su_ttfb_n", type: "INT64", data: i64("su_ttfb_n") },
+        { name: "v_bl_hist", type: "BYTE_ARRAY", data: bin("v_bl_hist") },
+        { name: "bl_hist", type: "BYTE_ARRAY", data: bin("bl_hist") },
+        { name: "v_mtp_hist", type: "BYTE_ARRAY", data: bin("v_mtp_hist") },
+        { name: "mtp_hist", type: "BYTE_ARRAY", data: bin("mtp_hist") },
+        { name: "min_ts", type: "INT64", data: i64("min_ts") },
+        { name: "max_ts", type: "INT64", data: i64("max_ts") },
+        { name: "first_ts", type: "INT64", data: i64("first_ts") },
+        { name: "last_ts", type: "INT64", data: i64("last_ts") },
+      ],
+    });
+    const key = "processed/request/cmcd_summary/window=sparse-bs.parquet";
+    const res = await cmcdFromRollup(
+      {
+        start_time: new Date(t0).toISOString(),
+        end_time: new Date(t2).toISOString(),
+        bucket_seconds: 300,
+      },
+      {
+        async fetchJson() {
+          return {
+            files: [{ key, start: new Date(t0).toISOString(), end: new Date(t2).toISOString(), size: bytes.byteLength, rows: rows.length }],
+            next_cursor: null,
+            complete: true,
+          };
+        },
+        async fetchFile() {
+          return { bytes, cached: false };
+        },
+      },
+    );
+    expect(res).not.toBeNull();
+    expect(res?.overview.rebuffer_rate).toBe(0);
+    expect(res?.sessions_ts.map((b) => b.rebuffer_session_pct)).toEqual([0, 0]);
+    expect(res?.buffer_health_ts.map((b) => b.starvation_rate)).toEqual([0, 0]);
+    expect(res?.startup_ts.map((b) => b.startup_ratio)).toEqual([50, 0]);
+    expect(res?.top_content[0]).toMatchObject({ content_id: "live-1", rebuffer_rate: 0 });
+    expect(res?.rebuffer_by_country).toHaveLength(1);
+    expect(res?.rebuffer_by_country[0]).toMatchObject({ country: "US", rebuffer_rate: 0 });
+    expect(res?.rebuffer_by_asn).toHaveLength(1);
+    expect(res?.rebuffer_by_asn[0]).toMatchObject({ asn: 15169, rebuffer_rate: 0 });
+  });
 });

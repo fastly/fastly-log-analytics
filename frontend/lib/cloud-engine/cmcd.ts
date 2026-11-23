@@ -124,7 +124,7 @@ export function emptyCmcdAggregates() {
 function buildCmcdWhere(params: CmcdQueryParams): string {
   const clauses: string[] = [
     rangeServiceSql(params, [
-      "(cmcd_sid IS NOT NULL OR cmcd_br IS NOT NULL OR cmcd_bl IS NOT NULL OR cmcd_ot IS NOT NULL)",
+      "(NULLIF(cmcd_sid, '') IS NOT NULL OR cmcd_br IS NOT NULL OR cmcd_bl IS NOT NULL OR NULLIF(cmcd_ot, '') IS NOT NULL)",
     ]),
   ];
   if (params.filter_sf) {
@@ -172,10 +172,10 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
   const summaryRows = await engine.executeSql<Record<string, unknown>>(
     `SELECT
       COUNT(*)::BIGINT AS total_requests,
-      COUNT(DISTINCT cmcd_sid)::BIGINT AS active_sessions,
+      COUNT(DISTINCT NULLIF(cmcd_sid, ''))::BIGINT AS active_sessions,
       (COUNT(*) FILTER (WHERE cmcd_bs IS TRUE))::BIGINT AS rebuffer_events,
       COUNT(cmcd_bs) AS has_bs,
-      COUNT(DISTINCT cmcd_sid) FILTER (WHERE cmcd_bs IS TRUE) AS rebuffer_sessions,
+      COUNT(DISTINCT NULLIF(cmcd_sid, '')) FILTER (WHERE cmcd_bs IS TRUE) AS rebuffer_sessions,
       AVG(cmcd_br)::DOUBLE AS avg_bitrate_kbps,
       AVG(cmcd_tb)::DOUBLE AS avg_top_bitrate_kbps,
       AVG(cmcd_bl)::DOUBLE AS avg_buffer_ms,
@@ -210,6 +210,10 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
   const video = hasOt ? "cmcd_ot = 'v'" : "TRUE";
   // High-Scale omits a section when the window never reported the CMCD keys it needs.
   const has = (key: string) => Number(s[`has_${key}`]) > 0;
+  // cmcd_bs is a sparse flag (1 only on starvation, NULL otherwise), so buffer-length telemetry
+  // proves starvation tracking is active even in healthy windows with 0 starvations.
+  const hasBsEffective = has("bs") || has("bl");
+  const hasSu = has("su");
   const rebufferEvents = Number(s.rebuffer_events ?? 0);
   const rebufferRate =
     totalRequests > 0 ? roundTo((rebufferEvents * 100) / totalRequests, 2) : 0;
@@ -222,9 +226,9 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
     `SELECT
       (floor(ts_ms / ${bucketMs}) * ${bucketMs})::BIGINT AS bucket_ms,
       COUNT(*)::BIGINT AS reqs,
-      COUNT(DISTINCT cmcd_sid)::BIGINT AS active_sessions,
+      COUNT(DISTINCT NULLIF(cmcd_sid, ''))::BIGINT AS active_sessions,
       (COUNT(*) FILTER (WHERE cmcd_bs IS TRUE))::BIGINT AS rebuffer_events,
-      COUNT(DISTINCT cmcd_sid) FILTER (WHERE cmcd_bs IS TRUE) AS rebuffer_sessions,
+      COUNT(DISTINCT NULLIF(cmcd_sid, '')) FILTER (WHERE cmcd_bs IS TRUE) AS rebuffer_sessions,
       COUNT(cmcd_bs) AS has_bs,
       COUNT(cmcd_su) AS has_su,
       AVG(cmcd_bl)::DOUBLE AS avg_buffer_ms,
@@ -270,7 +274,7 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
       bucket: tsIso,
       concurrent_sessions: sess,
       new_sessions: 0,
-      rebuffer_session_pct: Number(b.has_bs) && sess > 0 ? roundTo(Number(b.rebuffer_sessions) * 100 / sess, 2) : null,
+      rebuffer_session_pct: hasBsEffective && sess > 0 ? roundTo(Number(b.rebuffer_sessions) * 100 / sess, 2) : null,
       timestamp: tsIso,
       active_sessions: sess,
       rebuffer_events: rebuf,
@@ -280,7 +284,7 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
       bucket: tsIso,
       p50_buffer: nullable(b.p50_buffer_ms),
       p95_buffer: nullable(b.p95_buffer_ms),
-      starvation_rate: Number(b.has_bs) ? roundTo(rebuf * 100 / reqs, 2) : null,
+      starvation_rate: hasBsEffective && reqs > 0 ? roundTo(rebuf * 100 / reqs, 2) : null,
       timestamp: tsIso,
       avg_buffer_ms: roundTo(Number(b.avg_buffer_ms ?? 0), 1),
       p10_buffer_ms: roundTo(Number(b.p10_buffer_ms ?? 0), 1),
@@ -307,7 +311,7 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
     });
     startup_ts.push({
       bucket: tsIso,
-      startup_ratio: Number(b.has_su) ? roundTo(Number(b.startup_requests) * 100 / reqs, 2) : null,
+      startup_ratio: hasSu && reqs > 0 ? roundTo(Number(b.startup_requests) * 100 / reqs, 2) : null,
       timestamp: tsIso,
       startup_requests: Number(b.startup_requests ?? 0),
       avg_startup_buffer_ms: roundTo(Number(b.avg_startup_buffer_ms ?? 0), 1),
@@ -367,6 +371,10 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
     };
   });
 
+  const rebufferRateSql = hasBsEffective
+    ? "COUNT(DISTINCT NULLIF(cmcd_sid, '')) FILTER (WHERE cmcd_bs IS TRUE) * 100.0 / NULLIF(COUNT(DISTINCT NULLIF(cmcd_sid, '')), 0)"
+    : "NULL";
+
   const [
     topContentRows,
     countryRows,
@@ -377,11 +385,11 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
     engine.executeSql<Record<string, unknown>>(
       `SELECT
         cmcd_cid AS content_id,
-        COUNT(DISTINCT cmcd_sid)::BIGINT AS sessions,
+        COUNT(DISTINCT NULLIF(cmcd_sid, ''))::BIGINT AS sessions,
         COUNT(*)::BIGINT AS requests,
         AVG(cmcd_br) FILTER (WHERE ${video})::DOUBLE AS avg_bitrate_kbps,
         AVG(cmcd_bl) FILTER (WHERE ${video})::DOUBLE AS avg_buffer_length,
-        CASE WHEN COUNT(cmcd_bs) > 0 THEN COUNT(DISTINCT cmcd_sid) FILTER (WHERE cmcd_bs IS TRUE) * 100.0 / NULLIF(COUNT(DISTINCT cmcd_sid), 0) END AS rebuffer_rate
+        ${rebufferRateSql} AS rebuffer_rate
       FROM requests
       WHERE ${where} AND cmcd_cid <> ''
       GROUP BY 1
@@ -393,11 +401,11 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
     engine.executeSql<Record<string, unknown>>(
       `SELECT
         COALESCE(NULLIF(geo_country, ''), country) AS country,
-        COUNT(DISTINCT cmcd_sid)::BIGINT AS sessions,
+        COUNT(DISTINCT NULLIF(cmcd_sid, ''))::BIGINT AS sessions,
         COUNT(*)::BIGINT AS requests,
         (COUNT(*) FILTER (WHERE cmcd_bs IS TRUE))::BIGINT AS rebuffer_events,
         QUANTILE_CONT(cmcd_mtp, 0.5) FILTER (WHERE ${video})::DOUBLE AS median_throughput,
-        CASE WHEN COUNT(cmcd_bs) > 0 THEN COUNT(DISTINCT cmcd_sid) FILTER (WHERE cmcd_bs IS TRUE) * 100.0 / NULLIF(COUNT(DISTINCT cmcd_sid), 0) END AS rebuffer_rate
+        ${rebufferRateSql} AS rebuffer_rate
       FROM requests
       WHERE ${where} AND COALESCE(NULLIF(geo_country, ''), NULLIF(country, '')) IS NOT NULL
       GROUP BY 1
@@ -410,12 +418,12 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
       `SELECT
         COALESCE(client_asn, asn)::BIGINT AS asn,
         COALESCE(NULLIF(as_name, ''), 'AS' || CAST(COALESCE(client_asn, asn) AS VARCHAR)) AS as_name,
-        COUNT(DISTINCT cmcd_sid)::BIGINT AS sessions,
+        COUNT(DISTINCT NULLIF(cmcd_sid, ''))::BIGINT AS sessions,
         COUNT(*)::BIGINT AS requests,
         (COUNT(*) FILTER (WHERE cmcd_bs IS TRUE))::BIGINT AS rebuffer_events,
         AVG(cmcd_br) FILTER (WHERE ${video})::DOUBLE AS avg_bitrate,
         AVG(cmcd_bl) FILTER (WHERE ${video})::DOUBLE AS avg_buffer_length,
-        CASE WHEN COUNT(cmcd_bs) > 0 THEN COUNT(DISTINCT cmcd_sid) FILTER (WHERE cmcd_bs IS TRUE) * 100.0 / NULLIF(COUNT(DISTINCT cmcd_sid), 0) END AS rebuffer_rate,
+        ${rebufferRateSql} AS rebuffer_rate,
         AVG(cmcd_mtp)::DOUBLE AS avg_throughput_kbps
       FROM requests
       WHERE ${where} AND COALESCE(client_asn, asn) IS NOT NULL
@@ -431,7 +439,7 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
       params.signal,
     ),
     engine.executeSql<{ format: string; requests: number; sessions: number }>(
-      `SELECT cmcd_sf AS format, COUNT(*)::BIGINT AS requests, COUNT(DISTINCT cmcd_sid)::BIGINT AS sessions FROM requests WHERE ${where} AND cmcd_sf <> '' GROUP BY 1 ORDER BY sessions DESC, format`,
+      `SELECT cmcd_sf AS format, COUNT(*)::BIGINT AS requests, COUNT(DISTINCT NULLIF(cmcd_sid, ''))::BIGINT AS sessions FROM requests WHERE ${where} AND cmcd_sf <> '' GROUP BY 1 ORDER BY sessions DESC, format`,
       [],
       params.signal,
     ),
@@ -444,7 +452,7 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
       active_sessions: activeSessions,
       peak_viewers: peakViewers,
       avg_session_duration: durations.length ? Math.round(durations.reduce((sum, duration) => sum + duration, 0) / durations.length) : null,
-      rebuffer_rate: Number(s.has_bs) && activeSessions ? roundTo(Number(s.rebuffer_sessions) * 100 / activeSessions, 2) : null,
+      rebuffer_rate: hasBsEffective && activeSessions ? roundTo(Number(s.rebuffer_sessions) * 100 / activeSessions, 2) : null,
       avg_bitrate: nullable(hasOt ? s.video_avg_bitrate : s.avg_bitrate_kbps),
       avg_buffer_length: nullable(hasOt ? s.video_avg_buffer : s.avg_buffer_ms),
       median_throughput: nullable(hasOt ? s.video_median_throughput : s.median_throughput),
@@ -465,7 +473,7 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
     buffer_health_ts: has("bl") ? buffer_health_ts : [],
     bitrate_ts: has("br") ? bitrate_ts : [],
     throughput_ts: has("mtp") ? throughput_ts : [],
-    startup_ts: has("su") ? startup_ts : [],
+    startup_ts: hasSu ? startup_ts : [],
     top_content: !has("cid") ? [] : topContentRows.map((r) => ({
       content_id: String(r.content_id ?? "Unknown"),
       sessions: Number(r.sessions ?? 0),
@@ -476,7 +484,7 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
       avg_buffer_length: nullable(r.avg_buffer_length),
       rebuffer_rate: nullable(r.rebuffer_rate),
     })),
-    rebuffer_by_country: !has("bs") ? [] : countryRows.map((r) => ({
+    rebuffer_by_country: !hasBsEffective ? [] : countryRows.map((r) => ({
       country: String(r.country ?? "Unknown"),
       session_count: Number(r.sessions ?? 0),
       median_throughput: nullable(r.median_throughput),
@@ -485,7 +493,7 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
       rebuffer_events: Number(r.rebuffer_events ?? 0),
       rebuffer_rate: nullable(r.rebuffer_rate),
     })),
-    rebuffer_by_asn: !has("bs") ? [] : asnRows.map((r) => ({
+    rebuffer_by_asn: !hasBsEffective ? [] : asnRows.map((r) => ({
       asn: Number(r.asn ?? 0),
       as_name: String(r.as_name ?? ""),
       label: String(r.as_name ?? ""),
