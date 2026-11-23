@@ -90,6 +90,7 @@ export class ParquetBindingStore {
   private queue: Promise<unknown> = Promise.resolve();
   private recovery: Promise<void> | null = null;
   private generation = 1;
+  private footersCached = false;
   private poisoned: Error | null = null;
   private creationFailure: DuckDBBackendInitializationError | null = null;
   private nextFile = 1;
@@ -163,10 +164,6 @@ export class ParquetBindingStore {
     this.check(generation);
     if (!this.initialized) {
       await backend.query(`SET memory_limit = ${literal(this.config.memoryLimit)}`);
-      // A read runs several statements over each registered file; without the
-      // cache each one re-parses a compact's footer (~250 KB of thrift). File
-      // names are never reused, so a cached footer can't outlive its bytes.
-      await backend.query("SET parquet_metadata_cache = true");
       this.check(generation);
       await this.publish(backend, this.snapshot([]));
       this.check(generation);
@@ -198,6 +195,7 @@ export class ParquetBindingStore {
       if (generation !== this.generation) throw new ExpiredDuckDBReadError();
       this.backendPromise = null;
       this.initialized = false;
+      this.footersCached = false;
       this.bindings.clear();
       this.retired.clear();
       this.ownedNames.clear();
@@ -277,6 +275,20 @@ export class ParquetBindingStore {
     if (snapshot.valid && !snapshot.valid()) throw new ExpiredDuckDBReadError();
     if (snapshot.bindings.some((binding) => binding.dropped || binding.retired && binding.pins === 0))
       throw new ExpiredDuckDBReadError();
+  }
+
+  /**
+   * Caches Parquet footers on the current backend. A read runs several
+   * statements over each registered file; without the cache each one re-parses
+   * a compact's footer (~250 KB of thrift). File names are never reused, so a
+   * cached footer can't outlive its bytes. The setting belongs to the Parquet
+   * extension, so it waits for a read that loads the extension anyway.
+   */
+  protected async cacheParquetFooters(backend: DuckDBBackend, signal?: AbortSignal): Promise<void> {
+    if (this.footersCached) return;
+    const generation = this.generation;
+    await backend.query("SET parquet_metadata_cache = true", signal);
+    if (generation === this.generation) this.footersCached = true;
   }
 
   protected runRead<T>(

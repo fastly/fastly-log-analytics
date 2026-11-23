@@ -1101,6 +1101,7 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
           registered.push(name);
           signal?.throwIfAborted();
         }
+        await this.cacheParquetFooters(backend, signal);
         const footerGroups = footerSchemaGroups(accesses, registered);
         const groups: ParquetGroup[] = footerGroups ?? [];
         for (const names of footerGroups ? [] : await parquetSchemaGroups(backend, registered, signal)) {
