@@ -38,14 +38,15 @@ const line = (estimate: ReturnType<typeof estimateMonthly>, id: string) =>
   estimate.lines.find((l) => l.id === id)!;
 
 describe("front clock probes", () => {
-  it("ticks at a quarter of the shortest log period, between 1 and 30 s, as reconcile sets it", () => {
+  it("ticks at half the shortest log period, between 1 and 30 s, as reconcile sets it", () => {
     const off = { ...DEFAULT_INPUTS, rumPageviewsPerDay: 0 };
-    expect(clockIntervalS({ ...off, logPeriodS: 60 })).toBe(15);
+    expect(clockIntervalS({ ...off, logPeriodS: 60 })).toBe(30);
+    expect(clockIntervalS({ ...off, logPeriodS: 40 })).toBe(20);
     expect(clockIntervalS({ ...off, logPeriodS: 300 })).toBe(30);
-    expect(clockIntervalS({ ...off, logPeriodS: 2 })).toBe(1);
-    expect(clockIntervalS({ ...off, logPeriodS: 60, rumLogPeriodS: 20 })).toBe(15);
-    expect(clockIntervalS({ ...DEFAULT_INPUTS, rumPageviewsPerDay: 1, logPeriodS: 60, rumLogPeriodS: 20 })).toBe(5);
-    expect(clockIntervalS({ ...DEFAULT_INPUTS, rumPageviewsPerDay: 1, logPeriodS: 60, rumLogPeriodS: 1 })).toBe(1.25);
+    expect(clockIntervalS({ ...off, logPeriodS: 1 })).toBe(1);
+    expect(clockIntervalS({ ...off, logPeriodS: 60, rumLogPeriodS: 20 })).toBe(30);
+    expect(clockIntervalS({ ...DEFAULT_INPUTS, rumPageviewsPerDay: 1, logPeriodS: 60, rumLogPeriodS: 20 })).toBe(10);
+    expect(clockIntervalS({ ...DEFAULT_INPUTS, rumPageviewsPerDay: 1, logPeriodS: 60, rumLogPeriodS: 1 })).toBe(2.5);
   });
 
   it("prices both health checks from every probing POP as front requests and bytes", () => {
@@ -54,12 +55,13 @@ describe("front clock probes", () => {
     const quiet = { ...DEFAULT_INPUTS, requestsPerDay: 0, edgeRequestsPerDay: 0, rumPageviewsPerDay: 0 };
     const delivery = (logPeriodS: number) =>
       line(estimateMonthly({ ...quiet, logPeriodS }, units, rates), "delivery").usd;
-    // 2 checks × 53 POPs × 86,400 s ÷ 15 s = 610,560 probes a day, 30 days a month, ~2 KB each.
-    const probes = (2 * 53 * 86_400) / 15 * 30;
+    // 2 checks × 53 POPs × 86,400 s ÷ 30 s = 305,280 probes a day, 30 days a month, ~2 KB each.
+    const probes = (2 * 53 * 86_400) / 30 * 30;
     expect(delivery(60)).toBeCloseTo((probes / 10_000) * 0.01 + ((probes * 2_000) / 1e9) * 0.12);
-    expect(delivery(300)).toBeCloseTo(delivery(60) / 2);
+    expect(delivery(20)).toBeCloseTo(delivery(60) * 3);
+    expect(delivery(300)).toBeCloseTo(delivery(60));
     expect(line(estimateMonthly({ ...quiet, logPeriodS: 60 }, units, rates), "delivery").detail)
-      .toContain("610,560 clock probes/day every 15 s");
+      .toContain("305,280 clock probes/day every 30 s");
   });
 });
 

@@ -42,6 +42,7 @@ sub vcl_recv {
     unset req.http.x-flp-clock-secret;
     unset req.http.x-flp-worker-key;
     unset req.http.x-flp-tick;
+    unset req.http.x-flp-tick-pass;
     unset req.http.x-flp-auth-fail;
     unset req.http.x-flp-api-file;
     unset req.http.x-flp-fos-service;
@@ -283,6 +284,15 @@ sub vcl_recv {
     set req.url = req.url.path;
     set req.http.x-flp-tick = "1";
     unset req.http.Cookie;
+    # flp continues a turn that stopped with work left by calling its own clock with the CDN
+    # key, which only it holds; that call skips the cache on every hop so the next turn starts now.
+    if (req.http.x-flp-continue) {
+      declare local var.continue_key STRING;
+      set var.continue_key = table.lookup(flp_front_auth, "cdn_key", "");
+      if (var.continue_key != "" && req.http.x-fastly-key && digest.secure_is_equal(var.continue_key, req.http.x-fastly-key)) {
+        set req.http.x-flp-tick-pass = "1";
+      }
+    }
   }
 #FASTLY recv
   if (
@@ -317,6 +327,9 @@ sub vcl_recv {
         unset req.http.x-flp-gzip;
       }
     }
+  }
+  if (req.http.x-flp-tick-pass == "1") {
+    return(pass);
   }
   if (req.http.x-flp-fos-service) {
     # Every FOS object key is written once; only bucket listings change underneath us.

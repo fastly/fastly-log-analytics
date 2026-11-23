@@ -882,7 +882,7 @@ fn reconcile_sets_the_front_clock_health_checks_from_the_log_periods() {
     if record["rum"]["enabled"] == true {
         period = period.min(record["rum"]["log_period"].as_u64().unwrap().max(5));
     }
-    let want = (period * 1000 / 4).clamp(1000, 30_000);
+    let want = (period * 1000 / 2).clamp(1000, 30_000);
     assert_ne!(want, 1000, "fixture log period should need a slower clock");
     let intervals = || {
         platform

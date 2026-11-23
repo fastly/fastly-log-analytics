@@ -660,6 +660,24 @@ pub fn release(
         .map_err(|error| format!("schedule_release_failed:{error:?}"))
 }
 
+/// Whether a clock turn that just finished should start the next one now rather than wait for a
+/// probe: on the shield, with the record still wanting a run and no lease held.
+pub fn clock_continue_wanted(runtime: &impl Runtime, path: &str) -> bool {
+    if !runtime.on_log_shield() {
+        return false;
+    }
+    let now = runtime.now();
+    match path {
+        "/_tick" => continue_wanted(peek(runtime, SCHED_KEY).as_ref(), now, tick_wanted),
+        "/_flush" => continue_wanted(peek(runtime, FLUSH_SCHED_KEY).as_ref(), now, flush_wanted),
+        _ => false,
+    }
+}
+
+fn continue_wanted(record: Option<&Sched>, now: u64, wanted: fn(&Sched, u64) -> bool) -> bool {
+    record.is_some_and(|record| record.lease_until <= now && wanted(record, now))
+}
+
 /// The cached record, read without claiming (status surfaces and the health check).
 pub fn peek(runtime: &impl Runtime, key: &str) -> Option<Sched> {
     decode(runtime.core_cache_lookup(key).ok().flatten())
@@ -712,6 +730,29 @@ pub fn next_tick_at(runtime: &impl Runtime, last_tick: Option<u64>) -> Option<u6
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_turn_continues_only_while_the_clock_record_wants_a_run_and_no_lease_is_held() {
+        let now = 1_800_000_000;
+        let stale = Sched::default();
+        assert!(continue_wanted(Some(&stale), now, tick_wanted));
+        let leased = Sched {
+            lease_until: now + 30,
+            ..Sched::default()
+        };
+        assert!(!continue_wanted(Some(&leased), now, tick_wanted));
+        let fresh = Sched {
+            refreshed_at: now,
+            ..Sched::default()
+        };
+        assert!(!continue_wanted(Some(&fresh), now, tick_wanted));
+        let backing_off = Sched {
+            retry_after: now + 60,
+            ..Sched::default()
+        };
+        assert!(!continue_wanted(Some(&backing_off), now, tick_wanted));
+        assert!(!continue_wanted(None, now, tick_wanted));
+    }
 
     #[test]
     fn legacy_watermarks_wake_after_backoff_without_losing_backlog_state() {

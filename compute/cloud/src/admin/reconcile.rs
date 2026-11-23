@@ -1299,9 +1299,11 @@ fn upsert(
 }
 
 /// The front clock health checks' interval (`flp_clock` on `/_tick`, `flp_flush` on `/_flush`):
-/// a quarter of the shortest log period the clock serves (request, and RUM when enabled, whose
+/// half the shortest log period the clock serves (request, and RUM when enabled, whose
 /// ingest runs at least every 5 s), between 1 s and 30 s. Every Fastly POP sends both probes at
 /// this interval and each is a billed front request, so a 1 s clock costs ~9M requests a day.
+/// Half a period suffices because a turn that stops with work left continues itself
+/// (`Shell::continue_clock`) instead of waiting for the next probe.
 pub fn clock_interval_ms(service: &Service) -> u64 {
     clock_interval_ms_for(
         service.log_period,
@@ -1314,7 +1316,7 @@ fn clock_interval_ms_for(log_period_s: u32, rum_log_period_s: Option<u32>) -> u6
     if let Some(rum) = rum_log_period_s {
         period = period.min(u64::from(rum.max(5)));
     }
-    (period * 1000 / 4).clamp(1000, 30_000)
+    (period * 1000 / 2).clamp(1000, 30_000)
 }
 
 /// Clock health check changes that bring the front's existing checks to `clock_interval_ms`.
@@ -1618,12 +1620,13 @@ mod clock_tests {
     use super::clock_interval_ms_for;
 
     #[test]
-    fn the_clock_runs_at_a_quarter_of_the_shortest_log_period_between_1_and_30_s() {
-        assert_eq!(clock_interval_ms_for(60, None), 15_000);
+    fn the_clock_runs_at_half_the_shortest_log_period_between_1_and_30_s() {
+        assert_eq!(clock_interval_ms_for(60, None), 30_000);
         assert_eq!(clock_interval_ms_for(300, None), 30_000);
-        assert_eq!(clock_interval_ms_for(2, None), 1_000);
-        assert_eq!(clock_interval_ms_for(60, Some(20)), 5_000);
-        // RUM ingest runs at least every 5 s, so a shorter RUM period still clocks at 1.25 s.
-        assert_eq!(clock_interval_ms_for(60, Some(1)), 1_250);
+        assert_eq!(clock_interval_ms_for(40, None), 20_000);
+        assert_eq!(clock_interval_ms_for(1, None), 1_000);
+        assert_eq!(clock_interval_ms_for(60, Some(20)), 10_000);
+        // RUM ingest runs at least every 5 s, so a shorter RUM period still clocks at 2.5 s.
+        assert_eq!(clock_interval_ms_for(60, Some(1)), 2_500);
     }
 }

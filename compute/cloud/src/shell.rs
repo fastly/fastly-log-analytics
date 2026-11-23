@@ -370,6 +370,12 @@ pub trait Runtime: SetupStores {
     fn on_log_shield(&self) -> bool {
         false
     }
+    /// Starts the next clock turn now, for a turn that stopped with work left: `GET path` on the
+    /// front with the CDN key and `x-flp-continue: depth`, which the front passes past its cache.
+    /// Runtimes without a front do nothing.
+    fn continue_clock(&self, _path: &str, _depth: u32) -> Result<(), String> {
+        Ok(())
+    }
     fn setup_missing(&self, _control_plane: bool) -> Result<Vec<crate::setup::MissingEntry>, String>
     where
         Self: Sized,
@@ -383,6 +389,20 @@ struct Trace {
     actor: Option<String>,
     rows: Vec<Value>,
     dropped: u64,
+}
+
+/// Consecutive self-continued clock turns before the probes take over again, so a job that keeps
+/// reporting work left can't chain executions without end.
+pub const MAX_CLOCK_CONTINUATIONS: u32 = 20;
+
+/// The depth the continuation of a clock request carries (its `x-flp-continue` plus one), or
+/// `None` once the chain reaches [`MAX_CLOCK_CONTINUATIONS`].
+fn next_continuation(request: &Request) -> Option<u32> {
+    let depth = request
+        .header("x-flp-continue")
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .unwrap_or(0);
+    (depth < MAX_CLOCK_CONTINUATIONS).then_some(depth + 1)
 }
 
 pub struct Shell<'a, R: Runtime, S: StateStore> {
@@ -443,6 +463,20 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
             .header("content-type", "application/json")
             .header("cache-control", format!("public, max-age={ttl}"))
             .header("x-flp-tick-ttl", ttl.to_string())
+    }
+
+    /// After a clock turn: when it left work (the record still wants a run and no lease is held),
+    /// start the next turn now instead of waiting for a probe to reach the shield. A failed
+    /// continuation is logged by the runtime and the next probe starts the turn, as before.
+    fn continue_clock(&self, request: &Request, path: &str) {
+        let Some(depth) = next_continuation(request) else {
+            return;
+        };
+        if crate::admin::schedule::clock_continue_wanted(self.runtime, path) {
+            // The runtime logs each attempt with its outcome (`clock.continue`); on failure the
+            // next probe starts the turn, as it did before continuations.
+            let _outcome = self.runtime.continue_clock(path, depth);
+        }
     }
 
     /// The response a front-authorized clock probe (`GET /_tick` or `/_flush`) gets before its
@@ -667,7 +701,10 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
                 return Err(AuthError::Forbidden);
             }
             return match crate::admin::record_tick(self.runtime, "clock", "clock") {
-                Ok(_) => Ok(self.clock_response("/_tick")),
+                Ok(_) => {
+                    self.continue_clock(request, "/_tick");
+                    Ok(self.clock_response("/_tick"))
+                }
                 Err(reason) if reason == "worker_tick_forbidden" => Err(AuthError::Forbidden),
                 Err(reason) => Err(storage(reason)),
             };
@@ -677,7 +714,10 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
                 return Err(AuthError::Forbidden);
             }
             return match crate::admin::record_flush(self.runtime) {
-                Ok(_) => Ok(self.clock_response("/_flush")),
+                Ok(_) => {
+                    self.continue_clock(request, "/_flush");
+                    Ok(self.clock_response("/_flush"))
+                }
                 Err(reason) if reason == "worker_tick_forbidden" => Err(AuthError::Forbidden),
                 Err(reason) => Err(storage(reason)),
             };
@@ -2373,6 +2413,26 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[test]
+    fn a_clock_turn_continues_one_level_deeper_up_to_the_cap() {
+        let tick = |continue_header: Option<&str>| Request {
+            method: "GET".into(),
+            path: "/_tick".into(),
+            headers: continue_header
+                .map(|v| BTreeMap::from([("x-flp-continue".into(), v.into())]))
+                .unwrap_or_default(),
+            body: vec![],
+        };
+        assert_eq!(next_continuation(&tick(None)), Some(1));
+        assert_eq!(next_continuation(&tick(Some("4"))), Some(5));
+        assert_eq!(next_continuation(&tick(Some("junk"))), Some(1));
+        assert_eq!(
+            next_continuation(&tick(Some("19"))),
+            Some(MAX_CLOCK_CONTINUATIONS)
+        );
+        assert_eq!(next_continuation(&tick(Some("20"))), None);
+    }
+
+    #[test]
     fn share_listings_report_creation_acceptance_and_login_times() {
         let user = User {
             id: "u".into(),
@@ -2544,6 +2604,8 @@ mod tests {
         pop: Option<String>,
         shield: bool,
         store_calls: std::cell::Cell<u32>,
+        now_s: u64,
+        continued: std::cell::RefCell<Vec<(String, u32)>>,
     }
 
     impl SetupStores for MemRuntime {
@@ -2569,7 +2631,7 @@ mod tests {
             Ok([0; 32])
         }
         fn now(&self) -> u64 {
-            0
+            self.now_s
         }
         fn checks(&self, _: bool) -> Result<Value, String> {
             unreachable!()
@@ -2662,6 +2724,73 @@ mod tests {
         fn on_log_shield(&self) -> bool {
             self.shield
         }
+        fn continue_clock(&self, path: &str, depth: u32) -> Result<(), String> {
+            self.continued.borrow_mut().push((path.into(), depth));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_finished_turn_with_work_left_on_the_shield_starts_the_next_turn() {
+        let now = 1_800_000_000;
+        let tick = Request {
+            method: "GET".into(),
+            path: "/_tick".into(),
+            headers: BTreeMap::from([("x-flp-continue".into(), "3".into())]),
+            body: vec![],
+        };
+        let seed = |rt: &MemRuntime, record: crate::admin::schedule::Sched| {
+            rt.cache.borrow_mut().insert(
+                crate::admin::schedule::SCHED_KEY.into(),
+                (
+                    (serde_json::to_vec(&record).unwrap(), Vec::new()),
+                    Vec::new(),
+                ),
+            );
+        };
+        let store = MemoryStore::default();
+
+        let rt = MemRuntime {
+            shield: true,
+            now_s: now,
+            ..MemRuntime::default()
+        };
+        Shell::new(&rt, &store, &[]).continue_clock(&tick, "/_tick");
+        assert!(
+            rt.continued.borrow().is_empty(),
+            "no clock record, nothing to continue"
+        );
+        // A stale record still wants a run: continue one level deeper.
+        seed(&rt, crate::admin::schedule::Sched::default());
+        Shell::new(&rt, &store, &[]).continue_clock(&tick, "/_tick");
+        assert_eq!(*rt.continued.borrow(), vec![("/_tick".to_owned(), 4)]);
+
+        let fresh = MemRuntime {
+            shield: true,
+            now_s: now,
+            ..MemRuntime::default()
+        };
+        seed(
+            &fresh,
+            crate::admin::schedule::Sched {
+                refreshed_at: now,
+                ..Default::default()
+            },
+        );
+        Shell::new(&fresh, &store, &[]).continue_clock(&tick, "/_tick");
+        assert!(fresh.continued.borrow().is_empty(), "nothing due");
+
+        let edge = MemRuntime {
+            shield: false,
+            now_s: now,
+            ..MemRuntime::default()
+        };
+        seed(&edge, crate::admin::schedule::Sched::default());
+        Shell::new(&edge, &store, &[]).continue_clock(&tick, "/_tick");
+        assert!(
+            edge.continued.borrow().is_empty(),
+            "only the shield runs turns"
+        );
     }
 
     #[test]

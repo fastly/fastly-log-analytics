@@ -1817,6 +1817,36 @@ impl Runtime for FastlyRuntime {
             .map(|shield| shield.running_on())
             .unwrap_or(false)
     }
+    fn continue_clock(&self, path: &str, depth: u32) -> Result<(), String> {
+        let started = Instant::now();
+        let result = (|| {
+            let cdn_key = self
+                .secret("cdn_key")?
+                .filter(|key| !key.is_empty())
+                .ok_or("missing_cdn_key")?;
+            let base = self.required("public_base_url")?;
+            let host = url::Url::parse(&base)
+                .ok()
+                .and_then(|u| u.host_str().map(str::to_owned))
+                .ok_or("public_base_url_invalid")?;
+            self.budget.charge()?;
+            // The front passes this past its tick cache on every hop (`x-flp-continue` with the
+            // CDN key); the next execution acknowledges at once and runs its turn after.
+            let request = Request::get(format!("https://{host}{path}"))
+                .with_header("x-fastly-key", cdn_key)
+                .with_header("x-flp-continue", depth.to_string());
+            let response = send_with_timeout(request, "flp_front", CLOCK_CONTINUE_TIMEOUT, true)?;
+            match response.get_status().as_u16() {
+                200 => Ok(()),
+                status => Err(format!("status_{status}")),
+            }
+        })();
+        println!(
+            "{}",
+            json!({"event":"clock.continue","level":if result.is_err() {"warn"} else {"info"},"path":path,"depth":depth,"error":result.as_ref().err(),"duration_ms":started.elapsed().as_millis()})
+        );
+        result
+    }
 }
 
 impl FastlyRuntime {
@@ -2214,6 +2244,9 @@ fn bounded_send_with_timeout(
 ) -> Result<fastly::Response, String> {
     send_with_timeout(request, backend, timeout, true)
 }
+
+/// The next clock execution answers before its work runs, so this only waits for that answer.
+const CLOCK_CONTINUE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 fn send_with_timeout(
     request: Request,

@@ -137,12 +137,12 @@ describe('Cloud cron schedule evidence', () => {
         />
       </QueryClientProvider>
     )
-    const { rerender } = render(tab({ probe_interval_s: 15, log_period_s: 60, rum_log_period_s: null }))
-    expect(screen.getByTestId('cron-clock')).toHaveTextContent('Clock ticks every 15 s (¼ of the 60 s request log period)')
-    rerender(tab({ probe_interval_s: 5, log_period_s: 60, rum_log_period_s: 20 }))
-    expect(screen.getByTestId('cron-clock')).toHaveTextContent('Clock ticks every 5 s (¼ of the 20 s RUM log period)')
+    const { rerender } = render(tab({ probe_interval_s: 20, log_period_s: 40, rum_log_period_s: null }))
+    expect(screen.getByTestId('cron-clock')).toHaveTextContent('Each POP probes every 20 s (½ of the 40 s request log period)')
+    rerender(tab({ probe_interval_s: 10, log_period_s: 60, rum_log_period_s: 20 }))
+    expect(screen.getByTestId('cron-clock')).toHaveTextContent('Each POP probes every 10 s (½ of the 20 s RUM log period)')
     rerender(tab({ probe_interval_s: 30, log_period_s: 300, rum_log_period_s: null }))
-    expect(screen.getByTestId('cron-clock')).toHaveTextContent('Clock ticks every 30 s (the 30 s maximum; 300 s request log period)')
+    expect(screen.getByTestId('cron-clock')).toHaveTextContent('Each POP probes every 30 s (the 30 s maximum; 300 s request log period)')
     rerender(tab(null))
     expect(screen.queryByTestId('cron-clock')).not.toBeInTheDocument()
   })

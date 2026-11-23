@@ -37,14 +37,14 @@ export {
 
 export type CronClock = { probe_interval_s: number; log_period_s: number; rum_log_period_s: number | null }
 
-/** "Clock ticks every 15 s (¼ of the 60 s request log period)", naming the cap or floor when one applies. */
+/** "Each POP probes every 30 s (½ of the 60 s request log period)", naming the cap or floor when one applies. */
 export function describeClock(clock: CronClock): string {
   const rum = clock.rum_log_period_s
   const [period, kind] = rum != null && Math.max(rum, 5) < clock.log_period_s
     ? [Math.max(rum, 5), 'RUM']
     : [clock.log_period_s, 'request']
-  const every = `Clock ticks every ${clock.probe_interval_s} s`
-  if (Math.abs(period / 4 - clock.probe_interval_s) < 0.001) return `${every} (¼ of the ${period} s ${kind} log period)`
+  const every = `Each POP probes every ${clock.probe_interval_s} s`
+  if (Math.abs(period / 2 - clock.probe_interval_s) < 0.001) return `${every} (½ of the ${period} s ${kind} log period)`
   const bound = clock.probe_interval_s >= 30 ? 'the 30 s maximum' : 'the 1 s minimum'
   return `${every} (${bound}; ${period} s ${kind} log period)`
 }

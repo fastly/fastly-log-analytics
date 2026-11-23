@@ -266,7 +266,7 @@ def backend(name: str, host: str, *, shield: bool = False) -> dict[str, str]:
 # IAD shield for 1 s, or for the sleep TTL flp returns in `x-flp-tick-ttl` (up to 60 s), so at
 # most one probe a second reaches flp, whose dispatcher decides whether anything runs. Every POP
 # sends both probes and each is a billed front request, so they start at 1 s here and every
-# reconcile (including each deploy's) sets them to a quarter of the shortest log period, 1-30 s
+# reconcile (including each deploy's) sets them to half the shortest log period, 1-30 s
 # (`clock_interval_ms` in src/admin/reconcile.rs).
 APP_CONDITION = 'req.url.path != "/_tick" && req.url.path != "/_flush" && req.url.path !~ "^/fos(/|$)"'
 TICK_CONDITION = 'req.url.path == "/_tick" || req.url.path == "/_flush"'

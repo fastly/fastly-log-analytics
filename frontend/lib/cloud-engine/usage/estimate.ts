@@ -396,14 +396,14 @@ const gb = (n: number) =>
 /** Monthly cost: what the install spends at rest plus per-file and per-line work at this traffic. */
 /**
  * The front clock health checks' interval in seconds, as reconcile sets it
- * (`clock_interval_ms` in compute/cloud/src/admin/reconcile.rs): a quarter of the shortest log
+ * (`clock_interval_ms` in compute/cloud/src/admin/reconcile.rs): half the shortest log
  * period the clock serves (request, and RUM when it has pageviews, whose ingest runs at least
  * every 5 s), between 1 and 30 s.
  */
 export function clockIntervalS(inputs: Pick<EstimateInputs, "logPeriodS" | "rumLogPeriodS" | "rumPageviewsPerDay">): number {
   let period = Math.max(1, inputs.logPeriodS);
   if (inputs.rumPageviewsPerDay > 0) period = Math.min(period, Math.max(5, inputs.rumLogPeriodS));
-  return Math.min(30, Math.max(1, period / 4));
+  return Math.min(30, Math.max(1, period / 2));
 }
 
 /**

@@ -212,6 +212,39 @@ sub clock_normalizes_query_string_for_sleep_ttl_caching {
 
 
 // @scope: recv
+sub clock_continue_with_the_cdn_key_skips_the_cache {
+  testing.inject_variable("req.is_ssl", true);
+  set req.url = "/_tick";
+  set req.http.x-flp-continue = "1";
+  set req.http.x-fastly-key = "test-cdn-key-not-a-live-secret";
+  testing.call_subroutine("vcl_recv");
+  assert.equal(req.http.x-flp-tick, "1");
+  assert.state(pass);
+}
+
+
+// @scope: recv
+sub clock_continue_without_the_cdn_key_stays_cached {
+  testing.inject_variable("req.is_ssl", true);
+  set req.url = "/_tick";
+  set req.http.x-flp-continue = "1";
+  set req.http.x-fastly-key = "wrong";
+  testing.call_subroutine("vcl_recv");
+  assert.state(lookup);
+}
+
+
+// @scope: recv
+sub clock_ignores_a_client_sent_pass_marker {
+  testing.inject_variable("req.is_ssl", true);
+  set req.url = "/_tick";
+  set req.http.x-flp-tick-pass = "1";
+  testing.call_subroutine("vcl_recv");
+  assert.state(lookup);
+}
+
+
+// @scope: recv
 sub flush_clock_normalizes_query_string_for_sleep_ttl_caching {
   testing.inject_variable("req.is_ssl", true);
   set req.url = "/_flush?b=7";

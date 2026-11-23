@@ -54,8 +54,8 @@ describe("high-RPS ingest costs", () => {
       NO_COMPACTION,
       { relay: 0 },
     );
-    // Includes the front clock probes: 2 checks × 53 POPs every 30 s (a quarter of the default
-    // 300 s log period, capped) ≈ $9.16 of requests and $2.20 of bytes a month.
+    // Includes the front clock probes: 2 checks × 53 POPs every 30 s (half the default 300 s log
+    // period, capped) ≈ $9.16 of requests and $2.20 of bytes a month.
     expect(defaults.total).toBeCloseTo(30.95349352593645, 9);
     expect(defaults.lines.map((l) => l.id)).toEqual(BASE_IDS);
     const tenK = estimateMonthly(
@@ -65,8 +65,8 @@ describe("high-RPS ingest costs", () => {
       NO_COMPACTION,
       { relay: 0 },
     );
-    // Plus the clock probes every 15 s (a quarter of the 60 s log period): ≈ $18.32 + $4.40.
-    expect(tenK.total).toBeCloseTo(576.9463453881451, 9);
+    // Plus the clock probes every 30 s (half the 60 s log period): ≈ $9.16 + $2.20.
+    expect(tenK.total).toBeCloseTo(565.5899293881452, 9);
     expect(tenK.lines.map((l) => l.id)).toEqual(BASE_IDS);
   });
 
