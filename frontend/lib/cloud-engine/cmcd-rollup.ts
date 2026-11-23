@@ -249,7 +249,8 @@ async function listCmcdSummaryFiles(
 
 /**
  * The fewest CMCD summary files for the range: `view=summary` replaces each hour whose
- * `hour_bundle` covers exactly its listed windows (and whole days likewise) with that bundle.
+ * `hour_bundle` covers exactly its listed windows (and whole days likewise) with that bundle,
+ * and the open hour's settled windows with its `open_bundle` snapshot (also kind `hour`).
  * Bundles merge their windows losslessly, so either listing gives the same aggregates. A server
  * without CMCD bundles rejects the view, and the per-window listing answers instead.
  */
@@ -313,7 +314,16 @@ export async function cmcdFromRollup(
     if (signal?.aborted || !(error instanceof MissingCloudFileError)) throw error;
     const missing = files.find((file) => file.key === error.key);
     if (missing?.kind !== "hour" && missing?.kind !== "day") throw error;
-    // A bundle the listing names but storage lost: its hours' windows still answer them exactly.
+    // An open hour's snapshot is replaced as the hour grows: a fresh summary view names its
+    // successor. A bundle storage lost stays listed, and its hours' windows answer exactly.
+    const relisted = await listCmcdRollupFiles(source.fetchJson, fromIso, toIso, fromMs, toMs, signal);
+    if (relisted && relisted.length > 0 && !relisted.some((file) => file.key === error.key)) {
+      try {
+        return await cmcdFromFiles(relisted, params, fromMs, toMs, source, signal);
+      } catch (retryError) {
+        if (signal?.aborted || !(retryError instanceof MissingCloudFileError)) throw retryError;
+      }
+    }
     console.warn(`flp: CMCD bundle ${error.key} is listed but missing; reading its windows`);
     const windows = await listCmcdSummaryFiles(
       source.fetchJson,

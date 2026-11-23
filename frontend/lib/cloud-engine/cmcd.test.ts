@@ -687,9 +687,48 @@ describe("Feature F24 — CMCD Streaming Media cloud-engine", () => {
         },
       },
     );
-    expect(views).toEqual(["summary", null]);
+    // The fresh summary view still names the lost bundle, so its windows answer.
+    expect(views).toEqual(["summary", "summary", null]);
     expect(fetched.sort()).toEqual([bundle.key, ...windows.map((w) => w.key)].sort());
     expect(res?.summary.total_requests).toBe(15);
+  });
+
+  it("reads the open hour's CMCD open bundle and relists the summary view when a snapshot it names was replaced", async () => {
+    const t0 = Date.parse("2026-01-01T00:00:00Z");
+    const open = t0 + 3_600_000;
+    const file = (kind: string, key: string, from: number, to: number) =>
+      ({ kind, key, start: new Date(from).toISOString(), end: new Date(to).toISOString(), size: 1, rows: 1 });
+    const hour = file("hour", "processed/summary_bundle/cmcd_summary/hour_bundle=00.parquet", t0, open);
+    const stale = file("hour", "processed/summary_bundle/cmcd_summary/open_bundle=01-a.parquet", open, open + 1_200_000);
+    const fresh = file("hour", "processed/summary_bundle/cmcd_summary/open_bundle=01-b.parquet", open, open + 1_500_000);
+    const tail = [25, 26].map((m) =>
+      file("window", `processed/request/cmcd_summary/window=${m}.parquet`, open + m * 60_000, open + (m + 1) * 60_000));
+    // The per-window listing of the range is over the cap, so only the summary view can answer.
+    const windows = Array.from({ length: MAX_CMCD_ROLLUP_FILES + 1 }, (_, i) =>
+      file("window", `processed/request/cmcd_summary/window=all-${i}.parquet`, t0 + i * 1_000, t0 + (i + 1) * 1_000));
+    const views: (string | null)[] = [];
+    const fetched: string[] = [];
+    const res = await cmcdFromRollup(
+      { start_time: new Date(t0).toISOString(), end_time: new Date(open + 1_800_000).toISOString(), bucket_seconds: 300 },
+      {
+        async fetchJson(url: string) {
+          const view = new URL(url, "http://x").searchParams.get("view");
+          views.push(view);
+          if (view !== "summary") return { files: windows, next_cursor: null, complete: true };
+          const snapshot = views.length === 1 ? stale : fresh;
+          return { files: [hour, snapshot, ...tail], next_cursor: null, complete: true };
+        },
+        async fetchFile(key: string) {
+          fetched.push(key);
+          if (key === stale.key) throw new MissingCloudFileError(key);
+          const reqs = key === hour.key ? 100 : key === fresh.key ? 25 : 1;
+          return { bytes: oneBucketSummary(t0, reqs), cached: false };
+        },
+      },
+    );
+    expect(views).toEqual(["summary", "summary"]);
+    expect([...new Set(fetched)].sort()).toEqual([hour.key, stale.key, fresh.key, ...tail.map((w) => w.key)].sort());
+    expect(res?.summary.total_requests).toBe(127);
   });
 
   it("filters out cmcd_summary buckets outside [fromMs, toMs) and reports has_data=false when none remain", async () => {

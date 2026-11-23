@@ -2260,6 +2260,44 @@ mod summary_bundles {
     }
 
     #[test]
+    fn cmcd_summary_view_reads_the_open_bundle_plus_the_windows_after_it() {
+        let now = BASE + 25 * 60;
+        let fake = Fake::new(now);
+        watermark(&fake, now);
+        let mut windows: Vec<String> = (0..20)
+            .map(|m| cmcd_window(&fake, BASE + m * 60, 0, 5))
+            .collect();
+        settle_cmcd(&fake);
+        // Windows written after the snapshot.
+        windows.extend((20..23).map(|m| cmcd_window(&fake, BASE + m * 60, 0, 5)));
+        let open: Vec<String> = fake
+            .keys(CMCD_BUNDLES)
+            .into_iter()
+            .filter(|k| k.contains("open_bundle=08-"))
+            .collect();
+        assert_eq!(open.len(), 1, "{:?}", fake.keys(CMCD_BUNDLES));
+        let covered = bundle::parse_name(&open[0]).unwrap().count;
+        assert!((6..=20).contains(&covered), "{}", open[0]);
+
+        // The open bundle stands in for the settled windows it names; the rest are read raw.
+        let view = cmcd_view(&fake, BASE, now);
+        let mut expected = vec![("hour".to_owned(), open[0].clone(), covered as u64 * 5)];
+        expected.extend(
+            windows[covered..]
+                .iter()
+                .map(|k| ("window".to_owned(), k.clone(), 5)),
+        );
+        assert_eq!(view, expected);
+
+        // A late window sorting inside the bundle's prefix breaks the proof: every window is read.
+        let late = cmcd_window(&fake, BASE, 1, 2);
+        let view = cmcd_view(&fake, BASE, now);
+        assert!(view.iter().all(|v| v.0 == "window"), "{view:?}");
+        assert_eq!(view.len(), 24);
+        assert!(view.iter().any(|v| v.1 == late));
+    }
+
+    #[test]
     fn the_tick_bundles_cmcd_summaries_after_request_summaries() {
         let fake = Fake::new(BASE + 3 * HOUR);
         tick_runtime(&fake);
