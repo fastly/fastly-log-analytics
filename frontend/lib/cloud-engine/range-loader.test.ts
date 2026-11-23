@@ -21,6 +21,7 @@ import { insightsBaselineFromRollup } from "./insights-rollup";
 import { mergeRollups } from "./dashboard/rollup-query";
 import { dashboardManifestCacheScope } from "./dashboard/sources";
 import { wholeReadLimits } from "./dashboard/parquet-projection";
+import { MAX_REGISTERED_BYTES } from "./dashboard/budget";
 
 const DEFAULT_WHOLE_READ_LIMITS = { ...wholeReadLimits };
 
@@ -43,6 +44,18 @@ vi.mock("./insights-rollup", async (importOriginal) => ({
   ...await importOriginal<typeof import("./insights-rollup")>(),
   insightsBaselineFromRollup: vi.fn(async () => null),
 }));
+// Lets a test stand in footer-planned sizes for large files without allocating them.
+const planned = vi.hoisted(() => ({ projectedBytes: null as number | null }));
+vi.mock("./dashboard/parquet-projection", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./dashboard/parquet-projection")>();
+  return {
+    ...actual,
+    planParquetProjection: (...args: Parameters<typeof actual.planParquetProjection>) => {
+      const plan = actual.planParquetProjection(...args);
+      return planned.projectedBytes === null ? plan : { ...plan, projectedBytes: planned.projectedBytes };
+    },
+  };
+});
 vi.mock("./dashboard/manifest", async (importOriginal) => ({
   ...await importOriginal<typeof import("./dashboard/manifest")>(),
   fetchManifest: vi.fn(),
@@ -212,6 +225,19 @@ describe("Cloud first-page analytical range loading", () => {
       .rejects.toBeInstanceOf(CloudBudgetError);
     expect(ranges.count).toBe(entries.length);
     expect([...await engine.getPresentColumns()]).toEqual(resident);
+  });
+
+  it("budgets a projection on what DuckDB can register, whatever larger budget the caller asks for", async () => {
+    const { ranges, entries } = projectedFiles(3);
+    planned.projectedBytes = Math.ceil(MAX_REGISTERED_BYTES * 0.4);
+    try {
+      const error = await ensureCloudRange(from, to, signal, ["request"], projection(96 * 1024 * 1024)).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(CloudBudgetError);
+      expect((error as CloudBudgetError).detail).toEqual({ unit: "bytes", needed: 3 * planned.projectedBytes, limit: MAX_REGISTERED_BYTES });
+      expect(ranges.count).toBe(entries.length);
+    } finally {
+      planned.projectedBytes = null;
+    }
   });
 
   it("names the needed and allowed size when a projection is over budget", async () => {

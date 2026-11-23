@@ -315,8 +315,13 @@ Where raw reads remain:
 
 /origin has no slices: a filtered /origin reads every section raw (only a
 summary-only request with one low-cardinality include comes from
-`filtered_rollups`). Its column projection may load up to 96 MiB, the
-projected ceiling Insights uses.
+`filtered_rollups`). Its column projection, like every projected scan, may
+load up to 64 MiB: the compressed bytes DuckDB can hold registered at once
+(`MAX_REGISTERED_BYTES`). The budget check sums each file's projected size
+(needed column chunks plus the source footer, an upper bound on the
+assembled file), so a range that passes it also fits registration. Bytes
+another section still holds pinned can still push a registration over; that
+raises the same `CloudBudgetError`, so the page narrows rather than failing.
 
 Any raw scan over the browser budget narrows the same way rather than
 failing the page: /origin, /performance, /security (not the proxy export),

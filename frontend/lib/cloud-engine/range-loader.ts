@@ -13,14 +13,14 @@ import {
 } from "./dashboard/parquet-projection";
 import { beginCloudLoading } from "./loading-progress";
 import { fetchLanes } from "./fetch-lanes";
+import { CloudBudgetError, MAX_REGISTERED_BYTES, type CloudBudgetDetail } from "./dashboard/budget";
 
 const MAX_RANGE_FILES = 256;
 // RUM window files are a few KiB each and the open hour's stay loose until they age into a
 // compact, so a day lists more of them than the request table does; the byte budget, not the file
 // count, bounds that scan.
 const MAX_RUM_RANGE_FILES = 2048;
-const MAX_RANGE_BYTES = 64 * 1024 * 1024;
-const MAX_PROJECTED_RANGE_BYTES = 96 * 1024 * 1024;
+const MAX_RANGE_BYTES = MAX_REGISTERED_BYTES;
 const PREFETCH_CONCURRENCY = 6;
 // Projected ranges are mostly a few KiB, so their round trips, not bandwidth, bound a cold load.
 const RANGE_CONCURRENCY = 16;
@@ -28,18 +28,7 @@ const source = browserSource("");
 const requestReads = new WeakMap<Request, DuckDBReadContext>();
 const activeRangeDownloads = new Set<AbortController>();
 
-/** What a refused range needed against its limit, in bytes or files. */
-export type CloudBudgetDetail = { unit: "bytes" | "files"; needed: number; limit: number };
-
-/** A range the browser won't scan: retrying the same request fails the same way. */
-export class CloudBudgetError extends Error {
-  readonly detail?: CloudBudgetDetail;
-
-  constructor(message: string, detail?: CloudBudgetDetail) {
-    super(message);
-    this.detail = detail;
-  }
-}
+export { CloudBudgetError, type CloudBudgetDetail };
 
 export function formatBudgetAmount(unit: CloudBudgetDetail["unit"], amount: number): string {
   return unit === "files" ? `${amount} files` : `${(amount / (1024 * 1024)).toFixed(1)} MiB`;
@@ -224,8 +213,8 @@ export async function ensureCloudRange(
     customFields?: readonly CustomField[];
     /**
      * Loads only these request columns, read as byte ranges, and budgets the
-     * range on their footer-measured bytes (at most `maxBytes`, default the
-     * range byte budget) instead of whole-file sizes. Files a listing from
+     * range on their footer-measured bytes (at most `maxBytes`, capped at and
+     * defaulting to what DuckDB can register) instead of whole-file sizes. Files a listing from
      * `wider.from` to the range end would include also load `wider.columns`,
      * so they share the cache entries of an earlier load of that range.
      */
@@ -245,9 +234,8 @@ export async function ensureCloudRange(
   // The same second-floored bound as the listing below.
   const widerFromMs = wider ? Math.floor(Date.parse(wider.from) / 1000) * 1000 : NaN;
   if (wider && !Number.isFinite(widerFromMs)) throw new Error("Invalid Cloud projection range");
-  const byteLimit = projection
-    ? Math.min(projection.maxBytes ?? MAX_RANGE_BYTES, MAX_PROJECTED_RANGE_BYTES)
-    : MAX_RANGE_BYTES;
+  // DuckDB registers at most MAX_REGISTERED_BYTES, so a larger projection budget could only fail later.
+  const byteLimit = Math.min(projection?.maxBytes ?? MAX_RANGE_BYTES, MAX_REGISTERED_BYTES);
   const engine = getDuckDBEngine();
   const generation = await engine.beginRequest();
   generation.assertCurrent();
