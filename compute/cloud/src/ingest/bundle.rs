@@ -1224,20 +1224,29 @@ impl Default for Acc {
     }
 }
 
-/// `(count desc, value asc)`.
-fn by_count<T>(a: &(String, T), b: &(String, T), count: impl Fn(&T) -> i64) -> Ordering {
-    count(&b.1).cmp(&count(&a.1)).then_with(|| a.0.cmp(&b.0))
-}
-
-/// Keeps the first `k` of `items` by `order`, in no particular order; true if any were cut.
-fn keep_top<T>(items: &mut Vec<T>, k: usize, order: impl FnMut(&T, &T) -> Ordering) -> bool {
-    if items.len() <= k {
+/// Keeps the `k` entries of `map` with the highest `count`, ties to the lowest key, in place:
+/// it finds the k-th entry and retains everything ordered at or before it, so nothing is
+/// moved or rehashed. True if any were cut.
+fn retain_top<K: Ord + Clone + std::hash::Hash, V, S: std::hash::BuildHasher>(
+    map: &mut HashMap<K, V, S>,
+    k: usize,
+    count: impl Fn(&V) -> i64,
+) -> bool {
+    if map.len() <= k {
         return false;
     }
-    if k > 0 {
-        items.select_nth_unstable_by(k - 1, order);
+    if k == 0 {
+        map.clear();
+        return true;
     }
-    items.truncate(k);
+    let mut ranked: Vec<(i64, &K)> = map.iter().map(|(key, v)| (count(v), key)).collect();
+    let (_, &mut (n, key), _) =
+        ranked.select_nth_unstable_by(k - 1, |a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+    let key = key.clone();
+    map.retain(|k, v| {
+        let c = count(v);
+        c > n || (c == n && *k <= key)
+    });
     true
 }
 
@@ -1560,12 +1569,7 @@ impl Acc {
     /// order, never on where an execution stopped.
     fn prune(&mut self) {
         for acc in self.fields.values_mut() {
-            if acc.values.len() > summary::TOP_K {
-                let mut values: Vec<(String, FieldVal)> = acc.values.drain().collect();
-                keep_top(&mut values, summary::TOP_K, |a, b| {
-                    by_count(a, b, |v| v.count)
-                });
-                acc.values.extend(values);
+            if retain_top(&mut acc.values, summary::TOP_K, |v| v.count) {
                 acc.truncated = true;
             }
             if acc.values.len() > summary::IP_TOP_K {
@@ -1586,19 +1590,12 @@ impl Acc {
                 }
             }
         }
-        if self.sessions.len() > summary::SESSION_K {
-            let mut sessions: Vec<(SessionKey, Vec<Cell>)> = self.sessions.drain().collect();
-            keep_top(&mut sessions, summary::SESSION_K, session_order);
-            self.sessions.extend(sessions);
-        }
+        retain_top(&mut self.sessions, summary::SESSION_K, |v| {
+            int(&v[SESSION_REQS])
+        });
         for (group, fields) in GROUPS.iter().zip(&mut self.groups) {
             for (field, acc) in fields.iter_mut() {
-                let keep = group.keep(field);
-                if acc.values.len() > keep {
-                    let mut values: Vec<(String, BTreeMap<i64, Vec<Cell>>)> =
-                        acc.values.drain().collect();
-                    keep_top(&mut values, keep, |a, b| by_count(a, b, GroupAcc::requests));
-                    acc.values.extend(values);
+                if retain_top(&mut acc.values, group.keep(field), GroupAcc::requests) {
                     acc.truncated = true;
                 }
             }
@@ -1608,20 +1605,12 @@ impl Acc {
             self.sample.truncate(summary::SAMPLE_K);
         }
         for pivot in self.pivots.values_mut() {
-            if pivot.values.len() > summary::PIVOT_K {
-                let mut values: Vec<(String, SliceAcc)> = pivot.values.drain().collect();
-                keep_top(&mut values, summary::PIVOT_K, |a, b| {
-                    by_count(a, b, |s| s.requests)
-                });
-                pivot.values.extend(values);
+            if retain_top(&mut pivot.values, summary::PIVOT_K, |s| s.requests) {
                 pivot.truncated = true;
             }
             for slice in pivot.values.values_mut() {
                 for acc in slice.fields.values_mut() {
-                    if acc.values.len() > summary::TOP_K {
-                        let mut values: Vec<(String, i64)> = acc.values.drain().collect();
-                        keep_top(&mut values, summary::TOP_K, |a, b| by_count(a, b, |n| *n));
-                        acc.values.extend(values);
+                    if retain_top(&mut acc.values, summary::TOP_K, |n| *n) {
                         acc.truncated = true;
                     }
                 }
@@ -2410,12 +2399,6 @@ impl Acc {
             ],
         )
     }
-}
-
-fn session_order(a: &(SessionKey, Vec<Cell>), b: &(SessionKey, Vec<Cell>)) -> Ordering {
-    int(&b.1[SESSION_REQS])
-        .cmp(&int(&a.1[SESSION_REQS]))
-        .then_with(|| a.0.cmp(&b.0))
 }
 
 /// Merges `sources` (window summaries for an hour, hour bundles for a day), in the order given,
@@ -4279,6 +4262,31 @@ mod tests {
         let rows = convert::convert_object(&zst, 300, base).unwrap();
         let batch = rows.windows.into_values().next().unwrap();
         summary::write_summary(&[&batch], base).unwrap()
+    }
+
+    /// Folding and pruning live-shaped windows past every cut (IPs, URLs, sessions, small-K
+    /// dims) keeps writing the same bundle bytes, directly and through a partial round trip, so
+    /// a cheaper fold or prune changes no result.
+    #[test]
+    fn a_pruned_hour_writes_the_same_bundle() {
+        let mut acc = Acc::new(Unit::Hour);
+        for i in 0..24 {
+            acc.fold(live_window(i * 24, 400), 1).unwrap();
+            acc.prune();
+        }
+        assert!(acc.sessions.len() == summary::SESSION_K && acc.fields["url"].truncated);
+        let bundle = acc.write(1_800_000_000, Some(Unit::Hour), "hour").unwrap();
+        assert_eq!(
+            hex::encode(Sha256::digest(&bundle)),
+            "d085362f0b9b80b2a6ef1e2a0baab630eab50227459895e300f1958bcbcb7924"
+        );
+        let resumed = Acc::decode_partial(&acc.encode_partial(), Unit::Hour).unwrap();
+        assert_eq!(
+            resumed
+                .write(1_800_000_000, Some(Unit::Hour), "hour")
+                .unwrap(),
+            bundle
+        );
     }
 
     /// The CPU of one open-hour bundling turn on a live-sized hour: resume the partial, fold the
