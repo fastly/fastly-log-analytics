@@ -8,6 +8,7 @@ import {
   estimateMonthly,
   measureEstimate,
   rawFilesPerDay,
+  type EstimateFeature,
   type EstimateMeasurements,
   type UnitCosts,
 } from "./estimate";
@@ -16,16 +17,7 @@ const NO_COMPACTION = { ...DEFAULT_COMPACTION, enabled: false };
 import { INGEST_ASSUMPTIONS, INGEST_LIMITS } from "./ingestShape";
 
 const MIB = 1024 * 1024;
-const BASE_IDS = [
-  "storage",
-  "ops",
-  "delivery",
-  "compute",
-  "kv",
-  "secrets",
-  "config",
-  "summaries",
-];
+const BASE_IDS = ["storage", "delivery", "compute", "kv", "secrets", "config"];
 
 const zeroUnits = Object.fromEntries(
   Object.keys(DEFAULT_UNITS).map((key) => [key, 0]),
@@ -44,6 +36,8 @@ const atRps = (rps: number, logPeriodS = 60) => ({
 
 const line = (estimate: ReturnType<typeof estimateMonthly>, id: string) =>
   estimate.lines.find((l) => l.id === id);
+const feature = (estimate: ReturnType<typeof estimateMonthly>, id: EstimateFeature) =>
+  estimate.featureUsd[id];
 
 describe("high-RPS ingest costs", () => {
   it("leaves today's estimate unchanged without relay, segments or multipart", () => {
@@ -88,7 +82,7 @@ describe("high-RPS ingest costs", () => {
       DEFAULT_COMPACTION,
       { relay: 0 },
     );
-    expect(line(requests, "segments")!.usd).toBeCloseTo(
+    expect(feature(requests, "segments")!).toBeCloseTo(
       (F * (S - 0.125) * MONTH_DAYS) / 1e6,
       6,
     );
@@ -101,7 +95,7 @@ describe("high-RPS ingest costs", () => {
       DEFAULT_COMPACTION,
       { relay: 0 },
     );
-    expect(line(vcpu, "segments")!.usd).toBeCloseTo(
+    expect(feature(vcpu, "segments")!).toBeCloseTo(
       (F * skippedMib * INGEST_ASSUMPTIONS.skipVcpuMsPerMib * MONTH_DAYS) / 1e6,
       6,
     );
@@ -113,11 +107,11 @@ describe("high-RPS ingest costs", () => {
       { relay: 0 },
     );
     // Each segment writes its own window file and summary: S windows instead of 0.125.
-    expect(line(classA, "segments")!.usd).toBeCloseTo(
+    expect(feature(classA, "segments")!).toBeCloseTo(
       (F * (S - 0.125) * 2 * MONTH_DAYS) / 1000,
       6,
     );
-    expect(line(classA, "multipart")).toBeUndefined();
+    expect(feature(classA, "multipart")).toBeUndefined();
   });
 
   it("charges the whole raw file's CDN download again for every segment after the first", () => {
@@ -130,9 +124,10 @@ describe("high-RPS ingest costs", () => {
       DEFAULT_COMPACTION,
       { relay: 0 },
     );
-    expect(line(estimate, "segments")!.usd).toBeCloseTo(19_160.064, 3);
+    expect(feature(estimate, "segments")!).toBeCloseTo(19_160.064, 3);
+    // Delivery carries the base download plus every segment's re-download.
     expect(line(estimate, "delivery")!.usd).toBeCloseTo(
-      ((inputs.edgeRequestsPerDay * 88) / 1e9) * 0.12 * MONTH_DAYS,
+      ((inputs.edgeRequestsPerDay * 88) / 1e9) * 0.12 * MONTH_DAYS + feature(estimate, "segments")!,
       6,
     );
   });
@@ -145,7 +140,7 @@ describe("high-RPS ingest costs", () => {
       DEFAULT_COMPACTION,
       { relay: 0 },
     );
-    expect(line(estimate, "segments")).toBeUndefined();
+    expect(feature(estimate, "segments")).toBeUndefined();
   });
 
   it("charges multipart create, parts and complete for windows above one part", () => {
@@ -163,7 +158,7 @@ describe("high-RPS ingest costs", () => {
       DEFAULT_COMPACTION,
       { relay: 0 },
     );
-    expect(line(estimate, "multipart")!.usd).toBeCloseTo(
+    expect(feature(estimate, "multipart")!).toBeCloseTo(
       (windows * (parts + 1) * MONTH_DAYS) / 1000,
       6,
     );
@@ -172,7 +167,7 @@ describe("high-RPS ingest costs", () => {
       { ...zeroUnits, windowFilesPerFile: 0.125 },
       LIST_PRICE_RATES,
     );
-    expect(line(small, "multipart")).toBeUndefined();
+    expect(feature(small, "multipart")).toBeUndefined();
   });
 
   it("adds a relay execution per group of relayed shards only when relaying", () => {
@@ -184,7 +179,7 @@ describe("high-RPS ingest costs", () => {
       DEFAULT_COMPACTION,
       { relay: 0 },
     );
-    expect(line(direct, "relay")).toBeUndefined();
+    expect(feature(direct, "relay")).toBeUndefined();
     expect(direct.ingest.relayRequestsPerDay).toBe(0);
     const relayed = estimateMonthly(
       inputs,
@@ -200,13 +195,13 @@ describe("high-RPS ingest costs", () => {
     expect(relayRequestsPerDay).toBeLessThan(shardsPerDay / 2);
     // At list/contract rates (20 ms free per request), the 5 ms relay execution
     // sits inside the per-request CPU allowance and bills only the request fee.
-    expect(line(relayed, "relay")!.usd).toBeCloseTo(
+    expect(feature(relayed, "relay")!).toBeCloseTo(
       ((relayRequestsPerDay * MONTH_DAYS) / 1e6) *
         LIST_PRICE_RATES.compute_request_rate_per_million,
       9,
     );
     expect(relayed.total - direct.total).toBeCloseTo(
-      line(relayed, "relay")!.usd,
+      feature(relayed, "relay")!,
       9,
     );
     const relayedNoAllowance = estimateMonthly(
@@ -220,7 +215,7 @@ describe("high-RPS ingest costs", () => {
       DEFAULT_COMPACTION,
       { relay: INGEST_LIMITS.maxRelayShards },
     );
-    expect(line(relayedNoAllowance, "relay")!.usd).toBeCloseTo(
+    expect(feature(relayedNoAllowance, "relay")!).toBeCloseTo(
       ((relayRequestsPerDay * MONTH_DAYS) / 1e6) *
         LIST_PRICE_RATES.compute_request_rate_per_million +
         ((relayRequestsPerDay *

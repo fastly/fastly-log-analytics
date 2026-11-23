@@ -64,19 +64,23 @@ export function CloudCostCalculator({ prefillData, rates: configuredRates, local
   const localStorageCost = localStorageGbMonths == null
     ? null
     : localStorageGbMonths * rates.storage_rate_per_gb_month
+  // Measured storage replaces only the modelled GB-months; operations stay modelled.
+  const modelledStorageUsd = result.lines
+    .find((line) => line.id === 'storage')
+    ?.parts?.find((part) => part.label === 'Storage')?.usd ?? 0
   const resultLines = localStorageCost == null
     ? result.lines
     : result.lines.map((line) => line.id === 'storage'
       ? {
           ...line,
           detail: `Measured · this install · ${(localStorageGbMonths ?? 0).toFixed(2)} GB-months`,
-          usd: localStorageCost,
-          parts: undefined,
+          usd: line.usd - modelledStorageUsd + localStorageCost,
+          parts: line.parts?.map((part) => part.label === 'Storage' ? { ...part, usd: localStorageCost } : part),
         }
       : line)
   const resultTotal = localStorageCost == null
     ? result.total
-    : result.total - (result.lines.find((line) => line.id === 'storage')?.usd ?? 0) + localStorageCost
+    : result.total - modelledStorageUsd + localStorageCost
   const set = (key: keyof EstimateInputs) => (value: number | boolean) =>
     setEdits((current) => ({ ...current, [key]: value }))
   const inputRow = ([key, label]: [keyof EstimateInputs, string]) => (

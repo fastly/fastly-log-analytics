@@ -16,6 +16,7 @@ import {
   measureEstimate,
   rawFilesPerDay,
   summaryBytes,
+  type EstimateFeature,
   type EstimateMeasurements,
   type UnitCosts,
 } from "./estimate";
@@ -36,6 +37,8 @@ const zeroRates = Object.fromEntries(
 
 const line = (estimate: ReturnType<typeof estimateMonthly>, id: string) =>
   estimate.lines.find((l) => l.id === id)!;
+const feature = (estimate: ReturnType<typeof estimateMonthly>, id: EstimateFeature) =>
+  estimate.featureUsd[id];
 
 describe("front clock probes", () => {
   it("ticks at half the shortest log period, between 1 and 30 s, as reconcile sets it", () => {
@@ -73,11 +76,11 @@ describe("estimateMonthly", () => {
       LIST_PRICE_RATES,
     );
     const labels = (id: string) => line(est, id).parts?.map((p) => p.label);
+    expect(est.lines.map((l) => l.id)).toEqual(["storage", "delivery", "compute", "kv", "secrets", "config"]);
+    expect(labels("storage")).toEqual(["Storage", "Class A", "Class B"]);
     expect(labels("delivery")).toEqual(["Egress", "Requests"]);
-    expect(labels("ops")).toEqual(["Class A", "Class B"]);
+    expect(labels("compute")).toEqual(["Requests", "vCPU"]);
     expect(labels("kv")).toEqual(["Class A", "Class B"]);
-    expect(labels("storage")).toEqual(["Raw logs", "Parquet", "Fixed"]);
-    expect(labels("compute")).toEqual(["Requests", "App vCPU", "Worker vCPU"]);
     for (const l of est.lines) {
       if (!l.parts) continue;
       expect(l.parts.length).toBeGreaterThan(1);
@@ -134,16 +137,13 @@ describe("estimateMonthly", () => {
       minBilledDays: 30,
     };
     const rates = { ...LIST_PRICE_RATES, storage_rate_per_gb_month: 1 };
-    // 1 GB of raw a day.
-    expect(
-      line(estimateMonthly(inputs, zeroUnits, rates), "storage").usd,
-    ).toBeCloseTo(30);
-    expect(
-      line(
-        estimateMonthly({ ...inputs, deleteAfter: false }, zeroUnits, rates),
-        "storage",
-      ).usd,
-    ).toBeCloseTo(90);
+    const stored = (deleteAfter: boolean) =>
+      line(estimateMonthly({ ...inputs, deleteAfter }, zeroUnits, rates), "storage")
+        .parts!.find((p) => p.label === "Storage")!.usd;
+    // 1 GB of raw a day: 30 days billed when deleted, 90 when kept; summary files ride on top.
+    expect(stored(true)).toBeGreaterThanOrEqual(30);
+    expect(stored(true)).toBeLessThan(30.1);
+    expect(stored(false) - stored(true)).toBeCloseTo(60);
   });
 
   it("adds fixed daily cost to per-file and per-line work over 30 days", () => {
@@ -163,14 +163,18 @@ describe("estimateMonthly", () => {
       gzBytesPerLine: 0,
       parquetBytesPerRow: 0,
     };
-    const estimate = estimateMonthly(inputs, units, LIST_PRICE_RATES);
+    const estimate = estimateMonthly(inputs, units, LIST_PRICE_RATES, {
+      ...DEFAULT_COMPACTION,
+      enabled: false,
+    });
     expect(estimate.filesPerDay).toBe(1_440);
     // (1,000 + 0.5 × 1,440) × 30 requests; 10 × 1,000 = 10,000 vCPU ms/day across 720 worker executions (~13.89 ms/exec, within 20 ms free tier => $0 excess CPU).
     expect(line(estimate, "compute").usd).toBeCloseTo(
       (51_600 / 1e6) * 0.5,
     );
-    expect(line(estimate, "ops").usd).toBeCloseTo(
-      ((3 * 1_440 * 30) / 1000) * 0.0025,
+    // Per-file Class A plus the summary bundles' 24 hourly and 1 daily PUT a day.
+    expect(line(estimate, "storage").parts!.find((p) => p.label === "Class A")!.usd).toBeCloseTo(
+      (((3 * 1_440 + 25) * 30) / 1000) * 0.0025,
     );
     expect(line(estimate, "secrets").usd).toBe(10);
     expect(estimate.total).toBeCloseTo(
@@ -213,7 +217,7 @@ describe("RUM", () => {
       zeroUnits,
       LIST_PRICE_RATES,
     );
-    expect(estimate.lines.find((l) => l.id === "rum")).toBeUndefined();
+    expect(feature(estimate, "rum")).toBeUndefined();
   });
 
   it("logs one batched beacon line per sampled flush and bills its requests and storage", () => {
@@ -231,7 +235,7 @@ describe("RUM", () => {
     expect(r.rowsPerDay).toBe(400_000);
     // 50,000 lines × 200 B raw billed 30 days, 400,000 rows × 50 B kept 30 days.
     expect(r.storedGb).toBeCloseTo(0.01 * 30 + 0.02 * 30);
-    expect(line(estimate, "rum").usd).toBeCloseTo(
+    expect(feature(estimate, "rum")!).toBeCloseTo(
       r.storedGb + (50_000 * 30) / 10_000,
     );
     expect(estimate.total).toBeCloseTo(
@@ -247,7 +251,7 @@ describe("RUM", () => {
       rates,
     );
     expect(quiet.rum!.runsPerDay).toBe(288);
-    expect(line(quiet, "rum").usd).toBeCloseTo((288 * 30) / 1000, 3);
+    expect(feature(quiet, "rum")!).toBeCloseTo((288 * 30) / 1000, 3);
     expect(
       estimateMonthly({ ...rum, rumLogPeriodS: 60 }, zeroUnits, rates).rum!
         .runsPerDay,
@@ -271,7 +275,7 @@ describe("RUM", () => {
       rates,
     );
     expect(estimate.rum!.filesPerDay).toBeCloseTo(288);
-    expect(line(estimate, "rum").usd).toBeCloseTo(
+    expect(feature(estimate, "rum")!).toBeCloseTo(
       ((3 * 288 + 288) * 30) / 1000 + 288 * 30,
     );
   });
@@ -304,7 +308,7 @@ describe("summary bundles", () => {
       const baseline = estimateMonthly(settings, units, rates);
       const rewritten = estimateMonthly(settings, unitsWithPartials, rates);
       expect(
-        line(rewritten, "summaries").usd - line(baseline, "summaries").usd,
+        feature(rewritten, "summaries")! - feature(baseline, "summaries")!,
       ).toBeCloseTo(0.5 * minBilledDays);
     }
   });
@@ -337,7 +341,7 @@ describe("summary bundles", () => {
     expect(s.storedGb).toBeCloseTo(gbPerDay * 30);
     // 100 ms per window summary execution: 80 ms excess above the 20 ms contract allowance across 1,440 runs/day.
     const billedSummaryVcpuPerDay = 80 * 1_440;
-    expect(line(estimate, "summaries").usd).toBeCloseTo(
+    expect(feature(estimate, "summaries")!).toBeCloseTo(
       s.storedGb * 0.02 +
         ((s.classAPerDay * 30) / 1000) * 0.0025 +
         ((s.classBPerDay * 30) / 10_000) * 0.004 +
@@ -369,14 +373,35 @@ describe("compaction", () => {
     expect(DEFAULT_COMPACTION).toMatchObject({ enabled: true, targetMb: 128 });
     const defaultEstimate = estimateMonthly(inputs, units, LIST_PRICE_RATES);
     expect(defaultEstimate.compaction).not.toBeNull();
-    expect(defaultEstimate.lines.find((l) => l.id === "compaction")).toBeDefined();
 
     const offEstimate = estimateMonthly(inputs, units, LIST_PRICE_RATES, {
       ...DEFAULT_COMPACTION,
       enabled: false,
     });
     expect(offEstimate.compaction).toBeNull();
-    expect(offEstimate.lines.find((l) => l.id === "compaction")).toBeUndefined();
+    expect(defaultEstimate.total).toBeGreaterThan(offEstimate.total);
+  });
+
+  it("counts compaction's usage in the storage, operations, delivery, Compute and KV lines instead of its own", () => {
+    const withIt = estimateMonthly(inputs, units, LIST_PRICE_RATES, on);
+    const off = estimateMonthly(inputs, units, LIST_PRICE_RATES, { ...on, enabled: false });
+    const c = withIt.compaction!;
+    expect(withIt.lines.map((l) => l.id)).not.toContain("compaction");
+    const part = (e: typeof withIt, id: string, label: string) =>
+      line(e, id).parts?.find((p) => p.label === label)?.usd ?? 0;
+    expect(part(withIt, "storage", "Storage") - part(off, "storage", "Storage")).toBeCloseTo(
+      c.extraStoredGb * LIST_PRICE_RATES.storage_rate_per_gb_month,
+    );
+    expect(part(withIt, "storage", "Class A") - part(off, "storage", "Class A")).toBeCloseTo(
+      ((c.classAPerDay * 30) / 1000) * LIST_PRICE_RATES.class_a_rate_per_1k,
+    );
+    expect(part(withIt, "kv", "Class B") - part(off, "kv", "Class B")).toBeCloseTo(
+      ((c.kvClassBPerDay * 30) / 1e6) * LIST_PRICE_RATES.kv_class_b_rate_per_million,
+    );
+    expect(part(withIt, "compute", "Requests") - part(off, "compute", "Requests")).toBeCloseTo(
+      (((c.dispatchesPerDay + c.executionsPerDay) * 30) / 1e6) *
+        LIST_PRICE_RATES.compute_request_rate_per_million,
+    );
   });
 
   it("merges up to 13 sources per execution, level by level, until the hour reaches its target count", () => {
@@ -450,7 +475,13 @@ describe("compaction", () => {
     );
     expect(idle.compaction!.executionsPerDay).toBe(0);
     expect(idle.compaction!.dispatchesPerDay).toBe(86_400 / 30);
-    expect(line(idle, "compaction").usd).toBeCloseTo(
+    const idleOff = estimateMonthly(
+      { ...inputs, edgeRequestsPerDay: 0 },
+      units,
+      LIST_PRICE_RATES,
+      { ...on, enabled: false },
+    );
+    expect(idle.total - idleOff.total).toBeCloseTo(
       ((86_400 / 30) * 30 * LIST_PRICE_RATES.compute_request_rate_per_million) / 1e6 +
         ((86_400 / 30) * 30 * 2 * LIST_PRICE_RATES.kv_class_b_rate_per_million) / 1e6,
       6,
@@ -470,7 +501,7 @@ describe("compaction", () => {
     });
     const saved = 230 * 30;
     expect(
-      line(without, "compaction").usd - line(estimate, "compaction").usd,
+      without.total - estimate.total,
     ).toBeCloseTo((saved / 10_000) * 0.01 + (saved / 10_000) * 0.004);
   });
 });
@@ -604,10 +635,9 @@ describe("measureEstimate", () => {
       { ...DEFAULT_INPUTS, edgeRequestsPerDay: 1_000 },
       units,
       { ...zeroRates, compute_vcpu_rate_per_million_ms: 1e6 },
+      { ...DEFAULT_COMPACTION, enabled: false },
     );
-    expect(
-      line(estimate, "compute").usd + line(estimate, "summaries").usd,
-    ).toBe((300_000 + 400) * 30);
+    expect(line(estimate, "compute").usd).toBeCloseTo((300_000 + 400) * 30, 6);
   });
 
   it("caps the estimated summary share at the measured worker CPU", () => {
@@ -626,10 +656,9 @@ describe("measureEstimate", () => {
       { ...DEFAULT_INPUTS, edgeRequestsPerDay: 1_000 },
       { ...units, appVcpuMsPerDay: 0 },
       { ...zeroRates, compute_vcpu_rate_per_million_ms: 1e6 },
+      { ...DEFAULT_COMPACTION, enabled: false },
     );
-    expect(
-      line(estimate, "compute").usd + line(estimate, "summaries").usd,
-    ).toBe(10 * 30);
+    expect(line(estimate, "compute").usd).toBeCloseTo(10 * 30, 6);
   });
 
   it("attributes a bill smaller than the per-file default entirely to files", () => {

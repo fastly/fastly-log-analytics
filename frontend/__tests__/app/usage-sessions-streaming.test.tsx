@@ -393,7 +393,7 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
 
     renderWithQuery(<UsagePage />, { queryClient })
     expect(await screen.findByText('Compute (app + worker)')).toBeInTheDocument()
-    expect(screen.getByText('KV Store operations')).toBeInTheDocument()
+    expect(screen.getByText('KV Store')).toBeInTheDocument()
     expect(screen.getByText('3 secrets')).toBeInTheDocument()
     expect(screen.getByText('$21.00')).toBeInTheDocument()
     expect(screen.getByText(/front reqs/)).toBeInTheDocument()

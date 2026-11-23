@@ -14,7 +14,10 @@ describe('Cloud cost calculator', () => {
   it('turns measured storage for the selected range into a month at its average size', () => {
     render(<CloudCostCalculator localStorageGbHours={24} localStoragePeriodHours={24} rates={{ storage_rate_per_gb_month: 2 }} />)
     expect(screen.getByText('Measured · this install · 1.00 GB-months')).toBeInTheDocument()
-    expect(screen.getAllByText('$2.00').length).toBeGreaterThan(0)
+    const storage = screen.getByText('Object Storage').closest('[data-estimate-line]') as HTMLElement
+    expect(storage).toHaveTextContent(/Storage\s*\$2\.00/)
+    expect(storage).toHaveTextContent(/Class A\s*\$/)
+    expect(storage).toHaveTextContent(/Class B\s*\$/)
   })
 
   it('falls back for a null rate without replacing an explicit zero rate', () => {
