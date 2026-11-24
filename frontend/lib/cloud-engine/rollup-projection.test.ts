@@ -33,11 +33,20 @@ const FIXTURES = {
   dashboard: loadSummaryFixtures("../dashboard/__fixtures__/summaries"),
   securityValue: loadSummaryFixtures("security-value-summaries"),
   preValue: loadSummaryFixtures("network-summaries"),
+  ttlBuckets: loadSummaryFixtures("origin-summaries"),
 };
 type FixtureName = keyof typeof FIXTURES;
-/** Summary rows as written before the `value` group, for the reads that fall back without it. */
+/** Synthetic summary variants for paths no binary fixture here holds (pre-`value` fallback, `urls/ttl_bucket` exact buckets). */
 const EDITS: Partial<Record<FixtureName, (rows: Record<string, unknown>[]) => Record<string, unknown>[]>> = {
   preValue: (rows) => rows.filter((row) => row.bundle !== "value" && !(row.bundle === "dim_totals" && row.value === "value")),
+  ttlBuckets: (rows) => {
+    const bucket = rows.find((row) => row.bundle === "urls")?.bucket ?? BigInt(0);
+    return [
+      ...rows,
+      { bundle: "dim_totals", bucket, field: "ttl_bucket", value: "urls", requests: BigInt(10), truncated: false },
+      { bundle: "urls", bucket, field: "ttl_bucket", value: "< 60s", requests: BigInt(10) },
+    ];
+  },
 };
 
 type Answer = (source: RollupAnswerSource, spec: SummarySpec | null) => Promise<unknown>;
@@ -124,7 +133,7 @@ const PAGES: Record<string, Page> = {
   },
   performance: {
     spec: PERFORMANCE_SUMMARY_SPEC,
-    fixtures: ["origin", "dashboard"],
+    fixtures: ["origin", "dashboard", "ttlBuckets"],
     answers: [performance({}), performance({ sort_by: "avg" } as Partial<PerformanceRollupBody>)],
   },
   assets: {
