@@ -31,13 +31,19 @@ pub const SECRET_KEYS: &[&str] = &[
 
 /// Secrets an operator rotates by writing a standalone Secret Store entry: the app
 /// reads that entry ahead of its secret bundle, folds it in, then deletes it. Covers
-/// the per-service `fastly_token.<service_id>` refs that compaction and admin
-/// confirmations use, not just the install-wide `fastly_token`.
+/// the per-service `fastly_token.<service_id>`, `fos_ak.<service_id>`, and
+/// `fos_sk.<service_id>` refs, not just the install-wide `fastly_token`.
 pub fn rotatable_secret(name: &str) -> bool {
     matches!(name, "admin_setup_hash" | "fastly_token")
-        || name.strip_prefix("fastly_token.").is_some_and(|sid| {
-            !sid.is_empty() && sid.len() <= 64 && sid.bytes().all(|b| b.is_ascii_alphanumeric())
-        })
+        || ["fastly_token.", "fos_ak.", "fos_sk."]
+            .iter()
+            .any(|prefix| {
+                name.strip_prefix(prefix).is_some_and(|sid| {
+                    !sid.is_empty()
+                        && sid.len() <= 64
+                        && sid.bytes().all(|b| b.is_ascii_alphanumeric())
+                })
+            })
 }
 
 pub trait SetupStores {
@@ -155,17 +161,22 @@ mod tests {
     }
 
     #[test]
-    fn app_and_per_service_fastly_tokens_are_rotatable_but_other_secrets_are_not() {
+    fn app_and_per_service_fastly_tokens_and_fos_keys_are_rotatable_but_other_secrets_are_not() {
         assert!(rotatable_secret("fastly_token"));
         assert!(rotatable_secret("admin_setup_hash"));
         assert!(rotatable_secret("fastly_token.svcFixture0123456789ab"));
+        assert!(rotatable_secret("fos_ak.svcFixture0123456789ab"));
+        assert!(rotatable_secret("fos_sk.svcFixture0123456789ab"));
         for name in [
             "fastly_token.",
             "fastly_tokens",
             "fastly_token.a/b",
+            "fos_ak.",
+            "fos_sk.",
+            "fos_ak.a/b",
+            "fos_sk.a/b",
             "cdn_key",
             "session_key",
-            "fos_ak.svcFixture0123456789ab",
             "flp_bundle",
         ] {
             assert!(!rotatable_secret(name), "{name}");
