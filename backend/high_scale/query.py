@@ -1834,14 +1834,6 @@ _APPLY_FOLLOW_STOPWORDS = frozenset(
         "FORMAT",
         "INTO",
         "AS",
-        "AND",
-        "OR",
-        "IN",
-        "NOT",
-        "IS",
-        "BETWEEN",
-        "LIKE",
-        "ILIKE",
         "THEN",
         "ELSE",
         "END",
@@ -1855,12 +1847,8 @@ _APPLY_FOLLOW_STOPWORDS = frozenset(
         "FULL",
         "CROSS",
         "GLOBAL",
-        "ANY",
-        "ALL",
-        "ASOF",
         "SEMI",
         "ANTI",
-        "ARRAY",
         "OVER",
         "ASC",
         "DESC",
@@ -1868,6 +1856,7 @@ _APPLY_FOLLOW_STOPWORDS = frozenset(
         "COLLATE",
     }
 )
+_APPLY_JOIN_MOD_WORDS = frozenset({"ANY", "ALL", "ASOF", "ARRAY"})
 
 
 def _reject_unsafe_functions(sql: str, *, parse_tree: Any | None = None) -> None:
@@ -1916,10 +1905,18 @@ def _reject_unsafe_functions(sql: str, *, parse_tree: Any | None = None) -> None
             )
             if preceded_by_target:
                 nxt_k, nxt_t, _ = sig[idx + 1]
+                nxt_u = nxt_t.upper() if nxt_k == "IDENT" else ""
+                is_subq_join_mod = (
+                    prev_pair == ("OP", ")")
+                    and nxt_u in _APPLY_JOIN_MOD_WORDS
+                    and idx + 2 < len(sig)
+                    and sig[idx + 2][0] == "IDENT"
+                    and sig[idx + 2][1].upper() in ("JOIN", "INNER", "LEFT", "RIGHT", "FULL", "CROSS", "SEMI", "ANTI")
+                )
                 if (
                     (nxt_k == "OP" and nxt_t == "(")
                     or nxt_k == "DQUOTE"
-                    or (nxt_k == "IDENT" and nxt_t.upper() not in _APPLY_FOLLOW_STOPWORDS)
+                    or (nxt_k == "IDENT" and nxt_u not in _APPLY_FOLLOW_STOPWORDS and not is_subq_join_mod)
                 ):
                     raise PermissionError("APPLY column transformer is not allowed in console queries")
         if (sig[idx + 1][0], sig[idx + 1][1]) != ("OP", "("):

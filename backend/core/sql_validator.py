@@ -1891,14 +1891,6 @@ _APPLY_FOLLOW_STOPWORDS = frozenset(
         "FORMAT",
         "INTO",
         "AS",
-        "AND",
-        "OR",
-        "IN",
-        "NOT",
-        "IS",
-        "BETWEEN",
-        "LIKE",
-        "ILIKE",
         "THEN",
         "ELSE",
         "END",
@@ -1912,12 +1904,8 @@ _APPLY_FOLLOW_STOPWORDS = frozenset(
         "FULL",
         "CROSS",
         "GLOBAL",
-        "ANY",
-        "ALL",
-        "ASOF",
         "SEMI",
         "ANTI",
-        "ARRAY",
         "OVER",
         "ASC",
         "DESC",
@@ -1925,6 +1913,7 @@ _APPLY_FOLLOW_STOPWORDS = frozenset(
         "COLLATE",
     }
 )
+_APPLY_JOIN_MOD_WORDS = frozenset({"ANY", "ALL", "ASOF", "ARRAY"})
 
 
 def _is_star_except_clause(tokens: list[_Tok], idx: int) -> bool:
@@ -1964,7 +1953,20 @@ def _is_apply_column_transformer(tokens: list[_Tok], idx: int) -> bool:
     nxt = tokens[idx + 1]
     if nxt.kind in ("LPAREN", "QIDENT"):
         return True
-    return nxt.kind == "WORD" and nxt.val.upper() not in _APPLY_FOLLOW_STOPWORDS
+    if nxt.kind != "WORD":
+        return False
+    nu = nxt.val.upper()
+    if nu in _APPLY_FOLLOW_STOPWORDS:
+        return False
+    if (
+        prev.kind == "RPAREN"
+        and nu in _APPLY_JOIN_MOD_WORDS
+        and idx + 2 < len(tokens)
+        and tokens[idx + 2].kind == "WORD"
+        and tokens[idx + 2].val.upper() in ("JOIN", "INNER", "LEFT", "RIGHT", "FULL", "CROSS", "SEMI", "ANTI")
+    ):
+        return False
+    return True
 
 
 def _is_dot_qualifier_at(tokens: list[_Tok], idx: int) -> bool:

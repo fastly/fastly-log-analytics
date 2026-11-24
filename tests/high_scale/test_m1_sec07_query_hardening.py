@@ -5274,6 +5274,15 @@ def test_sec_t5_iter37_apply_column_transformer_blocked() -> None:
         "SELECT * APPLY url FROM logs",
         "SELECT * APPLY s3 FROM logs",
         "SELECT (SELECT * APPLY file FROM (SELECT '/etc/passwd' AS a)) FROM logs",
+        "SELECT * APPLY any FROM logs",
+        "SELECT * APPLY array FROM logs",
+        "SELECT * APPLY not FROM logs",
+        "SELECT * APPLY any APPLY file FROM (SELECT '/etc/passwd' AS a)",
+        "SELECT * APPLY array APPLY file FROM (SELECT '/etc/passwd' AS a)",
+        "SELECT * APPLY not APPLY file FROM (SELECT '/etc/passwd' AS a)",
+        "SELECT * EXCEPT (status) APPLY not APPLY sleep FROM logs",
+        "SELECT COLUMNS('.*') APPLY any FROM logs",
+        "SELECT COLUMNS('.*') APPLY array FROM logs",
     )
 
     class _DenyClient:
