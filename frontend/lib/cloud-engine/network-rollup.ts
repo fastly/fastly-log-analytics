@@ -10,6 +10,7 @@ import {
   networkBundle,
   normalizeProtocolBucket,
   parseEpochMs,
+  parseMetroCode,
   PROTOCOL_BUCKETS,
   roundTo,
   TCP_FIELDS,
@@ -294,6 +295,7 @@ export function mapFromRollup(result: RollupResult, params: Pick<NetworkQueryPar
       ),
       city_idx: cityIndexes.get(key),
       country,
+      metro_code: parseMetroCode(agg.label),
     });
     mapBuckets.set(t, entry);
   }

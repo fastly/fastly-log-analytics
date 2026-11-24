@@ -285,12 +285,20 @@ export function emptyNetworkBundle(missingTcpFields: string[] = []) {
   };
 }
 
+export function parseMetroCode(raw: unknown): number | null {
+  if (raw == null) return null;
+  const n = typeof raw === "bigint" ? Number(raw) : typeof raw === "number" ? raw : Number(String(raw).trim());
+  if (!Number.isFinite(n)) return null;
+  const code = Math.trunc(n);
+  return code > 0 && code === n ? code : null;
+}
+
 /** Every request column the /network scans read, physical Cloud names and their aliases alike. */
 export const NETWORK_SCAN_COLUMNS = [
   "timestamp", "ts_ms", "service_id", "status", "cache", "cache_status", "resp_bytes", "resp_body_size",
   "elapsed", "time_elapsed_usec", "proto", "protocol", "pop", "fastly_pop", "edge", "rid", "prid",
   "ttfb", "ttfb_ms", "ottfb", "country", "geo_country", "city", "geo_city", "region", "geo_region",
-  "lat", "lon", "asn", "client_asn", "as_name", "tcp_rtt", "tcpi_rtt", "client_rtt_us", "client_tcpi_rtt",
+  "lat", "lon", "metro", "asn", "client_asn", "as_name", "tcp_rtt", "tcpi_rtt", "client_rtt_us", "client_tcpi_rtt",
   "ploss", "client_ploss", "client_cwnd", "rtt_var", "tcpi_rtt_var", "client_tcpi_rttvar",
   "retrans", "client_tcpi_delta_retrans", "delivery_rate", "tcpi_delivery_rate",
 ] as const;
@@ -303,10 +311,10 @@ const POP_COLUMNS = ["pop", "fastly_pop"];
 
 /** The columns each raw /network scan reads, beyond the time and service ones every scan filters on. */
 const SCAN_COLUMNS = {
-  health: [...COUNTRY_COLUMNS, ...ASN_COLUMNS, "as_name", "city", "geo_city", "lat", "lon", ...RTT_COLUMNS,
+  health: [...COUNTRY_COLUMNS, ...ASN_COLUMNS, "as_name", "city", "geo_city", "lat", "lon", "metro", ...RTT_COLUMNS,
     "ploss", "client_ploss", "status"],
   // The map alone (`mapOnly`); a chosen map ASN adds the ASN columns (`networkScanColumns`).
-  map: ["city", "geo_city", ...COUNTRY_COLUMNS, "lat", "lon", ...RTT_COLUMNS, "ploss", "client_ploss", "status"],
+  map: ["city", "geo_city", ...COUNTRY_COLUMNS, "lat", "lon", "metro", ...RTT_COLUMNS, "ploss", "client_ploss", "status"],
   shielding: ["edge", "rid", "prid", "pop", "ttfb", "ottfb"],
   quality: [...COUNTRY_COLUMNS, ...ASN_COLUMNS, "as_name", "proto", "protocol", ...POP_COLUMNS, "region", "geo_region",
     ...RTT_COLUMNS, "client_cwnd", "client_tcpi_rttvar", "ploss", "client_ploss", "rtt_var", "tcpi_rtt_var",
@@ -430,6 +438,7 @@ async function queryNetworkBuckets(
         COALESCE(geo_country, country) AS country_key,
         ${mapAsnFilter === null ? "1" : `CASE WHEN COALESCE(client_asn, asn, 0) = ${mapAsnFilter} THEN 1 END`} AS map_key,
         lat, lon,
+        CASE WHEN TRY_CAST(metro AS BIGINT) > 0 THEN TRY_CAST(metro AS BIGINT) END AS metro_code,
         COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt) AS rtt_us,
         COALESCE(client_ploss, ploss) AS ploss_value,
         status
@@ -438,6 +447,7 @@ async function queryNetworkBuckets(
       SELECT GROUPING(asn_key) = 0 AS is_asn,
         bucket_ms, asn_key AS asn, city_key AS city, country_key AS country, map_key,
         AVG(lat) AS lat, AVG(lon) AS lon,
+        MIN(metro_code) AS metro_code,
         COUNT(*)::BIGINT AS reqs,
         QUANTILE_CONT(rtt_us, [0.5, 0.1]) AS rtt_quantiles,
         AVG(ploss_value) AS avg_ploss,
@@ -445,7 +455,7 @@ async function queryNetworkBuckets(
       FROM scoped
       GROUP BY GROUPING SETS ((bucket_ms, asn_key), (bucket_ms, city_key, country_key, map_key))
     )
-    SELECT is_asn, bucket_ms, asn, city, country, map_key, lat, lon, reqs,
+    SELECT is_asn, bucket_ms, asn, city, country, map_key, lat, lon, metro_code, reqs,
       rtt_quantiles[1] AS rtt_med_us, rtt_quantiles[2] AS baseline, avg_ploss, error_pct
     FROM grouped ORDER BY bucket_ms, reqs DESC`, [], params.signal);
   const asnRows = rows.filter((row) => row.is_asn && Number(row.asn ?? 0) > 0);
@@ -484,7 +494,12 @@ async function queryNetworkBuckets(
     }
     const bucket = new Date(Number(row.bucket_ms)).toISOString();
     const entry = mapBuckets.get(bucket) ?? { bucket, bucket_idx: bucketIndexes.get(bucket)!, cities: [] };
-    entry.cities.push({ ...cell(row), city_idx: cityIndexes.get(key), country: row.country });
+    entry.cities.push({
+      ...cell(row),
+      city_idx: cityIndexes.get(key),
+      country: row.country,
+      metro_code: parseMetroCode(row.metro_code),
+    });
     mapBuckets.set(bucket, entry);
   }
   return {

@@ -234,7 +234,7 @@ describe("network rollup vs raw DuckDB over the same rows", () => {
       for (const [key, row] of want) {
         const cell = got.get(key)!;
         const exact = (c: Record<string, unknown>) =>
-          [c.reqs, c.error_pct, c.avg_ploss == null ? null : Number(Number(c.avg_ploss).toFixed(12)), c.country];
+          [c.reqs, c.error_pct, c.avg_ploss == null ? null : Number(Number(c.avg_ploss).toFixed(12)), c.country, c.metro_code];
         expect(exact(cell), key).toEqual(exact(row));
         // Histogram medians of a handful of rows can land a bin away from the interpolated raw median.
         if (row.rtt_med_us == null) expect(cell.rtt_med_us, key).toBeNull();
@@ -625,6 +625,52 @@ describe("networkFromRollup", () => {
     if (!isNetworkPartial(fullFallback)) throw new Error("expected NetworkPartial");
     expect(fullFallback.residual.start_time).toBe(span[0].start);
     expect(fullFallback.residual.end_time).toBe(span[2].end);
+  });
+
+  it("emits metro_code on mapFromRollup cities from series5/city label and preserves it when re-bucketing", async () => {
+    const t0 = new Date(T0);
+    const t1 = new Date(T0 + 300_000);
+    const summaryBuf = parquetWriteBuffer({
+      kvMetadata: [{ key: "flp_summary", value: "3" }],
+      columnData: [
+        { name: "bundle", data: ["dim_totals", "dim_totals", "series5", "series5", "series5", "series5", "series5", "series5"], type: "STRING" },
+        { name: "bucket", data: [t0, t0, t0, t1, t0, t1, t0, t0], type: "TIMESTAMP" },
+        { name: "field", data: ["overall", "city", "overall", "overall", "city", "city", "city", "city"], type: "STRING" },
+        {
+          name: "value",
+          data: [
+            "series5",
+            "series5",
+            "",
+            "",
+            JSON.stringify(["US", "New York"]),
+            JSON.stringify(["US", "New York"]),
+            JSON.stringify(["GB", "London"]),
+            JSON.stringify(["US", "BadMetro"]),
+          ],
+          type: "STRING",
+        },
+        { name: "requests", data: [10, 10, 6, 4, 3, 4, 2, 1].map((n) => BigInt(n)), type: "INT64" },
+        { name: "status_5xx", data: [null, null, ...[0, 0, 0, 0, 0, 0].map((n) => BigInt(n))], type: "INT64" },
+        { name: "lat_sum", data: [null, null, null, null, 122.13, 162.84, 103.02, 39.04], type: "DOUBLE" },
+        { name: "lon_sum", data: [null, null, null, null, -222.03, -296.04, -0.26, -77.49], type: "DOUBLE" },
+        { name: "geo_count", data: [null, null, null, null, ...[3, 4, 2, 1].map((n) => BigInt(n))], type: "INT64" },
+        { name: "label", data: [null, null, null, null, null, "501", null, "0"], type: "STRING" },
+        { name: "truncated", data: [false, false, null, null, null, null, null, null], type: "BOOLEAN" },
+      ],
+    });
+    const win = WINDOWS[0];
+    const served = await networkFromRollup(
+      "/api/network-health",
+      { start_time: win.start, end_time: win.end, bucket_seconds: 900, sections: ["buckets", "cities", "map_buckets"] },
+      source([win], { [win.key]: summaryBuf }),
+    ) as MapAnswer;
+    const byCity = new Map(
+      served.map_buckets[0].cities.map((c) => [served.cities[c.city_idx as number].name, c.metro_code]),
+    );
+    expect(byCity.get("New York")).toBe(501);
+    expect(byCity.get("London")).toBeNull();
+    expect(byCity.get("BadMetro")).toBeNull();
   });
 
   it("serves filtered /api/network-health summary from filtered_rollups for hour-aligned single low-card filters", async () => {

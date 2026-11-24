@@ -1012,6 +1012,7 @@ struct NetCols<'a> {
     retrans: Num<'a>,
     lat: Num<'a>,
     lon: Num<'a>,
+    metro: Num<'a>,
     header: Num<'a>,
     waf_sig: Option<&'a StringArray>,
     asset_type: Str<'a>,
@@ -1089,6 +1090,7 @@ impl<'a> NetCols<'a> {
             ),
             lat: Num::new(batch, &[("lat", 1.0)]),
             lon: Num::new(batch, &[("lon", 1.0)]),
+            metro: Num::new(batch, &[("metro", 1.0)]),
             header: Num::new(batch, &[("req_header_bytes", 1.0)]),
             waf_sig: col(batch, "waf_sig"),
             asset_type: Str::new(batch, &["asset_type"]),
@@ -1167,6 +1169,7 @@ struct Net<'a> {
     rttvar: Option<f64>,
     retrans: bool,
     geo: Option<(f64, f64)>,
+    metro: Option<i64>,
     as_name: Option<&'a str>,
     country: &'a str,
     city: &'a str,
@@ -1462,14 +1465,15 @@ impl Transport {
     }
 }
 
-/// A `series5` `city` cell: the /network map's requests, 5xx, loss, coordinates and RTT per
-/// bucket and `[COALESCE(geo_country, country), COALESCE(geo_city, city)]`.
+/// A `series5` `city` cell: the /network map's requests, 5xx, loss, coordinates, DMA metro code
+/// and RTT per bucket and `[COALESCE(geo_country, country), COALESCE(geo_city, city)]`.
 #[derive(Default)]
 struct MapCell {
     requests: i64,
     s5: i64,
     ploss: (f64, i64),
     geo: (f64, f64, i64),
+    metro: Option<i64>,
     rtt: Hist,
 }
 
@@ -1486,6 +1490,7 @@ impl MapCell {
             self.geo.1 += lo;
             self.geo.2 += 1;
         }
+        self.metro = min_opt(self.metro, n.metro);
         if let Some((v, slot)) = n.lat[2] {
             self.rtt.add_slot(v, slot);
         }
@@ -1493,6 +1498,7 @@ impl MapCell {
 
     fn push(&self, out: &mut Out, bucket: i64, value: &str) {
         let rtt = self.rtt.to_bytes();
+        let metro = self.metro.map(|m| m.to_string());
         let mut row = vec![
             (C::Bundle, V::S("series5")),
             (C::Bucket, V::I(bucket)),
@@ -1505,6 +1511,7 @@ impl MapCell {
             (C::LatSum, V::F(self.geo.0)),
             (C::LonSum, V::F(self.geo.1)),
             (C::GeoCount, V::I(self.geo.2)),
+            (C::Label, opt_s(metro.as_deref())),
         ];
         push_hists(&mut row, &[C::RttHist], std::slice::from_ref(&rtt));
         out.push(&row);
@@ -2287,6 +2294,10 @@ fn write_v3<'a>(
                 rttvar: c.rttvar.get(i),
                 retrans: c.retrans.get(i).is_some_and(|v| v > 0.0),
                 geo: c.lat.get(i).zip(c.lon.get(i)),
+                metro: c.metro.get(i).and_then(|v| {
+                    let n = v.trunc();
+                    (n > 0.0 && n == v && n <= i64::MAX as f64).then_some(n as i64)
+                }),
                 as_name,
                 country: country.unwrap_or("Unknown"),
                 city: city.unwrap_or("Unknown"),
@@ -3799,4 +3810,111 @@ pub fn write_summary(batches: &[&RecordBatch], start: i64) -> Result<Vec<u8>, St
             SUMMARY_VERSION.to_string(),
         )],
     )
+}
+
+#[cfg(test)]
+mod map_metro_tests {
+    use super::*;
+    use crate::ingest::bundle::{self, Unit};
+    use bytes::Bytes;
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+    fn read_city_labels(parquet: Vec<u8>) -> BTreeMap<String, Option<String>> {
+        let reader = ParquetRecordBatchReaderBuilder::try_new(Bytes::from(parquet))
+            .unwrap()
+            .build()
+            .unwrap();
+        let mut out = BTreeMap::new();
+        for batch in reader {
+            let batch = batch.unwrap();
+            let bundle = col::<StringArray>(&batch, "bundle").unwrap();
+            let field = col::<StringArray>(&batch, "field").unwrap();
+            let value = col::<StringArray>(&batch, "value").unwrap();
+            let label = col::<StringArray>(&batch, "label").unwrap();
+            for i in 0..batch.num_rows() {
+                if bundle.is_valid(i)
+                    && bundle.value(i) == "series5"
+                    && field.is_valid(i)
+                    && field.value(i) == "city"
+                    && value.is_valid(i)
+                {
+                    let l = label.is_valid(i).then(|| label.value(i).to_owned());
+                    out.insert(value.value(i).to_owned(), l);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn series5_city_records_positive_metro_in_label_and_bundle_preserves_it() {
+        let base = 1_800_000_000i64;
+        let schema = convert::RequestSchema::new(Vec::new());
+        let make_window = |offset: i64, rows: &[serde_json::Value]| -> Vec<u8> {
+            let mut plain = Vec::new();
+            for row in rows {
+                plain.extend_from_slice(row.to_string().as_bytes());
+                plain.push(b'\n');
+            }
+            let gz = zstd::stream::encode_all(plain.as_slice(), 1).unwrap();
+            let converted =
+                convert::convert_object_capped(&gz, 300, base + offset, u64::MAX, &schema).unwrap();
+            let batch = converted.windows.into_values().next().unwrap();
+            write_summary(&[&batch], base + offset).unwrap()
+        };
+        let ts = |s: i64| {
+            time::OffsetDateTime::from_unix_timestamp(base + s)
+                .unwrap()
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap()
+        };
+
+        let w1 = make_window(
+            0,
+            &[
+                serde_json::json!({"timestamp": ts(1), "country": "US", "city": "New York", "lat": 40.71, "lon": -74.01, "metro": 501}),
+                serde_json::json!({"timestamp": ts(2), "country": "US", "city": "Denver", "lat": 39.74, "lon": -104.99, "metro": 0}),
+                serde_json::json!({"timestamp": ts(3), "country": "GB", "city": "London", "lat": 51.51, "lon": -0.13}),
+            ],
+        );
+        let w2 = make_window(
+            300,
+            &[
+                serde_json::json!({"timestamp": ts(301), "country": "US", "city": "New York", "lat": 40.71, "lon": -74.01, "metro": 501}),
+                serde_json::json!({"timestamp": ts(302), "country": "US", "city": "Denver", "lat": 39.74, "lon": -104.99, "metro": 751}),
+            ],
+        );
+
+        let w1_labels = read_city_labels(w1.clone());
+        assert_eq!(
+            w1_labels.get(r#"["US","New York"]"#),
+            Some(&Some("501".to_owned()))
+        );
+        assert_eq!(w1_labels.get(r#"["US","Denver"]"#), Some(&None));
+        assert_eq!(w1_labels.get(r#"["GB","London"]"#), Some(&None));
+
+        let hour = bundle::merge(&[w1.as_slice(), w2.as_slice()], base, Unit::Hour).unwrap();
+        let hour_labels = read_city_labels(hour.clone());
+        assert_eq!(
+            hour_labels.get(r#"["US","New York"]"#),
+            Some(&Some("501".to_owned()))
+        );
+        assert_eq!(
+            hour_labels.get(r#"["US","Denver"]"#),
+            Some(&Some("751".to_owned()))
+        );
+        assert_eq!(hour_labels.get(r#"["GB","London"]"#), Some(&None));
+
+        let day = bundle::merge(&[hour.as_slice()], base, Unit::Day).unwrap();
+        let day_labels = read_city_labels(day);
+        assert_eq!(
+            day_labels.get(r#"["US","New York"]"#),
+            Some(&Some("501".to_owned()))
+        );
+        assert_eq!(
+            day_labels.get(r#"["US","Denver"]"#),
+            Some(&Some("751".to_owned()))
+        );
+        assert_eq!(day_labels.get(r#"["GB","London"]"#), Some(&None));
+    }
 }

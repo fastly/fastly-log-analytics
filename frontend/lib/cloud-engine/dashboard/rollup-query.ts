@@ -72,7 +72,7 @@ export type RollupAgg = {
   /** `quality` rows: response bits per elapsed µs, over rows with an elapsed above 0. */
   throughputSum: number;
   throughputCount: number;
-  /** AS name for `asn` values (the smallest seen). */
+  /** AS name for `asn` values (the smallest seen), or DMA metro code string for `series5/city`. */
   label: string | null;
   hists: RollupHists;
   /** Clone-safe serialized `hists.elapsed` used when `insightsBaselineRollup` crosses a worker boundary. */

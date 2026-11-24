@@ -15,6 +15,7 @@ import {
   deduplicateMetroLeaderboard,
   handleNetworkRequest,
   NETWORK_SCAN_COLUMNS,
+  networkScanColumns,
   queryNetworkBundle,
   queryNetworkHealth,
 } from "./network";
@@ -328,6 +329,63 @@ describe("Feature F21 — Network cloud-engine", () => {
       expect(bundle.network_health.cities.some((c) => c.name === "?")).toBe(false);
     } finally {
       await engine.reset();
+    }
+  });
+
+  it("emits positive metro_code on map_buckets cities and handles absent or non-positive metro columns", async () => {
+    expect(networkScanColumns("/api/network-health", { sections: ["buckets", "cities", "map_buckets"] })).toContain("metro");
+    expect(networkScanColumns("/api/network-health", { sections: ["summary", "cities", "map_buckets"] })).toContain("metro");
+
+    const engine = new DuckDBAnalyticalEngine();
+    try {
+      await engine.executeSql(`INSERT INTO requests
+        (scoped_key, ts_ms, country, city, lat, lon, metro, tcp_rtt, status)
+        VALUES
+          ('native', 1700000100000, 'US', 'Denver', 39.74, -104.99, 751, 10000, 200),
+          ('native', 1700000105000, 'US', 'Ashburn', 39.04, -77.49, 0, 12000, 200),
+          ('native', 1700000110000, 'GB', 'London', 51.51, -0.13, NULL, 15000, 200)`);
+      const health = await queryNetworkHealth({
+        engine,
+        bucket_seconds: 300,
+        sections: ["buckets", "cities", "map_buckets"],
+      });
+      const bucket0 = health.map_buckets[0] as { cities: Record<string, unknown>[] };
+      const byCity = new Map(
+        bucket0.cities.map((c) => [
+          health.cities[c.city_idx as number].name,
+          c.metro_code,
+        ]),
+      );
+      expect(byCity.get("Denver")).toBe(751);
+      expect(byCity.get("Ashburn")).toBeNull();
+      expect(byCity.get("London")).toBeNull();
+    } finally {
+      await engine.reset();
+    }
+
+    const parquetEngine = new ParquetEngine();
+    const lease = parquetEngine.lease([]);
+    try {
+      await lease.ingestFile("no-metro", "no-metro.parquet", parquetWriteBuffer({
+        columnData: [
+          { name: "timestamp", type: "TIMESTAMP", data: [new Date(1700000100000)] },
+          { name: "country", type: "STRING", data: ["US"] },
+          { name: "city", type: "STRING", data: ["Seattle"] },
+          { name: "lat", type: "DOUBLE", data: [47.61] },
+          { name: "lon", type: "DOUBLE", data: [-122.33] },
+          { name: "status", type: "INT64", data: [BigInt(200)] },
+        ],
+      }));
+      const health = await queryNetworkHealth({
+        engine: lease.readContext(),
+        bucket_seconds: 300,
+        sections: ["buckets", "cities", "map_buckets"],
+      });
+      const bucket0 = health.map_buckets[0] as { cities: Record<string, unknown>[] };
+      expect(bucket0.cities[0]).toMatchObject({ country: "US", metro_code: null });
+    } finally {
+      lease.release();
+      await parquetEngine.reset();
     }
   });
 });
