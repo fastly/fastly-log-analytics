@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
-GIB_BYTES = 1024**3
+GB_BYTES = 1_000_000_000
 HOUR_MS = 3_600_000
 
 StorageBillingKind = Literal["live", "deleted", "minimum_billed"]
@@ -29,7 +29,7 @@ class StorageBillingInterval(BaseModel):
 
 
 class StorageBillingSummary(BaseModel):
-    """Aggregated GiB-hours across a selected [start_ms, end_ms) period."""
+    """Aggregated GB-hours across a selected [start_ms, end_ms) period."""
 
     live_gb_hours: float
     deleted_gb_hours: float
@@ -50,7 +50,7 @@ def calculate_storage_billing(
     start_ms: int,
     end_ms: int,
 ) -> StorageBillingSummary:
-    """Integrate billable byte-time over ``[start_ms, end_ms)`` in GiB-hours."""
+    """Integrate billable byte-time over ``[start_ms, end_ms)`` in GB-hours."""
     if end_ms < start_ms:
         raise ValueError(f"end_ms ({end_ms}) must be >= start_ms ({start_ms})")
     if end_ms == start_ms:
@@ -85,7 +85,7 @@ def calculate_storage_billing(
             continue
 
         clamped_bytes = max(0, int(interval.bytes))
-        gb_hours = (clamped_bytes / GIB_BYTES) * ((overlap_end - overlap_start) / HOUR_MS)
+        gb_hours = (clamped_bytes / GB_BYTES) * ((overlap_end - overlap_start) / HOUR_MS)
 
         if interval.kind == "live":
             live_gb_hours += gb_hours

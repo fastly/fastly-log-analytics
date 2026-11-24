@@ -298,8 +298,8 @@ export function UsagePageContent({
   const totalClassB = ops?.total_class_b ?? 0
   const totalBwGB = (bw?.total_bytes ?? 0) / 1e9
 
-  const rateA = rateSettings?.class_a_rate_per_1k ?? 0.005
-  const rateBPer10k = rateSettings?.class_b_rate_per_10k ?? 0.01
+  const rateA = rateSettings?.class_a_rate_per_1k ?? 0.0025
+  const rateBPer10k = rateSettings?.class_b_rate_per_10k ?? 0.004
   const rateB = rateBPer10k / 10
   const rateEgress = rateSettings?.cdn_egress_rate_per_gb ?? 0.12
   const rateStorage = rateSettings?.storage_rate_per_gb_month ?? 0.02

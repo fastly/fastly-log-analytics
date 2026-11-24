@@ -12,7 +12,7 @@ from backend.core.storage_billing import (
 
 pytestmark = pytest.mark.no_postgres
 
-GIB = 1024**3
+GB = 1_000_000_000
 HOUR_MS = 3_600_000
 
 
@@ -26,7 +26,7 @@ def test_selected_period_intersects_live_and_minimum_billed_objects() -> None:
             "id": "live-a",
             "dataset": "pq_request",
             "kind": "live",
-            "bytes": GIB,
+            "bytes": GB,
             "billed_from": _h(10),
             "billed_until": _h(20),
             "complete": True,
@@ -36,7 +36,7 @@ def test_selected_period_intersects_live_and_minimum_billed_objects() -> None:
             "id": "deleted-a",
             "dataset": "raw_request",
             "kind": "minimum_billed",
-            "bytes": 2 * GIB,
+            "bytes": 2 * GB,
             "billed_from": _h(11),
             "billed_until": _h(13),
             "complete": True,
@@ -62,7 +62,7 @@ def test_deleted_interval_stops_at_deletion_and_excludes_non_overlapping() -> No
             id="del-after-min",
             dataset="raw_request",
             kind="deleted",
-            bytes=GIB,
+            bytes=GB,
             created_at=_h(0),
             deleted_at=_h(730),
             billed_from=_h(0),
@@ -74,7 +74,7 @@ def test_deleted_interval_stops_at_deletion_and_excludes_non_overlapping() -> No
             id="outside-before",
             dataset="raw_request",
             kind="deleted",
-            bytes=10 * GIB,
+            bytes=10 * GB,
             billed_from=_h(0),
             billed_until=_h(720),
             complete=False,
@@ -84,7 +84,7 @@ def test_deleted_interval_stops_at_deletion_and_excludes_non_overlapping() -> No
             id="outside-after",
             dataset="raw_request",
             kind="live",
-            bytes=10 * GIB,
+            bytes=10 * GB,
             billed_from=_h(740),
             billed_until=_h(750),
             complete=False,
@@ -108,7 +108,7 @@ def test_incomplete_contributing_interval_marks_summary_incomplete() -> None:
             "id": "incomplete-copy-del",
             "dataset": "cloud_copy",
             "kind": "minimum_billed",
-            "bytes": GIB,
+            "bytes": GB,
             "created_at": None,
             "deleted_at": _h(1),
             "billed_from": _h(1),
@@ -132,7 +132,7 @@ def test_deduplicates_by_interval_id_and_clamps_negative_bytes() -> None:
             "id": "dup-1",
             "dataset": "raw_request",
             "kind": "live",
-            "bytes": GIB,
+            "bytes": GB,
             "billed_from": _h(0),
             "billed_until": _h(4),
             "complete": True,
@@ -142,7 +142,7 @@ def test_deduplicates_by_interval_id_and_clamps_negative_bytes() -> None:
             "id": "dup-1",
             "dataset": "raw_request",
             "kind": "live",
-            "bytes": 99 * GIB,
+            "bytes": 99 * GB,
             "billed_from": _h(0),
             "billed_until": _h(4),
             "complete": False,
@@ -175,7 +175,7 @@ def test_empty_period_returns_zero_complete_and_empty_provenance() -> None:
             "id": "live-a",
             "dataset": "raw_request",
             "kind": "live",
-            "bytes": GIB,
+            "bytes": GB,
             "billed_from": _h(0),
             "billed_until": _h(10),
             "complete": False,
@@ -213,20 +213,20 @@ def test_postgres_control_plane_storage_billing_intervals_lifecycle() -> None:
 
     source_rows = [
         # Live source object discovered at t0 + 8h (overlaps [10h, 14h) = 4h)
-        ("obj-live", "request", GIB, "acknowledged", t0 + timedelta(hours=8), t0 + timedelta(hours=9)),
+        ("obj-live", "request", GB, "acknowledged", t0 + timedelta(hours=8), t0 + timedelta(hours=9)),
         # Deleted inside 30d minimum term: discovered at t0 + 9h, deleted at t0 + 11h
         # In [10h, 14h): 1h deleted ([10h, 11h)) + 3h minimum_billed ([11h, 14h))
-        ("obj-del-min", "request", 2 * GIB, "source_deleted", t0 + timedelta(hours=9), t0 + timedelta(hours=11)),
+        ("obj-del-min", "request", 2 * GB, "source_deleted", t0 + timedelta(hours=9), t0 + timedelta(hours=11)),
         # Deleted AFTER 30d minimum term: discovered 35d before t0, deleted at t0 + 12h
         # In [10h, 14h): 2h deleted ([10h, 12h)), 0h minimum_billed
-        ("obj-del-after", "rum", GIB, "source_deleted", t0 - timedelta(days=35), t0 + timedelta(hours=12)),
+        ("obj-del-after", "rum", GB, "source_deleted", t0 - timedelta(days=35), t0 + timedelta(hours=12)),
     ]
     archive_rows = [
-        # Live archive manifest: 4 GiB artifact_size counted ONCE (not 3x for 3 FOS objects)
-        ("man-live", "request", 4 * GIB, t0 + timedelta(hours=12), None),
+        # Live archive manifest: 4 GB artifact_size counted ONCE (not 3x for 3 FOS objects)
+        ("man-live", "request", 4 * GB, t0 + timedelta(hours=12), None),
         # Expired archive manifest inside 30d minimum term: created at t0 + 8h, expired at t0 + 10h
         # In [10h, 14h): 4h minimum_billed
-        ("man-exp", "request", GIB, t0 + timedelta(hours=8), t0 + timedelta(hours=10)),
+        ("man-exp", "request", GB, t0 + timedelta(hours=8), t0 + timedelta(hours=10)),
     ]
 
     class FakeCursor:
@@ -268,11 +268,11 @@ def test_postgres_control_plane_storage_billing_intervals_lifecycle() -> None:
     assert complete is True
     assert summary.complete is True
     assert provenance == ["high-scale:archive_manifests", "high-scale:source_objects"]
-    # live: obj-live (1 GiB * 4h = 4) + man-live (4 GiB * 2h = 8) = 12
+    # live: obj-live (1 GB * 4h = 4) + man-live (4 GB * 2h = 8) = 12
     assert summary.live_gb_hours == pytest.approx(12.0)
-    # deleted: obj-del-min (2 GiB * 1h = 2) + obj-del-after (1 GiB * 2h = 2) = 4
+    # deleted: obj-del-min (2 GB * 1h = 2) + obj-del-after (1 GB * 2h = 2) = 4
     assert summary.deleted_gb_hours == pytest.approx(4.0)
-    # minimum_billed: obj-del-min (2 GiB * 3h = 6) + man-exp (1 GiB * 4h = 4) = 10
+    # minimum_billed: obj-del-min (2 GB * 3h = 6) + man-exp (1 GB * 4h = 4) = 10
     assert summary.minimum_billed_gb_hours == pytest.approx(10.0)
     assert summary.total_gb_hours == pytest.approx(26.0)
 
@@ -298,7 +298,7 @@ def test_postgres_control_plane_missing_creation_timestamp_marks_incomplete() ->
     class FakeConnection:
         def execute(self, sql: str, _params=()):
             if "high_scale_source_objects" in sql:
-                return FakeCursor([("obj-no-ts", "request", GIB, "source_deleted", None, t0 + timedelta(hours=9))])
+                return FakeCursor([("obj-no-ts", "request", GB, "source_deleted", None, t0 + timedelta(hours=9))])
             return FakeCursor([])
 
     plane = object.__new__(PostgresControlPlane)
@@ -437,7 +437,7 @@ def test_fos_usage_utc_date_helpers_and_ratchet_compliance(monkeypatch: pytest.M
 
         def fetchall(self):
             if len(captured_params) == 1:
-                return [("2026-06-01T12:00:00Z", GIB, 2)]
+                return [("2026-06-01T12:00:00Z", GB, 2)]
             return []
 
         def close(self) -> None:

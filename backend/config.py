@@ -887,8 +887,8 @@ class _UsageLoggingConfigModel(BaseModel):
 
     enabled: bool = False
     retention_days: int = 30
-    class_a_rate_per_1k: float = 0.005
-    class_b_rate_per_10k: float = 0.01
+    class_a_rate_per_1k: float = 0.0025
+    class_b_rate_per_10k: float = 0.004
     cdn_egress_rate_per_gb: float = 0.12
     storage_rate_per_gb_month: float = 0.02
     min_billed_days: int = 30

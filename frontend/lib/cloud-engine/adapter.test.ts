@@ -874,7 +874,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
   });
 
   describe("local lifecycle storage billing on /api/usage/current-storage", () => {
-    const GiB = 1024 ** 3;
+    const BYTES_PER_GB = 1_000_000_000;
     const hour = 3_600_000;
     const from = Date.parse("2026-11-22T12:00:00.000Z");
     const to = from + 2 * hour;
@@ -901,7 +901,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
             id: "pq_request:processed/request/live.parquet",
             dataset: "pq_request",
             kind: "live",
-            bytes: GiB,
+            bytes: BYTES_PER_GB,
             createdAt: from - 2 * hour,
             deletedAt: null,
             billedFrom: from - 2 * hour,
@@ -914,7 +914,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
             id: "raw_request:raw/request/deleted.zst",
             dataset: "raw_request",
             kind: "live",
-            bytes: 2 * GiB,
+            bytes: 2 * BYTES_PER_GB,
             createdAt: from - hour,
             deletedAt: null,
             billedFrom: from - hour,
@@ -935,7 +935,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
             id: "raw_request:raw/request/deleted.zst",
             dataset: "raw_request",
             kind: "minimum_billed",
-            bytes: 2 * GiB,
+            bytes: 2 * BYTES_PER_GB,
             createdAt: from - hour,
             deletedAt: from,
             billedFrom: from - hour,
@@ -944,7 +944,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
             provenance: "cloud:ingest_files",
           },
         ],
-        bytes: 2 * GiB,
+        bytes: 2 * BYTES_PER_GB,
         complete: true,
         provenance: "cloud:ingest_files",
       });
@@ -990,7 +990,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
             id: "pq_request:processed/request/live.parquet",
             dataset: "pq_request",
             kind: "live",
-            bytes: GiB,
+            bytes: BYTES_PER_GB,
             createdAt: from - hour,
             deletedAt: null,
             billedFrom: from - hour,
@@ -1019,7 +1019,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
             dataset: "pq_request",
             timestamp: from,
             bytes_in: 0,
-            bytes_deleted: GiB,
+            bytes_deleted: BYTES_PER_GB,
             bytes_deleted_complete: true,
           },
         ],

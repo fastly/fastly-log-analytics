@@ -182,6 +182,21 @@ export const DEFAULT_INPUTS: EstimateInputs = {
 };
 
 /**
+ * Idle-ingest dispatches coalesce their KV writes (`schedule.rs` `IDLE_WRITE_BATCH`): a batch is
+ * flushed once every `IDLE_WRITE_BATCH` idle periods, not every period.
+ */
+export const IDLE_WRITE_BATCH = 6;
+
+/**
+ * Idle-ingest KV Class A writes a day. An idle dispatch runs once per log period (never faster
+ * than every 5 s) and writes 2 keys (`cron:state` and the outbox bucket), batched one flush per
+ * `IDLE_WRITE_BATCH` periods: 96/day at 300 s, 480/day at 60 s.
+ */
+export function idleIngestKvClassAPerDay(logPeriodS: number): number {
+  return (86_400 / Math.max(5, logPeriodS) / IDLE_WRITE_BATCH) * 2;
+}
+
+/**
  * Unit costs measured on the reference install (2026-10-31: 2.3 billed days,
  * 8,159 raw files, 1.0M lines), adjusted for consolidated secrets, low-cardinality
  * Parquet sorting, column-specific encodings (DELTA_BINARY_PACKED, BYTE_STREAM_SPLIT,
@@ -191,8 +206,9 @@ export const DEFAULT_INPUTS: EstimateInputs = {
  * a busy-bundle allowance: 720 turns/day, 795 ms vCPU, a 500 KB partial read,
  * one LIST and a partial PUT per turn (deletes are free). Billing replaces these fixed totals.
  *
- * Idle ingest dispatches write 2 KV keys each (`cron:state` and the outbox bucket) and run once
- * per 300 s period, 288 a day (`an_idle_tick_is_read_dominated_and_over_reports_its_kv_ops`).
+ * Idle ingest dispatches write 2 KV keys each (`cron:state` and the outbox bucket), batched one
+ * flush per `IDLE_WRITE_BATCH` idle periods (`idleIngestKvClassAPerDay`): `kvClassAPerDay` holds
+ * the default-period value, and `estimateMonthly` rescales it to the chosen log period.
  * Fixed daily `fosClassAPerDay`, `kvClassBPerDay`, and `fixedStoredGb` also cover event-driven
  * Cloud DR state snapshots (`meta/cloud_dr_state.json`, classified under `pq_ops`), written when
  * service settings or saved views change and folded automatically into measured `fos_usage`.
@@ -208,15 +224,15 @@ export const DEFAULT_UNITS: UnitCosts = {
   deliveryGbPerDay: (720 * 500_000) / 1e9,
   fosClassAPerDay: 2_000 + 720 * 2,
   fosClassBPerDay: 1_000 + 720,
-  kvClassAPerDay: 288 * 2,
+  kvClassAPerDay: idleIngestKvClassAPerDay(DEFAULT_INPUTS.logPeriodS),
   kvClassBPerDay: 10_000,
   fixedStoredGb: 0.006,
   secrets: 1,
   workerRequestsPerFile: 0.125,
   frontRequestsPerFile: 1,
   // 1 Fastly raw-log PUT + windowFilesPerFile window Parquet PUTs + ~1/22 shard intent-manifest
-  // PUT (1 + 0.125 + ~0.045 ≈ 1.17). Deletes are free in FOS, and per-window summaries and
-  // compaction PUTs are counted separately in their own feature records.
+  // PUT (1 + 0.125 + ~0.045 ≈ 1.17). Per-window summaries and compaction PUTs/deletes are counted
+  // separately in their own feature records.
   fosClassAPerFile: 1.17,
   fosClassBPerFile: 1,
   kvClassAPerFile: 0.25,
@@ -508,7 +524,13 @@ export function estimateMonthly(
   const vcpuMs = month(
     units.appVcpuMsPerDay + (units.vcpuMsPer1kLines * L) / 1000,
   );
-  const kvA = month(units.kvClassAPerDay + units.kvClassAPerFile * F);
+  // Idle-ingest KV writes scale with the log period. The calculator passes DEFAULT_UNITS and lets
+  // the period vary, so rescale the default; a measured (or custom) base passes through unchanged.
+  const kvClassAPerDay =
+    units.kvClassAPerDay === idleIngestKvClassAPerDay(DEFAULT_INPUTS.logPeriodS)
+      ? idleIngestKvClassAPerDay(inputs.logPeriodS)
+      : units.kvClassAPerDay;
+  const kvA = month(kvClassAPerDay + units.kvClassAPerFile * F);
   const kvB = month(units.kvClassBPerDay + units.kvClassBPerFile * F);
   const storedDays = Math.max(inputs.retentionDays, inputs.minBilledDays);
   const classAUsd = (n: number) => (n / 1000) * rates.class_a_rate_per_1k;
@@ -590,15 +612,17 @@ export function estimateMonthly(
       compaction,
     );
     // Per execution: create and complete the multipart upload (2 Class A), plus one part PUT per
-    // uploaded part; one LIST per closed hour finds the sources. DeleteObjects is free in FOS, and
-    // the source reads stay on Class B. The job itself runs every COMPACT_JOB_INTERVAL_S, reading
-    // the installed service and the catalog head each time.
+    // uploaded part; one LIST per closed hour finds the sources. DeleteObject(s) are Class A in
+    // Fastly Object Storage, so each hour's merged-away sources cost one DeleteObjects call per
+    // 1,000 objects. The source reads stay on Class B. The job itself runs every
+    // COMPACT_JOB_INTERVAL_S, reading the installed service and the catalog head each time.
     const dispatches = 86_400 / COMPACT_JOB_INTERVAL_S;
+    const deleteBatches = hour.sourcesRead > 0 ? Math.ceil(hour.sourcesRead / 1000) : 0;
     compactionDay = {
       dispatchesPerDay: dispatches,
       executionsPerDay: hour.executions * 24,
       classAPerDay:
-        (hour.partsUploaded + 2 * hour.executions) * 24 +
+        (hour.partsUploaded + 2 * hour.executions + deleteBatches) * 24 +
         (hour.executions > 0 ? 24 : 0),
       classBPerDay: hour.sourcesRead * 24,
       kvClassAPerDay: 2 * hour.executions * 24,
@@ -629,6 +653,20 @@ export function estimateMonthly(
     (u.kvA / 1e6) * rates.kv_class_a_rate_per_million +
     (u.kvB / 1e6) * rates.kv_class_b_rate_per_million;
 
+  // One worker execution writes both the window Parquet and its summary (worker.rs:582-602), so
+  // price their combined vCPU-ms once across the worker executions instead of applying the
+  // per-execution free allowance twice. Ingest keeps the window-write share; summaries take the
+  // incremental excess, so ingest's worker vCPU + summaries' vCPU == the single combined price.
+  const workerExecutionsPerDay = units.workerRequestsPerFile * F;
+  const ingestOnlyWorkerVcpuUsd = vcpuExecUsd(
+    (units.vcpuMsPer1kLines * L) / 1000,
+    workerExecutionsPerDay,
+  );
+  const combinedWorkerVcpuUsd = vcpuExecUsd(
+    ((units.vcpuMsPer1kLines + units.summaryVcpuMsPer1kLines) * L) / 1000,
+    workerExecutionsPerDay,
+  );
+
   record("ingest", {
     storageGb: storedGb,
     fosA: classA,
@@ -638,7 +676,7 @@ export function estimateMonthly(
     computeRequests,
     vcpuUsd:
       vcpuExecUsd(units.appVcpuMsPerDay, units.appRequestsPerDay) +
-      vcpuExecUsd((units.vcpuMsPer1kLines * L) / 1000, units.workerRequestsPerFile * F),
+      ingestOnlyWorkerVcpuUsd,
     vcpuMs,
     kvA,
     kvB,
@@ -648,12 +686,7 @@ export function estimateMonthly(
     fosA: month(summaries.classAPerDay),
     fosB: month(summaries.classBPerDay),
     frontRequests: month(summaries.classBPerDay),
-    vcpuUsd: vcpuExecUsd(
-      summaries.vcpuMsPerDay,
-      summaries.windowFilesPerDay > 0
-        ? summaries.windowFilesPerDay
-        : units.workerRequestsPerFile * F,
-    ),
+    vcpuUsd: combinedWorkerVcpuUsd - ingestOnlyWorkerVcpuUsd,
     vcpuMs: month(summaries.vcpuMsPerDay),
   });
   const g = ingestDay;
@@ -826,7 +859,7 @@ export function estimateMonthly(
     units.fixedStoredGb * rates.storage_rate_per_gb_month +
     classAUsd(month(units.fosClassAPerDay)) +
     classBUsd(month(units.fosClassBPerDay)) +
-    (month(units.kvClassAPerDay) / 1e6) * rates.kv_class_a_rate_per_million +
+    (month(kvClassAPerDay) / 1e6) * rates.kv_class_a_rate_per_million +
     (month(units.kvClassBPerDay) / 1e6) * rates.kv_class_b_rate_per_million;
   return {
     linesPerDay: L,
@@ -1099,9 +1132,15 @@ export function measureEstimate(m: EstimateMeasurements): EstimatePrefill {
       fixedBytesOut / 1e9 / m.days +
         (b ? b.computeBandwidthBytes / 1e9 / W : 0),
     );
-    // Fastly's logging PUT of each raw file is a Class A operation this app never sees.
+    // Fastly's logging PUT of each raw file is a Class A operation this app never sees. The
+    // `worker:ingest` Class A ops already include the per-window summary PUTs, and those same
+    // window summaries are counted again in `summaries.classAPerDay`, so subtract the per-file
+    // window count (clamped at zero) to avoid double-counting them.
     if (F > 0) {
-      setUnit("fosClassAPerFile", 1 + fileA / F);
+      setUnit(
+        "fosClassAPerFile",
+        1 + Math.max(0, fileA / F - units.windowFilesPerFile),
+      );
       setUnit("fosClassBPerFile", fileB / F);
       setUnit("frontRequestsPerFile", fileFrontReqs / F);
     }

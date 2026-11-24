@@ -149,33 +149,22 @@ def log_usage_calls(service_id: str, calls: list[dict], process_context: str | N
         details = c.get("details") or ""
         svc = c.get("service", "FOS")
 
-        # FOS classification:
-        #   Class A: PUT/POST/COPY/LIST family (mutating writes, multi-object delete via POST ?delete).
-        #     Canonical S3 op names land here; so do raw HTTP verbs PUT/POST/COPY,
-        #     which is what the telemetry proxy emits via request.method.
-        #   Class B: GET/HEAD/single-object DELETE (the default).
-        # Note: single-object DELETE (`DELETE /key`) is Class B in Fastly billing;
-        # the DeleteObjects batch endpoint arrives as POST and is therefore A.
-        op_class = "B"
+        # Fastly Object Storage S3 API billing classification:
+        # https://www.fastly.com/documentation/guides/platform/object-storage/working-with-object-storage/#using-the-s3-compatible-api
+        #   Class B: GetObject and HeadObject ONLY (raw HTTP GET/HEAD).
+        #   Class A: all other FOS operations, including PutObject, CopyObject,
+        #     DeleteObject, DeleteObjects, ListObjectsV1/V2, multipart, and bucket ops.
         normalized_op = op_type.replace("_", "")
-        if svc == "FOS" and (
-            normalized_op
-            in (
-                "PUTOBJECT",
-                "POSTOBJECT",
-                "COPYOBJECT",
-                "LISTOBJECTSV2",
-                "DELETEOBJECTS",
-                "PUT",
-                "POST",
-                "COPY",
-            )
-        ):
-            op_class = "A"
-        elif svc == "CDN":
+        if svc == "CDN":
             op_class = "CDN"
+        elif svc == "FOS":
+            op_class = (
+                "B" if normalized_op in ("GET", "HEAD", "GETOBJECT", "HEADOBJECT") and "Class A" not in details else "A"
+            )
         elif "Class A" in details:
             op_class = "A"
+        else:
+            op_class = "B"
 
         # Apply shield egress multiplier for CDN operations
         op_bytes = c.get("bytes")

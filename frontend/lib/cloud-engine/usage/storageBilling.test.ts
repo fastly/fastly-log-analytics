@@ -77,7 +77,7 @@ describe("calculateStorageBilling", () => {
   });
 
   it("preserves full floating-point precision without premature rounding", () => {
-    const GiB = 1024 ** 3;
+    const BYTES_PER_GB = 1_000_000_000;
     const hour = 3_600_000;
     const summary = calculateStorageBilling(
       [
@@ -85,7 +85,7 @@ describe("calculateStorageBilling", () => {
           id: "fractional",
           dataset: "pq_request",
           kind: "live",
-          bytes: GiB,
+          bytes: BYTES_PER_GB,
           billedFrom: 0,
           billedUntil: 1_200_000, // 1/3 hour
           complete: true,
@@ -101,7 +101,7 @@ describe("calculateStorageBilling", () => {
   });
 
   it("ignores intervals with inverted or non-finite billing bounds", () => {
-    const GiB = 1024 ** 3;
+    const BYTES_PER_GB = 1_000_000_000;
     const hour = 3_600_000;
     const summary = calculateStorageBilling(
       [
@@ -109,7 +109,7 @@ describe("calculateStorageBilling", () => {
           id: "inverted-bounds",
           dataset: "pq_request",
           kind: "live",
-          bytes: GiB,
+          bytes: BYTES_PER_GB,
           billedFrom: 2 * hour,
           billedUntil: hour,
           complete: false,
@@ -119,7 +119,7 @@ describe("calculateStorageBilling", () => {
           id: "nan-bounds",
           dataset: "pq_request",
           kind: "live",
-          bytes: GiB,
+          bytes: BYTES_PER_GB,
           billedFrom: Number.NaN,
           billedUntil: hour,
           complete: false,

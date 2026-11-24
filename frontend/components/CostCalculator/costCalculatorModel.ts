@@ -78,7 +78,7 @@ export const DEFAULTS: CalcState = {
   deleteLogs: true,
   snapshotIntervalMinutes: SERVICE_DEFAULTS.snapshotIntervalMinutes,
   archiveBatchObjects: 500,
-  rateA: 0.005, rateB: 0.001, rateStorage: 0.02, rateEgress: 0.12, minDays: 30,
+  rateA: 0.0025, rateB: 0.0004, rateStorage: 0.02, rateEgress: 0.12, minDays: 30,
   billingZone: 'MBZ200',
 }
 
@@ -210,7 +210,6 @@ export function calculate(s: CalcState): CalcResults {
   const totalBytesPerMonth = totalBytesPerDay * 30
   const totalGzBytesPerDay = totalBytesPerDay / RAW_LOG_COMPRESSION_RATIO
   const totalGzBytesPerMonth = totalGzBytesPerDay * 30
-  const logSizeKB = logFilesPerDay > 0 ? (totalGzBytesPerDay / logFilesPerDay) / 1024 : 0
 
   const ingestSeconds = Math.max(10, Math.floor(s.logPeriod / 2))
   const syncsPerDay = (24 * 60 * 60) / ingestSeconds
@@ -259,20 +258,20 @@ export function calculate(s: CalcState): CalcResults {
   // Queries read ClickHouse, so FOS reads are raw .zst ingest plus archive publish verification reads.
   const classBPerMonth = logFilesPerMonth + (archivePagesPerDay + rumPagesPerDay) * 30 * 5
 
-  const logGBPerFile = logSizeKB / (1024 * 1024)
+  const logGBPerFile = logFilesPerDay > 0 ? (totalGzBytesPerDay / logFilesPerDay) / 1e9 : 0
   const logActualH = s.deleteLogs ? rawSteadyStateHours : s.retentionDays * 24
   const logBilledH = Math.max(logActualH, minChargeHours)
   const rawLogGBMonths = (logFilesPerMonth * logGBPerFile * logBilledH) / 720
 
   // RUM data follows its own retention (rum_retention_days), not the request retention.
   const rumBilledH = Math.max(s.rumRetentionDays * 24, minChargeHours)
-  const rumParquetGBMonths = ((s.rumBeaconsDay * 30 * RUM_COMPRESSED_BYTES_PER_BEACON) / (1024 * 1024 * 1024)) * (rumBilledH / 720)
+  const rumParquetGBMonths = ((s.rumBeaconsDay * 30 * RUM_COMPRESSED_BYTES_PER_BEACON) / 1e9) * (rumBilledH / 720)
   const archiveBilledH = Math.max((s.retentionDays + ARCHIVE_RETENTION_MARGIN_DAYS) * 24, minChargeHours)
   const archiveBytesPerMonth = archivePagesPerDay * 30 * ARCHIVE_FIXED_BYTES + reqDayEffective * 30 * ARCHIVE_BYTES_PER_ROW
-  const archiveGBMonths = (archiveBytesPerMonth / (1024 * 1024 * 1024)) * (archiveBilledH / 720)
+  const archiveGBMonths = (archiveBytesPerMonth / 1e9) * (archiveBilledH / 720)
   const rumArchiveBilledH = Math.max((s.rumRetentionDays + ARCHIVE_RETENTION_MARGIN_DAYS) * 24, minChargeHours)
   const rumArchiveBytesPerMonth = rumPagesPerDay * 30 * RUM_ARCHIVE_FIXED_BYTES + s.rumBeaconsDay * 30 * RUM_ARCHIVE_BYTES_PER_ROW
-  const rumArchiveGBMonths = rumObjectsPerDay > 0 ? (rumArchiveBytesPerMonth / (1024 * 1024 * 1024)) * (rumArchiveBilledH / 720) : 0
+  const rumArchiveGBMonths = rumObjectsPerDay > 0 ? (rumArchiveBytesPerMonth / 1e9) * (rumArchiveBilledH / 720) : 0
   const totalGBStored = rawLogGBMonths + rumParquetGBMonths + archiveGBMonths + rumArchiveGBMonths
 
   const storageTiers: CalcResults['storageTiers'] = []

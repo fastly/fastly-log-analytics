@@ -229,6 +229,13 @@ fn dataset_of(path: &str) -> &'static str {
     }
 }
 
+/// Maps a storage op to its billed class per Fastly Object Storage's S3-compatible API pricing.
+///
+/// Fastly bills only `GetObject` and `HeadObject` as Class B; every other S3 operation
+/// (`PutObject`, `CopyObject`, `DeleteObject`, `DeleteObjects`, all `List*`, all multipart,
+/// bucket and lifecycle operations) is Class A. A read served from the CDN cache is a hit, not an
+/// origin op. See Fastly's Object Storage docs:
+/// https://www.fastly.com/documentation/guides/platform/object-storage/working-with-object-storage/#using-the-s3-compatible-api
 fn op_class(op: &str, cdn_cache: &str) -> &'static str {
     match (op, cdn_cache) {
         (_, "HIT") => "CDN_HIT",
@@ -738,7 +745,7 @@ pub fn platform_storage(body: &Value, from: u64, to: u64) -> Result<Value, Strin
     for (index, (start, value)) in bytes.iter().copied().enumerate() {
         let next = bytes.get(index + 1).map_or(to, |(next, _)| *next);
         let overlap = next.min(to).saturating_sub(start.max(from));
-        gb_hours += value as f64 / 1_073_741_824.0 * overlap as f64 / 3_600.0;
+        gb_hours += value as f64 / 1_000_000_000.0 * overlap as f64 / 3_600.0;
     }
     let (observed, latest_bytes) = bytes[bytes.len() - 1];
     let mut output = json!({
@@ -1223,6 +1230,47 @@ mod billing_tests {
     }
 
     #[test]
+    fn op_class_matches_fastly_object_storage_classification() {
+        use super::op_class;
+        // Only GetObject/HeadObject are Class B; everything else is Class A.
+        for op in ["GET", "HEAD"] {
+            assert_eq!(op_class(op, "MISS"), "B", "{op} should be Class B");
+        }
+        for op in [
+            "PUT",
+            "LIST",
+            "POST",
+            "DELETE",
+            "DELETE_OBJECTS",
+            "COPY",
+            "CREATE_MULTIPART",
+            "UPLOAD_PART",
+            "COMPLETE_MULTIPART",
+            "HEAD_BUCKET",
+        ] {
+            assert_eq!(op_class(op, "MISS"), "A", "{op} should be Class A");
+        }
+        // A cached read is a CDN hit regardless of the op.
+        assert_eq!(op_class("GET", "HIT"), "CDN_HIT");
+
+        let agg = UsageAgg::default();
+        agg.set_caller("admin:test");
+        agg.record_fos("DELETE", "processed/ops/a.parquet", "", Some(204), 1, 0, 0);
+        agg.record_fos("POST", "", "delete", Some(200), 1, 0, 0);
+        let rates = UsageLogging::default();
+        let rows = agg.drain_rows(&rates);
+        let unit_a = rates.class_a_rate_per_1k / 1000.0;
+        for op in ["DELETE", "DELETE_OBJECTS"] {
+            let row = rows
+                .iter()
+                .find(|r| r["op"] == op)
+                .unwrap_or_else(|| panic!("missing op {op}"));
+            assert_eq!(row["op_class"], "A");
+            assert_eq!(row["est_cost_usd"], unit_a);
+        }
+    }
+
+    #[test]
     fn geography_sums_regions_and_shares() {
         let from = 1_794_355_200;
         let out = platform_geography(
@@ -1446,12 +1494,12 @@ mod billing_tests {
             &json!({"data": [
                 {
                     "timestamp": "2026-11-11T00:00:00Z",
-                    "object_storage_bytes_count": 1_073_741_824,
+                    "object_storage_bytes_count": 1_000_000_000,
                     "object_storage_buckets_count": 4,
                 },
                 {
                     "timestamp": "2026-11-12T00:00:00Z",
-                    "object_storage_bytes_count": 2_147_483_648u64
+                    "object_storage_bytes_count": 2_000_000_000u64
                 }
             ]}),
             day,
@@ -1459,7 +1507,7 @@ mod billing_tests {
         )
         .unwrap();
 
-        assert_eq!(body["bytes"], 2_147_483_648u64);
+        assert_eq!(body["bytes"], 2_000_000_000u64);
         assert_eq!(body["buckets"], 4);
         assert_eq!(body["gb_hours"], 72.0);
         assert_eq!(body["observed_at"], "2026-11-12T00:00:00Z");

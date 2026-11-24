@@ -303,6 +303,12 @@ describe('High-Scale cost calculator model fixes', () => {
     ...over,
   })
 
+  it('defaults FOS operation rates to Fastly published list rates (A $0.0025/1k, B $0.004/10k)', () => {
+    expect(DEFAULTS.rateA).toBe(0.0025)
+    expect(DEFAULTS.rateB).toBe(0.0004)
+    expect(DEFAULTS.rateB * 10).toBeCloseTo(0.004, 6)
+  })
+
   it('caps log files per day with the Poisson coupon-collector formula at low volume', () => {
     const r = calculate(base({ reqDay: 10_000, logNodes: 100, logPeriod: 60 }))
     expect(r.logFilesPerMonth / 30).toBeCloseTo(9660.7, 0)

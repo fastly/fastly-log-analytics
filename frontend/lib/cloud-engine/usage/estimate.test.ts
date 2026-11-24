@@ -16,12 +16,15 @@ import {
   measureEstimate,
   rawFilesPerDay,
   summaryBytes,
+  IDLE_WRITE_BATCH,
+  idleIngestKvClassAPerDay,
   type EstimateFeature,
   type EstimateMeasurements,
   type UnitCosts,
 } from "./estimate";
 import { INGEST_LIMITS } from "./ingestShape";
 import {
+  billedVcpuForExecutions,
   incurredCost,
   summarizeUsage,
   type ComputeBilling,
@@ -294,6 +297,7 @@ describe("summary bundles", () => {
   const units = {
     ...zeroUnits,
     windowFilesPerFile: 1,
+    workerRequestsPerFile: 1,
     summaryVcpuMsPer1kLines: 100,
     summaryMaxKbPerWindow: 380,
   };
@@ -448,15 +452,18 @@ describe("compaction", () => {
     expect(plan.partsUploaded).toBeLessThan(plan.sourcesRead);
   });
 
-  it("prices compaction Class A from parts and the two multipart calls, not free deletes or reads", () => {
+  it("prices compaction Class A from parts, the two multipart calls and the delete batches", () => {
     const estimate = estimateMonthly(inputs, units, LIST_PRICE_RATES, on);
     const hour = compactionPlan(24, 1e6, on);
     const c = estimate.compaction!;
-    // create + complete (2) per execution plus one PUT per uploaded part, and a LIST per hour.
-    // DeleteObjects is free in FOS and the source reads stay on Class B.
-    expect(c.classAPerDay).toBe((hour.partsUploaded + 2 * hour.executions) * 24 + 24);
+    // create + complete (2) per execution, one PUT per uploaded part, a LIST per hour, and one
+    // DeleteObjects Class A call per 1,000 merged-away sources. The source reads stay on Class B.
+    const deleteBatches = Math.ceil(hour.sourcesRead / 1000);
+    expect(c.classAPerDay).toBe(
+      (hour.partsUploaded + 2 * hour.executions + deleteBatches) * 24 + 24,
+    );
     expect(c.classBPerDay).toBe(hour.sourcesRead * 24);
-    // The old model charged sourcesRead + 3 executions; the fix is strictly cheaper here.
+    // Still far cheaper than charging a Class A op per source read.
     expect(c.classAPerDay).toBeLessThan((hour.sourcesRead + 3 * hour.executions) * 24 + 24);
   });
 
@@ -467,9 +474,10 @@ describe("compaction", () => {
     // Every source and the intermediate compacts are deleted early.
     expect(c.extraStoredGb).toBeCloseTo(((parquetGb * 48) / 24) * 30, 6);
     expect(c.executionsPerDay).toBe(3 * 24);
-    // Per execution: create + complete multipart upload (2) plus one part per 8 MiB of output; and a
-    // LIST per hour. 24 → (13,11) merges then a (2) merge: 2+2 parts, then 3 parts = 7 parts/hour.
-    expect(estimate.compaction!.classAPerDay).toBe((7 + 2 * 3) * 24 + 24);
+    // Per execution: create + complete multipart upload (2) plus one part per 8 MiB of output; a
+    // LIST per hour; and one DeleteObjects Class A call for the 26 merged-away sources/hour.
+    // 24 → (13,11) merges then a (2) merge: 2+2 parts, then 3 parts = 7 parts/hour.
+    expect(estimate.compaction!.classAPerDay).toBe((7 + 2 * 3 + 1) * 24 + 24);
     expect(c.classBPerDay).toBe(26 * 24);
     expect(c.vcpuMsPerDay - c.dispatchesPerDay * COMPACT_DISPATCH_VCPU_MS).toBeCloseTo(
       48 * 20 * 24,
@@ -584,6 +592,145 @@ describe("usage audit fixes", () => {
       expect(l.parts.reduce((sum, p) => sum + p.usd, 0)).toBeCloseTo(l.usd, 9);
     }
     expect(est.lines.reduce((sum, l) => sum + l.usd, 0)).toBeCloseTo(est.total, 9);
+  });
+
+  it("prices the combined worker window+summary vCPU once, not the free tier twice", () => {
+    const u = {
+      ...zeroUnits,
+      workerRequestsPerFile: 1,
+      windowFilesPerFile: 1,
+      vcpuMsPer1kLines: 30,
+      summaryVcpuMsPer1kLines: 30,
+      summaryMaxKbPerWindow: 380,
+    };
+    const inputs = {
+      ...DEFAULT_INPUTS,
+      edgeRequestsPerDay: 1_440_000,
+      filesPerPeriod: 1,
+      logPeriodS: 60,
+    };
+    // Isolate vCPU: only the per-second excess rate is non-zero, so each feature's USD is its vCPU.
+    const rates = {
+      ...zeroRates,
+      compute_vcpu_excess_rate_per_second: 0.00005,
+      compute_vcpu_free_ms_per_request: 20,
+      compute_vcpu_rounding_ms: 10,
+    };
+    const est = estimateMonthly(inputs, u, rates, {
+      ...DEFAULT_COMPACTION,
+      enabled: false,
+    });
+    const L = est.linesPerDay;
+    const execs = u.workerRequestsPerFile * est.filesPerDay;
+    const combined =
+      billedVcpuForExecutions(
+        ((u.vcpuMsPer1kLines + u.summaryVcpuMsPer1kLines) * L) / 1000,
+        execs,
+        rates,
+      ).usd * 30;
+    const ingestOnly =
+      billedVcpuForExecutions((u.vcpuMsPer1kLines * L) / 1000, execs, rates).usd *
+      30;
+    // ingest keeps the window-write share; summaries take the incremental excess; they add to the
+    // single combined worker price — the 20 ms free allowance is applied once, not per component.
+    expect(feature(est, "ingest")!).toBeCloseTo(ingestOnly);
+    expect(feature(est, "summaries")!).toBeCloseTo(combined - ingestOnly);
+    expect(feature(est, "ingest")! + feature(est, "summaries")!).toBeCloseTo(combined);
+    // The old model billed each component against its own free tier, which was strictly cheaper.
+    const doubleCountedSummary =
+      billedVcpuForExecutions((u.summaryVcpuMsPer1kLines * L) / 1000, execs, rates)
+        .usd * 30;
+    expect(combined).toBeGreaterThan(ingestOnly + doubleCountedSummary);
+  });
+
+  it("includes compaction DeleteObjects as Class A, one call per 1,000 merged-away sources", () => {
+    const inputs = {
+      ...DEFAULT_INPUTS,
+      edgeRequestsPerDay: 576_000,
+      filesPerPeriod: 1,
+      logPeriodS: 3_600,
+      parquetBytesPerRow: 1_000,
+    };
+    const units = { ...zeroUnits, windowFilesPerFile: 24, compactVcpuMsPerMb: 20 };
+    const on = { ...DEFAULT_COMPACTION, enabled: true, targetMb: 64 };
+    const est = estimateMonthly(inputs, units, LIST_PRICE_RATES, on);
+    const hour = compactionPlan(24, 1e6, on);
+    // 26 sources merged away an hour → one DeleteObjects Class A call/hour.
+    const deleteBatches = Math.ceil(hour.sourcesRead / 1000);
+    expect(deleteBatches).toBe(1);
+    expect(est.compaction!.classAPerDay).toBe(
+      (hour.partsUploaded + 2 * hour.executions + deleteBatches) * 24 + 24,
+    );
+    // Deletes are no longer free: dropping them would undercount Class A.
+    expect(est.compaction!.classAPerDay).toBeGreaterThan(
+      (hour.partsUploaded + 2 * hour.executions) * 24 + 24,
+    );
+  });
+
+  it("scales batched idle-ingest KV writes with the log period", () => {
+    expect(IDLE_WRITE_BATCH).toBe(6);
+    expect(idleIngestKvClassAPerDay(300)).toBe(96);
+    expect(idleIngestKvClassAPerDay(60)).toBe(480);
+    // Never polls faster than every 5 s.
+    expect(idleIngestKvClassAPerDay(1)).toBe(idleIngestKvClassAPerDay(5));
+    expect(DEFAULT_UNITS.kvClassAPerDay).toBe(idleIngestKvClassAPerDay(300));
+
+    const rates = { ...zeroRates, kv_class_a_rate_per_million: 1 };
+    const off = { ...DEFAULT_COMPACTION, enabled: false };
+    const kvClassAUsd = (est: ReturnType<typeof estimateMonthly>) =>
+      line(est, "kv").parts!.find((p) => p.label === "Class A")!.usd;
+    const quiet = { ...DEFAULT_INPUTS, edgeRequestsPerDay: 0, rumPageviewsPerDay: 0 };
+    // The calculator passes DEFAULT_UNITS; idle KV follows the chosen period.
+    expect(
+      kvClassAUsd(estimateMonthly({ ...quiet, logPeriodS: 300 }, DEFAULT_UNITS, rates, off)),
+    ).toBeCloseTo((96 * 30) / 1e6);
+    expect(
+      kvClassAUsd(estimateMonthly({ ...quiet, logPeriodS: 60 }, DEFAULT_UNITS, rates, off)),
+    ).toBeCloseTo((480 * 30) / 1e6);
+    // A measured (non-default) base passes through unchanged regardless of the period.
+    expect(
+      kvClassAUsd(
+        estimateMonthly(
+          { ...quiet, logPeriodS: 60 },
+          { ...DEFAULT_UNITS, kvClassAPerDay: 1_000 },
+          rates,
+          off,
+        ),
+      ),
+    ).toBeCloseTo((1_000 * 30) / 1e6);
+  });
+
+  it("does not double-count per-window summary Class A PUTs in the measured per-file ops", () => {
+    const fosRow = (op_count: number) =>
+      [{ caller: "worker:ingest", op_class: "A" as const, op_count }].map((row) => ({
+        timestamp: 0,
+        op: "PUT",
+        dataset: "x",
+        cdn_cache: "DIRECT" as const,
+        bytes_in: 0,
+        bytes_out: 0,
+        bytes_deleted: 0,
+        est_cost_usd: 0,
+        ...row,
+      }));
+    // 100 converted files, parquet.files = 100 → windowFilesPerFile = 1.
+    const measured = measureEstimate({
+      ...base,
+      parquet: { bytes: 60_000, rows: 1_000, files: 100 },
+      fos: fosRow(300),
+    });
+    expect(measured.units.windowFilesPerFile).toBe(1);
+    // fileA/F = 3; subtract the 1 window summary PUT/file already in summaries: 1 + (3 - 1) = 3.
+    expect(measured.units.fosClassAPerFile).toBe(3);
+
+    // When windows/file exceed the measured per-file ops, the subtraction clamps at zero.
+    const clamped = measureEstimate({
+      ...base,
+      parquet: { bytes: 60_000, rows: 1_000, files: 1_000 },
+      fos: fosRow(300),
+    });
+    expect(clamped.units.windowFilesPerFile).toBe(10);
+    expect(clamped.units.fosClassAPerFile).toBe(1);
   });
 });
 
@@ -793,7 +940,9 @@ describe("measureEstimate", () => {
         op_class: row.op_class as "A" | "B" | "CDN_HIT",
       })),
     });
-    expect(units.fosClassAPerFile).toBe(2.5);
+    // fileA/F = 150/100 = 1.5, minus the 0.125 default window summaries already counted in
+    // summaries.classAPerDay, plus 1 for Fastly's raw-log PUT: 1 + (1.5 - 0.125) = 2.375.
+    expect(units.fosClassAPerFile).toBeCloseTo(2.375, 10);
     expect(units.fosClassBPerFile).toBe(1);
     expect(units.fosClassAPerDay).toBe(10);
     expect(units.fosClassBPerDay).toBe(100);
@@ -819,8 +968,9 @@ describe("measureEstimate", () => {
         ...row,
       })),
     });
-    // 6 worker:ingest ops / 2 files = 3, plus 1 Class A op/file for Fastly's raw log PUT = 4
-    expect(units.fosClassAPerFile).toBe(4);
+    // 6 worker:ingest ops / 2 files = 3, minus the 0.125 default window summaries already counted,
+    // plus 1 Class A op/file for Fastly's raw log PUT = 1 + (3 - 0.125) = 3.875
+    expect(units.fosClassAPerFile).toBeCloseTo(3.875, 10);
     expect(units.fosClassAPerDay).toBe(7);
   });
 
@@ -915,7 +1065,7 @@ describe("measureEstimate", () => {
     expect(units).toEqual(DEFAULT_UNITS);
     expect(DEFAULT_UNITS.secrets).toBe(1);
     expect(DEFAULT_UNITS.fosClassAPerDay).toBe(2_000 + 720 * 2);
-    expect(DEFAULT_UNITS.kvClassAPerDay).toBe(288 * 2);
+    expect(DEFAULT_UNITS.kvClassAPerDay).toBe(96);
     expect(DEFAULT_UNITS.kvClassBPerDay).toBe(10_000);
     expect(DEFAULT_UNITS.kvClassAPerFile).toBe(0.25);
     expect(DEFAULT_UNITS.kvClassBPerFile).toBe(0.5);

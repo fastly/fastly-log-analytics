@@ -116,7 +116,7 @@ def _platform_storage(records: list[dict[str, Any]], from_epoch: int, to_epoch: 
     for index, (start, value) in enumerate(bytes_by_day):
         end = bytes_by_day[index + 1][0] if index + 1 < len(bytes_by_day) else to_epoch
         overlap = max(0, min(end, to_epoch) - max(start, from_epoch))
-        gb_hours += value / 1024**3 * overlap / 3600
+        gb_hours += value / 1_000_000_000 * overlap / 3600
 
     bucket_rows = sorted(
         (int(row["start_time"]), int(row["object_storage_buckets_count"]))
@@ -184,8 +184,8 @@ def _compute_prefill_rates(
         "log_retention_days": 30,
         "rum_retention_days": 30,
         "snapshot_interval_minutes": DEFAULT_SNAPSHOT_INTERVAL_MINUTES,
-        "class_a_rate_per_1k": float(global_rates.get("class_a_rate_per_1k", 0.005)),
-        "class_b_rate_per_10k": float(global_rates.get("class_b_rate_per_10k", 0.01)),
+        "class_a_rate_per_1k": float(global_rates.get("class_a_rate_per_1k", 0.0025)),
+        "class_b_rate_per_10k": float(global_rates.get("class_b_rate_per_10k", 0.004)),
         "cdn_egress_rate_per_gb": float(global_rates.get("cdn_egress_rate_per_gb", 0.12)),
         "storage_rate_per_gb_month": float(global_rates.get("storage_rate_per_gb_month", 0.02)),
         "min_billed_days": int(global_rates.get("min_billed_days", 30)),
@@ -690,7 +690,7 @@ def usage_current_storage(
             + archive_expired_bytes
             + cloud_copy_deleted_bytes
         )
-        billed_gb = billed_bytes / (1024 * 1024 * 1024)
+        billed_gb = billed_bytes / 1_000_000_000
         gb_hours = billed_gb * (MIN_BILLING_DAYS * 24)
 
         live_billed_gb_hours = 0.0
@@ -1220,7 +1220,7 @@ def usage_rum_breakdown(
     from backend import config as svcconfig
 
     global_rates = svcconfig.load_usage_logging_config()
-    class_a_rate = float(global_rates.get("class_a_rate_per_1k", 0.005))
+    class_a_rate = float(global_rates.get("class_a_rate_per_1k", 0.0025))
 
     beacons_by_date: dict[str, int]
     hs_service = get_high_scale_service_registry().resolve(service_id)

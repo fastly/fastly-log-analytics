@@ -1,4 +1,4 @@
-const GIB = 1024 ** 3;
+const BYTES_PER_GB = 1_000_000_000;
 const MS_PER_HOUR = 3_600_000;
 
 export type StorageBillingIntervalKind = "live" | "deleted" | "minimum_billed";
@@ -73,7 +73,7 @@ export function calculateStorageBilling(
     }
 
     const bytes = Number.isFinite(interval.bytes) && interval.bytes > 0 ? interval.bytes : 0;
-    const gbHours = (bytes / GIB) * (overlapMs / MS_PER_HOUR);
+    const gbHours = (bytes / BYTES_PER_GB) * (overlapMs / MS_PER_HOUR);
 
     switch (interval.kind) {
       case "live":

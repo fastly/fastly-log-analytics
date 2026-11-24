@@ -1659,11 +1659,11 @@ describe("incurredCost", () => {
 
     // request_ingest: 1 LIST + 1 PUT (Class A = 2), 5 GETs (Class B = 5)
     // log_flush: 2 PUTs (Class A = 2)
-    // log_compact: 1 LIST + 1 PUT (Class A = 2), 4 GETs (Class B = 4)
-    expect(summary.totals.classA).toBe(6);
+    // log_compact: 1 LIST + 1 PUT + 1 DELETE_OBJECTS batch (Class A = 3), 4 GETs (Class B = 4)
+    expect(summary.totals.classA).toBe(7);
     expect(summary.totals.classB).toBe(9);
     expect(summary.bytesWritten).toBe(250_000 + 18_000 + 36_000);
-    expect(summary.telemetryOps?.classA).toBe(4);
+    expect(summary.telemetryOps?.classA).toBe(5);
     expect(summary.telemetryOps?.classB).toBe(4);
     expect(
       summary.storage.datasets.find((d) => d.dataset === "pq_request")?.bytes,
@@ -1671,7 +1671,7 @@ describe("incurredCost", () => {
     expect(
       summary.storage.datasets.find((d) => d.dataset === "pq_ops")?.bytes,
     ).toBe(200_000 + 18_000);
-    expect(summary.overhead.classA).toBe(4);
+    expect(summary.overhead.classA).toBe(5);
     expect(summary.overhead.classB).toBe(4);
   });
 

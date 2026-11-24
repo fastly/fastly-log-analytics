@@ -1438,7 +1438,7 @@ class PostgresControlPlane:
         if end_utc <= start_utc:
             return 0.0, 0.0, 0.0, True, ["high-scale:archive_manifests", "high-scale:source_objects"]
         min_days = max(int(minimum_days), 1)
-        gb_hour_denom = 1073741824.0 * 3600.0
+        gb_hour_denom = 1_000_000_000.0 * 3600.0
 
         with self.transaction(read_only=True) as connection:
             src_row = connection.execute(
