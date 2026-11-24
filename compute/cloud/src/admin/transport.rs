@@ -410,17 +410,27 @@ impl<'a, R: Runtime> Context<'a, R> {
             }
         }
     }
+    fn call_cap(&self) -> u32 {
+        // Background job steps reserve 8 of Fastly Compute's 32 backend calls for
+        // checkpointing and lease release; one-shot synchronous endpoints (such as DR
+        // recovery) have no job checkpoint/lease and may use up to 30 of the 32 calls.
+        if self.dispatch_journal.borrow().is_some() {
+            24
+        } else {
+            30
+        }
+    }
     pub fn check(&self) -> Result<(), Error> {
         if self.runtime.admin_elapsed(self.started) >= STEP_WALL_BUDGET {
             return Err(Error::new(503, "wall_time_budget"));
         }
-        if self.calls.get() >= 24 || self.runtime.admin_remaining_calls() == 0 {
+        if self.calls.get() >= self.call_cap() || self.runtime.admin_remaining_calls() == 0 {
             return Err(Error::new(503, "backend_budget"));
         }
         Ok(())
     }
     pub fn remaining_calls(&self) -> u32 {
-        24u32
+        self.call_cap()
             .saturating_sub(self.calls.get())
             .min(self.runtime.admin_remaining_calls())
     }

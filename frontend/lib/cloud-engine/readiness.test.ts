@@ -121,18 +121,18 @@ it("reports a bounded, redacted error message so a failed query can be diagnosed
     const multiContractionErr = new Error("Backend can't reach don't user's metadata");
     const mcIdx = events.length;
     await expect(measureCloudQuery("dashboard.bundle", async () => { throw multiContractionErr; })).rejects.toBe(multiContractionErr);
-    expect(events[mcIdx + 1]?.error).toBe("Error: Backend can't reach don't user's metadata");
+    expect(events[mcIdx + 1]?.error).toBe("Error: Backend can't reach don't [redacted]");
 
     for (const [advMsg, forbiddenFrags, requiredSubstr] of [
       ["Binder Error: can't parse value '198.51.100.42' in filter", ["198.51.100.42"], "Error: Binder Error: can't parse value [redacted] in filter"],
-      [`Binder Error: user's column "SecCol99" has value 'SecVal88'`, ["SecCol99", "SecVal88"], "Error: Binder Error: user's column [redacted] has value [redacted]"],
+      [`Binder Error: user's column "SecCol99" has value 'SecVal88'`, ["SecCol99", "SecVal88", "user's"], "Error: Binder Error: [redacted]"],
       ["Parser Error: invalid literal E'prefix\\'SecEsc77'", ["SecEsc77", "prefix"], "Error: Parser Error: invalid literal [redacted]"],
       ['JSON Error: bad value "foo\\"AliceRowValue99"', ["AliceRowValue99", "foo"], "Error: JSON Error: bad value [redacted]"],
       ["Binder Error: invalid literal $$SecDollar66$$ in query", ["SecDollar66"], "Error: Binder Error: invalid literal [redacted] in query"],
       ["Binder Error: invalid literal $tag$SecTag55\nSELECT 1$tag$ in query", ["SecTag55", "SELECT 1"], "Error: Binder Error: invalid literal [redacted] in query"],
-      // BUG-T5-ITER27-01: Unicode possessives, plural possessives, trailing SQL backslashes, N'/R' prefixes, unspaced keyword quotes, and raw IPv4:
-      ["Binder Error: café's owner '198.51.100.42' in filter", ["198.51.100.42"], "Error: Binder Error: café's owner [redacted] in filter"],
-      ["Binder Error: users' 'SecAfterPlural' in filter", ["SecAfterPlural"], "Error: Binder Error: users' [redacted] in filter"],
+      // BUG-T5-ITER27-01 (tightened in Iter32 closed-vocab): Unicode possessives, plural possessives, trailing SQL backslashes, N'/R' prefixes, unspaced keyword quotes, and raw IPv4:
+      ["Binder Error: café's owner '198.51.100.42' in filter", ["198.51.100.42", "café"], "Error: Binder Error: [redacted]"],
+      ["Binder Error: users' 'SecAfterPlural' in filter", ["SecAfterPlural", "users"], "Error: Binder Error: [redacted]"],
       ["Binder Error: invalid pattern LIKE '%\\' for client '198.51.100.42'", ["198.51.100.42", "%\\"], "Error: Binder Error: invalid pattern LIKE [redacted] for client [redacted]"],
       ["Binder Error: invalid pattern LIKE '%\\\\' for client '198.51.100.42'", ["198.51.100.42", "%\\\\"], "Error: Binder Error: invalid pattern LIKE [redacted] for client [redacted]"],
       ["Parser Error: invalid literal N'198.51.100.42' or n'SecNat88' or R'SecRaw77'", ["198.51.100.42", "SecNat88", "SecRaw77"], "Error: Parser Error: invalid literal [redacted] or [redacted] or [redacted]"],
@@ -336,13 +336,13 @@ it("BUG-T5-ITER28-FE-01 & BUG-T5-ITER28-02: redacts internal apostrophe+delimite
       ],
       [
         "Binder Error: d'Artagnan filter '.SecDotTok99' and ' SecSpaceTok88'",
-        ["SecDotTok99", "SecSpaceTok88"],
-        "Error: Binder Error: d'Artagnan filter [redacted] and [redacted]",
+        ["SecDotTok99", "SecSpaceTok88", "Artagnan"],
+        "Error: Binder Error: [redacted]",
       ],
       [
         "Binder Error: O'Brien filter '?cid=SecQmark77' failed",
-        ["SecQmark77"],
-        "Error: Binder Error: O'Brien filter [redacted] failed",
+        ["SecQmark77", "Brien"],
+        "Error: Binder Error: [redacted]?[redacted]",
       ],
       [
         "Parser Error: syntax error in 'foo'='SecAdjUnclosed33",
@@ -351,8 +351,8 @@ it("BUG-T5-ITER28-FE-01 & BUG-T5-ITER28-02: redacts internal apostrophe+delimite
       ],
       [
         "Runtime Error: DB::Exception at 12:34:56 for client 2001:db8:85a3::8a2e:370:7334 or 2001:db8::42 or ::ffff:198.51.100.42",
-        ["2001:db8", "8a2e", "198.51.100.42"],
-        "Error: Runtime Error: DB::Exception at 12:34:56 for client [redacted] or [redacted] or [redacted]",
+        ["2001:db8", "8a2e", "198.51.100.42", "12:34:56"],
+        "Error: Runtime Error: DB::Exception at [redacted] for client [redacted] or [redacted] or [redacted]",
       ],
     ] as const) {
       const err = new Error(msg);
@@ -450,23 +450,23 @@ it("SEC-T5-ITER29-FE-01 & BUG-T5-ITER29-FE-01: redacts multiline DuckDB casts, d
       ],
       [
         "Binder Error: N'Djamena '.users' failed",
-        ["users"],
-        "Error: Binder Error: N'Djamena [redacted] failed",
+        ["users", "Djamena"],
+        "Error: Binder Error: [redacted]",
       ],
       [
         "Binder Error: ce n'est '.users' ici",
-        ["users"],
-        "Error: Binder Error: ce n'est [redacted] ici",
+        ["users", "ce", "ici"],
+        "Error: Binder Error: [redacted]",
       ],
       [
         "Binder Error: B'Elanna and R'lyeh saw 'SecLore77' vs N'SecNat66'",
-        ["SecLore77", "SecNat66"],
-        "Error: Binder Error: B'Elanna and R'lyeh saw [redacted] vs [redacted]",
+        ["SecLore77", "SecNat66", "Elanna", "lyeh"],
+        "Error: Binder Error: [redacted]",
       ],
       [
         "Runtime Error: DB::Exception at 12:34:56 for fe80::1%eth0 or [fe80::2%en0]:443 or 2001:db8:85a3:0:0:8a2e:370:7334:443 at 09:15:00",
-        ["fe80", "eth0", "en0", "2001:db8", "8a2e", "7334"],
-        "Error: Runtime Error: DB::Exception at 12:34:56 for [redacted] or [[redacted]]:443 or [redacted] at 09:15:00",
+        ["fe80", "eth0", "en0", "2001:db8", "8a2e", "7334", "12:34:56", "09:15:00"],
+        "Error: Runtime Error: DB::Exception at [redacted] for [redacted] or [[redacted]]:443 or [redacted] at [redacted]",
       ],
     ];
     for (const [msg, forbidden, expectedExact] of syntheticCases) {
@@ -683,6 +683,174 @@ it("SEC-T5-ITER30-FE-01: closed-vocabulary O(N) sanitizer blocks DECIMAL/TIME/ba
       await expect(measureCloudQuery("dashboard.bundle", async () => { throw eightKbErr; })).rejects.toBe(eightKbErr);
     }
     expect((performance.now() - t0) / 10).toBeLessThan(50);
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+    await backend.dispose();
+  }
+}, 45000);
+
+it("SEC-T5-ITER31-FE-01: closed DIAGNOSTIC_VOCAB, anchored Stage-1 templates, compound/Bignum/array/ENUM/Binder/Duplicate/strptime frames, no safeLabel/clock leaks, and <20ms 60KB O(N)", async () => {
+  const { createNodeBackend } = await import("./dashboard/duckdb");
+  const backend = await createNodeBackend();
+  setCloudModeRuntime(true);
+  const events: { state?: string; error?: string }[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    await backend.query("CREATE TABLE t_iter32 (id INT PRIMARY KEY, u VARCHAR, u_q VARCHAR, \"bad\"\"secret\" VARCHAR)");
+    await backend.query("INSERT INTO t_iter32 VALUES (1, 'alice private email token', 'alice'' to INT32 bob private', 'x')");
+    await backend.query("CREATE TABLE t_iter32_pk (k VARCHAR PRIMARY KEY, v VARCHAR)");
+    await backend.query("INSERT INTO t_iter32_pk VALUES ('alice violates bob customer pii', 'a')");
+    await backend.query("CREATE TYPE iter32_enum AS ENUM ('canaryenum')");
+
+    const realDuckCases: readonly [string, readonly string[], string?][] = [
+      ["SELECT CAST(u AS BIGNUM) FROM t_iter32", ["alice", "private", "email", "token"], "Bignum"],
+      ["SELECT CAST(u_q AS BIGNUM) FROM t_iter32", ["alice", "bob", "private", "INT32"], "Bignum"],
+      ["SELECT CAST(u AS VARINT) FROM t_iter32", ["alice", "private", "email", "token"], "Bignum"],
+      ["SELECT CAST(u AS INTEGER[3]) FROM t_iter32", ["alice", "private", "email", "token"], "INTEGER[3]"],
+      ["SELECT CAST(u AS STRUCT(secretfield INT)) FROM t_iter32", ["alice", "private", "secretfield"], "STRUCT([redacted])"],
+      ['SELECT CAST(u AS STRUCT("a)secretfield" INT)) FROM t_iter32', ["alice", "private", "secretfield"], "STRUCT([redacted])"],
+      [
+        "SELECT CAST(u AS UNION(secretmember INT, canarymember DOUBLE)) FROM t_iter32",
+        ["secretmember", "canarymember", "alice"],
+        "UNION([redacted])",
+      ],
+      ["SELECT CAST(1 AS STRUCT(secretfield INT))", ["secretfield"], "STRUCT([redacted])"],
+      ["SELECT CAST(u AS MAP(VARCHAR, INT)) FROM t_iter32", ["alice", "private"], "MAP([redacted])"],
+      ["SELECT abs(CAST('canaryenum' AS iter32_enum))", ["canaryenum"]],
+      [
+        "SELECT regexp_matches('x', '[' || 'alice bob private at or near x')",
+        ["alice", "bob", "private", "at or near"],
+      ],
+      [
+        "SELECT regexp_matches('x', '(?P<bad alice bob Could not convert string a to INT(secret word)')",
+        ["alice", "bob", "secret", "word", "Could not convert"],
+      ],
+      ["SELECT strptime('x', 'canaryfmt%')", ["canaryfmt"], "Failed to parse format specifier [redacted]"],
+      ["SELECT strftime(DATE '2025-01-01', 'canaryfmt%')", ["canaryfmt"], "Failed to parse format specifier [redacted]"],
+      ["SELECT strptime('x', '%1canaryfmt')", ["canaryfmt"], "Failed to parse format specifier [redacted]"],
+      ["SELECT error(u) FROM t_iter32", ["alice", "private", "email", "token"]],
+      ['SELECT "missing""secret" FROM t_iter32', ["missing", "secret"], "Referenced column [redacted] not found in FROM clause!"],
+      ['SELECT t_iter32."missing""secret" FROM t_iter32', ["t_iter32", "missing", "secret"], "Table [redacted] does not have a column named [redacted]"],
+      [
+        'SELECT "a""secret" FROM (SELECT 1 AS "a""secret") x, (SELECT 2 AS "a""secret") y',
+        ["secret"],
+        "Ambiguous reference to column name [redacted]",
+      ],
+      ['SELECT "bad""secret", count(*) FROM t_iter32', ["bad", "secret"], "must appear in the GROUP BY clause"],
+      [
+        "INSERT INTO t_iter32_pk VALUES ('alice violates bob customer pii', 'b')",
+        ["alice", "bob", "customer", "pii"],
+        "Duplicate key [redacted] violates primary key constraint.",
+      ],
+    ];
+    for (const [sql, forbidden, requiredSubstr] of realDuckCases) {
+      await expect(measureCloudQuery("query.console", () => backend.query(sql))).rejects.toThrow();
+      const got = events.at(-1)?.error ?? "";
+      for (const frag of forbidden) {
+        expect(got, `sql=${sql} got=${got}`).not.toContain(frag);
+      }
+      if (requiredSubstr) {
+        expect(got, `sql=${sql} got=${got}`).toContain(requiredSubstr);
+      }
+    }
+
+    const syntheticWave31: readonly [string, readonly string[], string?][] = [
+      // Closed DIAGNOSTIC_VOCAB blocks arbitrary lowercase row tokens:
+      [
+        "Invalid Input Error: alice bob private secretfield canaryalpha canaryfmt mysecretword privateemail secretmember canaryenum",
+        ["alice", "bob", "private", "secretfield", "canaryalpha", "canaryfmt", "mysecretword", "privateemail", "secretmember", "canaryenum"],
+        "Error: Invalid Input Error: [redacted]",
+      ],
+      // Mixed-case apostrophes and unterminated hex-prefix literals are redacted:
+      ["Binder Error: Secret'Token failed", ["Secret", "Token"], "Error: Binder Error: [redacted]"],
+      ["Binder Error: O'Connor failed", ["Connor"], "Error: Binder Error: [redacted]"],
+      ["Parser Error: X'deadbeef", ["deadbeef", "X'"], "Error: Parser Error: [redacted]"],
+      ["Parser Error: x'deadbeef", ["deadbeef", "x'"], "Error: Parser Error: [redacted]"],
+      // Explicit closed contractions remain intact:
+      [
+        "Binder Error: can't doesn't couldn't didn't isn't wasn't won't don't haven't hasn't aren't weren't",
+        [],
+        "Error: Binder Error: can't doesn't couldn't didn't isn't wasn't won't don't haven't hasn't aren't weren't",
+      ],
+      // Quote before colon does NOT bypass redactPostColonDiagnosticTail:
+      [
+        "Invalid Input Error: bad 'x' details: canaryalpha",
+        ["canaryalpha"],
+        "Error: Invalid Input Error: bad [redacted] details: [redacted]",
+      ],
+      [
+        "Invalid Input Error: bad 'x' details: column value error",
+        ["column", "value", "error"],
+        "Error: Invalid Input Error: bad [redacted] details: [redacted]",
+      ],
+      // Could not convert string never backtracks into untrusted row text and handles Varint / ENUM / unknown types:
+      [
+        "Conversion Error: Could not convert string 'alice to INT32 bob' to CustomSecretType",
+        ["alice", "bob", "INT32", "CustomSecretType"],
+        "Error: Conversion Error: Could not convert string [redacted] to [redacted]",
+      ],
+      [
+        "Conversion Error: Could not convert string 'alice' to Varint",
+        ["alice"],
+        "Error: Conversion Error: Could not convert string [redacted] to Varint",
+      ],
+      [
+        "Conversion Error: Could not convert string 'alice' to ENUM('canaryenum')",
+        ["alice", "canaryenum"],
+        "Error: Conversion Error: Could not convert string [redacted] to ENUM([redacted])",
+      ],
+      // Unquoted GROUP BY column identifier is redacted:
+      [
+        "Binder Error: column secretcol must appear in the GROUP BY clause or must be part of an aggregate function.",
+        ["secretcol"],
+        "Error: Binder Error: column [redacted] must appear in the GROUP BY clause or must be part of an aggregate function.",
+      ],
+      // Duplicate key redacts custom constraint text / identifiers after violates:
+      [
+        "Constraint Error: Duplicate key k violates bob customer pii",
+        ["bob", "customer", "pii"],
+        "Error: Constraint Error: Duplicate key [redacted] violates [redacted]",
+      ],
+      [
+        'Constraint Error: Duplicate key k violates unique constraint "secret_idx"',
+        ["secret_idx"],
+        "Error: Constraint Error: Duplicate key [redacted] violates [redacted]",
+      ],
+      // Stage-2B never echoes arbitrary secret key labels (tenant42_api_key / acme99_token):
+      [
+        "Runtime Error: tenant42_api_key=supersecret acme99_token: mysecretval corp7_secret=abc",
+        ["tenant42", "api_key", "supersecret", "acme99", "token", "mysecretval", "corp7", "secret"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      // Raw clock timestamps are redacted (tryScanClockTime removed):
+      [
+        "Runtime Error: query failed at 14:25:36.123456 and 09:05:01",
+        ["14:25:36", "123456", "09:05:01"],
+        "Error: Runtime Error: query failed at [redacted] and [redacted]",
+      ],
+    ];
+    for (const [msg, forbidden, expectedExact] of syntheticWave31) {
+      const err = new Error(msg);
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+      const got = events.at(-1)?.error ?? "";
+      for (const frag of forbidden) {
+        expect(got, `msg=${msg} got=${got}`).not.toContain(frag);
+      }
+      if (expectedExact) {
+        expect(got, `msg=${msg}`).toBe(expectedExact);
+      }
+    }
+
+    // 60 KB O(N^2) regression check: must stay strictly O(N) (< 20ms) and redact cleanly:
+    const dos60Kb = new Error("Conversion Error: Could not convert string '" + " to INT(".repeat(7500));
+    await expect(measureCloudQuery("dashboard.bundle", async () => { throw dos60Kb; })).rejects.toBe(dos60Kb);
+    expect(events.at(-1)?.error).toBe("Error: Conversion Error: Could not convert string [redacted] to [redacted]");
+    const tDos0 = performance.now();
+    for (let k = 0; k < 5; k += 1) {
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw dos60Kb; })).rejects.toBe(dos60Kb);
+    }
+    expect((performance.now() - tDos0) / 5).toBeLessThan(20);
   } finally {
     window.removeEventListener("fla:cloud-query", listener);
     await backend.dispose();

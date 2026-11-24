@@ -500,7 +500,9 @@ fn svc_is_reset(svc_val: &Value, cursor: &Cursor) -> bool {
             return true;
         }
         match (&cursor.svc_zero_anchor, &cur_anchor) {
-            (Some(prev), Some(cur)) => prev != cur,
+            (Some(prev), Some(cur)) => {
+                prev != cur || cursor.svc_outbox_archived > cursor.svc_zero_virtual_base + len
+            }
             (None, _) => {
                 let first_at = first_entry.and_then(|e| e["at"].as_u64()).unwrap_or(0);
                 cursor.svc_outbox_archived > cursor.svc_zero_virtual_base + len
@@ -1347,6 +1349,7 @@ fn gc(
                 manifest.svc_range.1,
                 manifest.svc_virtual_base,
                 manifest.svc_zero_anchor.as_deref(),
+                manifest.svc_observed_base,
             )?;
     }
     if done {
@@ -1366,6 +1369,7 @@ fn trim_svc_outbox(
     archived: u64,
     virtual_base: Option<u64>,
     expected_zero_anchor: Option<&str>,
+    expected_observed_base: Option<u64>,
 ) -> Result<bool, String> {
     let key = format!("svc:{sid}");
     let Some(record) = runtime.admin_get(&key)? else {
@@ -1376,15 +1380,28 @@ fn trim_svc_outbox(
         .as_array()
         .cloned()
         .unwrap_or_default();
+    if expected_observed_base.is_some_and(|ob| raw_base < ob) {
+        return Ok(true);
+    }
+    if expected_observed_base == Some(0)
+        && raw_base > 0
+        && virtual_base.is_some_and(|vb| vb > raw_base)
+    {
+        return Ok(true);
+    }
+    if raw_base > 0 && virtual_base.is_some_and(|vb| vb > raw_base) {
+        return Ok(true);
+    }
     if raw_base == 0
         && expected_zero_anchor.is_some()
         && outbox.first().map(svc_entry_anchor).as_deref() != expected_zero_anchor
     {
         return Ok(true);
     }
-    let eff_base = match virtual_base {
-        Some(vb) if vb > raw_base => vb,
-        _ => raw_base,
+    let eff_base = if raw_base == 0 {
+        virtual_base.unwrap_or(0)
+    } else {
+        raw_base
     };
     let removable = outbox
         .len()

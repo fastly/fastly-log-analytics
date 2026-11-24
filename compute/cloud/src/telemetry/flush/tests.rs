@@ -1793,3 +1793,477 @@ fn bug_cloud_outbox_dr_30a_post_nonzero_base_reset_and_tight_budget_flush_preser
     assert_eq!(seqs_2a2, vec![3, 4, 5]);
     assert_eq!(rt2.cursor().svc_outbox_archived, 6);
 }
+
+#[test]
+fn bug_cloud_outbox_dr_31a_and_31b_trim_observed_base_guards_and_matching_anchor_rollback() {
+    let make_entries = |prefix: &str, count: usize, start_at: u64| -> Vec<Value> {
+        (0..count)
+            .map(|i| {
+                json!({
+                    "actor": "admin",
+                    "at": start_at + i as u64,
+                    "event": format!("{prefix}.{i}"),
+                    "config_version": (i + 1) as u64,
+                })
+            })
+            .collect()
+    };
+    let audit_rows = |r: &Rt| -> Vec<Value> {
+        r.objects
+            .borrow()
+            .iter()
+            .filter(|(k, _)| k.contains("/admin_audit/"))
+            .flat_map(|(_, body)| schema::from_parquet(LogKind::AdminAudit, body.clone()).unwrap())
+            .collect()
+    };
+
+    // 1. GcPending deferred GC after base = 10 -> 0 reset: 80 new entries preserved, 0 dropped!
+    {
+        let rt = Rt::new();
+        rt.put_kv(
+            &cursor_key(SID),
+            json!({
+                "scan_min": NOW_MIN - 2,
+                "cache_min": NOW_MIN - 2,
+                "svc_outbox_archived": 10,
+                "svc_last_base": 10,
+                "last_flush_s": NOW_S - 600,
+                "last_svc_flush_s": NOW_S - 600,
+            }),
+        );
+        rt.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": 10,
+                "_audit_outbox": make_entries("pre10", 80, NOW_S - 200),
+            }),
+        );
+        rt.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("gc1")),
+            cron_line("gc-tick-1"),
+        );
+        // Simulate a committed GcPending manifest from Flush 1 (svc_observed_base = Some(10), svc_range = (10, 90))
+        // by running Flush 1 with tight budget OR writing the exact manifest state produced when GC pauses before trim.
+        // First run Flush 1 with tight budget so it commits cursor and returns GcPending before trim_svc_outbox:
+        // Probe call count by running flush with exact budget that allows commit but not trim_svc_outbox!
+        let mut gcp_rt = None;
+        for cap in 8..=32u32 {
+            let probe = Rt::new();
+            probe.put_kv(
+                &cursor_key(SID),
+                json!({
+                    "scan_min": NOW_MIN - 2,
+                    "cache_min": NOW_MIN - 2,
+                    "svc_outbox_archived": 10,
+                    "svc_last_base": 10,
+                    "last_flush_s": NOW_S - 600,
+                    "last_svc_flush_s": NOW_S - 600,
+                }),
+            );
+            probe.put_kv(
+                "svc:svc1",
+                json!({
+                    "service_id": SID,
+                    "_audit_outbox_base": 10,
+                    "_audit_outbox": make_entries("pre10", 80, NOW_S - 200),
+                }),
+            );
+            probe.put_kv(
+                &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("gc1")),
+                cron_line("gc-tick-1"),
+            );
+            probe.put_kv(
+                &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 39, Some("gc2")),
+                cron_line("gc-tick-2"),
+            );
+            probe.budget.set(probe.calls.get() + cap);
+            let rep = run(&probe, true);
+            if rep.status == FlushStatus::GcPending
+                && probe.cursor().svc_outbox_archived == 90
+                && probe.get_kv("svc:svc1").unwrap()["_audit_outbox"]
+                    .as_array()
+                    .unwrap()
+                    .len()
+                    == 80
+            {
+                gcp_rt = Some(probe);
+                break;
+            }
+        }
+        // Fallback: if flush's collect() always reserves SVC_TRIM_CALLS when single-group, test deferred GcPending
+        // directly by seeding the committed manifest right before trim (as happens after a transient CAS conflict on svc:svc1).
+        let rt_gcp = gcp_rt.unwrap_or_else(|| {
+            rt.budget.set(rt.calls.get() + 64);
+            let committed_manifest = Manifest {
+                txn_id: "txn-gcp-31a".into(),
+                start_min: NOW_MIN,
+                svc_range: (10, 90),
+                svc_observed_base: Some(10),
+                committed: true,
+                gc_done: false,
+                ..Default::default()
+            };
+            rt.put_kv(
+                &cursor_key(SID),
+                json!({
+                    "scan_min": NOW_MIN - 2,
+                    "cache_min": NOW_MIN - 2,
+                    "svc_outbox_archived": 90,
+                    "svc_last_base": 10,
+                    "last_flush_s": NOW_S,
+                    "last_svc_flush_s": NOW_S,
+                    "txn_id": "txn-gcp-31a",
+                }),
+            );
+            rt.put_kv(&manifest_key(SID), to_value(&committed_manifest));
+            rt
+        });
+
+        // External KV reset of svc:svc1 from base = 10 -> 0 with 80 brand-new unarchived entries:
+        rt_gcp.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": 0,
+                "_audit_outbox": make_entries("post_reset", 80, NOW_S),
+            }),
+        );
+        rt_gcp.budget.set(rt_gcp.calls.get() + 64);
+        // Non-manual resume finishes ONLY the GcPending manifest (last_flush_s == NOW_S, not due for a new flush):
+        let resume_rep = run(&rt_gcp, false);
+        assert!(
+            matches!(
+                resume_rep.status,
+                FlushStatus::NotDue | FlushStatus::Committed
+            ),
+            "unexpected status: {:?}",
+            resume_rep.status
+        );
+        assert!(
+            rt_gcp.get_kv(&manifest_key(SID)).is_none(),
+            "GcPending manifest must be deleted after safe abort of trim_svc_outbox"
+        );
+        let after_gcp = rt_gcp.get_kv("svc:svc1").unwrap();
+        assert_eq!(
+            after_gcp["_audit_outbox_base"].as_u64(),
+            Some(0),
+            "BUG-CLOUD-OUTBOX-DR-31A (GcPending): base=10->0 reset must NOT be overwritten"
+        );
+        assert_eq!(
+            after_gcp["_audit_outbox"].as_array().unwrap().len(),
+            80,
+            "BUG-CLOUD-OUTBOX-DR-31A (GcPending): 80 post-reset entries must be preserved (0 dropped)"
+        );
+        assert_eq!(after_gcp["_audit_outbox"][0]["event"], "post_reset.0");
+
+        // Subsequent manual flush archives ALL 80 post-reset entries at source_seq 90..170 with 0 lost:
+        rt_gcp.budget.set(rt_gcp.calls.get() + 64);
+        let post_flush_rep = run(&rt_gcp, true);
+        assert_eq!(post_flush_rep.status, FlushStatus::Committed);
+        let post_rows: Vec<Value> = audit_rows(&rt_gcp)
+            .into_iter()
+            .filter(|r| {
+                r["action"]
+                    .as_str()
+                    .is_some_and(|a| a.starts_with("post_reset."))
+            })
+            .collect();
+        assert_eq!(
+            post_rows.len(),
+            80,
+            "BUG-CLOUD-OUTBOX-DR-31A (GcPending): all 80 post_reset entries must be archived (0 lost)"
+        );
+        assert_eq!(rt_gcp.cursor().svc_outbox_archived, 170);
+    }
+
+    // 2. Same-tick reset race (base = 10 -> 0 happens right after cursor commit, before gc() calls trim_svc_outbox)
+    // AND 3. Nonzero-to-smaller-nonzero reset race (base = 100 -> 10):
+    for (pre_base, post_base, label) in [
+        (10u64, 0u64, "same-tick 10->0"),
+        (100u64, 10u64, "nonzero-to-smaller-nonzero 100->10"),
+    ] {
+        struct RaceRt {
+            inner: Rt,
+            post_base: u64,
+            post_entries: Vec<Value>,
+            triggered: Cell<bool>,
+        }
+        impl SetupStores for RaceRt {
+            fn config_present(&self, n: &str) -> Result<bool, String> {
+                self.inner.config_present(n)
+            }
+            fn secret_present(&self, n: &str) -> Result<bool, String> {
+                self.inner.secret_present(n)
+            }
+            fn state_linked(&self) -> Result<bool, String> {
+                self.inner.state_linked()
+            }
+        }
+        impl Runtime for RaceRt {
+            fn config(&self, n: &str) -> Result<Option<String>, String> {
+                self.inner.config(n)
+            }
+            fn secret(&self, n: &str) -> Result<Option<String>, String> {
+                self.inner.secret(n)
+            }
+            fn random(&self) -> Result<[u8; 32], String> {
+                self.inner.random()
+            }
+            fn now(&self) -> u64 {
+                self.inner.now()
+            }
+            fn checks(&self, l: bool) -> Result<Value, String> {
+                self.inner.checks(l)
+            }
+            fn versions(&self) -> Result<Value, String> {
+                self.inner.versions()
+            }
+            fn compute_service_id(&self) -> Option<String> {
+                self.inner.compute_service_id()
+            }
+            fn compute_service_version(&self) -> Option<String> {
+                self.inner.compute_service_version()
+            }
+            fn admin_get(&self, key: &str) -> Result<Option<Record>, String> {
+                self.inner.admin_get(key)
+            }
+            fn admin_cas(
+                &self,
+                key: &str,
+                generation: Option<&str>,
+                value: &Value,
+            ) -> Result<bool, String> {
+                let ok = self.inner.admin_cas(key, generation, value)?;
+                if ok && key == cursor_key(SID) && !self.triggered.replace(true) {
+                    self.inner.put_kv(
+                        "svc:svc1",
+                        json!({
+                            "service_id": SID,
+                            "_audit_outbox_base": self.post_base,
+                            "_audit_outbox": self.post_entries,
+                        }),
+                    );
+                }
+                Ok(ok)
+            }
+            fn kv_list(
+                &self,
+                prefix: &str,
+                cursor: Option<&str>,
+                limit: u32,
+            ) -> Result<KvPage, String> {
+                self.inner.kv_list(prefix, cursor, limit)
+            }
+            fn kv_delete(&self, key: &str) -> Result<(), String> {
+                self.inner.kv_delete(key)
+            }
+            fn admin_fos(&self, req: FosRequest<'_>) -> Result<FosResponse, String> {
+                self.inner.admin_fos(req)
+            }
+            fn admin_remaining_calls(&self) -> u32 {
+                self.inner.admin_remaining_calls()
+            }
+            fn core_cache_lookup(
+                &self,
+                key: &str,
+            ) -> Result<Option<CoreCacheEntry>, CoreCacheError> {
+                self.inner.core_cache_lookup(key)
+            }
+            fn core_cache_replace(
+                &self,
+                key: &str,
+                surrogate_keys: &[&str],
+                ttl: Duration,
+                update: &dyn Fn(Option<CoreCacheEntry>) -> CoreCacheEntry,
+            ) -> Result<(), CoreCacheError> {
+                self.inner
+                    .core_cache_replace(key, surrogate_keys, ttl, update)
+            }
+            fn core_cache_purge(&self, surrogate: &str) -> Result<(), CoreCacheError> {
+                self.inner.core_cache_purge(surrogate)
+            }
+            fn vcpu_ms(&self) -> u64 {
+                self.inner.vcpu_ms()
+            }
+            fn admin_elapsed(&self, started: Instant) -> Duration {
+                self.inner.admin_elapsed(started)
+            }
+        }
+
+        let inner = Rt::new();
+        inner.put_kv(
+            &cursor_key(SID),
+            json!({
+                "scan_min": NOW_MIN - 2,
+                "cache_min": NOW_MIN - 2,
+                "svc_outbox_archived": pre_base,
+                "svc_last_base": pre_base,
+                "last_flush_s": NOW_S - 600,
+                "last_svc_flush_s": NOW_S - 600,
+            }),
+        );
+        inner.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": pre_base,
+                "_audit_outbox": make_entries("pre_race", 80, NOW_S - 200),
+            }),
+        );
+        inner.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("race")),
+            cron_line("race-tick"),
+        );
+        inner.budget.set(inner.calls.get() + 64);
+
+        let race_rt = RaceRt {
+            inner,
+            post_base,
+            post_entries: make_entries("race_post", 80, NOW_S),
+            triggered: Cell::new(false),
+        };
+        let rep = log_flush(
+            &race_rt,
+            SID,
+            Some(&target()),
+            &OperationalLogSettings::default(),
+            true,
+            Instant::now(),
+        )
+        .unwrap();
+        assert_eq!(rep.status, FlushStatus::Committed, "{label}");
+        assert!(race_rt.triggered.get(), "{label}: race must have fired");
+        let after = race_rt.inner.get_kv("svc:svc1").unwrap();
+        assert_eq!(
+            after["_audit_outbox_base"].as_u64(),
+            Some(post_base),
+            "BUG-CLOUD-OUTBOX-DR-31A ({label}): _audit_outbox_base was clobbered!"
+        );
+        assert_eq!(
+            after["_audit_outbox"].as_array().unwrap().len(),
+            80,
+            "BUG-CLOUD-OUTBOX-DR-31A ({label}): post-reset entries were dropped!"
+        );
+        assert_eq!(after["_audit_outbox"][0]["event"], "race_post.0");
+    }
+
+    // 4. virtual_base = 50 vs reset to raw_base = 10 (len = 5 AND len = 80): never overwrite nonzero raw_base with virtual_base!
+    for len in [5usize, 80usize] {
+        let rt_vb = Rt::new();
+        rt_vb.put_kv(
+            &cursor_key(SID),
+            json!({
+                "scan_min": NOW_MIN - 2,
+                "cache_min": NOW_MIN - 2,
+                "svc_outbox_archived": 55,
+                "svc_last_base": 0,
+                "last_flush_s": NOW_S,
+                "last_svc_flush_s": NOW_S,
+                "txn_id": "txn-vb-31a",
+            }),
+        );
+        let manifest_vb = Manifest {
+            txn_id: "txn-vb-31a".into(),
+            start_min: NOW_MIN,
+            svc_range: (50, 55),
+            svc_virtual_base: Some(50),
+            svc_observed_base: Some(0),
+            committed: true,
+            gc_done: false,
+            ..Default::default()
+        };
+        rt_vb.put_kv(&manifest_key(SID), to_value(&manifest_vb));
+        rt_vb.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": 10,
+                "_audit_outbox": make_entries("vb_post", len, NOW_S),
+            }),
+        );
+        rt_vb.budget.set(rt_vb.calls.get() + 64);
+        let rep_vb = run(&rt_vb, false);
+        assert!(
+            matches!(rep_vb.status, FlushStatus::NotDue | FlushStatus::Committed),
+            "len={len}: unexpected status {:?}",
+            rep_vb.status
+        );
+        assert!(rt_vb.get_kv(&manifest_key(SID)).is_none(), "len={len}");
+        let after_vb = rt_vb.get_kv("svc:svc1").unwrap();
+        assert_eq!(
+            after_vb["_audit_outbox_base"].as_u64(),
+            Some(10),
+            "BUG-CLOUD-OUTBOX-DR-31A (virtual_base=50 vs raw_base=10, len={len}): must NOT overwrite nonzero raw_base"
+        );
+        assert_eq!(
+            after_vb["_audit_outbox"].as_array().unwrap().len(),
+            len,
+            "BUG-CLOUD-OUTBOX-DR-31A (virtual_base=50 vs raw_base=10, len={len}): 0 entries may be dropped"
+        );
+        assert_eq!(after_vb["_audit_outbox"][0]["event"], "vb_post.0");
+    }
+
+    // 5. BUG-CLOUD-OUTBOX-DR-31B: rollback/truncation preserving entries[0] (archived = 5 > 0 + 4)
+    {
+        let rt_rb = Rt::new();
+        rt_rb.set_cursor(NOW_MIN - 2);
+        let e0 = json!({"actor": "admin", "at": NOW_S - 50, "event": "e0", "config_version": 1});
+        let e1 = json!({"actor": "admin", "at": NOW_S - 40, "event": "e1", "config_version": 2});
+        let e2 = json!({"actor": "admin", "at": NOW_S - 30, "event": "e2", "config_version": 3});
+        let e3 = json!({"actor": "admin", "at": NOW_S - 20, "event": "e3", "config_version": 4});
+        let e4 = json!({"actor": "admin", "at": NOW_S - 10, "event": "e4", "config_version": 5});
+        rt_rb.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": 0,
+                "_audit_outbox": [e0.clone(), e1.clone(), e2, e3, e4],
+            }),
+        );
+        rt_rb.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("rb1")),
+            cron_line("rb-tick-1"),
+        );
+        rt_rb.budget.set(rt_rb.calls.get() + 64);
+        assert_eq!(run(&rt_rb, false).status, FlushStatus::Committed);
+        assert_eq!(rt_rb.cursor().svc_outbox_archived, 5);
+        assert!(rt_rb.cursor().svc_zero_anchor.is_some());
+
+        // Rollback/truncation preserving entries[0] (len = 4 < archived = 5):
+        let post2 = json!({"actor": "admin", "at": NOW_S - 5, "event": "post_rollback.2", "config_version": 3});
+        let post3 = json!({"actor": "admin", "at": NOW_S - 4, "event": "post_rollback.3", "config_version": 4});
+        rt_rb.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": 0,
+                "_audit_outbox": [e0, e1, post2, post3],
+            }),
+        );
+        rt_rb.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 39, Some("rb2")),
+            cron_line("rb-tick-2"),
+        );
+        rt_rb.budget.set(rt_rb.calls.get() + 64);
+        assert_eq!(run(&rt_rb, true).status, FlushStatus::Committed);
+
+        let rows_rb = audit_rows(&rt_rb);
+        assert_eq!(
+            rows_rb.len(),
+            9,
+            "BUG-CLOUD-OUTBOX-DR-31B: rollback preserving entries[0] (archived=5 > 0+4) must detect reset and archive all 4 post-rollback entries, got {}",
+            rows_rb.len()
+        );
+        assert!(
+            rows_rb.iter().any(|r| r["action"] == "post_rollback.2")
+                && rows_rb.iter().any(|r| r["action"] == "post_rollback.3"),
+            "BUG-CLOUD-OUTBOX-DR-31B: post_rollback.2 and post_rollback.3 were blackholed! rows={rows_rb:?}"
+        );
+        assert_eq!(rt_rb.cursor().svc_outbox_archived, 9);
+        assert_eq!(
+            rt_rb.get_kv("svc:svc1").unwrap()["_audit_outbox_base"].as_u64(),
+            Some(5)
+        );
+    }
+}

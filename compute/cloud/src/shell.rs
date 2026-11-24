@@ -397,11 +397,17 @@ pub const MAX_CLOCK_CONTINUATIONS: u32 = 20;
 
 /// The depth the continuation of a clock request carries (its `x-flp-continue` plus one), or
 /// `None` once the chain reaches [`MAX_CLOCK_CONTINUATIONS`].
+/// Defense-in-depth: only honor `x-flp-continue` when the front VCL authenticated the request and
+/// stamped `x-flp-tick-pass: 1`, so a spoofed header can never suppress clock self-continuation.
 fn next_continuation(request: &Request) -> Option<u32> {
-    let depth = request
-        .header("x-flp-continue")
-        .and_then(|value| value.trim().parse::<u32>().ok())
-        .unwrap_or(0);
+    let depth = if request.header("x-flp-tick-pass") == Some("1") {
+        request
+            .header("x-flp-continue")
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .unwrap_or(0)
+    } else {
+        0
+    };
     (depth < MAX_CLOCK_CONTINUATIONS).then_some(depth + 1)
 }
 
@@ -2419,7 +2425,12 @@ mod tests {
             method: "GET".into(),
             path: "/_tick".into(),
             headers: continue_header
-                .map(|v| BTreeMap::from([("x-flp-continue".into(), v.into())]))
+                .map(|v| {
+                    BTreeMap::from([
+                        ("x-flp-tick-pass".into(), "1".into()),
+                        ("x-flp-continue".into(), v.into()),
+                    ])
+                })
                 .unwrap_or_default(),
             body: vec![],
         };
@@ -2431,6 +2442,14 @@ mod tests {
             Some(MAX_CLOCK_CONTINUATIONS)
         );
         assert_eq!(next_continuation(&tick(Some("20"))), None);
+        // Spoofed x-flp-continue without front-verified x-flp-tick-pass: 1 is ignored.
+        let spoofed = Request {
+            method: "GET".into(),
+            path: "/_tick".into(),
+            headers: BTreeMap::from([("x-flp-continue".into(), "20".into())]),
+            body: vec![],
+        };
+        assert_eq!(next_continuation(&spoofed), Some(1));
     }
 
     #[test]
@@ -2737,7 +2756,10 @@ mod tests {
         let tick = Request {
             method: "GET".into(),
             path: "/_tick".into(),
-            headers: BTreeMap::from([("x-flp-continue".into(), "3".into())]),
+            headers: BTreeMap::from([
+                ("x-flp-tick-pass".into(), "1".into()),
+                ("x-flp-continue".into(), "3".into()),
+            ]),
             body: vec![],
         };
         let seed = |rt: &MemRuntime, record: crate::admin::schedule::Sched| {

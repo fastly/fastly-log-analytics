@@ -2160,3 +2160,536 @@ def test_sec_t5_iter30_hs01_01_and_bug_hs01_canonical_pii_numeric_predicates_and
                     f"Real chdb/duckdb Iter31 suite failed:\nSTDOUT:\n{run_res.stdout}\nSTDERR:\n{run_res.stderr}"
                 )
                 assert "ITER31_CHDB_DUCKDB_PARITY_OK" in run_res.stdout
+
+
+_REAL_CHDB_DUCKDB_ITER32_SCRIPT = """
+import json
+import tempfile
+from types import SimpleNamespace
+
+import chdb
+from chdb import session as chdb_session
+import duckdb
+
+from backend.high_scale import query as hs_query
+from backend.high_scale.postgres_control import console_access
+from backend.models.analytics import QueryRequest as DashboardQueryRequest
+
+with tempfile.TemporaryDirectory(prefix="fla_iter32_chdb_") as tmpdir:
+    sess = chdb_session.Session(tmpdir)
+    sess.query(
+        "CREATE TABLE high_scale_batch_publications ("
+        "service_id String, domain String, batch_id String, publication_state String"
+        ") ENGINE = ReplacingMergeTree() ORDER BY (service_id, domain, batch_id)"
+    )
+    sess.query(
+        "CREATE TABLE request_facts ("
+        "service_id String, batch_id String, publication_state String, "
+        "event_timestamp DateTime64(6, 'UTC'), line_ordinal UInt32, "
+        "url String, client_ip String, req_id String, response_size UInt64, "
+        "custom_fields Map(String, String), cmcd Map(String, String)"
+        ") ENGINE = MergeTree() ORDER BY (service_id, event_timestamp, line_ordinal)"
+    )
+    sess.query("CREATE TABLE rum_vitals_facts (service_id String, batch_id String, publication_state String, event_timestamp DateTime64(6, 'UTC')) ENGINE = MergeTree() ORDER BY (service_id, event_timestamp)")
+    sess.query("CREATE TABLE rum_error_facts (service_id String, batch_id String, publication_state String, event_timestamp DateTime64(6, 'UTC')) ENGINE = MergeTree() ORDER BY (service_id, event_timestamp)")
+
+    sess.query("INSERT INTO high_scale_batch_publications VALUES ('svc_alpha', 'request', 'b1', 'visible')")
+
+    def _ch_lit(s: str) -> str:
+        return "'" + s.replace("\\\\", "\\\\\\\\").replace("'", "\\\\'") + "'"
+
+    iter32_pii_pairs = (
+        ("meta['user.authorization']", "Bearer meta-auth-1"),
+        ("a[b[client_ip]]", "198.51.100.11"),
+        ("a[['req_http_authorization']]", "Bearer nested-req-auth-2"),
+        ("http/authorization", "Bearer slash-auth-3"),
+        ("request:client_ip", "198.51.100.12"),
+        ("a%2Fb%5Bclient_ip%5D", "198.51.100.13"),
+        ("%61uthorization", "Bearer pct-auth-4"),
+        ("clientIP", "198.51.100.14"),
+        ("sessionID", "camel-sess-5"),
+        ("xAuthToken", "xauth-tok-6"),
+        ("xAccessToken", "xaccess-tok-7"),
+        ("xSessionId", "xsess-id-8"),
+        ("xSessionToken", "xsess-tok-9"),
+        ("xForwardedClientIp", "198.51.100.15"),
+        ("HTTPAuthorization", "Bearer http-auth-10"),
+        ("-filter-cookie", "sid=dash-filter-ck-11"),
+        ("session_id_1-", "trail-dash-sess-12"),
+        ("client_ip_1!", "198.51.100.16"),
+        ("authorization_1/", "Bearer trail-slash-auth-13"),
+        ("client_ip1", "198.51.100.17"),
+        ("session_id2", "num-sess-14"),
+        ("sid1", "num-sid-15"),
+        ("authorization_1", "Bearer num-auth-16"),
+        ("req_http_filter_x_real_ip", "198.51.100.18"),
+        ("x_auth_token", "raw-xauth-17"),
+        ("x_access_token", "raw-xaccess-18"),
+        ("x_session_id", "raw-xsess-19"),
+        ("x_session_token", "raw-xsess-tok-20"),
+        ("x_forwarded_client_ip", "198.51.100.19"),
+    )
+    iter32_safe_pairs = (
+        ("cache-status", "HIT"),
+        ("origin-time", "14"),
+        ("session_duration_ms", "900"),
+        ("ip_version", "4"),
+        ("client_asn", "54113"),
+        ("token_count", "7"),
+        ("http_status", "200"),
+        ("ipv6", "false"),
+    )
+    row1_cf_items = [
+        "'status': '200'",
+        "'bot_score': '10.0'",
+        "'bytes': '250'",
+    ] + [f"{_ch_lit(k)}: {_ch_lit(v)}" for k, v in iter32_pii_pairs + iter32_safe_pairs]
+    row1_cf = "{" + ", ".join(row1_cf_items) + "}"
+    row2_cf = "{'status': '200', 'bot_score': '007', 'bytes': '100'}"
+    row3_cf = "{'status': '404', 'bot_score': '-0', 'bytes': '0'}"
+    row4_cf = "{'status': '500', 'bot_score': '', 'bytes': '500'}"
+    row5_cf = "{'status': '503', 'bot_score': 'abc', 'bytes': '750'}"
+    row6_cf = "{'status': '201', 'bot_score': '-10', 'bytes': '300'}"
+    row1_cmcd = "{'a[b[sid]]': 'cmcd-nested-sid-99', 'CMCD_BR': '3200'}"
+    sess.query(
+        "INSERT INTO request_facts VALUES "
+        f"('svc_alpha', 'b1', 'visible', '2026-11-19 00:10:00.000000', 1, '/r1', '198.51.100.10', 'req-1', 250, {row1_cf}, {row1_cmcd}), "
+        f"('svc_alpha', 'b1', 'visible', '2026-11-19 00:11:00.000000', 2, '/r2', '198.51.100.11', 'req-2', 100, {row2_cf}, {{}}), "
+        f"('svc_alpha', 'b1', 'visible', '2026-11-19 00:12:00.000000', 3, '/r3', '198.51.100.12', 'req-3', 0, {row3_cf}, {{}}), "
+        f"('svc_alpha', 'b1', 'visible', '2026-11-19 00:13:00.000000', 4, '/r4', '198.51.100.13', 'req-4', 500, {row4_cf}, {{}}), "
+        f"('svc_alpha', 'b1', 'visible', '2026-11-19 00:14:00.000000', 5, '/r5', '198.51.100.14', 'req-5', 750, {row5_cf}, {{}}), "
+        f"('svc_alpha', 'b1', 'visible', '2026-11-19 00:15:00.000000', 6, '/r6', '198.51.100.15', 'req-6', 300, {row6_cf}, {{}})"
+    )
+
+    desc_rows = json.loads(sess.query("DESCRIBE TABLE default.request_facts", "JSON").bytes())["data"]
+    cols = [(r["name"], r["type"]) for r in desc_rows if str(r.get("default_type") or "").upper() not in ("MATERIALIZED", "ALIAS")]
+    for masked in (False, True):
+        v_map = console_access.console_tables("svc_alpha", masked=masked)
+        v_sql = console_access._view_select("default", "request_facts", cols, "svc_alpha", masked=masked)
+        sess.query(f"CREATE VIEW `{v_map['request_facts']}` AS {v_sql}")
+
+    class _ChdbClient:
+        _table_filters_verified = True
+
+        def execute(self, sql, settings=None, rewrite_cf=False):
+            s_parts = []
+            for k, v in (settings or {}).items():
+                val_esc = str(v).replace("\\\\", "\\\\\\\\").replace("'", "\\\\'")
+                s_parts.append(f"{k} = '{val_esc}'")
+            full_sql = f"{sql} SETTINGS {', '.join(s_parts)}" if s_parts else sql
+            raw = sess.query(full_sql, "JSON").bytes()
+            return json.loads(raw.decode("utf-8"))["data"] if raw else []
+
+    svc = SimpleNamespace(service_id="svc_alpha", client=_ChdbClient())
+    raw_tables = console_access.console_tables("svc_alpha", masked=False)
+    masked_tables = console_access.console_tables("svc_alpha", masked=True)
+
+    # 1. Masked view redaction + blind-oracle (oracle_n == 0) across all 29 Iter-32 PII keys + cmcd['a[b[sid]]'] + safe preservation:
+    def _sql_key(k: str) -> str:
+        return k.replace("'", "''")
+
+    proj_sql = (
+        "SELECT "
+        + ", ".join(f"custom_fields['{_sql_key(k)}'] AS p_{i}" for i, (k, _) in enumerate(iter32_pii_pairs))
+        + ", "
+        + ", ".join(f"custom_fields['{_sql_key(k)}'] AS np_{i}" for i, (k, _) in enumerate(iter32_safe_pairs))
+        + ", cmcd['a[b[sid]]'] AS cmcd_p, cmcd['CMCD_BR'] AS cmcd_s FROM logs WHERE line_ordinal = 1"
+    )
+    masked_row = hs_query.query_endpoint(
+        svc, DashboardQueryRequest(sql=proj_sql, max_rows=10),
+        "2026-11-19T00:00:00Z", "2026-11-19T01:00:00Z", mask_ips=True, tables=masked_tables,
+    )["data"][0]
+    raw_row = hs_query.query_endpoint(
+        svc, DashboardQueryRequest(sql=proj_sql, max_rows=10),
+        "2026-11-19T00:00:00Z", "2026-11-19T01:00:00Z", mask_ips=False, tables=raw_tables,
+    )["data"][0]
+    for i, (k, raw_secret) in enumerate(iter32_pii_pairs):
+        assert masked_row[f"p_{i}"] == "[redacted]", f"Unredacted {k}: {masked_row[f'p_{i}']!r}"
+        assert raw_row[f"p_{i}"] == raw_secret, f"Raw lost {k}: {raw_row[f'p_{i}']!r}"
+        oracle_sql = f"SELECT count() AS oracle_n FROM logs WHERE custom_fields['{_sql_key(k)}'] = '{_sql_key(raw_secret)}'"
+        oracle_res = hs_query.query_endpoint(
+            svc, DashboardQueryRequest(sql=oracle_sql, max_rows=10),
+            "2026-11-19T00:00:00Z", "2026-11-19T01:00:00Z", mask_ips=True, tables=masked_tables,
+        )["data"]
+        assert int(oracle_res[0]["oracle_n"]) == 0, f"Blind oracle leaked {k}: {oracle_res}"
+    assert masked_row["cmcd_p"] == "[redacted]"
+    assert raw_row["cmcd_p"] == "cmcd-nested-sid-99"
+    assert masked_row["cmcd_s"] == "3200"
+    for i, (nk, nv) in enumerate(iter32_safe_pairs):
+        assert masked_row[f"np_{i}"] == nv, f"False redaction on {nk}: {masked_row[f'np_{i}']!r}"
+
+    # 2. Valid ClickHouse syntax: PREWHERE (...) on MergeTree, SELECT ip, * EXCEPT (...), ARRAY JOIN ... JOIN, PASTE JOIN, POSITION('a' IN url):
+    prewhere_ok = hs_query.query_endpoint(
+        svc, DashboardQueryRequest(sql="SELECT url FROM logs PREWHERE (status = 200) ORDER BY url", max_rows=10),
+        "2026-11-19T00:00:00Z", "2026-11-19T01:00:00Z", mask_ips=False, tables=None,
+    )["data"]
+    assert [r["url"] for r in prewhere_ok] == ["/r1", "/r2"], prewhere_ok
+    for valid_ch_sql in (
+        "SELECT ip, * EXCEPT (custom_fields, cmcd) FROM logs WHERE line_ordinal = 1",
+        "SELECT l.url, x, l3.url AS u3 FROM logs AS l JOIN logs AS l2 USING (url) ARRAY JOIN [1] AS x JOIN logs AS l3 ON l.url = l3.url WHERE l.line_ordinal = 1",
+        "SELECT l.url, r.url AS r_url FROM logs AS l PASTE JOIN logs AS r LIMIT 2",
+        "SELECT url FROM logs WHERE POSITION('r1' IN url) > 0",
+    ):
+        res_ok = hs_query.query_endpoint(
+            svc, DashboardQueryRequest(sql=valid_ch_sql, max_rows=10),
+            "2026-11-19T00:00:00Z", "2026-11-19T01:00:00Z", mask_ips=True, tables=masked_tables,
+        )["data"]
+        assert len(res_ok) >= 1, f"Expected rows for valid ClickHouse SQL: {valid_ch_sql}"
+
+    # 3. Real chdb == duckdb numeric differential parity across '', 'abc', '10.0', '007', '-0', '-10', IN/NOT IN, %, CAST, CASE, arithmetic LHS, reversed BETWEEN:
+    dcon = duckdb.connect(":memory:")
+    dcon.execute(
+        "CREATE TABLE logs (url VARCHAR, bot_score DOUBLE, bytes BIGINT, status BIGINT); "
+        "INSERT INTO logs VALUES "
+        "('/r1', 10.0, 250, 200), "
+        "('/r2', 7.0, 100, 200), "
+        "('/r3', 0.0, 0, 404), "
+        "('/r4', NULL, 500, 500), "
+        "('/r5', NULL, 750, 503), "
+        "('/r6', -10.0, 300, 201);"
+    )
+    parity_queries = (
+        "SELECT url FROM logs WHERE bot_score = 10 ORDER BY url",
+        "SELECT url FROM logs WHERE bot_score = 7 ORDER BY url",
+        "SELECT url FROM logs WHERE bot_score = 0 ORDER BY url",
+        "SELECT url FROM logs WHERE bot_score != 10 ORDER BY url",
+        "SELECT url FROM logs WHERE bot_score < 10 ORDER BY url",
+        "SELECT url FROM logs WHERE bot_score >= 0 ORDER BY url",
+        "SELECT url FROM logs WHERE bot_score BETWEEN -1 AND 1 ORDER BY url",
+        "SELECT url FROM logs WHERE bot_score NOT BETWEEN 1 AND 5 ORDER BY url",
+        "SELECT url FROM logs WHERE bot_score IN (10, 7) ORDER BY url",
+        "SELECT url FROM logs WHERE (bot_score) NOT IN (10, 7) ORDER BY url",
+        "SELECT url FROM logs WHERE (bot_score) IN (-10, +10, 7e0) ORDER BY url",
+        "SELECT url FROM logs WHERE bot_score = -(10) ORDER BY url",
+        "SELECT url FROM logs WHERE bot_score = +(10) ORDER BY url",
+        "SELECT url FROM logs WHERE bot_score = 25 % 15 ORDER BY url",
+        "SELECT url FROM logs WHERE bot_score = CAST(10 AS DOUBLE) ORDER BY url",
+        "SELECT url FROM logs WHERE bot_score = CASE WHEN status = 200 THEN 10 ELSE 7 END ORDER BY url",
+        "SELECT url FROM logs WHERE bot_score + 1 = 11 ORDER BY url",
+        "SELECT url FROM logs WHERE -(bot_score) = 10 ORDER BY url",
+        "SELECT url FROM logs WHERE 5 BETWEEN bot_score AND 10 ORDER BY url",
+        "SELECT url FROM logs WHERE 8 BETWEEN bot_score AND 10 ORDER BY url",
+    )
+    for q_sql in parity_queries:
+        duck_urls = [r[0] for r in dcon.execute(q_sql).fetchall()]
+        for mask_flag, tbls in ((False, raw_tables), (True, masked_tables)):
+            ch_urls = [
+                r["url"]
+                for r in hs_query.query_endpoint(
+                    svc, DashboardQueryRequest(sql=q_sql, max_rows=10),
+                    "2026-11-19T00:00:00Z", "2026-11-19T01:00:00Z", mask_ips=mask_flag, tables=tbls,
+                )["data"]
+            ]
+            assert ch_urls == duck_urls, f"Parity mismatch (mask={mask_flag}) on {q_sql}: ch={ch_urls} vs duck={duck_urls}"
+    print("ITER32_CHDB_DUCKDB_PARITY_OK")
+"""
+
+
+@pytest.mark.security_regression
+def test_sec_t5_iter31_sql_dos_array_join_on_star_in_pii_and_numeric_parity() -> None:
+    """ITER32 remediation: ARRAY JOIN/PASTE JOIN/ON b.*/ON JOIN <kw>/IN <table>/\\'/backtick, DoS, PREWHERE/EXCEPT, numeric parity, PII canonicalization."""
+    import os
+    import shutil
+    import site
+    import subprocess
+    import time
+    from pathlib import Path
+
+    from backend.core.share_db import SHARED_PII_KEYS
+    from backend.core.sql_validator import SQLValidationError, validate_user_sql
+    from backend.high_scale.postgres_control import console_access
+
+    # 1. Exact 18-key MASKED_KEYS == SHARED_PII_KEYS contract + expanded PII canonicalization in console_access.py:
+    assert len(console_access.MASKED_KEYS) == 18
+    assert len(SHARED_PII_KEYS) == 18
+    assert set(console_access.MASKED_KEYS) == set(SHARED_PII_KEYS)
+    keys_sql = ", ".join(f"'{k}'" for k in console_access._MAP_MASKED_KEYS)
+    map_view_expr = console_access._redaction("custom_fields", "Map(String, String)", keys_sql)
+    assert map_view_expr is not None
+    assert "mapApply((k, v) -> (k, if((arrayExists(seg -> seg != '' AND (seg IN (" in map_view_expr
+    assert "decodeURLComponent(" in map_view_expr
+
+    iter32_pii_idents = (
+        "meta['user.authorization']",
+        "a[b[client_ip]]",
+        "a[['req_http_authorization']]",
+        "http/authorization",
+        "request:client_ip",
+        "cmcd['a[b[sid]]']",
+        "a%2Fb%5Bclient_ip%5D",
+        "%61uthorization",
+        "clientIP",
+        "sessionID",
+        "xAuthToken",
+        "xAccessToken",
+        "xSessionId",
+        "xSessionToken",
+        "xForwardedClientIp",
+        "HTTPAuthorization",
+        "-filter-cookie",
+        "session_id_1-",
+        "client_ip_1!",
+        "authorization_1/",
+        "client_ip1",
+        "session_id2",
+        "sid1",
+        "authorization_1",
+        "authorization\r\n",
+        "req_http_filter_x_real_ip",
+        "x_auth_token",
+        "x_access_token",
+        "x_session_id",
+        "x_session_token",
+        "x_forwarded_client_ip",
+    )
+    for pii_ident in iter32_pii_idents:
+        assert console_access._is_console_pii_identifier(pii_ident), f"console_access missed {pii_ident!r}"
+        assert console_access._redaction(pii_ident, "String", keys_sql) is not None, f"_redaction missed {pii_ident!r}"
+        assert hs_query._classify_console_pii_key(pii_ident) is not None, f"query.py missed {pii_ident!r}"
+    for safe_ident in (
+        "cache-status",
+        "origin-time",
+        "session_duration_ms",
+        "ip_version",
+        "client_asn",
+        "token_count",
+        "CMCD_BR",
+        "http_status",
+        "req_id",
+        "ipv6",
+    ):
+        assert not console_access._is_console_pii_identifier(safe_ident), f"console_access FP {safe_ident!r}"
+        assert hs_query._classify_console_pii_key(safe_ident) is None, f"query.py FP {safe_ident!r}"
+
+    # 2. CRITICAL cross-tenant / arbitrary-table bypasses blocked directly in validate_user_sql:
+    direct_validator_attacks = (
+        "SELECT * FROM logs ARRAY JOIN [1] AS x JOIN secret_other_tenant ON 1=1",
+        "SELECT * FROM logs ARRAY JOIN [1] AS x LEFT JOIN secret_other_tenant ON 1=1",
+        "SELECT * FROM logs ARRAY JOIN [1] AS x GLOBAL LEFT JOIN secret_other_tenant ON 1=1",
+        "SELECT * FROM logs ARRAY JOIN [1] AS x ASOF JOIN secret_other_tenant ON 1=1",
+        "SELECT * FROM logs ARRAY JOIN [1] AS x PASTE JOIN secret_other_tenant",
+        "SELECT * FROM logs AS l PASTE JOIN secret_other_tenant AS r",
+        "SELECT * FROM logs AS a JOIN logs AS b ON a.url = b.* JOIN secret_other_tenant AS c ON 1=1",
+        "SELECT * FROM logs AS a JOIN logs AS b ON a.url = b.url JOIN at AS x ON 1=1",
+        "SELECT * FROM logs AS a JOIN logs AS b ON a.url = b.url JOIN in AS x ON 1=1",
+        "SELECT * FROM logs AS a JOIN logs AS b ON a.url = b.url JOIN not AS x ON 1=1",
+        "SELECT * FROM logs WHERE 1 IN system.numbers",
+        "SELECT * FROM logs WHERE 1 GLOBAL IN system.numbers",
+        "SELECT * FROM logs WHERE 1 NOT IN secret_other_tenant",
+        "SELECT trim(CASE WHEN 1 GLOBAL IN system.numbers THEN 'a' ELSE 'b' END) FROM logs",
+        "SELECT overlay(CASE WHEN 1 IN system.numbers THEN 'a' ELSE 'b' END PLACING 'x' FROM 1) FROM logs",
+        "SELECT position('a', CASE WHEN 'x' IN system.tables THEN 'a' ELSE 'b' END) FROM logs",
+        "SELECT position(CASE WHEN 'x' IN system.tables THEN 'a' ELSE 'b' END IN url) FROM logs",
+        "SELECT 'a\\', ' FROM logs UNION ALL SELECT secret_col FROM secret_other_tenant -- ' FROM logs",
+        "SELECT `file`('/etc/passwd') FROM logs",
+        "SELECT * FROM `secret_other_tenant`",
+    )
+    for atk_sql in direct_validator_attacks:
+        with pytest.raises(SQLValidationError):
+            validate_user_sql(atk_sql, allowed_tables=frozenset({"logs"}))
+
+    # 3. Direct rewriter defense-in-depth in query.py for TRIM/OVERLAY/POSITION bare IN, ARRAY JOIN, PASTE JOIN, PREWHERE, * EXCEPT (...):
+    for bad_in_sql in (
+        "SELECT trim(CASE WHEN 1 GLOBAL IN system.numbers THEN 'a' ELSE 'b' END) FROM logs",
+        "SELECT overlay(CASE WHEN 1 IN system.numbers THEN 'a' ELSE 'b' END PLACING 'x' FROM 1) FROM logs",
+        "SELECT position('a', CASE WHEN 'x' IN system.tables THEN 'a' ELSE 'b' END) FROM logs",
+        "SELECT position(CASE WHEN 'x' IN system.tables THEN 'a' ELSE 'b' END IN url) FROM logs",
+        "SELECT position('a' IN url AND 1 IN system.numbers) FROM logs",
+    ):
+        with pytest.raises((PermissionError, SQLValidationError)):
+            hs_query._rewrite_console_sql(
+                bad_in_sql,
+                svc_table="request_facts",
+                names={"request_facts": "request_facts"},
+            )
+
+    rw_array_join = hs_query._rewrite_console_sql(
+        "SELECT * FROM logs AS l JOIN logs AS l2 USING (url) ARRAY JOIN [1] AS x JOIN logs AS l3 ON 1=1",
+        svc_table="request_facts",
+        names={"request_facts": "request_facts"},
+    )
+    assert rw_array_join.count("request_facts") == 3, rw_array_join
+    assert " logs " not in f" {rw_array_join} ", rw_array_join
+
+    rw_paste = hs_query._rewrite_console_sql(
+        "SELECT l.url, r.url FROM logs AS l PASTE JOIN logs AS r",
+        svc_table="request_facts",
+        names={"request_facts": "request_facts"},
+    )
+    assert rw_paste.count("request_facts") == 2, rw_paste
+
+    rw_prewhere = hs_query._rewrite_console_sql(
+        "SELECT url FROM logs PREWHERE (status = 200)",
+        svc_table="request_facts",
+        names={"request_facts": "request_facts"},
+    )
+    assert "AS PREWHERE" not in rw_prewhere, rw_prewhere
+    assert "PREWHERE (" in rw_prewhere and "custom_fields['status']" in rw_prewhere, rw_prewhere
+
+    rw_prewhere_col = hs_query._rewrite_console_sql(
+        "SELECT url FROM logs PREWHERE (status)",
+        svc_table="request_facts",
+        names={"request_facts": "request_facts"},
+    )
+    assert "AS PREWHERE" not in rw_prewhere_col, rw_prewhere_col
+    assert "PREWHERE (custom_fields['status'])" in rw_prewhere_col, rw_prewhere_col
+
+    assert validate_user_sql("SELECT url FROM logs PREWHERE (status = 200)", allowed_tables={"logs"}).parse_tree
+    assert validate_user_sql("SELECT url FROM logs PREWHERE (status)", allowed_tables={"logs"}).parse_tree
+    assert validate_user_sql("SELECT url FROM logs WHERE POSITION('a' IN url) > 0", allowed_tables={"logs"}).parse_tree
+
+    rw_except = hs_query._rewrite_console_sql(
+        "SELECT ip, * EXCEPT (status) FROM logs",
+        svc_table="request_facts",
+        names={"request_facts": "request_facts"},
+    )
+    assert rw_except == "SELECT client_ip, * EXCEPT (status) FROM request_facts", rw_except
+
+    rw_alias_except = hs_query._rewrite_console_sql(
+        "SELECT l.ip, l.* EXCEPT (status) FROM logs AS l",
+        svc_table="request_facts",
+        names={"request_facts": "request_facts"},
+    )
+    assert rw_alias_except == "SELECT l.client_ip, l.* EXCEPT (status) FROM request_facts AS l", rw_alias_except
+
+    # 4. Algorithmic DoS elimination (depth limit + O(N) paren match + O(1) AS-run parity) in BOTH sql_validator.py and query.py:
+    deep_parens = "(" * 500 + "1" + ")" * 500
+    deep_select = f"SELECT {deep_parens} FROM logs"
+    deep_wrapped = "(" * 500 + "SELECT 1 FROM logs" + ")" * 500
+    for deep_sql in (deep_parens, deep_select, deep_wrapped):
+        t0 = time.perf_counter()
+        with pytest.raises(SQLValidationError):
+            validate_user_sql(deep_sql, allowed_tables=frozenset({"logs"}))
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        assert elapsed_ms < 50.0, f"validate_user_sql deep parens took {elapsed_ms:.1f}ms"
+
+    t0 = time.perf_counter()
+    with pytest.raises(SQLValidationError):
+        hs_query._rewrite_console_sql(
+            deep_select,
+            svc_table="request_facts",
+            names={"request_facts": "request_facts"},
+        )
+    assert (time.perf_counter() - t0) * 1000.0 < 50.0
+
+    as_chain = "SELECT 1" + " AS" * 2000 + " x FROM logs"
+    t0 = time.perf_counter()
+    try:
+        validate_user_sql(as_chain, allowed_tables=frozenset({"logs"}))
+    except SQLValidationError:
+        pass
+    val_as_ms = (time.perf_counter() - t0) * 1000.0
+    assert val_as_ms < 50.0, f"validate_user_sql AS-chain took {val_as_ms:.1f}ms"
+
+    t0 = time.perf_counter()
+    hs_query._rewrite_console_sql(
+        as_chain,
+        svc_table="request_facts",
+        names={"request_facts": "request_facts"},
+    )
+    rw_as_ms = (time.perf_counter() - t0) * 1000.0
+    assert rw_as_ms < 50.0, f"_rewrite_console_sql AS-chain took {rw_as_ms:.1f}ms"
+
+    # 5. Post-processing PII masking in query.py: qualified arrayElement(r.custom_fields, ...), list/tuple parent propagation, int/float scalars:
+    assert hs_query._classify_console_pii_key("arrayElement(r.custom_fields, 'authorization')") == "session"
+    assert hs_query._classify_console_pii_key("arrayElement(r.custom_fields, 'clientIP')") == "ip"
+    masked_rows = hs_query._mask_nested_extra_pii(
+        [
+            {
+                "arrayElement(r.custom_fields, 'authorization')": "Bearer qual-secret",
+                "authorization": ["Bearer list-secret-1", "Bearer list-secret-2"],
+                "session_id": 987654321,
+                "x_auth_token": 42.5,
+                "custom_fields": {
+                    "authorization": ["Bearer nested-list-1", 111222],
+                    "x_forwarded_client_ip": ("198.51.100.1", "203.0.113.2"),
+                    "session_id": 123456,
+                    "cache-status": "HIT",
+                },
+                "cache-status": "HIT",
+            }
+        ]
+    )
+    m0 = masked_rows[0]
+    assert m0["arrayElement(r.custom_fields, 'authorization')"] == "[redacted]"
+    assert m0["authorization"] == ["[redacted]", "[redacted]"]
+    assert m0["session_id"] == "[redacted]"
+    assert m0["x_auth_token"] == "[redacted]"
+    assert m0["custom_fields"]["authorization"] == ["[redacted]", "[redacted]"]
+    assert m0["custom_fields"]["x_forwarded_client_ip"] == ("198.51.100.xxx", "203.0.113.xxx")
+    assert m0["custom_fields"]["session_id"] == "[redacted]"
+    assert m0["custom_fields"]["cache-status"] == "HIT"
+    assert m0["cache-status"] == "HIT"
+
+    # 6. Numeric predicate coercion in query.py: IN/NOT IN, %, CAST, CASE, arithmetic LHS, reversed BETWEEN, NULL-safe comparisons:
+    rw_num = hs_query._rewrite_console_sql(
+        "SELECT url FROM logs WHERE bot_score IN (10, 7) AND (bot_score) NOT IN (-1, +2) "
+        "AND bot_score = 25 % 15 AND bot_score + 1 = 11 AND 5 BETWEEN bot_score AND 10 "
+        "AND bot_score = CAST(10 AS DOUBLE) AND bot_score = CASE WHEN status = 200 THEN 10 ELSE 7 END",
+        svc_table="request_facts",
+        names={"request_facts": "request_facts"},
+    )
+    assert "toFloat64OrNull(nullIf(custom_fields['bot_score'], '')) IN (10, 7)" in rw_num, rw_num
+    assert "toFloat64OrNull(nullIf(custom_fields['bot_score'], '')) NOT IN (-1, +2)" in rw_num, rw_num
+    assert "toFloat64OrNull(nullIf(custom_fields['bot_score'], '')) = 25 % 15" in rw_num, rw_num
+    assert "toFloat64OrNull(nullIf(custom_fields['bot_score'], '')) + 1 = 11" in rw_num, rw_num
+    assert "5 BETWEEN toFloat64OrNull(nullIf(custom_fields['bot_score'], '')) AND 10" in rw_num, rw_num
+    assert "toFloat64OrNull(nullIf(custom_fields['bot_score'], '')) = CAST(10 AS DOUBLE)" in rw_num, rw_num
+    assert "toFloat64OrNull(nullIf(custom_fields['bot_score'], '')) = CASE WHEN" in rw_num, rw_num
+
+    # 7. Real chdb + duckdb execution for all Iter-32 PII keys, valid ClickHouse syntax, and numeric differential parity:
+    repo_root = str(Path(hs_query.__file__).resolve().parents[2])
+    try:
+        import chdb as _chdb  # noqa: F401
+        import duckdb as _duckdb  # noqa: F401
+
+        exec(_REAL_CHDB_DUCKDB_ITER32_SCRIPT, {})
+    except ImportError:
+        uv_bin = shutil.which("uv")
+        if uv_bin is not None:
+            py_paths = [repo_root, *site.getsitepackages()]
+            env = {k: v for k, v in os.environ.items() if k != "VIRTUAL_ENV"}
+            env["PYTHONPATH"] = os.pathsep.join(py_paths)
+            probe = subprocess.run(
+                [
+                    uv_bin,
+                    "run",
+                    "--offline",
+                    "--no-project",
+                    "--with",
+                    "chdb",
+                    "--with",
+                    "duckdb",
+                    "python",
+                    "-c",
+                    "import chdb, duckdb",
+                ],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            if probe.returncode == 0:
+                run_res = subprocess.run(
+                    [
+                        uv_bin,
+                        "run",
+                        "--offline",
+                        "--no-project",
+                        "--with",
+                        "chdb",
+                        "--with",
+                        "duckdb",
+                        "python",
+                        "-c",
+                        _REAL_CHDB_DUCKDB_ITER32_SCRIPT,
+                    ],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                )
+                assert run_res.returncode == 0, (
+                    f"Real chdb/duckdb Iter32 suite failed:\nSTDOUT:\n{run_res.stdout}\nSTDERR:\n{run_res.stderr}"
+                )
+                assert "ITER32_CHDB_DUCKDB_PARITY_OK" in run_res.stdout

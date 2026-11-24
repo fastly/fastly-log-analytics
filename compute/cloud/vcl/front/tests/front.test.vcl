@@ -929,3 +929,118 @@ sub edge_auth_denials_emit_auth_fail_marker_and_clear_bad_cdn_cookies {
   assert.equal(obj.status, 400);
   assert.is_notset(obj.http.x-flp-auth-fail);
 }
+
+
+// @scope: recv
+sub sec_coex_vcl_31a_strips_unauthenticated_clock_continue_on_tick_and_flush {
+  // Unauthenticated HTTPS /_tick with spoofed x-flp-continue: 20
+  testing.inject_variable("req.is_ssl", true);
+  testing.inject_variable("fastly.ff.visits_this_service", 0);
+  set req.url = "/_tick";
+  set req.http.x-flp-continue = "20";
+  testing.call_subroutine("vcl_recv");
+  assert.is_notset(req.http.x-flp-continue);
+  assert.is_notset(req.http.x-flp-tick-pass);
+  assert.state(lookup);
+
+  // Unauthenticated HTTPS /_flush with spoofed x-flp-continue: 20
+  set req.url = "/_flush";
+  set req.http.x-flp-continue = "20";
+  testing.call_subroutine("vcl_recv");
+  assert.is_notset(req.http.x-flp-continue);
+  assert.is_notset(req.http.x-flp-tick-pass);
+  assert.state(lookup);
+
+  // Wrong x-fastly-key on /_tick and /_flush over HTTPS
+  set req.url = "/_tick";
+  set req.http.x-flp-continue = "20";
+  set req.http.x-fastly-key = "wrong-cdn-key";
+  testing.call_subroutine("vcl_recv");
+  assert.is_notset(req.http.x-flp-continue);
+  assert.is_notset(req.http.x-flp-tick-pass);
+  assert.state(lookup);
+
+  set req.url = "/_flush";
+  set req.http.x-flp-continue = "20";
+  set req.http.x-fastly-key = "wrong-cdn-key";
+  testing.call_subroutine("vcl_recv");
+  assert.is_notset(req.http.x-flp-continue);
+  assert.is_notset(req.http.x-flp-tick-pass);
+  assert.state(lookup);
+
+  // Plain HTTP (!req.is_ssl) must NEVER honor x-flp-continue even with valid cdn_key
+  testing.inject_variable("req.is_ssl", false);
+  set req.url = "/_tick";
+  set req.http.x-flp-continue = "20";
+  set req.http.x-fastly-key = "test-cdn-key-not-a-live-secret";
+  testing.call_subroutine("vcl_recv");
+  assert.is_notset(req.http.x-flp-continue);
+  assert.is_notset(req.http.x-flp-tick-pass);
+  assert.state(lookup);
+
+  set req.url = "/_flush";
+  set req.http.x-flp-continue = "20";
+  set req.http.x-fastly-key = "test-cdn-key-not-a-live-secret";
+  testing.call_subroutine("vcl_recv");
+  assert.is_notset(req.http.x-flp-continue);
+  assert.is_notset(req.http.x-flp-tick-pass);
+  assert.state(lookup);
+
+  // Non-clock GET / must strip x-flp-continue even over HTTPS with valid cdn_key
+  testing.inject_variable("req.is_ssl", true);
+  set req.url = "/";
+  set req.http.x-flp-continue = "20";
+  set req.http.x-fastly-key = "test-cdn-key-not-a-live-secret";
+  testing.call_subroutine("vcl_recv");
+  assert.is_notset(req.http.x-flp-continue);
+  assert.is_notset(req.http.x-flp-tick-pass);
+  assert.state(lookup);
+}
+
+
+// @scope: recv
+sub sec_coex_vcl_31a_shield_hop_strips_unauth_continue_and_preserves_auth_continue {
+  // Shield hop (visits_this_service == 1) without valid x-fastly-key must strip x-flp-continue & x-flp-tick-pass
+  testing.inject_variable("req.is_ssl", true);
+  testing.inject_variable("fastly.ff.visits_this_service", 1);
+  set req.url = "/_tick";
+  set req.http.x-flp-continue = "20";
+  set req.http.x-flp-tick-pass = "1";
+  unset req.http.x-fastly-key;
+  testing.call_subroutine("vcl_recv");
+  assert.is_notset(req.http.x-flp-continue);
+  assert.is_notset(req.http.x-flp-tick-pass);
+  assert.state(lookup);
+
+  // Shield hop over plain HTTP must strip x-flp-continue even with valid x-fastly-key
+  testing.inject_variable("req.is_ssl", false);
+  set req.url = "/_flush";
+  set req.http.x-flp-continue = "20";
+  set req.http.x-flp-tick-pass = "1";
+  set req.http.x-fastly-key = "test-cdn-key-not-a-live-secret";
+  testing.call_subroutine("vcl_recv");
+  assert.is_notset(req.http.x-flp-continue);
+  assert.is_notset(req.http.x-flp-tick-pass);
+  assert.state(lookup);
+
+  // Authenticated HTTPS control at edge (visits_this_service == 0) preserves x-flp-continue & sets x-flp-tick-pass
+  testing.inject_variable("req.is_ssl", true);
+  testing.inject_variable("fastly.ff.visits_this_service", 0);
+  set req.url = "/_tick";
+  set req.http.x-flp-continue = "2";
+  set req.http.x-fastly-key = "test-cdn-key-not-a-live-secret";
+  testing.call_subroutine("vcl_recv");
+  assert.equal(req.http.x-flp-continue, "2");
+  assert.equal(req.http.x-flp-tick-pass, "1");
+  assert.state(pass);
+
+  // Authenticated HTTPS control at shield (visits_this_service == 1) on /_flush preserves x-flp-continue & x-flp-tick-pass
+  testing.inject_variable("fastly.ff.visits_this_service", 1);
+  set req.url = "/_flush";
+  set req.http.x-flp-continue = "2";
+  set req.http.x-fastly-key = "test-cdn-key-not-a-live-secret";
+  testing.call_subroutine("vcl_recv");
+  assert.equal(req.http.x-flp-continue, "2");
+  assert.equal(req.http.x-flp-tick-pass, "1");
+  assert.state(pass);
+}

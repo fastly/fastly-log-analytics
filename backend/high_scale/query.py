@@ -15,7 +15,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 import orjson
 import zstandard as zstd
@@ -830,16 +830,40 @@ def _exempt_col_list_ident_starts(
             return raw[1:-1].replace(q + q, q)
         return raw
 
+    _delim_pairs_ex = {"(": ")", "[": "]", "{": "}"}
+    _delim_close_ex = frozenset(_delim_pairs_ex.values())
+    _delim_cache_ex: dict[int, tuple[list[tuple[str, str, int]], dict[int, int]]] = {}
+
+    def _get_delim_map(s_list: list[tuple[str, str, int]], *, enforce_depth: bool = False) -> dict[int, int]:
+        cached = _delim_cache_ex.get(id(s_list))
+        if cached is not None and cached[0] is s_list:
+            return cached[1]
+        dmap: dict[int, int] = {}
+        dstack: list[tuple[int, str]] = []
+        for idx, (k, t, _) in enumerate(s_list):
+            if k == "OP" and t in _delim_pairs_ex:
+                dstack.append((idx, _delim_pairs_ex[t]))
+                if enforce_depth and len(dstack) > _MAX_PAREN_DEPTH:
+                    raise SQLValidationError("nesting_depth_exceeded", "SQL nesting depth limit exceeded")
+            elif k == "OP" and t in _delim_close_ex:
+                if dstack and dstack[-1][1] == t:
+                    oi, _ = dstack.pop()
+                    dmap[oi] = idx
+                    dmap[idx] = oi
+                else:
+                    dstack.clear()
+        _delim_cache_ex[id(s_list)] = (s_list, dmap)
+        return dmap
+
+    _get_delim_map(sig, enforce_depth=True)
+
     def _match_delim(s_list: list[tuple[str, str, int]], open_i: int, open_ch: str = "(", close_ch: str = ")") -> int:
-        depth = 0
-        for idx in range(open_i, len(s_list)):
-            k, t, _ = s_list[idx]
-            if k == "OP" and t == open_ch:
-                depth += 1
-            elif k == "OP" and t == close_ch:
-                depth -= 1
-                if depth == 0:
-                    return idx
+        if open_i < 0 or open_i >= len(s_list) or (s_list[open_i][0], s_list[open_i][1]) != ("OP", open_ch):
+            return -1
+        dmap = _get_delim_map(s_list)
+        ci = dmap.get(open_i, -1)
+        if ci > open_i and (s_list[ci][0], s_list[ci][1]) == ("OP", close_ch):
+            return ci
         return -1
 
     def _is_fn_call_open(s_list: list[tuple[str, str, int]], open_i: int) -> bool:
@@ -862,20 +886,29 @@ def _exempt_col_list_ident_starts(
             for p in range(len(sub_s))
         )
 
+    def _peel_s_list_parens(s_list: list[tuple[str, str, int]]) -> list[tuple[str, str, int]]:
+        if len(s_list) < 2 or (s_list[0][0], s_list[0][1]) != ("OP", "("):
+            return s_list
+        dmap = _get_delim_map(s_list)
+        lo = 0
+        hi = len(s_list) - 1
+        while lo < hi and (s_list[lo][0], s_list[lo][1]) == ("OP", "(") and dmap.get(lo) == hi:
+            lo += 1
+            hi -= 1
+        return s_list if (lo == 0 and hi == len(s_list) - 1) else s_list[lo : hi + 1]
+
     def _looks_like_subquery(sub_s: list[tuple[str, str, int]]) -> bool:
-        cur = sub_s
+        cur = _peel_s_list_parens(sub_s)
         while len(cur) >= 2 and (cur[0][0], cur[0][1]) == ("OP", "("):
             close_first = _match_delim(cur, 0)
-            if close_first == len(cur) - 1:
-                cur = cur[1:-1]
-                continue
             if (
                 0 < close_first < len(cur) - 1
                 and cur[close_first + 1][0] == "IDENT"
                 and cur[close_first + 1][1].upper()
                 in ("UNION", "INTERSECT", "EXCEPT", "ORDER", "LIMIT", "OFFSET", "FETCH")
             ):
-                return _looks_like_subquery(cur[1:close_first])
+                cur = _peel_s_list_parens(cur[1:close_first])
+                continue
             break
         return bool(cur) and cur[0][0] == "IDENT" and cur[0][1].upper() in ("SELECT", "WITH", "FROM", "TABLE")
 
@@ -954,12 +987,7 @@ def _exempt_col_list_ident_starts(
         return None
 
     def _walk_query(s_list: list[tuple[str, str, int]], inherited_ctes: frozenset[str] = frozenset()) -> None:
-        while (
-            len(s_list) >= 2
-            and (s_list[0][0], s_list[0][1]) == ("OP", "(")
-            and _match_delim(s_list, 0) == len(s_list) - 1
-        ):
-            s_list = s_list[1:-1]
+        s_list = _peel_s_list_parens(s_list)
         if not s_list:
             return
         in_scope_ctes: set[str] = set(inherited_ctes)
@@ -1188,7 +1216,6 @@ def _exempt_col_list_ident_starts(
                 if (
                     in_from
                     and not expect_table
-                    and not in_on
                     and not in_sample
                     and wu == "ARRAY"
                     and pos + 1 < n
@@ -1282,12 +1309,38 @@ def _exempt_col_list_ident_starts(
                 ):
                     nxt_s = s_list[pos + 1] if pos + 1 < n else None
                     nxt_s_dot = pos + 2 < n and (s_list[pos + 2][0], s_list[pos + 2][1]) == ("OP", ".")
+                    is_lparen_ctx_alias = False
+                    if nxt_s is not None and (nxt_s[0], nxt_s[1]) == ("OP", "("):
+                        if wu == "PREWHERE":
+                            rp_pw = _match_delim(s_list, pos + 1)
+                            after_pw = s_list[rp_pw + 1] if (rp_pw > pos + 1 and rp_pw + 1 < n) else None
+                            after_pw_dot = (
+                                rp_pw > pos + 1
+                                and rp_pw + 2 < n
+                                and (s_list[rp_pw + 2][0], s_list[rp_pw + 2][1]) == ("OP", ".")
+                            )
+                            is_lparen_ctx_alias = (
+                                rp_pw > pos + 1
+                                and _valid_ident_list(s_list[pos + 2 : rp_pw])
+                                and after_pw is not None
+                                and (
+                                    (after_pw[0], after_pw[1]) == ("OP", ",")
+                                    or (
+                                        after_pw[0] == "IDENT"
+                                        and not after_pw_dot
+                                        and after_pw[1].upper() in (_JOIN_MODIFIER_KEYWORDS | {"JOIN", "FINAL"})
+                                    )
+                                )
+                            )
+                        else:
+                            is_lparen_ctx_alias = True
                     is_bare_ctx_alias = (
                         allow_post_table_alias
                         and not saw_final
                         and (
                             nxt_s is None
-                            or (nxt_s[0], nxt_s[1]) in (("OP", ","), ("OP", "("))
+                            or (nxt_s[0], nxt_s[1]) == ("OP", ",")
+                            or is_lparen_ctx_alias
                             or (
                                 nxt_s[0] == "IDENT"
                                 and not nxt_s_dot
@@ -1625,6 +1678,7 @@ _FROM_EXIT_KEYWORDS = frozenset(
         "FOR",
     }
 )
+_MAX_PAREN_DEPTH = 64
 _JOIN_MODIFIER_KEYWORDS = frozenset(
     {
         "INNER",
@@ -1640,6 +1694,8 @@ _JOIN_MODIFIER_KEYWORDS = frozenset(
         "ASOF",
         "SEMI",
         "ANTI",
+        "POSITIONAL",
+        "PASTE",
     }
 )
 _SQL_CLAUSE_STOPWORDS = (
@@ -1994,14 +2050,64 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
         if canonical in names:
             table_map[names[canonical].lower()] = (names[canonical], domain, canonical)
 
-    def _sig_indices(tokens: list[tuple[str, str]]) -> list[int]:
-        return [i for i, (k, _) in enumerate(tokens) if k not in ("WS", "COMMENT")]
+    _lex_delim_pairs = {"(": ")", "[": "]", "{": "}"}
+    _lex_delim_close = frozenset(_lex_delim_pairs.values())
+    _lex_meta_cache: dict[
+        int,
+        tuple[
+            list[tuple[str, str]],
+            list[int],
+            dict[int, int],
+            list[int],
+            dict[int, int],
+            dict[int, int],
+            dict[int, bool],
+        ],
+    ] = {}
 
-    def _prev_sig_idx(tokens: list[tuple[str, str]], start_before: int) -> int | None:
-        for p in range(start_before - 1, -1, -1):
-            if tokens[p][0] not in ("WS", "COMMENT"):
-                return p
-        return None
+    def _get_lex_meta(
+        tokens: list[tuple[str, str]], *, enforce_depth: bool = False
+    ) -> tuple[list[int], dict[int, int], list[int], dict[int, int], dict[int, int], dict[int, bool]]:
+        cached = _lex_meta_cache.get(id(tokens))
+        if cached is not None and cached[0] is tokens:
+            return cached[1], cached[2], cached[3], cached[4], cached[5], cached[6]
+        sig_list: list[int] = []
+        sig_pos_map: dict[int, int] = {}
+        as_run: list[int] = []
+        match_by_tok: dict[int, int] = {}
+        match_by_s: dict[int, int] = {}
+        stack: list[tuple[int, int, str]] = []
+        run = 0
+        for tok_idx, (k, t) in enumerate(tokens):
+            if k in ("WS", "COMMENT"):
+                continue
+            s_pos = len(sig_list)
+            sig_list.append(tok_idx)
+            sig_pos_map[tok_idx] = s_pos
+            as_run.append(run)
+            if k == "IDENT" and t.upper() == "AS":
+                run += 1
+            else:
+                run = 0
+            if k == "OP" and t in _lex_delim_pairs:
+                stack.append((tok_idx, s_pos, _lex_delim_pairs[t]))
+                if enforce_depth and len(stack) > _MAX_PAREN_DEPTH:
+                    raise SQLValidationError("nesting_depth_exceeded", "SQL nesting depth limit exceeded")
+            elif k == "OP" and t in _lex_delim_close:
+                if stack and stack[-1][2] == t:
+                    ot, os_p, _ = stack.pop()
+                    match_by_tok[ot] = tok_idx
+                    match_by_tok[tok_idx] = ot
+                    match_by_s[os_p] = s_pos
+                    match_by_s[s_pos] = os_p
+                else:
+                    stack.clear()
+        non_kw_memo: dict[int, bool] = {}
+        _lex_meta_cache[id(tokens)] = (tokens, sig_list, sig_pos_map, as_run, match_by_tok, match_by_s, non_kw_memo)
+        return sig_list, sig_pos_map, as_run, match_by_tok, match_by_s, non_kw_memo
+
+    def _sig_indices(tokens: list[tuple[str, str]]) -> list[int]:
+        return _get_lex_meta(tokens)[0]
 
     def _is_dot_or_dcolon_lex(tokens: list[tuple[str, str]], pos: int | None) -> bool:
         if pos is None or pos < 0:
@@ -2017,19 +2123,10 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
         )
 
     def _find_matching_open_paren_lex(tokens: list[tuple[str, str]], close_s_pos: int, sig_list: list[int]) -> int:
-        rev_pairs = {")": "(", "]": "[", "}": "{"}
-        stack: list[str] = []
-        for s_i in range(close_s_pos, -1, -1):
-            tk, tt = tokens[sig_list[s_i]]
-            if tk == "OP" and tt in rev_pairs:
-                stack.append(rev_pairs[tt])
-            elif tk == "OP" and tt in ("(", "[", "{"):
-                if not stack or stack[-1] != tt:
-                    return -1
-                stack.pop()
-                if not stack:
-                    return s_i
-        return -1
+        del sig_list
+        _, _, _, _, match_by_s, _ = _get_lex_meta(tokens)
+        open_s = match_by_s.get(close_s_pos, -1)
+        return open_s if 0 <= open_s < close_s_pos else -1
 
     def _is_kw_lex_pos(tokens: list[tuple[str, str]], s_idx: int, sig_list: list[int], *words: str) -> bool:
         if s_idx < 0 or s_idx >= len(sig_list):
@@ -2170,25 +2267,17 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
         pk, pt = tokens[pos]
         if pk == "OP" and pt not in (")", "]", "}"):
             return True
-        sig_list: list[int] | None = None
-        s_pos = -1
+        sig_list, sig_pos_map, _, _, _, _ = _get_lex_meta(tokens)
+        s_pos = sig_pos_map.get(pos, -1)
         if pk == "OTHER":
             if pt != "!":
                 return True
             if (r % 2) == 0:
                 return False
-            sig_list = _sig_indices(tokens)
-            try:
-                s_pos = sig_list.index(pos)
-            except ValueError:
+            if s_pos < 0:
                 return True
             return not _is_postfix_factorial_lex(tokens, s_pos, sig_list)
         if pk in ("NUM", "SUBQ") or (pk == "OP" and pt == ")") or (pk == "IDENT" and pt.upper() == "TIES"):
-            sig_list = _sig_indices(tokens)
-            try:
-                s_pos = sig_list.index(pos)
-            except ValueError:
-                s_pos = -1
             if s_pos >= 0 and _is_select_head_modifier_end_lex(tokens, s_pos, sig_list):
                 if (r % 2) == 0:
                     return False
@@ -2199,10 +2288,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                         and after_sig_top[0] == "IDENT"
                         and after_sig_top[1].upper() in ("WHERE", "SELECT")
                     ):
-                        try:
-                            after_s = sig_list.index(after_as_idx)
-                        except ValueError:
-                            after_s = -1
+                        after_s = sig_pos_map.get(after_as_idx, -1)
                         nxt_sig = (
                             tokens[sig_list[after_s + 1]] if 0 <= after_s and after_s + 1 < len(sig_list) else None
                         )
@@ -2251,13 +2337,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 and after_sig[0] == "IDENT"
                 and after_sig[1].upper() in _SQL_INTERVAL_UNITS
             )
-        if sig_list is None:
-            sig_list = _sig_indices(tokens)
-            try:
-                s_pos = sig_list.index(pos)
-            except ValueError:
-                return False
-        elif s_pos < 0:
+        if s_pos < 0:
             return False
         if _is_lex_prev_word_operator(tokens, s_pos, sig_list, after_sig):
             return True
@@ -2307,20 +2387,41 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
         return False
 
     def _is_non_kw_lex_pos(tokens: list[tuple[str, str]], idx: int) -> bool:
-        p = _prev_sig_idx(tokens, idx)
-        if p is None:
+        sig_list, sig_pos_map, as_run, _, _, non_kw_memo = _get_lex_meta(tokens)
+        s_pos = sig_pos_map.get(idx)
+        if s_pos is None or s_pos == 0:
             return False
-        if _is_dot_or_dcolon_lex(tokens, p):
+        cached = non_kw_memo.get(s_pos)
+        if cached is not None:
+            return cached
+        prev_tok_idx = sig_list[s_pos - 1]
+        if _is_dot_or_dcolon_lex(tokens, prev_tok_idx):
+            non_kw_memo[s_pos] = True
             return True
-        r = 0
-        while p is not None and tokens[p][0] == "IDENT" and tokens[p][1].upper() == "AS":
-            r += 1
-            p = _prev_sig_idx(tokens, p)
+        r = as_run[s_pos]
         if r == 0:
+            non_kw_memo[s_pos] = False
             return False
-        if _cannot_end_aliasable_lex(tokens, p, r, idx):
+        p_s = s_pos - 1 - r
+        if p_s > 0 and p_s not in non_kw_memo and as_run[p_s] > 0:
+            chain: list[int] = []
+            cur_s = p_s
+            while cur_s > 0 and cur_s not in non_kw_memo and as_run[cur_s] > 0:
+                chain.append(cur_s)
+                cur_s = cur_s - 1 - as_run[cur_s]
+            for c_s in reversed(chain):
+                c_r = as_run[c_s]
+                c_p_s = c_s - 1 - c_r
+                c_p_tok = sig_list[c_p_s] if c_p_s >= 0 else None
+                if _cannot_end_aliasable_lex(tokens, c_p_tok, c_r, sig_list[c_s]):
+                    c_r -= 1
+                non_kw_memo[c_s] = (c_r % 2) == 1
+        p_tok = sig_list[p_s] if p_s >= 0 else None
+        if _cannot_end_aliasable_lex(tokens, p_tok, r, idx):
             r -= 1
-        return (r % 2) == 1
+        res = (r % 2) == 1
+        non_kw_memo[s_pos] = res
+        return res
 
     def _is_valid_lex_ident_list(tokens: list[tuple[str, str]]) -> bool:
         sig = _sig_indices(tokens)
@@ -2384,6 +2485,8 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
         if tk == "OTHER":
             return not _is_postfix_factorial_lex(tokens, s_pos, sig_list)
         if tk == "OP" and tt not in (")", "]", "}"):
+            if tt == "*" and s_pos >= 1 and tokens[sig_list[s_pos - 1]] == ("OP", "."):
+                return False
             return True
         if tk != "IDENT" or _is_non_kw_lex_pos(tokens, tok_idx):
             return False
@@ -2541,8 +2644,9 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
         prev_sig = tokens[prev_idx] if prev_idx is not None else None
         nxt_sig = tokens[sig_list[s_pos + 1]] if s_pos + 1 < len(sig_list) else None
         if prev_sig is not None:
+            is_prev_qual_star = prev_sig == ("OP", "*") and s_pos >= 2 and tokens[sig_list[s_pos - 2]] == ("OP", ".")
             if (prev_sig[0] == "OTHER" and not _is_postfix_factorial_lex(tokens, s_pos - 1, sig_list)) or (
-                prev_sig[0] == "OP" and prev_sig[1] not in (")", "]", "}", ";")
+                prev_sig[0] == "OP" and prev_sig[1] not in (")", "]", "}", ";") and not is_prev_qual_star
             ):
                 return True
             if prev_sig[0] == "IDENT" and _is_lex_prev_word_operator(tokens, s_pos - 1, sig_list, nxt_sig):
@@ -2563,6 +2667,9 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 "QUALIFY",
                 "LIMIT",
                 "OFFSET",
+                "JOIN",
+                "FROM",
+                "TABLE",
             ):
                 return True
             if nxt_sig[0] == "OP" and nxt_sig[1] not in ("(", ")", "[", "]", "{", "}", ",", ";"):
@@ -2575,7 +2682,8 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 nxt_sig[0] == "IDENT"
                 and nxt_sig[1].upper() in _ON_EXPR_NEXT_WORDS
                 and not _is_non_kw_lex_pos(tokens, sig_list[s_pos + 1])
-                and wu not in ("SELECT", "WHERE", "PREWHERE", "HAVING", "QUALIFY", "LIMIT", "OFFSET")
+                and wu
+                not in ("SELECT", "WHERE", "PREWHERE", "HAVING", "QUALIFY", "LIMIT", "OFFSET", "JOIN", "FROM", "TABLE")
             ):
                 return True
         return False
@@ -2595,47 +2703,65 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
             return nxt_sig is not None and nxt_sig[0] == "IDENT" and nxt_sig[1].upper() in ("FIRST", "NEXT")
         return True
 
+    def _is_lex_star_except(tokens: list[tuple[str, str]], s_pos: int, sig_list: list[int]) -> bool:
+        return (
+            s_pos > 0
+            and s_pos + 1 < len(sig_list)
+            and tokens[sig_list[s_pos]][0] == "IDENT"
+            and tokens[sig_list[s_pos]][1].upper() == "EXCEPT"
+            and tokens[sig_list[s_pos - 1]] == ("OP", "*")
+            and tokens[sig_list[s_pos + 1]] == ("OP", "(")
+        )
+
     def _find_matching_paren(tokens: list[tuple[str, str]], open_idx: int) -> int:
-        depth = 0
-        for idx in range(open_idx, len(tokens)):
-            k, t = tokens[idx]
-            if k == "OP" and t == "(":
-                depth += 1
-            elif k == "OP" and t == ")":
-                depth -= 1
-                if depth == 0:
-                    return idx
-        return len(tokens) - 1
+        _, _, _, match_by_tok, _, _ = _get_lex_meta(tokens)
+        close_idx = match_by_tok.get(open_idx, -1)
+        return close_idx if close_idx > open_idx else len(tokens) - 1
 
     def _has_enclosing_parens(tokens: list[tuple[str, str]]) -> tuple[int, int] | None:
-        sig = _sig_indices(tokens)
-        if len(sig) >= 2 and tokens[sig[0]] == ("OP", "(") and _find_matching_paren(tokens, sig[0]) == sig[-1]:
+        sig, _, _, match_by_tok, _, _ = _get_lex_meta(tokens)
+        if len(sig) >= 2 and tokens[sig[0]] == ("OP", "(") and match_by_tok.get(sig[0]) == sig[-1]:
             return sig[0], sig[-1]
         return None
 
+    def _peel_enclosing_parens(tokens: list[tuple[str, str]]) -> tuple[list[tuple[str, str]], str, str]:
+        sig, _, _, match_by_tok, _, _ = _get_lex_meta(tokens)
+        lo_s = 0
+        hi_s = len(sig) - 1
+        if hi_s < 1 or tokens[sig[0]] != ("OP", "(") or match_by_tok.get(sig[0]) != sig[-1]:
+            return tokens, "", ""
+        while lo_s < hi_s and tokens[sig[lo_s]] == ("OP", "(") and match_by_tok.get(sig[lo_s]) == sig[hi_s]:
+            lo_s += 1
+            hi_s -= 1
+        start_tok = sig[lo_s - 1] + 1
+        end_tok = sig[hi_s + 1]
+        prefix_s = "".join(tk for _, tk in tokens[:start_tok])
+        suffix_s = "".join(tk for _, tk in tokens[end_tok:])
+        return tokens[start_tok:end_tok], prefix_s, suffix_s
+
     def _is_subquery_tokens(inner_tokens: list[tuple[str, str]]) -> bool:
-        cur = inner_tokens
-        while (enc := _has_enclosing_parens(cur)) is not None:
-            cur = cur[enc[0] + 1 : enc[1]]
-        sig = _sig_indices(cur)
-        if not sig:
+        cur, _, _ = _peel_enclosing_parens(inner_tokens)
+        while True:
+            sig, _, _, match_by_tok, _, _ = _get_lex_meta(cur)
+            if not sig:
+                return False
+            k0, t0 = cur[sig[0]]
+            if k0 == "IDENT" and t0.upper() in ("SELECT", "WITH", "FROM", "TABLE"):
+                return True
+            if k0 == "OP" and t0 == "(":
+                close_first = match_by_tok.get(sig[0], len(cur) - 1)
+                if close_first < sig[-1]:
+                    j = close_first + 1
+                    while j < len(cur) and cur[j][0] in ("WS", "COMMENT"):
+                        j += 1
+                    if (
+                        j < len(cur)
+                        and cur[j][0] == "IDENT"
+                        and cur[j][1].upper() in ("UNION", "INTERSECT", "EXCEPT", "ORDER", "LIMIT", "OFFSET", "FETCH")
+                    ):
+                        cur, _, _ = _peel_enclosing_parens(cur[sig[0] + 1 : close_first])
+                        continue
             return False
-        k0, t0 = cur[sig[0]]
-        if k0 == "IDENT" and t0.upper() in ("SELECT", "WITH", "FROM", "TABLE"):
-            return True
-        if k0 == "OP" and t0 == "(":
-            close_first = _find_matching_paren(cur, sig[0])
-            if close_first < sig[-1]:
-                j = close_first + 1
-                while j < len(cur) and cur[j][0] in ("WS", "COMMENT"):
-                    j += 1
-                if (
-                    j < len(cur)
-                    and cur[j][0] == "IDENT"
-                    and cur[j][1].upper() in ("UNION", "INTERSECT", "EXCEPT", "ORDER", "LIMIT", "OFFSET", "FETCH")
-                ):
-                    return _is_subquery_tokens(cur[sig[0] + 1 : close_first])
-        return False
 
     def _coerce_request_predicates(
         segment_tokens: list[tuple[str, str]],
@@ -2747,8 +2873,12 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 return bool(m_w and m_w.group(1).upper() in _unary_kw)
             return True
 
-        if touches_request:
+        seg_low_check = seg_sql.lower()
+        has_cf_lookup = touches_request and "custom_fields[" in seg_low_check
+        if has_cf_lookup:
             for b_field in sorted(_REQUEST_BOOLEAN_CF_FIELDS):
+                if f"custom_fields['{b_field}']" not in seg_low_check:
+                    continue
                 for pat, repl in _bool_rules:
                     seg_sql = re.sub(
                         rf"({_qual_re})custom_fields\['{re.escape(b_field)}'\]\s*{pat}",
@@ -2795,8 +2925,9 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
             return col_name in q_sch.str_cols
 
         if derived_str_cols and (unqualified_derived or _alias_map):
+            seg_low_dc = seg_sql.lower()
             for d_col in sorted(derived_str_cols):
-                if d_col in _REQUEST_BOOLEAN_CF_FIELDS or d_col in derived_bool_cols:
+                if (d_col in _REQUEST_BOOLEAN_CF_FIELDS or d_col in derived_bool_cols) and d_col in seg_low_dc:
                     col_pat = rf"(?<![A-Za-z0-9_.\"'`])({_single_ident_re}\s*\.\s*)?(\b{re.escape(d_col)}\b)(?!\s*[.(])"
                     for b_pat, b_repl in _bool_rules:
 
@@ -2817,7 +2948,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
 
                         seg_sql = re.sub(rf"{rb_pat}\s*{col_pat}", _sub_rev_bool, seg_sql, flags=re.IGNORECASE)
 
-        if touches_request or (derived_str_cols and (unqualified_derived or _alias_map)):
+        if has_cf_lookup or (derived_str_cols and (unqualified_derived or _alias_map)):
             lex_toks = [
                 (m.lastgroup or "OTHER", m.group(0), m.start(), m.end()) for m in _CONSOLE_SQL_LEX_RE.finditer(seg_sql)
             ]
@@ -2858,18 +2989,63 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 }
             )
             _lit_prefix = f"__fla_str_lit_{lit_nonce}_"
+            _numeric_cast_types = frozenset(
+                {
+                    "INT",
+                    "INTEGER",
+                    "BIGINT",
+                    "SMALLINT",
+                    "TINYINT",
+                    "MEDIUMINT",
+                    "INT8",
+                    "INT16",
+                    "INT32",
+                    "INT64",
+                    "INT128",
+                    "INT256",
+                    "UINT8",
+                    "UINT16",
+                    "UINT32",
+                    "UINT64",
+                    "UINT128",
+                    "UINT256",
+                    "FLOAT",
+                    "FLOAT32",
+                    "FLOAT64",
+                    "DOUBLE",
+                    "REAL",
+                    "DECIMAL",
+                    "NUMERIC",
+                    "NUMBER",
+                    "HUGEINT",
+                    "UHUGEINT",
+                    "SIGNED",
+                    "UNSIGNED",
+                }
+            )
+            paren_match_sp: dict[int, int] = {}
+            _p_stack_c: list[int] = []
+            for _cur_sp_i, _tok_c_i in enumerate(sig_c):
+                _ck_c, _ct_c, _, _ = lex_toks[_tok_c_i]
+                if _ck_c == "OP" and _ct_c == "(":
+                    _p_stack_c.append(_cur_sp_i)
+                    if len(_p_stack_c) > _MAX_PAREN_DEPTH:
+                        raise SQLValidationError("nesting_depth_exceeded", "SQL nesting depth limit exceeded")
+                elif _ck_c == "OP" and _ct_c == ")":
+                    if _p_stack_c:
+                        _open_c = _p_stack_c.pop()
+                        paren_match_sp[_open_c] = _cur_sp_i
+                        paren_match_sp[_cur_sp_i] = _open_c
 
             def _match_paren_sp(open_sp: int) -> int:
-                depth = 0
-                for cur_sp in range(open_sp, len(sig_c)):
-                    ck, ct, _, _ = lex_toks[sig_c[cur_sp]]
-                    if ck == "OP" and ct == "(":
-                        depth += 1
-                    elif ck == "OP" and ct == ")":
-                        depth -= 1
-                        if depth == 0:
-                            return cur_sp
-                return -1
+                ci = paren_match_sp.get(open_sp, -1)
+                return ci if ci > open_sp else -1
+
+            def _is_arith_op_sp(op_idx: int) -> bool:
+                if op_idx >= len(sig_c):
+                    return False
+                ok, ot, _, _ = lex_toks[sig_c[op_idx]]
+                return (ok == "OP" and ot in ("+", "-", "*", "/")) or (ok == "OTHER" and ot == "%")
 
             def _is_call_before_sp(open_sp: int) -> bool:
                 if open_sp <= 0:
@@ -2892,17 +3068,28 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
             def _parse_str_col_sp(sp: int) -> tuple[int, str, bool] | None:
                 if sp >= len(sig_c):
                     return None
-                tk0, tt0, _, _ = lex_toks[sig_c[sp]]
-                if (tk0, tt0) == ("OP", "(") and not _is_call_before_sp(sp):
-                    close_sp = _match_paren_sp(sp)
-                    if close_sp > sp + 1 and _not_chained_after(close_sp):
-                        inner_col = _parse_str_col_sp(sp + 1)
-                        if inner_col is not None and inner_col[0] == close_sp - 1:
-                            return (close_sp, inner_col[1], True)
+                cur_sp = sp
+                outer_close = -1
+                expected_inner_end = -1
+                had_parens = False
+                while cur_sp < len(sig_c) and lex_toks[sig_c[cur_sp]][0:2] == ("OP", "("):
+                    if _is_call_before_sp(cur_sp):
+                        return None
+                    close_sp = _match_paren_sp(cur_sp)
+                    if close_sp <= cur_sp + 1 or not _not_chained_after(close_sp):
+                        return None
+                    if had_parens and close_sp != expected_inner_end:
+                        return None
+                    if not had_parens:
+                        outer_close = close_sp
+                    had_parens = True
+                    expected_inner_end = close_sp - 1
+                    cur_sp += 1
+                if cur_sp >= len(sig_c):
                     return None
-                if sp > 0 and lex_toks[sig_c[sp - 1]][0:2] == ("OP", "."):
+                if cur_sp > 0 and lex_toks[sig_c[cur_sp - 1]][0:2] == ("OP", "."):
                     return None
-                q_sp = sp
+                q_sp = cur_sp
                 while (
                     q_sp + 2 < len(sig_c)
                     and lex_toks[sig_c[q_sp]][0] in ("IDENT", "DQUOTE")
@@ -2913,6 +3100,8 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 if q_sp >= len(sig_c):
                     return None
                 qk, qt, _, q_end = lex_toks[sig_c[q_sp]]
+                res_end = -1
+                core_sql = ""
                 if (
                     touches_request
                     and qk == "IDENT"
@@ -2924,68 +3113,233 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                     and lex_toks[sig_c[q_sp + 3]][0:2] == ("OP", "]")
                     and _not_chained_after(q_sp + 3)
                 ):
-                    core_sql = seg_sql[lex_toks[sig_c[sp]][2] : lex_toks[sig_c[q_sp + 3]][3]]
-                    return (q_sp + 3, core_sql, False)
-                if (
-                    q_sp in (sp, sp + 2)
+                    core_sql = seg_sql[lex_toks[sig_c[cur_sp]][2] : lex_toks[sig_c[q_sp + 3]][3]]
+                    res_end = q_sp + 3
+                elif (
+                    q_sp in (cur_sp, cur_sp + 2)
                     and qk == "IDENT"
                     and not qt.startswith(_lit_prefix)
                     and qt.lower() in derived_str_cols
                     and _not_chained_after(q_sp)
                 ):
-                    raw_qual = seg_sql[lex_toks[sig_c[sp]][2] : lex_toks[sig_c[q_sp]][2]] if q_sp > sp else ""
+                    raw_qual = seg_sql[lex_toks[sig_c[cur_sp]][2] : lex_toks[sig_c[q_sp]][2]] if q_sp > cur_sp else ""
                     if _qual_matches_derived(raw_qual, qt.lower()):
-                        core_sql = seg_sql[lex_toks[sig_c[sp]][2] : q_end]
-                        return (q_sp, core_sql, False)
-                return None
-
-            def _parse_num_expr_sp(sp: int, *, atom_only: bool = False) -> tuple[int, str, bool] | None:
-                if sp >= len(sig_c):
+                        core_sql = seg_sql[lex_toks[sig_c[cur_sp]][2] : q_end]
+                        res_end = q_sp
+                if res_end < 0:
                     return None
-                tk0, tt0, t_start, t_end = lex_toks[sig_c[sp]]
+                if had_parens:
+                    if res_end != expected_inner_end:
+                        return None
+                    return (outer_close, core_sql, True)
+                return (res_end, core_sql, False)
+
+            def _parse_numeric_cast_sp(sp: int) -> int:
+                if sp + 1 >= len(sig_c) or lex_toks[sig_c[sp + 1]][0:2] != ("OP", "("):
+                    return -1
+                close_sp = _match_paren_sp(sp + 1)
+                if close_sp <= sp + 3 or not _not_chained_after(close_sp):
+                    return -1
+                as_sp = -1
+                cur = sp + 2
+                while cur < close_sp:
+                    ck, ct, _, _ = lex_toks[sig_c[cur]]
+                    if (ck, ct) == ("OP", "("):
+                        mc = _match_paren_sp(cur)
+                        if mc <= cur:
+                            return -1
+                        cur = mc + 1
+                        continue
+                    if ck == "IDENT" and ct.upper() == "AS":
+                        as_sp = cur
+                        break
+                    cur += 1
+                if as_sp < 0 or as_sp + 1 >= close_sp:
+                    return -1
+                t_sp = as_sp + 1
+                tk_t, tt_t, _, _ = lex_toks[sig_c[t_sp]]
+                if tk_t != "IDENT":
+                    return -1
+                if tt_t.upper() == "NULLABLE" and t_sp + 2 < close_sp and lex_toks[sig_c[t_sp + 1]][0:2] == ("OP", "("):
+                    t_sp += 2
+                    tk_t, tt_t, _, _ = lex_toks[sig_c[t_sp]]
+                    if tk_t != "IDENT":
+                        return -1
+                if tt_t.upper() in _numeric_cast_types:
+                    return close_sp
+                return -1
+
+            def _parse_numeric_case_sp(
+                sp: int,
+                depth: int,
+                parse_num_fn: Any,
+            ) -> int:
+                if depth > _MAX_PAREN_DEPTH:
+                    return -1
+                case_depth = 1
+                cur = sp + 1
+                end_sp = -1
+                branch_spans: list[tuple[int, int]] = []
+                cur_branch_start = -1
+                while cur < len(sig_c):
+                    ck, ct, _, _ = lex_toks[sig_c[cur]]
+                    if (ck, ct) == ("OP", "("):
+                        mc = _match_paren_sp(cur)
+                        if mc <= cur:
+                            return -1
+                        cur = mc + 1
+                        continue
+                    if ck == "IDENT":
+                        cu = ct.upper()
+                        if cu == "CASE":
+                            case_depth += 1
+                        elif cu == "END":
+                            case_depth -= 1
+                            if case_depth == 0:
+                                if cur_branch_start >= 0:
+                                    branch_spans.append((cur_branch_start, cur - 1))
+                                end_sp = cur
+                                break
+                        elif case_depth == 1:
+                            if cu in ("WHEN", "ELSE"):
+                                if cur_branch_start >= 0:
+                                    branch_spans.append((cur_branch_start, cur - 1))
+                                    cur_branch_start = -1
+                                if cu == "ELSE":
+                                    cur_branch_start = cur + 1
+                            elif cu == "THEN":
+                                cur_branch_start = cur + 1
+                    cur += 1
+                if end_sp < 0 or not branch_spans or not _not_chained_after(end_sp):
+                    return -1
+                saw_numeric = False
+                for b_start, b_end in branch_spans:
+                    if b_start > b_end:
+                        return -1
+                    if (
+                        b_start == b_end
+                        and lex_toks[sig_c[b_start]][0] == "IDENT"
+                        and lex_toks[sig_c[b_start]][1].upper() == "NULL"
+                    ):
+                        continue
+                    bm = parse_num_fn(b_start, atom_only=False, depth=depth + 1)
+                    if bm is None or bm[0] != b_end:
+                        return -1
+                    saw_numeric = True
+                return end_sp if saw_numeric else -1
+
+            def _parse_num_expr_sp(
+                sp: int, *, atom_only: bool = False, depth: int = 0
+            ) -> tuple[int, str, bool, bool] | None:
+                if sp >= len(sig_c) or depth > _MAX_PAREN_DEPTH:
+                    return None
+                t_start = lex_toks[sig_c[sp]][2]
+                cur_sp = sp
+                sign_count = 0
+                while cur_sp < len(sig_c) and lex_toks[sig_c[cur_sp]][0:2] in (("OP", "+"), ("OP", "-")):
+                    sign_count += 1
+                    cur_sp += 1
+                if cur_sp >= len(sig_c):
+                    return None
+                tk0, tt0, _, t_end = lex_toks[sig_c[cur_sp]]
                 atom_end: int
                 plain_dec: bool
-                if tk0 == "OP" and tt0 in ("+", "-"):
-                    sub = _parse_num_expr_sp(sp + 1, atom_only=True)
-                    if sub is None:
+                has_sub = False
+                if tk0 == "NUM":
+                    if cur_sp > 0 and lex_toks[sig_c[cur_sp - 1]][0:2] == ("OP", "."):
                         return None
-                    atom_end = sub[0]
-                    atom_sql = seg_sql[t_start : lex_toks[sig_c[atom_end]][3]]
-                    plain_dec = bool(re.fullmatch(r"-?\d+(?:\.\d+)?", atom_sql))
-                elif tk0 == "NUM":
-                    if sp > 0 and lex_toks[sig_c[sp - 1]][0:2] == ("OP", "."):
+                    if cur_sp + 1 < len(sig_c) and lex_toks[sig_c[cur_sp + 1]][0:2] == ("OP", "."):
                         return None
-                    if sp + 1 < len(sig_c) and lex_toks[sig_c[sp + 1]][0:2] == ("OP", "."):
-                        return None
-                    atom_end = sp
+                    atom_end = cur_sp
                     atom_sql = seg_sql[t_start:t_end]
-                    plain_dec = bool(re.fullmatch(r"\d+(?:\.\d+)?", atom_sql))
-                elif (tk0, tt0) == ("OP", "(") and not _is_call_before_sp(sp):
-                    close_sp = _match_paren_sp(sp)
-                    if close_sp <= sp + 1 or not _not_chained_after(close_sp):
+                    plain_dec = bool(
+                        (sign_count == 0 and re.fullmatch(r"\d+(?:\.\d+)?", atom_sql))
+                        or (sign_count == 1 and re.fullmatch(r"-\d+(?:\.\d+)?", atom_sql))
+                    )
+                elif (tk0, tt0) == ("OP", "(") and not _is_call_before_sp(cur_sp):
+                    close_sp = _match_paren_sp(cur_sp)
+                    if close_sp <= cur_sp + 1 or not _not_chained_after(close_sp):
                         return None
-                    inner_n = _parse_num_expr_sp(sp + 1, atom_only=False)
+                    inner_n = _parse_num_expr_sp(cur_sp + 1, atom_only=False, depth=depth + 1)
                     if inner_n is None or inner_n[0] != close_sp - 1:
                         return None
                     atom_end = close_sp
-                    atom_sql = seg_sql[t_start : lex_toks[sig_c[close_sp]][3]]
                     plain_dec = False
+                    has_sub = inner_n[3]
+                elif tk0 == "IDENT" and tt0.upper() in ("CAST", "TRY_CAST"):
+                    cast_end = _parse_numeric_cast_sp(cur_sp)
+                    if cast_end < 0:
+                        return None
+                    atom_end = cast_end
+                    plain_dec = False
+                    has_sub = True
+                elif tk0 == "IDENT" and tt0.upper() == "CASE":
+                    case_end = _parse_numeric_case_sp(cur_sp, depth + 1, _parse_num_expr_sp)
+                    if case_end < 0:
+                        return None
+                    atom_end = case_end
+                    plain_dec = False
+                    has_sub = True
                 else:
                     return None
                 if atom_only:
-                    return (atom_end, atom_sql, plain_dec)
-                while (
-                    atom_end + 1 < len(sig_c)
-                    and lex_toks[sig_c[atom_end + 1]][0] == "OP"
-                    and lex_toks[sig_c[atom_end + 1]][1] in ("+", "-", "*", "/")
-                ):
-                    rhs_a = _parse_num_expr_sp(atom_end + 2, atom_only=True)
+                    return (atom_end, seg_sql[t_start : lex_toks[sig_c[atom_end]][3]], plain_dec, has_sub)
+                while _is_arith_op_sp(atom_end + 1):
+                    rhs_a = _parse_num_expr_sp(atom_end + 2, atom_only=True, depth=depth + 1)
                     if rhs_a is None:
                         return None
                     atom_end = rhs_a[0]
                     plain_dec = False
+                    has_sub = has_sub or rhs_a[3]
                 full_sql = seg_sql[t_start : lex_toks[sig_c[atom_end]][3]]
-                return (atom_end, full_sql, plain_dec)
+                return (atom_end, full_sql, plain_dec, has_sub)
+
+            def _parse_col_arith_expr_sp(
+                sp: int, *, atom_only: bool = False, depth: int = 0
+            ) -> tuple[int, list[tuple[int, int, str]], bool] | None:
+                if sp >= len(sig_c) or depth > _MAX_PAREN_DEPTH:
+                    return None
+                cur_sp = sp
+                sign_count = 0
+                while cur_sp < len(sig_c) and lex_toks[sig_c[cur_sp]][0:2] in (("OP", "+"), ("OP", "-")):
+                    sign_count += 1
+                    cur_sp += 1
+                if cur_sp >= len(sig_c):
+                    return None
+                spans: list[tuple[int, int, str]] = []
+                has_op = False
+                atom_end: int
+                col_a = _parse_str_col_sp(cur_sp)
+                if col_a is not None:
+                    atom_end = col_a[0]
+                    spans.append((lex_toks[sig_c[cur_sp]][2], lex_toks[sig_c[atom_end]][3], col_a[1]))
+                    if sign_count > 0:
+                        has_op = True
+                elif lex_toks[sig_c[cur_sp]][0:2] == ("OP", "(") and not _is_call_before_sp(cur_sp):
+                    close_sp = _match_paren_sp(cur_sp)
+                    if close_sp <= cur_sp + 1 or not _not_chained_after(close_sp):
+                        return None
+                    inner_ca = _parse_col_arith_expr_sp(cur_sp + 1, atom_only=False, depth=depth + 1)
+                    if inner_ca is None or inner_ca[0] != close_sp - 1:
+                        return None
+                    atom_end = close_sp
+                    spans.extend(inner_ca[1])
+                    has_op = inner_ca[2] or (sign_count > 0 and bool(inner_ca[1]))
+                else:
+                    num_a = _parse_num_expr_sp(cur_sp, atom_only=True, depth=depth + 1)
+                    if num_a is None:
+                        return None
+                    atom_end = num_a[0]
+                if atom_only:
+                    return (atom_end, spans, has_op)
+                while _is_arith_op_sp(atom_end + 1):
+                    rhs_ca = _parse_col_arith_expr_sp(atom_end + 2, atom_only=True, depth=depth + 1)
+                    if rhs_ca is None:
+                        return None
+                    atom_end = rhs_ca[0]
+                    spans.extend(rhs_ca[1])
+                    has_op = True
+                return (atom_end, spans, has_op)
 
             def _valid_num_start_boundary(sp: int) -> bool:
                 if sp <= 0:
@@ -2995,6 +3349,12 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                     return True
                 return pk == "IDENT" and pt.upper() in _unary_kw
 
+            def _valid_arith_start_boundary(sp: int) -> bool:
+                if _valid_num_start_boundary(sp):
+                    return True
+                pk, pt, _, _ = lex_toks[sig_c[sp - 1]]
+                return pk == "OP" and pt in ("=", "!=", "<>", "<", "<=", ">", ">=")
+
             def _valid_num_end_boundary(next_sp: int) -> bool:
                 if next_sp >= len(sig_c):
                     return True
@@ -3003,22 +3363,90 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                     return True
                 return nk == "IDENT" and nt.upper() in _post_num_kw
 
+            def _valid_arith_end_boundary(next_sp: int) -> bool:
+                if _valid_num_end_boundary(next_sp):
+                    return True
+                nk, nt, _, _ = lex_toks[sig_c[next_sp]]
+                if nk == "OP" and nt in ("=", "!=", "<>", "<", "<=", ">", ">="):
+                    return True
+                return nk == "IDENT" and nt.upper() in ("BETWEEN", "NOT", "IN", "GLOBAL", "IS")
+
+            def _parse_numeric_in_list(lp_sp: int) -> int:
+                if lp_sp >= len(sig_c) or lex_toks[sig_c[lp_sp]][0:2] != ("OP", "("):
+                    return -1
+                rp_sp = _match_paren_sp(lp_sp)
+                if rp_sp <= lp_sp + 1:
+                    return -1
+                cur = lp_sp + 1
+                item_count = 0
+                while cur < rp_sp:
+                    item_m = _parse_num_expr_sp(cur)
+                    if item_m is None or item_m[0] >= rp_sp:
+                        return -1
+                    item_count += 1
+                    nxt = item_m[0] + 1
+                    if nxt == rp_sp:
+                        return rp_sp
+                    if lex_toks[sig_c[nxt]][0:2] != ("OP", ","):
+                        return -1
+                    cur = nxt + 1
+                return -1
+
             edits: list[tuple[int, int, str]] = []
             sp_i = 0
             while sp_i < len(sig_c):
+                if _valid_arith_start_boundary(sp_i):
+                    arith_m = _parse_col_arith_expr_sp(sp_i)
+                    if arith_m is not None and arith_m[1] and arith_m[2] and _valid_arith_end_boundary(arith_m[0] + 1):
+                        for a_start, a_end, a_core in arith_m[1]:
+                            edits.append((a_start, a_end, f"toFloat64OrNull(nullIf({a_core}, ''))"))
+                        sp_i = arith_m[0] + 1
+                        continue
                 col_m = _parse_str_col_sp(sp_i)
                 if col_m is not None:
                     c_end, c_core, c_parens = col_m
                     op_sp = c_end + 1
                     if op_sp < len(sig_c) and lex_toks[sig_c[op_sp]][0] == "IDENT":
                         w1 = lex_toks[sig_c[op_sp]][1]
+                        w1u = w1.upper()
+                        # [GLOBAL] [NOT] IN (<num_expr>, ...)
+                        in_lp_sp = -1
+                        if w1u == "IN":
+                            in_lp_sp = op_sp + 1
+                        elif (
+                            w1u in ("NOT", "GLOBAL")
+                            and op_sp + 1 < len(sig_c)
+                            and lex_toks[sig_c[op_sp + 1]][0] == "IDENT"
+                        ):
+                            w2u = lex_toks[sig_c[op_sp + 1]][1].upper()
+                            if w2u == "IN":
+                                in_lp_sp = op_sp + 2
+                            elif (
+                                ((w1u == "GLOBAL" and w2u == "NOT") or (w1u == "NOT" and w2u == "GLOBAL"))
+                                and op_sp + 2 < len(sig_c)
+                                and lex_toks[sig_c[op_sp + 2]][0] == "IDENT"
+                                and lex_toks[sig_c[op_sp + 2]][1].upper() == "IN"
+                            ):
+                                in_lp_sp = op_sp + 3
+                        if in_lp_sp > 0:
+                            in_rp_sp = _parse_numeric_in_list(in_lp_sp)
+                            if in_rp_sp > in_lp_sp and _valid_num_end_boundary(in_rp_sp + 1):
+                                edits.append(
+                                    (
+                                        lex_toks[sig_c[sp_i]][2],
+                                        lex_toks[sig_c[c_end]][3],
+                                        f"toFloat64OrNull(nullIf({c_core}, ''))",
+                                    )
+                                )
+                                sp_i = op_sp + 1
+                                continue
                         bw_kw: str | None = None
                         low_sp = -1
-                        if w1.upper() == "BETWEEN":
+                        if w1u == "BETWEEN":
                             bw_kw = w1
                             low_sp = op_sp + 1
                         elif (
-                            w1.upper() == "NOT"
+                            w1u == "NOT"
                             and op_sp + 1 < len(sig_c)
                             and lex_toks[sig_c[op_sp + 1]][0] == "IDENT"
                             and lex_toks[sig_c[op_sp + 1]][1].upper() == "BETWEEN"
@@ -3028,7 +3456,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                         if bw_kw is not None:
                             low_m = _parse_num_expr_sp(low_sp)
                             if low_m is not None:
-                                l_end, l_sql, _ = low_m
+                                l_end, l_sql, _, l_sub = low_m
                                 and_sp = l_end + 1
                                 if (
                                     and_sp < len(sig_c)
@@ -3037,16 +3465,26 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                                 ):
                                     high_m = _parse_num_expr_sp(and_sp + 1)
                                     if high_m is not None and _valid_num_end_boundary(high_m[0] + 1):
-                                        h_end, h_sql, _ = high_m
+                                        h_end, h_sql, _, h_sub = high_m
                                         and_kw = lex_toks[sig_c[and_sp]][1]
-                                        edits.append(
-                                            (
-                                                lex_toks[sig_c[sp_i]][2],
-                                                lex_toks[sig_c[h_end]][3],
-                                                f"toFloat64OrZero({c_core}) {bw_kw} {l_sql} {and_kw} {h_sql}",
+                                        if l_sub or h_sub:
+                                            edits.append(
+                                                (
+                                                    lex_toks[sig_c[sp_i]][2],
+                                                    lex_toks[sig_c[c_end]][3],
+                                                    f"toFloat64OrNull(nullIf({c_core}, ''))",
+                                                )
                                             )
-                                        )
-                                        sp_i = h_end + 1
+                                            sp_i = op_sp + 1
+                                        else:
+                                            edits.append(
+                                                (
+                                                    lex_toks[sig_c[sp_i]][2],
+                                                    lex_toks[sig_c[h_end]][3],
+                                                    f"if(isNull(toFloat64OrNull(nullIf({c_core}, ''))), NULL, toFloat64OrZero({c_core}) {bw_kw} {l_sql} {and_kw} {h_sql})",
+                                                )
+                                            )
+                                            sp_i = h_end + 1
                                         continue
                     if (
                         op_sp < len(sig_c)
@@ -3056,11 +3494,21 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                         op_txt = lex_toks[sig_c[op_sp]][1]
                         rhs_m = _parse_num_expr_sp(op_sp + 1)
                         if rhs_m is not None and _valid_num_end_boundary(rhs_m[0] + 1):
-                            r_end, r_sql, r_plain = rhs_m
+                            r_end, r_sql, r_plain, r_sub = rhs_m
+                            if r_sub:
+                                edits.append(
+                                    (
+                                        lex_toks[sig_c[sp_i]][2],
+                                        lex_toks[sig_c[c_end]][3],
+                                        f"toFloat64OrNull(nullIf({c_core}, ''))",
+                                    )
+                                )
+                                sp_i = op_sp + 1
+                                continue
                             if op_txt in ("<", "<=", ">", ">="):
-                                repl_s = f"toFloat64OrZero({c_core}) {op_txt} {r_sql}"
-                            elif r_plain and not c_parens:
-                                repl_s = f"{c_core} {op_txt} '{r_sql}'"
+                                repl_s = f"if(isNull(toFloat64OrNull(nullIf({c_core}, ''))), NULL, toFloat64OrZero({c_core}) {op_txt} {r_sql})"
+                            elif op_txt == "=" and r_plain and not c_parens:
+                                repl_s = f"if(isNull(toFloat64OrNull(nullIf({c_core}, ''))), NULL, ({c_core} = '{r_sql}' OR toFloat64OrNull(nullIf({c_core}, '')) = {r_sql}))"
                             else:
                                 repl_s = f"toFloat64OrNull(nullIf({c_core}, '')) {op_txt} {r_sql}"
                             edits.append((lex_toks[sig_c[sp_i]][2], lex_toks[sig_c[r_end]][3], repl_s))
@@ -3069,8 +3517,63 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 if _valid_num_start_boundary(sp_i):
                     lhs_m = _parse_num_expr_sp(sp_i)
                     if lhs_m is not None:
-                        l_end2, l_sql2, l_plain2 = lhs_m
+                        l_end2, l_sql2, l_plain2, l_sub2 = lhs_m
                         op_sp2 = l_end2 + 1
+                        if op_sp2 < len(sig_c) and lex_toks[sig_c[op_sp2]][0] == "IDENT":
+                            rw1 = lex_toks[sig_c[op_sp2]][1].upper()
+                            rbw_low_sp = -1
+                            if rw1 == "BETWEEN":
+                                rbw_low_sp = op_sp2 + 1
+                            elif (
+                                rw1 == "NOT"
+                                and op_sp2 + 1 < len(sig_c)
+                                and lex_toks[sig_c[op_sp2 + 1]][0] == "IDENT"
+                                and lex_toks[sig_c[op_sp2 + 1]][1].upper() == "BETWEEN"
+                            ):
+                                rbw_low_sp = op_sp2 + 2
+                            if rbw_low_sp > 0:
+                                rlow_c = _parse_str_col_sp(rbw_low_sp)
+                                rlow_n = None if rlow_c is not None else _parse_num_expr_sp(rbw_low_sp)
+                                rlow_end = (
+                                    rlow_c[0] if rlow_c is not None else (rlow_n[0] if rlow_n is not None else -1)
+                                )
+                                rand_sp = rlow_end + 1
+                                if (
+                                    rlow_end >= rbw_low_sp
+                                    and rand_sp < len(sig_c)
+                                    and lex_toks[sig_c[rand_sp]][0] == "IDENT"
+                                    and lex_toks[sig_c[rand_sp]][1].upper() == "AND"
+                                ):
+                                    rhigh_c = _parse_str_col_sp(rand_sp + 1)
+                                    rhigh_n = None if rhigh_c is not None else _parse_num_expr_sp(rand_sp + 1)
+                                    rhigh_end = (
+                                        rhigh_c[0]
+                                        if rhigh_c is not None
+                                        else (rhigh_n[0] if rhigh_n is not None else -1)
+                                    )
+                                    if (
+                                        rhigh_end >= rand_sp + 1
+                                        and (rlow_c is not None or rhigh_c is not None)
+                                        and _valid_num_end_boundary(rhigh_end + 1)
+                                    ):
+                                        if rlow_c is not None:
+                                            edits.append(
+                                                (
+                                                    lex_toks[sig_c[rbw_low_sp]][2],
+                                                    lex_toks[sig_c[rlow_c[0]]][3],
+                                                    f"toFloat64OrNull(nullIf({rlow_c[1]}, ''))",
+                                                )
+                                            )
+                                        if rhigh_c is not None:
+                                            edits.append(
+                                                (
+                                                    lex_toks[sig_c[rand_sp + 1]][2],
+                                                    lex_toks[sig_c[rhigh_c[0]]][3],
+                                                    f"toFloat64OrNull(nullIf({rhigh_c[1]}, ''))",
+                                                )
+                                            )
+                                        sp_i = rhigh_end + 1
+                                        continue
                         if (
                             op_sp2 < len(sig_c)
                             and lex_toks[sig_c[op_sp2]][0] == "OP"
@@ -3080,10 +3583,20 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                             rhs_c = _parse_str_col_sp(op_sp2 + 1)
                             if rhs_c is not None and _valid_num_end_boundary(rhs_c[0] + 1):
                                 rc_end, rc_core, rc_parens = rhs_c
+                                if l_sub2:
+                                    edits.append(
+                                        (
+                                            lex_toks[sig_c[op_sp2 + 1]][2],
+                                            lex_toks[sig_c[rc_end]][3],
+                                            f"toFloat64OrNull(nullIf({rc_core}, ''))",
+                                        )
+                                    )
+                                    sp_i = rc_end + 1
+                                    continue
                                 if op_txt2 in ("<", "<=", ">", ">="):
-                                    repl_r = f"{l_sql2} {op_txt2} toFloat64OrZero({rc_core})"
-                                elif l_plain2 and not rc_parens:
-                                    repl_r = f"'{l_sql2}' {op_txt2} {rc_core}"
+                                    repl_r = f"if(isNull(toFloat64OrNull(nullIf({rc_core}, ''))), NULL, {l_sql2} {op_txt2} toFloat64OrZero({rc_core}))"
+                                elif op_txt2 == "=" and l_plain2 and not rc_parens:
+                                    repl_r = f"if(isNull(toFloat64OrNull(nullIf({rc_core}, ''))), NULL, ('{l_sql2}' = {rc_core} OR {l_sql2} = toFloat64OrNull(nullIf({rc_core}, ''))))"
                                 else:
                                     repl_r = f"{l_sql2} {op_txt2} toFloat64OrNull(nullIf({rc_core}, ''))"
                                 edits.append((lex_toks[sig_c[sp_i]][2], lex_toks[sig_c[rc_end]][3], repl_r))
@@ -3144,18 +3657,12 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
         *,
         is_subquery: bool = False,
     ) -> tuple[str, set[str], set[str], _DerivedCfSchema]:
-        prefix_wrap: list[str] = []
-        suffix_wrap: list[str] = []
-        while (enc := _has_enclosing_parens(tokens)) is not None:
-            open_i, close_i = enc
-            prefix_wrap.append("".join(tk for _, tk in tokens[: open_i + 1]))
-            suffix_wrap.append("".join(tk for _, tk in tokens[close_i:]))
-            tokens = tokens[open_i + 1 : close_i]
+        tokens, prefix_wrap_s, suffix_wrap_s = _peel_enclosing_parens(tokens)
 
         def _wrap(s: str) -> str:
-            if not prefix_wrap:
+            if not prefix_wrap_s and not suffix_wrap_s:
                 return s
-            return "".join(prefix_wrap) + s + "".join(reversed(suffix_wrap))
+            return prefix_wrap_s + s + suffix_wrap_s
 
         ctes = dict(inherited_ctes)
         all_canonicals: set[str] = set()
@@ -3253,8 +3760,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 if not tokens:
                     return _wrap(out_prefix), set(), all_canonicals, _DerivedCfSchema()
 
-        top_sig = _sig_indices(tokens)
-        top_sig_pos = {idx: pos for pos, idx in enumerate(top_sig)}
+        top_sig, top_sig_pos, _, _, _, _ = _get_lex_meta(tokens)
         branches: list[tuple[list[tuple[str, str]], list[tuple[str, str]]]] = []
         cur_branch: list[tuple[str, str]] = []
         i_tok = 0
@@ -3262,6 +3768,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
         split_in_from = False
         split_expect_table = False
         split_in_on = False
+        split_in_array_join = False
         while i_tok < len(tokens):
             k, t = tokens[i_tok]
             if k == "OP" and t in ("(", "[", "{"):
@@ -3271,7 +3778,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
             elif k == "OP" and t in (")", "]", "}"):
                 depth = max(0, depth - 1)
             elif depth == 0 and k == "OP" and t == "," and split_in_from:
-                split_expect_table = True
+                split_expect_table = not split_in_array_join
                 split_in_on = False
             elif depth == 0 and k == "IDENT" and not _is_non_kw_lex_pos(tokens, i_tok):
                 wu_top = t.upper()
@@ -3285,8 +3792,10 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                     and _is_lex_on_expr_ident(tokens, s_pos_top, top_sig)
                 )
                 if not is_top_dot and not is_top_within and not is_top_on_ident:
-                    if wu_top in ("UNION", "INTERSECT", "EXCEPT") and _is_lex_multi_token_post_on_exit(
-                        tokens, s_pos_top, top_sig
+                    if (
+                        wu_top in ("UNION", "INTERSECT", "EXCEPT")
+                        and not _is_lex_star_except(tokens, s_pos_top, top_sig)
+                        and _is_lex_multi_token_post_on_exit(tokens, s_pos_top, top_sig)
                     ):
                         sep: list[tuple[str, str]] = [tokens[i_tok]]
                         j = i_tok + 1
@@ -3301,15 +3810,25 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                         split_in_from = False
                         split_expect_table = False
                         split_in_on = False
+                        split_in_array_join = False
                         i_tok = j
                         continue
                     if (wu_top == "FROM" and not _is_lex_distinct_from(tokens, s_pos_top, top_sig)) or wu_top == "JOIN":
+                        is_arr_join_tok = (
+                            wu_top == "JOIN"
+                            and s_pos_top > 0
+                            and tokens[top_sig[s_pos_top - 1]][0] == "IDENT"
+                            and tokens[top_sig[s_pos_top - 1]][1].upper() == "ARRAY"
+                            and not _is_non_kw_lex_pos(tokens, top_sig[s_pos_top - 1])
+                        )
                         split_in_from = True
-                        split_expect_table = True
+                        split_in_array_join = is_arr_join_tok
+                        split_expect_table = not is_arr_join_tok
                         split_in_on = False
                     elif wu_top in _JOIN_MODIFIER_KEYWORDS:
                         if split_in_from:
                             split_expect_table = False
+                            split_in_array_join = False
                     elif split_in_from and not split_expect_table and not split_in_on and wu_top == "SELECT":
                         after_top = tokens[top_sig[s_pos_top + 1]] if s_pos_top + 1 < len(top_sig) else None
                         is_fn_proj_top = (
@@ -3331,10 +3850,12 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                         if not is_bare_sel_top:
                             split_in_from = False
                             split_in_on = False
+                            split_in_array_join = False
                     elif (
                         split_in_from
                         and not split_expect_table
                         and not split_in_on
+                        and not split_in_array_join
                         and wu_top
                         in (
                             "PREWHERE",
@@ -3346,20 +3867,49 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                         )
                     ):
                         after_top = tokens[top_sig[s_pos_top + 1]] if s_pos_top + 1 < len(top_sig) else None
+                        is_lparen_top = False
+                        if after_top == ("OP", "("):
+                            if wu_top == "PREWHERE":
+                                lp_pw_t = top_sig[s_pos_top + 1]
+                                rp_pw_t = _find_matching_paren(tokens, lp_pw_t)
+                                rp_pw_s = top_sig_pos.get(rp_pw_t, -1)
+                                after_pw_t = (
+                                    tokens[top_sig[rp_pw_s + 1]]
+                                    if (rp_pw_s >= 0 and rp_pw_s + 1 < len(top_sig))
+                                    else None
+                                )
+                                is_lparen_top = (
+                                    rp_pw_t > lp_pw_t
+                                    and _is_valid_lex_ident_list(tokens[lp_pw_t + 1 : rp_pw_t])
+                                    and after_pw_t is not None
+                                    and (
+                                        after_pw_t == ("OP", ",")
+                                        or (
+                                            after_pw_t[0] == "IDENT"
+                                            and after_pw_t[1].upper() in (_JOIN_MODIFIER_KEYWORDS | {"JOIN", "FINAL"})
+                                        )
+                                    )
+                                )
+                            else:
+                                is_lparen_top = True
                         is_bare_top = (
                             after_top is None
-                            or after_top in (("OP", ","), ("OP", "("))
+                            or after_top == ("OP", ",")
+                            or is_lparen_top
                             or (after_top[0] == "IDENT" and after_top[1].upper() in _SQL_CLAUSE_STOPWORDS)
                         )
                         if not is_bare_top and wu_top != "SAMPLE":
                             split_in_from = False
                             split_in_on = False
+                            split_in_array_join = False
                     elif (
-                        wu_top in _FROM_EXIT_KEYWORDS or (split_in_from and wu_top == "SELECT")
+                        (wu_top in _FROM_EXIT_KEYWORDS and not _is_lex_star_except(tokens, s_pos_top, top_sig))
+                        or (split_in_from and wu_top == "SELECT")
                     ) and _can_exit_from_lex(tokens, s_pos_top, top_sig, in_on_clause=split_in_on):
                         split_in_from = False
                         split_expect_table = False
                         split_in_on = False
+                        split_in_array_join = False
                     elif split_in_from and (wu_top == "ON" or (wu_top == "USING" and not split_in_on)):
                         split_expect_table = False
                         split_in_on = wu_top == "ON"
@@ -3471,7 +4021,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
             processed.append((k, t))
             i += 1
 
-        sig_idxs = _sig_indices(processed)
+        sig_idxs, proc_sig_pos, _, _, proc_match_by_s, _ = _get_lex_meta(processed)
 
         def _is_bare_clause_alias_at(cand_s_pos: int) -> bool:
             if cand_s_pos >= len(sig_idxs):
@@ -3502,9 +4052,30 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 return False
             if cu not in ("PREWHERE", "SAMPLE", "SETTINGS", "FORMAT", "FOR", "SET"):
                 return False
+            if after == ("OP", "("):
+                if cu == "PREWHERE":
+                    lp_pw_b = sig_idxs[cand_s_pos + 1]
+                    rp_pw_b = _find_matching_paren(processed, lp_pw_b)
+                    rp_pw_bs = proc_sig_pos.get(rp_pw_b, -1)
+                    after_pw_b = (
+                        processed[sig_idxs[rp_pw_bs + 1]] if (rp_pw_bs >= 0 and rp_pw_bs + 1 < len(sig_idxs)) else None
+                    )
+                    return (
+                        rp_pw_b > lp_pw_b
+                        and _is_valid_lex_ident_list(processed[lp_pw_b + 1 : rp_pw_b])
+                        and after_pw_b is not None
+                        and (
+                            after_pw_b == ("OP", ",")
+                            or (
+                                after_pw_b[0] == "IDENT"
+                                and after_pw_b[1].upper() in (_JOIN_MODIFIER_KEYWORDS | {"JOIN", "FINAL"})
+                            )
+                        )
+                    )
+                return True
             return (
                 after is None
-                or after in (("OP", ","), ("OP", "("))
+                or after == ("OP", ",")
                 or (after[0] == "IDENT" and after[1].upper() in _SQL_CLAUSE_STOPWORDS)
             )
 
@@ -3536,16 +4107,77 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                     return col_names, end_s_pos
             return None, next_s_pos
 
+        def _is_valid_lex_position_in(open_s_pos: int, in_s_pos: int) -> bool:
+            if in_s_pos > 0:
+                prev_k, prev_t = processed[sig_idxs[in_s_pos - 1]]
+                if prev_k == "IDENT" and prev_t.upper() in ("NOT", "GLOBAL"):
+                    return False
+            close_s_pos = proc_match_by_s.get(open_s_pos, -1)
+            if close_s_pos <= open_s_pos:
+                return False
+            case_depth = 0
+            top_in_count = 0
+            in_at_case_zero = False
+            cur_s = open_s_pos + 1
+            while cur_s < close_s_pos:
+                ck_p, ct_p = processed[sig_idxs[cur_s]]
+                if ck_p == "OP" and ct_p in ("(", "[", "{"):
+                    cl_s = proc_match_by_s.get(cur_s, -1)
+                    if cl_s <= cur_s:
+                        return False
+                    cur_s = cl_s + 1
+                    continue
+                if (ck_p, ct_p) == ("OP", ","):
+                    return False
+                if (
+                    ck_p == "IDENT"
+                    and not _is_non_kw_lex_pos(processed, sig_idxs[cur_s])
+                    and not _is_lex_dot_qualifier(processed, cur_s, sig_idxs)
+                ):
+                    cwu = ct_p.upper()
+                    if cwu == "CASE":
+                        case_depth += 1
+                    elif cwu == "END":
+                        case_depth = max(0, case_depth - 1)
+                    elif cwu == "IN":
+                        top_in_count += 1
+                        if cur_s == in_s_pos:
+                            in_at_case_zero = case_depth == 0
+                cur_s += 1
+            return in_at_case_zero and top_in_count == 1
+
+        def _starts_branch_join_mod_seq(start_sp: int) -> bool:
+            q_s = start_sp
+            while (
+                q_s < len(sig_idxs)
+                and processed[sig_idxs[q_s]][0] == "IDENT"
+                and processed[sig_idxs[q_s]][1].upper() in _JOIN_MODIFIER_KEYWORDS
+            ):
+                q_s += 1
+            if q_s < len(sig_idxs) and processed[sig_idxs[q_s]][0] == "IDENT":
+                qu = processed[sig_idxs[q_s]][1].upper()
+                if qu == "JOIN":
+                    return True
+                if (
+                    qu == "ARRAY"
+                    and q_s + 1 < len(sig_idxs)
+                    and processed[sig_idxs[q_s + 1]][0] == "IDENT"
+                    and processed[sig_idxs[q_s + 1]][1].upper() == "JOIN"
+                ):
+                    return True
+            return False
+
         table_token_idxs: dict[int, str] = {}
         col_list_table_spans: dict[int, tuple[int, str]] = {}
         table_alias_idxs: set[int] = set()
         from_source_schemas: list[_DerivedCfSchema] = []
-        func_stack: list[str] = []
+        func_stack: list[tuple[str, int]] = []
         top_from_s_pos: int | None = None
         in_from = False
         expect_table = False
         in_sample_clause = False
         in_on_clause = False
+        in_array_join = False
         depth = 0
         s_pos = 0
         while s_pos < len(sig_idxs):
@@ -3558,9 +4190,9 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                     )
                 if t == "(":
                     prev_fn = processed[sig_idxs[s_pos - 1]] if s_pos > 0 else None
-                    func_stack.append(prev_fn[1].upper() if prev_fn and prev_fn[0] == "IDENT" else "")
+                    func_stack.append((prev_fn[1].upper() if prev_fn and prev_fn[0] == "IDENT" else "", s_pos))
                 else:
-                    func_stack.append(t)
+                    func_stack.append((t, s_pos))
                 depth += 1
                 s_pos += 1
                 continue
@@ -3572,7 +4204,12 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 continue
 
             if k == "IDENT" and t.upper() == "IN" and not _is_non_kw_lex_pos(processed, idx):
-                if not (func_stack and func_stack[-1] in ("POSITION", "OVERLAY", "TRIM")):
+                is_valid_pos_in = (
+                    bool(func_stack)
+                    and func_stack[-1][0] == "POSITION"
+                    and _is_valid_lex_position_in(func_stack[-1][1], s_pos)
+                )
+                if not is_valid_pos_in:
                     nxt_tok = processed[sig_idxs[s_pos + 1]] if s_pos + 1 < len(sig_idxs) else None
                     if nxt_tok is None or (nxt_tok[0] != "SUBQ" and nxt_tok != ("OP", "(")):
                         raise PermissionError(
@@ -3598,17 +4235,47 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                     in_sample_clause = False
                     s_pos += 1
                     continue
+                if _is_lex_star_except(processed, s_pos, sig_idxs):
+                    lp_ex = sig_idxs[s_pos + 1]
+                    rp_ex = _find_matching_paren(processed, lp_ex)
+                    for ex_tok_i in range(lp_ex + 1, rp_ex):
+                        if processed[ex_tok_i][0] in ("IDENT", "DQUOTE"):
+                            table_alias_idxs.add(ex_tok_i)
+                    s_pos += 1
+                    continue
+                if (
+                    in_from
+                    and not expect_table
+                    and not in_sample_clause
+                    and not (in_on_clause and _is_lex_on_expr_ident(processed, s_pos, sig_idxs))
+                    and wu == "ARRAY"
+                    and s_pos + 1 < len(sig_idxs)
+                    and processed[sig_idxs[s_pos + 1]][0] == "IDENT"
+                    and processed[sig_idxs[s_pos + 1]][1].upper() == "JOIN"
+                ):
+                    in_array_join = True
+                    expect_table = False
+                    in_sample_clause = False
+                    in_on_clause = False
+                    s_pos += 2
+                    continue
                 if (wu == "FROM" and not _is_lex_distinct_from(processed, s_pos, sig_idxs)) or wu == "JOIN":
                     if wu == "FROM" and top_from_s_pos is None:
                         top_from_s_pos = s_pos
                     in_from = True
+                    in_array_join = False
                     expect_table = True
                     in_sample_clause = False
                     in_on_clause = False
                     s_pos += 1
                     continue
                 if wu in _JOIN_MODIFIER_KEYWORDS:
-                    if in_from and not (
+                    if in_from and _starts_branch_join_mod_seq(s_pos):
+                        expect_table = False
+                        in_sample_clause = False
+                        in_on_clause = False
+                        in_array_join = False
+                    elif in_from and not (
                         in_on_clause
                         and s_pos + 1 < len(sig_idxs)
                         and (
@@ -3619,7 +4286,13 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                         in_sample_clause = False
                     s_pos += 1
                     continue
-                if in_from and not expect_table and not in_on_clause and _is_bare_clause_alias_at(s_pos):
+                if (
+                    in_from
+                    and not expect_table
+                    and not in_on_clause
+                    and not in_array_join
+                    and _is_bare_clause_alias_at(s_pos)
+                ):
                     table_alias_idxs.add(idx)
                     in_sample_clause = False
                     s_pos += 1
@@ -3634,6 +4307,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                     if top_from_s_pos is None:
                         top_from_s_pos = s_pos
                     in_from = False
+                    in_array_join = False
                     expect_table = False
                     in_sample_clause = False
                     in_on_clause = False
@@ -3645,14 +4319,14 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                     in_on_clause = wu == "ON"
                     s_pos += 1
                     continue
-                if in_from and not in_on_clause and wu in ("FINAL", "SAMPLE"):
+                if in_from and not in_on_clause and not in_array_join and wu in ("FINAL", "SAMPLE"):
                     expect_table = False
                     in_sample_clause = wu == "SAMPLE"
                     s_pos += 1
                     continue
 
             if in_from and k == "OP" and t == ",":
-                expect_table = True
+                expect_table = not in_array_join
                 in_sample_clause = False
                 in_on_clause = False
                 s_pos += 1
@@ -3890,23 +4564,43 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 proj_items.append(cur_item)
 
             for it_idxs in proj_items:
-                if len(it_idxs) == 1 and processed[it_idxs[0]] == ("OP", "*"):
+                is_bare_star_item = (len(it_idxs) == 1 and processed[it_idxs[0]] == ("OP", "*")) or (
+                    len(it_idxs) >= 4
+                    and processed[it_idxs[0]] == ("OP", "*")
+                    and processed[it_idxs[1]][0] == "IDENT"
+                    and processed[it_idxs[1]][1].upper() == "EXCEPT"
+                    and processed[it_idxs[2]] == ("OP", "(")
+                )
+                is_qual_star_item = (
+                    len(it_idxs) == 3
+                    and processed[it_idxs[0]][0] in ("IDENT", "DQUOTE")
+                    and processed[it_idxs[1]] == ("OP", ".")
+                    and processed[it_idxs[2]] == ("OP", "*")
+                ) or (
+                    len(it_idxs) >= 6
+                    and processed[it_idxs[0]][0] in ("IDENT", "DQUOTE")
+                    and processed[it_idxs[1]] == ("OP", ".")
+                    and processed[it_idxs[2]] == ("OP", "*")
+                    and processed[it_idxs[3]][0] == "IDENT"
+                    and processed[it_idxs[3]][1].upper() == "EXCEPT"
+                    and processed[it_idxs[4]] == ("OP", "(")
+                )
+                if is_bare_star_item:
                     projects_star = True
                     out_str_cf_cols |= branch_inherited_str_cf
                     out_bool_cf_cols |= branch_inherited_bool_cf
                     out_all_cols |= branch_inherited_all_cols
                     if touches_request:
                         out_all_cols |= _phys_req_star_cols
-                    if len(from_source_schemas) == 1 and from_source_schemas[0].positional is not None:
+                    if (
+                        len(it_idxs) == 1
+                        and len(from_source_schemas) == 1
+                        and from_source_schemas[0].positional is not None
+                    ):
                         pos_flags.extend(from_source_schemas[0].positional)
                     else:
                         has_unknown_star_item = True
-                elif (
-                    len(it_idxs) == 3
-                    and processed[it_idxs[0]][0] in ("IDENT", "DQUOTE")
-                    and processed[it_idxs[1]] == ("OP", ".")
-                    and processed[it_idxs[2]] == ("OP", "*")
-                ):
+                elif is_qual_star_item:
                     q_nm = _unquote_sql_ident(processed[it_idxs[0]][1]).lower()
                     q_dom = alias_domains.get(q_nm, domains)
                     if q_dom & raw_fact_domains:
@@ -3917,7 +4611,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                     out_all_cols |= q_sch.all_cols
                     if "request" in q_dom:
                         out_all_cols |= _phys_req_star_cols
-                    if q_sch.positional is not None:
+                    if len(it_idxs) == 3 and q_sch.positional is not None:
                         pos_flags.extend(q_sch.positional)
                     else:
                         has_unknown_star_item = True
@@ -4172,6 +4866,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
         )
 
     tokens = [(m.lastgroup or "OTHER", m.group(0)) for m in _CONSOLE_SQL_LEX_RE.finditer(sql)]
+    _get_lex_meta(tokens, enforce_depth=True)
     rewritten, _, canonicals, _ = _rewrite_tokens(tokens, {}, is_subquery=False)
     return rewritten, canonicals
 
@@ -4193,15 +4888,19 @@ _CONSOLE_EXTRA_SESSION_PII_KEYS = (
             "x_api_key",
             "api_key",
             "access_token",
+            "x_access_token",
             "id_token",
             "refresh_token",
             "auth_token",
+            "x_auth_token",
             "csrf_token",
             "xsrf_token",
             "x_csrf_token",
             "x_xsrf_token",
             "session",
             "session_token",
+            "x_session_id",
+            "x_session_token",
             "cmcd.sid",
             "cmcd.cid",
             "cmcd.session",
@@ -4216,57 +4915,73 @@ _CONSOLE_EXTRA_IP_PII_KEYS = PII_IP_KEYS | frozenset(
         "origin_ip",
         "cf_connecting_ip",
         "cf_connecting_ipv6",
+        "connecting_ip",
+        "connecting_ipv6",
         "x_real_ip",
         "x_client_ip",
         "x_cluster_client_ip",
         "x_original_forwarded_for",
+        "x_forwarded_client_ip",
         "forwarded",
         "forwarded_for",
     }
 )
 _CONSOLE_EXTRA_IP_NONWORD = frozenset(re.sub(r"[^a-z0-9]+", "", k.lower()) for k in _CONSOLE_EXTRA_IP_PII_KEYS)
-_CONSOLE_BRACKET_PII_RE = re.compile(r"\[['\"`]?([^'\"`\]]+)['\"`]?\]")
-_CONSOLE_ARRAY_ELEM_PII_RE = re.compile(r"arrayelement\(\s*(?:custom_fields|cmcd)\s*,\s*'([^']+)'\s*\)", re.IGNORECASE)
-_CONSOLE_AFFIX_PREFIX_RE = re.compile(
-    r"^(?:_cf_)?(?:x?filter_(?:_?cf_)?)?(?:_cf_)?(?:(?:req|resp|bereq|beresp|obj)_http_|headers?_)?"
+_CONSOLE_PII_CAMEL_RE_1 = re.compile(r"([a-z0-9])([A-Z])")
+_CONSOLE_PII_CAMEL_RE_2 = re.compile(r"([A-Z]+)([A-Z][a-z])")
+_CONSOLE_PII_SPLIT_OUTER_RE = re.compile(r"[\[\]/:]+")
+_CONSOLE_PII_SPLIT_ALL_RE = re.compile(r"[.\[\]/:]+")
+_CONSOLE_ARRAY_ELEM_PII_RE = re.compile(
+    r"arrayelement\(\s*(?:(?:[A-Za-z_][A-Za-z0-9_]*|\"(?:[^\"]|\"\")*\"|`(?:[^`]|``)*`)\s*\.\s*)*(?:custom_fields|cmcd)\s*,\s*'([^']+)'\s*\)",
+    re.IGNORECASE,
 )
-_CONSOLE_NUM_SUFFIX_RE = re.compile(r"_[0-9]+$")
+_CONSOLE_AFFIX_PREFIX_RE = re.compile(
+    r"^(?:(?:x_?)?filter_|_?cf_|(?:req|resp|request|response|bereq|beresp|obj)_http_|http_|(?:req|resp|request|response)_|headers?_)+"
+)
+_CONSOLE_NUM_SUFFIX_RE = re.compile(r"_?[0-9]+$")
 
 
 def _classify_console_pii_key(raw_key: Any) -> Literal["session", "ip"] | None:
     if not isinstance(raw_key, str) or not raw_key.strip():
         return None
-    low_s = raw_key.strip().lower()
-    unbracketed = _CONSOLE_BRACKET_PII_RE.sub("", low_s)
-    candidates = [low_s]
-    if "." in unbracketed:
-        candidates.extend(seg.strip() for seg in unbracketed.split(".") if seg.strip())
-    for m_br in _CONSOLE_BRACKET_PII_RE.finditer(low_s):
-        if m_br.group(1).strip():
-            candidates.append(m_br.group(1).strip())
-    for m_ae in _CONSOLE_ARRAY_ELEM_PII_RE.finditer(low_s):
+    seeds = [raw_key]
+    for m_ae in _CONSOLE_ARRAY_ELEM_PII_RE.finditer(raw_key):
         if m_ae.group(1).strip():
-            candidates.append(m_ae.group(1).strip())
+            seeds.append(m_ae.group(1))
+    candidates: list[str] = []
+    for seed in seeds:
+        low_seed = seed.strip().lower()
+        if low_seed:
+            candidates.append(low_seed)
+        decoded = unquote(seed)
+        camel = _CONSOLE_PII_CAMEL_RE_2.sub(r"\1_\2", _CONSOLE_PII_CAMEL_RE_1.sub(r"\1_\2", decoded)).lower()
+        if camel:
+            candidates.append(camel)
+            candidates.extend(_CONSOLE_PII_SPLIT_OUTER_RE.split(camel))
+            candidates.extend(_CONSOLE_PII_SPLIT_ALL_RE.split(camel))
     matched_ip = False
     for seg in candidates:
-        clean = seg.strip(" \t'\"`")
-        if not clean:
+        if not seg:
             continue
-        raw_norm = re.sub(r"[^a-z0-9_]+", "_", clean)
-        canon = raw_norm.strip("_")
-        stripped = _CONSOLE_NUM_SUFFIX_RE.sub("", _CONSOLE_AFFIX_PREFIX_RE.sub("", raw_norm)).strip("_")
+        canon = re.sub(r"[^a-z0-9_]+", "_", seg).strip("_")
+        if not canon:
+            continue
+        no_digits = _CONSOLE_NUM_SUFFIX_RE.sub("", canon).strip("_")
+        stripped = _CONSOLE_NUM_SUFFIX_RE.sub("", _CONSOLE_AFFIX_PREFIX_RE.sub("", canon)).strip("_")
         nw = stripped.replace("_", "")
         if (
-            clean in _CONSOLE_EXTRA_SESSION_PII_KEYS
+            seg in _CONSOLE_EXTRA_SESSION_PII_KEYS
             or canon in _CONSOLE_EXTRA_SESSION_PII_KEYS
-            or stripped in _CONSOLE_EXTRA_SESSION_PII_KEYS
+            or (no_digits != "" and no_digits in _CONSOLE_EXTRA_SESSION_PII_KEYS)
+            or (stripped != "" and stripped in _CONSOLE_EXTRA_SESSION_PII_KEYS)
             or (nw != "" and nw in _CONSOLE_EXTRA_SESSION_NONWORD)
         ):
             return "session"
         if (
-            clean in _CONSOLE_EXTRA_IP_PII_KEYS
+            seg in _CONSOLE_EXTRA_IP_PII_KEYS
             or canon in _CONSOLE_EXTRA_IP_PII_KEYS
-            or stripped in _CONSOLE_EXTRA_IP_PII_KEYS
+            or (no_digits != "" and no_digits in _CONSOLE_EXTRA_IP_PII_KEYS)
+            or (stripped != "" and stripped in _CONSOLE_EXTRA_IP_PII_KEYS)
             or (nw != "" and nw in _CONSOLE_EXTRA_IP_NONWORD)
         ):
             matched_ip = True
@@ -4278,33 +4993,39 @@ def _classify_console_pii_key(raw_key: Any) -> Literal["session", "ip"] | None:
 
 
 def _mask_nested_extra_pii(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    def _walk_nested(obj: Any, *, top_row: bool = False) -> Any:
+    def _mask_scalar(val: Any, kind: Literal["session", "ip"] | None) -> Any:
+        if kind is None:
+            return val
+        if isinstance(val, str):
+            if kind == "session":
+                return "[redacted]" if val else val
+            return val if val == "[redacted]" else mask_ip_or_chain(val)
+        if isinstance(val, (int, float)) and not isinstance(val, bool):
+            return "[redacted]"
+        return val
+
+    def _walk_nested(
+        obj: Any,
+        *,
+        parent_kind: Literal["session", "ip"] | None = None,
+    ) -> Any:
         if isinstance(obj, dict):
             out_d: dict[str, Any] = {}
             for k, v in obj.items():
-                if top_row:
-                    out_d[k] = _walk_nested(v, top_row=False) if isinstance(v, (dict, list, tuple)) else v
-                    continue
-                kind = _classify_console_pii_key(k)
-                if isinstance(v, str):
-                    if kind == "session":
-                        out_d[k] = "[redacted]" if v else v
-                    elif kind == "ip":
-                        out_d[k] = v if v == "[redacted]" else mask_ip_or_chain(v)
-                    else:
-                        out_d[k] = v
-                elif isinstance(v, (dict, list, tuple)):
-                    out_d[k] = _walk_nested(v, top_row=False)
+                key_kind = _classify_console_pii_key(k)
+                eff_kind = key_kind if key_kind is not None else parent_kind
+                if isinstance(v, (dict, list, tuple)):
+                    out_d[k] = _walk_nested(v, parent_kind=eff_kind)
                 else:
-                    out_d[k] = v
+                    out_d[k] = _mask_scalar(v, eff_kind)
             return out_d
         if isinstance(obj, list):
-            return [_walk_nested(x, top_row=False) for x in obj]
+            return [_walk_nested(x, parent_kind=parent_kind) for x in obj]
         if isinstance(obj, tuple):
-            return tuple(_walk_nested(x, top_row=False) for x in obj)
-        return obj
+            return tuple(_walk_nested(x, parent_kind=parent_kind) for x in obj)
+        return _mask_scalar(obj, parent_kind)
 
-    return [_walk_nested(r, top_row=True) for r in rows]
+    return [_walk_nested(r, parent_kind=None) for r in rows]
 
 
 def _scrub_ip_leaves(obj: Any) -> Any:
@@ -4495,7 +5216,7 @@ def query_endpoint(
             elif (
                 mask_ips
                 and not isinstance(v, (dict, list, tuple))
-                and v
+                and (bool(v) or (isinstance(v, (int, float)) and not isinstance(v, bool)))
                 and _classify_console_pii_key(str(k)) is not None
             ):
                 row_copy[k] = "[redacted]"

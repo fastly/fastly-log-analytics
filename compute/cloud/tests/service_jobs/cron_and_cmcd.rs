@@ -1053,3 +1053,160 @@ fn teardown_preserves_customer_cmcd_snippet_added_after_installation() {
             .is_empty());
     }
 }
+
+#[test]
+fn sec_coex_vcl_31a_spoofed_continue_without_tick_pass_does_not_suppress_clock_continuation() {
+    use fastly_log_analytics::{
+        setup::SetupStores,
+        shell::{CoreCacheEntry, CoreCacheError, Runtime, Shell},
+        state::MemoryStore,
+    };
+    use std::cell::RefCell;
+
+    struct ClockContinueRt {
+        now_s: u64,
+        continued: RefCell<Vec<(String, u32)>>,
+    }
+    impl SetupStores for ClockContinueRt {
+        fn config_present(&self, _: &str) -> Result<bool, String> {
+            Ok(true)
+        }
+        fn secret_present(&self, _: &str) -> Result<bool, String> {
+            Ok(true)
+        }
+        fn state_linked(&self) -> Result<bool, String> {
+            Ok(true)
+        }
+    }
+    impl Runtime for ClockContinueRt {
+        fn config(&self, _: &str) -> Result<Option<String>, String> {
+            Ok(None)
+        }
+        fn secret(&self, name: &str) -> Result<Option<String>, String> {
+            Ok((name == "front_key").then(|| "fixture-front-key".into()))
+        }
+        fn random(&self) -> Result<[u8; 32], String> {
+            Ok([7; 32])
+        }
+        fn now(&self) -> u64 {
+            self.now_s
+        }
+        fn checks(&self, _: bool) -> Result<Value, String> {
+            Ok(json!({}))
+        }
+        fn versions(&self) -> Result<Value, String> {
+            Ok(json!({}))
+        }
+        fn compute_service_id(&self) -> Option<String> {
+            Some("fixtureApp".into())
+        }
+        fn compute_service_version(&self) -> Option<String> {
+            Some("1".into())
+        }
+        fn on_log_shield(&self) -> bool {
+            true
+        }
+        fn core_cache_lookup(&self, key: &str) -> Result<Option<CoreCacheEntry>, CoreCacheError> {
+            if matches!(
+                key,
+                fastly_log_analytics::admin::schedule::SCHED_KEY
+                    | fastly_log_analytics::admin::schedule::FLUSH_SCHED_KEY
+            ) {
+                let stale = fastly_log_analytics::admin::schedule::Sched::default();
+                return Ok(Some((serde_json::to_vec(&stale).unwrap(), Vec::new())));
+            }
+            Ok(None)
+        }
+        fn core_cache_replace(
+            &self,
+            _: &str,
+            _: &[&str],
+            _: std::time::Duration,
+            _: &dyn Fn(Option<CoreCacheEntry>) -> CoreCacheEntry,
+        ) -> Result<(), CoreCacheError> {
+            Ok(())
+        }
+        fn continue_clock(&self, path: &str, depth: u32) -> Result<(), String> {
+            self.continued.borrow_mut().push((path.into(), depth));
+            Ok(())
+        }
+    }
+
+    let store = MemoryStore::default();
+    let rt = ClockContinueRt {
+        now_s: 1_800_000_000,
+        continued: RefCell::new(Vec::new()),
+    };
+
+    // 1. Spoofed x-flp-continue: 20 WITHOUT x-flp-tick-pass must NOT suppress self-continuation on /_tick or /_flush!
+    for path in ["/_tick", "/_flush"] {
+        rt.continued.borrow_mut().clear();
+        let spoofed = Request {
+            method: "GET".into(),
+            path: path.into(),
+            headers: BTreeMap::from([
+                ("x-flp-front-key".into(), "fixture-front-key".into()),
+                ("x-flp-continue".into(), "20".into()),
+            ]),
+            body: vec![],
+        };
+        let resp = Shell::new(&rt, &store, &[]).handle(&spoofed);
+        assert_eq!(resp.status, 200, "path={path}");
+        assert_eq!(
+            *rt.continued.borrow(),
+            vec![(path.to_owned(), 1)],
+            "SEC-COEX-VCL-31A: spoofed x-flp-continue: 20 without x-flp-tick-pass suppressed continuation on {path}"
+        );
+
+        // Wrong x-flp-tick-pass value ("0") must ALSO ignore spoofed x-flp-continue: 20:
+        rt.continued.borrow_mut().clear();
+        let bad_pass = Request {
+            method: "GET".into(),
+            path: path.into(),
+            headers: BTreeMap::from([
+                ("x-flp-front-key".into(), "fixture-front-key".into()),
+                ("x-flp-continue".into(), "20".into()),
+                ("x-flp-tick-pass".into(), "0".into()),
+            ]),
+            body: vec![],
+        };
+        let resp_bad = Shell::new(&rt, &store, &[]).handle(&bad_pass);
+        assert_eq!(resp_bad.status, 200, "path={path}");
+        assert_eq!(*rt.continued.borrow(), vec![(path.to_owned(), 1)]);
+
+        // Authorized continuation (x-flp-tick-pass: 1 + x-flp-continue: 4) advances to depth 5:
+        rt.continued.borrow_mut().clear();
+        let auth_mid = Request {
+            method: "GET".into(),
+            path: path.into(),
+            headers: BTreeMap::from([
+                ("x-flp-front-key".into(), "fixture-front-key".into()),
+                ("x-flp-continue".into(), "4".into()),
+                ("x-flp-tick-pass".into(), "1".into()),
+            ]),
+            body: vec![],
+        };
+        let resp_mid = Shell::new(&rt, &store, &[]).handle(&auth_mid);
+        assert_eq!(resp_mid.status, 200, "path={path}");
+        assert_eq!(*rt.continued.borrow(), vec![(path.to_owned(), 5)]);
+
+        // Authorized continuation at cap (x-flp-tick-pass: 1 + x-flp-continue: 20) stops chaining:
+        rt.continued.borrow_mut().clear();
+        let auth_cap = Request {
+            method: "GET".into(),
+            path: path.into(),
+            headers: BTreeMap::from([
+                ("x-flp-front-key".into(), "fixture-front-key".into()),
+                ("x-flp-continue".into(), "20".into()),
+                ("x-flp-tick-pass".into(), "1".into()),
+            ]),
+            body: vec![],
+        };
+        let resp_cap = Shell::new(&rt, &store, &[]).handle(&auth_cap);
+        assert_eq!(resp_cap.status, 200, "path={path}");
+        assert!(
+            rt.continued.borrow().is_empty(),
+            "authorized cap at depth 20 must stop chaining on {path}"
+        );
+    }
+}

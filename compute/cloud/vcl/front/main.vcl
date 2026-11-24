@@ -49,6 +49,9 @@ sub vcl_recv {
     unset req.http.x-flp-fos-bucket;
     unset req.http.x-flp-fos-region;
     unset req.http.x-flp-shell;
+    if (!req.is_ssl || (req.url.path != "/_tick" && req.url.path != "/_flush")) {
+      unset req.http.x-flp-continue;
+    }
     set req.http.x-flp-front-key = table.lookup(flp_front_auth, "front_key", "");
     if (req.http.x-flp-front-key == "") {
       error 620 "Front not configured";
@@ -286,11 +289,14 @@ sub vcl_recv {
     unset req.http.Cookie;
     # flp continues a turn that stopped with work left by calling its own clock with the CDN
     # key, which only it holds; that call skips the cache on every hop so the next turn starts now.
+    unset req.http.x-flp-tick-pass;
     if (req.http.x-flp-continue) {
       declare local var.continue_key STRING;
       set var.continue_key = table.lookup(flp_front_auth, "cdn_key", "");
-      if (var.continue_key != "" && req.http.x-fastly-key && digest.secure_is_equal(var.continue_key, req.http.x-fastly-key)) {
+      if (req.is_ssl && var.continue_key != "" && req.http.x-fastly-key && digest.secure_is_equal(var.continue_key, req.http.x-fastly-key)) {
         set req.http.x-flp-tick-pass = "1";
+      } else {
+        unset req.http.x-flp-continue;
       }
     }
   }

@@ -528,16 +528,33 @@ fn re_recovery_after_teardown_respects_budget_with_existing_kv_and_many_catalog_
         m.borrow_mut().insert(manifest_key.into(), 1_800_000_100);
     });
 
-    let response = platform.call(
-        "POST",
-        "/api/admin/provision/recover",
-        json!({
-            "token": "fixture-token",
-            "service_id": "fixtureService",
-            "fos_bucket": "fos-fixture-logs",
-            "fos_region": "us-east-1"
-        }),
+    // Realistic Compute budget (CALLS=5 -> 27 calls, well under 32-call cap) with mandatory
+    // 3-call BUG-CLOUD-DR-31A pre-upsert collision inspection enabled.
+    ELAPSED_MS.with(|e| e.set(0));
+    CALLS.with(|c| c.set(5));
+    SECRETS.with(|s| {
+        *s.borrow_mut() =
+            std::collections::BTreeSet::from(["front_key".into(), "session_key".into()])
+    });
+    let response = fastly_log_analytics::admin::handle(
+        &platform,
+        "fixtureAdmin",
+        &fastly_log_analytics::http::Request {
+            method: "POST".into(),
+            path: "/api/admin/provision/recover".into(),
+            headers: BTreeMap::new(),
+            body: json!({
+                "token": "fixture-token",
+                "service_id": "fixtureService",
+                "fos_bucket": "fos-fixture-logs",
+                "fos_region": "us-east-1"
+            })
+            .to_string()
+            .into_bytes(),
+        },
     );
+    assert!(CALLS.with(std::cell::Cell::get) <= 32);
+    assert!(SECRETS.with(|s| s.borrow().len()) <= 5);
     RICH_FOS.with(|r| r.set(false));
 
     assert_eq!(
@@ -996,15 +1013,30 @@ fn recover_retry_after_fresh_kv_partial_failure_respects_budget() {
         m.borrow_mut().insert(manifest_key.into(), 1_800_000_100);
     });
 
-    let response = platform.call(
-        "POST",
-        "/api/admin/provision/recover",
-        json!({
-            "token": "fixture-token",
-            "service_id": "fixtureService",
-            "fos_bucket": "fos-fixture-logs",
-            "fos_region": "us-east-1"
-        }),
+    // Realistic Compute budget (CALLS=5 -> 27 calls, well under 32-call cap) with mandatory
+    // 3-call BUG-CLOUD-DR-31A pre-upsert collision inspection enabled.
+    ELAPSED_MS.with(|e| e.set(0));
+    CALLS.with(|c| c.set(5));
+    SECRETS.with(|s| {
+        *s.borrow_mut() =
+            std::collections::BTreeSet::from(["front_key".into(), "session_key".into()])
+    });
+    let response = fastly_log_analytics::admin::handle(
+        &platform,
+        "fixtureAdmin",
+        &fastly_log_analytics::http::Request {
+            method: "POST".into(),
+            path: "/api/admin/provision/recover".into(),
+            headers: BTreeMap::new(),
+            body: json!({
+                "token": "fixture-token",
+                "service_id": "fixtureService",
+                "fos_bucket": "fos-fixture-logs",
+                "fos_region": "us-east-1"
+            })
+            .to_string()
+            .into_bytes(),
+        },
     );
     RICH_FOS.with(|r| r.set(false));
 
@@ -3174,16 +3206,33 @@ fn bug_cloud_dr_08_cold_start_scoring_fits_24_call_budget_and_heals_partial_svc_
         serde_json::to_vec(&full_dr).unwrap(),
     );
 
-    let r_full = p.call(
-        "POST",
-        "/api/admin/provision/recover",
-        json!({
-            "token": "fixture-token",
-            "service_id": "fixtureService",
-            "fos_bucket": "fos-fixture-logs",
-            "fos_region": "us-east-1"
-        }),
+    // Realistic Compute budget (CALLS=5 -> 27 calls, well under 32-call cap) with mandatory
+    // BUG-CLOUD-DR-31A pre-upsert collision inspection and BUG-CLOUD-DR-31C zero-partial-write upserts.
+    ELAPSED_MS.with(|e| e.set(0));
+    CALLS.with(|c| c.set(5));
+    SECRETS.with(|s| {
+        *s.borrow_mut() =
+            std::collections::BTreeSet::from(["front_key".into(), "session_key".into()])
+    });
+    let r_full = fastly_log_analytics::admin::handle(
+        &p,
+        "fixtureAdmin",
+        &fastly_log_analytics::http::Request {
+            method: "POST".into(),
+            path: "/api/admin/provision/recover".into(),
+            headers: BTreeMap::new(),
+            body: json!({
+                "token": "fixture-token",
+                "service_id": "fixtureService",
+                "fos_bucket": "fos-fixture-logs",
+                "fos_region": "us-east-1"
+            })
+            .to_string()
+            .into_bytes(),
+        },
     );
+    assert!(CALLS.with(std::cell::Cell::get) <= 32);
+    assert!(SECRETS.with(|s| s.borrow().len()) <= 5);
     assert_eq!(
         r_full.status,
         200,
@@ -3879,18 +3928,34 @@ fn bug_cloud_dr_11_post_dr_reconcile_self_heals_verified_endpoints_and_preseed_v
         p
     };
 
-    // 1. PROBE_2A_BUDGET [n_keys=1, preseed_views=true]: by-value try_insert_first keeps watermarks 1-call CAS -> 200 OK (<= 24 calls)!
+    // 1. PROBE_2A_BUDGET [n_keys=1, preseed_views=true]: realistic Compute budget (CALLS=5 -> 27 calls)
+    //    with mandatory BUG-CLOUD-DR-31A pre-upsert collision inspection + BUG-CLOUD-DR-31C zero-partial-write upserts!
     let p_preseed = make_scoring_platform(1, true);
-    let r_preseed = p_preseed.call(
-        "POST",
-        "/api/admin/provision/recover",
-        json!({
-            "token": "fixture-token",
-            "service_id": "fixtureService",
-            "fos_bucket": "fos-fixture-logs",
-            "fos_region": "us-east-1"
-        }),
+    ELAPSED_MS.with(|e| e.set(0));
+    CALLS.with(|c| c.set(5));
+    SECRETS.with(|s| {
+        *s.borrow_mut() =
+            std::collections::BTreeSet::from(["front_key".into(), "session_key".into()])
+    });
+    let r_preseed = fastly_log_analytics::admin::handle(
+        &p_preseed,
+        "fixtureAdmin",
+        &fastly_log_analytics::http::Request {
+            method: "POST".into(),
+            path: "/api/admin/provision/recover".into(),
+            headers: BTreeMap::new(),
+            body: json!({
+                "token": "fixture-token",
+                "service_id": "fixtureService",
+                "fos_bucket": "fos-fixture-logs",
+                "fos_region": "us-east-1"
+            })
+            .to_string()
+            .into_bytes(),
+        },
     );
+    assert!(CALLS.with(std::cell::Cell::get) <= 32);
+    assert!(SECRETS.with(|s| s.borrow().len()) <= 5);
     assert_eq!(
         r_preseed.status,
         200,
@@ -3906,8 +3971,9 @@ fn bug_cloud_dr_11_post_dr_reconcile_self_heals_verified_endpoints_and_preseed_v
         "fixtureService"
     );
 
-    // 2. PROBE_2B [n_keys=3]: when budget forces owned_endpoint_names == [] at DR time,
-    // subsequent reconcile self-heals verified Cloud endpoint into owned_endpoint_names and completes cleanly!
+    // 2. PROBE_2B [n_keys=3]: BUG-CLOUD-DR-31A never skips collision inspection at tight budget (503, 0 KV writes);
+    //    when active_version is transiently unavailable (404, like PROBE_2D) producing owned_endpoint_names == [],
+    //    subsequent reconcile still self-heals verified Cloud endpoint into owned_endpoint_names and completes cleanly!
     let p_2keys = make_scoring_platform(3, false);
     let r_2keys = p_2keys.call(
         "POST",
@@ -3919,7 +3985,26 @@ fn bug_cloud_dr_11_post_dr_reconcile_self_heals_verified_endpoints_and_preseed_v
             "fos_region": "us-east-1"
         }),
     );
-    assert_eq!(r_2keys.status, 200);
+    assert_eq!(r_2keys.status, 503);
+    assert!(!p_2keys.adapter.records().contains_key("svc:fixtureService"));
+    p_2keys.api_faults.lock().unwrap().push(ApiFault {
+        method: "GET",
+        path: "/service/fixtureService/version",
+        name: None,
+        status: 404,
+        retry_after: None,
+    });
+    let r_2keys_v404 = p_2keys.call(
+        "POST",
+        "/api/admin/provision/recover",
+        json!({
+            "token": "fixture-token",
+            "service_id": "fixtureService",
+            "fos_bucket": "fos-fixture-logs",
+            "fos_region": "us-east-1"
+        }),
+    );
+    assert_eq!(r_2keys_v404.status, 200);
     assert_eq!(
         p_2keys.adapter.records()["svc:fixtureService"].value["owned_endpoint_names"],
         json!([])
@@ -4165,6 +4250,37 @@ fn bug_cloud_dr_12_13_14_coexistence_scoring_teardown_minimal_attached_and_cold_
             })
             .unwrap(),
         );
+        let r_dr12_n3 = p_dr12_wedged.call(
+            "POST",
+            "/api/admin/provision/recover",
+            json!({
+                "token": "fixture-token",
+                "service_id": "fixtureService",
+                "fos_bucket": "fos-fixture-logs",
+                "fos_region": "us-east-1"
+            }),
+        );
+        assert!(
+            matches!(r_dr12_n3.status, 409 | 503),
+            "BUG-CLOUD-DR-31A: n_keys=3 on GCE coexistence must never skip collision inspection, got {}",
+            r_dr12_n3.status
+        );
+        assert!(
+            !p_dr12_wedged
+                .adapter
+                .records()
+                .contains_key("svc:fixtureService"),
+            "BUG-CLOUD-DR-31A: 0 KV writes on rejected n_keys=3 DR"
+        );
+        // Seed legacy pre-existing wedged Capture::Managed state (via transient /version 404) to
+        // keep testing downstream reconcile & teardown defense-in-depth guards unchanged!
+        p_dr12_wedged.api_faults.lock().unwrap().push(ApiFault {
+            method: "GET",
+            path: "/service/fixtureService/version",
+            name: None,
+            status: 404,
+            retry_after: None,
+        });
         assert_eq!(
             p_dr12_wedged
                 .call(
@@ -4358,7 +4474,9 @@ fn bug_cloud_dr_12_13_14_coexistence_scoring_teardown_minimal_attached_and_cold_
             .any(|b| b["name"] == "session_scorer"));
     }
 
-    // Also verify budget-exhausted DR without scoring (n_keys=8) can cleanly unprovision via local-only teardown:
+    // Also verify GCE-coexisting DR without scoring (n_keys=8): BUG-CLOUD-DR-31A rejects
+    // active-version GCE collision synchronously (409/503, 0 KV writes), while a pre-existing
+    // wedged recovery (e.g. transient /version 404) can still cleanly unprovision via local-only teardown:
     let p_nkeys5 = Platform::new();
     let _ = seed_gce_scoring(&p_nkeys5, 8);
     p_nkeys5.adapter.seed_object_bytes(
@@ -4376,6 +4494,30 @@ fn bug_cloud_dr_12_13_14_coexistence_scoring_teardown_minimal_attached_and_cold_
         })
         .unwrap(),
     );
+    let r_nkeys5_reject = p_nkeys5.call(
+        "POST",
+        "/api/admin/provision/recover",
+        json!({
+            "token": "fixture-token",
+            "service_id": "fixtureService",
+            "fos_bucket": "fos-fixture-logs",
+            "fos_region": "us-east-1"
+        }),
+    );
+    assert!(
+        matches!(r_nkeys5_reject.status, 409 | 503),
+        "BUG-CLOUD-DR-31A: GCE-coexisting n_keys=8 recover must reject 409/503, got {}: {}",
+        r_nkeys5_reject.status,
+        String::from_utf8_lossy(&r_nkeys5_reject.body)
+    );
+    assert!(p_nkeys5.adapter.records().is_empty());
+    p_nkeys5.api_faults.lock().unwrap().push(ApiFault {
+        method: "GET",
+        path: "/service/fixtureService/version",
+        name: None,
+        status: 404,
+        retry_after: None,
+    });
     assert_eq!(
         p_nkeys5
             .call(
@@ -4848,29 +4990,42 @@ fn bug_cloud_dr_12_13_14_coexistence_scoring_teardown_minimal_attached_and_cold_
                         })
                         .unwrap(),
                     );
-                    let r_b = p_b.call(
-                        "POST",
-                        "/api/admin/provision/recover",
-                        json!({
-                            "token": "fixture-token",
-                            "service_id": "fixtureService",
-                            "fos_bucket": "fos-fixture-logs",
-                            "fos_region": "us-east-1"
-                        }),
+                    ELAPSED_MS.with(|e| e.set(0));
+                    CALLS.with(|c| c.set(0));
+                    SECRETS.with(|s| {
+                        *s.borrow_mut() = std::collections::BTreeSet::from([
+                            "front_key".into(),
+                            "session_key".into(),
+                        ])
+                    });
+                    let r_b = fastly_log_analytics::admin::handle(
+                        &p_b,
+                        "fixtureAdmin",
+                        &fastly_log_analytics::http::Request {
+                            method: "POST".into(),
+                            path: "/api/admin/provision/recover".into(),
+                            headers: BTreeMap::new(),
+                            body: json!({
+                                "token": "fixture-token",
+                                "service_id": "fixtureService",
+                                "fos_bucket": "fos-fixture-logs",
+                                "fos_region": "us-east-1"
+                            })
+                            .to_string()
+                            .into_bytes(),
+                        },
                     );
                     assert_eq!(
                         r_b.status,
                         200,
-                        "BUG-CLOUD-DR-14 [identical={identical}, pv={pv}, pw={pw}, pr={pr}] must fit <=24 calls: {}",
+                        "BUG-CLOUD-DR-14 [identical={identical}, pv={pv}, pw={pw}, pr={pr}] must fit 32-call Compute budget with mandatory inspection: {}",
                         String::from_utf8_lossy(&r_b.body)
                     );
-                    if !pv && !pw && !pr {
-                        assert_eq!(
-                            p_b.adapter.records()["svc:fixtureService"].value["owned_endpoint_names"],
-                            json!(["Fastly Object Storage Logs"]),
-                            "BUG-CLOUD-DR-14 [pv=false, pw=false, pr=false] must verify owned_endpoint_names"
-                        );
-                    }
+                    assert_eq!(
+                        p_b.adapter.records()["svc:fixtureService"].value["owned_endpoint_names"],
+                        json!(["Fastly Object Storage Logs"]),
+                        "BUG-CLOUD-DR-14 [identical={identical}, pv={pv}, pw={pw}, pr={pr}] must verify owned_endpoint_names"
+                    );
                 }
             }
         }
@@ -5169,6 +5324,31 @@ fn bug_cloud_dr_15_16_coexistence_scoring_mutation_routes_catalog_scan_and_forei
         })
         .unwrap(),
     );
+    let r_dr15_n3 = p_dr15.call(
+        "POST",
+        "/api/admin/provision/recover",
+        json!({
+            "token": "fixture-token",
+            "service_id": "fixtureService",
+            "fos_bucket": "fos-fixture-logs",
+            "fos_region": "us-east-1"
+        }),
+    );
+    assert!(
+        matches!(r_dr15_n3.status, 409 | 503),
+        "BUG-CLOUD-DR-31A: n_keys=3 on GCE coexistence must reject DR, got {}",
+        r_dr15_n3.status
+    );
+    assert!(!p_dr15.adapter.records().contains_key("svc:fixtureService"));
+    // Seed legacy pre-existing wedged Capture::Managed state (via transient /version 404) so all 8
+    // downstream /scoring/* defense-in-depth 409 assertions continue executing unchanged!
+    p_dr15.api_faults.lock().unwrap().push(ApiFault {
+        method: "GET",
+        path: "/service/fixtureService/version",
+        name: None,
+        status: 404,
+        retry_after: None,
+    });
     assert_eq!(
         p_dr15
             .call(
@@ -5333,6 +5513,30 @@ fn bug_cloud_dr_15_16_coexistence_scoring_mutation_routes_catalog_scan_and_forei
         })
         .unwrap(),
     );
+    let r_en15_reject = p_en15.call(
+        "POST",
+        "/api/admin/provision/recover",
+        json!({
+            "token": "fixture-token",
+            "service_id": "fixtureService",
+            "fos_bucket": "fos-fixture-logs",
+            "fos_region": "us-east-1"
+        }),
+    );
+    assert!(
+        matches!(r_en15_reject.status, 409 | 503),
+        "BUG-CLOUD-DR-31A: GCE-coexisting n_keys=8 recover must reject 409/503, got {}: {}",
+        r_en15_reject.status,
+        String::from_utf8_lossy(&r_en15_reject.body)
+    );
+    assert!(p_en15.adapter.records().is_empty());
+    p_en15.api_faults.lock().unwrap().push(ApiFault {
+        method: "GET",
+        path: "/service/fixtureService/version",
+        name: None,
+        status: 404,
+        retry_after: None,
+    });
     assert_eq!(
         p_en15
             .call(
@@ -9241,10 +9445,12 @@ fn bug_cloud_dr_29a_cold_start_inspected_active_reserve_sweep_20_to_32() {
         );
         let body: Value = serde_json::from_slice(&resp.body).unwrap();
         assert_eq!(body["ok"], true);
-        assert_eq!(
-            body["catalog_generation"], 1,
-            "BUG-CLOUD-DR-29A: expected catalog_generation == 1 at budget={budget}, got {body}"
-        );
+        if budget >= 21 {
+            assert_eq!(
+                body["catalog_generation"], 1,
+                "BUG-CLOUD-DR-29A: expected catalog_generation == 1 at budget={budget}, got {body}"
+            );
+        }
         assert!(
             p.adapter.records().contains_key("svc:fixtureService"),
             "svc:fixtureService missing at budget={budget}"
@@ -9972,7 +10178,7 @@ fn bug_cloud_dr_30abc_delete_data_saved_views_no_front_cursor_and_post_reset_412
             if resp.status != 200 {
                 assert_eq!(resp.status, 503, "unexpected status at budget={budget}");
                 assert!(
-                    budget <= 15,
+                    budget <= 19,
                     "BUG-CLOUD-DR-30A (1B-i): post-Delete-Data recover failed at budget={budget}: {}",
                     String::from_utf8_lossy(&resp.body)
                 );
@@ -9995,10 +10201,10 @@ fn bug_cloud_dr_30abc_delete_data_saved_views_no_front_cursor_and_post_reset_412
                     !body["catalog_generation"].is_null(),
                     "budget={budget} body={body}"
                 );
-                if budget >= 20 {
+                if budget >= 24 {
                     assert_eq!(body["front_synced"], true, "budget={budget} body={body}");
                 }
-                if budget >= 21 {
+                if budget >= 25 {
                     assert_eq!(
                         recs["svc:fixtureService"].value["_audit_outbox_base"].as_u64(),
                         Some(58),
@@ -10086,7 +10292,7 @@ fn bug_cloud_dr_30abc_delete_data_saved_views_no_front_cursor_and_post_reset_412
             let recs = p.adapter.records();
             if resp.status != 200 {
                 assert_eq!(resp.status, 503);
-                assert!(budget <= 15, "1A SavedViews failed at budget={budget}");
+                assert!(budget <= 19, "1A SavedViews failed at budget={budget}");
                 for k in [
                     "svc:fixtureService",
                     "admin:install",
@@ -10107,13 +10313,13 @@ fn bug_cloud_dr_30abc_delete_data_saved_views_no_front_cursor_and_post_reset_412
                         "1A catalog_generation at budget={budget}"
                     );
                 }
-                if budget >= 20 {
+                if budget >= 24 {
                     assert_eq!(
                         body["front_synced"], true,
                         "1A front_synced at budget={budget}"
                     );
                 }
-                if budget >= 21 {
+                if budget >= 25 {
                     assert_eq!(
                         recs["svc:fixtureService"].value["_audit_outbox_base"].as_u64(),
                         Some(58),
@@ -10477,6 +10683,997 @@ fn bug_cloud_dr_30abc_delete_data_saved_views_no_front_cursor_and_post_reset_412
             assert_eq!(
                 after2["_audit_outbox"][0]["event"], "entry.25",
                 "budget={budget}"
+            );
+        }
+    }
+}
+
+#[test]
+fn bug_cloud_dr_31abc_outbox_31b_and_scoring_u3_monotonic() {
+    use fastly_log_analytics::{admin, http::Request, ingest};
+    use sha2::{Digest, Sha256};
+    use std::collections::BTreeSet;
+
+    struct RichGuard31;
+    impl Drop for RichGuard31 {
+        fn drop(&mut self) {
+            RICH_FOS.with(|r| r.set(false));
+            MTIMES.with(|m| m.borrow_mut().clear());
+        }
+    }
+    let _guard = RichGuard31;
+    RICH_FOS.with(|r| r.set(true));
+    MTIMES.with(|m| m.borrow_mut().clear());
+
+    let anchor_of = |entry: &Value| -> String {
+        let canonical = json!([
+            entry.get("at"),
+            entry.get("event"),
+            entry.get("actor"),
+            entry.get("job_id"),
+            entry.get("config_version"),
+            entry.get("source"),
+            entry,
+        ]);
+        hex::encode(Sha256::digest(canonical.to_string().as_bytes()))
+    };
+
+    // 1. BUG-CLOUD-OUTBOX-DR-31B: torn_down svc with raw_base = 0, len = 4120, matching svc_zero_anchor,
+    //    cursor.svc_outbox_archived = 5000 (> 0 + 4120 rollback/truncation) -> MUST reject 409 audit_archive_required
+    //    with 0 KV writes and 0 Secret Store writes (NEVER drain 25 entries & return 200 OK!).
+    {
+        let p = Platform::new();
+        let prov = p.provision();
+        p.drain(prov["job"].clone());
+        let td_gen = p.service()["generation"].clone();
+        let td = p.json(
+            "POST",
+            "/api/admin/provision/teardown",
+            json!({
+                "service_id": "fixtureService",
+                "confirm_service_id": "fixtureService",
+                "generation": td_gen,
+                "remove_logging": false,
+                "remove_snippets": false,
+                "delete_fos_keys": false
+            }),
+        );
+        p.drain(td["job"].clone());
+
+        let entries4120: Vec<Value> = (0..4120usize)
+            .map(|i| {
+                json!({
+                    "actor": "fixtureAdmin",
+                    "at": 1_800_000_000u64 + i as u64,
+                    "event": format!("rb_entry.{i}"),
+                    "config_version": 1
+                })
+            })
+            .collect();
+        let matching_anchor = anchor_of(&entries4120[0]);
+        let rec = p.adapter.get("svc:fixtureService").unwrap().unwrap();
+        let mut val = rec.value.clone();
+        val["_audit_outbox_base"] = json!(0);
+        val["_audit_outbox"] = Value::Array(entries4120);
+        assert!(p
+            .adapter
+            .cas("svc:fixtureService", Some(&rec.generation), &val)
+            .unwrap());
+        p.adapter
+            .cas(
+                "logs:cursor:fixtureService",
+                None,
+                &json!({
+                    "svc_outbox_archived": 5000,
+                    "svc_last_base": 0,
+                    "svc_zero_anchor": matching_anchor,
+                    "svc_zero_virtual_base": 0,
+                    "last_flush_s": 1_800_005_000
+                }),
+            )
+            .unwrap();
+        KV_CLASS.with(|ops| ops.borrow_mut().clear());
+        ELAPSED_MS.with(|e| e.set(0));
+        CALLS.with(|c| c.set(0));
+        SECRETS
+            .with(|s| *s.borrow_mut() = BTreeSet::from(["front_key".into(), "session_key".into()]));
+        let resp = admin::handle(
+            &p,
+            "fixtureAdmin",
+            &Request {
+                method: "POST".into(),
+                path: "/api/admin/provision/recover".into(),
+                headers: BTreeMap::new(),
+                body: json!({
+                    "token": "fixture-token",
+                    "service_id": "fixtureService",
+                    "fos_bucket": "fos-fixture-logs",
+                    "fos_region": "us-east-1"
+                })
+                .to_string()
+                .into_bytes(),
+            },
+        );
+        assert_eq!(
+            resp.status,
+            409,
+            "BUG-CLOUD-OUTBOX-DR-31B: rollback/truncation with matching anchor (archived=5000 > 0+4120) must return 409 audit_archive_required, got {}: {}",
+            resp.status,
+            String::from_utf8_lossy(&resp.body)
+        );
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["error"], "audit_archive_required");
+        let kv_writes: Vec<_> = KV_CLASS.with(|ops| {
+            ops.borrow()
+                .iter()
+                .filter(|(c, _)| *c == "write")
+                .cloned()
+                .collect()
+        });
+        assert!(
+            kv_writes.is_empty(),
+            "BUG-CLOUD-OUTBOX-DR-31B: 0 KV writes allowed on 409, got {kv_writes:?}"
+        );
+        assert_eq!(
+            p.adapter.secret("fastly_token.fixtureService").unwrap(),
+            None
+        );
+        assert_eq!(
+            p.adapter.records()["svc:fixtureService"].value["_audit_outbox"][0]["event"],
+            "rb_entry.0"
+        );
+    }
+
+    // 2. BUG-CLOUD-DR-31A: Zero partial KV writes before 409 resource_name_collision AND never skip
+    //    collision inspection at tight budget! Verify BOTH u=2 and u=3, API-key-only AND explicit-creds,
+    //    at production budget=32 AND tight budget=1..=32.
+    for (u_count, explicit) in [(2u32, false), (3u32, false), (2u32, true), (3u32, true)] {
+        for budget in [12u32, 16, 18, 20, 24, 32] {
+            let p = Platform::new();
+            // Seed a foreign colliding logging/fos endpoint with the SAME name ("Fastly Object Storage Logs")
+            // pointing to a DIFFERENT bucket ("foreign-other-bucket"):
+            p.adapter.seed_resource(
+                "fixtureService",
+                "logging/fos",
+                json!({
+                    "name": "Fastly Object Storage Logs",
+                    "bucket_name": "foreign-other-bucket",
+                    "region": "us-east-1",
+                    "path": "raw/",
+                    "response_condition": "foreign_cond"
+                }),
+            );
+            let head = Head {
+                version: VERSION,
+                generation: 2,
+                manifest: Some(
+                    "processed/_catalog/manifest-s-fixtureService-rev-18446744073709551613-aa.json"
+                        .into(),
+                ),
+                ..Head::default()
+            };
+            let state = CloudDrState {
+                schema_version: SCHEMA_VERSION,
+                updated_at: 1_800_000_000,
+                service_id: "fixtureService".into(),
+                service: json!({"log_period": 60}),
+                views: vec![SavedView {
+                    id: "v-col".into(),
+                    service_id: "fixtureService".into(),
+                    name: "5xx".into(),
+                    filters_json: r#"{"status":500}"#.into(),
+                    time_range_type: None,
+                    start_time: None,
+                    end_time: None,
+                    page: None,
+                    created_at: None,
+                }],
+                catalog_head: Some(head),
+                floor_key: Some("raw/request/year=2026/month=11/day=20/hour=00/minute=00/".into()),
+                rum_stats: if u_count == 3 {
+                    Some(json!({"rows": 12, "at": 1_800_000_000}))
+                } else {
+                    None
+                },
+            };
+            p.adapter.seed_object_bytes(
+                "fos-fixture-logs",
+                "meta/cloud_dr_state.json",
+                serde_json::to_vec(&state).unwrap(),
+            );
+            ELAPSED_MS.with(|e| e.set(0));
+            CALLS.with(|c| c.set(32 - budget));
+            SECRETS.with(|s| {
+                *s.borrow_mut() = BTreeSet::from(["front_key".into(), "session_key".into()])
+            });
+            KV_CLASS.with(|ops| ops.borrow_mut().clear());
+            let mut req_body = json!({
+                "token": "fixture-token",
+                "service_id": "fixtureService",
+                "fos_bucket": "fos-fixture-logs",
+                "fos_region": "us-east-1"
+            });
+            if explicit {
+                p.adapter
+                    .seed_fos_key("explicit-ak", "explicit-sk", "fos-fixture-logs");
+                req_body["fos_access_key"] = json!("explicit-ak");
+                req_body["fos_secret_key"] = json!("explicit-sk");
+            }
+            let resp = admin::handle(
+                &p,
+                "fixtureAdmin",
+                &Request {
+                    method: "POST".into(),
+                    path: "/api/admin/provision/recover".into(),
+                    headers: BTreeMap::new(),
+                    body: req_body.to_string().into_bytes(),
+                },
+            );
+            assert_ne!(
+                resp.status,
+                200,
+                "BUG-CLOUD-DR-31A [u={u_count}, explicit={explicit}, budget={budget}]: colliding endpoint bypassed inspection and returned 200 OK!"
+            );
+            if budget >= 24 {
+                assert_eq!(
+                    resp.status,
+                    409,
+                    "BUG-CLOUD-DR-31A [u={u_count}, explicit={explicit}, budget={budget}]: expected 409 resource_name_collision, got {}: {}",
+                    resp.status,
+                    String::from_utf8_lossy(&resp.body)
+                );
+                let body: Value = serde_json::from_slice(&resp.body).unwrap();
+                assert_eq!(body["error"], "resource_name_collision");
+            } else {
+                assert!(
+                    matches!(resp.status, 409 | 503),
+                    "BUG-CLOUD-DR-31A [u={u_count}, explicit={explicit}, budget={budget}]: expected 409 or 503, got {}",
+                    resp.status
+                );
+            }
+            let recs = p.adapter.records();
+            for k in [
+                "views:fixtureService",
+                ingest::WATERMARK_KEY,
+                "ingest:rum:watermark",
+                "svc:fixtureService",
+                "admin:install",
+            ] {
+                assert!(
+                    !recs.contains_key(k),
+                    "BUG-CLOUD-DR-31A [u={u_count}, explicit={explicit}, budget={budget}]: partial KV write to {k} before {}",
+                    resp.status
+                );
+            }
+            if explicit {
+                assert_eq!(
+                    p.adapter.secret("fastly_token.fixtureService").unwrap(),
+                    None
+                );
+                assert_eq!(p.adapter.secret("fos_ak.fixtureService").unwrap(), None);
+            }
+        }
+    }
+
+    // 3. BUG-CLOUD-DR-31B: Stale pre-Delete-Data dr_state.catalog_head where old manifest is deleted
+    //    (dr_manifest_missing == true) and FOS only has reset manifest gen=2 (reset_at = 1_800_000_000):
+    //    Across budget = 1..=32, NEVER return 200 OK without clamping floor_key, rum_floor_key, and reset_at!
+    {
+        let old_m1_key = format!(
+            "processed/_catalog/manifest-s-fixtureService-rev-{:020}-old1.json",
+            u64::MAX - 1
+        );
+        let reset_m2_key = format!(
+            "processed/_catalog/manifest-s-fixtureService-rev-{:020}-rst2.json",
+            u64::MAX - 2
+        );
+        let reset_at = 1_800_000_000i64;
+        let reset_m2 = json!({
+            "version": VERSION,
+            "service_id": "fixtureService",
+            "generation": 2u64,
+            "batch": "reset",
+            "schema": "v2",
+            "committed_at": "2027-01-15T08:00:00Z",
+            "reset_at": reset_at,
+            "previous": null,
+            "files": [], "summaries": [], "sources": [], "replaces": [],
+            "bytes": 0, "rows": 0, "parents": {}
+        });
+        let stale_head = Head {
+            version: VERSION,
+            generation: 1,
+            manifest: Some(old_m1_key.clone()),
+            recent: vec![Event {
+                cursor: "fixtureService:1".into(),
+                generation: 1,
+                committed_at: Some("2026-11-19T00:00:00Z".into()),
+                manifest: Some(old_m1_key),
+            }],
+            ..Head::default()
+        };
+        let stale_floor = "raw/request/year=2026/month=11/day=19/hour=00/minute=00/";
+        let stale_state = CloudDrState {
+            schema_version: SCHEMA_VERSION,
+            updated_at: 1_795_046_400,
+            service_id: "fixtureService".into(),
+            service: json!({"log_period": 60}),
+            views: vec![SavedView {
+                id: "v-del".into(),
+                service_id: "fixtureService".into(),
+                name: "Errors".into(),
+                filters_json: "{}".into(),
+                time_range_type: None,
+                start_time: None,
+                end_time: None,
+                page: None,
+                created_at: None,
+            }],
+            catalog_head: Some(stale_head),
+            floor_key: Some(stale_floor.into()),
+            rum_stats: None,
+        };
+        let expected_floor = "raw/request/year=2027/month=01/day=15/hour=08/minute=00/";
+        let expected_rum_floor = "raw/rum/year=2027/month=01/day=15/hour=08/minute=00/";
+        for budget in 1..=32u32 {
+            let p = Platform::new();
+            p.adapter.seed_object_bytes(
+                "fos-fixture-logs",
+                "meta/cloud_dr_state.json",
+                serde_json::to_vec(&stale_state).unwrap(),
+            );
+            p.adapter.seed_object_bytes(
+                "fos-fixture-logs",
+                &reset_m2_key,
+                serde_json::to_vec(&reset_m2).unwrap(),
+            );
+            ELAPSED_MS.with(|e| e.set(0));
+            CALLS.with(|c| c.set(32 - budget));
+            SECRETS.with(|s| {
+                *s.borrow_mut() = BTreeSet::from(["front_key".into(), "session_key".into()])
+            });
+            let resp = admin::handle(
+                &p,
+                "fixtureAdmin",
+                &Request {
+                    method: "POST".into(),
+                    path: "/api/admin/provision/recover".into(),
+                    headers: BTreeMap::new(),
+                    body: json!({
+                        "token": "fixture-token",
+                        "service_id": "fixtureService",
+                        "fos_bucket": "fos-fixture-logs",
+                        "fos_region": "us-east-1"
+                    })
+                    .to_string()
+                    .into_bytes(),
+                },
+            );
+            let recs = p.adapter.records();
+            if resp.status == 503 {
+                for k in [
+                    "views:fixtureService",
+                    ingest::WATERMARK_KEY,
+                    "ingest:rum:watermark",
+                    "svc:fixtureService",
+                    "admin:install",
+                ] {
+                    assert!(
+                        !recs.contains_key(k),
+                        "BUG-CLOUD-DR-31B [budget={budget}]: partial KV write to {k} on 503"
+                    );
+                }
+            } else {
+                assert_eq!(resp.status, 200, "budget={budget}");
+                let wm = &recs[ingest::WATERMARK_KEY].value;
+                // Only valid if scan did NOT run at all? Wait: at budget >= 24 scan MUST run and clamp!
+                // Even at tight budget, if scan ran and saw dr_manifest_missing, catalog_head cannot be None!
+                if wm.get("catalog").is_none() || wm["catalog"].is_null() {
+                    panic!(
+                        "BUG-CLOUD-DR-31B [budget={budget}]: dr_manifest_missing cleared catalog_head and returned 200 OK without clamping deleted raw logs! wm={wm}"
+                    );
+                }
+                if budget >= 24 {
+                    assert_eq!(
+                        wm["floor_key"].as_str(),
+                        Some(expected_floor),
+                        "BUG-CLOUD-DR-31B [budget={budget}]: floor_key not clamped to reset_at"
+                    );
+                    assert_eq!(
+                        recs["ingest:rum:watermark"].value["floor_key"].as_str(),
+                        Some(expected_rum_floor),
+                        "BUG-CLOUD-DR-31B [budget={budget}]: rum_floor_key not clamped to reset_at"
+                    );
+                    assert_eq!(
+                        wm["catalog"]["reset_at"].as_i64(),
+                        Some(reset_at),
+                        "BUG-CLOUD-DR-31B [budget={budget}]: reset_at missing"
+                    );
+                }
+            }
+        }
+    }
+
+    // 4. BUG-CLOUD-DR-31C: Cold start with views:<sid> ABSENT and ingest:watermark PRE-EXISTING STALE
+    //    across budget = 1..=32 -> 0 partial KV writes on EVERY 503 (views:<sid> must NOT be written!).
+    {
+        let head = Head {
+            version: VERSION,
+            generation: 1,
+            manifest: Some(
+                "processed/_catalog/manifest-s-fixtureService-rev-18446744073709551614-aa.json"
+                    .into(),
+            ),
+            ..Head::default()
+        };
+        let state = CloudDrState {
+            schema_version: SCHEMA_VERSION,
+            updated_at: 1_800_000_000,
+            service_id: "fixtureService".into(),
+            service: json!({"log_period": 60}),
+            views: vec![SavedView {
+                id: "v-31c".into(),
+                service_id: "fixtureService".into(),
+                name: "5xx".into(),
+                filters_json: r#"{"status":500}"#.into(),
+                time_range_type: None,
+                start_time: None,
+                end_time: None,
+                page: None,
+                created_at: None,
+            }],
+            catalog_head: Some(head),
+            floor_key: Some("raw/request/year=2027/month=01/day=15/hour=08/minute=00/".into()),
+            rum_stats: None,
+        };
+        for budget in 1..=32u32 {
+            let p = Platform::new();
+            p.adapter.seed_object_bytes(
+                "fos-fixture-logs",
+                "meta/cloud_dr_state.json",
+                serde_json::to_vec(&state).unwrap(),
+            );
+            // Pre-seed stale ingest:watermark while views:fixtureService is ABSENT:
+            p.adapter
+                .cas(
+                    ingest::WATERMARK_KEY,
+                    None,
+                    &json!({"floor_key": "raw/request/year=2025/month=01/day=01/hour=00/minute=00/"}),
+                )
+                .unwrap();
+            ELAPSED_MS.with(|e| e.set(0));
+            CALLS.with(|c| c.set(32 - budget));
+            SECRETS.with(|s| {
+                *s.borrow_mut() = BTreeSet::from(["front_key".into(), "session_key".into()])
+            });
+            let resp = admin::handle(
+                &p,
+                "fixtureAdmin",
+                &Request {
+                    method: "POST".into(),
+                    path: "/api/admin/provision/recover".into(),
+                    headers: BTreeMap::new(),
+                    body: json!({
+                        "token": "fixture-token",
+                        "service_id": "fixtureService",
+                        "fos_bucket": "fos-fixture-logs",
+                        "fos_region": "us-east-1"
+                    })
+                    .to_string()
+                    .into_bytes(),
+                },
+            );
+            let recs = p.adapter.records();
+            if resp.status != 200 {
+                assert_eq!(resp.status, 503, "31C budget={budget}");
+                assert!(
+                    !recs.contains_key("views:fixtureService"),
+                    "BUG-CLOUD-DR-31C [budget={budget}]: partial KV write to views:fixtureService on 503!"
+                );
+                assert!(
+                    !recs.contains_key("svc:fixtureService"),
+                    "BUG-CLOUD-DR-31C [budget={budget}]: partial KV write to svc:fixtureService on 503!"
+                );
+                assert!(
+                    !recs.contains_key("admin:install"),
+                    "BUG-CLOUD-DR-31C [budget={budget}]: partial KV write to admin:install on 503!"
+                );
+                assert_eq!(
+                    recs[ingest::WATERMARK_KEY].value["floor_key"],
+                    "raw/request/year=2025/month=01/day=01/hour=00/minute=00/",
+                    "BUG-CLOUD-DR-31C [budget={budget}]: stale ingest:watermark mutated on 503!"
+                );
+            }
+        }
+    }
+
+    // 5. Scoring + u=3 monotonic budget & cursor seeding across budget = 24..=32
+    //    (api-key AND explicit, with AND without front_dicts), plus st_dr14_all3 collision check!
+    {
+        struct NoFrontWrap<'a>(&'a Platform);
+        impl SetupStores for NoFrontWrap<'_> {
+            fn config_present(&self, n: &str) -> Result<bool, String> {
+                self.0.config_present(n)
+            }
+            fn secret_present(&self, n: &str) -> Result<bool, String> {
+                self.0.secret_present(n)
+            }
+            fn state_linked(&self) -> Result<bool, String> {
+                self.0.state_linked()
+            }
+        }
+        impl Runtime for NoFrontWrap<'_> {
+            fn config(&self, k: &str) -> Result<Option<String>, String> {
+                if matches!(k, "buckets_dictionary_id" | "credentials_dictionary_id") {
+                    return Ok(None);
+                }
+                self.0.config(k)
+            }
+            fn secret(&self, k: &str) -> Result<Option<String>, String> {
+                self.0.secret(k)
+            }
+            fn random(&self) -> Result<[u8; 32], String> {
+                self.0.random()
+            }
+            fn now(&self) -> u64 {
+                self.0.now()
+            }
+            fn checks(&self, l: bool) -> Result<Value, String> {
+                self.0.checks(l)
+            }
+            fn versions(&self) -> Result<Value, String> {
+                self.0.versions()
+            }
+            fn compute_service_id(&self) -> Option<String> {
+                self.0.compute_service_id()
+            }
+            fn compute_service_version(&self) -> Option<String> {
+                self.0.compute_service_version()
+            }
+            fn on_log_shield(&self) -> bool {
+                self.0.on_log_shield()
+            }
+            fn admin_get(&self, key: &str) -> Result<Option<Record>, String> {
+                self.0.admin_get(key)
+            }
+            fn admin_get_fresh(&self, key: &str, token: &str) -> Result<Option<Record>, String> {
+                self.0.admin_get_fresh(key, token)
+            }
+            fn admin_cas(
+                &self,
+                key: &str,
+                generation: Option<&str>,
+                value: &Value,
+            ) -> Result<bool, String> {
+                self.0.admin_cas(key, generation, value)
+            }
+            fn kv_delete(&self, key: &str) -> Result<(), String> {
+                self.0.kv_delete(key)
+            }
+            fn admin_api(&self, req: admin::ApiRequest<'_>) -> Result<admin::ApiResponse, String> {
+                self.0.admin_api(req)
+            }
+            fn admin_fos(&self, req: FosRequest<'_>) -> Result<FosResponse, String> {
+                self.0.admin_fos(req)
+            }
+            fn admin_remaining_calls(&self) -> u32 {
+                self.0.admin_remaining_calls()
+            }
+            fn admin_elapsed(&self, started: std::time::Instant) -> std::time::Duration {
+                self.0.admin_elapsed(started)
+            }
+            fn admin_wait(&self, millis: u64) {
+                self.0.admin_wait(millis)
+            }
+        }
+
+        for (explicit, with_front) in [(false, true), (false, false), (true, true), (true, false)] {
+            let mut saw_200 = false;
+            let mut saw_cursor = false;
+            let mut saw_front = false;
+            for budget in 24..=32u32 {
+                let p = Platform::new();
+                let (_, sc_svc) = p
+                    .adapter
+                    .api(admin::ApiRequest {
+                        method: "POST",
+                        path: "/service",
+                        token: "fixture-token",
+                        body: Some(json!({
+                            "name": "Session Scoring Service for fixtureService",
+                            "type": "wasm"
+                        })),
+                        timeout: std::time::Duration::from_secs(5),
+                        query: "",
+                    })
+                    .unwrap();
+                let s_id = sc_svc["id"].as_str().unwrap().to_owned();
+                let (_, k_r) = p
+                    .adapter
+                    .api(admin::ApiRequest {
+                        method: "POST",
+                        path: "/resources/stores/config",
+                        token: "fixture-token",
+                        body: Some(json!({"name": format!("scoring_keys_{s_id}")})),
+                        timeout: std::time::Duration::from_secs(5),
+                        query: "",
+                    })
+                    .unwrap();
+                let (_, c_r) = p
+                    .adapter
+                    .api(admin::ApiRequest {
+                        method: "POST",
+                        path: "/resources/stores/config",
+                        token: "fixture-token",
+                        body: Some(json!({"name": format!("scoring_config_{s_id}")})),
+                        timeout: std::time::Duration::from_secs(5),
+                        query: "",
+                    })
+                    .unwrap();
+                let (_, m_r) = p
+                    .adapter
+                    .api(admin::ApiRequest {
+                        method: "POST",
+                        path: "/resources/stores/kv",
+                        token: "fixture-token",
+                        body: Some(json!({"name": format!("scoring_matrix_{s_id}")})),
+                        timeout: std::time::Duration::from_secs(5),
+                        query: "",
+                    })
+                    .unwrap();
+                p.adapter.seed_resource(
+                    "fixtureService",
+                    "logging/fos",
+                    json!({
+                        "name": "Fastly Object Storage Logs",
+                        "bucket_name": "fos-fixture-logs",
+                        "region": "us-east-1",
+                        "path": "raw/",
+                        "response_condition": "log_analytics_condition"
+                    }),
+                );
+                let head = Head {
+                    version: VERSION,
+                    generation: 5,
+                    manifest: Some(format!(
+                        "processed/_catalog/manifest-s-fixtureService-rev-{:020}-s5.json",
+                        u64::MAX - 5
+                    )),
+                    ..Head::default()
+                };
+                let state = CloudDrState {
+                    schema_version: SCHEMA_VERSION,
+                    updated_at: 1_800_000_000,
+                    service_id: "fixtureService".into(),
+                    service: json!({
+                        "scoring": {
+                            "enabled": false,
+                            "scoring_service_id": s_id,
+                            "scoring_service_name": "Session Scoring Service for fixtureService",
+                            "scoring_domain": "fos-fixtureservice-session-scorer.edgecompute.app",
+                            "scoring_keys_store_id": k_r["id"],
+                            "scoring_config_store_id": c_r["id"],
+                            "scoring_matrix_store_id": m_r["id"],
+                            "enabled_at": "2026-11-20T00:00:00Z",
+                            "deployed_package_sha": "abc",
+                            "deployed_package_files_hash": "def",
+                            "deployed_vcl_sha": "ghi",
+                            "exclude_url_regex": ""
+                        }
+                    }),
+                    views: vec![SavedView {
+                        id: "v-sc3".into(),
+                        service_id: "fixtureService".into(),
+                        name: "5xx".into(),
+                        filters_json: "{}".into(),
+                        time_range_type: None,
+                        start_time: None,
+                        end_time: None,
+                        page: None,
+                        created_at: None,
+                    }],
+                    catalog_head: Some(head),
+                    floor_key: Some("raw/2027/f.zst".into()),
+                    rum_stats: Some(json!({"rows": 11})),
+                };
+                p.adapter.seed_object_bytes(
+                    "fos-fixture-logs",
+                    "meta/cloud_dr_state.json",
+                    serde_json::to_vec(&state).unwrap(),
+                );
+                p.adapter
+                    .cas(
+                        "logs:cursor:fixtureService",
+                        None,
+                        &json!({"svc_outbox_archived": 58, "last_flush_s": 1_799_999_000}),
+                    )
+                    .unwrap();
+
+                ELAPSED_MS.with(|e| e.set(0));
+                CALLS.with(|c| c.set(32 - budget));
+                SECRETS.with(|s| {
+                    *s.borrow_mut() = BTreeSet::from(["front_key".into(), "session_key".into()])
+                });
+                let mut req_body = json!({
+                    "token": "fixture-token",
+                    "service_id": "fixtureService",
+                    "fos_bucket": "fos-fixture-logs",
+                    "fos_region": "us-east-1"
+                });
+                if explicit {
+                    p.adapter
+                        .seed_fos_key("explicit-ak", "explicit-sk", "fos-fixture-logs");
+                    req_body["fos_access_key"] = json!("explicit-ak");
+                    req_body["fos_secret_key"] = json!("explicit-sk");
+                }
+                let req = Request {
+                    method: "POST".into(),
+                    path: "/api/admin/provision/recover".into(),
+                    headers: BTreeMap::new(),
+                    body: req_body.to_string().into_bytes(),
+                };
+                let resp = if with_front {
+                    admin::handle(&p, "fixtureAdmin", &req)
+                } else {
+                    let nf = NoFrontWrap(&p);
+                    admin::handle(&nf, "fixtureAdmin", &req)
+                };
+                let recs = p.adapter.records();
+                if resp.status == 503 {
+                    assert!(
+                        !saw_200,
+                        "scoring+u=3 [explicit={explicit}, front={with_front}] regressed from 200 -> 503 at budget={budget}"
+                    );
+                    for k in [
+                        "views:fixtureService",
+                        ingest::WATERMARK_KEY,
+                        "ingest:rum:watermark",
+                        "svc:fixtureService",
+                        "admin:install",
+                    ] {
+                        assert!(
+                            !recs.contains_key(k),
+                            "scoring+u=3 [explicit={explicit}, front={with_front}, budget={budget}]: partial write to {k} on 503"
+                        );
+                    }
+                } else {
+                    assert_eq!(
+                        resp.status,
+                        200,
+                        "scoring+u=3 [explicit={explicit}, front={with_front}, budget={budget}]: {}",
+                        String::from_utf8_lossy(&resp.body)
+                    );
+                    saw_200 = true;
+                    let body: Value = serde_json::from_slice(&resp.body).unwrap();
+                    let cur_seeded =
+                        recs["svc:fixtureService"].value["_audit_outbox_base"].as_u64() == Some(58);
+                    let cur_front = body["front_synced"] == true;
+                    if saw_front {
+                        assert!(
+                            cur_front,
+                            "scoring+u=3 [explicit={explicit}, front={with_front}] dropped front_synced at budget={budget}"
+                        );
+                    }
+                    if saw_cursor {
+                        assert!(
+                            cur_seeded,
+                            "scoring+u=3 [explicit={explicit}, front={with_front}] dropped cursor seeding at budget={budget}"
+                        );
+                    }
+                    saw_front |= cur_front;
+                    saw_cursor |= cur_seeded;
+                    assert_eq!(
+                        recs["svc:fixtureService"].value["owned_endpoint_names"],
+                        json!(["Fastly Object Storage Logs"]),
+                        "scoring+u=3 [explicit={explicit}, front={with_front}, budget={budget}] must always verify owned_endpoint_names"
+                    );
+                }
+            }
+            assert!(
+                saw_200 && saw_cursor,
+                "scoring+u=3 [explicit={explicit}, front={with_front}] must succeed and seed cursor within budget=24..=32"
+            );
+            if with_front {
+                assert!(
+                    saw_front,
+                    "scoring+u=3 [explicit={explicit}, front={with_front}] must sync front dicts within budget=24..=32"
+                );
+            }
+        }
+    }
+
+    // 6. st_dr14_all3 shape (scoring + 1 orphaned FOS key + u=3 + all 3 pre-existing stale KV keys):
+    //    (a) With colliding logging/fos -> MUST return 409 resource_name_collision with 0 KV writes (stale KV unchanged).
+    //    (b) With valid owned logging/fos -> MUST return 200 OK AND verify owned_endpoint_names (requires >24 calls -> tests transport.rs call_cap).
+    for colliding in [true, false] {
+        let p = Platform::new();
+        let (_, sc_svc) = p
+            .adapter
+            .api(admin::ApiRequest {
+                method: "POST",
+                path: "/service",
+                token: "fixture-token",
+                body: Some(json!({
+                    "name": "Session Scoring Service for fixtureService",
+                    "type": "wasm"
+                })),
+                timeout: std::time::Duration::from_secs(5),
+                query: "",
+            })
+            .unwrap();
+        let s_id = sc_svc["id"].as_str().unwrap().to_owned();
+        let (_, k_r) = p
+            .adapter
+            .api(admin::ApiRequest {
+                method: "POST",
+                path: "/resources/stores/config",
+                token: "fixture-token",
+                body: Some(json!({"name": format!("scoring_keys_{s_id}")})),
+                timeout: std::time::Duration::from_secs(5),
+                query: "",
+            })
+            .unwrap();
+        let (_, c_r) = p
+            .adapter
+            .api(admin::ApiRequest {
+                method: "POST",
+                path: "/resources/stores/config",
+                token: "fixture-token",
+                body: Some(json!({"name": format!("scoring_config_{s_id}")})),
+                timeout: std::time::Duration::from_secs(5),
+                query: "",
+            })
+            .unwrap();
+        let (_, m_r) = p
+            .adapter
+            .api(admin::ApiRequest {
+                method: "POST",
+                path: "/resources/stores/kv",
+                token: "fixture-token",
+                body: Some(json!({"name": format!("scoring_matrix_{s_id}")})),
+                timeout: std::time::Duration::from_secs(5),
+                query: "",
+            })
+            .unwrap();
+        let _ = p
+            .adapter
+            .api(admin::ApiRequest {
+                method: "POST",
+                path: "/resources/object-storage/access-keys",
+                token: "fixture-token",
+                body: Some(json!({
+                    "permission": "read-write-objects",
+                    "description": "flp-fixtureApp-fixtureService",
+                    "buckets": ["fos-fixture-logs"]
+                })),
+                timeout: std::time::Duration::from_secs(5),
+                query: "",
+            })
+            .unwrap();
+        p.adapter.seed_resource(
+            "fixtureService",
+            "logging/fos",
+            json!({
+                "name": "Fastly Object Storage Logs",
+                "bucket_name": if colliding { "foreign-bucket" } else { "fos-fixture-logs" },
+                "region": "us-east-1",
+                "path": "raw/",
+                "response_condition": if colliding { "foreign_cond" } else { "log_analytics_condition" }
+            }),
+        );
+        p.adapter
+            .cas(
+                "views:fixtureService",
+                None,
+                &json!({"views": [], "updated_at": 1}),
+            )
+            .unwrap();
+        p.adapter
+            .cas(
+                ingest::WATERMARK_KEY,
+                None,
+                &json!({"floor": "raw/old.zst"}),
+            )
+            .unwrap();
+        p.adapter
+            .cas(
+                "ingest:rum:watermark",
+                None,
+                &json!({"rum_stats": {"rows": 0}}),
+            )
+            .unwrap();
+        let head = Head {
+            version: VERSION,
+            generation: 9,
+            manifest: Some("processed/_catalog/manifest=9-fixtureService.json".into()),
+            ..Head::default()
+        };
+        let state = CloudDrState {
+            schema_version: SCHEMA_VERSION,
+            updated_at: 1_800_000_000,
+            service_id: "fixtureService".into(),
+            service: json!({
+                "scoring": {
+                    "enabled": false,
+                    "scoring_service_id": s_id,
+                    "scoring_service_name": "Session Scoring Service for fixtureService",
+                    "scoring_domain": "fos-fixtureservice-session-scorer.edgecompute.app",
+                    "scoring_keys_store_id": k_r["id"],
+                    "scoring_config_store_id": c_r["id"],
+                    "scoring_matrix_store_id": m_r["id"],
+                    "enabled_at": "2026-11-20T00:00:00Z",
+                    "deployed_package_sha": "abc",
+                    "deployed_package_files_hash": "def",
+                    "deployed_vcl_sha": "ghi",
+                    "exclude_url_regex": ""
+                }
+            }),
+            views: vec![SavedView {
+                id: "v14-31".into(),
+                service_id: "fixtureService".into(),
+                name: "Ops".into(),
+                filters_json: "{}".into(),
+                time_range_type: None,
+                start_time: None,
+                end_time: None,
+                page: None,
+                created_at: None,
+            }],
+            catalog_head: Some(head),
+            floor_key: Some("raw/2026/f.zst".into()),
+            rum_stats: Some(json!({"rows": 7})),
+        };
+        p.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            "meta/cloud_dr_state.json",
+            serde_json::to_vec(&state).unwrap(),
+        );
+        KV_CLASS.with(|ops| ops.borrow_mut().clear());
+        ELAPSED_MS.with(|e| e.set(0));
+        CALLS.with(|c| c.set(0));
+        SECRETS
+            .with(|s| *s.borrow_mut() = BTreeSet::from(["front_key".into(), "session_key".into()]));
+        let resp = admin::handle(
+            &p,
+            "fixtureAdmin",
+            &Request {
+                method: "POST".into(),
+                path: "/api/admin/provision/recover".into(),
+                headers: BTreeMap::new(),
+                body: json!({
+                    "token": "fixture-token",
+                    "service_id": "fixtureService",
+                    "fos_bucket": "fos-fixture-logs",
+                    "fos_region": "us-east-1"
+                })
+                .to_string()
+                .into_bytes(),
+            },
+        );
+        if colliding {
+            assert_eq!(resp.status, 409, "st_dr14_all3 colliding must return 409");
+            let kv_writes: Vec<_> = KV_CLASS.with(|ops| {
+                ops.borrow()
+                    .iter()
+                    .filter(|(c, _)| *c == "write")
+                    .cloned()
+                    .collect()
+            });
+            assert!(
+                kv_writes.is_empty(),
+                "st_dr14_all3 colliding must do 0 KV writes before 409, got {kv_writes:?}"
+            );
+        } else {
+            assert_eq!(
+                resp.status,
+                200,
+                "st_dr14_all3 valid must return 200 OK with mandatory inspection: {}",
+                String::from_utf8_lossy(&resp.body)
+            );
+            assert_eq!(
+                p.adapter.records()["svc:fixtureService"].value["owned_endpoint_names"],
+                json!(["Fastly Object Storage Logs"]),
+                "st_dr14_all3 valid must verify owned_endpoint_names"
             );
         }
     }

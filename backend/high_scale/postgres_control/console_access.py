@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import threading
+import urllib.parse
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from typing import Any
 
@@ -33,10 +34,13 @@ _EXTRA_MAP_MASKED_KEYS = frozenset(
         "origin_ip",
         "cf_connecting_ip",
         "cf_connecting_ipv6",
+        "connecting_ip",
+        "connecting_ipv6",
         "x_real_ip",
         "x_client_ip",
         "x_cluster_client_ip",
         "x_original_forwarded_for",
+        "x_forwarded_client_ip",
         "forwarded",
         "forwarded_for",
         "authorization",
@@ -46,15 +50,19 @@ _EXTRA_MAP_MASKED_KEYS = frozenset(
         "x_api_key",
         "api_key",
         "access_token",
+        "x_access_token",
         "id_token",
         "refresh_token",
         "auth_token",
+        "x_auth_token",
         "csrf_token",
         "xsrf_token",
         "x_csrf_token",
         "x_xsrf_token",
         "session",
         "session_token",
+        "x_session_id",
+        "x_session_token",
         "cmcd.sid",
         "cmcd.cid",
         "cmcd.session",
@@ -64,11 +72,14 @@ _MAP_MASKED_KEYS = tuple(sorted(SHARED_PII_KEYS | CMCD_SESSION_ALIAS_KEYS | _EXT
 _MAP_MASKED_KEY_SET = frozenset(_MAP_MASKED_KEYS)
 _MAP_MASKED_NONWORD_KEYS = tuple(sorted({re.sub(r"[^a-z0-9]+", "", k.lower()) for k in _MAP_MASKED_KEYS}))
 _MAP_MASKED_NONWORD_SET = frozenset(_MAP_MASKED_NONWORD_KEYS)
-_PII_BRACKET_RE = re.compile(r"\[['\"`]?([^'\"`\]]+)['\"`]?\]")
+_PII_CAMEL_RE_1 = re.compile(r"([a-z0-9])([A-Z])")
+_PII_CAMEL_RE_2 = re.compile(r"([A-Z]+)([A-Z][a-z])")
+_PII_SPLIT_OUTER_RE = re.compile(r"[\[\]/:]+")
+_PII_SPLIT_ALL_RE = re.compile(r"[.\[\]/:]+")
 _PII_AFFIX_PREFIX_RE = re.compile(
-    r"^(?:_cf_)?(?:x?filter_(?:_?cf_)?)?(?:_cf_)?(?:(?:req|resp|bereq|beresp|obj)_http_|headers?_)?"
+    r"^(?:(?:x_?)?filter_|_?cf_|(?:req|resp|request|response|bereq|beresp|obj)_http_|http_|(?:req|resp|request|response)_|headers?_)+"
 )
-_PII_NUM_SUFFIX_RE = re.compile(r"_[0-9]+$")
+_PII_NUM_SUFFIX_RE = re.compile(r"_?[0-9]+$")
 
 
 def _is_console_pii_identifier(name: str) -> bool:
@@ -77,24 +88,24 @@ def _is_console_pii_identifier(name: str) -> bool:
         return False
     if raw in MASKED_KEYS or raw in _MAP_MASKED_KEY_SET or is_saved_view_pii_key(name):
         return True
-    unbracketed = _PII_BRACKET_RE.sub("", raw)
-    candidates = [raw]
-    if "." in unbracketed:
-        candidates.extend(seg.strip() for seg in unbracketed.split(".") if seg.strip())
-    for match in _PII_BRACKET_RE.finditer(raw):
-        if match.group(1).strip():
-            candidates.append(match.group(1).strip())
+    decoded = urllib.parse.unquote(name)
+    camel = _PII_CAMEL_RE_2.sub(r"\1_\2", _PII_CAMEL_RE_1.sub(r"\1_\2", decoded)).lower()
+    candidates = [raw, camel]
+    candidates.extend(_PII_SPLIT_OUTER_RE.split(camel))
+    candidates.extend(_PII_SPLIT_ALL_RE.split(camel))
     for seg in candidates:
-        clean = seg.strip(" \t'\"`")
-        if not clean:
+        if not seg:
             continue
-        raw_norm = re.sub(r"[^a-z0-9_]+", "_", clean)
-        canon = raw_norm.strip("_")
-        stripped = _PII_NUM_SUFFIX_RE.sub("", _PII_AFFIX_PREFIX_RE.sub("", raw_norm)).strip("_")
+        canon = re.sub(r"[^a-z0-9_]+", "_", seg).strip("_")
+        if not canon:
+            continue
+        no_digits = _PII_NUM_SUFFIX_RE.sub("", canon).strip("_")
+        stripped = _PII_NUM_SUFFIX_RE.sub("", _PII_AFFIX_PREFIX_RE.sub("", canon)).strip("_")
         if (
-            clean in _MAP_MASKED_KEY_SET
+            seg in _MAP_MASKED_KEY_SET
             or canon in _MAP_MASKED_KEY_SET
-            or stripped in _MAP_MASKED_KEY_SET
+            or (no_digits != "" and no_digits in _MAP_MASKED_KEY_SET)
+            or (stripped != "" and stripped in _MAP_MASKED_KEY_SET)
             or (stripped != "" and stripped.replace("_", "") in _MAP_MASKED_NONWORD_SET)
         ):
             return True
@@ -153,27 +164,34 @@ def _redaction(name: str, type_: str, keys: str) -> str | None:
         match = re.fullmatch(r"Map\((.+?),\s*(.+)\)", type_)
         if not match or "String" not in match.group(1) or "String" not in match.group(2):
             raise RuntimeError(f"cannot redact column {name} of type {type_}")
-        bracket_pat = _literal(r"\[([^\]]+)\]")
-        trim_quotes_pat = _literal("^['\"` \t]+|['\"` \t]+$")
-        affix_pat = _literal(
-            r"^(?:_cf_)?(?:x?filter_(?:_?cf_)?)?(?:_cf_)?(?:(?:req|resp|bereq|beresp|obj)_http_|headers?_)?"
+        k_decoded = "decodeURLComponent(k)"
+        camel1_pat = _literal(r"([a-z0-9])([A-Z])")
+        camel2_pat = _literal(r"([A-Z]+)([A-Z][a-z])")
+        camel_repl = _literal(r"\1_\2")
+        k_camel = (
+            f"lower(replaceRegexpAll(replaceRegexpAll({k_decoded}, {camel1_pat}, {camel_repl}), "
+            f"{camel2_pat}, {camel_repl}))"
         )
-        seg_clean = f"replaceRegexpAll(seg, {trim_quotes_pat}, '')"
-        seg_raw_norm = f"replaceRegexpAll({seg_clean}, '[^a-z0-9_]+', '_')"
-        seg_canon = f"trim(BOTH '_' FROM {seg_raw_norm})"
+        split_outer_pat = _literal(r"[\[\]/:]+")
+        split_all_pat = _literal(r"[.\[\]/:]+")
+        affix_pat = _literal(
+            r"^(?:(?:x_?)?filter_|_?cf_|(?:req|resp|request|response|bereq|beresp|obj)_http_|http_|(?:req|resp|request|response)_|headers?_)+"
+        )
+        seg_canon = "trimBoth(replaceRegexpAll(seg, '[^a-z0-9_]+', '_'), '_')"
+        seg_no_digits = f"trimBoth(replaceRegexpOne({seg_canon}, '_?[0-9]+$', ''), '_')"
         seg_stripped = (
-            f"trim(BOTH '_' FROM replaceRegexpOne(replaceRegexpOne({seg_raw_norm}, {affix_pat}, ''), '_[0-9]+$', ''))"
+            f"trimBoth(replaceRegexpOne(replaceRegexpOne({seg_canon}, {affix_pat}, ''), '_?[0-9]+$', ''), '_')"
         )
         nw_keys = ", ".join(_literal(nk) for nk in _MAP_MASKED_NONWORD_KEYS)
         candidates_expr = (
-            f"arrayConcat([lower(k)], "
-            f"splitByChar('.', replaceRegexpAll(lower(k), {bracket_pat}, '')), "
-            f"extractAll(lower(k), {bracket_pat}))"
+            f"arrayConcat([{k_camel}], "
+            f"splitByRegexp({split_outer_pat}, {k_camel}), "
+            f"splitByRegexp({split_all_pat}, {k_camel}))"
         )
-        cmcd_extra = " OR lower(k) = 'session'" if name.lower() == "cmcd" else ""
+        cmcd_extra = f" OR {k_camel} = 'session'" if name.lower() == "cmcd" else ""
         return (
             f"mapApply((k, v) -> (k, if((arrayExists(seg -> seg != '' AND ("
-            f"seg IN ({keys}) OR {seg_canon} IN ({keys}) OR {seg_stripped} IN ({keys}) "
+            f"seg IN ({keys}) OR {seg_canon} IN ({keys}) OR {seg_no_digits} IN ({keys}) OR {seg_stripped} IN ({keys}) "
             f"OR ({seg_stripped} != '' AND replaceRegexpAll({seg_stripped}, '_', '') IN ({nw_keys}))"
             f"), {candidates_expr}){cmcd_extra}) "
             f"AND NOT (isNull(v) OR v = ''), {redacted}, v)), `{name}`) AS `{name}`"

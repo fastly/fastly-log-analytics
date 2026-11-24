@@ -48,7 +48,6 @@ const SQL_KEYWORD_LIST = [
   "ORDER", "BETWEEN", "NULL", "TRUE", "FALSE", "OVER", "FILTER", "QUALIFY", "WINDOW",
   "ESCAPE",
 ] as const;
-const SQL_KEYWORD_NO_APOSTROPHE = new Set<string>(SQL_KEYWORD_LIST);
 
 const DUCKDB_BASE_TYPES = new Set<string>([
   "BOOL", "BOOLEAN",
@@ -60,8 +59,14 @@ const DUCKDB_BASE_TYPES = new Set<string>([
   "VARCHAR", "CHAR", "BPCHAR", "TEXT", "STRING", "BLOB", "BYTEA", "UUID",
   "DATE", "TIME", "TIMESTAMP", "TIMESTAMPTZ", "TIMESTAMP_S", "TIMESTAMP_MS",
   "TIMESTAMP_NS", "TIMESTAMP_TZ", "TIMETZ", "INTERVAL",
-  "BIT", "BITSTRING", "VARINT", "JSON", "LIST", "MAP", "STRUCT", "UNION", "ENUM", "ARRAY",
+  "BIT", "BITSTRING", "BIGNUM", "VARINT", "JSON", "LIST", "MAP", "STRUCT", "UNION", "ENUM", "ARRAY",
 ]);
+
+const COMPOUND_DUCKDB_TYPES = new Set<string>(["STRUCT", "UNION", "ENUM", "MAP"]);
+const NUMERIC_PARAM_DUCKDB_TYPES = new Set<string>([
+  "DECIMAL", "NUMERIC", "VARCHAR", "CHAR", "BPCHAR", "FLOAT", "TIME", "TIMESTAMP", "TIMESTAMPTZ",
+]);
+const SAFE_MIXED_CASE_TYPES = new Set<string>(["Bignum", "Varint"]);
 
 const DUCKDB_ALNUM_TYPES = new Set<string>([
   "INT8", "INT16", "INT32", "INT64", "INT128",
@@ -74,6 +79,7 @@ const SAFE_UPPERCASE_WORDS = new Set<string>([
   ...DUCKDB_BASE_TYPES,
   "HTTP", "HTTPS", "JSON", "IO", "DB", "SQL", "URL", "URI", "API", "TLS", "SSL",
   "KB", "MB", "GB", "TB", "B", "ID", "IP", "DNS", "TCP", "EOF", "NAN", "INF",
+  "OPFS", "WASM", "CDN", "FOS", "KV",
 ]);
 
 const SAFE_BYTE_UNITS = new Set<string>(["KiB", "MiB", "GiB", "TiB", "KB", "MB", "GB", "TB", "B"]);
@@ -91,6 +97,99 @@ const SAFE_CLAUSE_START_WORDS = new Set<string>([
   "Expected", "Cannot", "Unable", "No", "Function", "Scalar", "Aggregate", "Table",
   "Column", "View", "Schema", "Database", "Index", "Macro", "Referenced", "Overflow",
   "Candidate", "Did", "Line", "Like", "Map", "List", "Struct", "Duplicate",
+  "Ambiguous", "Unimplemented", "You", "Either", "Trailing", "Unrecognized",
+  "Union", "Enum", "Bignum", "Varint", "Primary", "Unique", "Foreign", "Check",
+]);
+
+const SAFE_CONTRACTIONS = new Set<string>([
+  "can't", "doesn't", "couldn't", "didn't", "isn't", "wasn't",
+  "won't", "don't", "haven't", "hasn't", "aren't", "weren't",
+]);
+
+const SAFE_CATALOG_OBJECTS = [
+  "Scalar Function", "Aggregate Function", "Table Function", "Pragma Function", "Copy Function",
+  "Table", "View", "Schema", "Database", "Column", "Index", "Sequence", "Type", "Macro",
+  "Function", "Catalog",
+] as const;
+
+const SAFE_CONSTRAINT_PHRASES = new Set<string>([
+  "primary key constraint",
+  "unique constraint",
+  "foreign key constraint",
+  "check constraint",
+  "not null constraint",
+]);
+
+const SAFE_KEY_PREFIX_WORDS = new Set<string>([
+  "primary", "foreign", "duplicate", "unique", "candidate", "partition", "sort", "join", "map",
+]);
+
+const DIAGNOSTIC_VOCAB = new Set<string>([
+  // Closed grammar glue
+  "a", "after", "an", "and", "are", "as", "at", "be", "because", "before", "between", "by",
+  "can", "cannot", "could", "did", "do", "does", "during", "for", "from", "had", "has", "have",
+  "if", "in", "into", "is", "it", "its", "may", "might", "must", "near", "need", "no", "not",
+  "of", "on", "only", "or", "out", "over", "per", "should", "since", "so", "than", "that",
+  "the", "there", "this", "to", "too", "unable", "under", "until", "up", "was", "were", "when",
+  "where", "which", "while", "will", "with", "within", "without", "would",
+  // Closed DuckDB / HTTP / Parquet / OPFS / Cloud-Engine diagnostic vocabulary
+  "abort", "aborted", "access", "according", "add", "addition", "aggregate", "allocate",
+  "allocation", "allowed", "ambiguous", "appear", "argument", "arguments", "array", "ascii", "assertion",
+  "available", "backend", "bad", "base64", "batch", "begin", "big", "binary", "binder", "bit",
+  "blob", "block", "blocked", "body", "boolean", "bound", "bounds", "bracket", "browser",
+  "budget", "buffer", "build", "byte", "bytes", "cache", "cached", "call", "cancel", "canceled",
+  "cancelled", "candidate", "capture", "cast", "casting", "casts", "catalog", "char",
+  "character", "characters", "check", "chunk", "class", "clause", "client", "close", "closed",
+  "code", "column", "columns", "command", "commit", "compatible", "compile", "complete",
+  "compression", "condition", "config", "conflict", "connect", "connection", "const",
+  "constant", "constraint", "contains", "context", "conversion", "convert", "corrupt",
+  "corrupted", "count", "create", "cursor", "data", "database", "date", "decimal", "decode",
+  "decoding", "default", "defined", "delete", "delimited", "denied", "depth", "destination",
+  "detail", "details", "directory", "disk", "distinct", "divide", "division", "dollar",
+  "double", "drop", "duplicate", "empty", "encode", "encoding", "end", "engine", "entry",
+  "enum", "eof", "equal", "error", "errors", "escape", "escaped", "eval", "exceed", "exceeded",
+  "exceeds", "exception", "exec", "execute", "execution", "exist", "exists", "expected",
+  "expired", "explicit", "expression", "extension", "external", "fail", "failed", "failure",
+  "false", "fatal", "fetch", "fetching", "field", "fields", "file", "files", "filter", "float",
+  "flush", "footer", "forbidden", "foreign", "format", "found", "frame", "free", "full",
+  "function", "functions", "gateway", "given", "global", "group", "handle", "handler",
+  "header", "headers", "heap", "hex", "host", "http", "https", "identifier", "illegal",
+  "implicit", "implicitly", "incompatible", "incomplete", "index", "init", "initialize",
+  "input", "insert", "int", "integer", "internal", "interrupted", "interval", "invalid", "io",
+  "item", "join", "json", "junk", "key", "keys", "kind", "large", "latin1", "left", "length",
+  "less", "limit", "limited", "line", "list", "literal", "load", "loading", "local", "lock",
+  "locked", "log", "long", "lookup", "macro", "magic", "malformed", "many", "map", "match",
+  "matched", "matches", "matching", "max", "maximum", "member", "members", "memory", "merge",
+  "message", "metadata", "method", "min", "minimum", "mismatch", "missing", "mode", "module",
+  "more", "multiple", "multiplication", "name", "named", "names", "namespace", "negative",
+  "nested", "network", "next", "node", "non", "none", "null", "number", "numeric", "object",
+  "offset", "op", "open", "operation", "operator", "opfs", "option", "order", "origin",
+  "output", "overflow", "page", "param", "parameter", "parameters", "parquet", "parse",
+  "parser", "parsing", "part", "partial", "partition", "path", "pattern", "pending",
+  "permission", "pipe", "plan", "pointer", "pool", "port", "position", "positive", "precision",
+  "prefix", "prepare", "primary", "process", "processing", "protocol", "proxy", "query",
+  "queue", "quota", "quote", "quoted", "range", "rate", "raw", "reach", "reachable", "read",
+  "reader", "reading", "ready", "record", "recursion", "ref", "reference", "referenced",
+  "refused", "regex", "register", "rejected", "relation", "remote", "remove", "repeat",
+  "replace", "reply", "request", "required", "reset", "resize", "resolve", "resource",
+  "response", "result", "retry", "return", "right", "rollback", "root", "row", "rows", "rule",
+  "run", "runtime", "scalar", "scale", "scan", "schema", "scope", "second", "seconds",
+  "section", "segment", "select", "sequence", "serialization", "serialize", "server",
+  "service", "session", "set", "short", "shutdown", "signed", "single", "size", "skip",
+  "slice", "slot", "small", "socket", "sort", "source", "space", "span", "specifier", "split",
+  "sql", "stack", "stage", "stale", "start", "state", "statement", "static", "status", "step",
+  "storage", "store", "stream", "strftime", "string", "strptime", "struct", "subquery",
+  "subtraction", "suffix", "sum", "support", "supported", "syntax", "system", "table",
+  "tables", "tag", "target", "task", "temp", "template", "temporary", "terminated", "text",
+  "thread", "threshold", "time", "timed", "timeout", "timestamp", "timezone", "tls", "total",
+  "trailing", "transaction", "transfer", "tree", "true", "truncate", "truncated", "tuple",
+  "type", "types", "unclosed", "underflow", "unexpected", "unicode", "unimplemented", "union",
+  "unique", "unit", "unknown", "unmatched", "unrecognized", "unsigned", "unsupported",
+  "unterminated", "update", "upstream", "uri", "url", "usage", "use", "used", "using", "utf8",
+  "valid", "validate", "validation", "value", "values", "varchar", "variable", "varint",
+  "vector", "version", "view", "violate", "violates", "violation", "virtual", "wait",
+  "waiting", "warning", "wasm", "window", "worker", "write", "writer", "writing", "wrong",
+  "zero",
 ]);
 
 const SAFE_DECODE_ENCODINGS = new Set<string>([
@@ -103,10 +202,7 @@ const SECRET_STEMS = new Set<string>([
 ]);
 const AUTH_SCHEMES = new Set<string>(["bearer", "basic", "digest", "token"]);
 
-const LETTER_RE = /\p{L}/u;
-const LOWER_LETTER_RE = /\p{Ll}/u;
 const WORD_CHAR_RE = /[\p{L}\p{N}_]/u;
-const CONTRACTION_RE = /^(?:s|t|d|m|re|ve|ll)$/i;
 const DOLLAR_TAG_CHAR_RE = /[A-Za-z0-9_\u0080-\uffff]/;
 const DOLLAR_TAG_START_RE = /[A-Za-z_\u0080-\uffff]/;
 
@@ -181,7 +277,11 @@ function redactDollarQuotedSpans(raw: string): string {
       }
       if (j < len && DOLLAR_TAG_START_RE.test(raw[j]!)) {
         j += 1;
-        while (j < len && DOLLAR_TAG_CHAR_RE.test(raw[j]!)) j += 1;
+        let tagLen = 1;
+        while (j < len && tagLen < 32 && DOLLAR_TAG_CHAR_RE.test(raw[j]!)) {
+          j += 1;
+          tagLen += 1;
+        }
         if (j < len && raw[j] === "$") {
           const tag = raw.slice(i, j + 1);
           const close = raw.indexOf(tag, j + 1);
@@ -197,26 +297,83 @@ function redactDollarQuotedSpans(raw: string): string {
   return parts.join("");
 }
 
-function scanDuckDbType(s: string, pos: number): number {
+function parseSanitizedDuckDbType(s: string, pos: number): { text: string; end: number } | null {
   const len = s.length;
   let i = pos;
-  while (i < len && (isAsciiAlpha(s[i]) || isAsciiDigit(s[i]) || s[i] === "_")) i += 1;
-  const base = s.slice(pos, i).toUpperCase();
-  if (!DUCKDB_BASE_TYPES.has(base)) return -1;
+  const baseLimit = Math.min(len, pos + 24);
+  while (i < baseLimit && (isAsciiAlpha(s[i]) || isAsciiDigit(s[i]) || s[i] === "_")) i += 1;
+  if (i === pos) return null;
+  if (i < len && (isAsciiAlpha(s[i]) || isAsciiDigit(s[i]) || s[i] === "_")) return null;
+  const rawBase = s.slice(pos, i);
+  const baseUpper = rawBase.toUpperCase();
+  if (!DUCKDB_BASE_TYPES.has(baseUpper)) return null;
+  let out = SAFE_MIXED_CASE_TYPES.has(rawBase) ? rawBase : baseUpper;
+
   if (i < len && s[i] === "(") {
-    let depth = 1;
-    i += 1;
-    while (i < len && depth > 0 && s[i] !== "\n" && s[i] !== "\r") {
-      if (s[i] === "(") depth += 1;
-      else if (s[i] === ")") depth -= 1;
+    if (COMPOUND_DUCKDB_TYPES.has(baseUpper)) {
+      let depth = 1;
       i += 1;
+      while (i < len && depth > 0 && s[i] !== "\n" && s[i] !== "\r") {
+        if (s[i] === "'" || s[i] === '"') {
+          const q = s[i]!;
+          i += 1;
+          while (i < len && s[i] !== "\n" && s[i] !== "\r") {
+            if (s[i] === q) {
+              i += 1;
+              if (s[i] === q) {
+                i += 1;
+                continue;
+              }
+              break;
+            }
+            i += 1;
+          }
+          continue;
+        }
+        if (s[i] === "(") depth += 1;
+        else if (s[i] === ")") depth -= 1;
+        i += 1;
+      }
+      if (depth !== 0) return null;
+      out = `${out}([redacted])`;
+    } else if (NUMERIC_PARAM_DUCKDB_TYPES.has(baseUpper)) {
+      const paramStart = i;
+      const paramLimit = Math.min(len, i + 26);
+      i += 1;
+      while (i < paramLimit && s[i] !== ")") {
+        const c = s[i]!;
+        if (!isAsciiDigit(c) && c !== "," && c !== " ") return null;
+        i += 1;
+      }
+      if (i >= paramLimit || s[i] !== ")") return null;
+      i += 1;
+      out += s.slice(paramStart, i);
+    } else {
+      return null;
     }
-    if (depth !== 0) return -1;
   }
-  while (i + 1 < len && s[i] === "[" && s[i + 1] === "]") {
-    i += 2;
+
+  let dims = 0;
+  while (dims < 8 && i < len && s[i] === "[") {
+    if (s[i + 1] === "]") {
+      out += "[]";
+      i += 2;
+      dims += 1;
+      continue;
+    }
+    let d = i + 1;
+    const dLimit = Math.min(len, d + 6);
+    while (d < dLimit && isAsciiDigit(s[d])) d += 1;
+    if (d > i + 1 && d < len && s[d] === "]") {
+      out += s.slice(i, d + 1);
+      i = d + 1;
+      dims += 1;
+      continue;
+    }
+    break;
   }
-  return i;
+
+  return { text: out, end: i };
 }
 
 function sanitizeCastingSuffix(tail: string): string {
@@ -236,7 +393,16 @@ function sliceFirstLine(s: string): string {
   return nl === -1 ? s : s.slice(0, nl);
 }
 
-// Stage 1: Closed-vocabulary O(N) canonicalizer for DuckDB value/pattern/identifier templates.
+function isSafeDiagnosticPhrase(phrase: string): boolean {
+  const trimmed = phrase.trim();
+  if (!trimmed || trimmed.length > 64 || !/^[a-z]+(?: [a-z-]+)*$/.test(trimmed)) return false;
+  for (const part of trimmed.split(/[\s-]+/)) {
+    if (!part || !DIAGNOSTIC_VOCAB.has(part)) return false;
+  }
+  return true;
+}
+
+// Stage 1: Strictly header-anchored O(N) canonicalizer for DuckDB value/pattern/identifier templates.
 function canonicalizeDuckDbTemplates(rawInput: string): { text: string; canonicalized: boolean } {
   if (rawInput.length > MAX_SCAN_INPUT_LEN) {
     const headLine = sliceFirstLine(rawInput.slice(0, 128));
@@ -248,76 +414,122 @@ function canonicalizeDuckDbTemplates(rawInput: string): { text: string; canonica
   }
 
   const s = redactDollarQuotedSpans(stripDiagnosticLineTail(rawInput));
+  const headLine = sliceFirstLine(s);
+  const hdrColon = detectSafeErrorHeaderEnd(headLine);
+  const hdrLower = hdrColon !== -1 ? headLine.slice(0, hdrColon).trim().toLowerCase() : "";
+  let bodyStart = hdrColon !== -1 ? hdrColon + 1 : 0;
+  while (bodyStart < s.length && (s[bodyStart] === " " || s[bodyStart] === "\t")) {
+    bodyStart += 1;
+  }
+  const prefix = s.slice(0, bodyStart);
+  const bodyLine1 = headLine.slice(bodyStart);
+  const bodyLine1Lower = bodyLine1.toLowerCase();
 
-  const mjIdx = s.indexOf("Malformed JSON");
-  if (mjIdx !== -1) {
-    const inputIdx = s.indexOf("Input:", mjIdx + 14);
+  if (s.startsWith("Malformed JSON", bodyStart)) {
+    const inputIdx = headLine.indexOf("Input:", bodyStart + 14);
     if (inputIdx !== -1) {
-      return { text: `${s.slice(0, inputIdx + 6)} [redacted]`, canonicalized: true };
+      return { text: `${headLine.slice(0, inputIdx + 6)} [redacted]`, canonicalized: true };
     }
   }
 
-  const cpsIdx = s.indexOf("Could not parse string ");
-  if (cpsIdx !== -1) {
+  if (s.startsWith("Could not parse string ", bodyStart)) {
     const accMarker = " according to format specifier ";
     const accIdx = s.lastIndexOf(accMarker);
-    if (accIdx > cpsIdx) {
-      return { text: `${s.slice(0, cpsIdx + 23)}[redacted]${accMarker}[redacted]`, canonicalized: true };
+    if (accIdx > bodyStart + 23) {
+      return { text: `${prefix}Could not parse string [redacted]${accMarker}[redacted]`, canonicalized: true };
     }
+    return { text: `${prefix}Could not parse string [redacted]`, canonicalized: true };
+  }
+
+  if (s.startsWith("Failed to parse format specifier ", bodyStart)) {
+    return { text: `${prefix}Failed to parse format specifier [redacted]`, canonicalized: true };
   }
 
   const cncsMarker = "Could not convert string ";
-  const cncsIdx = s.indexOf(cncsMarker);
-  if (cncsIdx !== -1) {
-    let searchEnd = s.length;
-    while (searchEnd > cncsIdx) {
-      const toIdx = s.lastIndexOf(" to ", searchEnd - 1);
-      if (toIdx <= cncsIdx) break;
-      const typeEnd = scanDuckDbType(s, toIdx + 4);
-      if (typeEnd !== -1) {
-        const afterLine = sliceFirstLine(s.slice(typeEnd));
+  if (s.startsWith(cncsMarker, bodyStart)) {
+    const lastNl = Math.max(s.lastIndexOf("\n"), s.lastIndexOf("\r"));
+    const finalLineStart = Math.max(bodyStart + cncsMarker.length, lastNl + 1);
+    const toIdx = s.lastIndexOf(" to ");
+    if (toIdx >= finalLineStart) {
+      const parsed = parseSanitizedDuckDbType(s, toIdx + 4);
+      if (parsed) {
+        const afterLine = s.slice(parsed.end);
         if (afterLine === "" || afterLine.startsWith(" when casting") || /^[,.;:)\s]*$/.test(afterLine)) {
-          const typeText = s.slice(toIdx + 4, typeEnd);
           return {
-            text: `${s.slice(0, cncsIdx + cncsMarker.length)}[redacted] to ${typeText}${sanitizeCastingSuffix(afterLine)}`,
+            text: `${prefix}${cncsMarker}[redacted] to ${parsed.text}${sanitizeCastingSuffix(afterLine)}`,
             canonicalized: true,
           };
         }
       }
-      searchEnd = toIdx;
     }
+    return { text: `${prefix}${cncsMarker}[redacted] to [redacted]`, canonicalized: true };
   }
 
-  const typeIdx = s.indexOf("Type ");
-  if (typeIdx !== -1) {
-    const srcEnd = scanDuckDbType(s, typeIdx + 5);
-    if (srcEnd !== -1 && s.startsWith(" with value ", srcEnd)) {
-      const cantIdx = s.lastIndexOf(" can't be cast ");
-      if (cantIdx > srcEnd) {
-        const destMarker = "destination type ";
-        const destIdx = s.indexOf(destMarker, cantIdx);
-        if (destIdx !== -1) {
-          const dstEnd = scanDuckDbType(s, destIdx + destMarker.length);
-          if (dstEnd !== -1) {
+  if (s.startsWith("Type ", bodyStart)) {
+    const src = parseSanitizedDuckDbType(s, bodyStart + 5);
+    if (src) {
+      if (s.startsWith(" with value ", src.end)) {
+        const cantIdx = s.lastIndexOf(" can't be cast ");
+        if (cantIdx > src.end) {
+          const destMarker = "destination type ";
+          const destIdx = s.indexOf(destMarker, cantIdx);
+          if (destIdx !== -1) {
             const bridge = s.slice(cantIdx, destIdx + destMarker.length);
             if (/^ can't be cast (?:to the |because the value is out of range for the )destination type $/.test(bridge)) {
-              const dstText = s.slice(destIdx + destMarker.length, dstEnd);
-              const afterLine = sliceFirstLine(s.slice(dstEnd));
+              const dst = parseSanitizedDuckDbType(s, destIdx + destMarker.length);
+              const afterLine = dst ? sliceFirstLine(s.slice(dst.end)) : "";
               return {
-                text: `${s.slice(0, srcEnd + 12)}[redacted]${bridge}${dstText}${sanitizeCastingSuffix(afterLine)}`,
+                text: `${prefix}Type ${src.text} with value [redacted]${bridge}${dst ? dst.text : "[redacted]"}${sanitizeCastingSuffix(afterLine)}`,
                 canonicalized: true,
               };
             }
           }
         }
+        return { text: `${prefix}Type ${src.text} with value [redacted]`, canonicalized: true };
+      }
+      if (s.startsWith(" can't be cast as ", src.end)) {
+        const dst = parseSanitizedDuckDbType(s, src.end + 18);
+        return {
+          text: `${prefix}Type ${src.text} can't be cast as ${dst ? dst.text : "[redacted]"}`,
+          canonicalized: true,
+        };
+      }
+      if (s.startsWith(" can't be cast ", src.end)) {
+        const destMarker = "destination type ";
+        const destIdx = s.indexOf(destMarker, src.end);
+        if (destIdx !== -1) {
+          const dst = parseSanitizedDuckDbType(s, destIdx + destMarker.length);
+          return {
+            text: `${prefix}Type ${src.text} can't be cast to ${dst ? dst.text : "[redacted]"}`,
+            canonicalized: true,
+          };
+        }
+        return { text: `${prefix}Type ${src.text} can't be cast [redacted]`, canonicalized: true };
       }
     }
   }
 
-  const lower = s.toLowerCase();
-  const ffIdx = lower.indexOf("field format:");
-  const fvorIdx = lower.indexOf("field value out of range:");
-  const fieldColonIdx = ffIdx !== -1 ? ffIdx + 12 : fvorIdx !== -1 ? fvorIdx + 24 : -1;
+  const unimplCastMarker = "Unimplemented type for cast (";
+  if (s.startsWith(unimplCastMarker, bodyStart)) {
+    const src = parseSanitizedDuckDbType(s, bodyStart + unimplCastMarker.length);
+    if (src && s.startsWith(" -> ", src.end)) {
+      const dst = parseSanitizedDuckDbType(s, src.end + 4);
+      return {
+        text: `${prefix}${unimplCastMarker}${src.text} -> ${dst ? dst.text : "[redacted]"})`,
+        canonicalized: true,
+      };
+    }
+    return { text: `${prefix}${unimplCastMarker}[redacted])`, canonicalized: true };
+  }
+
+  const ffRel = bodyLine1Lower.indexOf("field format:");
+  const fvorRel = bodyLine1Lower.indexOf("field value out of range:");
+  let fieldColonIdx = -1;
+  if (ffRel >= 0 && ffRel <= 32 && (ffRel === 0 || isSafeDiagnosticPhrase(bodyLine1Lower.slice(0, ffRel)))) {
+    fieldColonIdx = bodyStart + ffRel + 12;
+  } else if (fvorRel >= 0 && fvorRel <= 32 && (fvorRel === 0 || isSafeDiagnosticPhrase(bodyLine1Lower.slice(0, fvorRel)))) {
+    fieldColonIdx = bodyStart + fvorRel + 24;
+  }
   if (fieldColonIdx !== -1) {
     const expMarker = ", expected format is (";
     const expIdx = s.lastIndexOf(expMarker);
@@ -333,41 +545,42 @@ function canonicalizeDuckDbTemplates(rawInput: string): { text: string; canonica
         };
       }
     }
+    return { text: `${s.slice(0, fieldColonIdx + 1)} [redacted]`, canonicalized: true };
   }
 
   const cndsMarker = "Could not decode string ";
-  const cndsIdx = s.indexOf(cndsMarker);
-  if (cndsIdx !== -1) {
-    let searchEnd = s.length;
-    while (searchEnd > cndsIdx) {
-      const asIdx = s.lastIndexOf(" as ", searchEnd - 1);
-      if (asIdx <= cndsIdx) break;
+  if (s.startsWith(cndsMarker, bodyStart)) {
+    const lastNl = Math.max(s.lastIndexOf("\n"), s.lastIndexOf("\r"));
+    const finalLineStart = Math.max(bodyStart + cndsMarker.length, lastNl + 1);
+    const asIdx = s.lastIndexOf(" as ");
+    if (asIdx >= finalLineStart) {
       let k = asIdx + 4;
-      while (k < s.length && (isAsciiAlpha(s[k]) || isAsciiDigit(s[k]) || s[k] === "_")) k += 1;
+      const encLimit = Math.min(s.length, k + 16);
+      while (k < encLimit && (isAsciiAlpha(s[k]) || isAsciiDigit(s[k]) || s[k] === "_")) k += 1;
       const enc = s.slice(asIdx + 4, k).toLowerCase();
       if (SAFE_DECODE_ENCODINGS.has(enc) && (k === s.length || s[k] === ":" || /\s/.test(s[k]!))) {
-        return { text: `${s.slice(0, cndsIdx + cndsMarker.length)}[redacted] as ${enc}`, canonicalized: true };
+        return { text: `${prefix}${cndsMarker}[redacted] as ${enc}`, canonicalized: true };
       }
-      searchEnd = asIdx;
     }
+    return { text: `${prefix}${cndsMarker}[redacted]`, canonicalized: true };
   }
 
-  const invIdx = lower.indexOf("invalid ");
-  if (invIdx !== -1) {
-    let p = invIdx + 8;
+  if (bodyLine1Lower.startsWith("invalid ")) {
+    const lower = s.toLowerCase();
+    let p = bodyStart + 8;
     let words = 0;
     let wordEnd = p;
-    while (words < 3 && p < s.length) {
-      while (p < s.length && s[p] === " ") p += 1;
+    while (words < 3 && p < headLine.length) {
+      while (p < headLine.length && s[p] === " ") p += 1;
       const ws = p;
-      while (p < s.length && (isAsciiAlpha(s[p]) || s[p] === "_")) p += 1;
+      while (p < headLine.length && (isAsciiAlpha(s[p]) || s[p] === "_")) p += 1;
       if (p === ws || s[p] !== " ") break;
       const w = lower.slice(ws, p);
-      if (w === "in" || w === "when" || w === "at" || w === "expected") break;
+      if (w === "in" || w === "when" || w === "at" || w === "expected" || !DIAGNOSTIC_VOCAB.has(w)) break;
       words += 1;
       wordEnd = p;
     }
-    if (words >= 1) {
+    if (words >= 1 && s[p] !== ":") {
       for (const anchor of [" in column", " when casting", " at position", " expected"]) {
         const aIdx = lower.lastIndexOf(anchor);
         if (aIdx > wordEnd) {
@@ -386,174 +599,123 @@ function canonicalizeDuckDbTemplates(rawInput: string): { text: string; canonica
     }
   }
 
-  const wnMarker = " with name ";
-  const dneMarker = " does not exist";
-  const wnIdx = s.indexOf(wnMarker);
-  if (wnIdx !== -1) {
-    const dneIdx = s.indexOf(dneMarker, wnIdx + wnMarker.length);
-    if (dneIdx !== -1) {
-      const restLine = sliceFirstLine(s.slice(dneIdx));
-      const bang = restLine.startsWith(`${dneMarker}!`) ? "!" : "";
-      return { text: `${s.slice(0, wnIdx + wnMarker.length)}[redacted]${dneMarker}${bang}`, canonicalized: true };
+  for (const catalogObj of SAFE_CATALOG_OBJECTS) {
+    const catPrefix = `${catalogObj} with name `;
+    if (bodyLine1.startsWith(catPrefix)) {
+      const dneMarker = " does not exist";
+      const dneIdx = headLine.lastIndexOf(dneMarker);
+      if (dneIdx > bodyStart + catPrefix.length) {
+        const bang = headLine.startsWith(`${dneMarker}!`, dneIdx) ? "!" : "";
+        return { text: `${prefix}${catPrefix}[redacted]${dneMarker}${bang}`, canonicalized: true };
+      }
+      return { text: `${prefix}${catPrefix}[redacted]`, canonicalized: true };
     }
   }
 
-  const ovIdx = s.indexOf("Overflow in ");
-  if (ovIdx !== -1) {
-    const lp = s.indexOf("(", ovIdx + 12);
-    const rp = lp !== -1 ? s.lastIndexOf(")") : -1;
-    if (lp !== -1 && rp > lp) {
-      const bang = s[rp + 1] === "!" ? "!" : "";
-      return { text: `${s.slice(0, lp)}([redacted])${bang}`, canonicalized: true };
+  if (s.startsWith("Overflow in ", bodyStart)) {
+    const lp = headLine.indexOf("(", bodyStart + 12);
+    const rp = lp !== -1 ? headLine.lastIndexOf(")") : -1;
+    if (lp !== -1 && rp > lp && !headLine.slice(bodyStart + 12, lp).includes(":")) {
+      const bang = headLine[rp + 1] === "!" ? "!" : "";
+      return { text: `${headLine.slice(0, lp)}([redacted])${bang}`, canonicalized: true };
     }
   }
 
-  for (const tailMarker of [" at or near ", " match the pattern ", "JSON path error near "]) {
-    const mIdx = s.indexOf(tailMarker);
-    if (mIdx !== -1) {
-      return { text: `${s.slice(0, mIdx + tailMarker.length)}[redacted]`, canonicalized: true };
-    }
-  }
-
-  const dupIdx = s.indexOf("Duplicate key ");
-  if (dupIdx !== -1) {
-    const violIdx = s.indexOf(" violates ", dupIdx + 14);
-    if (violIdx !== -1) {
+  const noFuncMarker = "No function matches the given name and argument types '";
+  if (s.startsWith(noFuncMarker, bodyStart)) {
+    const afterOpen = bodyStart + noFuncMarker.length;
+    const closeDot = headLine.lastIndexOf("'.");
+    const closeQuote = closeDot >= afterOpen ? closeDot : headLine.lastIndexOf("'");
+    if (closeQuote >= afterOpen && headLine.slice(closeQuote).startsWith("'. You might need to add explicit type casts.")) {
       return {
-        text: `${s.slice(0, dupIdx + 14)}[redacted]${sliceFirstLine(s.slice(violIdx))}`,
+        text: `${prefix}No function matches the given name and argument types [redacted]. You might need to add explicit type casts.`,
         canonicalized: true,
       };
+    }
+    return {
+      text: `${prefix}No function matches the given name and argument types [redacted]`,
+      canonicalized: true,
+    };
+  }
+
+  if (s.startsWith("Referenced column ", bodyStart)) {
+    const nfIdx = headLine.lastIndexOf(" not found in FROM clause");
+    if (nfIdx > bodyStart + 18) {
+      return { text: `${prefix}Referenced column [redacted] not found in FROM clause!`, canonicalized: true };
+    }
+    return { text: `${prefix}Referenced column [redacted] not found`, canonicalized: true };
+  }
+
+  if (s.startsWith("Ambiguous reference to column name ", bodyStart)) {
+    return { text: `${prefix}Ambiguous reference to column name [redacted]`, canonicalized: true };
+  }
+
+  if (s.startsWith("Table ", bodyStart)) {
+    const dnhIdx = headLine.lastIndexOf(" does not have a column named ");
+    if (dnhIdx > bodyStart + 6) {
+      return { text: `${prefix}Table [redacted] does not have a column named [redacted]`, canonicalized: true };
+    }
+  }
+
+  if (s.startsWith("column ", bodyStart) || s.startsWith("Column ", bodyStart)) {
+    const gbMarker = " must appear in the GROUP BY clause";
+    const gbIdx = headLine.lastIndexOf(gbMarker);
+    if (gbIdx > bodyStart + 7) {
+      const hasAgg = headLine.slice(gbIdx).startsWith(`${gbMarker} or must be part of an aggregate function`);
+      return {
+        text: `${prefix}column [redacted]${gbMarker}${hasAgg ? " or must be part of an aggregate function." : ""}`,
+        canonicalized: true,
+      };
+    }
+  }
+
+  if (s.startsWith("Duplicate key ", bodyStart)) {
+    const violIdx = headLine.lastIndexOf(" violates ");
+    if (violIdx > bodyStart + 14) {
+      const rawConstraint = headLine.slice(violIdx + 10).trim();
+      const hasDot = rawConstraint.endsWith(".");
+      const normalized = (hasDot ? rawConstraint.slice(0, -1) : rawConstraint).toLowerCase();
+      const safeConstraint = SAFE_CONSTRAINT_PHRASES.has(normalized)
+        ? `${normalized}${hasDot ? "." : ""}`
+        : "[redacted]";
+      return {
+        text: `${prefix}Duplicate key [redacted] violates ${safeConstraint}`,
+        canonicalized: true,
+      };
+    }
+    return { text: `${prefix}Duplicate key [redacted]`, canonicalized: true };
+  }
+
+  const noFilesMarker = "No files found that match the pattern ";
+  if (s.startsWith(noFilesMarker, bodyStart)) {
+    return { text: `${prefix}${noFilesMarker}[redacted]`, canonicalized: true };
+  }
+
+  const jsonPathMarker = "JSON path error near ";
+  if (s.startsWith(jsonPathMarker, bodyStart)) {
+    return { text: `${prefix}${jsonPathMarker}[redacted]`, canonicalized: true };
+  }
+
+  if (hdrLower === "" || hdrLower === "parser error") {
+    const aonMarker = " at or near ";
+    const aonIdx = headLine.indexOf(aonMarker, bodyStart);
+    if (aonIdx > bodyStart && isSafeDiagnosticPhrase(headLine.slice(bodyStart, aonIdx))) {
+      return { text: `${headLine.slice(0, aonIdx + aonMarker.length)}[redacted]`, canonicalized: true };
     }
   }
 
   return { text: s, canonicalized: false };
 }
 
-function extractBoundedPrevWord(line: string, idx: number): string {
-  let start = idx;
-  const floor = Math.max(0, idx - 24);
-  while (start > floor && WORD_CHAR_RE.test(line[start - 1]!)) {
-    start -= 1;
-  }
-  if (start === floor && start > 0 && WORD_CHAR_RE.test(line[start - 1]!)) return "";
-  return line.slice(start, idx);
-}
-
-function extractBoundedAfterLetters(
-  line: string,
-  idx: number,
-): { letters: string; fullLen: number; atBoundary: boolean } {
-  let end = idx;
-  const ceil = Math.min(line.length, idx + 24);
-  while (end < ceil && LETTER_RE.test(line[end]!)) {
-    end += 1;
-  }
-  let possessEnd = end;
-  if (end + 1 < line.length && line[end] === "'" && (line[end + 1] === "s" || line[end + 1] === "S")) {
-    possessEnd = end + 2;
-  }
-  const nextCh = line[possessEnd];
-  const atBoundary = nextCh === undefined || /[\s,.;:!?)\]}]/.test(nextCh);
-  return { letters: line.slice(idx, end), fullLen: possessEnd - idx, atBoundary };
-}
-
-function isMidWordApostropheO1(line: string, pos: number): boolean {
-  if (pos <= 0 || pos + 1 >= line.length) return false;
-  if (!LETTER_RE.test(line[pos - 1]!) || !LETTER_RE.test(line[pos + 1]!)) return false;
-  const stem = extractBoundedPrevWord(line, pos);
-  if (!stem || !/^\p{L}+$/u.test(stem) || SQL_KEYWORD_NO_APOSTROPHE.has(stem.toUpperCase())) return false;
-  const { letters, atBoundary } = extractBoundedAfterLetters(line, pos + 1);
-  if (!atBoundary) return false;
-  return CONTRACTION_RE.test(letters) || letters.length >= 2;
-}
-
-// Mark `\'` inside E'...' / U&'...' in one O(N) forward pass so suffix quote parity is exact.
-function markEscapedSingleQuotes(line: string): Uint8Array | null {
-  if (!line.includes("\\")) return null;
-  const len = line.length;
-  const escaped = new Uint8Array(len);
-  let i = 0;
-  while (i < len) {
-    const prevWord = i > 0 && WORD_CHAR_RE.test(line[i - 1]!);
-    const typedLen = prevWord
-      ? 0
-      : (line[i] === "U" || line[i] === "u") && line[i + 1] === "&" && line[i + 2] === "'"
-        ? 3
-        : (line[i] === "E" || line[i] === "e") && line[i + 1] === "'"
-          ? 2
-          : 0;
-    if (typedLen > 0) {
-      i += typedLen;
-      while (i < len) {
-        if (line[i] === "\\" && i + 1 < len) {
-          if (line[i + 1] === "'") escaped[i + 1] = 1;
-          i += 2;
-          continue;
-        }
-        if (line[i] === "'") {
-          if (line[i + 1] === "'") {
-            i += 2;
-            continue;
-          }
-          i += 1;
-          break;
-        }
-        i += 1;
-      }
-      continue;
-    }
-    i += 1;
-  }
-  return escaped;
-}
-
-function buildSuffixNonApostropheQuotes(line: string): Int32Array {
-  const len = line.length;
-  const escaped = markEscapedSingleQuotes(line);
-  const suffix = new Int32Array(len + 1);
-  let i = len - 1;
-  while (i >= 0) {
-    suffix[i] = suffix[i + 1]!;
-    if (escaped && escaped[i] === 1) {
-      i -= 1;
-      continue;
-    }
-    if (line[i] === "'" && i > 0 && line[i - 1] === "'" && !(escaped && escaped[i - 1] === 1)) {
-      suffix[i] = suffix[i + 1]! + 1;
-      suffix[i - 1] = suffix[i]! + 1;
-      i -= 2;
-      continue;
-    }
-    if (line[i] === "'" && !isMidWordApostropheO1(line, i)) {
-      suffix[i] = suffix[i + 1]! + 1;
-    }
-    i -= 1;
-  }
-  return suffix;
-}
-
-function isStandaloneWordApostropheO1(line: string, pos: number, suffixQuotes: Int32Array): boolean {
-  const stem = extractBoundedPrevWord(line, pos);
-  if (!stem || !/^\p{L}+$/u.test(stem) || SQL_KEYWORD_NO_APOSTROPHE.has(stem.toUpperCase())) {
-    return false;
-  }
-  if (pos + 1 < line.length && LETTER_RE.test(line[pos + 1]!)) {
-    const { letters, fullLen, atBoundary } = extractBoundedAfterLetters(line, pos + 1);
-    if (!atBoundary) return false;
-    if (CONTRACTION_RE.test(letters) || letters.length >= 2) {
-      if (stem.length >= 2 || !isSqlPrefixChar(stem)) return true;
-      return suffixQuotes[pos + 1 + fullLen]! % 2 === 0;
-    }
-  }
-  if (
-    stem.length >= 2
-    && (stem.endsWith("s") || stem.endsWith("S"))
-    && LOWER_LETTER_RE.test(stem[stem.length - 2]!)
-    && (pos + 1 >= line.length || /\s/.test(line[pos + 1]!))
-  ) {
-    return true;
-  }
-  return false;
+function matchSafeContractionLen(line: string, pos: number): number {
+  if (pos > 0 && WORD_CHAR_RE.test(line[pos - 1]!)) return 0;
+  let end = pos;
+  const limit = Math.min(line.length, pos + 10);
+  while (end < limit && (isAsciiAlpha(line[end]) || line[end] === "'")) end += 1;
+  const tok = line.slice(pos, end);
+  if (!tok.includes("'") || !SAFE_CONTRACTIONS.has(tok)) return 0;
+  if (end < line.length && !/[\s,.;:!?)\]}]/.test(line[end]!)) return 0;
+  return end - pos;
 }
 
 function redactPostColonDiagnosticTail(line1: string): string {
@@ -564,10 +726,20 @@ function redactPostColonDiagnosticTail(line1: string): string {
   else if (lower.startsWith("regex error:")) afterHeader = 12;
   if (afterHeader === -1) return line1;
   for (let i = afterHeader; i < line1.length; i += 1) {
-    const ch = line1[i]!;
-    if (ch === "'" || ch === '"' || ch === "`") break;
-    if (line1.startsWith("[redacted]", i) || line1.startsWith("[url]", i)) break;
-    if (ch === ":") {
+    if (line1.startsWith("[redacted]", i)) {
+      i += 9;
+      continue;
+    }
+    if (line1.startsWith("[url]", i)) {
+      i += 4;
+      continue;
+    }
+    const v6End = tryScanIpv6(line1, i);
+    if (v6End !== -1) {
+      i = v6End - 1;
+      continue;
+    }
+    if (line1[i] === ":") {
       if (line1[i + 1] === ":") {
         i += 1;
         continue;
@@ -578,9 +750,8 @@ function redactPostColonDiagnosticTail(line1: string): string {
   return line1;
 }
 
-// Stage 2A: O(N) strict pair-by-pair quote & URL scanner (never skips quotes across spans).
+// Stage 2A: O(N) strict pair-by-pair quote & URL scanner (closed contraction allowlist only).
 function redactQuotesAndUrlsLine(line1: string): string {
-  const suffixQuotes = buildSuffixNonApostropheQuotes(line1);
   const parts: string[] = [];
   let outChars = 0;
   let i = 0;
@@ -597,6 +768,14 @@ function redactQuotesAndUrlsLine(line1: string): string {
       parts.push("[url]");
       outChars += 5;
       i += 5;
+      continue;
+    }
+    const contractionLen = matchSafeContractionLen(line1, i);
+    if (contractionLen > 0) {
+      const tok = line1.slice(i, i + contractionLen);
+      parts.push(tok);
+      outChars += contractionLen;
+      i += contractionLen;
       continue;
     }
     if (isAsciiAlpha(line1[i]) && (i === 0 || !WORD_CHAR_RE.test(line1[i - 1]!))) {
@@ -617,14 +796,6 @@ function redactQuotesAndUrlsLine(line1: string): string {
       }
     }
     const prevWord = i > 0 && WORD_CHAR_RE.test(line1[i - 1]!);
-    if (!prevWord && isSqlPrefixChar(line1[i]) && line1[i + 1] === "'" && isStandaloneWordApostropheO1(line1, i + 1, suffixQuotes)) {
-      const { fullLen } = extractBoundedAfterLetters(line1, i + 2);
-      const tok = line1.slice(i, i + 2 + fullLen);
-      parts.push(tok);
-      outChars += tok.length;
-      i += 2 + fullLen;
-      continue;
-    }
     const typedLen = prevWord
       ? 0
       : (line1[i] === "U" || line1[i] === "u") && line1[i + 1] === "&" && line1[i + 2] === "'"
@@ -632,16 +803,7 @@ function redactQuotesAndUrlsLine(line1: string): string {
         : isSqlPrefixChar(line1[i]) && line1[i + 1] === "'"
           ? 2
           : 0;
-    const isApostrophe = line1[i] === "'" && prevWord && isStandaloneWordApostropheO1(line1, i, suffixQuotes);
-    if (typedLen > 0 && isStandaloneWordApostropheO1(line1, i + typedLen - 1, suffixQuotes)) {
-      const { fullLen } = extractBoundedAfterLetters(line1, i + typedLen);
-      const tok = line1.slice(i, i + typedLen + fullLen);
-      parts.push(tok);
-      outChars += tok.length;
-      i += typedLen + fullLen;
-      continue;
-    }
-    if (typedLen > 0 || (line1[i] === "'" && !isApostrophe)) {
+    if (typedLen > 0 || line1[i] === "'") {
       const firstCh = line1[i];
       const isEscapeSingle = typedLen > 0 && (firstCh === "E" || firstCh === "e" || firstCh === "U" || firstCh === "u");
       parts.push("[redacted]");
@@ -714,23 +876,6 @@ function tryScanIpv4(s: string, pos: number): number {
   }
   if (i < s.length && (isAsciiDigit(s[i]) || s[i] === ".")) return -1;
   return i;
-}
-
-function tryScanClockTime(s: string, pos: number): number {
-  if (pos > 0 && (isAsciiAlpha(s[pos - 1]) || isAsciiDigit(s[pos - 1]) || s[pos - 1] === ":")) return -1;
-  if (pos + 8 > s.length) return -1;
-  if (s[pos + 2] !== ":" || s[pos + 5] !== ":") return -1;
-  const hh = s.slice(pos, pos + 2);
-  const mm = s.slice(pos + 3, pos + 5);
-  const ss = s.slice(pos + 6, pos + 8);
-  if (!/^(?:[01]\d|2[0-3])$/.test(hh) || !/^[0-5]\d$/.test(mm) || !/^[0-5]\d$/.test(ss)) return -1;
-  let end = pos + 8;
-  if (s[end] === "." && isAsciiDigit(s[end + 1])) {
-    end += 1;
-    while (end < s.length && isAsciiDigit(s[end]) && end - (pos + 9) < 6) end += 1;
-  }
-  if (end < s.length && (isAsciiAlpha(s[end]) || isAsciiDigit(s[end]) || s[end] === ":" || s[end] === "%")) return -1;
-  return end;
 }
 
 function tryScanIpv6(s: string, pos: number): number {
@@ -815,39 +960,27 @@ function isSecretKeyStem(word: string): boolean {
 }
 
 function isAllowlistedCoreWord(word: string, isClauseStart: boolean, inErrorHeader: boolean): boolean {
-  if (!word || word.length >= 20) return false;
+  if (!word || word.length >= 24) return false;
   if (SAFE_BYTE_UNITS.has(word)) return true;
   if (DUCKDB_ALNUM_TYPES.has(word)) return true;
+  if (SAFE_MIXED_CASE_TYPES.has(word)) return true;
+  if (SAFE_CONTRACTIONS.has(word)) return true;
   if (/^\d{1,6}(?:\.\d{1,3})?$/.test(word)) return true;
-  if (/^[a-z]{1,19}$/.test(word)) return true;
+  if (DIAGNOSTIC_VOCAB.has(word)) return true;
   if (/^[A-Z]{2,19}$/.test(word)) return SAFE_UPPERCASE_WORDS.has(word);
   if (inErrorHeader && SAFE_HEADER_WORDS.has(word)) return true;
   if (isClauseStart && SAFE_CLAUSE_START_WORDS.has(word)) return true;
-  const aposIdx = word.indexOf("'");
-  if (aposIdx > 0) {
-    const stem = word.slice(0, aposIdx);
-    const tail = word.slice(aposIdx + 1);
-    if (!/^\p{L}{1,12}$/u.test(stem) || SQL_KEYWORD_NO_APOSTROPHE.has(stem.toUpperCase())) return false;
-    if (
-      tail === ""
-      && stem.length >= 2
-      && (stem.endsWith("s") || stem.endsWith("S"))
-      && LOWER_LETTER_RE.test(stem[stem.length - 2]!)
-    ) {
-      return true;
-    }
-    if (/^\p{L}{1,12}(?:'s)?$/u.test(tail)) return true;
-  }
   return false;
 }
 
-// Stage 2B: Single-pass O(N) allowlist structural token emitter.
+// Stage 2B: Single-pass O(N) closed-vocabulary structural token emitter.
 function emitAllowlistedTokens(line: string): string {
   const headerColonIdx = detectSafeErrorHeaderEnd(line);
   const parts: string[] = [];
   let i = 0;
   const len = line.length;
   let isClauseStart = true;
+  let prevTokLower = "";
 
   while (i < len) {
     const ch = line[i]!;
@@ -860,31 +993,35 @@ function emitAllowlistedTokens(line: string): string {
       parts.push("[redacted]");
       i += 10;
       isClauseStart = false;
+      prevTokLower = "";
       continue;
     }
     if (line.startsWith("[url]", i)) {
       parts.push("[url]");
       i += 5;
       isClauseStart = false;
+      prevTokLower = "";
       continue;
     }
     if (line.startsWith("(YYYY-MM-DD)", i)) {
       parts.push("(YYYY-MM-DD)");
       i += 12;
       isClauseStart = false;
+      prevTokLower = "";
       continue;
     }
     if (line.startsWith("DB::Exception", i) && (i + 13 === len || !WORD_CHAR_RE.test(line[i + 13]!))) {
       parts.push("DB::Exception");
       i += 13;
       isClauseStart = false;
+      prevTokLower = "";
       continue;
     }
-    const clockEnd = tryScanClockTime(line, i);
-    if (clockEnd !== -1) {
-      parts.push(line.slice(i, clockEnd));
-      i = clockEnd;
+    if (line.startsWith("->", i) && (i === 0 || /\s/.test(line[i - 1]!)) && (i + 2 === len || /\s/.test(line[i + 2]!))) {
+      parts.push("->");
+      i += 2;
       isClauseStart = false;
+      prevTokLower = "";
       continue;
     }
     const v6End = tryScanIpv6(line, i);
@@ -892,6 +1029,7 @@ function emitAllowlistedTokens(line: string): string {
       parts.push("[redacted]");
       i = v6End;
       isClauseStart = false;
+      prevTokLower = "";
       continue;
     }
     const v4End = tryScanIpv4(line, i);
@@ -906,6 +1044,7 @@ function emitAllowlistedTokens(line: string): string {
       parts.push("[redacted]");
       i = end4;
       isClauseStart = false;
+      prevTokLower = "";
       continue;
     }
     const memMatch = /^(KiB|MiB|GiB|TiB|KB|MB|GB|TB|B)\/(\d{1,6}(?:\.\d{1,3})?)(?=$|[\s,.;:!?)\]}])/.exec(
@@ -915,30 +1054,38 @@ function emitAllowlistedTokens(line: string): string {
       parts.push(memMatch[0]);
       i += memMatch[0].length;
       isClauseStart = false;
+      prevTokLower = "";
       continue;
     }
     if (ch === "(" || ch === ")" || ch === "[" || ch === "]" || ch === "," || ch === "+" || ch === "=") {
       parts.push(ch);
       i += 1;
+      prevTokLower = "";
       continue;
     }
     if (ch === ":" || ch === "." || ch === "!" || ch === "?") {
       if (ch === "." && i + 1 < len && !/\s/.test(line[i + 1]!)) {
         let j = i + 1;
-        while (j < len && !/[\s,;:!?)\]}]/.test(line[j]!)) j += 1;
+        while (j < len && !/[\s,;:!?()[\]{}]/.test(line[j]!)) {
+          if (line.startsWith("[redacted]", j) || line.startsWith("[url]", j)) break;
+          j += 1;
+        }
         parts.push("[redacted]");
         i = j;
         isClauseStart = false;
+        prevTokLower = "";
         continue;
       }
       parts.push(ch);
       i += 1;
       isClauseStart = true;
+      prevTokLower = "";
       continue;
     }
     if (ch === ";") {
       parts.push(" ");
       i += 1;
+      prevTokLower = "";
       continue;
     }
 
@@ -964,13 +1111,14 @@ function emitAllowlistedTokens(line: string): string {
 
     const eqIdx = rawTok.indexOf("=");
     if (eqIdx > 0 && isSecretKeyStem(rawTok.slice(0, eqIdx))) {
-      const label = rawTok.slice(0, eqIdx);
-      const safeLabel = /^[A-Za-z][A-Za-z0-9_-]{0,23}$/.test(label) ? label : "[redacted]";
-      parts.push(`${safeLabel} [redacted]`);
+      parts.push("[redacted]");
       isClauseStart = false;
+      prevTokLower = "";
       continue;
     }
-    if (isSecretKeyStem(rawTok)) {
+    const rawLower = rawTok.toLowerCase();
+    const isSqlKeyPhrase = rawLower === "key" && line[i] !== ":" && line[i] !== "=" && SAFE_KEY_PREFIX_WORDS.has(prevTokLower);
+    if (isSecretKeyStem(rawTok) && !isSqlKeyPhrase) {
       let p = i;
       if (line[p] === ":" || line[p] === "=") p += 1;
       while (p < len && line[p] === " ") p += 1;
@@ -985,18 +1133,20 @@ function emitAllowlistedTokens(line: string): string {
         let valEnd = p;
         while (valEnd < len && !/[\s,;]/.test(line[valEnd]!)) valEnd += 1;
         if (valEnd > p) {
-          const safeLabel = /^[A-Za-z][A-Za-z0-9_-]{0,23}$/.test(rawTok) ? rawTok : "[redacted]";
-          parts.push(`${safeLabel} [redacted]`);
+          parts.push("[redacted]");
           i = valEnd;
           isClauseStart = false;
+          prevTokLower = "";
           continue;
         }
       }
     }
 
     const inHeader = headerColonIdx !== -1 && tokStart < headerColonIdx;
-    parts.push(isAllowlistedCoreWord(rawTok, isClauseStart, inHeader) ? rawTok : "[redacted]");
+    const allowed = isAllowlistedCoreWord(rawTok, isClauseStart, inHeader);
+    parts.push(allowed ? rawTok : "[redacted]");
     isClauseStart = false;
+    prevTokLower = allowed ? rawLower : "";
   }
 
   return parts
@@ -1008,13 +1158,13 @@ function emitAllowlistedTokens(line: string): string {
 
 // Error messages can carry SQL, URLs, keys, IPs, or raw row/regex payloads:
 // canonicalize known DuckDB error frames in O(N), restrict to line 1, and emit
-// only allowlisted structural diagnostic tokens.
+// only closed-vocabulary structural diagnostic tokens.
 function redactedMessage(message: string): string {
   const { text: stage1, canonicalized } = canonicalizeDuckDbTemplates(message);
   const line1Raw = sliceFirstLine(stage1);
-  const firstLine = canonicalized ? line1Raw : redactPostColonDiagnosticTail(line1Raw);
-  const quotedRedacted = redactQuotesAndUrlsLine(firstLine);
-  const text = emitAllowlistedTokens(quotedRedacted);
+  const quotedRedacted = redactQuotesAndUrlsLine(line1Raw);
+  const tailRedacted = canonicalized ? quotedRedacted : redactPostColonDiagnosticTail(quotedRedacted);
+  const text = emitAllowlistedTokens(tailRedacted);
   return text.length > MESSAGE_LIMIT ? `${text.slice(0, MESSAGE_LIMIT - 1)}…` : text;
 }
 

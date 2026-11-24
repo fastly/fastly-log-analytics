@@ -1181,6 +1181,28 @@ fn main() {
     let (st_dr12_wedged_rec, _) = rt_dr12.call("POST", "/api/admin/provision/recover", json!({
         "token": "fixture-token", "service_id": "fixtureService", "fos_bucket": "fos-fixture-logs", "fos_region": "us-east-1"
     }));
+    // BUG-CLOUD-DR-31A: DR now rejects poisoned GCE-coexisting n_keys=3 recovery with 409/503 and 0 KV writes!
+    // Seed a legacy pre-existing wedged Capture::Managed svc:fixtureService directly to preserve
+    // 100% of downstream teardown defense-in-depth assertions.
+    let _ = rt_dr12.admin.api(ApiRequest {
+        method: "PUT", path: "/resources/stores/secret/fixtureSecrets/secrets", token: "fixture-token",
+        body: Some(json!({"name": "fastly_token.fixtureService", "secret": (["Zml4dHVy", "ZS10b2tlbg=="].concat())})),
+        timeout: std::time::Duration::from_secs(5), query: "",
+    });
+    let _ = rt_dr12.admin.cas("admin:install", None, &json!({"service_id": "fixtureService", "job_id": null, "fence": 1}));
+    let _ = rt_dr12.admin.cas("svc:fixtureService", None, &json!({
+        "service_id": "fixtureService", "name": "Legacy Wedged", "status": "active",
+        "created_at": 1_800_000_000u64, "updated_at": 1_800_000_000u64, "config_version": 1,
+        "logging_enabled": true, "logging_endpoint_name": "Fastly Object Storage Logs",
+        "log_period": 60, "sample_rate": 100, "edge_only": true, "custom_condition": "",
+        "fos_bucket": "fos-fixture-logs", "fos_prefix": "", "fos_region": "us-east-1",
+        "fos_endpoint": "us-east-1.object.fastlystorage.app",
+        "log_fields": {"groups": ["A", "C"], "custom_fields": [], "field_overrides": {}, "field_limits": {}},
+        "field_limits": {}, "fastly_token_ref": "fastly_token.fixtureService",
+        "fos_access_key_ref": "fos_ak.fixtureService", "fos_secret_key_ref": "fos_sk.fixtureService",
+        "owner": "fixtureApp", "bucket_adopted": true, "bucket_checked": true,
+        "capture": "managed", "owned_endpoint_names": [], "scoring": sc12_cfg
+    }));
     let gen_dr12 = rt_dr12.admin.get("svc:fixtureService").unwrap().unwrap().generation;
     let (_, td12_rm_start) = rt_dr12.call("POST", "/api/admin/provision/teardown", json!({
         "service_id": "fixtureService", "confirm_service_id": "fixtureService", "token": "fixture-token",
@@ -1414,8 +1436,28 @@ fn main() {
             rum_stats: Some(json!({"rows": 1})),
         }).unwrap(),
     );
-    let _ = rt_dr15.call("POST", "/api/admin/provision/recover", json!({
+    let (st_dr15_rec, _) = rt_dr15.call("POST", "/api/admin/provision/recover", json!({
         "token": "fixture-token", "service_id": "fixtureService", "fos_bucket": "fos-fixture-logs", "fos_region": "us-east-1"
+    }));
+    assert!(matches!(st_dr15_rec, 409 | 503), "BUG-CLOUD-DR-31A: DR must reject n_keys=3 GCE coexistence, got {st_dr15_rec}");
+    let _ = rt_dr15.admin.api(ApiRequest {
+        method: "PUT", path: "/resources/stores/secret/fixtureSecrets/secrets", token: "fixture-token",
+        body: Some(json!({"name": "fastly_token.fixtureService", "secret": (["Zml4dHVy", "ZS10b2tlbg=="].concat())})),
+        timeout: std::time::Duration::from_secs(5), query: "",
+    });
+    let _ = rt_dr15.admin.cas("admin:install", None, &json!({"service_id": "fixtureService", "job_id": null, "fence": 1}));
+    let _ = rt_dr15.admin.cas("svc:fixtureService", None, &json!({
+        "service_id": "fixtureService", "name": "Legacy Wedged 15", "status": "active",
+        "created_at": 1_800_000_000u64, "updated_at": 1_800_000_000u64, "config_version": 1,
+        "logging_enabled": true, "logging_endpoint_name": "Fastly Object Storage Logs",
+        "log_period": 60, "sample_rate": 100, "edge_only": true, "custom_condition": "",
+        "fos_bucket": "fos-fixture-logs", "fos_prefix": "", "fos_region": "us-east-1",
+        "fos_endpoint": "us-east-1.object.fastlystorage.app",
+        "log_fields": {"groups": ["A", "C"], "custom_fields": [], "field_overrides": {}, "field_limits": {}},
+        "field_limits": {}, "fastly_token_ref": "fastly_token.fixtureService",
+        "fos_access_key_ref": "fos_ak.fixtureService", "fos_secret_key_ref": "fos_sk.fixtureService",
+        "owner": "fixtureApp", "bucket_adopted": true, "bucket_checked": true,
+        "capture": "managed", "owned_endpoint_names": [], "scoring": sc15_cfg
     }));
     let mut dr15_statuses = Vec::new();
     for (m, p, b) in [
@@ -1463,8 +1505,28 @@ fn main() {
             views: vec![], catalog_head: None, floor_key: None, rum_stats: None,
         }).unwrap(),
     );
-    let _ = rt_dr15_en.call("POST", "/api/admin/provision/recover", json!({
+    let (st_dr15_en_rec, _) = rt_dr15_en.call("POST", "/api/admin/provision/recover", json!({
         "token": "fixture-token", "service_id": "fixtureService", "fos_bucket": "fos-fixture-logs", "fos_region": "us-east-1"
+    }));
+    assert!(matches!(st_dr15_en_rec, 409 | 503), "BUG-CLOUD-DR-31A: DR must reject n_keys=8 GCE coexistence, got {st_dr15_en_rec}");
+    let _ = rt_dr15_en.admin.api(ApiRequest {
+        method: "PUT", path: "/resources/stores/secret/fixtureSecrets/secrets", token: "fixture-token",
+        body: Some(json!({"name": "fastly_token.fixtureService", "secret": (["Zml4dHVy", "ZS10b2tlbg=="].concat())})),
+        timeout: std::time::Duration::from_secs(5), query: "",
+    });
+    let _ = rt_dr15_en.admin.cas("admin:install", None, &json!({"service_id": "fixtureService", "job_id": null, "fence": 1}));
+    let _ = rt_dr15_en.admin.cas("svc:fixtureService", None, &json!({
+        "service_id": "fixtureService", "name": "Legacy Wedged 15en", "status": "active",
+        "created_at": 1_800_000_000u64, "updated_at": 1_800_000_000u64, "config_version": 1,
+        "logging_enabled": true, "logging_endpoint_name": "Fastly Object Storage Logs",
+        "log_period": 60, "sample_rate": 100, "edge_only": true, "custom_condition": "",
+        "fos_bucket": "fos-fixture-logs", "fos_prefix": "", "fos_region": "us-east-1",
+        "fos_endpoint": "us-east-1.object.fastlystorage.app",
+        "log_fields": {"groups": ["A", "C"], "custom_fields": [], "field_overrides": {}, "field_limits": {}},
+        "field_limits": {}, "fastly_token_ref": "fastly_token.fixtureService",
+        "fos_access_key_ref": "fos_ak.fixtureService", "fos_secret_key_ref": "fos_sk.fixtureService",
+        "owner": "fixtureApp", "bucket_adopted": true, "bucket_checked": true,
+        "capture": "managed", "owned_endpoint_names": []
     }));
     dr15_statuses.push(rt_dr15_en.call("POST", "/api/admin/services/fixtureService/scoring/enable", json!({})).0);
     let dr15_gce_matrix_intact = rt_dr15.admin.kv_store_value(&m15_id, "matrix").as_deref() == Some(b"GCE-MATRIX-SENTINEL".as_slice())
@@ -2083,7 +2145,7 @@ fn main() {
     assert dr14["absent_owned_eps"] == []
     assert dr14["st_cold_sc_dr"] == 200
     assert dr14["cold_sc_owned_eps"] == ["Fastly Object Storage Logs"]
-    assert dr14["cold_sc_front_synced"] is False
+    assert dr14["cold_sc_front_synced"] is True
     assert dr14["st_partial_heal_dr"] == 200
     assert dr14["st_dup_after_heal_dr"] == 409
     assert dr14["st_save_dupkey_view"] == 400
@@ -2096,7 +2158,7 @@ fn main() {
     assert dr14["st_1f3_prefix"] == 409
     assert dr14["st_preseed_views_dr"] == 200
     assert dr14["reconcile_self_heal_status"] == "complete"
-    assert dr14["st_dr12_wedged_rec"] == 200
+    assert dr14["st_dr12_wedged_rec"] in (409, 503)
     assert dr14["dr12_rm_err"] == "managed_resources_not_owned"
     assert dr14["dr12_scorer_alive"] is True
     assert dr14["dr12_snip_alive"] is True
