@@ -450,6 +450,36 @@ def _walk_and_validate(
                 session_id,
                 service_id,
             )
+        if node.get("type") == "EXPR_CTE_TABLE_ALIAS":
+            target_type = str(node.get("target_type") or "")
+            alias_low = str(node.get("alias") or "").strip().lower()
+            if target_type == "PARSE_ERROR_NODE":
+                _reject(
+                    original_sql,
+                    "parse_error:SYNTAX",
+                    str(node.get("target_message") or "SQL parse error"),
+                    session_id,
+                    service_id,
+                )
+            if target_type == "BASE_TABLE":
+                target_node = {
+                    "type": "BASE_TABLE",
+                    "table_name": node.get("target_table") or "",
+                    "schema_name": node.get("target_schema") or "",
+                    "catalog_name": node.get("target_catalog") or "",
+                }
+                # Always enforce schema/catalog/prefix blocklist on expression-CTE table refs,
+                # and enforce allowed_tables whenever an expression CTE shadows an allowed table.
+                eff_allowed = allowed_tables if (allowed_tables is not None and alias_low in allowed_tables) else None
+                _check_table_reference(
+                    target_node,
+                    original_sql,
+                    session_id,
+                    service_id,
+                    allowed_tables=eff_allowed,
+                    cte_aliases=frozenset(),
+                )
+            return
         if node.get("type") == "BASE_TABLE" or "table_name" in node:
             _check_table_reference(
                 node, original_sql, session_id, service_id, allowed_tables=allowed_tables, cte_aliases=cte_aliases
@@ -1265,7 +1295,15 @@ def _get_tok_meta_entry(
             _TOK_META_TLS.last = entry
             return entry[1], entry[2], entry[3], entry[4]
         match_map, as_run, memo = _build_tok_meta(tokens)
-        case_state: dict[str, Any] = {"ready": False, "building": False, "map": {}}
+        case_state: dict[str, Any] = {
+            "ready": False,
+            "building": False,
+            "map": {},
+            "on_op": {},
+            "fact": {},
+            "pos_in_ready": False,
+            "pos_in_idx": None,
+        }
         new_entry = (tokens, match_map, as_run, memo, case_state)
         cache[id(tokens)] = new_entry
         _TOK_META_TLS.last = new_entry
@@ -1379,18 +1417,19 @@ def _is_select_head_modifier_end_tok(tokens: list[_Tok], pos: int) -> bool:
     return False
 
 
-def _is_postfix_factorial_tok(tokens: list[_Tok], pos: int) -> bool:
+def _is_bang_tok(tokens: list[_Tok], pos: int) -> bool:
     return (
-        0 < pos < len(tokens)
+        0 <= pos < len(tokens)
         and tokens[pos].kind == "OTHER"
         and bool(tokens[pos].val)
         and tokens[pos].val.strip("!") == ""
-        and (
-            _is_select_head_signed_top_end_tok(tokens, pos - 1)
-            or _is_postfix_factorial_tok(tokens, pos - 1)
-            or not _is_on_operator_tok_at(tokens, pos - 1)
-        )
     )
+
+
+def _is_postfix_factorial_tok(tokens: list[_Tok], pos: int) -> bool:
+    if pos <= 0 or pos >= len(tokens) or not _is_bang_tok(tokens, pos):
+        return False
+    return _eval_on_op_and_fact(tokens, "fact", pos)
 
 
 def _strip_outer_parens(tokens: list[_Tok]) -> list[_Tok]:
@@ -1693,7 +1732,9 @@ def _is_distinct_from_op(tokens: list[_Tok], idx: int) -> bool:
     return False
 
 
-def _parse_recursive_cte_tokens(tokens: list[_Tok]) -> dict[str, Any]:
+def _parse_recursive_cte_tokens(
+    tokens: list[_Tok], *, expr_cte_refs: dict[str, dict[str, Any]] | None = None
+) -> dict[str, Any]:
     inner = _strip_outer_parens(tokens)
     k = 0
     m = len(inner)
@@ -1720,7 +1761,7 @@ def _parse_recursive_cte_tokens(tokens: list[_Tok]) -> dict[str, Any]:
         k += 1
 
     if last_union_or_except_op != "UNION" or last_idx == -1:
-        body = _parse_query_tokens(inner)
+        body = _parse_query_tokens(inner, expr_cte_refs=expr_cte_refs)
         body["type"] = "RECURSIVE_CTE_NODE"
         return body
 
@@ -1736,19 +1777,65 @@ def _parse_recursive_cte_tokens(tokens: list[_Tok]) -> dict[str, Any]:
         or not _is_subquery_token_list(inner[:last_idx])
         or not _is_subquery_token_list(right_tokens)
     ):
-        body = _parse_query_tokens(inner)
+        body = _parse_query_tokens(inner, expr_cte_refs=expr_cte_refs)
         body["type"] = "RECURSIVE_CTE_NODE"
         return body
 
     return {
         "type": "RECURSIVE_CTE_NODE",
         "setop_type": "UNION",
-        "left": _parse_query_tokens(inner[:last_idx]),
-        "right": _parse_query_tokens(right_tokens),
+        "left": _parse_query_tokens(inner[:last_idx], expr_cte_refs=expr_cte_refs),
+        "right": _parse_query_tokens(right_tokens, expr_cte_refs=expr_cte_refs),
     }
 
 
-def _parse_query_tokens(tokens: list[_Tok]) -> dict[str, Any]:
+def _find_with_expr_cte_as_alias(tokens: list[_Tok], start_idx: int) -> tuple[int, int] | None:
+    """Locate ``<expr> AS <ident>`` for a ClickHouse expression CTE item starting at ``start_idx``."""
+    n = len(tokens)
+    k = start_idx
+    while k < n:
+        tk = tokens[k]
+        if tk.kind in _DELIM_PAIRS:
+            rp = _find_matching_rdelim(tokens, k)
+            if rp == -1:
+                return None
+            k = rp + 1
+            continue
+        if tk.kind in ("COMMA", "SEMI"):
+            return None
+        if tk.kind == "WORD":
+            wu = tk.val.upper()
+            if (
+                wu == "AS"
+                and k > start_idx
+                and not _is_dot_or_typecast_tok(tokens, k - 1)
+                and k + 1 < n
+                and tokens[k + 1].kind in ("WORD", "QIDENT")
+            ):
+                after_idx = k + 2
+                if after_idx < n:
+                    after_tok = tokens[after_idx]
+                    if after_tok.kind == "COMMA":
+                        return k, k + 1
+                    if after_tok.kind == "WORD" and after_tok.val.upper() in _SUBQUERY_HEAD_KEYWORDS:
+                        return k, k + 1
+                    if after_tok.kind == "LPAREN":
+                        rp_sub = _find_matching_rparen(tokens, after_idx)
+                        if rp_sub != -1 and _is_subquery_token_list(tokens[after_idx : rp_sub + 1]):
+                            return k, k + 1
+            elif (
+                wu in _SUBQUERY_HEAD_KEYWORDS
+                and not _is_non_keyword_ident_pos(tokens, k)
+                and not _is_dot_qualifier_at(tokens, k)
+            ):
+                return None
+        k += 1
+    return None
+
+
+def _parse_query_tokens(
+    tokens: list[_Tok], *, expr_cte_refs: dict[str, dict[str, Any]] | None = None
+) -> dict[str, Any]:
     tokens = _strip_outer_parens(tokens)
     node: dict[str, Any] = {"type": "SELECT_NODE", "children": []}
     if not tokens:
@@ -1775,6 +1862,7 @@ def _parse_query_tokens(tokens: list[_Tok]) -> dict[str, Any]:
             )
             return node
 
+    active_expr_ctes: dict[str, dict[str, Any]] = dict(expr_cte_refs) if expr_cte_refs else {}
     i = 0
     n = len(tokens)
     if tokens[0].kind == "WORD" and tokens[0].val.upper() == "WITH":
@@ -1786,47 +1874,85 @@ def _parse_query_tokens(tokens: list[_Tok]) -> dict[str, Any]:
         cte_entries: list[dict[str, Any]] = []
         while i < n:
             entry_start = i
-            if tokens[i].kind not in ("WORD", "QIDENT"):
+            matched_std_cte = False
+            if tokens[i].kind in ("WORD", "QIDENT"):
+                cte_name = tokens[i].val
+                j = i + 1
+                cols_ok = True
+                if j < n and tokens[j].kind == "LPAREN":
+                    rp_cols = _find_matching_rparen(tokens, j)
+                    if rp_cols == -1 or not _is_valid_ident_list(tokens[j + 1 : rp_cols]):
+                        cols_ok = False
+                    else:
+                        j = rp_cols + 1
+                if (
+                    cols_ok
+                    and j < n
+                    and tokens[j].kind == "WORD"
+                    and tokens[j].val.upper() == "AS"
+                    and not _is_non_keyword_ident_pos(tokens, j)
+                ):
+                    j += 1
+                    while j < n and tokens[j].kind == "WORD" and tokens[j].val.upper() in ("MATERIALIZED", "NOT"):
+                        j += 1
+                    if j < n and tokens[j].kind == "LPAREN":
+                        rp = _find_matching_rparen(tokens, j)
+                        if rp != -1 and _is_subquery_token_list(tokens[j + 1 : rp]):
+                            if is_recursive:
+                                cte_body = _parse_recursive_cte_tokens(
+                                    tokens[j + 1 : rp], expr_cte_refs=active_expr_ctes
+                                )
+                            else:
+                                cte_body = _parse_query_tokens(tokens[j + 1 : rp], expr_cte_refs=active_expr_ctes)
+                            cte_entries.append({"key": cte_name, "value": {"query": {"node": cte_body}}})
+                            active_expr_ctes.pop(cte_name.strip().lower(), None)
+                            i = rp + 1
+                            matched_std_cte = True
+            if matched_std_cte:
+                if i < n and tokens[i].kind == "COMMA":
+                    i += 1
+                    continue
                 break
-            cte_name = tokens[i].val
-            i += 1
-            if i < n and tokens[i].kind == "LPAREN":
-                rp_cols = _find_matching_rparen(tokens, i)
-                if rp_cols == -1 or not _is_valid_ident_list(tokens[i + 1 : rp_cols]):
-                    i = entry_start
-                    break
-                i = rp_cols + 1
-            if (
-                i >= n
-                or tokens[i].kind != "WORD"
-                or tokens[i].val.upper() != "AS"
-                or _is_non_keyword_ident_pos(tokens, i)
-            ):
-                i = entry_start
+            expr_cte_hit = _find_with_expr_cte_as_alias(tokens, entry_start)
+            if expr_cte_hit is not None:
+                as_idx, alias_idx = expr_cte_hit
+                expr_toks = tokens[entry_start:as_idx]
+                alias_low = tokens[alias_idx].val.strip().lower()
+                _scan_expr_tokens(expr_toks, node, expr_cte_refs=active_expr_ctes)
+                tbl_ref = _parse_in_rhs_table_ref(expr_toks)
+                if tbl_ref is not None:
+                    if (
+                        tbl_ref.get("type") == "BASE_TABLE"
+                        and not tbl_ref.get("schema_name")
+                        and not tbl_ref.get("catalog_name")
+                    ):
+                        ref_low = str(tbl_ref.get("table_name") or "").strip().lower()
+                        if ref_low in active_expr_ctes:
+                            tbl_ref = active_expr_ctes[ref_low]
+                    active_expr_ctes[alias_low] = tbl_ref
+                    node["children"].append(
+                        {
+                            "type": "EXPR_CTE_TABLE_ALIAS",
+                            "alias": alias_low,
+                            "target_type": tbl_ref.get("type") or "",
+                            "target_table": tbl_ref.get("table_name") or "",
+                            "target_schema": tbl_ref.get("schema_name") or "",
+                            "target_catalog": tbl_ref.get("catalog_name") or "",
+                            "target_message": tbl_ref.get("message") or "",
+                        }
+                    )
+                else:
+                    active_expr_ctes.pop(alias_low, None)
+                i = alias_idx + 1
+                if i < n and tokens[i].kind == "COMMA":
+                    i += 1
+                    continue
                 break
-            i += 1
-            while i < n and tokens[i].kind == "WORD" and tokens[i].val.upper() in ("MATERIALIZED", "NOT"):
-                i += 1
-            if i >= n or tokens[i].kind != "LPAREN":
-                i = entry_start
-                break
-            rp = _find_matching_rparen(tokens, i)
-            if rp == -1 or not _is_subquery_token_list(tokens[i + 1 : rp]):
-                i = entry_start
-                break
-            if is_recursive:
-                cte_body = _parse_recursive_cte_tokens(tokens[i + 1 : rp])
-            else:
-                cte_body = _parse_query_tokens(tokens[i + 1 : rp])
-            cte_entries.append({"key": cte_name, "value": {"query": {"node": cte_body}}})
-            i = rp + 1
-            if i < n and tokens[i].kind == "COMMA":
-                i += 1
-                continue
+            i = entry_start
             break
         node["cte_map"] = {"map": cte_entries}
 
-    _scan_body_tokens(tokens if i == 0 else tokens[i:], node)
+    _scan_body_tokens(tokens if i == 0 else tokens[i:], node, expr_cte_refs=active_expr_ctes or None)
     return node
 
 
@@ -1924,56 +2050,25 @@ def _has_matching_case_when_end_ahead(tokens: list[_Tok], case_idx: int) -> bool
         active.discard(tok_id)
 
 
-def _is_on_operator_tok_at(tokens: list[_Tok], pos: int) -> bool:
-    if pos < 0:
-        return True
-    tk = tokens[pos]
-    if (
-        tk.kind in ("OTHER", "RPAREN") or (tk.kind == "WORD" and len(tk.val) == 4 and tk.val.upper() == "TIES")
-    ) and _is_select_head_modifier_end_tok(tokens, pos):
-        return True
-    if tk.kind in ("COMMA", "SEMI", "LPAREN", "LBRACK", "LBRACE", "DOT"):
-        return True
-    if tk.kind == "OTHER" and not _is_num_tok_val(tk.val):
-        return not _is_postfix_factorial_tok(tokens, pos) and not _is_qualified_star_tok(tokens, pos)
-    if tk.kind != "WORD" or _is_non_keyword_ident_pos(tokens, pos):
-        return False
-    wu = tk.val.upper()
-    if wu in ("SELECT", "WHERE", "PREWHERE", "HAVING", "QUALIFY"):
-        if pos == 0:
-            return True
-        prev = tokens[pos - 1]
-        if prev.kind in ("COMMA", "LPAREN", "LBRACK", "LBRACE", "DOT") or (
-            prev.kind == "OTHER" and not _is_num_tok_val(prev.val) and not _is_postfix_factorial_tok(tokens, pos - 1)
-        ):
-            return False
-        if prev.kind == "WORD" and _is_prev_word_operator_at(tokens, pos - 1, tk):
-            return False
-        return True
-    if wu in ("DISTINCT", "ALL"):
-        return (
-            pos >= 1
-            and tokens[pos - 1].kind == "WORD"
-            and tokens[pos - 1].val.upper() in ("SELECT", "UNION", "INTERSECT", "EXCEPT")
-            and not _is_non_keyword_ident_pos(tokens, pos - 1)
-        ) or (wu == "ALL" and pos + 1 < len(tokens) and tokens[pos + 1].kind == "LPAREN")
-    after_operand = tokens[pos + 2] if pos + 2 < len(tokens) else None
-    return _is_prev_word_operator_at(tokens, pos, after_operand)
+_ON_OP_CANDIDATE_WORDS = _ON_EXPR_PREV_WORDS | frozenset(
+    {"SELECT", "WHERE", "PREWHERE", "HAVING", "QUALIFY", "DISTINCT", "ALL"}
+)
 
 
-def _is_prev_word_operator_at(tokens: list[_Tok], prev_idx: int, nxt_tok: _Tok | None) -> bool:
+def _prev_word_op_step(tokens: list[_Tok], prev_idx: int, nxt_tok: _Tok | None) -> tuple[bool | None, int]:
+    """Return ``(result, -1)`` if resolved directly, or ``(None, dep_pos)`` meaning ``not on_op(dep_pos)``."""
     pw = tokens[prev_idx].val.upper()
     if pw not in _ON_EXPR_PREV_WORDS or _is_non_keyword_ident_pos(tokens, prev_idx):
-        return False
+        return False, -1
     if pw == "FROM":
-        return _is_distinct_from_op(tokens, prev_idx)
+        return _is_distinct_from_op(tokens, prev_idx), -1
     if pw == "TO":
         return (
             prev_idx >= 1
             and tokens[prev_idx - 1].kind == "WORD"
             and tokens[prev_idx - 1].val.upper() == "SIMILAR"
             and not _is_non_keyword_ident_pos(tokens, prev_idx - 1)
-        )
+        ), -1
     if pw == "ZONE":
         return (
             prev_idx >= 2
@@ -1983,56 +2078,56 @@ def _is_prev_word_operator_at(tokens: list[_Tok], prev_idx: int, nxt_tok: _Tok |
             and tokens[prev_idx - 2].kind == "WORD"
             and tokens[prev_idx - 2].val.upper() == "AT"
             and not _is_non_keyword_ident_pos(tokens, prev_idx - 2)
-        )
+        ), -1
     if pw == "INTERVAL":
         return (
             nxt_tok is not None
             and nxt_tok.kind == "WORD"
             and nxt_tok.val.upper() in _SQL_INTERVAL_UNITS
             and not _is_non_keyword_ident_pos(tokens, prev_idx + 2)
-        )
+        ), -1
     if pw == "ESCAPE":
-        return prev_idx >= 1 and not _is_on_operator_tok_at(tokens, prev_idx - 1)
+        return (False, -1) if prev_idx < 1 else (None, prev_idx - 1)
     if pw in ("SYMMETRIC", "ASYMMETRIC"):
         return (
             prev_idx >= 1
             and tokens[prev_idx - 1].kind == "WORD"
             and tokens[prev_idx - 1].val.upper() == "BETWEEN"
             and not _is_non_keyword_ident_pos(tokens, prev_idx - 1)
-        )
+        ), -1
     if pw == "NOT":
-        return True
+        return True, -1
     if pw == "CASE":
         if not _has_matching_case_when_end_ahead(tokens, prev_idx):
-            return False
+            return False, -1
         first_after = tokens[prev_idx + 1] if prev_idx + 1 < len(tokens) else None
         if first_after is None:
-            return False
+            return False, -1
         if (
             first_after.kind == "WORD"
             and first_after.val.upper() == "WHEN"
             and not _is_non_keyword_ident_pos(tokens, prev_idx + 1)
         ):
-            return True
+            return True, -1
         if first_after.kind != "WORD":
-            return True
+            return True, -1
         if nxt_tok is None:
-            return False
+            return False, -1
         if nxt_tok.kind in ("DOT", "LPAREN", "LBRACK") or (
             nxt_tok.kind == "OTHER" and not _is_num_tok_val(nxt_tok.val)
         ):
-            return True
+            return True, -1
         return (
             nxt_tok.kind == "WORD"
             and nxt_tok.val.upper() in _ON_EXPR_NEXT_WORDS
             and (prev_idx + 2 >= len(tokens) or not _is_non_keyword_ident_pos(tokens, prev_idx + 2))
-        )
+        ), -1
     if pw == "ON":
-        return prev_idx == 0 or not _is_on_operator_tok_at(tokens, prev_idx - 1)
+        return (True, -1) if prev_idx == 0 else (None, prev_idx - 1)
     if pw == "WHEN":
         if prev_idx >= 1 and tokens[prev_idx - 1].kind == "WORD" and tokens[prev_idx - 1].val.upper() == "CASE":
-            return not _is_non_keyword_ident_pos(tokens, prev_idx - 1)
-        return prev_idx >= 1 and not _is_on_operator_tok_at(tokens, prev_idx - 1)
+            return (not _is_non_keyword_ident_pos(tokens, prev_idx - 1)), -1
+        return (False, -1) if prev_idx < 1 else (None, prev_idx - 1)
     if (
         pw in ("IN", "LIKE", "ILIKE", "RLIKE", "REGEXP", "GLOB", "SIMILAR", "BETWEEN")
         and prev_idx >= 2
@@ -2040,8 +2135,188 @@ def _is_prev_word_operator_at(tokens: list[_Tok], prev_idx: int, nxt_tok: _Tok |
         and tokens[prev_idx - 1].val.upper() == "NOT"
         and not _is_non_keyword_ident_pos(tokens, prev_idx - 1)
     ):
-        return not _is_on_operator_tok_at(tokens, prev_idx - 2)
-    return prev_idx >= 1 and not _is_on_operator_tok_at(tokens, prev_idx - 1)
+        return None, prev_idx - 2
+    return (False, -1) if prev_idx < 1 else (None, prev_idx - 1)
+
+
+def _eval_on_op_and_fact(tokens: list[_Tok], start_kind: str, start_pos: int) -> bool:
+    """Iterative, memoized evaluator for ``_is_on_operator_tok_at`` and ``_is_postfix_factorial_tok``."""
+    _, as_run, non_kw_memo, case_state = _get_tok_meta_entry(tokens)
+    if case_state is not None:
+        on_op_memo: dict[int, bool] = case_state["on_op"]
+        fact_memo: dict[int, bool] = case_state["fact"]
+    else:
+        on_op_memo = {}
+        fact_memo = {}
+
+    if start_kind == "on_op":
+        if start_pos < 0:
+            return True
+        cached = on_op_memo.get(start_pos)
+        if cached is not None:
+            return cached
+    else:
+        cached = fact_memo.get(start_pos)
+        if cached is not None:
+            return cached
+
+    n_tok = len(tokens)
+    stack: list[tuple[str, int]] = [(start_kind, start_pos)]
+    while stack:
+        kind, pos = stack.pop()
+        if kind == "fact":
+            if pos in fact_memo:
+                continue
+            if pos <= 0 or pos >= n_tok or not _is_bang_tok(tokens, pos):
+                fact_memo[pos] = False
+                continue
+            k = pos
+            while k > 0 and _is_bang_tok(tokens, k) and k not in fact_memo:
+                k -= 1
+            if k in fact_memo:
+                run_val = fact_memo[k]
+                fill_start = k + 1
+            elif _is_bang_tok(tokens, k):
+                run_val = False
+                fact_memo[0] = False
+                on_op_memo[0] = True
+                fill_start = 1
+            elif _is_select_head_signed_top_end_tok(tokens, k):
+                run_val = True
+                fill_start = k + 1
+            elif k in on_op_memo:
+                run_val = not on_op_memo[k]
+                fill_start = k + 1
+            else:
+                stack.append(("fact", pos))
+                stack.append(("on_op", k))
+                continue
+            for j in range(fill_start, pos + 1):
+                fact_memo[j] = run_val
+                on_op_memo[j] = not run_val
+            continue
+
+        if pos < 0 or pos in on_op_memo:
+            continue
+        tk = tokens[pos]
+        if (
+            tk.kind in ("OTHER", "RPAREN") or (tk.kind == "WORD" and len(tk.val) == 4 and tk.val.upper() == "TIES")
+        ) and _is_select_head_modifier_end_tok(tokens, pos):
+            on_op_memo[pos] = True
+            continue
+        if tk.kind in ("COMMA", "SEMI", "LPAREN", "LBRACK", "LBRACE", "DOT"):
+            on_op_memo[pos] = True
+            continue
+        if tk.kind == "OTHER" and not _is_num_tok_val(tk.val):
+            if _is_bang_tok(tokens, pos):
+                if pos not in fact_memo:
+                    stack.append(("on_op", pos))
+                    stack.append(("fact", pos))
+                    continue
+                on_op_memo[pos] = not fact_memo[pos]
+            else:
+                on_op_memo[pos] = not _is_qualified_star_tok(tokens, pos)
+            continue
+        if tk.kind != "WORD":
+            on_op_memo[pos] = False
+            continue
+        wu = tk.val.upper()
+        if wu not in _ON_OP_CANDIDATE_WORDS:
+            on_op_memo[pos] = False
+            continue
+        if pos not in non_kw_memo and as_run[pos] > 0:
+            cur_p = pos - 1 - as_run[pos]
+            needed: list[int] = []
+            while cur_p >= 0:
+                if cur_p not in on_op_memo:
+                    needed.append(cur_p)
+                if cur_p > 0 and (cur_p - 1) not in on_op_memo and tokens[cur_p].kind == "WORD":
+                    needed.append(cur_p - 1)
+                if cur_p in non_kw_memo or as_run[cur_p] == 0:
+                    break
+                cur_p = cur_p - 1 - as_run[cur_p]
+            if needed:
+                stack.append(("on_op", pos))
+                for np in needed:
+                    stack.append(("on_op", np))
+                continue
+        if _is_non_keyword_ident_pos(tokens, pos):
+            on_op_memo[pos] = False
+            continue
+        if wu in ("SELECT", "WHERE", "PREWHERE", "HAVING", "QUALIFY"):
+            if pos == 0:
+                on_op_memo[pos] = True
+                continue
+            prev = tokens[pos - 1]
+            if prev.kind in ("COMMA", "LPAREN", "LBRACK", "LBRACE", "DOT"):
+                on_op_memo[pos] = False
+                continue
+            if prev.kind == "OTHER" and not _is_num_tok_val(prev.val):
+                if _is_bang_tok(tokens, pos - 1):
+                    if (pos - 1) not in fact_memo:
+                        stack.append(("on_op", pos))
+                        stack.append(("fact", pos - 1))
+                        continue
+                    on_op_memo[pos] = fact_memo[pos - 1]
+                else:
+                    on_op_memo[pos] = False
+                continue
+            if prev.kind == "WORD":
+                if (pos - 1) not in non_kw_memo and as_run[pos - 1] > 0:
+                    p_prev = (pos - 1) - 1 - as_run[pos - 1]
+                    if p_prev >= 0 and p_prev not in on_op_memo:
+                        stack.append(("on_op", pos))
+                        stack.append(("on_op", p_prev))
+                        continue
+                res_w, dep_w = _prev_word_op_step(tokens, pos - 1, tk)
+                if res_w is None:
+                    if dep_w not in on_op_memo:
+                        stack.append(("on_op", pos))
+                        stack.append(("on_op", dep_w))
+                        continue
+                    res_w = not on_op_memo[dep_w]
+                on_op_memo[pos] = not res_w
+                continue
+            on_op_memo[pos] = True
+            continue
+        if wu in ("DISTINCT", "ALL"):
+            on_op_memo[pos] = (
+                pos >= 1
+                and tokens[pos - 1].kind == "WORD"
+                and tokens[pos - 1].val.upper() in ("SELECT", "UNION", "INTERSECT", "EXCEPT")
+                and not _is_non_keyword_ident_pos(tokens, pos - 1)
+            ) or (wu == "ALL" and pos + 1 < n_tok and tokens[pos + 1].kind == "LPAREN")
+            continue
+        after_operand = tokens[pos + 2] if pos + 2 < n_tok else None
+        if pos >= 1 and (pos - 1) not in non_kw_memo and as_run[pos - 1] > 0:
+            p_prev2 = (pos - 1) - 1 - as_run[pos - 1]
+            if p_prev2 >= 0 and p_prev2 not in on_op_memo:
+                stack.append(("on_op", pos))
+                stack.append(("on_op", p_prev2))
+                continue
+        res_w, dep_w = _prev_word_op_step(tokens, pos, after_operand)
+        if res_w is None:
+            if dep_w not in on_op_memo:
+                stack.append(("on_op", pos))
+                stack.append(("on_op", dep_w))
+                continue
+            res_w = not on_op_memo[dep_w]
+        on_op_memo[pos] = res_w
+
+    return on_op_memo[start_pos] if start_kind == "on_op" else fact_memo[start_pos]
+
+
+def _is_on_operator_tok_at(tokens: list[_Tok], pos: int) -> bool:
+    if pos < 0:
+        return True
+    return _eval_on_op_and_fact(tokens, "on_op", pos)
+
+
+def _is_prev_word_operator_at(tokens: list[_Tok], prev_idx: int, nxt_tok: _Tok | None) -> bool:
+    res, dep = _prev_word_op_step(tokens, prev_idx, nxt_tok)
+    if res is not None:
+        return res
+    return not _eval_on_op_and_fact(tokens, "on_op", dep)
 
 
 def _is_multi_token_post_on_exit(tokens: list[_Tok], idx: int) -> bool:
@@ -2214,7 +2489,21 @@ def _is_prefix_in_call(tokens: list[_Tok], in_idx: int) -> bool:
 
 def _parse_in_rhs_table_ref(rhs_tokens: list[_Tok]) -> dict[str, Any] | None:
     """Detect bare or schema/catalog-qualified table identifiers inside ``IN (...)``."""
-    unwrapped = _strip_outer_parens(rhs_tokens)
+    unwrapped = rhs_tokens
+    while unwrapped:
+        peeled = _strip_outer_parens(unwrapped)
+        if len(peeled) != len(unwrapped):
+            unwrapped = peeled
+            continue
+        if (
+            len(unwrapped) >= 3
+            and unwrapped[-2].kind == "WORD"
+            and unwrapped[-2].val.upper() == "AS"
+            and unwrapped[-1].kind in ("WORD", "QIDENT")
+        ):
+            unwrapped = unwrapped[:-2]
+            continue
+        break
     if not unwrapped or len(unwrapped) % 2 == 0:
         return None
     for idx, tk in enumerate(unwrapped):
@@ -2235,29 +2524,51 @@ def _parse_in_rhs_table_ref(rhs_tokens: list[_Tok]) -> dict[str, Any] | None:
     return {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: invalid table reference in IN clause"}
 
 
-def _is_valid_position_in_frame(tokens: list[_Tok], in_idx: int) -> bool:
+def _resolve_in_rhs_table_ref(
+    rhs_tokens: list[_Tok], expr_cte_refs: dict[str, dict[str, Any]] | None
+) -> dict[str, Any] | None:
+    tbl_ref = _parse_in_rhs_table_ref(rhs_tokens)
+    if (
+        tbl_ref is not None
+        and expr_cte_refs
+        and tbl_ref.get("type") == "BASE_TABLE"
+        and not tbl_ref.get("schema_name")
+        and not tbl_ref.get("catalog_name")
+    ):
+        resolved = expr_cte_refs.get(str(tbl_ref.get("table_name") or "").strip().lower())
+        if resolved is not None:
+            return resolved
+    return tbl_ref
+
+
+def _find_valid_position_in_idx(tokens: list[_Tok]) -> int | None:
+    """Return the unique valid ``IN`` index in a ``POSITION(... IN ...)`` frame, or ``None``."""
+    match_map, _, _, case_state = _get_tok_meta_entry(tokens)
+    if case_state is not None and case_state["pos_in_ready"]:
+        return case_state["pos_in_idx"]
     n = len(tokens)
-    if in_idx <= 0 or in_idx >= n - 1:
-        return False
-    if tokens[in_idx - 1].kind == "WORD" and tokens[in_idx - 1].val.upper() in ("NOT", "GLOBAL"):
-        return False
-    match_map, _, _ = _get_tok_meta(tokens)
     case_depth = 0
     top_in_count = 0
-    in_at_case_zero = False
+    valid_in_idx: int | None = None
     k = 0
     while k < n:
         tk = tokens[k]
         if tk.kind in _DELIM_PAIRS:
             rp = match_map.get(k, -1)
             if rp <= k:
-                return False
+                valid_in_idx = None
+                top_in_count = 0
+                break
             k = rp + 1
             continue
         if tk.kind == "COMMA":
-            return False
+            valid_in_idx = None
+            top_in_count = 0
+            break
         if case_depth == 0 and tk.kind == "OTHER" and any(ch in tk.val for ch in ("=", "<", ">", "!")):
-            return False
+            valid_in_idx = None
+            top_in_count = 0
+            break
         if tk.kind == "WORD" and not _is_non_keyword_ident_pos(tokens, k) and not _is_dot_qualifier_at(tokens, k):
             wu = tk.val.upper()
             if wu == "CASE":
@@ -2266,12 +2577,34 @@ def _is_valid_position_in_frame(tokens: list[_Tok], in_idx: int) -> bool:
                 case_depth = max(0, case_depth - 1)
             elif wu == "IN":
                 top_in_count += 1
-                if k == in_idx:
-                    in_at_case_zero = case_depth == 0
+                if top_in_count > 1:
+                    valid_in_idx = None
+                    break
+                if (
+                    case_depth == 0
+                    and 0 < k < n - 1
+                    and not (tokens[k - 1].kind == "WORD" and tokens[k - 1].val.upper() in ("NOT", "GLOBAL"))
+                ):
+                    valid_in_idx = k
+                else:
+                    valid_in_idx = None
+                    break
             elif case_depth == 0 and wu in _POSITION_FRAME_DISALLOWED_KEYWORDS:
-                return False
+                valid_in_idx = None
+                top_in_count = 0
+                break
         k += 1
-    return in_at_case_zero and top_in_count == 1
+    res = valid_in_idx if top_in_count == 1 else None
+    if case_state is not None:
+        case_state["pos_in_ready"] = True
+        case_state["pos_in_idx"] = res
+    return res
+
+
+def _is_valid_position_in_frame(tokens: list[_Tok], in_idx: int) -> bool:
+    if in_idx <= 0 or in_idx >= len(tokens) - 1:
+        return False
+    return _find_valid_position_in_idx(tokens) == in_idx
 
 
 def _is_list_comp_in_at(tokens: list[_Tok], idx: int, *, in_bracket: bool) -> bool:
@@ -2292,6 +2625,7 @@ def _scan_expr_tokens(
     enclosing_special_call: str | None = None,
     allow_direct_subquery: bool = True,
     in_bracket: bool = False,
+    expr_cte_refs: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     work: list[tuple[list[_Tok], str | None, bool, bool]] = [
         (tokens, enclosing_special_call, allow_direct_subquery, in_bracket)
@@ -2299,9 +2633,12 @@ def _scan_expr_tokens(
     while work:
         cur_tokens, cur_special, cur_allow_subq, cur_in_brack = work.pop()
         if cur_allow_subq and _is_subquery_token_list(cur_tokens, enclosing_special_call=cur_special):
-            node["children"].append(_parse_query_tokens(_strip_outer_parens(cur_tokens)))
+            node["children"].append(_parse_query_tokens(_strip_outer_parens(cur_tokens), expr_cte_refs=expr_cte_refs))
             continue
 
+        cur_match_map, _, _ = _get_tok_meta(cur_tokens)
+        pos_in_cached: int | None = None
+        pos_in_computed = False
         i = 0
         n = len(cur_tokens)
         while i < n:
@@ -2327,7 +2664,13 @@ def _scan_expr_tokens(
                 and not _is_non_keyword_ident_pos(cur_tokens, i)
                 and not _is_dot_qualifier_at(cur_tokens, i)
             ):
-                is_valid_pos_in = cur_special == "position" and _is_valid_position_in_frame(cur_tokens, i)
+                if cur_special == "position":
+                    if not pos_in_computed:
+                        pos_in_cached = _find_valid_position_in_idx(cur_tokens)
+                        pos_in_computed = True
+                    is_valid_pos_in = pos_in_cached == i
+                else:
+                    is_valid_pos_in = False
                 nxt_is_lparen = i + 1 < n and cur_tokens[i + 1].kind == "LPAREN"
                 if nxt_is_lparen:
                     if not is_valid_pos_in:
@@ -2341,7 +2684,7 @@ def _scan_expr_tokens(
                         elif rp != -1:
                             rhs = cur_tokens[i + 2 : rp]
                             if not _is_subquery_token_list(rhs):
-                                tbl_ref = _parse_in_rhs_table_ref(rhs)
+                                tbl_ref = _resolve_in_rhs_table_ref(rhs, expr_cte_refs)
                                 if tbl_ref is not None:
                                     node["children"].append(tbl_ref)
                 elif not (is_valid_pos_in or _is_list_comp_in_at(cur_tokens, i, in_bracket=cur_in_brack)):
@@ -2368,9 +2711,13 @@ def _scan_expr_tokens(
                     i = rp + 1
                     continue
             if tok.kind == "LPAREN":
-                rp = _find_matching_rparen(cur_tokens, i)
-                if rp != -1:
-                    work.append((cur_tokens[i + 1 : rp], None, True, False))
+                rp = cur_match_map.get(i, -1)
+                if rp > i:
+                    lo_p, hi_p = i + 1, rp - 1
+                    while lo_p < hi_p and cur_tokens[lo_p].kind == "LPAREN" and cur_match_map.get(lo_p) == hi_p:
+                        lo_p += 1
+                        hi_p -= 1
+                    work.append((cur_tokens[lo_p : hi_p + 1], None, True, False))
                     i = rp + 1
                     continue
             if tok.kind in ("LBRACK", "LBRACE"):
@@ -2440,6 +2787,7 @@ def _scan_body_tokens(
     *,
     in_from: bool = False,
     expect_table: bool = False,
+    expr_cte_refs: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     i = 0
     n = len(tokens)
@@ -2452,18 +2800,29 @@ def _scan_body_tokens(
     in_join_mod = False
     saw_join = False
     outside_from_kws = _OUTSIDE_FROM_KEYWORDS
+    join_mod_only = _JOIN_MODIFIERS - {"JOIN"}
+    jm_cache_start = -1
+    jm_cache_end = -1
+    jm_cache_ok = False
 
     def _starts_join_modifier_seq(idx: int) -> bool:
+        nonlocal jm_cache_start, jm_cache_end, jm_cache_ok
+        if jm_cache_start <= idx < jm_cache_end:
+            return jm_cache_ok
         k = idx
-        while k < n and tokens[k].kind == "WORD" and tokens[k].val.upper() in (_JOIN_MODIFIERS - {"JOIN"}):
+        while k < n and tokens[k].kind == "WORD" and tokens[k].val.upper() in join_mod_only:
             k += 1
+        ok = False
         if k < n and tokens[k].kind == "WORD":
             ku = tokens[k].val.upper()
             if ku == "JOIN":
-                return True
-            if ku == "ARRAY" and k + 1 < n and tokens[k + 1].kind == "WORD" and tokens[k + 1].val.upper() == "JOIN":
-                return True
-        return False
+                ok = True
+            elif ku == "ARRAY" and k + 1 < n and tokens[k + 1].kind == "WORD" and tokens[k + 1].val.upper() == "JOIN":
+                ok = True
+        jm_cache_start = idx
+        jm_cache_end = k
+        jm_cache_ok = ok
+        return ok
 
     while i < n:
         tok = tokens[i]
@@ -2954,9 +3313,9 @@ def _scan_body_tokens(
                 if rp != -1:
                     inner = _strip_outer_parens(tokens[i + 1 : rp])
                     if _is_subquery_token_list(inner):
-                        node["children"].append(_parse_query_tokens(inner))
+                        node["children"].append(_parse_query_tokens(inner, expr_cte_refs=expr_cte_refs))
                     else:
-                        _scan_body_tokens(inner, node, in_from=True, expect_table=True)
+                        _scan_body_tokens(inner, node, in_from=True, expect_table=True, expr_cte_refs=expr_cte_refs)
                     expect_table = False
                     allow_table_alias = True
                     saw_final = False
@@ -2996,7 +3355,7 @@ def _scan_body_tokens(
                                 "function_name": parts[-1],
                             }
                         )
-                        _scan_expr_tokens(tokens[j + 1 : rp], node)
+                        _scan_expr_tokens(tokens[j + 1 : rp], node, expr_cte_refs=expr_cte_refs)
                         i = rp + 1
                         # Skip optional table alias and column alias list: e.g. `range(3) t(n)` or `AS t(n)`
                         used_as_tf = False
@@ -3057,8 +3416,22 @@ def _scan_body_tokens(
                         cat_name, sch_name, tbl_name = "", "", parts[0]
                     elif len(parts) == 2:
                         cat_name, sch_name, tbl_name = "", parts[0], parts[1]
+                    elif len(parts) == 3:
+                        cat_name, sch_name, tbl_name = parts[0], parts[1], parts[2]
                     else:
-                        cat_name, sch_name, tbl_name = parts[0], parts[1], parts[-1]
+                        node["children"].append(
+                            {
+                                "type": "PARSE_ERROR_NODE",
+                                "message": "SQL parse error: table identifier has too many qualifier parts",
+                            }
+                        )
+                        expect_table = False
+                        allow_table_alias = False
+                        saw_final = False
+                        in_join_mod = False
+                        at_branch_start = False
+                        i = j
+                        continue
                     node["children"].append(
                         {
                             "type": "BASE_TABLE",
@@ -3136,13 +3509,13 @@ def _scan_body_tokens(
                 if _is_prefix_in_call(tokens, i):
                     node["children"].append({"class": "FUNCTION", "function_name": tok.val})
                     if rp != -1:
-                        _scan_expr_tokens(tokens[i + 2 : rp], node)
+                        _scan_expr_tokens(tokens[i + 2 : rp], node, expr_cte_refs=expr_cte_refs)
                         i = rp + 1
                         continue
                 elif rp != -1:
                     rhs = tokens[i + 2 : rp]
                     if not _is_subquery_token_list(rhs):
-                        tbl_ref = _parse_in_rhs_table_ref(rhs)
+                        tbl_ref = _resolve_in_rhs_table_ref(rhs, expr_cte_refs)
                         if tbl_ref is not None:
                             node["children"].append(tbl_ref)
             else:
@@ -3159,26 +3532,40 @@ def _scan_body_tokens(
             if rp != -1:
                 if tok.kind == "WORD" and tok.val.lower() in _NON_FUNCTION_KEYWORDS:
                     if tok.val.lower() in _SPECIAL_CALL_KEYWORDS:
-                        _scan_expr_tokens(tokens[i + 2 : rp], node, enclosing_special_call=tok.val.lower())
+                        _scan_expr_tokens(
+                            tokens[i + 2 : rp],
+                            node,
+                            enclosing_special_call=tok.val.lower(),
+                            expr_cte_refs=expr_cte_refs,
+                        )
                         i = rp + 1
                         continue
                     i += 1
                     continue
                 node["children"].append({"class": "FUNCTION", "function_name": tok.val})
-                _scan_expr_tokens(tokens[i + 2 : rp], node)
+                _scan_expr_tokens(tokens[i + 2 : rp], node, expr_cte_refs=expr_cte_refs)
                 i = rp + 1
                 continue
         if tok.kind == "LPAREN":
             rp = _find_matching_rparen(tokens, i)
             if rp != -1:
-                _scan_expr_tokens(tokens[i + 1 : rp], node)
+                body_match_map, _, _ = _get_tok_meta(tokens)
+                lo_p, hi_p = i + 1, rp - 1
+                while lo_p < hi_p and tokens[lo_p].kind == "LPAREN" and body_match_map.get(lo_p) == hi_p:
+                    lo_p += 1
+                    hi_p -= 1
+                _scan_expr_tokens(tokens[lo_p : hi_p + 1], node, expr_cte_refs=expr_cte_refs)
                 i = rp + 1
                 continue
         if tok.kind in ("LBRACK", "LBRACE"):
             rb = _find_matching_rdelim(tokens, i)
             if rb != -1:
                 _scan_expr_tokens(
-                    tokens[i + 1 : rb], node, allow_direct_subquery=False, in_bracket=(tok.kind == "LBRACK")
+                    tokens[i + 1 : rb],
+                    node,
+                    allow_direct_subquery=False,
+                    in_bracket=(tok.kind == "LBRACK"),
+                    expr_cte_refs=expr_cte_refs,
                 )
                 i = rb + 1
                 continue

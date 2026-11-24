@@ -119,6 +119,12 @@ pub struct Cursor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub svc_head_anchor: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub svc_prefix_anchor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub svc_trimmed_base: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub svc_trimmed_prefix_anchor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_svc_flush_s: Option<u64>,
     pub last_flush_s: u64,
     pub expired: u64,
@@ -183,6 +189,14 @@ struct Manifest {
     svc_archived_anchor: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     svc_head_anchor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    svc_prefix_anchor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    svc_trimmed_base: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    svc_trimmed_prefix_anchor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    svc_planned_trim: Option<usize>,
     #[serde(default)]
     svc_caught_up: bool,
     notes: Notes,
@@ -499,6 +513,46 @@ fn svc_entry_anchor(entry: &Value) -> String {
     hex::encode(Sha256::digest(canonical.to_string().as_bytes()))
 }
 
+fn svc_slice_anchor(entries: &[Value]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update((entries.len() as u64).to_be_bytes());
+    for entry in entries {
+        hasher.update(svc_entry_anchor(entry).as_bytes());
+        hasher.update(b"\n");
+    }
+    hex::encode(hasher.finalize())
+}
+
+fn manifest_svc_matches(manifest: &Manifest, svc_val: Option<&Value>) -> bool {
+    if manifest.svc_range.0 >= manifest.svc_range.1 {
+        return true;
+    }
+    let Some(value) = svc_val else {
+        return false;
+    };
+    let raw_base = value["_audit_outbox_base"].as_u64().unwrap_or(0);
+    let entries = value["_audit_outbox"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let Some(obs_base) = manifest.svc_observed_base else {
+        return false;
+    };
+    if raw_base != obs_base {
+        return false;
+    }
+    let eff_base = manifest.svc_virtual_base.unwrap_or(obs_base);
+    let kv_archived = manifest
+        .svc_kv_archived
+        .unwrap_or_else(|| obs_base.saturating_add(manifest.svc_range.1.saturating_sub(eff_base)));
+    if kv_archived <= raw_base || kv_archived > raw_base + entries.len() as u64 {
+        return false;
+    }
+    let archived_in_kv = (kv_archived - raw_base) as usize;
+    manifest.svc_prefix_anchor.as_deref()
+        == Some(svc_slice_anchor(&entries[..archived_in_kv]).as_str())
+}
+
 #[derive(Clone, Copy, Debug)]
 struct SvcEpoch {
     is_reset: bool,
@@ -526,20 +580,19 @@ fn classify_svc_outbox(svc_val: &Value, cursor: &Cursor) -> SvcEpoch {
 
     // 1a. Un-rebased KV epoch from a prior reset where `trim_svc_outbox` has not yet advanced
     // `_audit_outbox_base` into Parquet sequence space (`svc_kv_archived < archived`).
+    // Guard against rebased `raw_base >= svc_rebased_base` so Parquet-space coordinates are
+    // never compared against pre-rebase `svc_kv_archived`.
     if let Some(kv_arch) = cursor.svc_kv_archived {
         if kv_arch < archived
-            && cursor.svc_last_base.is_none_or(|lb| raw_base >= lb)
+            && cursor.svc_rebased_base.is_none_or(|rb| raw_base < rb)
+            && cursor.svc_last_base == Some(raw_base)
             && raw_base < kv_arch
             && kv_arch <= raw_base + len
         {
-            let boundary_pos = (kv_arch - 1 - raw_base) as usize;
-            let boundary_ok = cursor.svc_archived_anchor.as_deref()
-                == Some(svc_entry_anchor(&entries[boundary_pos]).as_str());
-            let head_ok = cursor.svc_last_base != Some(raw_base)
-                || cursor.svc_head_anchor.is_none()
-                || cursor.svc_head_anchor == cur_head_anchor;
-            if boundary_ok && head_ok {
-                let archived_in_kv = (kv_arch - raw_base) as usize;
+            let archived_in_kv = (kv_arch - raw_base) as usize;
+            let slice_ok = cursor.svc_prefix_anchor.as_deref()
+                == Some(svc_slice_anchor(&entries[..archived_in_kv]).as_str());
+            if slice_ok {
                 return SvcEpoch {
                     is_reset: false,
                     effective_seq_base: archived - archived_in_kv as u64,
@@ -581,31 +634,37 @@ fn classify_svc_outbox(svc_val: &Value, cursor: &Cursor) -> SvcEpoch {
     }
 
     // 2b. Normal or rebased space where `raw_base < archived`: KV claims `archived - raw_base`
-    // prefix entries are already archived. Verify bounds, base monotonicity, and entry anchor.
+    // prefix entries are already archived. Verify bounds, exact untrimmed or planned-trimmed
+    // base, and cryptographic full-slice SHA-256 anchor over `entries[0..archived_in_kv]`.
     let min_expected_base = cursor.svc_rebased_base.or(cursor.svc_last_base);
     let bounds_ok = archived <= raw_base + len && min_expected_base.is_none_or(|lb| raw_base >= lb);
     if bounds_ok {
-        let boundary_pos = (archived - 1 - raw_base) as usize;
-        let verified = if let Some(ref exp_arch) = cursor.svc_archived_anchor {
-            svc_entry_anchor(&entries[boundary_pos]) == *exp_arch
-                && (min_expected_base != Some(raw_base)
-                    || cursor.svc_head_anchor.is_none()
-                    || cursor.svc_head_anchor == cur_head_anchor)
+        let archived_in_kv = (archived - raw_base) as usize;
+        let slice = &entries[..archived_in_kv];
+        let verified = if cursor.svc_prefix_anchor.is_some() || cursor.svc_archived_anchor.is_some()
+        {
+            if min_expected_base == Some(raw_base) {
+                cursor.svc_prefix_anchor.as_deref() == Some(svc_slice_anchor(slice).as_str())
+            } else if cursor.svc_trimmed_base == Some(raw_base) {
+                cursor.svc_trimmed_prefix_anchor.as_deref()
+                    == Some(svc_slice_anchor(slice).as_str())
+            } else {
+                false
+            }
         } else if raw_base == 0 && cursor.svc_zero_anchor.is_some() {
             cursor.svc_zero_virtual_base == 0
                 && cursor.svc_zero_anchor == cur_head_anchor
                 && (eff_last_svc_s == 0
-                    || entries[boundary_pos]["at"].as_u64().unwrap_or(0) <= eff_last_svc_s)
+                    || entries[archived_in_kv - 1]["at"].as_u64().unwrap_or(0) <= eff_last_svc_s)
         } else {
-            eff_last_svc_s == 0
-                || (entries[0]["at"].as_u64().unwrap_or(0) <= eff_last_svc_s
-                    && entries[boundary_pos]["at"].as_u64().unwrap_or(0) <= eff_last_svc_s)
+            // Legacy anchorless cursor: fail safe (re-archive rather than dropping unarchived rows).
+            false
         };
         if verified {
             return SvcEpoch {
                 is_reset: false,
                 effective_seq_base: raw_base,
-                archived_in_kv: (archived - raw_base) as usize,
+                archived_in_kv,
             };
         }
     }
@@ -617,15 +676,6 @@ fn classify_svc_outbox(svc_val: &Value, cursor: &Cursor) -> SvcEpoch {
         effective_seq_base: archived,
         archived_in_kv: 0,
     }
-}
-
-fn read_source(
-    runtime: &impl Runtime,
-    sid: &str,
-    id: &SourceId,
-    svc_virtual_base: Option<u64>,
-) -> Result<Vec<LogRow>, String> {
-    read_source_with(runtime, sid, id, &Kept::default(), None, svc_virtual_base)
 }
 
 /// Reads one source, taking bucket bodies this execution's scan kept and the `svc:` record
@@ -973,6 +1023,9 @@ fn build_next_cursor(cursor: &Cursor, manifest: &Manifest, now: u64) -> Cursor {
         next.svc_rebased_base = manifest.svc_virtual_base;
         next.svc_archived_anchor = manifest.svc_archived_anchor.clone();
         next.svc_head_anchor = manifest.svc_head_anchor.clone();
+        next.svc_prefix_anchor = manifest.svc_prefix_anchor.clone();
+        next.svc_trimmed_base = manifest.svc_trimmed_base;
+        next.svc_trimmed_prefix_anchor = manifest.svc_trimmed_prefix_anchor.clone();
         if let Some(obs_base) = manifest.svc_observed_base {
             next.svc_last_base = Some(obs_base);
             if obs_base == 0 {
@@ -994,6 +1047,9 @@ fn build_next_cursor(cursor: &Cursor, manifest: &Manifest, now: u64) -> Cursor {
         next.svc_rebased_base = manifest.svc_virtual_base;
         next.svc_archived_anchor = manifest.svc_archived_anchor.clone();
         next.svc_head_anchor = manifest.svc_head_anchor.clone();
+        next.svc_prefix_anchor = manifest.svc_prefix_anchor.clone();
+        next.svc_trimmed_base = manifest.svc_trimmed_base;
+        next.svc_trimmed_prefix_anchor = manifest.svc_trimmed_prefix_anchor.clone();
         if let Some(obs_base) = manifest.svc_observed_base {
             next.svc_last_base = Some(obs_base);
             if obs_base == 0 {
@@ -1032,17 +1088,21 @@ fn manifest_sources(manifest: &Manifest) -> Vec<SourceId> {
     sources
 }
 
-fn read_manifest_rows(
+fn read_manifest_rows_with(
     runtime: &impl Runtime,
     sid: &str,
     manifest: &Manifest,
+    verified_svc: Option<&Value>,
 ) -> Result<Vec<LogRow>, String> {
     let mut rows = note_rows(sid, manifest);
+    let kept = Kept::default();
     for source in manifest_sources(manifest) {
-        rows.extend(read_source(
+        rows.extend(read_source_with(
             runtime,
             sid,
             &source,
+            &kept,
+            verified_svc,
             manifest.svc_virtual_base,
         )?);
     }
@@ -1295,6 +1355,21 @@ fn collect(
                 .get(archived_in_kv_after.saturating_sub(1))
                 .map(svc_entry_anchor);
             manifest.svc_head_anchor = entries.first().map(svc_entry_anchor);
+            if archived_in_kv_after > 0 && archived_in_kv_after <= entries.len() {
+                manifest.svc_prefix_anchor =
+                    Some(svc_slice_anchor(&entries[..archived_in_kv_after]));
+                let planned_trim = entries
+                    .len()
+                    .saturating_sub(SVC_OUTBOX_KEEP)
+                    .min(archived_in_kv_after);
+                manifest.svc_planned_trim = Some(planned_trim);
+                if planned_trim > 0 && planned_trim < archived_in_kv_after {
+                    manifest.svc_trimmed_base = Some(effective_svc_base + planned_trim as u64);
+                    manifest.svc_trimmed_prefix_anchor = Some(svc_slice_anchor(
+                        &entries[planned_trim..archived_in_kv_after],
+                    ));
+                }
+            }
         } else if manifest.svc_caught_up {
             manifest.svc_kv_archived = Some(raw_base + svc_epoch_archived_in_kv as u64);
             manifest.svc_archived_anchor = if svc_epoch_archived_in_kv > 0 {
@@ -1305,6 +1380,10 @@ fn collect(
                 cursor.svc_archived_anchor.clone()
             };
             manifest.svc_head_anchor = entries.first().map(svc_entry_anchor);
+            if svc_epoch_archived_in_kv > 0 && svc_epoch_archived_in_kv <= entries.len() {
+                manifest.svc_prefix_anchor =
+                    Some(svc_slice_anchor(&entries[..svc_epoch_archived_in_kv]));
+            }
         }
     }
     let svc_end = svc.as_ref().map_or(0, |value| {
@@ -1343,6 +1422,22 @@ fn run_txn(
     started: Instant,
     report: &mut FlushReport,
 ) -> Result<bool, String> {
+    run_txn_with(
+        runtime, sid, target, manifest, prepared, None, started, report,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_txn_with(
+    runtime: &impl Runtime,
+    sid: &str,
+    target: &FlushTarget<'_>,
+    manifest: &mut Manifest,
+    prepared: Option<PreparedFiles>,
+    verified_svc: Option<&Value>,
+    started: Instant,
+    report: &mut FlushReport,
+) -> Result<bool, String> {
     // A fresh transaction (rows in hand) has a new id no cursor can carry yet.
     let already_committed = prepared.is_none()
         && runtime.admin_get(&cursor_key(sid))?.is_some_and(|record| {
@@ -1356,7 +1451,7 @@ fn run_txn(
                 manifest.start_min,
                 &manifest.txn_id,
                 manifest.keep_idle,
-                read_manifest_rows(runtime, sid, manifest)?,
+                read_manifest_rows_with(runtime, sid, manifest, verified_svc)?,
             ),
         };
         for (key, kind, file_rows) in &files {
@@ -1520,10 +1615,22 @@ fn trim_svc_outbox(runtime: &impl Runtime, sid: &str, manifest: &Manifest) -> Re
         }
     }
     let archived_in_kv = (kv_archived - raw_base) as usize;
-    let removable = outbox
-        .len()
-        .saturating_sub(SVC_OUTBOX_KEEP)
-        .min(archived_in_kv);
+    if let Some(exp_prefix) = manifest.svc_prefix_anchor.as_deref() {
+        if svc_slice_anchor(&outbox[..archived_in_kv]) != exp_prefix {
+            return Ok(true);
+        }
+    }
+    let removable = match manifest.svc_planned_trim {
+        Some(planned) => outbox
+            .len()
+            .saturating_sub(SVC_OUTBOX_KEEP)
+            .min(archived_in_kv)
+            .min(planned),
+        None => outbox
+            .len()
+            .saturating_sub(SVC_OUTBOX_KEEP)
+            .min(archived_in_kv),
+    };
     let new_base = eff_base + removable as u64;
     if removable == 0 && new_base == raw_base {
         return Ok(true);
@@ -1743,6 +1850,7 @@ pub fn log_flush_reserving(
     }
     let mut skip = BTreeSet::new();
 
+    let mut manifest_abandoned = false;
     if manifest_record.is_some() && !manifest.committed {
         let Some(lease) = acquire_lease(runtime, Some(&manifest.txn_id))? else {
             report.status = FlushStatus::Busy;
@@ -1759,33 +1867,101 @@ pub fn log_flush_reserving(
                 return Err(error);
             }
         }
-        let result = run_txn(
-            runtime,
-            sid,
-            target,
-            &mut manifest,
-            None,
-            started,
-            &mut report,
-        );
-        let finished = match result {
-            Ok(true) => finish_committed(
+        let mut verified_svc: Option<Value> = None;
+        let stale_svc = if manifest.svc_range.0 < manifest.svc_range.1 {
+            let svc_rec = match runtime.admin_get(&format!("svc:{sid}")) {
+                Ok(rec) => rec,
+                Err(error) => {
+                    lease.release();
+                    return Err(error);
+                }
+            };
+            if manifest_svc_matches(&manifest, svc_rec.as_ref().map(|r| &r.value)) {
+                verified_svc = svc_rec.map(|r| r.value);
+                false
+            } else {
+                true
+            }
+        } else {
+            false
+        };
+        if stale_svc {
+            // Verify cursor was not committed concurrently before abandoning the stale manifest.
+            let already_committed = match runtime.admin_get(&cursor_key(sid)) {
+                Ok(rec) => rec
+                    .is_some_and(|r| r.value["txn_id"].as_str() == Some(manifest.txn_id.as_str())),
+                Err(error) => {
+                    lease.release();
+                    return Err(error);
+                }
+            };
+            if already_committed {
+                manifest.committed = true;
+                let finished = finish_committed(
+                    runtime,
+                    sid,
+                    &mut manifest,
+                    settings,
+                    &mut report,
+                    reserve,
+                    true,
+                );
+                lease.release();
+                finished?;
+                return Ok(report);
+            }
+            if runtime.admin_remaining_calls() < manifest.outputs.len() as u32 + 2 {
+                report.status = FlushStatus::Deferred;
+                lease.release();
+                return Ok(report);
+            }
+            for key in &manifest.outputs {
+                if let Err(error) = delete_file(runtime, target, key) {
+                    lease.release();
+                    return Err(error);
+                }
+            }
+            if let Err(error) = runtime.kv_delete(&manifest_key(sid)) {
+                lease.release();
+                return Err(error);
+            }
+            lease.release();
+            manifest_abandoned = true;
+            if runtime.admin_remaining_calls().saturating_sub(reserve) < FIXED_CALLS + 4 {
+                return Ok(report);
+            }
+            report.status = FlushStatus::NotDue;
+            (cursor_record, cursor) = load_cursor()?;
+        } else {
+            let result = run_txn_with(
                 runtime,
                 sid,
+                target,
                 &mut manifest,
-                settings,
+                None,
+                verified_svc.as_ref(),
+                started,
                 &mut report,
-                reserve,
-                true,
-            ),
-            Ok(false) => Ok(()),
-            Err(error) => Err(error),
-        };
-        lease.release();
-        finished?;
-        return Ok(report);
+            );
+            let finished = match result {
+                Ok(true) => finish_committed(
+                    runtime,
+                    sid,
+                    &mut manifest,
+                    settings,
+                    &mut report,
+                    reserve,
+                    true,
+                ),
+                Ok(false) => Ok(()),
+                Err(error) => Err(error),
+            };
+            lease.release();
+            finished?;
+            return Ok(report);
+        }
     }
-    if manifest_record.is_some() && !manifest.gc_done {
+    if manifest_record.is_some() && !manifest_abandoned && !manifest.gc_done {
         skip.extend(manifest.outbox_keys.iter().cloned());
         let Some(lease) = acquire_lease(runtime, Some(&manifest.txn_id))? else {
             report.status = FlushStatus::Busy;

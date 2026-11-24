@@ -484,9 +484,6 @@ fn walk<R: Runtime>(
                         } else {
                             summaries.push(entry(&coverage.file, state.generation));
                         }
-                        if files.len() >= FILES_PAGE || summaries.len() >= FILES_PAGE {
-                            break;
-                        }
                     }
                 }
             }
@@ -497,6 +494,9 @@ fn walk<R: Runtime>(
                     == Some(state.covered_windows.len() as u64)
             {
                 state.current = None;
+            }
+            if files.len() >= FILES_PAGE || summaries.len() >= FILES_PAGE {
+                break;
             }
         }
         let Some(reference) = state.current.clone() else {
@@ -880,6 +880,15 @@ mod tests {
                 other => Err(format!("unexpected fos method: {other}")),
             }
         }
+        fn admin_fos_etag(
+            &self,
+            request: FosRequest<'_>,
+        ) -> Result<(FosResponse, Option<String>), String> {
+            use md5::{Digest, Md5};
+            let etag = (request.method == "PUT").then(|| hex::encode(Md5::digest(&request.body)));
+            let resp = self.admin_fos(request)?;
+            Ok((resp, etag))
+        }
     }
 
     fn test_service() -> Service {
@@ -1128,5 +1137,456 @@ mod tests {
         assert_eq!(keys.len(), 27);
         assert!(keys.iter().all(|k| !k.contains("open_bundle=")));
         assert!(!keys.contains(&windows[27].as_str()));
+    }
+
+    #[test]
+    fn rt_e1a_open_and_hour_bundle_not_duplicated_at_files_page_boundary() {
+        use crate::ingest::bundle::hour_bundle_key;
+
+        // Case 1 & 2: Hour 0 has FILES_PAGE - 1 (499) unbundled summary files; Hour 1 has 10
+        // windows covered by an `open_bundle`. Test both with `summary_counts` matching 10 (fast
+        // skip) and without `summary_counts` fast-skip (forces Page 2 to resume Hour 1!).
+        for with_fast_skip in [false, true] {
+            let hour0 = BASE;
+            let hour1 = BASE + 3600;
+            let rt = MockRt {
+                now: (hour1 + 25 * 60) as u64,
+                kv: RefCell::new(BTreeMap::new()),
+                objects: RefCell::new(BTreeMap::new()),
+            };
+            let svc = test_service();
+
+            let mut h0_summaries = Vec::with_capacity(FILES_PAGE - 1);
+            for i in 0..(FILES_PAGE - 1) {
+                let start = hour0 + (i as i64) * 2;
+                let end = start + 2;
+                let key = format!(
+                    "processed/summary/request/year=2027/month=01/day=15/hour=08/summary={start}-{end}-{i}.parquet"
+                );
+                h0_summaries.push(Output {
+                    key,
+                    bytes: 100,
+                    rows: 1,
+                    md5: format!("h0m{i}"),
+                    metadata: None,
+                });
+            }
+            let h0_block_key = "processed/_catalog/block-h0.json".to_owned();
+            let h0_block = Block {
+                version: VERSION,
+                service_id: svc.service_id.clone(),
+                generation: 1,
+                hour: hour0,
+                previous: None,
+                files: Vec::new(),
+                summaries: h0_summaries,
+                replaces: Vec::new(),
+                committed_at: BTreeMap::new(),
+            };
+
+            let mut h1_windows = Vec::new();
+            let mut h1_summaries = Vec::new();
+            for i in 0..10 {
+                let start = hour1 + i * 120;
+                let end = start + 120;
+                let key = format!(
+                    "processed/summary/request/year=2027/month=01/day=15/hour=09/summary={start}-{end}-0.parquet"
+                );
+                h1_summaries.push(Output {
+                    key: key.clone(),
+                    bytes: 100,
+                    rows: 10,
+                    md5: format!("h1m{i}"),
+                    metadata: None,
+                });
+                h1_windows.push(key);
+            }
+            let end_ms = (hour1 + 10 * 120) * 1000;
+            let open_key = open_bundle_key(
+                "processed/summary_bundle/request/",
+                hour1,
+                end_ms,
+                &h1_windows,
+            );
+            let coverage_key = "processed/_catalog/open-coverage-h1.json".to_owned();
+            let coverage = bundles::Coverage {
+                file: Output {
+                    key: open_key.clone(),
+                    bytes: 1000,
+                    rows: 100,
+                    md5: "openmd5h1".into(),
+                    metadata: None,
+                },
+                start: hour1,
+                end: hour1 + 10 * 120,
+                windows: h1_windows.iter().cloned().collect(),
+                hours: BTreeMap::new(),
+                built_generation: 1,
+            };
+            let h1_block_key = "processed/_catalog/block-h1.json".to_owned();
+            let h1_block = Block {
+                version: VERSION,
+                service_id: svc.service_id.clone(),
+                generation: 1,
+                hour: hour1,
+                previous: None,
+                files: Vec::new(),
+                summaries: h1_summaries,
+                replaces: Vec::new(),
+                committed_at: BTreeMap::new(),
+            };
+
+            let day = day_start(hour0);
+            let day_key = "processed/_catalog/day-e1a.json".to_owned();
+            let mut summary_counts = BTreeMap::from([(hour0, (FILES_PAGE - 1) as u64)]);
+            if with_fast_skip {
+                summary_counts.insert(hour1, 10);
+            }
+            let day_index = Day {
+                version: VERSION,
+                service_id: Some(svc.service_id.clone()),
+                hours: BTreeMap::from([
+                    (
+                        hour0,
+                        Reference {
+                            key: h0_block_key.clone(),
+                            generation: 1,
+                        },
+                    ),
+                    (
+                        hour1,
+                        Reference {
+                            key: h1_block_key.clone(),
+                            generation: 1,
+                        },
+                    ),
+                ]),
+                summary_counts,
+                ..Default::default()
+            };
+            let head = Head {
+                version: VERSION,
+                generation: 1,
+                recent: vec![super::super::Event {
+                    cursor: "1".into(),
+                    generation: 1,
+                    committed_at: None,
+                    manifest: None,
+                }],
+                days: BTreeMap::from([(day, day_key.clone())]),
+                open_bundles: BTreeMap::from([(
+                    hour1,
+                    Reference {
+                        key: coverage_key.clone(),
+                        generation: 1,
+                    },
+                )]),
+                ..Default::default()
+            };
+            rt.objects
+                .borrow_mut()
+                .insert(coverage_key, serde_json::to_vec(&coverage).unwrap());
+            rt.objects
+                .borrow_mut()
+                .insert(h0_block_key, serde_json::to_vec(&h0_block).unwrap());
+            rt.objects
+                .borrow_mut()
+                .insert(h1_block_key, serde_json::to_vec(&h1_block).unwrap());
+            rt.objects
+                .borrow_mut()
+                .insert(day_key, serde_json::to_vec(&day_index).unwrap());
+            rt.kv
+                .borrow_mut()
+                .insert(WATERMARK_KEY.into(), json!({ "catalog": head }));
+
+            let store = Store {
+                runtime: &rt,
+                service: &svc,
+                access_key: "ak".into(),
+                secret_key: "sk".into(),
+                started: Instant::now(),
+                vcpu_start: 0,
+            };
+            let from = hour0;
+            let to = hour1 + 25 * 60;
+            let mut checkpoint: Option<String> = None;
+            let mut pages = 0usize;
+            let mut all_keys = Vec::new();
+            loop {
+                let page = pinned_page_precise(
+                    &store,
+                    from,
+                    to,
+                    true,
+                    false,
+                    checkpoint.as_deref(),
+                    None,
+                    (from, to),
+                )
+                .unwrap();
+                pages += 1;
+                all_keys.extend(
+                    page.files
+                        .iter()
+                        .map(|f| f["key"].as_str().unwrap().to_owned()),
+                );
+                checkpoint = page.next;
+                if checkpoint.is_none() {
+                    break;
+                }
+                assert!(pages < 10, "pagination loop did not terminate");
+            }
+            let open_occurrences = all_keys.iter().filter(|k| *k == &open_key).count();
+            assert_eq!(
+                open_occurrences, 1,
+                "RT-E1a (with_fast_skip={with_fast_skip}): open_bundle emitted {open_occurrences} times (expected 1)"
+            );
+            assert_eq!(
+                all_keys.len(),
+                FILES_PAGE,
+                "RT-E1a (with_fast_skip={with_fast_skip}): expected exactly {FILES_PAGE} files, got {}",
+                all_keys.len()
+            );
+            if !with_fast_skip {
+                assert_eq!(
+                    pages, 2,
+                    "RT-E1a (no fast-skip): expected 2 pages to exercise checkpoint resume"
+                );
+            } else {
+                assert_eq!(
+                    pages, 1,
+                    "RT-E1a (fast-skip): covered last hour should complete on page 1 without redundant cursor"
+                );
+            }
+        }
+
+        // Case 3: Hour 0 = 499 unbundled summaries, Hour 1 = closed hour_bundle (10 windows), Hour 2 = 1 summary.
+        {
+            let hour0 = BASE;
+            let hour1 = BASE + 3600;
+            let hour2 = BASE + 7200;
+            let rt = MockRt {
+                now: (hour2 + 600) as u64,
+                kv: RefCell::new(BTreeMap::new()),
+                objects: RefCell::new(BTreeMap::new()),
+            };
+            let svc = test_service();
+            let h0_summaries: Vec<Output> = (0..(FILES_PAGE - 1))
+                .map(|i| {
+                    let start = hour0 + (i as i64) * 2;
+                    let end = start + 2;
+                    Output {
+                        key: format!(
+                            "processed/summary/request/year=2027/month=01/day=15/hour=08/summary={start}-{end}-{i}.parquet"
+                        ),
+                        bytes: 100,
+                        rows: 1,
+                        md5: format!("hb0m{i}"),
+                        metadata: None,
+                    }
+                })
+                .collect();
+            let h1_windows: Vec<String> = (0..10)
+                .map(|i| {
+                    let start = hour1 + i * 120;
+                    let end = start + 120;
+                    format!(
+                        "processed/summary/request/year=2027/month=01/day=15/hour=09/summary={start}-{end}-0.parquet"
+                    )
+                })
+                .collect();
+            let h1_summaries: Vec<Output> = h1_windows
+                .iter()
+                .enumerate()
+                .map(|(i, k)| Output {
+                    key: k.clone(),
+                    bytes: 100,
+                    rows: 10,
+                    md5: format!("hb1m{i}"),
+                    metadata: None,
+                })
+                .collect();
+            let h2_key = format!(
+                "processed/summary/request/year=2027/month=01/day=15/hour=10/summary={hour2}-{}-0.parquet",
+                hour2 + 120
+            );
+            let h2_block = Block {
+                version: VERSION,
+                service_id: svc.service_id.clone(),
+                generation: 1,
+                hour: hour2,
+                previous: None,
+                files: Vec::new(),
+                summaries: vec![Output {
+                    key: h2_key.clone(),
+                    bytes: 100,
+                    rows: 10,
+                    md5: "hb2m0".into(),
+                    metadata: None,
+                }],
+                replaces: Vec::new(),
+                committed_at: BTreeMap::new(),
+            };
+            let hour_bundle =
+                hour_bundle_key("processed/summary_bundle/request/", hour1, &h1_windows);
+            let coverage_key = "processed/_catalog/hour-coverage-h1.json".to_owned();
+            let coverage = bundles::Coverage {
+                file: Output {
+                    key: hour_bundle.clone(),
+                    bytes: 1000,
+                    rows: 100,
+                    md5: "hourmd5h1".into(),
+                    metadata: None,
+                },
+                start: hour1,
+                end: hour1 + 3600,
+                windows: h1_windows.iter().cloned().collect(),
+                hours: BTreeMap::new(),
+                built_generation: 1,
+            };
+            let day = day_start(hour0);
+            let day_key = "processed/_catalog/day-e1a-hb.json".to_owned();
+            let day_index = Day {
+                version: VERSION,
+                service_id: Some(svc.service_id.clone()),
+                hours: BTreeMap::from([
+                    (
+                        hour0,
+                        Reference {
+                            key: "processed/_catalog/hb-block-h0.json".into(),
+                            generation: 1,
+                        },
+                    ),
+                    (
+                        hour1,
+                        Reference {
+                            key: "processed/_catalog/hb-block-h1.json".into(),
+                            generation: 1,
+                        },
+                    ),
+                    (
+                        hour2,
+                        Reference {
+                            key: "processed/_catalog/hb-block-h2.json".into(),
+                            generation: 1,
+                        },
+                    ),
+                ]),
+                summary_counts: BTreeMap::from([
+                    (hour0, (FILES_PAGE - 1) as u64),
+                    (hour1, 10),
+                    (hour2, 1),
+                ]),
+                ..Default::default()
+            };
+            let head = Head {
+                version: VERSION,
+                generation: 1,
+                recent: vec![super::super::Event {
+                    cursor: "1".into(),
+                    generation: 1,
+                    committed_at: None,
+                    manifest: None,
+                }],
+                days: BTreeMap::from([(day, day_key.clone())]),
+                hour_bundles: BTreeMap::from([(
+                    hour1,
+                    Reference {
+                        key: coverage_key.clone(),
+                        generation: 1,
+                    },
+                )]),
+                ..Default::default()
+            };
+            rt.objects
+                .borrow_mut()
+                .insert(coverage_key, serde_json::to_vec(&coverage).unwrap());
+            rt.objects.borrow_mut().insert(
+                "processed/_catalog/hb-block-h0.json".into(),
+                serde_json::to_vec(&Block {
+                    version: VERSION,
+                    service_id: svc.service_id.clone(),
+                    generation: 1,
+                    hour: hour0,
+                    previous: None,
+                    files: Vec::new(),
+                    summaries: h0_summaries,
+                    replaces: Vec::new(),
+                    committed_at: BTreeMap::new(),
+                })
+                .unwrap(),
+            );
+            rt.objects.borrow_mut().insert(
+                "processed/_catalog/hb-block-h1.json".into(),
+                serde_json::to_vec(&Block {
+                    version: VERSION,
+                    service_id: svc.service_id.clone(),
+                    generation: 1,
+                    hour: hour1,
+                    previous: None,
+                    files: Vec::new(),
+                    summaries: h1_summaries,
+                    replaces: Vec::new(),
+                    committed_at: BTreeMap::new(),
+                })
+                .unwrap(),
+            );
+            rt.objects.borrow_mut().insert(
+                "processed/_catalog/hb-block-h2.json".into(),
+                serde_json::to_vec(&h2_block).unwrap(),
+            );
+            rt.objects
+                .borrow_mut()
+                .insert(day_key, serde_json::to_vec(&day_index).unwrap());
+            rt.kv
+                .borrow_mut()
+                .insert(WATERMARK_KEY.into(), json!({ "catalog": head }));
+
+            let store = Store {
+                runtime: &rt,
+                service: &svc,
+                access_key: "ak".into(),
+                secret_key: "sk".into(),
+                started: Instant::now(),
+                vcpu_start: 0,
+            };
+            let from = hour0;
+            let to = hour2 + 600;
+            let mut checkpoint: Option<String> = None;
+            let mut pages = 0usize;
+            let mut all_keys = Vec::new();
+            loop {
+                let page = pinned_page_precise(
+                    &store,
+                    from,
+                    to,
+                    true,
+                    false,
+                    checkpoint.as_deref(),
+                    None,
+                    (from, to),
+                )
+                .unwrap();
+                pages += 1;
+                all_keys.extend(
+                    page.files
+                        .iter()
+                        .map(|f| f["key"].as_str().unwrap().to_owned()),
+                );
+                checkpoint = page.next;
+                if checkpoint.is_none() {
+                    break;
+                }
+                assert!(pages < 10);
+            }
+            let hb_occurrences = all_keys.iter().filter(|k| *k == &hour_bundle).count();
+            assert_eq!(
+                hb_occurrences, 1,
+                "RT-E1a (hour_bundle): emitted {hb_occurrences} times (expected 1)"
+            );
+            assert_eq!(pages, 2);
+            assert_eq!(all_keys.len(), FILES_PAGE + 1);
+            assert!(all_keys.contains(&h2_key));
+        }
     }
 }

@@ -588,6 +588,7 @@ struct CatalogScanOpts<'a> {
     cursor_hold: u32,
     extra_if_catalog: (u32, u32),
     extra_if_reset: (u32, u32),
+    optional_manifest_reserve: (u32, u32),
     foreign_dr_state: bool,
     from_dr_state: bool,
     must_verify_dr_state: bool,
@@ -608,6 +609,7 @@ fn scan_catalog_head(
         cursor_hold,
         extra_if_catalog,
         extra_if_reset,
+        optional_manifest_reserve,
         foreign_dr_state,
         from_dr_state,
         must_verify_dr_state,
@@ -627,47 +629,47 @@ fn scan_catalog_head(
     let svc_rev_tag = format!("manifest-s-{}-rev-", service.service_id);
     let svc_rev_prefix = format!("{prefix}{svc_rev_tag}");
     let mut tried_svc_rev = false;
-    let (mut raw_objects, mut next_cat_tok, page_was_truncated, page_was_nonempty) =
-        if !from_dr_state
-            && expected_manifest.is_none()
-            && context.remaining_calls() >= fallback_reserve_calls + 7
-        {
-            tried_svc_rev = true;
-            match fos::list_objects(context, service, creds, &svc_rev_prefix, None) {
-                Ok(svc_page) if !svc_page.objects.is_empty() => {
-                    (svc_page.objects, None, false, true)
+    let (mut raw_objects, mut next_cat_tok, page_was_truncated) = if !from_dr_state
+        && expected_manifest.is_none()
+        && context.remaining_calls() >= fallback_reserve_calls + 7
+    {
+        tried_svc_rev = true;
+        match fos::list_objects(context, service, creds, &svc_rev_prefix, None) {
+            Ok(svc_page) if !svc_page.objects.is_empty() => (svc_page.objects, None, false),
+            Err(err) if err.status == 503 => return Err(err),
+            _ => {
+                if context.remaining_calls() <= fallback_reserve_calls + 1 {
+                    return Ok((None, false));
                 }
-                Err(err) if err.status == 503 => return Err(err),
-                _ => {
-                    if context.remaining_calls() <= fallback_reserve_calls + 1 {
-                        return Ok((None, false));
-                    }
-                    let page = match fos::list_objects(context, service, creds, &prefix, None) {
-                        Ok(page) => page,
-                        Err(err) if err.status == 503 => return Err(err),
-                        Err(_) => return Ok((None, false)),
-                    };
-                    let trunc = page.next_token.is_some();
-                    let nonempty = !page.objects.is_empty();
-                    (page.objects, page.next_token, trunc, nonempty)
-                }
+                let page = match fos::list_objects(context, service, creds, &prefix, None) {
+                    Ok(page) => page,
+                    Err(err) if err.status == 503 => return Err(err),
+                    Err(_) => return Ok((None, false)),
+                };
+                let trunc = page.next_token.is_some();
+                (page.objects, page.next_token, trunc)
             }
-        } else {
-            let page = match fos::list_objects(context, service, creds, &prefix, None) {
-                Ok(page) => page,
-                Err(err) if err.status == 503 || must_verify_dr_state => return Err(err),
-                Err(_) => return Ok((None, false)),
-            };
-            let trunc = page.next_token.is_some();
-            let nonempty = !page.objects.is_empty();
-            (page.objects, page.next_token, trunc, nonempty)
+        }
+    } else {
+        let page = match fos::list_objects(context, service, creds, &prefix, None) {
+            Ok(page) => page,
+            Err(err) if err.status == 503 || must_verify_dr_state => return Err(err),
+            Err(_) => return Ok((None, false)),
         };
+        let trunc = page.next_token.is_some();
+        (page.objects, page.next_token, trunc)
+    };
     let mut budget_stopped = false;
+    let trunc_list_floor = if !must_verify_dr_state && optional_manifest_reserve.0 > 0 {
+        (fallback_reserve_calls + 1).max(optional_manifest_reserve.0 + 1)
+    } else {
+        fallback_reserve_calls + 1
+    };
 
     if page_was_truncated {
         let mut found_svc_rev = false;
         if !tried_svc_rev {
-            if context.remaining_calls() > fallback_reserve_calls + 1 {
+            if context.remaining_calls() > trunc_list_floor {
                 match fos::list_objects(context, service, creds, &svc_rev_prefix, None) {
                     Ok(svc_page) => {
                         if !svc_page.objects.is_empty() {
@@ -682,15 +684,18 @@ fn scan_catalog_head(
                 budget_stopped = true;
             }
         }
-        if !found_svc_rev && !budget_stopped {
-            if context.remaining_calls() > fallback_reserve_calls + 1 {
+        // Always scan `legacy_m_prefix` even when `found_svc_rev` is true so newer legacy reset
+        // manifests (e.g. `manifest-0011-reset.json`) are never hidden behind older
+        // `manifest-s-{sid}-rev-*` objects.
+        if !budget_stopped {
+            if context.remaining_calls() > trunc_list_floor {
                 let legacy_m_prefix = format!("{prefix}manifest");
                 let mut m_tok: Option<String> = next_cat_tok
                     .clone()
                     .filter(|t| t.starts_with(&legacy_m_prefix));
                 let mut saw_any_manifest = m_tok.is_some();
                 loop {
-                    if context.remaining_calls() <= fallback_reserve_calls + 1 {
+                    if context.remaining_calls() <= trunc_list_floor {
                         budget_stopped = true;
                         break;
                     }
@@ -716,9 +721,11 @@ fn scan_catalog_head(
                         break;
                     }
                 }
-                if !saw_any_manifest {
+                if !saw_any_manifest && !found_svc_rev {
                     while let Some(tok) = next_cat_tok.as_deref() {
-                        if context.remaining_calls() <= fallback_reserve_calls + 3 {
+                        if context.remaining_calls()
+                            <= trunc_list_floor.max(fallback_reserve_calls + 3)
+                        {
                             budget_stopped = true;
                             break;
                         }
@@ -759,7 +766,7 @@ fn scan_catalog_head(
         })
     });
     let expected_missing = match expected_manifest {
-        Some(m_key) if !expected_on_page && page_was_nonempty => {
+        Some(m_key) if !expected_on_page => {
             if !page_was_truncated {
                 true
             } else if has_newer_svc_manifest {
@@ -823,8 +830,10 @@ fn scan_catalog_head(
     objects.sort_by(|a, b| {
         let (a_m, a_g) = manifest_sort_rank(&a.key);
         let (b_m, b_g) = manifest_sort_rank(&b.key);
-        b_m.cmp(&a_m)
+        (b_m > 0)
+            .cmp(&(a_m > 0))
             .then_with(|| b_g.cmp(&a_g))
+            .then_with(|| b_m.cmp(&a_m))
             .then_with(|| b.last_modified.cmp(&a.last_modified))
             .then_with(|| b.key.cmp(&a.key))
     });
@@ -920,7 +929,19 @@ fn scan_catalog_head(
         } else {
             extra_if_catalog.1
         };
-        if context.remaining_calls() <= cur_reserve + extra_verify_hold + dynamic_reset_hold {
+        let optional_floor = if optional_manifest_reserve.0 > 0 {
+            let need = if effective_reset.is_some() || (m_tier > 0 && obj.key.contains("reset")) {
+                optional_manifest_reserve.1
+            } else {
+                optional_manifest_reserve.0
+            };
+            need + extra_verify_hold
+        } else {
+            0
+        };
+        if context.remaining_calls()
+            <= (cur_reserve + extra_verify_hold + dynamic_reset_hold).max(optional_floor)
+        {
             if m_tier > 0 || (expected_missing && best_manifest.is_none()) {
                 budget_stopped = true;
             }
@@ -1126,7 +1147,14 @@ fn scan_catalog_head(
                             all_ok = false;
                             break;
                         }
-                        if context.remaining_calls() <= fallback_reserve_calls + reset_hold {
+                        let optional_blk_floor = if effective_reset.is_some() {
+                            optional_manifest_reserve.1
+                        } else {
+                            optional_manifest_reserve.0
+                        };
+                        if context.remaining_calls()
+                            <= (fallback_reserve_calls + reset_hold).max(optional_blk_floor)
+                        {
                             all_ok = false;
                             break;
                         }
@@ -1266,6 +1294,17 @@ fn dr_svc_entry_anchor(entry: &Value) -> String {
     hex::encode(Sha256::digest(canonical.to_string().as_bytes()))
 }
 
+fn dr_svc_slice_anchor(entries: &[Value]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update((entries.len() as u64).to_be_bytes());
+    for entry in entries {
+        hasher.update(dr_svc_entry_anchor(entry).as_bytes());
+        hasher.update(b"\n");
+    }
+    hex::encode(hasher.finalize())
+}
+
 fn dr_svc_archived_removable(svc_val: &Value, cursor_val: Option<&Value>) -> (u64, usize) {
     let raw_base = svc_val["_audit_outbox_base"].as_u64().unwrap_or(0);
     let Some(cv) = cursor_val else {
@@ -1287,7 +1326,9 @@ fn dr_svc_archived_removable(svc_val: &Value, cursor_val: Option<&Value>) -> (u6
     let svc_kv_archived = cv.get("svc_kv_archived").and_then(Value::as_u64);
     let svc_rebased_base = cv.get("svc_rebased_base").and_then(Value::as_u64);
     let svc_archived_anchor = cv.get("svc_archived_anchor").and_then(Value::as_str);
-    let svc_head_anchor = cv.get("svc_head_anchor").and_then(Value::as_str);
+    let svc_prefix_anchor = cv.get("svc_prefix_anchor").and_then(Value::as_str);
+    let svc_trimmed_base = cv.get("svc_trimmed_base").and_then(Value::as_u64);
+    let svc_trimmed_prefix_anchor = cv.get("svc_trimmed_prefix_anchor").and_then(Value::as_str);
     let svc_zero_anchor = cv.get("svc_zero_anchor").and_then(Value::as_str);
     let svc_zero_virtual_base = cv
         .get("svc_zero_virtual_base")
@@ -1301,20 +1342,19 @@ fn dr_svc_archived_removable(svc_val: &Value, cursor_val: Option<&Value>) -> (u6
     let cur_head_anchor = entries.first().map(dr_svc_entry_anchor);
 
     // 1a. Un-rebased KV epoch from a prior reset (`svc_kv_archived < archived`).
+    // Guard against rebased `raw_base >= svc_rebased_base` so Parquet-space coordinates are
+    // never compared against pre-rebase `svc_kv_archived`.
     if let Some(kv_arch) = svc_kv_archived {
         if kv_arch < archived
-            && svc_last_base.is_none_or(|lb| raw_base >= lb)
+            && svc_rebased_base.is_none_or(|rb| raw_base < rb)
+            && svc_last_base == Some(raw_base)
             && raw_base < kv_arch
             && kv_arch <= raw_base + len
         {
-            let boundary_pos = (kv_arch - 1 - raw_base) as usize;
-            let boundary_ok =
-                svc_archived_anchor == Some(dr_svc_entry_anchor(&entries[boundary_pos]).as_str());
-            let head_ok = svc_last_base != Some(raw_base)
-                || svc_head_anchor.is_none()
-                || svc_head_anchor == cur_head_anchor.as_deref();
-            if boundary_ok && head_ok {
-                let removable = (kv_arch - raw_base) as usize;
+            let removable = (kv_arch - raw_base) as usize;
+            let slice_ok =
+                svc_prefix_anchor == Some(dr_svc_slice_anchor(&entries[..removable]).as_str());
+            if slice_ok {
                 return (archived - removable as u64, removable);
             }
         }
@@ -1342,29 +1382,32 @@ fn dr_svc_archived_removable(svc_val: &Value, cursor_val: Option<&Value>) -> (u6
         return (raw_base, 0);
     }
 
-    // 2b. Normal or rebased space where `raw_base < archived`: verify bounds, base monotonicity,
-    // and exact archived-boundary anchor (or timestamp bound for legacy anchorless cursors).
+    // 2b. Normal or rebased space where `raw_base < archived`: verify bounds, exact untrimmed or
+    // planned-trimmed base, and full archived-slice SHA-256 anchor over `entries[0..removable]`.
     let min_expected_base = svc_rebased_base.or(svc_last_base);
     let bounds_ok = archived <= raw_base + len && min_expected_base.is_none_or(|lb| raw_base >= lb);
     if bounds_ok {
-        let boundary_pos = (archived - 1 - raw_base) as usize;
-        let verified = if let Some(exp_arch) = svc_archived_anchor {
-            dr_svc_entry_anchor(&entries[boundary_pos]) == exp_arch
-                && (min_expected_base != Some(raw_base)
-                    || svc_head_anchor.is_none()
-                    || svc_head_anchor == cur_head_anchor.as_deref())
+        let removable = (archived - raw_base) as usize;
+        let slice = &entries[..removable];
+        let verified = if svc_prefix_anchor.is_some() || svc_archived_anchor.is_some() {
+            if min_expected_base == Some(raw_base) {
+                svc_prefix_anchor == Some(dr_svc_slice_anchor(slice).as_str())
+            } else if svc_trimmed_base == Some(raw_base) {
+                svc_trimmed_prefix_anchor == Some(dr_svc_slice_anchor(slice).as_str())
+            } else {
+                false
+            }
         } else if raw_base == 0 && svc_zero_anchor.is_some() {
             svc_zero_virtual_base == 0
                 && svc_zero_anchor == cur_head_anchor.as_deref()
                 && (eff_last_svc_s == 0
-                    || entries[boundary_pos]["at"].as_u64().unwrap_or(0) <= eff_last_svc_s)
+                    || entries[removable - 1]["at"].as_u64().unwrap_or(0) <= eff_last_svc_s)
         } else {
-            eff_last_svc_s == 0
-                || (entries[0]["at"].as_u64().unwrap_or(0) <= eff_last_svc_s
-                    && entries[boundary_pos]["at"].as_u64().unwrap_or(0) <= eff_last_svc_s)
+            // Legacy anchorless cursor: fail closed -> 409 audit_archive_required.
+            false
         };
         if verified {
-            return (raw_base, (archived - raw_base) as usize);
+            return (raw_base, removable);
         }
     }
 
@@ -1415,6 +1458,26 @@ fn verify_candidate_endpoints(
     Ok(verified_owned)
 }
 
+fn dr_api_list(
+    context: &Context<'_, impl Runtime>,
+    path: &str,
+    token: &str,
+) -> Result<Vec<Value>, Error> {
+    let (status, val) = context.api_status("GET", path, token, None)?;
+    if status == 401 || status == 403 {
+        return Err(Error::new(403, "fastly_token_scope_insufficient"));
+    }
+    if status == 503 {
+        return Err(Error::new(503, "fastly_api_error"));
+    }
+    if !(200..300).contains(&status) {
+        return Err(Error::new(502, "fastly_api_error"));
+    }
+    list(&val)
+        .cloned()
+        .map_err(|_| Error::new(502, "fastly_api_error"))
+}
+
 fn inspect_active_version_for_dr(
     context: &Context<'_, impl Runtime>,
     service: &mut Service,
@@ -1425,84 +1488,54 @@ fn inspect_active_version_for_dr(
     let scope = crate::ingest::scope(service);
     let ver = match super::reconcile::active_version(context, &service.service_id, token) {
         Ok(ver) => ver,
+        Err(err) if err.status == 409 && err.code == "active_version_required" => return Ok(()),
         Err(err) if err.status == 403 => {
             return Err(Error::new(403, "fastly_token_scope_insufficient"));
         }
-        Err(err) if err.status == 503 => return Err(err),
-        Err(_) => return Ok(()),
+        Err(err) => return Err(err),
     };
     let encoded_sid = encode(&service.service_id);
-    let (s3_st, s3_val) = context.api_status(
-        "GET",
+    let s3_items = dr_api_list(
+        context,
         &format!("/service/{encoded_sid}/version/{ver}/logging/s3"),
         token,
-        None,
     )?;
-    if s3_st == 401 || s3_st == 403 {
-        return Err(Error::new(403, "fastly_token_scope_insufficient"));
-    }
-    let (fos_st, fos_val) = context.api_status(
-        "GET",
+    let fos_items = dr_api_list(
+        context,
         &format!("/service/{encoded_sid}/version/{ver}/logging/fos"),
         token,
-        None,
     )?;
-    if fos_st == 401 || fos_st == 403 {
-        return Err(Error::new(403, "fastly_token_scope_insufficient"));
-    }
-    if !(200..300).contains(&s3_st) || !(200..300).contains(&fos_st) {
-        return Ok(());
-    }
-    let (Ok(s3_items), Ok(fos_items)) = (list(&s3_val), list(&fos_val)) else {
-        return Ok(());
-    };
 
-    let mut coexist = super::reconcile::has_attach_endpoint_marker(s3_items, fos_items);
+    let mut coexist = super::reconcile::has_attach_endpoint_marker(&s3_items, &fos_items);
     if !coexist
         && (minimal_fallback || service.capture == Capture::Managed)
         && super::reconcile::has_foreign_primary_endpoint(
-            service, &scope, s3_items, fos_items, false,
+            service, &scope, &s3_items, &fos_items, false,
         )
     {
         if context.remaining_calls() == 0 {
             return Err(Error::new(503, "backend_budget"));
         }
-        let (snip_st, snip_val) = context.api_status(
-            "GET",
+        let snip_items = dr_api_list(
+            context,
             &format!("/service/{encoded_sid}/version/{ver}/snippet"),
             token,
-            None,
         )?;
-        if snip_st == 401 || snip_st == 403 {
-            return Err(Error::new(403, "fastly_token_scope_insufficient"));
-        }
-        if (200..300).contains(&snip_st) {
-            if let Ok(snip_items) = list(&snip_val) {
-                if super::reconcile::capture_present(snip_items) {
-                    coexist = true;
-                }
-            }
+        if super::reconcile::capture_present(&snip_items) {
+            coexist = true;
         }
     }
     if !coexist && (minimal_fallback || service.capture == Capture::Managed) {
         if context.remaining_calls() == 0 {
             return Err(Error::new(503, "backend_budget"));
         }
-        let (cond_st, cond_val) = context.api_status(
-            "GET",
+        let cond_items = dr_api_list(
+            context,
             &format!("/service/{encoded_sid}/version/{ver}/condition"),
             token,
-            None,
         )?;
-        if cond_st == 401 || cond_st == 403 {
-            return Err(Error::new(403, "fastly_token_scope_insufficient"));
-        }
-        if (200..300).contains(&cond_st) {
-            if let Ok(cond_items) = list(&cond_val) {
-                if super::reconcile::has_attach_condition_marker(cond_items) {
-                    coexist = true;
-                }
-            }
+        if super::reconcile::has_attach_condition_marker(&cond_items) {
+            coexist = true;
         }
     }
 
@@ -1517,8 +1550,8 @@ fn inspect_active_version_for_dr(
                 service,
                 &scope,
                 &attach_candidates,
-                s3_items,
-                fos_items,
+                &s3_items,
+                &fos_items,
             )?;
         } else {
             let managed_candidates = vec![service.logging_endpoint_name.clone()];
@@ -1526,8 +1559,8 @@ fn inspect_active_version_for_dr(
                 service,
                 &scope,
                 &managed_candidates,
-                s3_items,
-                fos_items,
+                &s3_items,
+                &fos_items,
             )?;
         }
         return Ok(());
@@ -1537,7 +1570,7 @@ fn inspect_active_version_for_dr(
         return Err(Error::new(409, "resource_name_collision"));
     }
     service.owned_endpoint_names =
-        verify_candidate_endpoints(service, &scope, candidate_names, s3_items, fos_items)?;
+        verify_candidate_endpoints(service, &scope, candidate_names, &s3_items, &fos_items)?;
     Ok(())
 }
 
@@ -1915,6 +1948,19 @@ pub(super) fn recover(
                 || floor_key.is_some()
                 || rum_floor_key.is_some()
                 || rum_stats.is_some());
+        let commit_calls_est = pending_secret_puts + 2;
+        let optional_manifest_reserve = if !must_verify_dr_state
+            && base_upserts > 0
+            && catalog_head.is_none()
+            && floor_key.is_none()
+        {
+            let u_rst =
+                base_upserts + 1 + u32::from(rum_stats.is_none() && rum_floor_key.is_none());
+            let need_rst = commit_calls_est + PER_UPSERT * u_rst + front_calls + cursor_hold;
+            (need_rst, need_rst)
+        } else {
+            (0u32, 0u32)
+        };
 
         if let Some(ref dr_head) = catalog_head {
             let (scanned_opt, dr_manifest_missing) = scan_catalog_head(
@@ -1927,6 +1973,7 @@ pub(super) fn recover(
                     cursor_hold,
                     extra_if_catalog,
                     extra_if_reset,
+                    optional_manifest_reserve,
                     foreign_dr_state,
                     from_dr_state: source == "dr_state",
                     must_verify_dr_state,
@@ -1990,6 +2037,7 @@ pub(super) fn recover(
                     cursor_hold,
                     extra_if_catalog,
                     extra_if_reset,
+                    optional_manifest_reserve,
                     foreign_dr_state,
                     from_dr_state: source == "dr_state",
                     must_verify_dr_state,

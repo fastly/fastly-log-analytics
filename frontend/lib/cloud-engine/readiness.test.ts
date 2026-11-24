@@ -912,7 +912,7 @@ it("SEC-T5-ITER32-FE-01: redacts real DuckDB numeric cast/overflow/range row val
       [
         "SELECT CAST(1 AS INT) << pin FROM t_num",
         ["847291"],
-        "Error: Out of Range Error: [redacted] value [redacted] is out of range",
+        "Error: Out of Range Error: Left-shift value [redacted] is out of range",
       ],
       [
         "SELECT to_millennia(pin) FROM t_num",
@@ -1165,6 +1165,253 @@ it("SEC-T5-ITER32-FE-03: caps RFC 3986 URL-scheme lookahead so valid schemes red
         expect(got, `msg=${msg} got=${got}`).not.toContain(frag);
       }
       expect(got, `msg=${msg}`).toBe(expectedExact);
+    }
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+  }
+}, 30000);
+
+it("SEC-T5-ITER34-FE-01: removes blanket numeric allowlist to redact real DuckDB numeric row leaks while preserving diagnostic numbers and Left-shift", async () => {
+  const { createNodeBackend } = await import("./dashboard/duckdb");
+  const backend = await createNodeBackend();
+  setCloudModeRuntime(true);
+  const events: { state?: string; error?: string }[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    await backend.query("CREATE TABLE t_p (pin INT, small_pin INT)");
+    await backend.query("INSERT INTO t_p VALUES (847291, 42)");
+
+    const realDuckNumericLeaks: readonly [string, readonly string[], string?][] = [
+      [
+        "SELECT get_bit('0101'::BIT, pin) FROM t_p",
+        ["847291"],
+        "Error: Out of Range Error: bit index [redacted] out of valid range ([redacted])",
+      ],
+      [
+        "SELECT set_bit('0101'::BIT, pin, 1) FROM t_p",
+        ["847291"],
+        "Error: Out of Range Error: bit index [redacted] out of valid range ([redacted])",
+      ],
+      [
+        "SELECT get_bit('0101'::BIT, small_pin) FROM t_p",
+        ["42"],
+        "Error: Out of Range Error: bit index [redacted] out of valid range ([redacted])",
+      ],
+      [
+        "SELECT regexp_extract_all('abc', '(a)', pin) FROM t_p",
+        ["847291"],
+      ],
+      [
+        "SELECT error('code ' || pin) FROM t_p",
+        ["847291"],
+        "Error: Invalid Input Error: code [redacted]",
+      ],
+      [
+        "SELECT error('index ' || small_pin) FROM t_p",
+        ["42"],
+        "Error: Invalid Input Error: index [redacted]",
+      ],
+      [
+        "SELECT CAST(1 AS INT) << pin FROM t_p",
+        ["847291"],
+        "Error: Out of Range Error: Left-shift value [redacted] is out of range",
+      ],
+    ];
+    for (const [sql, forbidden, expectedExact] of realDuckNumericLeaks) {
+      await expect(measureCloudQuery("query.console", () => backend.query(sql))).rejects.toThrow();
+      const got = events.at(-1)?.error ?? "";
+      for (const frag of forbidden) {
+        expect(got, `sql=${sql} got=${got}`).not.toContain(frag);
+      }
+      if (expectedExact) {
+        expect(got, `sql=${sql}`).toBe(expectedExact);
+      }
+    }
+
+    const numericCases: readonly [string, readonly string[], string][] = [
+      // Arbitrary row-value numbers must be redacted:
+      [
+        "Out of Range Error: bit index 847291 out of valid range (0..3)",
+        ["847291"],
+        "Error: Out of Range Error: bit index [redacted] out of valid range ([redacted])",
+      ],
+      [
+        "Invalid Input Error: Pattern has 1 groups. Cannot access group 847291",
+        ["847291"],
+        "Error: Invalid Input Error: [redacted] has [redacted]. Cannot access group [redacted]",
+      ],
+      [
+        "Runtime Error: failed for code 123456 and index 42",
+        ["123456", "42"],
+        "Error: Runtime Error: failed for code [redacted] and index [redacted]",
+      ],
+      // Left-shift clause-start word preserved while redacting value:
+      [
+        "Out of Range Error: Left-shift value 847291 is out of range",
+        ["847291"],
+        "Error: Out of Range Error: Left-shift value [redacted] is out of range",
+      ],
+      // Genuine diagnostic numbers stay preserved:
+      [
+        "IO Error: upstream HTTP 503 timeout after 30s",
+        [],
+        "Error: IO Error: upstream HTTP 503 timeout after 30s",
+      ],
+      [
+        "IO Error: HTTP 404 response for request",
+        [],
+        "Error: IO Error: HTTP 404 response for request",
+      ],
+      [
+        "Runtime Error: buffer exceeded 1024 bytes (16 MB limit)",
+        [],
+        "Error: Runtime Error: buffer exceeded 1024 bytes (16 MB limit)",
+      ],
+      [
+        "Conversion Error: Could not cast value 847291 to DECIMAL(18,3)",
+        ["847291"],
+        "Error: Conversion Error: Could not cast value [redacted] to DECIMAL(18,3)",
+      ],
+      [
+        "Parser Error: syntax error at line 1: unexpected input",
+        [],
+        "Error: Parser Error: syntax error at line 1: unexpected input",
+      ],
+    ];
+    for (const [msg, forbidden, expectedExact] of numericCases) {
+      const err = new Error(msg);
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+      const got = events.at(-1)?.error ?? "";
+      for (const frag of forbidden) {
+        expect(got, `msg=${msg} got=${got}`).not.toContain(frag);
+      }
+      expect(got, `msg=${msg}`).toBe(expectedExact);
+    }
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+    await backend.dispose();
+  }
+}, 45000);
+
+it("SEC-T5-ITER34-FE-02: redacts Stage-2A/2B delimited/spaced secrets, spaced SQL key assignments, Basic/Digest/Cookie headers, JSON secret pairs, suffix stems, and stays <25ms on 64 KiB", async () => {
+  setCloudModeRuntime(true);
+  const events: { state?: string; error?: string }[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    const wave34Cases: readonly [string, readonly string[], string][] = [
+      // Finding 2: delimiter immediately after = / :
+      ["Runtime Error: token=(847291) rejected", ["847291", "token", "("], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: token=[847291] rejected", ["847291", "token"], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: token={847291} rejected", ["847291", "token"], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: token:(847291) rejected", ["847291", "token", "("], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: password=(847291) rejected", ["847291", "password", "("], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: api_key=(847291) rejected", ["847291", "api_key", "("], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: cookie=(847291) rejected", ["847291", "cookie", "("], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: token=(server) rejected", ["server", "token", "("], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: token=[cache] rejected", ["cache", "token"], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: token={server} rejected", ["server", "token"], "Error: Runtime Error: [redacted] rejected"],
+
+      // Finding 3: spaced parenthesized/bracketed/braced secret values
+      ["Runtime Error: token: ( 847291 ) rejected", ["847291", "token", "("], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: token = ( 847291 ) rejected", ["847291", "token", "("], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: token=Bearer ( 847291 ) rejected", ["847291", "Bearer", "token", "("], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: token: ( server cache ) rejected", ["server", "cache", "token", "("], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: token = [ ( server ) ] rejected", ["server", "token", "("], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: token={ server cache } rejected", ["server", "cache", "token"], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: token=Bearer ( server cache ) rejected", ["server", "cache", "Bearer", "("], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: token=Bearer(847291) rejected", ["847291", "Bearer", "token", "("], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: token = ( server 847291", ["server", "847291", "token"], "Error: Runtime Error: [redacted]"],
+
+      // Finding 4: SAFE_KEY_PREFIX_WORDS with whitespace before = / :
+      ["Runtime Error: primary key = 847291 violated", ["847291", "key", "="], "Error: Runtime Error: primary [redacted]"],
+      ["Runtime Error: map key : 847291 failed", ["847291", "key"], "Error: Runtime Error: map [redacted] failed"],
+      ["Runtime Error: unique key = 847291 failed", ["847291", "key", "="], "Error: Runtime Error: unique [redacted] failed"],
+      ["Runtime Error: foreign key = 847291 failed", ["847291", "key", "="], "Error: Runtime Error: foreign [redacted] failed"],
+      ["Runtime Error: partition key : 847291 failed", ["847291", "key"], "Error: Runtime Error: partition [redacted] failed"],
+      ["Runtime Error: primary key = cache failed", ["cache", "key", "="], "Error: Runtime Error: primary [redacted] failed"],
+      ["Runtime Error: primary key = ( cache ) failed", ["cache", "key", "=", "("], "Error: Runtime Error: primary [redacted] failed"],
+      ["Runtime Error: map key : server failed", ["server", "key"], "Error: Runtime Error: map [redacted] failed"],
+      ["Constraint Error: primary key constraint violation", [], "Error: Constraint Error: primary key constraint violation"],
+
+      // Finding 5: Bare Basic/Digest auth schemes & multi-parameter Authorization:/Cookie: headers
+      ["Runtime Error: Basic 847291 rejected", ["847291", "Basic"], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: Basic server rejected", ["server", "Basic"], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: Basic(server) rejected", ["server", "Basic", "("], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: Digest 847291 rejected", ["847291", "Digest"], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: Digest cache rejected", ["cache", "Digest"], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: Authorization: Basic YWRtaW46c2VjcmV= rejected", ["YWRtaW46c2VjcmV", "Basic"], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: Authorization: Digest username=alice, response = 847291", ["alice", "response", "847291", "Digest", "="], "Error: Runtime Error: [redacted]"],
+      ["Runtime Error: Authorization: Digest username=client, response = cache rejected", ["client", "response", "cache", "Digest", "="], "Error: Runtime Error: [redacted] rejected"],
+      ['Runtime Error: Authorization: Digest username="alice", nonce="999", response = ( 847291 ) rejected', ["alice", "999", "response", "847291", "="], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: Cookie: sid=tok_sentinel_999; pin = 847291", ["tok_sentinel_999", "sid", "pin", "847291", "="], "Error: Runtime Error: [redacted]"],
+      ["Runtime Error: Cookie: sid=tok_sentinel_999; mode = cache rejected", ["tok_sentinel_999", "mode", "cache", "="], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: Cookie:sid = cache; mode = server rejected", ["cache", "server", "mode", "="], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: Set-Cookie: sid=tok_sentinel_999; HttpOnly; Secure; pin = cache rejected", ["tok_sentinel_999", "HttpOnly", "Secure", "pin", "cache", "="], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: basic syntax error", [], "Error: Runtime Error: [redacted] syntax error"],
+
+      // Finding 6: JSON secret keys + values redacted before Stage 2A strips key names
+      ['Runtime Error: {"secret": 847291, "token": 123456}', ["secret", "847291", "token", "123456"], "Error: Runtime Error: [redacted], [redacted]"],
+      ['Runtime Error: {"a": "", "secret": server}', ["secret", "server"], "Error: Runtime Error: [redacted]: [redacted], [redacted]"],
+      ['Runtime Error: {"secret": true, "token": false, "api_key": null}', ["secret", "true", "token", "false", "api_key", "null"], "Error: Runtime Error: [redacted], [redacted], [redacted]"],
+      ['Runtime Error: {"session_id": [1, "server", true], "auth_code": {"nested": true, "cache": 847291}} rejected', ["session_id", "server", "true", "auth_code", "nested", "cache", "847291"], "Error: Runtime Error: [redacted], [redacted] rejected"],
+      ['Runtime Error: {"password_hash": "val\\"847291", "pin": server} rejected', ["password_hash", "847291", "pin", "server"], "Error: Runtime Error: [redacted], [redacted] rejected"],
+      ["Runtime Error: {'secret': 847291, 'token': cache} rejected", ["secret", "847291", "token", "cache"], "Error: Runtime Error: [redacted], [redacted] rejected"],
+
+      // Finding 7: Suffix-qualified secret stems & session
+      ["Runtime Error: session = 847291 expired", ["847291", "session", "="], "Error: Runtime Error: [redacted] expired"],
+      ["Runtime Error: session = cache expired", ["cache", "session", "="], "Error: Runtime Error: [redacted] expired"],
+      ["Runtime Error: session_id = 847291 expired", ["847291", "session_id", "="], "Error: Runtime Error: [redacted] expired"],
+      ["Runtime Error: session_id = server expired", ["server", "session_id", "="], "Error: Runtime Error: [redacted] expired"],
+      ["Runtime Error: token_id = 847291 rejected", ["847291", "token_id", "="], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: token_id = valid rejected", ["valid", "token_id", "="], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: password_hash = 847291 rejected", ["847291", "password_hash", "="], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: password_hash = cache rejected", ["cache", "password_hash", "="], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: auth_code = 847291 rejected", ["847291", "auth_code", "="], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: auth_code = client rejected", ["client", "auth_code", "="], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: user_pwd_v2 = cache rejected", ["cache", "user_pwd_v2", "="], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: client_apikey_v1 = server rejected", ["server", "client_apikey_v1", "="], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: jwt_payload = cache rejected", ["cache", "jwt_payload", "="], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: csrf_nonce_id = valid rejected", ["valid", "csrf_nonce_id", "="], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: mfa_otp_code = value rejected", ["value", "mfa_otp_code", "="], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: card_pin_num = cache rejected", ["cache", "card_pin_num", "="], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: req_hmac_val = server rejected", ["server", "req_hmac_val", "="], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: signature_b64 = client rejected", ["client", "signature_b64", "="], "Error: Runtime Error: [redacted] rejected"],
+      ["Runtime Error: session expired", [], "Error: Runtime Error: session expired"],
+    ];
+    for (const [msg, forbidden, expectedExact] of wave34Cases) {
+      const err = new Error(msg);
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+      const got = events.at(-1)?.error ?? "";
+      for (const frag of forbidden) {
+        expect(got, `msg=${msg} got=${got}`).not.toContain(frag);
+      }
+      expect(got, `msg=${msg}`).toBe(expectedExact);
+    }
+
+    // 64 KiB O(N) performance guards (< 25 ms per call):
+    const perfPayloads = [
+      "Runtime Error: token=" + "(".repeat(65000),
+      "Runtime Error: token = ( " + "a ".repeat(32000),
+      'Runtime Error: {"secret": ' + "{".repeat(65000),
+      'Runtime Error: ' + '{"secret":1},'.repeat(5000),
+      "Runtime Error: Cookie: " + "a=1; ".repeat(13000),
+      "Runtime Error: Authorization: Digest " + "a=1, ".repeat(13000),
+      "Runtime Error: primary key" + " ".repeat(65000) + "= 847291",
+    ];
+    for (const payload of perfPayloads) {
+      const err = new Error(payload);
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+      const trials: number[] = [];
+      for (let k = 0; k < 5; k += 1) {
+        const t0 = performance.now();
+        await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+        trials.push(performance.now() - t0);
+      }
+      const sorted = [...trials].sort((a, b) => a - b);
+      const max = sorted.at(-1)!;
+      expect(max, `len=${payload.length} trials=${trials.map((v) => v.toFixed(2)).join(",")}`).toBeLessThan(25);
     }
   } finally {
     window.removeEventListener("fla:cloud-query", listener);

@@ -2791,3 +2791,379 @@ fn bug_cloud_outbox_33a_epoch_anchor_rebase_and_gc_pending_continuity() {
         assert_eq!(rt.cursor().svc_outbox_archived, 107);
     }
 }
+
+#[test]
+fn rt_f1_f2_f3_cloud_outbox_coordinate_space_slice_anchor_and_stopped_resume() {
+    let audit_rows = |r: &Rt| -> Vec<Value> {
+        r.objects
+            .borrow()
+            .iter()
+            .filter(|(k, _)| k.contains("/admin_audit/"))
+            .flat_map(|(_, body)| schema::from_parquet(LogKind::AdminAudit, body.clone()).unwrap())
+            .collect()
+    };
+
+    // === RT-F1a: Branch 1a coordinate-space mismatch (95 -> 270 after trim, len=220) ===
+    {
+        let rt = Rt::new();
+        rt.put_kv(
+            &cursor_key(SID),
+            json!({
+                "scan_min": NOW_MIN - 2,
+                "cache_min": NOW_MIN - 2,
+                "svc_outbox_archived": 100,
+                "svc_last_base": 100,
+                "last_flush_s": NOW_S - 600,
+                "last_svc_flush_s": NOW_S - 600,
+            }),
+        );
+        // Same-second repeated `service.updated` events so entries[24] == entries[29] after trim!
+        let repeated = json!({
+            "actor": "admin",
+            "at": NOW_S - 50,
+            "event": "service.updated",
+            "config_version": 2,
+        });
+        let entries: Vec<Value> = (0..220)
+            .map(|i| {
+                if i < 200 {
+                    repeated.clone()
+                } else {
+                    json!({
+                        "actor": "admin",
+                        "at": NOW_S - 40 + (i - 200) as u64,
+                        "event": format!("tail.{i}"),
+                        "config_version": i + 1,
+                    })
+                }
+            })
+            .collect();
+        rt.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": 95,
+                "_audit_outbox": entries,
+            }),
+        );
+        rt.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("f1a1")),
+            cron_line("f1a1-tick"),
+        );
+        rt.budget.set(rt.calls.get() + 64);
+        assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+        assert_eq!(rt.cursor().svc_outbox_archived, 300);
+        assert_eq!(
+            rt.get_kv("svc:svc1").unwrap()["_audit_outbox_base"].as_u64(),
+            Some(270),
+            "RT-F1a: Tick 1 must rebase and trim 95 -> 270"
+        );
+        assert_eq!(audit_rows(&rt).len(), 200);
+
+        rt.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 39, Some("f1a2")),
+            cron_line("f1a2-tick"),
+        );
+        rt.budget.set(rt.calls.get() + 64);
+        assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+        let rows = audit_rows(&rt);
+        assert_eq!(
+            rows.len(),
+            220,
+            "RT-F1a: Tick 2 must archive only the 20 remaining entries (total 220, not 225 duplicate rows), got {}",
+            rows.len()
+        );
+        assert_eq!(rt.cursor().svc_outbox_archived, 320);
+    }
+
+    // === RT-F1b: Branch 1a coordinate-space mismatch (95 -> 100 after rebase with removable=0, len=20 + 1) ===
+    {
+        let rt = Rt::new();
+        rt.put_kv(
+            &cursor_key(SID),
+            json!({
+                "scan_min": NOW_MIN - 2,
+                "cache_min": NOW_MIN - 2,
+                "svc_outbox_archived": 100,
+                "svc_last_base": 100,
+                "last_flush_s": NOW_S - 600,
+                "last_svc_flush_s": NOW_S - 600,
+            }),
+        );
+        let repeated = json!({
+            "actor": "admin",
+            "at": NOW_S - 50,
+            "event": "service.updated",
+            "config_version": 2,
+        });
+        let mut entries: Vec<Value> = vec![repeated; 20];
+        rt.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": 95,
+                "_audit_outbox": entries,
+            }),
+        );
+        rt.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("f1b1")),
+            cron_line("f1b1-tick"),
+        );
+        rt.budget.set(rt.calls.get() + 64);
+        assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+        assert_eq!(rt.cursor().svc_outbox_archived, 120);
+        assert_eq!(
+            rt.get_kv("svc:svc1").unwrap()["_audit_outbox_base"].as_u64(),
+            Some(100),
+            "RT-F1b: Tick 1 must rebase 95 -> 100"
+        );
+
+        entries.push(json!({
+            "actor": "admin",
+            "at": NOW_S - 10,
+            "event": "new.20",
+            "config_version": 21,
+        }));
+        let mut svc_val = rt.get_kv("svc:svc1").unwrap();
+        svc_val["_audit_outbox"] = Value::Array(entries);
+        rt.put_kv("svc:svc1", svc_val);
+        rt.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 39, Some("f1b2")),
+            cron_line("f1b2-tick"),
+        );
+        rt.budget.set(rt.calls.get() + 64);
+        assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+        let rows = audit_rows(&rt);
+        assert_eq!(
+            rows.len(),
+            21,
+            "RT-F1b: Tick 2 must archive only 1 new entry (total 21, not 26), got {}",
+            rows.len()
+        );
+        assert_eq!(rt.cursor().svc_outbox_archived, 121);
+    }
+
+    // === RT-F2a: Shifted-base replacement (0 -> 5 and 0 -> 10) with matching same-second boundary event ===
+    for shifted_base in [5u64, 10u64] {
+        let rt = Rt::new();
+        rt.set_cursor(NOW_MIN - 2);
+        let shared_event = json!({
+            "actor": "admin",
+            "at": NOW_S - 30,
+            "event": "service.updated",
+            "config_version": 2,
+        });
+        let mut orig: Vec<Value> = (0..19)
+            .map(|i| {
+                json!({
+                    "actor": "admin",
+                    "at": NOW_S - 100 + i as u64,
+                    "event": format!("orig.{i}"),
+                    "config_version": i + 1,
+                })
+            })
+            .collect();
+        orig.push(shared_event.clone());
+        rt.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": 0,
+                "_audit_outbox": orig,
+            }),
+        );
+        rt.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("f2a1")),
+            cron_line("f2a1-tick"),
+        );
+        rt.budget.set(rt.calls.get() + 64);
+        assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+        assert_eq!(rt.cursor().svc_outbox_archived, 20);
+
+        // Replace svc:svc1 with shifted_base (5 or 10) and 20 unarchived entries whose boundary_pos
+        // happens to equal `shared_event`!
+        let boundary_pos = (20 - 1 - shifted_base) as usize;
+        let replaced: Vec<Value> = (0..20)
+            .map(|i| {
+                if i == boundary_pos {
+                    shared_event.clone()
+                } else {
+                    json!({
+                        "actor": "admin",
+                        "at": NOW_S - 20 + i as u64,
+                        "event": format!("shifted.{i}"),
+                        "config_version": i + 1,
+                    })
+                }
+            })
+            .collect();
+        rt.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": shifted_base,
+                "_audit_outbox": replaced,
+            }),
+        );
+        rt.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 39, Some("f2a2")),
+            cron_line("f2a2-tick"),
+        );
+        rt.budget.set(rt.calls.get() + 64);
+        assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+        let rows = audit_rows(&rt);
+        assert_eq!(
+            rows.len(),
+            40,
+            "RT-F2a (shifted_base={shifted_base}): shifted-base replacement must archive all 20 replaced entries (total 40), got {}",
+            rows.len()
+        );
+        assert!(
+            rows.iter().any(|r| r["action"] == "shifted.0"),
+            "RT-F2a (shifted_base={shifted_base}): shifted.0 was silently dropped!"
+        );
+        assert_eq!(rt.cursor().svc_outbox_archived, 40);
+    }
+
+    // === RT-F2b: Legacy anchorless cursor (last_flush_s = 0 and last_flush_s = NOW_S) must fail safe & archive ===
+    for last_flush_s in [0u64, NOW_S] {
+        let rt = Rt::new();
+        rt.put_kv(
+            &cursor_key(SID),
+            json!({
+                "scan_min": NOW_MIN - 2,
+                "cache_min": NOW_MIN - 2,
+                "svc_outbox_archived": 20,
+                "last_flush_s": last_flush_s,
+            }),
+        );
+        let entries: Vec<Value> = (0..20)
+            .map(|i| {
+                json!({
+                    "actor": "admin",
+                    "at": NOW_S - 50 + i as u64,
+                    "event": format!("legacy_unarchived.{i}"),
+                    "config_version": i + 1,
+                })
+            })
+            .collect();
+        rt.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": 0,
+                "_audit_outbox": entries,
+            }),
+        );
+        rt.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("f2b")),
+            cron_line("f2b-tick"),
+        );
+        rt.budget.set(rt.calls.get() + 64);
+        assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+        let rows = audit_rows(&rt);
+        assert_eq!(
+            rows.len(),
+            20,
+            "RT-F2b (last_flush_s={last_flush_s}): legacy anchorless cursor must archive all 20 entries instead of blackholing, got {}",
+            rows.len()
+        );
+        assert_eq!(rt.cursor().svc_outbox_archived, 40);
+    }
+
+    // === RT-F3: Uncommitted Stopped manifest resume must NOT archive swapped svc outbox twice ===
+    {
+        let rt = Rt::new();
+        rt.put_kv(
+            &cursor_key(SID),
+            json!({
+                "scan_min": NOW_MIN - 2,
+                "cache_min": NOW_MIN - 2,
+                "svc_outbox_archived": 100,
+                "svc_last_base": 100,
+                "last_flush_s": NOW_S - 600,
+                "last_svc_flush_s": NOW_S - 600,
+            }),
+        );
+        let orig: Vec<Value> = (0..20)
+            .map(|i| {
+                json!({
+                    "actor": "admin",
+                    "at": NOW_S - 100 + i as u64,
+                    "event": format!("orig.{i}"),
+                    "config_version": i + 1,
+                })
+            })
+            .collect();
+        rt.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": 10,
+                "_audit_outbox": orig,
+            }),
+        );
+        rt.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("f3-1")),
+            cron_line("f3-1-tick"),
+        );
+        // Tick 1: collect svc_range=(100, 120), save manifest, hit WALL_STOP -> Stopped!
+        rt.elapsed_s.set(WALL_STOP.as_secs());
+        rt.budget.set(rt.calls.get() + 64);
+        let t1 = run(&rt, true);
+        assert_eq!(t1.status, FlushStatus::Stopped);
+        assert!(rt.get_kv(&manifest_key(SID)).is_some());
+
+        // Swap svc:svc1 while Stopped (raw_base=20, 20 new swap.* entries):
+        let swap: Vec<Value> = (0..20)
+            .map(|i| {
+                json!({
+                    "actor": "admin",
+                    "at": NOW_S - 50 + i as u64,
+                    "event": format!("swap.{i}"),
+                    "config_version": i + 1,
+                })
+            })
+            .collect();
+        rt.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": 20,
+                "_audit_outbox": swap,
+            }),
+        );
+
+        // Tick 2 & Tick 3 with normal wall time:
+        rt.elapsed_s.set(0);
+        rt.budget.set(rt.calls.get() + 64);
+        let t2 = run(&rt, true);
+        assert!(matches!(
+            t2.status,
+            FlushStatus::Committed | FlushStatus::NotDue
+        ));
+
+        rt.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 39, Some("f3-3")),
+            cron_line("f3-3-tick"),
+        );
+        rt.budget.set(rt.calls.get() + 64);
+        assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+
+        let rows = audit_rows(&rt);
+        let swap0_count = rows.iter().filter(|r| r["action"] == "swap.0").count();
+        assert_eq!(
+            swap0_count,
+            1,
+            "RT-F3: swap.0 must be archived exactly once (got {swap0_count}, total_rows={})",
+            rows.len()
+        );
+        assert_eq!(
+            rows.len(),
+            20,
+            "RT-F3: expected exactly 20 archived rows (swap.0..19 once), got {}",
+            rows.len()
+        );
+        assert_eq!(rt.cursor().svc_outbox_archived, 120);
+    }
+}

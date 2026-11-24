@@ -66,37 +66,68 @@ _EXTRA_MAP_MASKED_KEYS = frozenset(
         "cmcd.sid",
         "cmcd.cid",
         "cmcd.session",
+        "src_ip",
+        "remote_ip",
+        "peer_ip",
+        "x_ip",
+        "x_cookie",
+        "x_authorization",
+        "bearer_token",
+        "session_cookie",
     }
 )
 _MAP_MASKED_KEYS = tuple(sorted(SHARED_PII_KEYS | CMCD_SESSION_ALIAS_KEYS | _EXTRA_MAP_MASKED_KEYS))
 _MAP_MASKED_KEY_SET = frozenset(_MAP_MASKED_KEYS)
 _MAP_MASKED_NONWORD_KEYS = tuple(sorted({re.sub(r"[^a-z0-9]+", "", k.lower()) for k in _MAP_MASKED_KEYS}))
 _MAP_MASKED_NONWORD_SET = frozenset(_MAP_MASKED_NONWORD_KEYS)
+_PII_WS_RE2_CHARS = (
+    r" \t\n\r\f\x0b\x{0085}\x{00a0}\x{1680}\x{2000}-\x{200b}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}"
+)
+_PII_WS_PY_CHARS = " \t\n\r\f\x0b\x85\u00a0\u1680\u2000-\u200b\u2028\u2029\u202f\u205f\u3000\ufeff"
+_PII_WS_STRIP_CHARS = (
+    " \t\n\r\f\x0b\x85\u00a0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u200b"
+    "\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+_PII_WS_TRIM_RE2 = f"^[{_PII_WS_RE2_CHARS}]+|[{_PII_WS_RE2_CHARS}]+$"
+_PII_SPLIT_OUTER_RE2 = f"[\\[\\]/:;|,&=?{_PII_WS_RE2_CHARS}]+"
+_PII_SPLIT_ALL_RE2 = f"[.\\[\\]/:;|,&=?{_PII_WS_RE2_CHARS}]+"
+_PII_CAMEL_IPV_RE = re.compile(r"IPv([46])")
 _PII_CAMEL_RE_1 = re.compile(r"([a-z0-9])([A-Z])")
-_PII_CAMEL_RE_2 = re.compile(r"([A-Z]+)([A-Z][a-z](?:[^0-9]|$))")
-_PII_SPLIT_OUTER_RE = re.compile(r"[\[\]/:;|,&=?\s]+")
-_PII_SPLIT_ALL_RE = re.compile(r"[.\[\]/:;|,&=?\s]+")
+_PII_CAMEL_RE_2 = re.compile(r"([A-Z]+)([A-Z][a-z])")
+_PII_SPLIT_OUTER_RE = re.compile(f"[\\[\\]/:;|,&=?{_PII_WS_PY_CHARS}]+")
+_PII_SPLIT_ALL_RE = re.compile(f"[.\\[\\]/:;|,&=?{_PII_WS_PY_CHARS}]+")
+_PII_BRACKET_STRIP_RE = re.compile(r"\[['\"`]?[^'\"`\]]+['\"`]?\]")
 _PII_IPV_RE = re.compile(r"([a-z_])ipv[46](?:_|$)")
 _PII_AFFIX_PREFIX_RE = re.compile(
-    r"^(?:(?:x_?)?filter_|_?cf_|(?:req|resp|request|response|bereq|beresp|obj)_http_|http_|(?:req|resp|request|response)_|headers?_)+"
+    r"^(?:(?:x_?)?filter_|_?cf_|(?:req|resp|request|response|bereq|beresp|obj)_http_|http_|(?:req|resp|request|response)_|headers?_|(?:raw|orig|original)_)+"
 )
 _PII_SUFFIX_RE = re.compile(r"(?:_v[0-9]+|_hash|_addr|_?[0-9]+)+$")
 
 
+def _normalize_pii_unicode(value: str) -> str:
+    # Exact parity with Python .lower() on all non-ASCII codepoints that fold to ASCII [a-z0-9]
+    # (U+0130 'İ' -> 'i' + U+0307, U+212A 'K' -> 'k'), while remaining compatible with non-ICU ClickHouse/chdb.
+    return value.replace("\u0130", "i").replace("\u0307", "").replace("\u212a", "k")
+
+
 def _is_console_pii_identifier(name: str) -> bool:
-    raw = name.strip().lower()
+    raw = _normalize_pii_unicode(name).strip(_PII_WS_STRIP_CHARS).lower()
     if not raw:
         return False
     if raw in MASKED_KEYS or raw in _MAP_MASKED_KEY_SET or is_saved_view_pii_key(name):
         return True
-    decoded = urllib.parse.unquote(urllib.parse.unquote(name))
-    raw_lower = decoded.strip().lower()
-    camel = _PII_CAMEL_RE_2.sub(r"\1_\2", _PII_CAMEL_RE_1.sub(r"\1_\2", decoded)).strip().lower()
-    candidates = [raw, raw_lower, camel]
-    candidates.extend(_PII_SPLIT_OUTER_RE.split(raw_lower))
-    candidates.extend(_PII_SPLIT_ALL_RE.split(raw_lower))
-    candidates.extend(_PII_SPLIT_OUTER_RE.split(camel))
-    candidates.extend(_PII_SPLIT_ALL_RE.split(camel))
+    decoded = _normalize_pii_unicode(urllib.parse.unquote(urllib.parse.unquote(name)))
+    raw_lower = decoded.strip(_PII_WS_STRIP_CHARS).lower()
+    camel_src = _PII_CAMEL_IPV_RE.sub(r"Ipv\1", decoded)
+    camel = _PII_CAMEL_RE_2.sub(r"\1_\2", _PII_CAMEL_RE_1.sub(r"\1_\2", camel_src)).strip(_PII_WS_STRIP_CHARS).lower()
+    raw_unbrack = _PII_BRACKET_STRIP_RE.sub("", raw_lower).strip(_PII_WS_STRIP_CHARS)
+    camel_unbrack = _PII_BRACKET_STRIP_RE.sub("", camel).strip(_PII_WS_STRIP_CHARS)
+    candidates = [raw, raw_lower, camel, raw_unbrack, camel_unbrack]
+    for base in (raw_lower, camel, raw_unbrack, camel_unbrack):
+        if base:
+            candidates.extend(_PII_SPLIT_OUTER_RE.split(base))
+            candidates.extend(_PII_SPLIT_ALL_RE.split(base))
     for seg in candidates:
         if not seg:
             continue
@@ -167,17 +198,36 @@ def _redaction(name: str, type_: str, keys: str) -> str | None:
         match = re.fullmatch(r"Map\((.+?),\s*(.+)\)", type_)
         if not match or "String" not in match.group(1) or "String" not in match.group(2):
             raise RuntimeError(f"cannot redact column {name} of type {type_}")
+        ws_trim_pat = _literal(_PII_WS_TRIM_RE2)
+        u_idot_pat = _literal(r"\x{0130}")
+        u_comb_dot_pat = _literal(r"\x{0307}")
+        u_kelvin_pat = _literal(r"\x{212a}")
+
+        def _ch_norm_u(expr: str) -> str:
+            return (
+                f"replaceRegexpAll(replaceRegexpAll(replaceRegexpAll({expr}, "
+                f"{u_idot_pat}, 'i'), {u_comb_dot_pat}, ''), {u_kelvin_pat}, 'k')"
+            )
+
+        k_raw_pre = f"lower(replaceRegexpAll({_ch_norm_u('k')}, {ws_trim_pat}, ''))"
         k_decoded = "decodeURLComponent(decodeURLComponent(k))"
-        k_raw_lower = f"lower(trimBoth({k_decoded}))"
+        k_norm = _ch_norm_u(k_decoded)
+        k_raw_lower = f"lower(replaceRegexpAll({k_norm}, {ws_trim_pat}, ''))"
+        camel_ipv_pat = _literal(_PII_CAMEL_IPV_RE.pattern)
+        camel_ipv_repl = _literal(r"Ipv\1")
         camel1_pat = _literal(_PII_CAMEL_RE_1.pattern)
         camel2_pat = _literal(_PII_CAMEL_RE_2.pattern)
         camel_repl = _literal(r"\1_\2")
+        k_camel_src = f"replaceRegexpAll({k_norm}, {camel_ipv_pat}, {camel_ipv_repl})"
         k_camel = (
-            f"lower(trimBoth(replaceRegexpAll(replaceRegexpAll({k_decoded}, {camel1_pat}, {camel_repl}), "
-            f"{camel2_pat}, {camel_repl})))"
+            f"lower(replaceRegexpAll(replaceRegexpAll(replaceRegexpAll({k_camel_src}, "
+            f"{camel1_pat}, {camel_repl}), {camel2_pat}, {camel_repl}), {ws_trim_pat}, ''))"
         )
-        split_outer_pat = _literal(_PII_SPLIT_OUTER_RE.pattern)
-        split_all_pat = _literal(_PII_SPLIT_ALL_RE.pattern)
+        bracket_strip_pat = _literal(_PII_BRACKET_STRIP_RE.pattern)
+        k_raw_unbrack = f"replaceRegexpAll(replaceRegexpAll({k_raw_lower}, {bracket_strip_pat}, ''), {ws_trim_pat}, '')"
+        k_camel_unbrack = f"replaceRegexpAll(replaceRegexpAll({k_camel}, {bracket_strip_pat}, ''), {ws_trim_pat}, '')"
+        split_outer_pat = _literal(_PII_SPLIT_OUTER_RE2)
+        split_all_pat = _literal(_PII_SPLIT_ALL_RE2)
         ipv_pat = _literal(_PII_IPV_RE.pattern)
         ipv_repl = _literal(r"\1ip_")
         affix_pat = _literal(_PII_AFFIX_PREFIX_RE.pattern)
@@ -189,11 +239,15 @@ def _redaction(name: str, type_: str, keys: str) -> str | None:
         seg_stripped = f"trimBoth(replaceRegexpOne({seg_affix}, {suffix_pat}, ''), '_')"
         nw_keys = ", ".join(_literal(nk) for nk in _MAP_MASKED_NONWORD_KEYS)
         candidates_expr = (
-            f"arrayConcat([{k_raw_lower}, {k_camel}], "
+            f"arrayConcat([{k_raw_pre}, {k_raw_lower}, {k_camel}, {k_raw_unbrack}, {k_camel_unbrack}], "
             f"splitByRegexp({split_outer_pat}, {k_raw_lower}), "
             f"splitByRegexp({split_all_pat}, {k_raw_lower}), "
             f"splitByRegexp({split_outer_pat}, {k_camel}), "
-            f"splitByRegexp({split_all_pat}, {k_camel}))"
+            f"splitByRegexp({split_all_pat}, {k_camel}), "
+            f"splitByRegexp({split_outer_pat}, {k_raw_unbrack}), "
+            f"splitByRegexp({split_all_pat}, {k_raw_unbrack}), "
+            f"splitByRegexp({split_outer_pat}, {k_camel_unbrack}), "
+            f"splitByRegexp({split_all_pat}, {k_camel_unbrack}))"
         )
         cmcd_extra = f" OR {k_camel} = 'session'" if name.lower() == "cmcd" else ""
         return (
