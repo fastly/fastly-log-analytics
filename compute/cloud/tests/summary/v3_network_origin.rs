@@ -867,7 +867,7 @@ fn bundles_drop_new_rows_unless_every_source_has_them() {
             .count()
     };
     let both = read(&bundles::merge(&[&w1, &w2], BASE, Unit::Hour).unwrap());
-    assert_eq!(new_fields(&both).len(), 25);
+    assert_eq!(new_fields(&both).len(), 26);
     assert!(stems(&both) > 1);
 
     let mixed_bytes = bundles::merge(&[&old, &w2], BASE, Unit::Hour).unwrap();
@@ -906,7 +906,7 @@ fn bundles_drop_new_rows_unless_every_source_has_them() {
     assert!(new_fields(&day).is_empty());
     assert_eq!(stems(&day), 0);
     let day = read(&bundles::merge(&[&full_hour], BASE, Unit::Day).unwrap());
-    assert_eq!(new_fields(&day).len(), 24);
+    assert_eq!(new_fields(&day).len(), 25);
     assert_eq!(stems(&day), stems(&both));
 }
 

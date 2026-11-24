@@ -240,11 +240,15 @@ def test_performance_projection_schema_covers_waterfall_and_scatter() -> None:
         "sample_key UInt64",
         "origin_ms Float64",
         "edge_ms Float64",
+        "latency_sk_v",
+        "latency_sk_w",
         "publication_state",
         "TTL bucket_start",
         "ReplicatedMergeTree",
     ):
         assert required in sql
+    assert "ALTER TABLE performance_minute_dimensions ADD COLUMN IF NOT EXISTS latency_sk_v Array(Float64)" in sql
+    assert "ALTER TABLE performance_minute_dimensions ADD COLUMN IF NOT EXISTS latency_sk_w Array(UInt32)" in sql
     assert sql.count("CREATE TABLE IF NOT EXISTS") == 3
 
 

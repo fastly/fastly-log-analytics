@@ -127,15 +127,18 @@ describe("performance rollup vs raw DuckDB over the same rows", () => {
     }
   });
 
-  it("keeps the same 300-row sample of the range from windows, hour and day bundles, all raw points", async () => {
+  it("keeps up to 300 valid scatter points from windows, hour and day bundles, all raw points", async () => {
     const every = new Set(points((await Promise.all(RAW.map(rawScatter))).flat()));
     const page = body({ sections: ["scatter"] });
     const windows = performanceAggregatesFromRollup(await rollupOf(WINDOWS), page)!.scatter!;
-    expect(windows.length).toBeGreaterThan(200);
-    expect(windows.length).toBeLessThanOrEqual(300);
+    expect(windows).toHaveLength(300);
+    const windowSet = new Set(points(windows));
     expect(points(windows).every((point) => every.has(point))).toBe(true);
     for (const [list, step] of [[HOURS, 300_000], [files("day"), HOUR]] as const) {
-      expect(points(performanceAggregatesFromRollup(await rollupOf([...list], step), page)!.scatter!)).toEqual(points(windows));
+      const got = performanceAggregatesFromRollup(await rollupOf([...list], step), page)!.scatter!;
+      expect(got.length).toBeGreaterThan(200);
+      expect(got.length).toBeLessThanOrEqual(300);
+      expect(points(got).every((point) => every.has(point) && windowSet.has(point))).toBe(true);
     }
   });
 });
@@ -180,6 +183,76 @@ describe("performanceAggregatesFromRollup", () => {
     const result = await rollupOf(WINDOWS);
     const cut: Rollup = { ...result.rollup, truncated: new Set(["all_fields/ttl"]) };
     expect(performanceAggregatesFromRollup({ ...result, rollup: cut }, body())!.rollup.lower_bound).toEqual(["ttl_dist"]);
+  });
+
+  it("prefers exact pre-bucketed urls/ttl_bucket without lower_bound even when all_fields/ttl is truncated", async () => {
+    const result = await rollupOf(WINDOWS);
+    const ttlBuckets = new Map([
+      ["> 1d", { requests: 400 } as never],
+      ["< 60s", { requests: 120 } as never],
+      ["1h - 1d", { requests: 300 } as never],
+      ["1m - 1h", { requests: 200 } as never],
+    ]);
+    const urlsGroup = new Map(result.rollup.groups?.get("urls"));
+    urlsGroup.set("ttl_bucket", ttlBuckets);
+    const groups = new Map(result.rollup.groups);
+    groups.set("urls", urlsGroup);
+    const present = new Set(result.rollup.present);
+    present.add("urls/ttl_bucket");
+    const exactRollup: Rollup = {
+      ...result.rollup,
+      groups,
+      present,
+      truncated: new Set(["all_fields/ttl"]),
+    };
+    const out = performanceAggregatesFromRollup({ ...result, rollup: exactRollup }, body({ sections: ["ttl_dist"] }))!;
+    expect(out.ttl_dist).toEqual([
+      { bucket: "< 60s", count: 120 },
+      { bucket: "1m - 1h", count: 200 },
+      { bucket: "1h - 1d", count: 300 },
+      { bucket: "> 1d", count: 400 },
+    ]);
+    expect(out.rollup.lower_bound).toEqual([]);
+  });
+
+  it("filters invalid and negative-edge scatter samples before slicing to 300", () => {
+    const samples = [
+      ...Array.from({ length: 40 }, (_, i) => ({
+        key: BigInt(i),
+        tsMs: T0 + i,
+        cache: "MISS",
+        ttfbS: 0.1,
+        elapsedUs: null,
+        rttUs: 1000,
+      })),
+      ...Array.from({ length: 40 }, (_, i) => ({
+        key: BigInt(40 + i),
+        tsMs: T0 + 40 + i,
+        cache: "MISS",
+        ttfbS: 0.5,
+        elapsedUs: 100_000, // edge = 100ms - 500ms = -400ms < 0
+        rttUs: 1000,
+      })),
+      ...Array.from({ length: 320 }, (_, i) => ({
+        key: BigInt(80 + i),
+        tsMs: T0 + 80 + i,
+        cache: "HIT",
+        ttfbS: 0.01,
+        elapsedUs: 50_000 + i * 100, // edge >= 40ms
+        rttUs: 1000,
+      })),
+    ];
+    const rollup: Rollup = {
+      dims: new Map(),
+      series: new Map(),
+      seriesStepMs: 300_000,
+      fields: new Map(),
+      truncated: new Set(),
+      samples,
+    };
+    const out = performanceAggregatesFromRollup({ rollup, dataFromMs: T0, dataThroughMs: T1 }, body({ sections: ["scatter"] }))!;
+    expect(out.scatter).toHaveLength(300);
+    expect(out.scatter!.every((p) => p.edge >= 0)).toBe(true);
   });
 
   it("answers only the requested sections, and an empty rollup with no waterfall and no buckets", () => {

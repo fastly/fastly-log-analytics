@@ -29,6 +29,14 @@ export type PerformanceRollupBody = {
 /** `buildTtlBucketCaseSql`'s buckets, in its `MIN(ttl)` order. */
 const TTL_BUCKETS: [string, number][] = [["< 60s", 60], ["1m - 1h", 3600], ["1h - 1d", 86400], ["> 1d", Infinity]];
 
+/** Exact pre-bucketed TTL distribution from `urls/ttl_bucket` (never top-K truncated). */
+function ttlDistFromBuckets(rows: Map<string, RollupAgg>): PerfTtlDistItem[] {
+  return TTL_BUCKETS.flatMap(([bucket]) => {
+    const count = rows.get(bucket)?.requests ?? 0;
+    return count > 0 ? [{ bucket, count }] : [];
+  });
+}
+
 /** `buildPerfTtlDistSql` from the `all_fields` TTL counts; values `TRY_CAST(... AS DOUBLE)` drops are skipped. */
 function ttlDist(counts: Map<string, number> | undefined): PerfTtlDistItem[] {
   const totals = new Map<string, number>();
@@ -84,13 +92,13 @@ function latencyRanking(result: RollupResult, key: "url" | "asn", minRequests: n
 function scatter(result: RollupResult) {
   return shapePerfScatterRows((result.rollup.samples ?? [])
     .toSorted((a, b) => a.key < b.key ? -1 : a.key > b.key ? 1 : a.tsMs - b.tsMs)
-    .slice(0, SCATTER_SAMPLE_SIZE)
     .flatMap((sample) => {
       if (sample.elapsedUs === null) return [];
       const origin = sample.ttfbS * 1000;
       const edge = sample.elapsedUs / 1000 - origin;
       return edge >= 0 ? [{ origin_ms: origin, edge_ms: edge, cache: sample.cache ?? "" }] : [];
-    }));
+    })
+    .slice(0, SCATTER_SAMPLE_SIZE));
 }
 
 /** Whether summaries may answer this /performance read at all, before any range or listing is resolved. */
@@ -146,7 +154,16 @@ export function performanceAggregatesFromRollup(
       } : null,
     };
   }
-  if (sections.has("ttl_dist")) out.ttl_dist = ttlDist(fields.get("ttl"));
+  let ttlFromBuckets = false;
+  if (sections.has("ttl_dist")) {
+    const exactTtl = rollupGroup(result.rollup, "urls", "ttl_bucket");
+    if (exactTtl) {
+      out.ttl_dist = ttlDistFromBuckets(exactTtl);
+      ttlFromBuckets = true;
+    } else {
+      out.ttl_dist = ttlDist(fields.get("ttl"));
+    }
+  }
   if (sections.has("scatter")) {
     out.scatter = scatter(result);
     approximate.push("scatter");
@@ -157,7 +174,9 @@ export function performanceAggregatesFromRollup(
       data_from: new Date(result.dataFromMs).toISOString(),
       data_through: new Date(result.dataThroughMs).toISOString(),
       approximate,
-      lower_bound: sections.has("ttl_dist") && truncated.has("all_fields/ttl") ? [...lowerBound, "ttl_dist"] : lowerBound,
+      lower_bound: sections.has("ttl_dist") && !ttlFromBuckets && truncated.has("all_fields/ttl")
+        ? [...lowerBound, "ttl_dist"]
+        : lowerBound,
     },
   };
 }
@@ -166,7 +185,7 @@ export function performanceAggregatesFromRollup(
 export const PERFORMANCE_SUMMARY_SPEC = defineSummarySpec({
   groups: ["overview", "urls", "all_fields", "field_totals", "sample", "dim_totals"],
   columns: [
-    "count", "elapsed_sum", "elapsed_count", "elapsed_hist", "waterfall_count", "edge_processing_sum",
+    "count", "requests", "elapsed_sum", "elapsed_count", "elapsed_hist", "waterfall_count", "edge_processing_sum",
     "origin_wait_sum", "origin_download_sum", "client_download_sum", "ttfb_sum", "sample_key", "elapsed_us",
   ],
 });

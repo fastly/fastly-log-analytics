@@ -2248,6 +2248,7 @@ fn write_v3<'a>(
     let mut origin_series: FastMap<(i64, Cow<str>), OriginSeries> = FastMap::default();
     let mut by_url: FastMap<Cow<str>, UrlAgg> = FastMap::default();
     let mut by_raw_asn: FastMap<Cow<str>, UrlAgg> = FastMap::default();
+    let mut ttl_buckets: FastMap<&'static str, i64> = FastMap::default();
     let mut map_cells: FastMap<(i64, Option<&str>, &str), MapCell> = FastMap::default();
     let mut quality = Quality::default();
     let mut quality_regions: FastMap<(&str, &str), Quality> = FastMap::default();
@@ -2493,6 +2494,9 @@ fn write_v3<'a>(
                         .add(None, elapsed_lat);
                 });
             }
+            if let Some(ttl) = c.ttl.get(i) {
+                *ttl_buckets.entry(ttl_bucket(ttl)).or_default() += 1;
+            }
 
             if ttfb.is_some() {
                 let key = sample_key(c.req_id.get(i, false), ts, url, get_s(r.ip, i), i);
@@ -2693,6 +2697,17 @@ fn write_v3<'a>(
             u.push(out, bucket, field, value);
         }
     }
+    let ttl_total: i64 = ttl_buckets.values().sum();
+    push_total(out, bucket, "urls", "ttl_bucket", ttl_total, false);
+    for (value, n) in &ttl_buckets {
+        out.push(&[
+            (C::Bundle, V::S("urls")),
+            (C::Bucket, V::I(bucket)),
+            (C::FieldName, V::S("ttl_bucket")),
+            (C::Value, V::S(value)),
+            (C::Requests, V::I(*n)),
+        ]);
+    }
 
     push_total(out, bucket, "quality", "overall", quality.requests, false);
     quality.push(out, bucket, "overall", "");
@@ -2716,6 +2731,18 @@ fn write_v3<'a>(
     }
 
     (sample.into_sorted_vec(), filtered)
+}
+
+fn ttl_bucket(ttl: f64) -> &'static str {
+    if ttl < 60.0 {
+        "< 60s"
+    } else if ttl < 3600.0 {
+        "1m - 1h"
+    } else if ttl < 86400.0 {
+        "1h - 1d"
+    } else {
+        "> 1d"
+    }
 }
 
 fn write_filtered_rollups(

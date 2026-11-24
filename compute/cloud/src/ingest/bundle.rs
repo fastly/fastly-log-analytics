@@ -884,8 +884,8 @@ const GROUPS: [Group; 21] = [
         name: "urls",
         cols: URL_COLS,
         timed: false,
-        fields: &["url", "asn"],
-        gated: &["url", "asn"],
+        fields: &["url", "asn", "ttl_bucket"],
+        gated: &["url", "asn", "ttl_bucket"],
     },
     Group {
         name: "quality",
@@ -4418,7 +4418,7 @@ mod tests {
         let bundle = acc.write(1_800_000_000, Some(Unit::Hour), "hour").unwrap();
         assert_eq!(
             hex::encode(Sha256::digest(&bundle)),
-            "1ced50948cb6fe80727bd3b8aeb121a0b452d5a94657f24eda56b2da17dab980"
+            "a3b8bb768332d976a0a25ffffcf30476b27a557af7eb1e24894490cbe489c589"
         );
         let resumed = Acc::decode_partial(&acc.encode_partial(), Unit::Hour).unwrap();
         assert_eq!(
@@ -4662,5 +4662,133 @@ mod tests {
         let pop_encoded = populated.encode_partial();
         let pop_decoded = Acc::decode_partial(&pop_encoded, Unit::Hour).unwrap();
         assert_eq!(pop_decoded.encode_partial().len(), pop_encoded.len());
+    }
+
+    #[test]
+    fn ttl_bucket_survives_high_cardinality_across_window_hour_and_day_bundles() {
+        let fmt = &time::format_description::well_known::Rfc3339;
+        let make_window = |hour_offset: i64, start_ttl: i64| -> Vec<u8> {
+            let base = 1_800_000_000 + hour_offset * HOUR_S;
+            let mut plain = Vec::new();
+            // 360 distinct TTLs per window (720 across 2 windows > DAY_TOP_K = 500):
+            // 60 in "< 60s", 100 in "1m - 1h", 100 in "1h - 1d", 100 in "> 1d", plus 5 nulls.
+            let mut ttls: Vec<Option<f64>> = Vec::new();
+            for j in 0..60 {
+                ttls.push(Some((j as f64) + (hour_offset as f64) * 0.5));
+            }
+            for j in 0..100 {
+                ttls.push(Some(60.0 + (start_ttl + j) as f64));
+            }
+            for j in 0..100 {
+                ttls.push(Some(3600.0 + (start_ttl + j) as f64));
+            }
+            for j in 0..100 {
+                ttls.push(Some(86400.0 + (start_ttl + j) as f64));
+            }
+            for _ in 0..5 {
+                ttls.push(None);
+            }
+            for (i, ttl) in ttls.into_iter().enumerate() {
+                let ts =
+                    time::OffsetDateTime::from_unix_timestamp(base + (i as i64) % 300).unwrap();
+                let mut obj = serde_json::json!({
+                    "timestamp": ts.format(fmt).unwrap(),
+                    "status": 200,
+                    "cache": "HIT",
+                    "url": "/ttl-test",
+                });
+                if let Some(v) = ttl {
+                    obj["ttl"] = serde_json::json!(v);
+                }
+                plain.extend_from_slice(obj.to_string().as_bytes());
+                plain.push(b'\n');
+            }
+            let zst = zstd::stream::encode_all(plain.as_slice(), 1).unwrap();
+            let rows = convert::convert_object(&zst, 300, base).unwrap();
+            let batch = rows.windows.into_values().next().unwrap();
+            summary::write_summary(&[&batch], base).unwrap()
+        };
+
+        let w0 = make_window(0, 0);
+        let w1 = make_window(1, 200);
+
+        let mut h0 = Acc::new(Unit::Hour);
+        h0.fold(w0, 1).unwrap();
+        let h0_bytes = h0.finish(1_800_000_000, Unit::Hour).unwrap();
+
+        let mut h1 = Acc::new(Unit::Hour);
+        h1.fold(w1, 1).unwrap();
+        let h1_bytes = h1.finish(1_800_000_000 + HOUR_S, Unit::Hour).unwrap();
+
+        let mut day = Acc::new(Unit::Day);
+        day.fold(h0_bytes, 1).unwrap();
+        day.fold(h1_bytes, 1).unwrap();
+        let day_bytes = day.finish(1_800_000_000, Unit::Day).unwrap();
+
+        let reader = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(day_bytes))
+            .unwrap()
+            .build()
+            .unwrap();
+        let mut buckets: HashMap<String, i64> = HashMap::new();
+        let mut ttl_bucket_total: Option<(i64, bool)> = None;
+        let mut all_fields_ttl_truncated = false;
+        for batch in reader {
+            let batch = batch.unwrap();
+            let bundle = batch
+                .column_by_name("bundle")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let field = batch
+                .column_by_name("field")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let value = batch
+                .column_by_name("value")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let requests = batch
+                .column_by_name("requests")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            let truncated = batch
+                .column_by_name("truncated")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .unwrap();
+            for i in 0..batch.num_rows() {
+                match (bundle.value(i), field.value(i)) {
+                    ("urls", "ttl_bucket") => {
+                        *buckets.entry(value.value(i).to_owned()).or_default() += requests.value(i);
+                    }
+                    ("dim_totals", "ttl_bucket") if value.value(i) == "urls" => {
+                        ttl_bucket_total = Some((requests.value(i), truncated.value(i)));
+                    }
+                    ("field_totals", "ttl") => {
+                        all_fields_ttl_truncated = truncated.value(i);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        assert!(
+            all_fields_ttl_truncated,
+            "all_fields/ttl should be top-K truncated past DAY_TOP_K"
+        );
+        assert_eq!(ttl_bucket_total, Some((720, false)));
+        assert_eq!(buckets.get("< 60s"), Some(&120));
+        assert_eq!(buckets.get("1m - 1h"), Some(&200));
+        assert_eq!(buckets.get("1h - 1d"), Some(&200));
+        assert_eq!(buckets.get("> 1d"), Some(&200));
+        assert_eq!(buckets.len(), 4);
     }
 }

@@ -988,6 +988,78 @@ def test_build_performance_projection_rows() -> None:
     }  # fmt: skip
 
 
+def test_performance_dimension_sketches_merge_across_minutes_and_preserve_legacy_fallback() -> None:
+    from backend.high_scale._common import percentiles as _exact_percentiles
+    from backend.high_scale.ingest_controller.service import _ORIGIN_COLUMNS
+
+    # Minute 1: 100 fast requests (10 ms = 10_000 us). Minute 2: 100 slow requests (1000 ms = 1_000_000 us).
+    # True combined p50 is ~10-1000 ms midpoint (~505 ms or 10/1000 boundary), p95 and p99 are 1000 ms.
+    # Weighted average of per-minute p99s would wrongly collapse to (10 + 1000) / 2 = 505 ms!
+    fast_us = [10_000.0 + i * 10.0 for i in range(100)]
+    slow_us = [1_000_000.0 + i * 100.0 for i in range(100)]
+    events = tuple(
+        _perf_event(event_id=f"f-{i}", timestamp="2026-09-16T14:00:05Z", url="/skew", asn=64500, elapsed=v)
+        for i, v in enumerate(fast_us)
+    ) + tuple(
+        _perf_event(event_id=f"s-{i}", timestamp="2026-09-16T14:01:05Z", url="/skew", asn=64500, elapsed=v)
+        for i, v in enumerate(slow_us)
+    )
+    proj = build_performance_projection_rows(events)
+    url_rows = [r for r in proj.dimension_rows if r["dimension"] == "url" and r["value"] == "/skew"]
+    assert len(url_rows) == 2
+    assert all(r["latency_sk_v"] and r["latency_sk_w"] for r in url_rows)
+
+    # Simulate ClickHouse quantilesExactWeightedArray(0.5, 0.95, 0.99)(latency_sk_v, latency_sk_w) / 1000.0
+    expanded_us: list[float] = []
+    for row in url_rows:
+        for centroid, weight in zip(row["latency_sk_v"], row["latency_sk_w"], strict=True):
+            expanded_us.extend([centroid] * weight)
+    merged_p50, merged_p95, merged_p99 = (v / 1000.0 for v in _exact_percentiles(expanded_us, (0.5, 0.95, 0.99)))
+    exact_p50, exact_p95, exact_p99 = (v / 1000.0 for v in _exact_percentiles(fast_us + slow_us, (0.5, 0.95, 0.99)))
+    legacy_weighted_p99 = (
+        sum(r["latency_p99_ms"] * r["latency_count"] for r in url_rows)
+        / sum(r["latency_count"] for r in url_rows)
+        / 1000.0
+    )
+    assert merged_p95 == pytest.approx(exact_p95, rel=0.02)
+    assert merged_p99 == pytest.approx(exact_p99, rel=0.02)
+    assert merged_p99 > 980.0 and legacy_weighted_p99 < 550.0  # proves sketch avoids weighted-avg collapse
+    assert merged_p50 <= exact_p50 * 1.05 or abs(merged_p50 - exact_p50) < 500.0
+
+    # Verify ingest_controller writes latency_sk_v / latency_sk_w for performance_dimensions
+    table_name, columns = _ORIGIN_COLUMNS["performance_dimensions"]
+    assert table_name == "performance_minute_dimensions"
+    assert {"latency_sk_v", "latency_sk_w"} <= set(columns)
+
+    # Verify _projection_percentile_rows uses merged sketches with legacy fallback when sumArray(latency_sk_w) == 0
+    executed_sql: list[str] = []
+
+    class _CaptureClient:
+        def execute(self, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+            executed_sql.append(sql)
+            return [
+                {
+                    "value": "/skew",
+                    "req_count": 200,
+                    "avg_ms": 505.0,
+                    "p50_ms": merged_p50,
+                    "p95_ms": merged_p95,
+                    "p99_ms": merged_p99,
+                }
+            ]
+
+    out = _run_perf(_CaptureClient(), sections={"top_urls"})
+    assert len(executed_sql) == 1
+    sql = executed_sql[0]
+    assert "quantilesExactWeightedArray(0.5, 0.95, 0.99)(latency_sk_v, latency_sk_w)[1]" in sql
+    assert "quantilesExactWeightedArray(0.5, 0.95, 0.99)(latency_sk_v, latency_sk_w)[2]" in sql
+    assert "quantilesExactWeightedArray(0.5, 0.95, 0.99)(latency_sk_v, latency_sk_w)[3]" in sql
+    assert "if(sumArray(latency_sk_w) > 0," in sql
+    assert "sum(latency_p99_ms * latency_count)" in sql
+    assert "/ 1000.0 AS p99_ms" in sql
+    assert out.top_urls[0].p99 == pytest.approx(merged_p99, abs=0.1)
+
+
 @pytest.fixture
 def script(monkeypatch: pytest.MonkeyPatch):
     from scripts import backfill_high_scale as module

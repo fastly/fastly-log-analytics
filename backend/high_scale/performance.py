@@ -25,6 +25,7 @@ from backend.high_scale._common import build_published_facts_where as _facts_whe
 from backend.high_scale._common import build_published_projection_where as _where
 from backend.high_scale._common import finite_float as _finite_float
 from backend.high_scale._common import percentiles as _percentiles
+from backend.high_scale._common import sketch as _sketch
 from backend.high_scale._common import text as _text
 from backend.models.analytics import PerformanceAggregatesResponse, ValueSummaryResponse
 from backend.repositories.utils.response_cache import (
@@ -187,6 +188,7 @@ def _summary_row(bucket: datetime, sums: _WaterfallSums) -> dict[str, Any]:
 
 def _dimension_row(bucket: datetime, dimension: str, value: str, acc: _Accumulator) -> dict[str, Any]:
     lat_p50, lat_p95, lat_p99 = _percentiles(acc.latencies, (0.50, 0.95, 0.99))
+    latency_sk = _sketch(acc.latencies)
     return {
         "bucket_start": bucket.isoformat(),
         "dimension": dimension,
@@ -197,6 +199,8 @@ def _dimension_row(bucket: datetime, dimension: str, value: str, acc: _Accumulat
         "latency_p50_ms": lat_p50,
         "latency_p95_ms": lat_p95,
         "latency_p99_ms": lat_p99,
+        "latency_sk_v": latency_sk[0],
+        "latency_sk_w": latency_sk[1],
     }
 
 
@@ -250,6 +254,14 @@ def _optional_float(value: Any) -> float:
     return float_or_zero(value)
 
 
+def _merged_percentile(index: int, legacy_column: str) -> str:
+    return (
+        f"if(sumArray(latency_sk_w) > 0, "
+        f"quantilesExactWeightedArray(0.5, 0.95, 0.99)(latency_sk_v, latency_sk_w)[{index}], "
+        f"{_weighted(legacy_column)}) / 1000.0"
+    )
+
+
 def _projection_percentile_rows(
     service: HighScaleService,
     *,
@@ -266,9 +278,9 @@ def _projection_percentile_rows(
         f"/* perf:{marker} */ SELECT value, "
         "sum(requests) AS req_count, "
         "sum(latency_sum_ms) / nullIf(sum(latency_count), 0) / 1000.0 AS avg_ms, "
-        f"{_weighted('latency_p50_ms')} / 1000.0 AS p50_ms, "
-        f"{_weighted('latency_p95_ms')} / 1000.0 AS p95_ms, "
-        f"{_weighted('latency_p99_ms')} / 1000.0 AS p99_ms "
+        f"{_merged_percentile(1, 'latency_p50_ms')} AS p50_ms, "
+        f"{_merged_percentile(2, 'latency_p95_ms')} AS p95_ms, "
+        f"{_merged_percentile(3, 'latency_p99_ms')} AS p99_ms "
         f"FROM performance_minute_dimensions WHERE {where} GROUP BY value "
         f"HAVING req_count > {min_requests} ORDER BY {sort_column} DESC NULLS LAST LIMIT {{limit:UInt32}}",
         params,

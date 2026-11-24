@@ -10,6 +10,8 @@ CREATE TABLE IF NOT EXISTS performance_minute_dimensions
     latency_p50_ms Nullable(Float64),
     latency_p95_ms Nullable(Float64),
     latency_p99_ms Nullable(Float64),
+    latency_sk_v Array(Float64),
+    latency_sk_w Array(UInt32),
     batch_id UUID,
     publication_state Enum8('pending' = 1, 'visible' = 2)
 )
@@ -17,6 +19,9 @@ ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/performance_minute_dime
 PARTITION BY toYYYYMMDD(bucket_start)
 ORDER BY (service_id, bucket_start, dimension, value, batch_id)
 TTL bucket_start + INTERVAL 30 DAY;
+
+ALTER TABLE performance_minute_dimensions ADD COLUMN IF NOT EXISTS latency_sk_v Array(Float64);
+ALTER TABLE performance_minute_dimensions ADD COLUMN IF NOT EXISTS latency_sk_w Array(UInt32);
 
 CREATE TABLE IF NOT EXISTS performance_minute_summary
 (

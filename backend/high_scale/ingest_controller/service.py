@@ -513,6 +513,8 @@ _ORIGIN_COLUMNS: dict[str, tuple[str, tuple[str, ...]]] = {
             "latency_p50_ms",
             "latency_p95_ms",
             "latency_p99_ms",
+            "latency_sk_v",
+            "latency_sk_w",
         ),
     ),
     "performance_summary": (
