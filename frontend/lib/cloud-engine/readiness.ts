@@ -209,6 +209,7 @@ const AUTH_SCHEMES = new Set<string>([
 ]);
 const COOKIE_STEMS = new Set<string>(["cookie", "cookies"]);
 const AUTHENTICATE_KEY_STEMS = new Set<string>(["authenticate"]);
+const AUTH_HEADER_KEY_STEMS = new Set<string>(["authorization", "authenticate"]);
 const MULTI_PARAM_AUTH_KEY_STEMS = new Set<string>(["authorization", "authenticate", "digest", "oauth"]);
 const MULTI_PARAM_AUTH_SCHEMES = new Set<string>(["digest", "oauth", "aws4-hmac-sha256"]);
 const HTTP_DATE_VALUE_RE = /^(?:[A-Za-z]{3,9},?\s+)?(?:\d{1,2}[\s-][A-Za-z]{3}[\s-]\d{2,4}|[A-Za-z]{3}\s+\d{1,2})\s+\d{1,2}:\d{2}:\d{2}(?:\s+(?:GMT|UTC|[+-]\d{4}|\d{4}))?(?=$|[\s;])/;
@@ -313,6 +314,32 @@ function scanAuthSchemeTokenEnd(line: string, p: number): number {
     sEnd += 1;
   }
   return sEnd;
+}
+
+function isCustomAuthScheme(
+  keyName: string,
+  rawScheme: string,
+  line: string,
+  schemeEnd: number,
+  allowSpaceInKey: boolean,
+): boolean {
+  if (!rawScheme || !isAsciiAlpha(rawScheme[0])) return false;
+  if (!hasKeyStemSegment(keyName, AUTH_HEADER_KEY_STEMS, allowSpaceInKey)) return false;
+  const delim = line[schemeEnd];
+  if (!isInlineWs(delim) && delim !== "(" && delim !== "[" && delim !== "{") return false;
+  let next = schemeEnd;
+  while (next < line.length && isInlineWs(line[next])) next += 1;
+  if (next >= line.length) return false;
+  const nextCh = line[next]!;
+  if (
+    nextCh === "=" || nextCh === "," || nextCh === ";"
+    || nextCh === "." || nextCh === "!" || nextCh === "?"
+    || nextCh === ")" || nextCh === "]" || nextCh === "}"
+  ) {
+    return false;
+  }
+  if (DIAGNOSTIC_VOCAB.has(rawScheme)) return false;
+  return true;
 }
 
 function matchByteUnitSuffixEnd(line: string, pos: number): number {
@@ -1003,7 +1030,7 @@ function redactPostColonDiagnosticTail(line1: string): string {
 }
 
 function isSecretJsonKey(key: string): boolean {
-  if (!key || key.length > 64 || key.includes("\\")) return false;
+  if (!key || key.includes("\\")) return false;
   return hasKeyStemSegment(key, SECRET_STEMS, true);
 }
 
@@ -1105,11 +1132,11 @@ function tryScanRawUrlEnd(line: string, pos: number): number {
 }
 
 function consumeJsonSecretValueAfterQuote(line1: string, pos: number, keyCandidate: string): number {
-  if (!isSecretJsonKey(keyCandidate)) return pos;
   const len = line1.length;
   let p = pos;
   while (p < len && isInlineWs(line1[p])) p += 1;
   if (line1[p] !== ":" && line1[p] !== "=") return pos;
+  if (!isSecretJsonKey(keyCandidate)) return pos;
   const sep = line1[p];
   p += 1;
   if (
@@ -1128,11 +1155,11 @@ function consumeJsonSecretValueAfterQuote(line1: string, pos: number, keyCandida
   let valStart = p;
   if (!startsQuotedOrGroup && !line1.startsWith("[redacted]", p) && !line1.startsWith("[url]", p)) {
     const sEnd = scanAuthSchemeTokenEnd(line1, p);
-    const maybeScheme = line1.slice(p, sEnd).toLowerCase();
-    if (
-      AUTH_SCHEMES.has(maybeScheme)
-      && (isInlineWs(line1[sEnd]) || line1[sEnd] === "(" || line1[sEnd] === "[" || line1[sEnd] === "{")
-    ) {
+    const rawScheme = line1.slice(p, sEnd);
+    const maybeScheme = rawScheme.toLowerCase();
+    const isKnownScheme = AUTH_SCHEMES.has(maybeScheme)
+      && (isInlineWs(line1[sEnd]) || line1[sEnd] === "(" || line1[sEnd] === "[" || line1[sEnd] === "{");
+    if (isKnownScheme || isCustomAuthScheme(keyCandidate, rawScheme, line1, sEnd, true)) {
       matchedScheme = maybeScheme;
       valStart = sEnd;
       while (valStart < len && isInlineWs(line1[valStart])) valStart += 1;
@@ -1150,12 +1177,15 @@ function consumeJsonSecretValueAfterQuote(line1: string, pos: number, keyCandida
   const cookieMode = isCookieKey(keyCandidate);
   const authParamMode = isMultiParamAuthHeader(keyCandidate, matchedScheme);
   const vCh = line1[valStart];
-  const valStartsQuotedOrGroup = vCh === '"' || vCh === "'" || vCh === "`"
-    || vCh === "{" || vCh === "[" || vCh === "(";
+  const valStartsQuoted = vCh === '"' || vCh === "'" || vCh === "`";
+  const valStartsQuotedOrGroup = valStartsQuoted || vCh === "{" || vCh === "[" || vCh === "(";
 
   let valEnd: number;
   if (valStartsQuotedOrGroup) {
-    valEnd = scanJsonValueEnd(line1, valStart);
+    const kvEnd = valStartsQuoted && (cookieMode || authParamMode)
+      ? tryScanKeyValueParamEnd(line1, valStart, cookieMode, true)
+      : -1;
+    valEnd = kvEnd !== -1 ? kvEnd : scanJsonValueEnd(line1, valStart);
     if (valEnd > valStart && (cookieMode || authParamMode)) {
       valEnd = scanContinuationParamsEnd(line1, valEnd, cookieMode, authParamMode, true);
     }
@@ -1169,12 +1199,39 @@ function consumeJsonSecretValueAfterQuote(line1: string, pos: number, keyCandida
   return matchedScheme ? valStart : pos;
 }
 
+function buildRemainingSingleQuoteCounts(line1: string): Int32Array {
+  const len = line1.length;
+  const isUnescapedQuote = new Uint8Array(len);
+  let p = 0;
+  while (p < len) {
+    const cLen = matchSafeContractionLen(line1, p);
+    if (cLen > 0) {
+      p += cLen;
+      continue;
+    }
+    if (line1[p] === "\\" && (line1[p + 1] === "\\" || line1[p + 1] === "'")) {
+      p += 2;
+      continue;
+    }
+    if (line1[p] === "'") {
+      isUnescapedQuote[p] = 1;
+    }
+    p += 1;
+  }
+  const suffix = new Int32Array(len + 1);
+  for (let j = len - 1; j >= 0; j -= 1) {
+    suffix[j] = suffix[j + 1]! + isUnescapedQuote[j]!;
+  }
+  return suffix;
+}
+
 // Stage 2A: O(N) strict pair-by-pair quote & URL scanner (closed contraction allowlist only).
 function redactQuotesAndUrlsLine(line1: string): string {
   const parts: string[] = [];
   let outChars = 0;
   let i = 0;
   const len = line1.length;
+  let remainingSingleQuotes: Int32Array | null = null;
   while (i < len) {
     if (outChars >= MESSAGE_LIMIT + 128) break;
     if (line1.startsWith("[redacted]", i)) {
@@ -1241,6 +1298,16 @@ function redactQuotesAndUrlsLine(line1: string): string {
           i += 2;
           continue;
         }
+        if (!isEscapeSingle && line1[i] === "\\" && line1[i + 1] === "'") {
+          if (remainingSingleQuotes === null) {
+            remainingSingleQuotes = buildRemainingSingleQuoteCounts(line1);
+          }
+          const rem = remainingSingleQuotes[i + 2]!;
+          if (rem === 0 || (rem & 1) === 1) {
+            i += 2;
+            continue;
+          }
+        }
         if (line1[i] === "'") {
           if (line1[i + 1] === "'") {
             i += 2;
@@ -1252,7 +1319,7 @@ function redactQuotesAndUrlsLine(line1: string): string {
         }
         i += 1;
       }
-      if (typedLen === 0 && contentEnd > contentStart && contentEnd - contentStart <= 64) {
+      if (typedLen === 0 && contentEnd > contentStart) {
         i = consumeJsonSecretValueAfterQuote(line1, i, line1.slice(contentStart, contentEnd));
       }
       continue;
@@ -1280,7 +1347,7 @@ function redactQuotesAndUrlsLine(line1: string): string {
         }
         i += 1;
       }
-      if ((q === '"' || q === "`") && contentEnd > contentStart && contentEnd - contentStart <= 64) {
+      if ((q === '"' || q === "`") && contentEnd > contentStart) {
         i = consumeJsonSecretValueAfterQuote(line1, i, line1.slice(contentStart, contentEnd));
       }
       continue;
@@ -2021,7 +2088,8 @@ function emitAllowlistedTokens(line: string): string {
       }
       const postSepLower = rawPostSep.toLowerCase();
       const isEmptySep = rawPostSep === "";
-      if (isEmptySep || AUTH_SCHEMES.has(postSepLower)) {
+      const isCustomInlineScheme = !isEmptySep && isCustomAuthScheme(keyPart, rawPostSep, line, i, false);
+      if (isEmptySep || AUTH_SCHEMES.has(postSepLower) || isCustomInlineScheme) {
         let p = consumedSecondSepInLine ? i + 1 : i;
         while (p < len && isInlineWs(line[p])) p += 1;
         const canConsume = isEmptySep
@@ -2031,11 +2099,11 @@ function emitAllowlistedTokens(line: string): string {
           let matchedScheme = isEmptySep ? "" : postSepLower;
           if (isEmptySep && !line.startsWith("[redacted]", p) && !line.startsWith("[url]", p)) {
             const sEnd = scanAuthSchemeTokenEnd(line, p);
-            const maybeScheme = line.slice(p, sEnd).toLowerCase();
-            if (
-              AUTH_SCHEMES.has(maybeScheme)
-              && (isInlineWs(line[sEnd]) || line[sEnd] === "(" || line[sEnd] === "[" || line[sEnd] === "{")
-            ) {
+            const rawScheme = line.slice(p, sEnd);
+            const maybeScheme = rawScheme.toLowerCase();
+            const isKnownScheme = AUTH_SCHEMES.has(maybeScheme)
+              && (isInlineWs(line[sEnd]) || line[sEnd] === "(" || line[sEnd] === "[" || line[sEnd] === "{");
+            if (isKnownScheme || isCustomAuthScheme(keyPart, rawScheme, line, sEnd, false)) {
               matchedScheme = maybeScheme;
               p = sEnd;
               while (p < len && isInlineWs(line[p])) p += 1;
@@ -2104,11 +2172,11 @@ function emitAllowlistedTokens(line: string): string {
       let matchedScheme = isBareAuthScheme || MULTI_PARAM_AUTH_SCHEMES.has(rawLower) ? rawLower : "";
       if (!isBareAuthScheme && p < len && !line.startsWith("[redacted]", p) && !line.startsWith("[url]", p)) {
         const sEnd = scanAuthSchemeTokenEnd(line, p);
-        const maybeScheme = line.slice(p, sEnd).toLowerCase();
-        if (
-          AUTH_SCHEMES.has(maybeScheme)
-          && (isInlineWs(line[sEnd]) || line[sEnd] === "(" || line[sEnd] === "[" || line[sEnd] === "{")
-        ) {
+        const rawScheme = line.slice(p, sEnd);
+        const maybeScheme = rawScheme.toLowerCase();
+        const isKnownScheme = AUTH_SCHEMES.has(maybeScheme)
+          && (isInlineWs(line[sEnd]) || line[sEnd] === "(" || line[sEnd] === "[" || line[sEnd] === "{");
+        if (isKnownScheme || (hasExplicitSep && isCustomAuthScheme(rawTok, rawScheme, line, sEnd, false))) {
           const afterScheme = sEnd;
           matchedScheme = maybeScheme;
           p = sEnd;

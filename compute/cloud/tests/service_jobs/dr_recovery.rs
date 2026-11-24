@@ -17134,3 +17134,224 @@ fn iter36_f10_dr_negative_and_i64_min_timestamps_do_not_panic_or_wrap() {
         assert_eq!(res["ok"], true);
     }
 }
+
+#[test]
+fn iter37_expected_manifest_verified_trace_a_tier3_and_trace_b_tier0() {
+    struct RichGuard;
+    impl Drop for RichGuard {
+        fn drop(&mut self) {
+            RICH_FOS.with(|r| r.set(false));
+            MTIMES.with(|m| m.borrow_mut().clear());
+        }
+    }
+    let _guard = RichGuard;
+    RICH_FOS.with(|r| r.set(true));
+    MTIMES.with(|m| m.borrow_mut().clear());
+
+    let day_ts = 1_799_971_200i64; // 2027-01-15T00:00:00Z
+    let d5_key =
+        "processed/_catalog/00000000000000000000000000000000000000000000000000000000000000d5.json";
+    let own_m5_key = format!(
+        "processed/_catalog/manifest-s-fixtureService-rev-{:020}-ok.json",
+        u64::MAX - 5
+    );
+    let own_m5 = json!({
+        "version": VERSION,
+        "service_id": "fixtureService",
+        "generation": 5u64,
+        "batch": "ingest",
+        "schema": "v2",
+        "committed_at": "2027-01-15T01:00:00Z",
+        "previous": null,
+        "files": [], "summaries": [], "sources": [], "replaces": [],
+        "bytes": 0, "rows": 0, "parents": {},
+        "head_days": { day_ts.to_string(): d5_key }
+    });
+    let foreign_expected = json!({
+        "version": VERSION,
+        "service_id": "foreignService22Chars0",
+        "generation": 5u64,
+        "batch": "ingest",
+        "schema": "v2",
+        "committed_at": "2027-01-15T01:00:00Z",
+        "previous": null,
+        "files": [], "summaries": [], "sources": [], "replaces": [],
+        "bytes": 0, "rows": 0, "parents": {}
+    });
+
+    // Trace A: m_tier == 3 expected_manifest with lower filename rev hint (3 < 5).
+    // Trace B: m_tier == 0 expected_manifest skipped by the line 930 `break` once best_manifest_days is set.
+    let cases = [
+        (
+            "trace_a_tier3_lower_rev_hint",
+            format!(
+                "processed/_catalog/manifest-s-fixtureService-rev-{:020}-lowhint.json",
+                u64::MAX - 3
+            ),
+        ),
+        (
+            "trace_b_tier0_after_break",
+            "processed/_catalog/custom-expected-head.json".to_owned(),
+        ),
+    ];
+
+    for (label, exp_key) in cases {
+        let p = Platform::new();
+        let dr_state = CloudDrState {
+            schema_version: SCHEMA_VERSION,
+            updated_at: 1_800_000_000,
+            service_id: "fixtureService".into(),
+            service: json!({"log_period": 60}),
+            views: vec![],
+            catalog_head: Some(Head {
+                version: VERSION,
+                generation: 5,
+                manifest: Some(exp_key.clone()),
+                recent: vec![Event {
+                    cursor: "fixtureService:5".into(),
+                    generation: 5,
+                    committed_at: Some("2027-01-15T01:00:00Z".into()),
+                    manifest: Some(exp_key.clone()),
+                }],
+                days: BTreeMap::from([(day_ts, d5_key.into())]),
+                ..Head::default()
+            }),
+            floor_key: None,
+            rum_stats: None,
+        };
+        p.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            "meta/cloud_dr_state.json",
+            serde_json::to_vec(&dr_state).unwrap(),
+        );
+        p.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            &own_m5_key,
+            serde_json::to_vec(&own_m5).unwrap(),
+        );
+        p.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            &exp_key,
+            serde_json::to_vec(&foreign_expected).unwrap(),
+        );
+        let resp = p.call(
+            "POST",
+            "/api/admin/provision/recover",
+            json!({
+                "token": "fixture-token",
+                "service_id": "fixtureService",
+                "fos_bucket": "fos-fixture-logs",
+                "fos_region": "us-east-1"
+            }),
+        );
+        assert_eq!(
+            resp.status,
+            400,
+            "iter37 ({label}): on-page foreign expected_manifest bypassed verification! got {}: {}",
+            resp.status,
+            String::from_utf8_lossy(&resp.body)
+        );
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["error"], "invalid_dr_catalog_head", "iter37 ({label})");
+    }
+}
+
+#[test]
+fn iter37_minimal_recovery_recovers_own_days_when_only_foreign_manifests_exist() {
+    use fastly_log_analytics::ingest;
+
+    struct RichGuard;
+    impl Drop for RichGuard {
+        fn drop(&mut self) {
+            RICH_FOS.with(|r| r.set(false));
+            MTIMES.with(|m| m.borrow_mut().clear());
+        }
+    }
+    let _guard = RichGuard;
+    RICH_FOS.with(|r| r.set(true));
+    MTIMES.with(|m| m.borrow_mut().clear());
+
+    let p = Platform::new();
+    let hour = 1_800_000_000i64; // 2027-01-15T08:00:00Z
+    let day_ts = 1_799_971_200i64; // 2027-01-15T00:00:00Z
+    let day_key =
+        "processed/_catalog/00000000000000000000000000000000000000000000000000000000000000d3.json";
+    let blk_key =
+        "processed/_catalog/00000000000000000000000000000000000000000000000000000000000000b3.json";
+    let foreign_m_key = format!(
+        "processed/_catalog/manifest-s-foreignService-rev-{:020}-f.json",
+        u64::MAX - 9
+    );
+    let foreign_m = json!({
+        "version": VERSION,
+        "service_id": "foreignService",
+        "generation": 9u64,
+        "batch": "ingest",
+        "schema": "v2",
+        "committed_at": "2027-01-15T09:00:00Z",
+        "previous": null,
+        "files": [], "summaries": [], "sources": [], "replaces": [],
+        "bytes": 0, "rows": 0, "parents": {}
+    });
+    let own_day = Day {
+        version: VERSION,
+        service_id: Some("fixtureService".into()),
+        hours: BTreeMap::from([(
+            hour,
+            Reference {
+                key: blk_key.into(),
+                generation: 3,
+            },
+        )]),
+        ..Day::default()
+    };
+    let own_block = fastly_log_analytics::ingest::catalog::Block {
+        version: VERSION,
+        service_id: "fixtureService".into(),
+        generation: 3,
+        hour,
+        previous: None,
+        files: vec![],
+        summaries: vec![],
+        replaces: vec![],
+        committed_at: BTreeMap::new(),
+    };
+    p.adapter.seed_object_bytes(
+        "fos-fixture-logs",
+        &foreign_m_key,
+        serde_json::to_vec(&foreign_m).unwrap(),
+    );
+    p.adapter.seed_object_bytes(
+        "fos-fixture-logs",
+        day_key,
+        serde_json::to_vec(&own_day).unwrap(),
+    );
+    p.adapter.seed_object_bytes(
+        "fos-fixture-logs",
+        blk_key,
+        serde_json::to_vec(&own_block).unwrap(),
+    );
+
+    let res = p.json(
+        "POST",
+        "/api/admin/provision/recover",
+        json!({
+            "token": "fixture-token",
+            "service_id": "fixtureService",
+            "fos_bucket": "fos-fixture-logs",
+            "fos_region": "us-east-1"
+        }),
+    );
+    assert_eq!(res["ok"], true);
+    let wm = &p.adapter.records()[ingest::WATERMARK_KEY].value;
+    assert_eq!(
+        wm["catalog"]["generation"],
+        json!(3),
+        "iter37: minimal recovery must fall back to scanning own Day/Block objects when only foreign manifests exist! wm={wm}"
+    );
+    assert_eq!(
+        wm["catalog"]["days"][day_ts.to_string()],
+        json!(day_key),
+        "iter37: recovered catalog_head must include the own Day object! wm={wm}"
+    );
+}

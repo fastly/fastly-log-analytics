@@ -438,13 +438,13 @@ _MAYBE_IP_RE = re.compile(r"[0-9A-Fa-f:.]+")
 _BRACKET_PII_KEY_RE = re.compile(r"\[['\"`]?([^'\"`\]]+)['\"`]?\]")
 _IDENT_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_\-]*")
 _UA_PROD_VER_RE = re.compile(
-    r"\b(?:Mozilla|Chrome|Chromium|CriOS|Firefox|FxiOS|Safari|Version|Edg|EdgA|EdgiOS|OPR|AppleWebKit|Gecko|Mobile)"
+    r"(?<![/\w.?#&=-])(?:Mozilla|Chrome|Chromium|CriOS|Firefox|FxiOS|Safari|Version|Edg|EdgA|EdgiOS|OPR|AppleWebKit|Gecko|Mobile)"
     r"/\d+(?:\.\d+){1,3}\b",
     re.IGNORECASE,
 )
-_EMBEDDED_IPV4_RE = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d]|\.\d)")
+_EMBEDDED_IPV4_RE = re.compile(r"(?<!\d)(?<!\d\.)(?:\d{1,3}\.){3}\d{1,3}(?![\d]|\.\d)")
 _EMBEDDED_IPV6_RE = re.compile(
-    r"(?<![A-Fa-f0-9:])(?:"
+    r"(?<![A-Za-z0-9])(?:"
     r"[A-Fa-f0-9]{1,4}(?::[A-Fa-f0-9]{1,4}){2,7}"
     r"|(?:[A-Fa-f0-9]{1,4}:){1,6}:(?:[A-Fa-f0-9]{1,4}(?::[A-Fa-f0-9]{1,4}){0,5})?"
     r"|::(?:[A-Fa-f0-9]{1,4}(?::[A-Fa-f0-9]{1,4}){0,6})"
@@ -913,6 +913,17 @@ def scrub_ip_text(val: str) -> str:
 
     def _sub_v6(match: re.Match[str]) -> str:
         cand = match.group(0)
+        start = match.start()
+        if start > 0 and out[start - 1] == ":":
+            j = start - 1
+            while j > 0 and (out[j - 1].isalnum() or out[j - 1] in "_-"):
+                j -= 1
+            prefix_tok = out[j : start - 1]
+            if not prefix_tok:
+                if start >= 2 and out[start - 2] == ":":
+                    return cand
+            elif all(ch in "0123456789abcdefABCDEF" for ch in prefix_tok):
+                return cand
         try:
             ipaddress.IPv6Address(cand)
         except ValueError:

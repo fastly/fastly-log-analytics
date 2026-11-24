@@ -1814,6 +1814,62 @@ def _is_prefix_in_call_sig(
     return False
 
 
+_APPLY_FOLLOW_STOPWORDS = frozenset(
+    {
+        "FROM",
+        "WHERE",
+        "PREWHERE",
+        "GROUP",
+        "HAVING",
+        "ORDER",
+        "LIMIT",
+        "OFFSET",
+        "FETCH",
+        "UNION",
+        "INTERSECT",
+        "EXCEPT",
+        "WINDOW",
+        "QUALIFY",
+        "SETTINGS",
+        "FORMAT",
+        "INTO",
+        "AS",
+        "AND",
+        "OR",
+        "IN",
+        "NOT",
+        "IS",
+        "BETWEEN",
+        "LIKE",
+        "ILIKE",
+        "THEN",
+        "ELSE",
+        "END",
+        "WHEN",
+        "ON",
+        "USING",
+        "JOIN",
+        "INNER",
+        "LEFT",
+        "RIGHT",
+        "FULL",
+        "CROSS",
+        "GLOBAL",
+        "ANY",
+        "ALL",
+        "ASOF",
+        "SEMI",
+        "ANTI",
+        "ARRAY",
+        "OVER",
+        "ASC",
+        "DESC",
+        "NULLS",
+        "COLLATE",
+    }
+)
+
+
 def _reject_unsafe_functions(sql: str, *, parse_tree: Any | None = None) -> None:
     from backend.core import sql_validator as _sv
 
@@ -1845,9 +1901,29 @@ def _reject_unsafe_functions(sql: str, *, parse_tree: Any | None = None) -> None
     ast_fn_budget: dict[str, int] = {}
     exempt_starts = _exempt_col_list_ident_starts(sql, parse_tree=eff_tree, _ast_fn_budget_out=ast_fn_budget)
     for idx in range(len(sig) - 1):
+        kind, tok, start_off = sig[idx]
+        if (
+            idx > 0
+            and kind == "IDENT"
+            and tok.upper() == "APPLY"
+            and (sig[idx - 1][0], sig[idx - 1][1]) != ("OP", ".")
+            and not (sig[idx - 1][0] == "IDENT" and sig[idx - 1][1].upper() == "AS")
+            and (sig[idx + 1][0], sig[idx + 1][1]) != ("OP", ".")
+        ):
+            prev_pair = (sig[idx - 1][0], sig[idx - 1][1])
+            preceded_by_target = prev_pair in (("OP", "*"), ("OP", ")")) or (
+                idx >= 2 and sig[idx - 2][0] == "IDENT" and sig[idx - 2][1].upper() in ("EXCEPT", "APPLY")
+            )
+            if preceded_by_target:
+                nxt_k, nxt_t, _ = sig[idx + 1]
+                if (
+                    (nxt_k == "OP" and nxt_t == "(")
+                    or nxt_k == "DQUOTE"
+                    or (nxt_k == "IDENT" and nxt_t.upper() not in _APPLY_FOLLOW_STOPWORDS)
+                ):
+                    raise PermissionError("APPLY column transformer is not allowed in console queries")
         if (sig[idx + 1][0], sig[idx + 1][1]) != ("OP", "("):
             continue
-        kind, tok, start_off = sig[idx]
         if kind == "DQUOTE":
             raise PermissionError("quoted function names are not allowed")
         if kind != "IDENT":
@@ -3456,13 +3532,22 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
         return True
 
     def _is_lex_star_except(tokens: list[tuple[str, str]], s_pos: int, sig_list: list[int]) -> bool:
-        return (
+        if not (
             s_pos > 0
             and s_pos + 1 < len(sig_list)
             and tokens[sig_list[s_pos]][0] == "IDENT"
             and tokens[sig_list[s_pos]][1].upper() == "EXCEPT"
             and tokens[sig_list[s_pos - 1]] == ("OP", "*")
-            and tokens[sig_list[s_pos + 1]] == ("OP", "(")
+        ):
+            return False
+        nxt_k, nxt_t = tokens[sig_list[s_pos + 1]]
+        return (
+            (nxt_k == "OP" and nxt_t == "(")
+            or nxt_k in ("DQUOTE", "STR")
+            or (
+                nxt_k == "IDENT"
+                and nxt_t.upper() not in ("SELECT", "WITH", "ALL", "DISTINCT", "TABLE", "VALUES", "FROM")
+            )
         )
 
     def _find_matching_paren(tokens: list[tuple[str, str]], open_idx: int) -> int:
@@ -5991,6 +6076,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
         has_unknown_star_item = False
         auto_alias_after_idx: dict[int, str] = {}
         proj_alias_idxs: set[int] = set()
+        star_except_ident_idxs: set[int] = set()
         out_str_cf_cols: set[str] = set()
         out_bool_cf_cols: set[str] = set()
         out_all_cols: set[str] = set()
@@ -6018,7 +6104,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
         if sig_idxs and processed[sig_idxs[0]][0] == "IDENT" and processed[sig_idxs[0]][1].upper() == "SELECT":
             sel_end = top_from_s_pos if top_from_s_pos is not None else len(sig_idxs)
             sel_start = 1
-            if sel_start < sel_end and processed[sig_idxs[sel_start]][0] == "IDENT":
+            while sel_start < sel_end and processed[sig_idxs[sel_start]][0] == "IDENT":
                 mod_u = processed[sig_idxs[sel_start]][1].upper()
                 if mod_u in ("DISTINCT", "ALL"):
                     sel_start += 1
@@ -6032,6 +6118,18 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                         on_close = _find_matching_paren(processed, sig_idxs[sel_start + 1])
                         while sel_start < sel_end and sig_idxs[sel_start] <= on_close:
                             sel_start += 1
+                elif mod_u == "TOP" and sel_start + 1 < sel_end and processed[sig_idxs[sel_start + 1]][0] == "NUM":
+                    sel_start += 2
+                    if (
+                        sel_start + 1 < sel_end
+                        and processed[sig_idxs[sel_start]][0] == "IDENT"
+                        and processed[sig_idxs[sel_start]][1].upper() == "WITH"
+                        and processed[sig_idxs[sel_start + 1]][0] == "IDENT"
+                        and processed[sig_idxs[sel_start + 1]][1].upper() == "TIES"
+                    ):
+                        sel_start += 2
+                else:
+                    break
             proj_items: list[list[int]] = []
             if not _has_any_delim_sql and "," not in sql:
                 if sel_start < sel_end:
@@ -6055,29 +6153,93 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 if cur_item:
                     proj_items.append(cur_item)
 
+            def _is_star_transformer_suffix(it_idxs: list[int], start_off: int) -> bool:
+                if start_off == len(it_idxs):
+                    return True
+                t_off = start_off
+                matched_any = False
+                while t_off < len(it_idxs):
+                    tk, tt = processed[it_idxs[t_off]]
+                    if tk != "IDENT":
+                        return False
+                    tu = tt.upper()
+                    if tu == "EXCEPT" and t_off + 1 < len(it_idxs):
+                        nk, nt = processed[it_idxs[t_off + 1]]
+                        if nk == "OP" and nt == "(":
+                            rp_e = _find_matching_paren(processed, it_idxs[t_off + 1])
+                            t_off += 2
+                            while t_off < len(it_idxs) and it_idxs[t_off] < rp_e:
+                                t_off += 1
+                            if t_off < len(it_idxs) and it_idxs[t_off] == rp_e:
+                                t_off += 1
+                            matched_any = True
+                            continue
+                        if nk in ("IDENT", "DQUOTE", "STR"):
+                            t_off += 2
+                            matched_any = True
+                            continue
+                        return False
+                    if tu == "REPLACE" and t_off + 1 < len(it_idxs) and processed[it_idxs[t_off + 1]] == ("OP", "("):
+                        rp_r = _find_matching_paren(processed, it_idxs[t_off + 1])
+                        t_off += 2
+                        while t_off < len(it_idxs) and it_idxs[t_off] < rp_r:
+                            t_off += 1
+                        if t_off < len(it_idxs) and it_idxs[t_off] == rp_r:
+                            t_off += 1
+                        matched_any = True
+                        continue
+                    return False
+                return matched_any
+
+            def _collect_star_except_idents(it_idxs: list[int], start_off: int) -> None:
+                t_off = start_off
+                while t_off < len(it_idxs):
+                    tk, tt = processed[it_idxs[t_off]]
+                    if tk != "IDENT":
+                        break
+                    tu = tt.upper()
+                    if tu == "EXCEPT" and t_off + 1 < len(it_idxs):
+                        nk, nt = processed[it_idxs[t_off + 1]]
+                        if nk == "OP" and nt == "(":
+                            rp_e = _find_matching_paren(processed, it_idxs[t_off + 1])
+                            t_off += 2
+                            while t_off < len(it_idxs) and it_idxs[t_off] < rp_e:
+                                if processed[it_idxs[t_off]][0] == "IDENT":
+                                    star_except_ident_idxs.add(it_idxs[t_off])
+                                t_off += 1
+                            if t_off < len(it_idxs) and it_idxs[t_off] == rp_e:
+                                t_off += 1
+                            continue
+                        if nk == "IDENT":
+                            star_except_ident_idxs.add(it_idxs[t_off + 1])
+                        t_off += 2
+                        continue
+                    if tu == "REPLACE" and t_off + 1 < len(it_idxs) and processed[it_idxs[t_off + 1]] == ("OP", "("):
+                        rp_r = _find_matching_paren(processed, it_idxs[t_off + 1])
+                        t_off += 2
+                        while t_off < len(it_idxs) and it_idxs[t_off] < rp_r:
+                            t_off += 1
+                        if t_off < len(it_idxs) and it_idxs[t_off] == rp_r:
+                            t_off += 1
+                        continue
+                    break
+
             for it_idxs in proj_items:
-                is_bare_star_item = (len(it_idxs) == 1 and processed[it_idxs[0]] == ("OP", "*")) or (
-                    len(it_idxs) >= 4
+                is_bare_star_item = (
+                    len(it_idxs) >= 1
                     and processed[it_idxs[0]] == ("OP", "*")
-                    and processed[it_idxs[1]][0] == "IDENT"
-                    and processed[it_idxs[1]][1].upper() == "EXCEPT"
-                    and processed[it_idxs[2]] == ("OP", "(")
+                    and _is_star_transformer_suffix(it_idxs, 1)
                 )
                 is_qual_star_item = (
-                    len(it_idxs) == 3
+                    len(it_idxs) >= 3
                     and processed[it_idxs[0]][0] in ("IDENT", "DQUOTE")
                     and processed[it_idxs[1]] == ("OP", ".")
                     and processed[it_idxs[2]] == ("OP", "*")
-                ) or (
-                    len(it_idxs) >= 6
-                    and processed[it_idxs[0]][0] in ("IDENT", "DQUOTE")
-                    and processed[it_idxs[1]] == ("OP", ".")
-                    and processed[it_idxs[2]] == ("OP", "*")
-                    and processed[it_idxs[3]][0] == "IDENT"
-                    and processed[it_idxs[3]][1].upper() == "EXCEPT"
-                    and processed[it_idxs[4]] == ("OP", "(")
+                    and _is_star_transformer_suffix(it_idxs, 3)
                 )
                 if is_bare_star_item:
+                    if len(it_idxs) > 1:
+                        _collect_star_except_idents(it_idxs, 1)
                     projects_star = True
                     out_str_cf_cols |= branch_inherited_str_cf
                     out_bool_cf_cols |= branch_inherited_bool_cf
@@ -6093,6 +6255,8 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                     else:
                         has_unknown_star_item = True
                 elif is_qual_star_item:
+                    if len(it_idxs) > 3:
+                        _collect_star_except_idents(it_idxs, 3)
                     q_nm = _unquote_sql_ident(processed[it_idxs[0]][1]).lower()
                     q_dom = alias_domains.get(q_nm, domains)
                     if q_dom & raw_fact_domains:
@@ -6331,7 +6495,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 append_rw(("IDENT", f"event_timestamp{alias_suffix}"))
             elif low_ident == "ip" and touches_request:
                 append_rw(("IDENT", f"client_ip{alias_suffix}"))
-            elif low_ident in _REQUEST_CF_FIELDS and touches_request:
+            elif low_ident in _REQUEST_CF_FIELDS and touches_request and idx not in star_except_ident_idxs:
                 append_rw(("IDENT", f"custom_fields['{low_ident}']{alias_suffix}"))
             else:
                 append_rw(tok_pair)

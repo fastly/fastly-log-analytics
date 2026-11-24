@@ -2352,3 +2352,285 @@ it("SEC-T5-ITER36-FE-05: maintains strict O(N) performance (<10ms) across 64 KiB
     window.removeEventListener("fla:cloud-query", listener);
   }
 }, 30000);
+
+it("SEC-T5-ITER37-FE-01: redacts spaced = on quoted first params in Cookie/Auth headers", async () => {
+  setCloudModeRuntime(true);
+  const events: { state?: string; error?: string }[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    const cases: readonly [string, readonly string[], string][] = [
+      [
+        'Runtime Error: "Authorization": Digest "realm" = memory, "response" = cache rejected',
+        ["Authorization", "Digest", "realm", "memory", "response", "cache", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        'Runtime Error: "Cookie": "sid" = memory; mode = server rejected',
+        ["Cookie", "sid", "memory", "mode", "server", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: \"Authorization\": Digest 'realm' = memory, 'response' = cache rejected",
+        ["Authorization", "Digest", "realm", "memory", "response", "cache", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        'Runtime Error: "Cookie": "sid" = "memory"; mode = server rejected',
+        ["Cookie", "sid", "memory", "mode", "server", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        'Runtime Error: "WWW-Authenticate": Bearer "realm" = memory, "error" = cache rejected',
+        ["WWW-Authenticate", "Bearer", "realm", "memory", "error", "cache", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        'Runtime Error: "Cookie": "sid=memory; mode=server" rejected',
+        ["Cookie", "sid", "memory", "mode", "server", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+    ];
+    for (const [msg, forbidden, expectedExact] of cases) {
+      const err = new Error(msg);
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+      const got = events.at(-1)?.error ?? "";
+      for (const frag of forbidden) {
+        expect(got, `msg=${msg} got=${got}`).not.toContain(frag);
+      }
+      expect(got, `msg=${msg}`).toBe(expectedExact);
+    }
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+  }
+});
+
+it("SEC-T5-ITER37-FE-02: redacts custom Authorization and Proxy-Authorization schemes not in AUTH_SCHEMES", async () => {
+  setCloudModeRuntime(true);
+  const events: { state?: string; error?: string }[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    const cases: readonly [string, readonly string[], string][] = [
+      [
+        "Authorization: FastlyKey select",
+        ["Authorization", "FastlyKey", "select"],
+        "Error: [redacted]",
+      ],
+      [
+        "Authorization: SSWS 123ms",
+        ["Authorization", "SSWS", "123ms"],
+        "Error: [redacted]",
+      ],
+      [
+        "Authorization: CustomScheme 42 MB",
+        ["Authorization", "CustomScheme", "42", "MB"],
+        "Error: [redacted]",
+      ],
+      [
+        "Proxy-Authorization: CustomAuth default",
+        ["Proxy-Authorization", "CustomAuth", "default"],
+        "Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization: FastlyKey select rejected",
+        ["Authorization", "FastlyKey", "select"],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: Authorization: CustomScheme 42 MB rejected",
+        ["Authorization", "CustomScheme", "42", "MB"],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        'Runtime Error: "Authorization": FastlyKey select rejected',
+        ["Authorization", "FastlyKey", "select"],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        'Runtime Error: "Authorization": "FastlyKey select" rejected',
+        ["Authorization", "FastlyKey", "select"],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        'Runtime Error: "Proxy-Authorization": CustomAuth default rejected',
+        ["Proxy-Authorization", "CustomAuth", "default"],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: Authorization:FastlyKey select rejected",
+        ["Authorization", "FastlyKey", "select"],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: Proxy-Authorization:CustomAuth default rejected",
+        ["Proxy-Authorization", "CustomAuth", "default"],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: Authorization: CustomScheme realm=a, response = memory rejected",
+        ["Authorization", "CustomScheme", "realm", "response", "memory", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: Authorization: FastlyKey. select rejected",
+        ["Authorization", "FastlyKey"],
+        "Error: Runtime Error: [redacted] select rejected",
+      ],
+    ];
+    for (const [msg, forbidden, expectedExact] of cases) {
+      const err = new Error(msg);
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+      const got = events.at(-1)?.error ?? "";
+      for (const frag of forbidden) {
+        expect(got, `msg=${msg} got=${got}`).not.toContain(frag);
+      }
+      expect(got, `msg=${msg}`).toBe(expectedExact);
+    }
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+  }
+});
+
+it("SEC-T5-ITER37-FE-03: handles non-E backslash-escaped single quotes in Stage 2A without exposing inner tokens", async () => {
+  setCloudModeRuntime(true);
+  const events: { state?: string; error?: string }[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    const cases: readonly [string, readonly string[], string][] = [
+      [
+        "Error parsing 'foo\\' table ' and 'bar'",
+        ["foo", "table", "bar"],
+        "Error: Error parsing [redacted] and [redacted]",
+      ],
+      [
+        "Runtime Error: parsing 'foo\\' table ' rejected",
+        ["foo", "table"],
+        "Error: Runtime Error: parsing [redacted] rejected",
+      ],
+      [
+        "Runtime Error: parsing 'foo\\\\' and 'bar' rejected",
+        ["foo", "bar"],
+        "Error: Runtime Error: parsing [redacted] and [redacted] rejected",
+      ],
+      [
+        "Runtime Error: parsing 'foo\\\\\\' table ' and 'bar' rejected",
+        ["foo", "table", "bar"],
+        "Error: Runtime Error: parsing [redacted] and [redacted] rejected",
+      ],
+      [
+        "Runtime Error: parsing 'foo''bar' and 'baz' rejected",
+        ["foo", "bar", "baz"],
+        "Error: Runtime Error: parsing [redacted] and [redacted] rejected",
+      ],
+      [
+        "Runtime Error: parsing 'foo\\' table",
+        ["foo", "table"],
+        "Error: Runtime Error: parsing [redacted]",
+      ],
+      [
+        "Binder Error: invalid pattern LIKE '%\\' for client 'memory'",
+        ["memory", "%\\"],
+        "Error: Binder Error: invalid pattern LIKE [redacted] for client [redacted]",
+      ],
+    ];
+    for (const [msg, forbidden, expectedExact] of cases) {
+      const err = new Error(msg);
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+      const got = events.at(-1)?.error ?? "";
+      for (const frag of forbidden) {
+        expect(got, `msg=${msg} got=${got}`).not.toContain(frag);
+      }
+      expect(got, `msg=${msg}`).toBe(expectedExact);
+    }
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+  }
+});
+
+it("SEC-T5-ITER37-FE-04: redacts values for >64-char JSON secret keys including 256+ char keys", async () => {
+  setCloudModeRuntime(true);
+  const events: { state?: string; error?: string }[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    const cases: readonly [string, readonly string[], string][] = [
+      [
+        `{"${"x".repeat(60)}_token": select}`,
+        ["token", "select"],
+        "Error: [redacted]",
+      ],
+      [
+        `{"${"x".repeat(256)}_secret": 100ms}`,
+        ["secret", "100ms"],
+        "Error: [redacted]",
+      ],
+      [
+        `{'${"x".repeat(60)}_token': select}`,
+        ["token", "select"],
+        "Error: [redacted]",
+      ],
+      [
+        `Runtime Error: {\`${"x".repeat(80)}_password\`: 42 MB} rejected`,
+        ["password", "42", "MB"],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        `Runtime Error: {"${"x".repeat(100)}_authorization": FastlyKey select} rejected`,
+        ["authorization", "FastlyKey", "select"],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+    ];
+    for (const [msg, forbidden, expectedExact] of cases) {
+      const err = new Error(msg);
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+      const got = events.at(-1)?.error ?? "";
+      for (const frag of forbidden) {
+        expect(got, `msg=${msg} got=${got}`).not.toContain(frag);
+      }
+      expect(got, `msg=${msg}`).toBe(expectedExact);
+    }
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+  }
+});
+
+it("SEC-T5-ITER37-FE-05: maintains strict O(N) performance (<10ms median) on 64 KiB Wave 37 adversarial inputs", async () => {
+  setCloudModeRuntime(true);
+  const events: { state?: string; error?: string }[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    const longKey512 = `${"k".repeat(506)}_token`;
+    const bigKeyErr = new Error(`Runtime Error: {"${longKey512}": select} rejected`);
+    await expect(measureCloudQuery("dashboard.bundle", async () => { throw bigKeyErr; })).rejects.toBe(bigKeyErr);
+    expect(events.at(-1)?.error).toBe("Error: Runtime Error: [redacted] rejected");
+
+    const perfPayloads64k = [
+      `Runtime Error: {"${"x".repeat(64000)}_token": select}`,
+      `Runtime Error: {"${"x".repeat(64000)}": select}`,
+      `Runtime Error: '${"\\'".repeat(32000)} table ' and 'bar'`,
+      `Runtime Error: "Authorization": Digest ${'"a" = b, '.repeat(7000)}"response" = cache`,
+      `Runtime Error: "Cookie": ${'"sid" = a; '.repeat(5800)}mode = server`,
+      `Runtime Error: ${"Authorization: CustomScheme ".repeat(2200)}42 MB`,
+    ];
+    for (const payload of perfPayloads64k) {
+      const err = new Error(payload);
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+      const trials: number[] = [];
+      for (let k = 0; k < 5; k += 1) {
+        const t0 = performance.now();
+        await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+        trials.push(performance.now() - t0);
+      }
+      const sorted = [...trials].sort((a, b) => a - b);
+      const median = sorted[Math.floor(sorted.length / 2)]!;
+      const max = sorted.at(-1)!;
+      expect(median, `len=${payload.length} trials=${trials.map((v) => v.toFixed(2)).join(",")}`).toBeLessThan(10);
+      expect(max, `len=${payload.length} trials=${trials.map((v) => v.toFixed(2)).join(",")}`).toBeLessThan(150);
+    }
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+  }
+}, 30000);

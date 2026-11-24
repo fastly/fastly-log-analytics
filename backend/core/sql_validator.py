@@ -1870,16 +1870,101 @@ def _is_qualified_star_tok(tokens: list[_Tok], pos: int) -> bool:
     )
 
 
+_STAR_EXCEPT_NON_COL_KEYWORDS = frozenset({"SELECT", "WITH", "ALL", "DISTINCT", "TABLE", "VALUES", "FROM"})
+_APPLY_FOLLOW_STOPWORDS = frozenset(
+    {
+        "FROM",
+        "WHERE",
+        "PREWHERE",
+        "GROUP",
+        "HAVING",
+        "ORDER",
+        "LIMIT",
+        "OFFSET",
+        "FETCH",
+        "UNION",
+        "INTERSECT",
+        "EXCEPT",
+        "WINDOW",
+        "QUALIFY",
+        "SETTINGS",
+        "FORMAT",
+        "INTO",
+        "AS",
+        "AND",
+        "OR",
+        "IN",
+        "NOT",
+        "IS",
+        "BETWEEN",
+        "LIKE",
+        "ILIKE",
+        "THEN",
+        "ELSE",
+        "END",
+        "WHEN",
+        "ON",
+        "USING",
+        "JOIN",
+        "INNER",
+        "LEFT",
+        "RIGHT",
+        "FULL",
+        "CROSS",
+        "GLOBAL",
+        "ANY",
+        "ALL",
+        "ASOF",
+        "SEMI",
+        "ANTI",
+        "ARRAY",
+        "OVER",
+        "ASC",
+        "DESC",
+        "NULLS",
+        "COLLATE",
+    }
+)
+
+
 def _is_star_except_clause(tokens: list[_Tok], idx: int) -> bool:
-    return (
+    if not (
         idx > 0
         and idx + 1 < len(tokens)
         and tokens[idx].kind == "WORD"
         and tokens[idx].val.upper() == "EXCEPT"
         and tokens[idx - 1].kind == "OTHER"
         and tokens[idx - 1].val == "*"
-        and tokens[idx + 1].kind == "LPAREN"
+    ):
+        return False
+    nxt = tokens[idx + 1]
+    return nxt.kind in ("LPAREN", "QIDENT", "STRING") or (
+        nxt.kind == "WORD" and nxt.val.upper() not in _STAR_EXCEPT_NON_COL_KEYWORDS
     )
+
+
+def _is_apply_column_transformer(tokens: list[_Tok], idx: int) -> bool:
+    if (
+        idx <= 0
+        or idx + 1 >= len(tokens)
+        or tokens[idx].kind != "WORD"
+        or tokens[idx].val.upper() != "APPLY"
+        or _is_non_keyword_ident_pos(tokens, idx)
+        or _is_dot_qualifier_at(tokens, idx)
+    ):
+        return False
+    prev = tokens[idx - 1]
+    preceded_by_target = (
+        (prev.kind == "OTHER" and prev.val == "*")
+        or prev.kind == "RPAREN"
+        or (idx >= 2 and tokens[idx - 2].kind == "WORD" and tokens[idx - 2].val.upper() in ("EXCEPT", "APPLY"))
+    )
+    if not preceded_by_target:
+        return False
+    nxt = tokens[idx + 1]
+    if nxt.kind in ("LPAREN", "QIDENT"):
+        return True
+    return nxt.kind == "WORD" and nxt.val.upper() not in _APPLY_FOLLOW_STOPWORDS
 
 
 def _is_dot_qualifier_at(tokens: list[_Tok], idx: int) -> bool:
@@ -3075,6 +3160,16 @@ def _scan_expr_tokens(
                     )
                 i += 1
                 continue
+            if _is_apply_column_transformer(cur_tokens, i):
+                node["children"].append(
+                    {
+                        "type": "DISALLOWED_SUBQUERY_STATEMENT",
+                        "reason": "apply_column_transformer",
+                        "message": "APPLY column transformer is not allowed in user queries",
+                    }
+                )
+                i += 1
+                continue
             if tok.kind in ("WORD", "QIDENT") and i + 1 < n and cur_tokens[i + 1].kind == "LPAREN":
                 rp = _find_matching_rparen(cur_tokens, i + 1)
                 if rp != -1:
@@ -3136,6 +3231,7 @@ _DISALLOWED_BARE_TABLE_ALIASES = _DISALLOWED_UNQUOTED_AS_TABLE_ALIASES | frozens
 _OUTSIDE_FROM_KEYWORDS = (
     frozenset(
         {
+            "APPLY",
             "FROM",
             "TABLE",
             "JOIN",
@@ -3964,6 +4060,16 @@ def _scan_body_tokens(
                         "message": "SQL parse error: IN must be followed by a parenthesized list or subquery",
                     }
                 )
+            i += 1
+            continue
+        if _is_apply_column_transformer(tokens, i):
+            node["children"].append(
+                {
+                    "type": "DISALLOWED_SUBQUERY_STATEMENT",
+                    "reason": "apply_column_transformer",
+                    "message": "APPLY column transformer is not allowed in user queries",
+                }
+            )
             i += 1
             continue
         if tok.kind in ("WORD", "QIDENT") and i + 1 < n and tokens[i + 1].kind == "LPAREN":

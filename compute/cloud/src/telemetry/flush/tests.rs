@@ -3850,3 +3850,194 @@ fn iter36_f10_flush_u64_max_bucket_and_oldest_min_zero_do_not_panic_or_wrap() {
     clear_cache(&rt, SID, Some(LogKind::FosUsage)).unwrap();
     assert_eq!(rt.cursor().cache_min, 0);
 }
+
+#[test]
+fn iter37_abandon_fenced_low_budget_defers_without_orphan_upload_or_lease_leak() {
+    let rt = Rt::new();
+    // Seed a cursor at a new generation with a different txn_id so the uncommitted manifest is fenced.
+    rt.put_kv(
+        &cursor_key(SID),
+        to_value(&Cursor {
+            scan_min: NOW_MIN - 2,
+            cache_min: NOW_MIN - 2,
+            txn_id: "other-committed-txn".into(),
+            last_flush_s: NOW_S,
+            last_svc_flush_s: Some(NOW_S),
+            ..Default::default()
+        }),
+    );
+    let fenced_manifest = Manifest {
+        txn_id: "fenced-txn-1".into(),
+        cursor_generation: Some("stale-old-gen".into()),
+        outputs: vec![
+            "processed/telemetry/fenced-out-1.parquet".into(),
+            "processed/telemetry/fenced-out-2.parquet".into(),
+        ],
+        outbox_keys: vec![],
+        svc_range: (0, 0),
+        committed: false,
+        gc_done: false,
+        ..Default::default()
+    };
+    rt.put_kv(&manifest_key(SID), to_value(&fenced_manifest));
+    // Pre-lease reads: cursor(1) + manifest(1) = 2; acquire_lease: get(1) + cas(1) = 2;
+    // post-lease re-reads: cursor(1) + manifest(1) = 2 => 6 calls before abandon_fenced.
+    // Give 6 + 3 = 9 calls total so remaining at abandon_fenced is 3 < outputs.len() + 2 (4),
+    // while still leaving enough budget to release the lease (1 call).
+    rt.budget.set(rt.calls.get() + 9);
+    let rep = log_flush(
+        &rt,
+        SID,
+        Some(&target()),
+        &OperationalLogSettings::default(),
+        true,
+        Instant::now(),
+    )
+    .unwrap();
+    assert_eq!(
+        rep.status,
+        FlushStatus::Deferred,
+        "iter37: low-budget abandon_fenced must return Deferred instead of falling through to run_txn_with"
+    );
+    assert!(
+        rt.objects.borrow().is_empty(),
+        "iter37: low-budget abandon_fenced must not upload orphan Parquet files!"
+    );
+    assert!(
+        rt.get_kv(&manifest_key(SID)).is_some(),
+        "iter37: deferred fenced manifest must remain intact for a later tick with budget"
+    );
+    assert!(
+        rt.get_kv(LEASE_KEY).is_none(),
+        "iter37: lease must be released when abandon_fenced returns Deferred"
+    );
+}
+
+#[test]
+fn iter37_not_due_cursor_write_releases_lease_on_manifest_get_error() {
+    struct FailSecondManifestGetRt {
+        inner: Rt,
+        manifest_gets: Cell<u32>,
+    }
+    impl SetupStores for FailSecondManifestGetRt {
+        fn config_present(&self, n: &str) -> Result<bool, String> {
+            self.inner.config_present(n)
+        }
+        fn secret_present(&self, n: &str) -> Result<bool, String> {
+            self.inner.secret_present(n)
+        }
+        fn state_linked(&self) -> Result<bool, String> {
+            self.inner.state_linked()
+        }
+    }
+    impl Runtime for FailSecondManifestGetRt {
+        fn config(&self, k: &str) -> Result<Option<String>, String> {
+            self.inner.config(k)
+        }
+        fn secret(&self, k: &str) -> Result<Option<String>, String> {
+            self.inner.secret(k)
+        }
+        fn random(&self) -> Result<[u8; 32], String> {
+            self.inner.random()
+        }
+        fn now(&self) -> u64 {
+            self.inner.now()
+        }
+        fn checks(&self, l: bool) -> Result<Value, String> {
+            self.inner.checks(l)
+        }
+        fn versions(&self) -> Result<Value, String> {
+            self.inner.versions()
+        }
+        fn compute_service_id(&self) -> Option<String> {
+            self.inner.compute_service_id()
+        }
+        fn compute_service_version(&self) -> Option<String> {
+            self.inner.compute_service_version()
+        }
+        fn admin_get(&self, key: &str) -> Result<Option<Record>, String> {
+            if key == manifest_key(SID) {
+                let n = self.manifest_gets.get() + 1;
+                self.manifest_gets.set(n);
+                if n == 2 {
+                    return Err("injected_manifest_get_error".into());
+                }
+            }
+            self.inner.admin_get(key)
+        }
+        fn admin_cas(
+            &self,
+            key: &str,
+            generation: Option<&str>,
+            value: &Value,
+        ) -> Result<bool, String> {
+            self.inner.admin_cas(key, generation, value)
+        }
+        fn kv_list(
+            &self,
+            prefix: &str,
+            cursor: Option<&str>,
+            limit: u32,
+        ) -> Result<KvPage, String> {
+            self.inner.kv_list(prefix, cursor, limit)
+        }
+        fn kv_delete(&self, key: &str) -> Result<(), String> {
+            self.inner.kv_delete(key)
+        }
+        fn admin_fos(&self, req: FosRequest<'_>) -> Result<FosResponse, String> {
+            self.inner.admin_fos(req)
+        }
+        fn admin_remaining_calls(&self) -> u32 {
+            self.inner.admin_remaining_calls()
+        }
+        fn core_cache_lookup(&self, key: &str) -> Result<Option<CoreCacheEntry>, CoreCacheError> {
+            self.inner.core_cache_lookup(key)
+        }
+        fn core_cache_replace(
+            &self,
+            key: &str,
+            surrogate_keys: &[&str],
+            ttl: Duration,
+            update: &dyn Fn(Option<CoreCacheEntry>) -> CoreCacheEntry,
+        ) -> Result<(), CoreCacheError> {
+            self.inner
+                .core_cache_replace(key, surrogate_keys, ttl, update)
+        }
+        fn core_cache_purge(&self, surrogate: &str) -> Result<(), CoreCacheError> {
+            self.inner.core_cache_purge(surrogate)
+        }
+        fn vcpu_ms(&self) -> u64 {
+            self.inner.vcpu_ms()
+        }
+        fn admin_elapsed(&self, started: Instant) -> Duration {
+            self.inner.admin_elapsed(started)
+        }
+    }
+
+    let inner = Rt::new();
+    inner.budget.set(inner.calls.get() + 64);
+    let rt = FailSecondManifestGetRt {
+        inner,
+        manifest_gets: Cell::new(0),
+    };
+    // Fresh cursor with no due outbox/pending triggers the `!due.due` cursor-write path.
+    let err = log_flush(
+        &rt,
+        SID,
+        Some(&target()),
+        &OperationalLogSettings::default(),
+        false,
+        Instant::now(),
+    )
+    .err();
+    assert_eq!(
+        err.as_deref(),
+        Some("injected_manifest_get_error"),
+        "iter37: injected admin_get error should propagate"
+    );
+    assert_eq!(rt.manifest_gets.get(), 2);
+    assert!(
+        rt.inner.get_kv(LEASE_KEY).is_none(),
+        "iter37: lease must be released when admin_get(&manifest_key) fails in !due.due path!"
+    );
+}

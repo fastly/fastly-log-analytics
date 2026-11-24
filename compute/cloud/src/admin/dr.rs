@@ -904,6 +904,7 @@ fn scan_catalog_head(
     let mut day_candidates: BTreeMap<i64, Vec<ScannedDay>> = BTreeMap::new();
     let mut skipped_reset_manifest = false;
     let mut expected_manifest_missing_on_get = false;
+    let mut expected_manifest_verified = false;
     let legacy_cutoff_day = (from_dr_state && service.log_retention_days > 0).then(|| {
         let cutoff =
             (now as i64 - i64::from(service.log_retention_days) * 86_400).div_euclid(3600) * 3600;
@@ -911,11 +912,15 @@ fn scan_catalog_head(
     });
 
     for (idx, obj) in objects.iter().enumerate() {
+        let is_expected = expected_manifest == Some(obj.key.as_str());
         let (m_tier, m_gen_hint) = manifest_sort_rank(&obj.key);
         if m_tier > 0 {
             if m_tier == 3 {
                 if let (Some(gh), Some((_, prev_bm))) = (m_gen_hint, best_manifest.as_ref()) {
-                    if gh < prev_bm.generation
+                    let superseded_by_newer_own =
+                        dr_head_gen.is_some_and(|dg| prev_bm.generation > dg);
+                    if (!is_expected || superseded_by_newer_own)
+                        && gh < prev_bm.generation
                         && (best_manifest_days.is_some() || prev_bm.batch == "reset")
                     {
                         continue;
@@ -961,7 +966,6 @@ fn scan_catalog_head(
         } else {
             0
         };
-        let is_expected = expected_manifest == Some(obj.key.as_str());
         let dynamic_reset_hold = if must_verify_dr_state && is_expected {
             0
         } else if effective_reset.is_some() || m_tier > 0 {
@@ -1038,8 +1042,11 @@ fn scan_catalog_head(
                 continue;
             }
             if manifest.service_id == service.service_id {
-                if is_expected && dr_head_gen.is_some_and(|dg| manifest.generation != dg) {
-                    return Err(Error::new(400, "invalid_dr_catalog_head"));
+                if is_expected {
+                    if dr_head_gen.is_some_and(|dg| manifest.generation != dg) {
+                        return Err(Error::new(400, "invalid_dr_catalog_head"));
+                    }
+                    expected_manifest_verified = true;
                 }
                 let raw_val = serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null);
                 if manifest.batch == "reset" {
@@ -1207,7 +1214,7 @@ fn scan_catalog_head(
         && !legacy_m_truncated
         && !skipped_reset_manifest
         && best_manifest_days.is_none()
-        && best_manifest.as_ref().is_some_and(|(_, m)| {
+        && best_manifest.as_ref().is_none_or(|(_, m)| {
             m.batch != "reset"
                 && effective_reset
                     .as_ref()
@@ -1333,8 +1340,8 @@ fn scan_catalog_head(
     });
     let expected_missing = match expected_manifest {
         Some(_) if expected_manifest_missing_on_get => true,
-        Some(m_key) if !expected_on_page => {
-            if !page_was_truncated {
+        Some(m_key) if !expected_manifest_verified => {
+            if !expected_on_page && !page_was_truncated {
                 true
             } else if has_verified_newer_own {
                 false

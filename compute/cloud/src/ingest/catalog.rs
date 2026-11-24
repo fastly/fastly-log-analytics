@@ -597,6 +597,7 @@ pub fn prepare_reserving<R: Runtime>(
                 || parent.service_id != store.service.service_id
                 || parent.hour != *hour
                 || parent.generation != current.generation
+                || current.generation > head.generation
             {
                 return Err("catalog_manifest_invalid".into());
             }
@@ -679,7 +680,25 @@ pub fn prepare_reserving<R: Runtime>(
                     .collect(),
             };
             if let Some(reference) = previous {
+                let max_parent_gen = if work.blocks.contains_key(hour) {
+                    generation
+                } else {
+                    head.generation
+                };
                 let parent: Block = read(store, &reference.key)?;
+                if parent.version != VERSION
+                    || parent.service_id != store.service.service_id
+                    || parent.hour != *hour
+                    || parent.generation != reference.generation
+                    || parent.generation > max_parent_gen
+                {
+                    return Err("catalog_manifest_invalid".into());
+                }
+                if parent.previous.as_ref().is_some_and(|prev| {
+                    prev.generation > parent.generation || prev.key == reference.key
+                }) {
+                    return Err("catalog_parent_invalid".into());
+                }
                 let mut merged = block.clone();
                 merged.previous = parent.previous;
                 let old_keys = parent
@@ -1467,6 +1486,236 @@ mod tests {
                 err.as_deref(),
                 Some("catalog_manifest_invalid"),
                 "iter36 F7 ({label}): proof block metadata mismatch must be rejected!"
+            );
+        }
+    }
+
+    #[test]
+    fn iter37_prepare_reserving_validates_proof_head_gen_and_parent_block_merge() {
+        let svc = test_service();
+        let hour = 1_800_000_000i64; // 2027-01-15T08:00:00Z
+        let day = day_start(hour);
+        let day_key = "processed/_catalog/day-iter37.json".to_owned();
+        let key_a = "processed/_catalog/block-iter37-a.json".to_owned();
+        let key_b = "processed/_catalog/block-iter37-b.json".to_owned();
+        let target_file =
+            "processed/request/year=2027/month=01/day=15/hour=08/window=1800000000-1800000120-0.parquet"
+                .to_owned();
+        let new_file = Output {
+            key: "processed/request/year=2027/month=01/day=15/hour=08/window=1800000120-1800000240-0.parquet"
+                .to_owned(),
+            bytes: 128,
+            rows: 10,
+            ..Default::default()
+        };
+        let head = Head {
+            version: VERSION,
+            generation: 5,
+            recent: vec![Event {
+                cursor: "5".into(),
+                generation: 5,
+                committed_at: None,
+                manifest: None,
+            }],
+            days: BTreeMap::from([(day, day_key.clone())]),
+            ..Default::default()
+        };
+        let wm = json!({ "catalog": serde_json::to_value(&head).unwrap() });
+
+        let rt = MockRt {
+            kv: RefCell::new(BTreeMap::new()),
+            objects: RefCell::new(BTreeMap::new()),
+            remaining: Cell::new(32),
+            gets: Cell::new(0),
+        };
+        let store = Store {
+            runtime: &rt,
+            service: &svc,
+            access_key: "ak".into(),
+            secret_key: "sk".into(),
+            started: Instant::now(),
+            vcpu_start: 0,
+        };
+
+        // 1. Proof loop: current.generation (6) > head.generation (5) must be rejected.
+        {
+            let day_gt = Day {
+                version: VERSION,
+                service_id: Some(svc.service_id.clone()),
+                hours: BTreeMap::from([(
+                    hour,
+                    Reference {
+                        key: key_a.clone(),
+                        generation: 6,
+                    },
+                )]),
+                ..Default::default()
+            };
+            let blk_gt = Block {
+                version: VERSION,
+                service_id: svc.service_id.clone(),
+                generation: 6,
+                hour,
+                previous: None,
+                files: vec![Output {
+                    key: target_file.clone(),
+                    ..new_file.clone()
+                }],
+                summaries: vec![],
+                replaces: vec![],
+                committed_at: BTreeMap::new(),
+            };
+            rt.kv.borrow_mut().clear();
+            rt.objects.borrow_mut().clear();
+            rt.objects
+                .borrow_mut()
+                .insert(day_key.clone(), serde_json::to_vec(&day_gt).unwrap());
+            rt.objects
+                .borrow_mut()
+                .insert(key_a.clone(), serde_json::to_vec(&blk_gt).unwrap());
+            rt.remaining.set(32);
+            let err = prepare_reserving(
+                &store,
+                &wm,
+                "compaction",
+                "v2",
+                std::slice::from_ref(&new_file),
+                &[],
+                &[],
+                std::slice::from_ref(&target_file),
+                0,
+            )
+            .err();
+            assert_eq!(
+                err.as_deref(),
+                Some("catalog_manifest_invalid"),
+                "iter37: proof loop must reject current.generation > head.generation!"
+            );
+        }
+
+        // 2. Parent block merge (no `replaces`, so proof loop is skipped):
+        //    validate version, service_id, hour, generation mismatch, generation > head.generation,
+        //    self-loop previous, and non-monotonic previous.generation > parent.generation.
+        let base_blk = Block {
+            version: VERSION,
+            service_id: svc.service_id.clone(),
+            generation: 5,
+            hour,
+            previous: None,
+            files: vec![],
+            summaries: vec![],
+            replaces: vec![],
+            committed_at: BTreeMap::new(),
+        };
+        let cases: Vec<(&str, u64, Block, &str)> = vec![
+            (
+                "foreign_sid",
+                5,
+                Block {
+                    service_id: "foreignService".into(),
+                    ..base_blk.clone()
+                },
+                "catalog_manifest_invalid",
+            ),
+            (
+                "wrong_version",
+                5,
+                Block {
+                    version: VERSION + 1,
+                    ..base_blk.clone()
+                },
+                "catalog_manifest_invalid",
+            ),
+            (
+                "wrong_hour",
+                5,
+                Block {
+                    hour: hour + 3600,
+                    ..base_blk.clone()
+                },
+                "catalog_manifest_invalid",
+            ),
+            (
+                "gen_mismatch",
+                5,
+                Block {
+                    generation: 4,
+                    ..base_blk.clone()
+                },
+                "catalog_manifest_invalid",
+            ),
+            (
+                "gen_exceeds_head",
+                6,
+                Block {
+                    generation: 6,
+                    ..base_blk.clone()
+                },
+                "catalog_manifest_invalid",
+            ),
+            (
+                "self_loop_previous",
+                5,
+                Block {
+                    previous: Some(Reference {
+                        key: key_a.clone(),
+                        generation: 5,
+                    }),
+                    ..base_blk.clone()
+                },
+                "catalog_parent_invalid",
+            ),
+            (
+                "monotonic_violation_previous",
+                5,
+                Block {
+                    previous: Some(Reference {
+                        key: key_b.clone(),
+                        generation: 6,
+                    }),
+                    ..base_blk.clone()
+                },
+                "catalog_parent_invalid",
+            ),
+        ];
+        for (label, ref_gen, bad_parent, expected_err) in cases {
+            let day_index = Day {
+                version: VERSION,
+                service_id: Some(svc.service_id.clone()),
+                hours: BTreeMap::from([(
+                    hour,
+                    Reference {
+                        key: key_a.clone(),
+                        generation: ref_gen,
+                    },
+                )]),
+                ..Default::default()
+            };
+            rt.kv.borrow_mut().clear();
+            rt.objects.borrow_mut().clear();
+            rt.objects
+                .borrow_mut()
+                .insert(day_key.clone(), serde_json::to_vec(&day_index).unwrap());
+            rt.objects
+                .borrow_mut()
+                .insert(key_a.clone(), serde_json::to_vec(&bad_parent).unwrap());
+            rt.remaining.set(32);
+            let err = prepare_reserving(
+                &store,
+                &wm,
+                "ingest",
+                "v2",
+                std::slice::from_ref(&new_file),
+                &[],
+                &[],
+                &[],
+                0,
+            )
+            .err();
+            assert_eq!(
+                err.as_deref(),
+                Some(expected_err),
+                "iter37 ({label}): parent block merge must reject invalid parent!"
             );
         }
     }

@@ -1559,6 +1559,7 @@ fn delete_file(runtime: &impl Runtime, target: &FlushTarget<'_>, key: &str) -> R
 enum AbandonOutcome {
     NotFenced,
     Abandoned,
+    Deferred,
     Stopped,
 }
 
@@ -1586,7 +1587,7 @@ fn abandon_fenced<R: Runtime>(
         return Ok(AbandonOutcome::Stopped);
     }
     if runtime.admin_remaining_calls() < manifest.outputs.len() as u32 + 2 {
-        return Ok(AbandonOutcome::NotFenced);
+        return Ok(AbandonOutcome::Deferred);
     }
     for key in &manifest.outputs {
         if !lease.can_mutate(started) {
@@ -2039,6 +2040,11 @@ pub fn log_flush_reserving(
                             lease.release();
                             return Ok(report);
                         }
+                        Ok(AbandonOutcome::Deferred) => {
+                            report.status = FlushStatus::Deferred;
+                            lease.release();
+                            return Ok(report);
+                        }
                         Ok(AbandonOutcome::Stopped) => {
                             report.status = FlushStatus::Stopped;
                             lease.release();
@@ -2213,13 +2219,21 @@ pub fn log_flush_reserving(
         let stored: Cursor = parse(&cursor_record);
         if fresh || cursor != stored {
             if let Some(lease) = acquire_lease(runtime, None)? {
-                let open = runtime
-                    .admin_get(&manifest_key(sid))?
-                    .is_some_and(|record| !parse::<Manifest>(&Some(record)).committed);
-                let written = if open {
-                    Ok(false)
-                } else {
-                    runtime.admin_cas(&cursor_key(sid), generation.as_deref(), &to_value(&cursor))
+                let written = match runtime.admin_get(&manifest_key(sid)) {
+                    Ok(record) => {
+                        let open =
+                            record.is_some_and(|rec| !parse::<Manifest>(&Some(rec)).committed);
+                        if open {
+                            Ok(false)
+                        } else {
+                            runtime.admin_cas(
+                                &cursor_key(sid),
+                                generation.as_deref(),
+                                &to_value(&cursor),
+                            )
+                        }
+                    }
+                    Err(error) => Err(error),
                 };
                 lease.release();
                 written?;

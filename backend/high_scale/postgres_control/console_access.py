@@ -250,16 +250,16 @@ def _redaction(name: str, type_: str, keys: str) -> str | None:
             f"lower(replaceRegexpAll(replaceRegexpAll(replaceRegexpAll({k_camel_src}, "
             f"{camel1_pat}, {camel_repl}), {camel2_pat}, {camel_repl}), {ws_trim_pat}, ''))"
         )
-        bracket_strip_pat = _literal(_PII_BRACKET_STRIP_RE.pattern)
-        bracket_greedy_pat = _literal(r"\[.*\]")
+        bracket_tok_pat = _literal(r"(?s)\[|\]|[^\[\]]+")
 
         def _ch_strip_brackets(expr: str) -> str:
-            cur_e = expr
-            for _ in range(5):
-                cur_e = f"replaceRegexpAll({cur_e}, {bracket_strip_pat}, '')"
             return (
-                f"arrayStringConcat(arrayMap(bseg -> replaceRegexpAll(bseg, {bracket_greedy_pat}, ''), "
-                f"splitByChar('.', {cur_e})), '.')"
+                "arrayMap(_bs -> if(position(_bs, '[') = 0, _bs, "
+                "arrayStringConcat(arrayFold((_bacc, _btok) -> "
+                "if(_btok = '[', arrayPushBack(_bacc, '['), "
+                "if(_btok = ']', if(length(_bacc) > 1, arrayPopBack(_bacc), [concat(_bacc[1], ']')]), "
+                "arrayPushBack(arrayPopBack(_bacc), concat(_bacc[-1], _btok)))), "
+                f"extractAll(_bs, {bracket_tok_pat}), ['']))), [{expr}])[1]"
             )
 
         k_raw_unbrack = f"replaceRegexpAll({_ch_strip_brackets(k_raw_lower)}, {ws_trim_pat}, '')"
