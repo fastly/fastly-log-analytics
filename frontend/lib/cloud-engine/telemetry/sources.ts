@@ -9,6 +9,7 @@ import {
   openCache,
   type BrowserSourceOptions,
 } from "../dashboard/sources";
+import { createSharedRequests } from "../shared-request";
 import type { OpsSource } from "./engine";
 
 export const OPS_CACHE_PREFIX = "flp-ops-parquet-v1:";
@@ -36,6 +37,17 @@ let volatileOpsScopeCounter = 0;
 let volatileOpsScope = `volatile-ops-${++volatileOpsScopeCounter}`;
 const activeOpsControllers = new Set<AbortController>();
 const activeOpsWrites = new Set<Promise<unknown>>();
+
+type OpsFileResult = {
+  bytes: ArrayBuffer;
+  cached: boolean;
+  cdn?: string | null;
+};
+
+// Overlapping ops reads (e.g. 24h, 7d, and 30d windows on /usage) create separate
+// browserOpsSource instances in the worker; share in-flight file fetches by epoch,
+// cache partition, and URL so cold-cache files are downloaded once.
+const sharedOpsFiles = createSharedRequests<OpsFileResult>();
 
 function opsAbortError(): DOMException {
   return new DOMException("The operation was aborted.", "AbortError");
@@ -340,127 +352,143 @@ export function browserOpsSource(
       });
     },
     async fetchFile(key, signal) {
-      return withOpsController(signal, async (callEpoch, controller) => {
-        const path = fileDisplayPath(key);
-        const pageLoadId = resolvedOptions?.getPageLoadId?.();
-        const url = fileUrl(key);
-        const cacheStart =
-          typeof performance !== "undefined" ? performance.now() : Date.now();
-        const cache = await open(callEpoch, controller.signal.aborted);
-        assertOpsActive(callEpoch, controller);
-        const hit =
-          callEpoch === opsCacheEpoch && !controller.signal.aborted
-            ? await cache?.match(url)
-            : undefined;
-        assertOpsActive(callEpoch, controller);
-        if (hit) {
-          const bytes = await hit.arrayBuffer();
-          assertOpsActive(callEpoch, controller);
-          const cacheEnd =
-            typeof performance !== "undefined" ? performance.now() : Date.now();
-          resolvedOptions?.onApiCall?.({
-            source: "Browser Cache",
-            method: "GET",
-            path,
-            status: 200,
-            duration_ms: Math.max(0, Math.round(cacheEnd - cacheStart)),
-            bytes: bytes.byteLength,
-            cache: "browser",
-            endpoint: "GET /api/file",
-            page_load_id: pageLoadId,
+      signal?.throwIfAborted();
+      const entryEpoch = opsCacheEpoch;
+      const url = fileUrl(key);
+      const dedupKey = JSON.stringify([entryEpoch, name, url]);
+      let started = false;
+      const result = await sharedOpsFiles(
+        dedupKey,
+        (sharedSignal) => {
+          started = true;
+          return withOpsController(sharedSignal, async (callEpoch, controller) => {
+            const path = fileDisplayPath(key);
+            const pageLoadId = resolvedOptions?.getPageLoadId?.();
+            const cacheStart =
+              typeof performance !== "undefined" ? performance.now() : Date.now();
+            const cache = await open(callEpoch, controller.signal.aborted);
+            assertOpsActive(callEpoch, controller);
+            const hit =
+              callEpoch === opsCacheEpoch && !controller.signal.aborted
+                ? await cache?.match(url)
+                : undefined;
+            assertOpsActive(callEpoch, controller);
+            if (hit) {
+              const bytes = await hit.arrayBuffer();
+              assertOpsActive(callEpoch, controller);
+              const cacheEnd =
+                typeof performance !== "undefined" ? performance.now() : Date.now();
+              resolvedOptions?.onApiCall?.({
+                source: "Browser Cache",
+                method: "GET",
+                path,
+                status: 200,
+                duration_ms: Math.max(0, Math.round(cacheEnd - cacheStart)),
+                bytes: bytes.byteLength,
+                cache: "browser",
+                endpoint: "GET /api/file",
+                page_load_id: pageLoadId,
+              });
+              return { bytes, cached: true };
+            }
+            const headers = buildRequestHeaders();
+            const start =
+              typeof performance !== "undefined" ? performance.now() : Date.now();
+            let onAbortRace!: () => void;
+            const abortRace = new Promise<never>((_, reject) => {
+              onAbortRace = () =>
+                reject(controller.signal.reason ?? opsAbortError());
+              if (controller.signal.aborted) {
+                onAbortRace();
+                return;
+              }
+              controller.signal.addEventListener("abort", onAbortRace, {
+                once: true,
+              });
+            });
+            let response: Response;
+            try {
+              response = await Promise.race([
+                fetch(url, {
+                  credentials: "same-origin",
+                  cache: "no-store",
+                  ...(headers ? { headers } : {}),
+                  signal: controller.signal,
+                }),
+                abortRace,
+              ]);
+            } finally {
+              controller.signal.removeEventListener("abort", onAbortRace);
+            }
+            assertOpsActive(callEpoch, controller);
+            if (!response.ok) {
+              const end =
+                typeof performance !== "undefined" ? performance.now() : Date.now();
+              resolvedOptions?.onApiCall?.({
+                source: "Compute API",
+                method: "GET",
+                path,
+                status: response.status,
+                duration_ms: Math.max(0, Math.round(end - start)),
+                endpoint: "GET /api/file",
+                page_load_id: pageLoadId,
+              });
+              await denied(response);
+              throw new Error(`File ${key} failed (${response.status})`);
+            }
+            if (cache && callEpoch === opsCacheEpoch && !controller.signal.aborted) {
+              const writePromise = cache.put(url, response.clone()).catch(() => {});
+              activeOpsWrites.add(writePromise);
+              writePromise.finally(() => activeOpsWrites.delete(writePromise));
+              await writePromise;
+            }
+            assertOpsActive(callEpoch, controller);
+            const bytes = await response.arrayBuffer();
+            assertOpsActive(callEpoch, controller);
+            const end =
+              typeof performance !== "undefined" ? performance.now() : Date.now();
+            const cdn = response.headers.get("x-flp-cdn-cache");
+            const cdnHit = isCdnHit(cdn);
+            const vcpuHeader = response?.headers?.get?.("x-flp-vcpu-ms");
+            const vcpuMs =
+              vcpuHeader != null && vcpuHeader !== "" ? Number(vcpuHeader) : null;
+            const directCdnMiss = cdn !== null && vcpuMs === null;
+            resolvedOptions?.onApiCall?.({
+              source: cdnHit
+                ? "CDN Cache"
+                : directCdnMiss
+                  ? "FOS S3"
+                  : "Compute API",
+              method: "GET",
+              path,
+              status: response.status,
+              duration_ms: Math.max(0, Math.round(end - start)),
+              vcpu_ms: Number.isFinite(vcpuMs) ? vcpuMs : null,
+              bytes: bytes.byteLength,
+              cache: cdnHit ? "cdn" : "miss",
+              endpoint: "GET /api/file",
+              page_load_id: pageLoadId,
+            });
+            emitDebugSubCalls(
+              response,
+              "GET /api/file",
+              pageLoadId,
+              resolvedOptions?.onApiCall,
+            );
+            return {
+              bytes,
+              cached: false,
+              cdn,
+            };
           });
-          return { bytes, cached: true };
-        }
-        const headers = buildRequestHeaders();
-        const start =
-          typeof performance !== "undefined" ? performance.now() : Date.now();
-        let onAbortRace!: () => void;
-        const abortRace = new Promise<never>((_, reject) => {
-          onAbortRace = () =>
-            reject(controller.signal.reason ?? opsAbortError());
-          if (controller.signal.aborted) {
-            onAbortRace();
-            return;
-          }
-          controller.signal.addEventListener("abort", onAbortRace, {
-            once: true,
-          });
-        });
-        let response: Response;
-        try {
-          response = await Promise.race([
-            fetch(url, {
-              credentials: "same-origin",
-              cache: "no-store",
-              ...(headers ? { headers } : {}),
-              signal: controller.signal,
-            }),
-            abortRace,
-          ]);
-        } finally {
-          controller.signal.removeEventListener("abort", onAbortRace);
-        }
-        assertOpsActive(callEpoch, controller);
-        if (!response.ok) {
-          const end =
-            typeof performance !== "undefined" ? performance.now() : Date.now();
-          resolvedOptions?.onApiCall?.({
-            source: "Compute API",
-            method: "GET",
-            path,
-            status: response.status,
-            duration_ms: Math.max(0, Math.round(end - start)),
-            endpoint: "GET /api/file",
-            page_load_id: pageLoadId,
-          });
-          await denied(response);
-          throw new Error(`File ${key} failed (${response.status})`);
-        }
-        if (cache && callEpoch === opsCacheEpoch && !controller.signal.aborted) {
-          const writePromise = cache.put(url, response.clone()).catch(() => {});
-          activeOpsWrites.add(writePromise);
-          writePromise.finally(() => activeOpsWrites.delete(writePromise));
-          await writePromise;
-        }
-        assertOpsActive(callEpoch, controller);
-        const bytes = await response.arrayBuffer();
-        assertOpsActive(callEpoch, controller);
-        const end =
-          typeof performance !== "undefined" ? performance.now() : Date.now();
-        const cdn = response.headers.get("x-flp-cdn-cache");
-        const cdnHit = isCdnHit(cdn);
-        const vcpuHeader = response?.headers?.get?.("x-flp-vcpu-ms");
-        const vcpuMs =
-          vcpuHeader != null && vcpuHeader !== "" ? Number(vcpuHeader) : null;
-        const directCdnMiss = cdn !== null && vcpuMs === null;
-        resolvedOptions?.onApiCall?.({
-          source: cdnHit
-            ? "CDN Cache"
-            : directCdnMiss
-              ? "FOS S3"
-              : "Compute API",
-          method: "GET",
-          path,
-          status: response.status,
-          duration_ms: Math.max(0, Math.round(end - start)),
-          vcpu_ms: Number.isFinite(vcpuMs) ? vcpuMs : null,
-          bytes: bytes.byteLength,
-          cache: cdnHit ? "cdn" : "miss",
-          endpoint: "GET /api/file",
-          page_load_id: pageLoadId,
-        });
-        emitDebugSubCalls(
-          response,
-          "GET /api/file",
-          pageLoadId,
-          resolvedOptions?.onApiCall,
-        );
-        return {
-          bytes,
-          cached: false,
-          cdn,
-        };
-      });
+        },
+        { signal },
+      );
+      assertOpsEpoch(entryEpoch, signal);
+      if (!started) {
+        return { bytes: result.bytes.slice(0), cached: true, cdn: null };
+      }
+      return result;
     },
     async cachedKeys() {
       const callEpoch = opsCacheEpoch;
