@@ -117,8 +117,8 @@ export function hydrateFilterStoreFromUrl(): void {
   hydrated = true
   const params = new URLSearchParams(window.location.search)
   const qsRange = params.get('range')
-  const qsStart = params.get('start_time')
-  const qsEnd = params.get('end_time')
+  const qsStart = params.get('start_time') ?? params.get('start')
+  const qsEnd = params.get('end_time') ?? params.get('end')
   const qsFilters = params.get('filters')
   const store = useFilterStore.getState()
   const rangeHours = qsRange ? rangeLabelToHours(qsRange) : null
@@ -146,7 +146,7 @@ export function hydrateFilterStoreFromUrl(): void {
   }
   if (touchedRange || touchedFilters) {
     const url = new URL(window.location.href)
-    for (const k of CANONICAL_FILTER_URL_PARAMS) url.searchParams.delete(k)
+    for (const k of [...CANONICAL_FILTER_URL_PARAMS, 'start', 'end']) url.searchParams.delete(k)
     Array.from(url.searchParams.keys()).forEach((key) => {
       if (key.startsWith('filter_')) url.searchParams.delete(key)
     })

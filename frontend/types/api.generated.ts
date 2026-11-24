@@ -10935,6 +10935,8 @@ export interface components {
              * @default false
              */
             force_refresh: boolean;
+            /** Clamp End */
+            clamp_end?: string | null;
         };
         /** InsightsResponse */
         InsightsResponse: {
@@ -10974,6 +10976,11 @@ export interface components {
             window_hours: number;
             /** Baseline Hours */
             baseline_hours: number;
+            /**
+             * Window Total Requests
+             * @default 0
+             */
+            window_total_requests: number;
             /**
              * Pending
              * @default false

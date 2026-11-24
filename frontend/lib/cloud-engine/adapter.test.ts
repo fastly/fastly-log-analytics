@@ -813,6 +813,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       "pq_request:processed/request/compact=1.parquet",
     ]);
     expect(body).toMatchObject({
+      live_bytes: 850,
       processed_request_bytes: 850,
       processed_objects: 2,
       cloud_copy_deleted_bytes: 400,

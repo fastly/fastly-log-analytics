@@ -24,6 +24,7 @@ from backend.models.analytics import (
 )
 from backend.models.common import DEFAULT_ERROR_RESPONSES
 from backend.utils.auth import mask_ips_for
+from backend.utils.date_utils import parse_iso_utc
 from backend.utils.remote_access import analyst_clamp_cache_key
 from backend.utils.router_utils import query_errors, require_high_scale
 
@@ -52,16 +53,26 @@ def _get_insights_sem(
 
 
 def _analyst_lookback_clamp(
-    ctx: RequestContext, baseline_hours: float, window_size_hrs: float
+    ctx: RequestContext,
+    baseline_hours: float,
+    window_size_hrs: float,
+    requested_end: str | None = None,
 ) -> tuple[str | None, str | None, bool, str | None]:
     """Resolve the analyst clamp window + mask_ips + stable cache key for the
-    insights endpoints. Admin (no analyst session) → ``(None, None, False,
-    None)`` so the scan runs the full range and hits the shared prewarmer cache.
+    insights endpoints. Admin (no analyst session) → ``(None, requested_end, False,
+    None)`` so default scans hit the shared prewarmer cache while explicit
+    ``end_time``/``clamp_end`` requests still anchor at the requested cutoff.
     """
     s = ctx.analyst_session
     if s is None:
-        return None, None, False, None
+        return None, requested_end, False, None
     now = datetime.now(UTC)
+    if requested_end:
+        parsed_end = parse_iso_utc(requested_end)
+        if parsed_end is not None:
+            parsed_utc = parsed_end.astimezone(UTC) if parsed_end.tzinfo is not None else parsed_end.replace(tzinfo=UTC)
+            if parsed_utc < now:
+                now = parsed_utc
     earliest = now - timedelta(hours=baseline_hours + window_size_hrs)
     clamp_start, clamp_end = ctx.clamp(earliest.isoformat(), now.isoformat())
     cache_key = analyst_clamp_cache_key(
@@ -79,8 +90,9 @@ async def insights_endpoint(
     ctx: RequestContext = Depends(build_request_context),
 ):
     record_insights_request(ctx.service_id)
+    requested_end = getattr(req, "clamp_end", None) or getattr(req, "end_time", None)
     clamp_start, clamp_end, mask_ips, clamp_cache_key = _analyst_lookback_clamp(
-        ctx, req.baseline_hours, req.window_size_hrs
+        ctx, req.baseline_hours, req.window_size_hrs, requested_end
     )
     high_scale_service = require_high_scale(ctx)
     force_refresh = req.force_refresh if ctx.analyst_session is None else False

@@ -4417,3 +4417,114 @@ def test_deferred_flush_all_empty_batch_exits_cleanly_without_error() -> None:
     for key, _ in empties:
         rec = ledger.source("svc-empty", key)
         assert rec is not None and rec.status == "source_missing"
+
+
+@pytest.mark.no_postgres
+def test_security_real_ch_avoids_periodic_minute_aliasing_and_normalizes_buckets_and_proxy_types() -> None:
+    from backend.repositories.utils.response_shaping import (
+        SECURITY_CONN_REUSE_BUCKETS,
+        SECURITY_REQ_HEADER_BUCKETS,
+        SECURITY_REQ_HEADER_LAST,
+    )
+
+    assert SECURITY_REQ_HEADER_BUCKETS == (
+        (256, "0-256B"),
+        (1024, "256B-1KB"),
+        (4096, "1KB-4KB"),
+        (8192, "4KB-8KB"),
+        (32768, "8KB-32KB"),
+    )
+    assert SECURITY_REQ_HEADER_LAST == ">32KB"
+    assert SECURITY_CONN_REUSE_BUCKETS[0] == (1, "1 (New)")
+
+    class _RealChClient(_Client):
+        def __init__(self, rows: dict[str, list[dict[str, Any]]] | None = None):
+            super().__init__(rows)
+            self._http = SimpleNamespace(_transport=object())
+
+    client = _RealChClient(
+        {
+            "tls_fingerprints": [{"fingerprint": "abc", "ip_count": "2", "request_count": "17"}],
+            "overview_5in1": [
+                {
+                    "bucket_ts": _EPOCH,
+                    "total_rows": 20,
+                    "tls_populated": 20,
+                    "ipv6_rows": 2,
+                    "h_map": {"0-256B": 12, "256B-1KB": 8},
+                    "c_map": {"1 (New)": 15, "2-5": 5},
+                    "p_map": {"H": 7, "hosting": 3, "E": 2},
+                    "top_hdr_ips": [],
+                }
+            ],
+            "proxies_combined": [
+                {
+                    "active_proxies_count": 3,
+                    "total_requests_count": 19,
+                    "distance_mismatches_count": 2,
+                    "q_tunnel": 11,
+                    "q_wifi": 4,
+                    "q_total": 20,
+                    "isp_map": {"15169": 11},
+                    "top_clients": [],
+                }
+            ],
+            "bot_efficiency": [
+                {
+                    "kind": "ua",
+                    "key": "Googlebot/2.1",
+                    "cnt": 13,
+                    "resp_bytes": 1300,
+                    "site_cnt": 20,
+                    "site_resp_bytes": 2000,
+                }
+            ],
+            "wellknown_bots": [{"ua": "Mozilla/5.0 (compatible; Googlebot/2.1)", "ip": "66.249.66.1", "cnt": "9"}],
+        }
+    )
+    hs._security_memo.cache.clear()
+    hs._security_memo._telemetry_cache.clear()
+    with (
+        patch("backend.utils.bot_sources.build_matcher", return_value=_match_googlebot),
+        patch("backend.utils.bot_sources.get_bot_regex_pattern", return_value="(?i)googlebot"),
+        patch(
+            "backend.utils.bot_sources.get_hostnames",
+            return_value={"66.249.66.1": ("crawl.googlebot.com", "resolved", True)},
+        ),
+        patch("backend.utils.bot_sources.enqueue"),
+        patch("backend.core.fos_client.get_asn_names", return_value={15169: "Example Net"}),
+    ):
+        res = hs.security_aggregates(
+            _service(client),
+            _req(),
+            "2026-10-18T00:00:00Z",
+            "2026-10-19T00:00:00Z",
+            sections={
+                "tls_fingerprints",
+                "req_size_dist",
+                "conn_reuse_dist",
+                "proxy_dist",
+                "proxies",
+                "bot_efficiency",
+                "wellknown_bots",
+            },
+        )
+    for tag, sql, _ in client.calls:
+        assert "toMinute(event_timestamp) %" not in sql, f"{tag} used periodic minute modulus"
+        assert "toStartOfMinute(event_timestamp) IN" not in sql, f"{tag} used periodic minute list"
+    assert res.tls_fingerprints[0].request_count == 17
+    assert res.tunnel_requests_count == 19
+    assert [b.model_dump() for b in res.req_size_dist] == [
+        {"bucket": "0-256B", "count": 12},
+        {"bucket": "256B-1KB", "count": 8},
+    ]
+    assert [b.model_dump() for b in res.conn_reuse_dist] == [
+        {"bucket": "1 (New)", "count": 15},
+        {"bucket": "2-5", "count": 5},
+    ]
+    assert [p.model_dump() for p in res.proxy_dist] == [
+        {"type": "hosting", "count": 10},
+        {"type": "edu", "count": 2},
+    ]
+    assert res.wellknown_bots[0].request_count == 9
+    assert res.bot_efficiency[0].request_count == 13

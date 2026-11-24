@@ -2446,6 +2446,12 @@ async function dispatchCloudRequest(
     if (pathname === "/api/usage/current-storage") {
       const storageBilling = resolvedStorageBilling!;
       const observedAtMs = storageBilling.observedAt ?? summary.storage.snapshotAt;
+      const liveIntervalBytes = storageBilling.intervals
+        .filter((interval) => interval.kind === "live")
+        .reduce((sum, interval) => sum + interval.bytes, 0);
+      const liveBytes = storageBilling.intervals.some((interval) => interval.kind === "live")
+        ? liveIntervalBytes
+        : summary.storage.totalBytes;
       return jsonResponse(
         {
           total_billed_gb_hours: storageBilling.summary.totalGbHours,
@@ -2459,7 +2465,7 @@ async function dispatchCloudRequest(
           storage_intervals: storageBilling.intervals,
           observed_at:
             observedAtMs !== null ? new Date(observedAtMs).toISOString() : null,
-          live_bytes: summary.storage.totalBytes,
+          live_bytes: liveBytes,
           deleted_bytes: storageBilling.deletedBytes,
           deleted_bytes_complete: storageBilling.deletedBytesComplete,
           deleted_bytes_provenance: storageBilling.deletedBytesProvenance,

@@ -193,4 +193,82 @@ describe("cloud-engine insights module", () => {
     expect(ipSql).toContain(`COUNT(DISTINCT NULLIF("url", '')) FILTER (WHERE is_w AND is_auth) AS ce_w_paths`);
     expect(ipSql).toContain(`COUNT(DISTINCT NULLIF("url", '')) FILTER (WHERE is_w AND status = 404) AS cd_distinct_404`);
   });
+
+  it("matches High-Scale severity thresholds and unrounded tail_latency ratio and honors end_time", async () => {
+    const env = await handleInsights(
+      {
+        service_id: "svc-1",
+        window_size_hrs: 6,
+        baseline_hours: 24,
+        end_time: "2026-11-24T18:00:00Z",
+      },
+      {
+        now: new Date("2026-11-24T20:00:00Z"),
+        availableColumns: new Set(["url", "elapsed", "city", "country", "status", "ua", "asn", "p_type", "method", "referer"]),
+        availableHistoryHours: 48,
+        windowTotalRequests: 10000,
+        baselineTotalRequests: 40000,
+        urlAggregateRows: [
+          {
+            url: "/wp-content/precious.gif",
+            w_total: 35,
+            b_total: 75,
+            w_lat_total: 35,
+            b_lat_total: 75,
+            w_p99: 242,
+            w_p50: 3,
+            w_p99_raw: 242.1,
+            w_p50_raw: 2.63,
+          },
+        ],
+        ipSecurityRows: [],
+        cityAggregateRows: [
+          { city: "davis", region: "CA", country: "US", w_cnt: 1888, b_cnt: 3119, w_errors_4xx: 1088, b_errors_4xx: 168 },
+          { city: "council bluffs", region: "IA", country: "US", w_cnt: 17180, b_cnt: 0, w_errors_4xx: 0, b_errors_4xx: 0 },
+          { city: "smallville", region: "KS", country: "US", w_cnt: 12, b_cnt: 0, w_errors_4xx: 0, b_errors_4xx: 0 },
+          { city: "wrexham", region: "WRX", country: "GB", w_cnt: 100, b_cnt: 80, w_errors_4xx: 0, b_errors_4xx: 0 },
+        ],
+        dimensionAggregateRows: [
+          { dimension: "ua", ua: "Bot/1", w_cnt: 6000, b_cnt: 10 },
+          { dimension: "ua", ua: "Human/1", w_cnt: 4000, b_cnt: 39990 },
+          { dimension: "country", country: "NZ", w_cnt: 25, b_cnt: 0 },
+          { dimension: "method", method: "POST", w_cnt: 3000, b_cnt: 100 },
+          { dimension: "method", method: "GET", w_cnt: 7000, b_cnt: 39900 },
+        ],
+        asnAggregateRows: [
+          { asn: 64512, w_cnt: 150, b_cnt: 0, w_proxy_total: 0, b_proxy_total: 0, w_hosting: 0, b_hosting: 0 },
+          { asn: 64513, w_cnt: 6000, b_cnt: 100, w_proxy_total: 100, b_proxy_total: 100, w_hosting: 80, b_hosting: 5 },
+        ],
+        geoLatencyRows: [],
+        scalarAggregateRows: [],
+      },
+    );
+
+    expect(env.window_end).toBe("2026-11-24T18:00:00.000Z");
+
+    const cityErr = env.insights.find((c) => c.id === "city_error_spikes");
+    expect(cityErr?.severity).toBe("critical");
+    expect(cityErr?.items[0].severity).toBe("critical");
+
+    const newCity = env.insights.find((c) => c.id === "new_city_traffic");
+    expect(newCity?.severity).toBe("warning");
+    expect(newCity?.items.find((i) => i.label.includes("council bluffs"))?.severity).toBe("warning");
+    expect(newCity?.items.find((i) => i.label.includes("smallville"))?.severity).toBe("info");
+
+    const tail = env.insights.find((c) => c.id === "tail_latency");
+    expect(tail?.severity).toBe("critical");
+    expect(tail?.items[0].severity).toBe("critical");
+    expect(tail?.items[0].meta.ratio).toBeCloseTo(92.1, 1);
+
+    const citySurges = env.insights.find((c) => c.id === "city_surges");
+    expect(citySurges?.items.find((i) => i.label.includes("wrexham"))?.severity).toBe("info");
+    expect(citySurges?.items.find((i) => i.label.includes("council bluffs"))?.severity).toBe("warning");
+
+    expect(env.insights.find((c) => c.id === "new_country_traffic")?.severity).toBe("warning");
+    expect(env.insights.find((c) => c.id === "new_asn_traffic")?.severity).toBe("warning");
+    expect(env.insights.find((c) => c.id === "ua_monoculture")?.severity).toBe("critical");
+    expect(env.insights.find((c) => c.id === "method_drift")?.severity).toBe("critical");
+    expect(env.insights.find((c) => c.id === "asn_concentration")?.severity).toBe("critical");
+    expect(env.insights.find((c) => c.id === "asn_hosting_shift")?.severity).toBe("critical");
+  });
 });

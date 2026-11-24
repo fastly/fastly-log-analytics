@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from backend.models.analytics.insights import InsightsResponse
 from backend.repositories.utils.response_shaping import build_insights_envelope
 from backend.routers import insights as insights_router_mod
@@ -78,3 +80,46 @@ def test_get_insights_sem_keys_by_service_and_windows() -> None:
     assert sem_a is sem_a_same
     assert sem_a is not sem_a_diff
     assert sem_a is not sem_b
+
+
+@pytest.mark.no_postgres
+def test_insights_response_preserves_window_total_requests_and_router_honors_end_time() -> None:
+    import asyncio
+    from unittest.mock import patch
+
+    from backend.models.analytics.insights import InsightsRequest
+
+    env = build_insights_envelope(
+        [],
+        window_start="2026-11-18T10:00:00Z",
+        window_end="2026-11-18T11:00:00Z",
+        baseline_start="2026-11-17T10:00:00Z",
+        baseline_end="2026-11-18T10:00:00Z",
+        computed_at="2026-11-18T11:00:00Z",
+        window_hours=1.0,
+        baseline_hours=24.0,
+        window_total_requests=97583,
+    )
+    validated = InsightsResponse.with_telemetry(**env)
+    assert validated.window_total_requests == 97583
+    assert validated.model_dump()["window_total_requests"] == 97583
+
+    req = InsightsRequest(window_size_hrs=6, baseline_hours=24, end_time="2026-11-24T18:00:00Z")
+    assert req.end_time == "2026-11-24T18:00:00Z"
+
+    captured: dict[str, object] = {}
+
+    def fake_hs_insights(svc, r, clamp_start, clamp_end, mask_ips, **kwargs):
+        captured["clamp_start"] = clamp_start
+        captured["clamp_end"] = clamp_end
+        return validated
+
+    admin_ctx = SimpleNamespace(service_id="svc-a", analyst_session=None)
+    with (
+        patch("backend.routers.insights.record_insights_request"),
+        patch("backend.routers.insights.require_high_scale", return_value=SimpleNamespace(service_id="svc-a")),
+        patch("backend.routers.insights.hs_insights", side_effect=fake_hs_insights),
+    ):
+        asyncio.run(insights_router_mod.insights_endpoint(req, admin_ctx))  # type: ignore[arg-type]
+    assert captured["clamp_start"] is None
+    assert captured["clamp_end"] == "2026-11-24T18:00:00Z"

@@ -20,7 +20,12 @@ from urllib.parse import parse_qs, unquote_to_bytes, urlparse
 import orjson
 import zstandard as zstd
 
-from backend.core.catalog import _CANONICAL_SYSTEM_FIELD_SPECS
+from backend.core.catalog import (
+    _CANONICAL_SYSTEM_FIELD_SPECS,
+    CONN_SPEED_ENCODE,
+    PROXY_DESC_ENCODE,
+    PROXY_TYPE_ENCODE,
+)
 from backend.core.log_fields import LOG_FIELD_CATALOG, SqlType, try_get
 from backend.core.share_db import (
     CMCD_SESSION_ALIAS_KEYS,
@@ -227,6 +232,13 @@ def _get_request_key_action(k: str) -> int:
     return action
 
 
+_VCL_ENUM_DECODE: tuple[tuple[str, dict[str, str]], ...] = (
+    ("p_type", {code: name for name, code in PROXY_TYPE_ENCODE.items()}),
+    ("c_speed", {code: name for name, code in CONN_SPEED_ENCODE.items()}),
+    ("p_desc", {code: name for name, code in PROXY_DESC_ENCODE.items()}),
+)
+
+
 def _normalize_serving_fields(event: dict[str, Any], domain: str) -> None:
     if domain in {"rum_vitals", "rum_errors"}:
         event["req_id"] = (
@@ -278,6 +290,13 @@ def _normalize_serving_fields(event: dict[str, Any], domain: str) -> None:
                         cmcd[short_k.lower()] = s_val
             else:
                 custom_fields[k] = str(val) if val is not None else ""
+        for field_name, decode_map in _VCL_ENUM_DECODE:
+            raw_top = event.get(field_name)
+            if isinstance(raw_top, str) and raw_top in decode_map:
+                event[field_name] = decode_map[raw_top]
+            raw_cf = custom_fields.get(field_name)
+            if isinstance(raw_cf, str) and raw_cf in decode_map:
+                custom_fields[field_name] = decode_map[raw_cf]
     elif domain == "rum_vitals":
         client_id = event.get("rum_cid") or event.get("client_id") or ""
         metric_name = event.get("rum_metric_name") or event.get("metric_name") or ""

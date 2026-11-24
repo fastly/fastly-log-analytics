@@ -353,6 +353,8 @@ class _WindowBaselineHoursMixin(BaseModel):
 
 class InsightsRequest(_WindowBaselineHoursMixin, FilteredRequest):
     force_refresh: bool = False
+    end_time: str | None = None
+    clamp_end: str | None = None
 
 
 class InsightItem[MetaT: WireSafeModel](BaseModel):
@@ -653,6 +655,7 @@ class InsightsResponse(BaseResponse):
     computed_at: str
     window_hours: float
     baseline_hours: float
+    window_total_requests: int = 0
     # High-scale only: ``pending`` cards are placeholders while the first evaluation runs; ``refreshing``
     # marks a previous result served while a newer one is computed; ``refresh_error`` is why the last refresh failed.
     pending: bool = False

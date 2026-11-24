@@ -1117,24 +1117,15 @@ def shape_perf_latency_row(
 
 SECURITY_REQ_HEADER_BUCKETS: tuple[tuple[int, str], ...] = (
     (256, "0-256B"),
-    (512, "256-512B"),
-    (768, "512-768B"),
-    (1024, "768B-1KB"),
-    (1536, "1-1.5KB"),
-    (2048, "1.5-2KB"),
-    (3072, "2-3KB"),
-    (4096, "3-4KB"),
-    (6144, "4-6KB"),
-    (8192, "6-8KB"),
-    (12288, "8-12KB"),
-    (16384, "12-16KB"),
-    (24576, "16-24KB"),
-    (32768, "24-32KB"),
+    (1024, "256B-1KB"),
+    (4096, "1KB-4KB"),
+    (8192, "4KB-8KB"),
+    (32768, "8KB-32KB"),
 )
 SECURITY_REQ_HEADER_LAST = ">32KB"
 
 SECURITY_CONN_REUSE_BUCKETS: tuple[tuple[int, str], ...] = (
-    (1, "1 (None)"),
+    (1, "1 (New)"),
     (5, "2-5"),
     (20, "6-20"),
     (100, "21-100"),

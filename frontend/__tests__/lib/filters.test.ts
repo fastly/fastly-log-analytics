@@ -133,6 +133,16 @@ describe('hydrateFilterStoreFromUrl', () => {
     expect(mockSetRange).toHaveBeenCalledWith('2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z')
   })
 
+  it('parses Insights start / end params and strips them after hydrating', async () => {
+    setSearch('start=2026-01-01T00:00:00Z&end=2026-01-02T00:00:00Z&filter_url=%2Fapi')
+    await hydrate()
+    expect(mockSetRange).toHaveBeenCalledWith('2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z')
+    expect(mockAddFilter).toHaveBeenCalledWith('url', '/api', 'include')
+    const remaining = new URLSearchParams(window.location.search)
+    expect(remaining.get('start')).toBeNull()
+    expect(remaining.get('end')).toBeNull()
+  })
+
   it.each(['24h', '5m'])('parses ?range=%s and calls setRelativeRange with computed start/end', async (token) => {
     setSearch(`range=${token}`)
     await hydrate()

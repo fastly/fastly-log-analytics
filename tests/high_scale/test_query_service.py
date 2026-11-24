@@ -3704,3 +3704,82 @@ def test_fast_publication_fence_sessions_index_fast_and_filtered_bundle_optimiza
     )
     s0 = sess_res["sessions"][0]
     assert s0["reqs_4xx"] == 5 and s0["total_bytes"] == 4096 and s0["flagged"] is True and s0["is_streaming"] is True
+
+
+@pytest.mark.no_postgres
+def test_sessions_long_window_avoids_minute_stride_sampling_and_decoder_expands_vcl_codes() -> None:
+    from backend.high_scale.archive import ArchiveSourceObject
+    from backend.high_scale.query import decode_source_object
+
+    decoded = decode_source_object(
+        ArchiveSourceObject(
+            service_id="svc",
+            domain="request",
+            object_key="raw/request/sample.jsonl",
+            checksum="abc",
+            size_bytes=100,
+        ),
+        b'{"timestamp":"2026-10-18T12:00:00Z","url":"/a","ip":"1.2.3.4","p_type":"H","c_speed":"B","p_desc":"v"}\n',
+        transform_version="v1",
+    )
+    assert len(decoded.events) == 1
+    ev = decoded.events[0]
+    assert ev["p_type"] == "hosting"
+    assert ev["c_speed"] == "broadband"
+    assert ev["p_desc"] == "vpn"
+
+    class _RealChSessClient(_SessClient):
+        def __init__(self):
+            super().__init__(
+                rows=[
+                    {
+                        "ip": "203.0.113.7",
+                        "ja4": "ja4-a",
+                        "session_start": "2026-10-18T00:00:00Z",
+                        "session_end": "2026-10-18T00:05:00Z",
+                        "req_count": 7,
+                        "total_sessions": 1,
+                    }
+                ]
+            )
+            self._http = SimpleNamespace(_transport=object())
+
+        def execute(self, sql: str, params: dict | None = None) -> list[dict]:
+            self.calls.append((sql, params or {}))
+            if "sessions:page" in sql:
+                return self._rows
+            if "sessions:enrich" in sql:
+                return [
+                    {
+                        "row_idx": 0,
+                        "en_req_count": 7,
+                        "en_session_start": "2026-10-18T00:00:00Z",
+                        "en_session_end": "2026-10-18T00:05:00Z",
+                        "en_asn": 15169,
+                        "en_country": "US",
+                        "en_unique_urls": 3,
+                        "en_ua": "Mozilla/5.0",
+                        "en_median_rtt_ms": 5.0,
+                        "en_edge_sid": "",
+                        "en_reqs_4xx": 1,
+                        "en_reqs_5xx": 0,
+                        "en_total_bytes": 1000,
+                        "en_edge_count": 7,
+                        "en_shield_count": 0,
+                        "en_streaming_reqs": 0,
+                    }
+                ]
+            raise AssertionError(sql)
+
+    client = _RealChSessClient()
+    res = sessions_endpoint(
+        SimpleNamespace(service_id="svc-exact", client=client),  # type: ignore[arg-type]
+        SessionsRequest(sort_by="req_count", sort_dir="desc"),
+        "2026-10-18T00:00:00Z",
+        "2026-10-18T12:00:00Z",
+    )
+    for sql, _ in client.calls:
+        assert "toMinute(event_timestamp) %" not in sql
+        assert "toStartOfMinute(event_timestamp) IN" not in sql
+    assert res["sessions"][0]["req_count"] == 7
+    assert res["sessions"][0]["reqs_4xx"] == 1

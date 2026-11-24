@@ -197,7 +197,8 @@ export function _coalesced_url_aggregates(
       PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY elapsed) FILTER (WHERE is_w AND elapsed IS NOT NULL) / 1000.0 AS w_p95,
       PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY elapsed) FILTER (WHERE is_b AND elapsed IS NOT NULL) / 1000.0 AS b_p95,
       ROUND(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY elapsed) FILTER (WHERE is_w AND elapsed IS NOT NULL) / 1000.0, 0) AS w_p99,
-      ROUND(PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY elapsed) FILTER (WHERE is_w AND elapsed IS NOT NULL) / 1000.0, 0) AS w_p50
+      ROUND(PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY elapsed) FILTER (WHERE is_w AND elapsed IS NOT NULL) / 1000.0, 0) AS w_p50,
+      ROUND(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY elapsed) FILTER (WHERE is_w AND elapsed IS NOT NULL) / NULLIF(PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY elapsed) FILTER (WHERE is_w AND elapsed IS NOT NULL), 0), 1) AS w_tail_ratio
     FROM base
     GROUP BY "url"
     HAVING COUNT(*) FILTER (WHERE is_w) >= 3
@@ -502,6 +503,7 @@ export interface InsightsRequest {
   baseline_hours?: number;
   clamp_start?: string | null;
   clamp_end?: string | null;
+  end_time?: string | null;
   filters?: Record<string, unknown>;
   /** Evaluate only these detectors (a follow-up for deferred ones). */
   detectors?: string[];
@@ -532,7 +534,8 @@ export interface CloudInsightsContext {
 export function resolveInsightWindow(body: InsightsRequest, now = new Date()) {
   const windowHours = Number(body.window_size_hrs ?? 24);
   const baselineHours = Number(body.baseline_hours ?? 168);
-  const requestedEnd = body.clamp_end == null ? now.getTime() : Date.parse(body.clamp_end);
+  const endParam = body.clamp_end ?? body.end_time;
+  const requestedEnd = endParam == null ? now.getTime() : Date.parse(endParam);
   if (!Number.isFinite(windowHours) || windowHours <= 0 ||
       !Number.isFinite(baselineHours) || baselineHours <= 0 || !Number.isFinite(requestedEnd)) {
     throw new Error("Invalid insight analysis window");
@@ -658,9 +661,16 @@ export async function handleInsights(
             }
           } else if (d.id === "latency_regression") {
             latency(r, label, { url: r.url }, 5, 20, 2, 200);
-          } else if (n(r, "w_lat_total") >= 20 && n(r, "w_p50") > 0 && n(r, "w_p99") > n(r, "w_p50") * 5) {
-            add(label, n(r, "w_p99"), n(r, "w_p50"), "ms (P99 vs P50)",
-              { ...meta, ratio: n(r, "w_p99") / n(r, "w_p50") });
+          } else if (n(r, "w_lat_total") >= 20 && n(r, "w_p50") > 0) {
+            const rawRatio = r.w_tail_ratio != null
+              ? n(r, "w_tail_ratio")
+              : r.w_p99_raw != null && n(r, "w_p50_raw") > 0
+                ? Math.round((n(r, "w_p99_raw") / n(r, "w_p50_raw")) * 10) / 10
+                : Math.round((n(r, "w_p99") / n(r, "w_p50")) * 10) / 10;
+            if (rawRatio > 5) {
+              add(label, n(r, "w_p99"), n(r, "w_p50"), "ms (P99 vs P50)",
+                { ...meta, ratio: rawRatio }, rawRatio > 10 ? "critical" : "warning");
+            }
           }
         }
         break;
@@ -694,10 +704,16 @@ export async function handleInsights(
           } else if (d.id === "city_error_spikes") {
             const wRate = pct(n(r, "w_errors_4xx"), w), bRate = pct(n(r, "b_errors_4xx"), b);
             if (w >= 10 && wRate >= 10 && (b < 50 || wRate >= bRate * 3 + 5)) {
-              add(label, wRate, bRate, "% errors", { window_requests: w, baseline_requests: b, filters });
+              add(label, wRate, bRate, "% errors", { window_requests: w, baseline_requests: b, filters },
+                wRate >= 50 ? "critical" : "warning");
             }
-          } else if (d.id === "new_city_traffic" ? w >= 5 && b === 0 : w >= 20 && w > scaled(b) * 3) {
-            add(label, w, scaled(b), "requests", { filters }, d.id === "new_city_traffic" ? "info" : "warning");
+          } else if (d.id === "new_city_traffic") {
+            if (w >= 5 && b === 0) {
+              add(label, w, 0, "requests", { filters }, w >= 50 ? "warning" : "info");
+            }
+          } else if (w >= 20 && w > scaled(b) * 3) {
+            const spikeRatio = w / Math.max(scaled(b), 1);
+            add(label, w, scaled(b), "requests", { filters }, spikeRatio < 10 ? "info" : "warning");
           }
         }
         break;
@@ -716,7 +732,7 @@ export async function handleInsights(
           const w = n(r, "w_cnt"), b = n(r, "b_cnt");
           const wShare = pct(w, wTotal), bShare = pct(b, bTotal);
           if (d.id === "new_country_traffic") {
-            if (w >= 3 && b === 0) add(label, w, 0, "requests", { filters: { [key]: label } }, "info");
+            if (w >= 3 && b === 0) add(label, w, 0, "requests", { filters: { [key]: label } }, w >= 10 ? "warning" : "info");
           } else if (d.id === "proxy_surge") {
             const wProxy = pct(rows.filter((r) => r[key] != null && r[key] !== "").reduce((s, r) => s + n(r, "w_cnt"), 0), wTotal);
             const bProxy = pct(rows.filter((r) => r[key] != null && r[key] !== "").reduce((s, r) => s + n(r, "b_cnt"), 0), bTotal);
@@ -725,7 +741,8 @@ export async function handleInsights(
             const method = d.id === "method_drift";
             const floor = method ? 10 : d.id === "ua_monoculture" ? 25 : 20;
             if ((!method || w >= 20) && wShare >= floor && (bTotal === 0 || wShare >= bShare * (method ? 2 : 3) + (method ? 5 : 10))) {
-              add(label, wShare, bShare, "% traffic", { window_requests: w, baseline_requests: b, filters: { [key]: label } });
+              const sev = wShare >= (method ? 25 : 50) ? "critical" : "warning";
+              add(label, wShare, bShare, "% traffic", { window_requests: w, baseline_requests: b, filters: { [key]: label } }, sev);
             }
           }
         }
@@ -739,14 +756,18 @@ export async function handleInsights(
           const label = formatAsnDisplayLabel(r.asn as string | number), w = n(r, "w_cnt"), b = n(r, "b_cnt");
           const meta = { window_requests: w, baseline_requests: b, filters: { asn: r.asn } };
           if (d.id === "new_asn_traffic") {
-            if (w >= 20 && b === 0) add(label, w, 0, "requests", meta, "info");
+            if (w >= 20 && b === 0) add(label, w, 0, "requests", meta, w >= 100 ? "warning" : "info");
           } else if (d.id === "asn_hosting_shift") {
             const wProxy = n(r, "w_proxy_total"), bProxy = n(r, "b_proxy_total");
             const wShare = pct(n(r, "w_hosting"), wProxy), bShare = pct(n(r, "b_hosting"), bProxy);
-            if (wProxy >= 50 && wShare >= 30 && (bProxy === 0 || wShare >= bShare * 3 + 10)) add(label, wShare, bShare, "% hosting", meta);
+            if (wProxy >= 50 && wShare >= 30 && (bProxy === 0 || wShare >= bShare * 3 + 10)) {
+              add(label, wShare, bShare, "% hosting", meta, wShare >= 60 ? "critical" : "warning");
+            }
           } else {
             const wShare = pct(w, ctx.windowTotalRequests ?? 0), bShare = pct(b, ctx.baselineTotalRequests ?? 0);
-            if (wShare >= 20 && ((ctx.baselineTotalRequests ?? 0) === 0 || wShare >= bShare * 3 + 10)) add(label, wShare, bShare, "% traffic", meta);
+            if (wShare >= 20 && ((ctx.baselineTotalRequests ?? 0) === 0 || wShare >= bShare * 3 + 10)) {
+              add(label, wShare, bShare, "% traffic", meta, wShare >= 50 ? "critical" : "warning");
+            }
           }
         }
         break;

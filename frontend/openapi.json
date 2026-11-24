@@ -63783,6 +63783,17 @@
             "type": "boolean",
             "title": "Force Refresh",
             "default": false
+          },
+          "clamp_end": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Clamp End"
           }
         },
         "type": "object",
@@ -64090,6 +64101,11 @@
           "baseline_hours": {
             "type": "number",
             "title": "Baseline Hours"
+          },
+          "window_total_requests": {
+            "type": "integer",
+            "title": "Window Total Requests",
+            "default": 0
           },
           "pending": {
             "type": "boolean",

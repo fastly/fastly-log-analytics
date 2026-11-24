@@ -609,6 +609,7 @@ export async function insightsFromRollup(
         b_p95: p95Ms(bU),
         w_p99: wQ99 == null ? null : Math.round(wQ99 / 1000),
         w_p50: wQ50 == null ? null : Math.round(wQ50 / 1000),
+        w_tail_ratio: wQ99 != null && wQ50 != null && wQ50 > 0 ? Math.round((wQ99 / wQ50) * 10) / 10 : null,
         ...(insUrlTruncated && !bIns ? { b_ins_url_absent: true } : {}),
       });
     }
