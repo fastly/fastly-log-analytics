@@ -921,8 +921,15 @@ def scrub_ip_text(val: str) -> str:
             prefix_tok = out[j : start - 1]
             if not prefix_tok:
                 if start >= 2 and out[start - 2] == ":":
-                    return cand
-            elif all(ch in "0123456789abcdefABCDEF" for ch in prefix_tok):
+                    k = start - 2
+                    while k > 0 and (out[k - 1].isalnum() or out[k - 1] in "_-"):
+                        k -= 1
+                    before_dcolon = out[k : start - 2]
+                    if not before_dcolon or (
+                        1 <= len(before_dcolon) <= 4 and all(ch in "0123456789abcdefABCDEF" for ch in before_dcolon)
+                    ):
+                        return cand
+            elif 1 <= len(prefix_tok) <= 4 and all(ch in "0123456789abcdefABCDEF" for ch in prefix_tok):
                 return cand
         try:
             ipaddress.IPv6Address(cand)

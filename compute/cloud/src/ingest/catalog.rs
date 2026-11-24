@@ -243,6 +243,26 @@ pub fn read<T: serde::de::DeserializeOwned, R: Runtime>(
     serde_json::from_slice(&bytes).map_err(|_| "catalog_object_invalid".into())
 }
 
+pub(crate) fn validate_day(day: &Day, service_id: &str) -> Result<(), &'static str> {
+    if day.version != VERSION {
+        return Err("catalog_version_unsupported");
+    }
+    if day
+        .service_id
+        .as_deref()
+        .is_some_and(|sid| sid != service_id)
+    {
+        return Err("catalog_manifest_invalid");
+    }
+    Ok(())
+}
+
+pub(crate) fn read_day<R: Runtime>(store: &Store<'_, R>, key: &str) -> Result<Day, String> {
+    let day: Day = read(store, key)?;
+    validate_day(&day, &store.service.service_id)?;
+    Ok(day)
+}
+
 /// Results of catalog reads sent ahead of need, by key.
 pub type Prefetched = BTreeMap<String, Result<Option<Vec<u8>>, String>>;
 
@@ -551,7 +571,7 @@ pub fn prepare_reserving<R: Runtime>(
         let index = head
             .days
             .get(day)
-            .map(|key| read(store, key))
+            .map(|key| read_day(store, key))
             .transpose()?
             .unwrap_or_else(|| Day {
                 version: VERSION,
@@ -989,7 +1009,7 @@ pub fn retire_reserving<R: Runtime>(store: &Store<'_, R>, reserve: u32) -> Resul
         if runtime.admin_remaining_calls() <= reserve + 1 || !admitted(store) {
             return Err("catalog_prepare_pending".into());
         }
-        let mut day: Day = read(store, key)?;
+        let mut day = read_day(store, key)?;
         if day.hours.keys().any(|hour| *hour < cutoff) {
             day.hours.retain(|hour, _| *hour >= cutoff);
             day.summary_counts.retain(|hour, _| *hour >= cutoff);
@@ -1290,10 +1310,21 @@ mod tests {
                 return Err("backend_budget_exhausted".into());
             }
             self.remaining.set(rem - 1);
+            let key = request.key.trim_start_matches('/');
+            if request.method == "PUT" {
+                self.objects
+                    .borrow_mut()
+                    .insert(key.to_owned(), request.body);
+                return Ok(FosResponse {
+                    status: 200,
+                    body: Vec::new(),
+                    cdn_cache: None,
+                    retry_after: None,
+                });
+            }
             if request.method == "GET" {
                 self.gets.set(self.gets.get() + 1);
             }
-            let key = request.key.trim_start_matches('/');
             match self.objects.borrow().get(key) {
                 Some(body) => Ok(FosResponse {
                     status: 200,
@@ -1308,6 +1339,18 @@ mod tests {
                     retry_after: None,
                 }),
             }
+        }
+        fn admin_fos_etag(
+            &self,
+            request: FosRequest<'_>,
+        ) -> Result<(FosResponse, Option<String>), String> {
+            use md5::{Digest as _, Md5};
+            let etag = if request.method == "PUT" {
+                Some(hex::encode(Md5::digest(&request.body)))
+            } else {
+                None
+            };
+            self.admin_fos(request).map(|resp| (resp, etag))
         }
         fn admin_remaining_calls(&self) -> u32 {
             self.remaining.get()
@@ -1718,5 +1761,236 @@ mod tests {
                 "iter37 ({label}): parent block merge must reject invalid parent!"
             );
         }
+    }
+
+    #[test]
+    fn iter39_f1_catalog_prepare_and_retire_validate_day_version_and_service_id() {
+        let mut svc = test_service();
+        svc.log_retention_days = 1;
+        let hour = 1_800_000_000i64; // 2027-01-15T08:00:00Z
+        let day = day_start(hour);
+        let day_key = "processed/_catalog/day-iter39.json".to_owned();
+        let new_file = Output {
+            key: "processed/request/year=2027/month=01/day=15/hour=08/window=1800000120-1800000240-0.parquet"
+                .into(),
+            rows: 5,
+            bytes: 128,
+            md5: String::new(),
+            metadata: None,
+        };
+        let wm = json!({
+            "catalog": Head {
+                version: VERSION,
+                generation: 5,
+                recent: vec![Event {
+                    cursor: "svc:5".into(),
+                    generation: 5,
+                    committed_at: None,
+                    manifest: None,
+                }],
+                days: BTreeMap::from([(day, day_key.clone())]),
+                ..Default::default()
+            }
+        });
+        let rt = MockRt {
+            kv: RefCell::new(BTreeMap::new()),
+            objects: RefCell::new(BTreeMap::new()),
+            remaining: Cell::new(32),
+            gets: Cell::new(0),
+        };
+        let store = Store {
+            runtime: &rt,
+            service: &svc,
+            access_key: "ak".into(),
+            secret_key: "sk".into(),
+            started: Instant::now(),
+            vcpu_start: 0,
+        };
+
+        // 1. prepare_reserving: reject foreign service_id and unsupported version; accept legacy None.
+        let prepare_reject_cases = [
+            (
+                "foreign_service_id",
+                Day {
+                    version: VERSION,
+                    service_id: Some("foreign-svc".into()),
+                    ..Default::default()
+                },
+                "catalog_manifest_invalid",
+            ),
+            (
+                "unsupported_version",
+                Day {
+                    version: VERSION + 1,
+                    service_id: Some(svc.service_id.clone()),
+                    ..Default::default()
+                },
+                "catalog_version_unsupported",
+            ),
+        ];
+        for (label, bad_day, expected_err) in prepare_reject_cases {
+            rt.kv.borrow_mut().clear();
+            rt.objects.borrow_mut().clear();
+            rt.objects
+                .borrow_mut()
+                .insert(day_key.clone(), serde_json::to_vec(&bad_day).unwrap());
+            rt.remaining.set(32);
+            let err = prepare_reserving(
+                &store,
+                &wm,
+                "ingest",
+                "v2",
+                std::slice::from_ref(&new_file),
+                &[],
+                &[],
+                &[],
+                0,
+            )
+            .err();
+            assert_eq!(
+                err.as_deref(),
+                Some(expected_err),
+                "iter39 ({label}): prepare_reserving must reject invalid Day without laundering"
+            );
+            assert_eq!(
+                rt.objects.borrow().len(),
+                1,
+                "iter39 ({label}): prepare_reserving must not write laundered Day/Block objects"
+            );
+        }
+
+        // Legacy v2 Day with service_id: None must remain accepted by prepare_reserving.
+        let legacy_day = Day {
+            version: VERSION,
+            service_id: None,
+            ..Default::default()
+        };
+        rt.kv.borrow_mut().clear();
+        rt.objects.borrow_mut().clear();
+        rt.objects
+            .borrow_mut()
+            .insert(day_key.clone(), serde_json::to_vec(&legacy_day).unwrap());
+        rt.remaining.set(32);
+        let prepared = prepare_reserving(
+            &store,
+            &wm,
+            "ingest",
+            "v2",
+            std::slice::from_ref(&new_file),
+            &[],
+            &[],
+            &[],
+            0,
+        );
+        assert!(
+            prepared.is_ok(),
+            "iter39: prepare_reserving must accept legacy v2 Day with service_id: None, got {:?}",
+            prepared.err()
+        );
+
+        // 2. retire_reserving: reject foreign service_id and unsupported version; accept legacy None.
+        let cutoff =
+            (rt.now() as i64 - i64::from(svc.log_retention_days) * 86_400).div_euclid(3600) * 3600;
+        let cutoff_day = day_start(cutoff);
+        let retire_day_key = "processed/_catalog/day-retire-iter39.json".to_owned();
+        let retire_wm = json!({
+            "catalog": Head {
+                version: VERSION,
+                generation: 5,
+                recent: vec![Event {
+                    cursor: "svc:5".into(),
+                    generation: 5,
+                    committed_at: None,
+                    manifest: None,
+                }],
+                days: BTreeMap::from([(cutoff_day, retire_day_key.clone())]),
+                ..Default::default()
+            }
+        });
+        let retire_reject_cases = [
+            (
+                "foreign_service_id",
+                Day {
+                    version: VERSION,
+                    service_id: Some("foreign-svc".into()),
+                    hours: BTreeMap::from([(
+                        cutoff - 3600,
+                        Reference {
+                            key: "processed/_catalog/old-blk.json".into(),
+                            generation: 1,
+                        },
+                    )]),
+                    ..Default::default()
+                },
+                "catalog_manifest_invalid",
+            ),
+            (
+                "unsupported_version",
+                Day {
+                    version: VERSION + 1,
+                    service_id: Some(svc.service_id.clone()),
+                    hours: BTreeMap::from([(
+                        cutoff - 3600,
+                        Reference {
+                            key: "processed/_catalog/old-blk.json".into(),
+                            generation: 1,
+                        },
+                    )]),
+                    ..Default::default()
+                },
+                "catalog_version_unsupported",
+            ),
+        ];
+        for (label, bad_day, expected_err) in retire_reject_cases {
+            rt.kv.borrow_mut().clear();
+            rt.kv
+                .borrow_mut()
+                .insert(WATERMARK_KEY.into(), retire_wm.clone());
+            rt.objects.borrow_mut().clear();
+            rt.objects.borrow_mut().insert(
+                retire_day_key.clone(),
+                serde_json::to_vec(&bad_day).unwrap(),
+            );
+            rt.remaining.set(32);
+            let err = retire_reserving(&store, 0).err();
+            assert_eq!(
+                err.as_deref(),
+                Some(expected_err),
+                "iter39 ({label}): retire_reserving must reject invalid Day without laundering"
+            );
+            assert_eq!(
+                rt.objects.borrow().len(),
+                1,
+                "iter39 ({label}): retire_reserving must not write laundered Day objects"
+            );
+        }
+
+        // Legacy v2 Day with service_id: None must remain accepted by retire_reserving.
+        let legacy_retire_day = Day {
+            version: VERSION,
+            service_id: None,
+            hours: BTreeMap::from([(
+                cutoff,
+                Reference {
+                    key: "processed/_catalog/kept-blk.json".into(),
+                    generation: 2,
+                },
+            )]),
+            ..Default::default()
+        };
+        rt.kv.borrow_mut().clear();
+        rt.kv.borrow_mut().insert(WATERMARK_KEY.into(), retire_wm);
+        rt.objects.borrow_mut().clear();
+        rt.objects.borrow_mut().insert(
+            retire_day_key,
+            serde_json::to_vec(&legacy_retire_day).unwrap(),
+        );
+        rt.remaining.set(32);
+        let retired = retire_reserving(&store, 0);
+        assert!(
+            retired.is_ok(),
+            "iter39: retire_reserving must accept legacy v2 Day with service_id: None, got {:?}",
+            retired.err()
+        );
     }
 }

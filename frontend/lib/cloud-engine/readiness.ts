@@ -1199,6 +1199,16 @@ function consumeJsonSecretValueAfterQuote(line1: string, pos: number, keyCandida
   return matchedScheme ? valStart : pos;
 }
 
+function isQuoteCloseDelimiter(ch: string | undefined): boolean {
+  return ch === undefined
+    || isInlineWs(ch)
+    || ch === ","
+    || ch === ")"
+    || ch === "]"
+    || ch === "}"
+    || ch === ";";
+}
+
 function buildRemainingSingleQuoteCounts(line1: string): Int32Array {
   const len = line1.length;
   const isUnescapedQuote = new Uint8Array(len);
@@ -1214,6 +1224,29 @@ function buildRemainingSingleQuoteCounts(line1: string): Int32Array {
       continue;
     }
     if (line1[p] === "'") {
+      if (!(p > 0 && isAsciiAlpha(line1[p - 1]) && isAsciiAlpha(line1[p + 1]))) {
+        isUnescapedQuote[p] = 1;
+      }
+    }
+    p += 1;
+  }
+  const suffix = new Int32Array(len + 1);
+  for (let j = len - 1; j >= 0; j -= 1) {
+    suffix[j] = suffix[j + 1]! + isUnescapedQuote[j]!;
+  }
+  return suffix;
+}
+
+function buildRemainingQuoteCounts(line1: string, quote: '"' | "`"): Int32Array {
+  const len = line1.length;
+  const isUnescapedQuote = new Uint8Array(len);
+  let p = 0;
+  while (p < len) {
+    if (line1[p] === "\\" && (line1[p + 1] === "\\" || line1[p + 1] === quote)) {
+      p += 2;
+      continue;
+    }
+    if (line1[p] === quote) {
       isUnescapedQuote[p] = 1;
     }
     p += 1;
@@ -1232,6 +1265,8 @@ function redactQuotesAndUrlsLine(line1: string): string {
   let i = 0;
   const len = line1.length;
   let remainingSingleQuotes: Int32Array | null = null;
+  let remainingDoubleQuotes: Int32Array | null = null;
+  let remainingBacktickQuotes: Int32Array | null = null;
   while (i < len) {
     if (outChars >= MESSAGE_LIMIT + 128) break;
     if (line1.startsWith("[redacted]", i)) {
@@ -1299,6 +1334,10 @@ function redactQuotesAndUrlsLine(line1: string): string {
           continue;
         }
         if (!isEscapeSingle && line1[i] === "\\" && line1[i + 1] === "'") {
+          if (!isQuoteCloseDelimiter(line1[i + 2])) {
+            i += 2;
+            continue;
+          }
           if (remainingSingleQuotes === null) {
             remainingSingleQuotes = buildRemainingSingleQuoteCounts(line1);
           }
@@ -1332,6 +1371,26 @@ function redactQuotesAndUrlsLine(line1: string): string {
       const contentStart = i;
       let contentEnd = -1;
       while (i < len) {
+        if (line1[i] === "\\" && line1[i + 1] === "\\") {
+          i += 2;
+          continue;
+        }
+        if (line1[i] === "\\" && line1[i + 1] === q) {
+          if (!isQuoteCloseDelimiter(line1[i + 2])) {
+            i += 2;
+            continue;
+          }
+          const remainingQuotes = q === '"'
+            ? (remainingDoubleQuotes ??= buildRemainingQuoteCounts(line1, '"'))
+            : (remainingBacktickQuotes ??= buildRemainingQuoteCounts(line1, "`"));
+          const rem = remainingQuotes[i + 2]!;
+          if (rem === 0 || (rem & 1) === 1) {
+            i += 2;
+            continue;
+          }
+          i += 1;
+          continue;
+        }
         if (line1[i] === "\\") {
           i += 2;
           continue;

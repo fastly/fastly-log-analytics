@@ -669,6 +669,7 @@ _NON_FUNCTION_KEYWORDS = _SPECIAL_CALL_KEYWORDS | frozenset(
         "between",
         "like",
         "ilike",
+        "strict",
     }
 )
 _SUBQUERY_HEAD_KEYWORDS = frozenset(
@@ -1913,7 +1914,92 @@ _APPLY_FOLLOW_STOPWORDS = frozenset(
         "COLLATE",
     }
 )
-_APPLY_JOIN_MOD_WORDS = frozenset({"ANY", "ALL", "ASOF", "ARRAY"})
+_APPLY_JOIN_MOD_WORDS = frozenset({"ANY", "ALL", "ASOF", "ARRAY", "NATURAL", "PASTE", "POSITIONAL"})
+_APPLY_PREV_NON_TARGET_WORDS = frozenset(
+    {
+        "SELECT",
+        "DISTINCT",
+        "ALL",
+        "FROM",
+        "JOIN",
+        "TABLE",
+        "WITH",
+        "RECURSIVE",
+        "AS",
+        "WHERE",
+        "PREWHERE",
+        "HAVING",
+        "QUALIFY",
+        "ON",
+        "AND",
+        "OR",
+        "XOR",
+        "NOT",
+        "IN",
+        "LIKE",
+        "ILIKE",
+        "BETWEEN",
+        "CASE",
+        "WHEN",
+        "THEN",
+        "ELSE",
+        "BY",
+        "DIV",
+        "MOD",
+        "TIES",
+        "VALUES",
+        "INTO",
+        "SET",
+        "WINDOW",
+    }
+)
+
+
+def _is_arrow_at(tokens: list[_Tok], pos: int) -> bool:
+    if pos >= len(tokens):
+        return False
+    tok = tokens[pos]
+    if tok.kind == "OTHER" and tok.val.startswith("->"):
+        return True
+    return (
+        pos + 1 < len(tokens)
+        and tok.kind == "OTHER"
+        and tok.val == "-"
+        and tokens[pos + 1].kind == "OTHER"
+        and tokens[pos + 1].val.startswith(">")
+    )
+
+
+def _preceded_by_star_transformer(tokens: list[_Tok], idx: int) -> bool:
+    p = idx - 1
+    if p < 0:
+        return False
+    match_map, _, _ = _get_tok_meta(tokens)
+    while p >= 0:
+        tok = tokens[p]
+        if tok.kind == "OTHER" and tok.val == "*":
+            return True
+        if tok.kind == "RPAREN":
+            open_i = match_map.get(p, -1)
+            if open_i <= 0:
+                return False
+            kw_i = open_i - 1
+            if tokens[kw_i].kind == "WORD" and tokens[kw_i].val.upper() == "STRICT" and kw_i > 0:
+                kw_i -= 1
+            if tokens[kw_i].kind == "WORD" and tokens[kw_i].val.upper() in ("REPLACE", "EXCEPT"):
+                p = kw_i - 1
+                continue
+            return False
+        if tok.kind in ("WORD", "QIDENT", "STRING"):
+            kw_i = p - 1
+            if kw_i >= 0 and tokens[kw_i].kind == "WORD" and tokens[kw_i].val.upper() == "STRICT":
+                kw_i -= 1
+            if kw_i >= 0 and tokens[kw_i].kind == "WORD" and tokens[kw_i].val.upper() == "EXCEPT":
+                p = kw_i - 1
+                continue
+            return False
+        return False
+    return False
 
 
 def _is_star_except_clause(tokens: list[_Tok], idx: int) -> bool:
@@ -1922,11 +2008,16 @@ def _is_star_except_clause(tokens: list[_Tok], idx: int) -> bool:
         and idx + 1 < len(tokens)
         and tokens[idx].kind == "WORD"
         and tokens[idx].val.upper() == "EXCEPT"
-        and tokens[idx - 1].kind == "OTHER"
-        and tokens[idx - 1].val == "*"
+        and _preceded_by_star_transformer(tokens, idx)
     ):
         return False
     nxt = tokens[idx + 1]
+    if nxt.kind == "WORD" and nxt.val.upper() == "STRICT" and idx + 2 < len(tokens):
+        nxt2 = tokens[idx + 2]
+        if nxt2.kind in ("LPAREN", "QIDENT", "STRING") or (
+            nxt2.kind == "WORD" and nxt2.val.upper() not in _STAR_EXCEPT_NON_COL_KEYWORDS
+        ):
+            return True
     return nxt.kind in ("LPAREN", "QIDENT", "STRING") or (
         nxt.kind == "WORD" and nxt.val.upper() not in _STAR_EXCEPT_NON_COL_KEYWORDS
     )
@@ -1944,9 +2035,12 @@ def _is_apply_column_transformer(tokens: list[_Tok], idx: int) -> bool:
         return False
     prev = tokens[idx - 1]
     preceded_by_target = (
-        (prev.kind == "OTHER" and prev.val == "*")
-        or prev.kind == "RPAREN"
-        or (idx >= 2 and tokens[idx - 2].kind == "WORD" and tokens[idx - 2].val.upper() in ("EXCEPT", "APPLY"))
+        (prev.kind == "OTHER" and (prev.val == "*" or _is_num_tok_val(prev.val)))
+        or prev.kind in ("RPAREN", "RBRACK", "QIDENT", "STRING")
+        or (prev.kind == "WORD" and prev.val.upper() not in _APPLY_PREV_NON_TARGET_WORDS)
+        or (
+            idx >= 2 and tokens[idx - 2].kind == "WORD" and tokens[idx - 2].val.upper() in ("EXCEPT", "APPLY", "STRICT")
+        )
     )
     if not preceded_by_target:
         return False
@@ -1955,11 +2049,13 @@ def _is_apply_column_transformer(tokens: list[_Tok], idx: int) -> bool:
         return True
     if nxt.kind != "WORD":
         return False
+    if _is_arrow_at(tokens, idx + 2):
+        return True
     nu = nxt.val.upper()
     if nu in _APPLY_FOLLOW_STOPWORDS:
         return False
     if (
-        prev.kind == "RPAREN"
+        prev.kind in ("RPAREN", "WORD", "QIDENT")
         and nu in _APPLY_JOIN_MOD_WORDS
         and idx + 2 < len(tokens)
         and tokens[idx + 2].kind == "WORD"

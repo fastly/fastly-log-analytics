@@ -1,8 +1,8 @@
 use super::{
     admitted, already_sent,
     bundles::{self, COVERAGE_LIMIT},
-    day_start, fetch_batched, file_bounds, file_hour, head, Block, Day, Head, Prefetched,
-    Reference, MANIFEST_LIMIT, VERSION,
+    day_start, fetch_batched, file_bounds, file_hour, head, validate_day, Block, Day, Head,
+    Prefetched, Reference, MANIFEST_LIMIT, VERSION,
 };
 use crate::{
     ingest::{api::FILES_PAGE, rfc3339, storage::Store, worker::Output, WATERMARK_KEY},
@@ -401,9 +401,7 @@ fn walk<R: Runtime>(
             let bytes = fetch(store, &mut prefetched, &key, MANIFEST_LIMIT, Vec::new)?;
             let index: Day =
                 serde_json::from_slice(&bytes).map_err(|_| "catalog_object_invalid")?;
-            if index.version != VERSION {
-                return Err("catalog_version_unsupported".into());
-            }
+            validate_day(&index, &store.service.service_id)?;
             enter_day(&mut state, day, index, include_summaries, summary_bounds);
             state.day += 1;
             if state.hours.is_empty() {
@@ -703,9 +701,7 @@ pub fn forked_page<R: Runtime>(
             })?;
             let index: Day =
                 serde_json::from_slice(&bytes).map_err(|_| "catalog_object_invalid")?;
-            if index.version != VERSION {
-                return Err("catalog_version_unsupported".into());
-            }
+            validate_day(&index, &store.service.service_id)?;
             let mut state = base.clone();
             state.days = Vec::new();
             state.day = 0;
@@ -1870,5 +1866,100 @@ mod tests {
         };
         let start = forked_page(&store, 0, i64::MAX, true, false, (0, i64::MAX)).unwrap();
         assert!(matches!(start, Start::Forks { .. }));
+    }
+
+    #[test]
+    fn iter39_f1_discovery_walk_and_forked_page_validate_day_version_and_service_id() {
+        let svc = test_service();
+        let hour = BASE;
+        let day = day_start(hour);
+        let day_key = "processed/_catalog/day-iter39-disc.json".to_owned();
+        let head = Head {
+            version: VERSION,
+            generation: 5,
+            recent: vec![super::super::Event {
+                cursor: "5".into(),
+                generation: 5,
+                committed_at: None,
+                manifest: None,
+            }],
+            days: BTreeMap::from([(day, day_key.clone())]),
+            ..Default::default()
+        };
+
+        let cases: Vec<(&str, Day, Option<&str>)> = vec![
+            (
+                "foreign_service_id",
+                Day {
+                    version: VERSION,
+                    service_id: Some("foreign-svc".into()),
+                    ..Default::default()
+                },
+                Some("catalog_manifest_invalid"),
+            ),
+            (
+                "unsupported_version",
+                Day {
+                    version: VERSION + 1,
+                    service_id: Some(svc.service_id.clone()),
+                    ..Default::default()
+                },
+                Some("catalog_version_unsupported"),
+            ),
+            (
+                "legacy_service_id_none",
+                Day {
+                    version: VERSION,
+                    service_id: None,
+                    ..Default::default()
+                },
+                None,
+            ),
+        ];
+
+        for (label, day_obj, expected_err) in cases {
+            let rt = MockRt {
+                now: (BASE + 3600) as u64,
+                kv: RefCell::new(BTreeMap::from([(
+                    WATERMARK_KEY.into(),
+                    json!({ "catalog": head }),
+                )])),
+                objects: RefCell::new(BTreeMap::from([(
+                    day_key.clone(),
+                    serde_json::to_vec(&day_obj).unwrap(),
+                )])),
+            };
+            let store = Store {
+                runtime: &rt,
+                service: &svc,
+                access_key: "ak".into(),
+                secret_key: "sk".into(),
+                started: Instant::now(),
+                vcpu_start: 0,
+            };
+
+            // 1. walk (via page)
+            let walk_res = page(&store, hour, hour + 3600, false, false, None);
+            assert_eq!(
+                walk_res.err().as_deref(),
+                expected_err,
+                "iter39 ({label}): discovery::walk Day validation mismatch"
+            );
+
+            // 2. forked_page (> FORK_MIN_SECONDS and <= FORK_DAY_INDEXES so it reads Day indexes)
+            let fork_res = forked_page(
+                &store,
+                hour,
+                hour + 4 * 3600,
+                false,
+                false,
+                (hour, hour + 4 * 3600),
+            );
+            assert_eq!(
+                fork_res.err().as_deref(),
+                expected_err,
+                "iter39 ({label}): discovery::forked_page Day validation mismatch"
+            );
+        }
     }
 }

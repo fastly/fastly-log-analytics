@@ -626,7 +626,7 @@ _ALLOWED_FUNCTIONS = frozenset(
 _SQL_KEYWORDS = frozenset(
     "in as and or not over where from join on select with when then else case end between like ilike using "
     "partition by order group having union all distinct exists any interval limit offset on inner "
-    "full cross intersect except array global prewhere final sample".split()
+    "full cross intersect except strict array global prewhere final sample".split()
 )
 _SQL_TOKEN = re.compile(
     r"""
@@ -1856,7 +1856,45 @@ _APPLY_FOLLOW_STOPWORDS = frozenset(
         "COLLATE",
     }
 )
-_APPLY_JOIN_MOD_WORDS = frozenset({"ANY", "ALL", "ASOF", "ARRAY"})
+_APPLY_JOIN_MOD_WORDS = frozenset({"ANY", "ALL", "ASOF", "ARRAY", "NATURAL", "PASTE", "POSITIONAL"})
+_APPLY_PREV_NON_TARGET_WORDS = frozenset(
+    {
+        "SELECT",
+        "DISTINCT",
+        "ALL",
+        "FROM",
+        "JOIN",
+        "TABLE",
+        "WITH",
+        "RECURSIVE",
+        "AS",
+        "WHERE",
+        "PREWHERE",
+        "HAVING",
+        "QUALIFY",
+        "ON",
+        "AND",
+        "OR",
+        "XOR",
+        "NOT",
+        "IN",
+        "LIKE",
+        "ILIKE",
+        "BETWEEN",
+        "CASE",
+        "WHEN",
+        "THEN",
+        "ELSE",
+        "BY",
+        "DIV",
+        "MOD",
+        "TIES",
+        "VALUES",
+        "INTO",
+        "SET",
+        "WINDOW",
+    }
+)
 
 
 def _reject_unsafe_functions(sql: str, *, parse_tree: Any | None = None) -> None:
@@ -1899,15 +1937,27 @@ def _reject_unsafe_functions(sql: str, *, parse_tree: Any | None = None) -> None
             and not (sig[idx - 1][0] == "IDENT" and sig[idx - 1][1].upper() == "AS")
             and (sig[idx + 1][0], sig[idx + 1][1]) != ("OP", ".")
         ):
-            prev_pair = (sig[idx - 1][0], sig[idx - 1][1])
-            preceded_by_target = prev_pair in (("OP", "*"), ("OP", ")")) or (
-                idx >= 2 and sig[idx - 2][0] == "IDENT" and sig[idx - 2][1].upper() in ("EXCEPT", "APPLY")
+            prev_k, prev_t = sig[idx - 1][0], sig[idx - 1][1]
+            prev_pair = (prev_k, prev_t)
+            preceded_by_target = (
+                prev_pair in (("OP", "*"), ("OP", ")"), ("OP", "]"))
+                or prev_k in ("DQUOTE", "STR", "NUM")
+                or (prev_k == "IDENT" and prev_t.upper() not in _APPLY_PREV_NON_TARGET_WORDS)
+                or (
+                    idx >= 2 and sig[idx - 2][0] == "IDENT" and sig[idx - 2][1].upper() in ("EXCEPT", "APPLY", "STRICT")
+                )
             )
             if preceded_by_target:
                 nxt_k, nxt_t, _ = sig[idx + 1]
                 nxt_u = nxt_t.upper() if nxt_k == "IDENT" else ""
+                is_lambda_arrow = (
+                    nxt_k == "IDENT"
+                    and idx + 3 < len(sig)
+                    and (sig[idx + 2][0], sig[idx + 2][1]) == ("OP", "-")
+                    and (sig[idx + 3][0], sig[idx + 3][1]) == ("OP", ">")
+                )
                 is_subq_join_mod = (
-                    prev_pair == ("OP", ")")
+                    (prev_pair == ("OP", ")") or prev_k in ("IDENT", "DQUOTE"))
                     and nxt_u in _APPLY_JOIN_MOD_WORDS
                     and idx + 2 < len(sig)
                     and sig[idx + 2][0] == "IDENT"
@@ -1916,6 +1966,7 @@ def _reject_unsafe_functions(sql: str, *, parse_tree: Any | None = None) -> None
                 if (
                     (nxt_k == "OP" and nxt_t == "(")
                     or nxt_k == "DQUOTE"
+                    or is_lambda_arrow
                     or (nxt_k == "IDENT" and nxt_u not in _APPLY_FOLLOW_STOPWORDS and not is_subq_join_mod)
                 ):
                     raise PermissionError("APPLY column transformer is not allowed in console queries")
@@ -3534,10 +3585,65 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
             and s_pos + 1 < len(sig_list)
             and tokens[sig_list[s_pos]][0] == "IDENT"
             and tokens[sig_list[s_pos]][1].upper() == "EXCEPT"
-            and tokens[sig_list[s_pos - 1]] == ("OP", "*")
         ):
             return False
+        _, _, _, _, match_by_s, _ = _get_lex_meta(tokens)
+        p = s_pos - 1
+        anchored = False
+        while p >= 0:
+            pk, pt = tokens[sig_list[p]]
+            if (pk, pt) == ("OP", "*"):
+                anchored = True
+                break
+            if (pk, pt) == ("OP", ")"):
+                open_sp = match_by_s.get(p, -1)
+                if open_sp <= 0:
+                    break
+                kw_sp = open_sp - 1
+                if (
+                    tokens[sig_list[kw_sp]][0] == "IDENT"
+                    and tokens[sig_list[kw_sp]][1].upper() == "STRICT"
+                    and kw_sp > 0
+                ):
+                    kw_sp -= 1
+                if tokens[sig_list[kw_sp]][0] == "IDENT" and tokens[sig_list[kw_sp]][1].upper() in (
+                    "REPLACE",
+                    "EXCEPT",
+                ):
+                    p = kw_sp - 1
+                    continue
+                break
+            if pk in ("IDENT", "DQUOTE", "STR"):
+                kw_sp = p - 1
+                if (
+                    kw_sp >= 0
+                    and tokens[sig_list[kw_sp]][0] == "IDENT"
+                    and tokens[sig_list[kw_sp]][1].upper() == "STRICT"
+                ):
+                    kw_sp -= 1
+                if (
+                    kw_sp >= 0
+                    and tokens[sig_list[kw_sp]][0] == "IDENT"
+                    and tokens[sig_list[kw_sp]][1].upper() == "EXCEPT"
+                ):
+                    p = kw_sp - 1
+                    continue
+                break
+            break
+        if not anchored:
+            return False
         nxt_k, nxt_t = tokens[sig_list[s_pos + 1]]
+        if nxt_k == "IDENT" and nxt_t.upper() == "STRICT" and s_pos + 2 < len(sig_list):
+            nn_k, nn_t = tokens[sig_list[s_pos + 2]]
+            if (
+                (nn_k == "OP" and nn_t == "(")
+                or nn_k in ("DQUOTE", "STR")
+                or (
+                    nn_k == "IDENT"
+                    and nn_t.upper() not in ("SELECT", "WITH", "ALL", "DISTINCT", "TABLE", "VALUES", "FROM")
+                )
+            ):
+                return True
         return (
             (nxt_k == "OP" and nxt_t == "(")
             or nxt_k in ("DQUOTE", "STR")
@@ -5805,12 +5911,22 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                     s_pos += 1
                     continue
                 if wu == "EXCEPT" and _is_lex_star_except(processed, s_pos, sig_idxs):
-                    lp_ex = sig_idxs[s_pos + 1]
-                    rp_ex = _find_matching_paren(processed, lp_ex)
-                    for ex_tok_i in range(lp_ex + 1, rp_ex):
-                        if processed[ex_tok_i][0] in ("IDENT", "DQUOTE"):
-                            table_alias_idxs.add(ex_tok_i)
-                    s_pos += 1
+                    ex_pos = s_pos + 1
+                    if (
+                        ex_pos + 1 < len(sig_idxs)
+                        and processed[sig_idxs[ex_pos]][0] == "IDENT"
+                        and processed[sig_idxs[ex_pos]][1].upper() == "STRICT"
+                    ):
+                        ex_pos += 1
+                    lp_ex = sig_idxs[ex_pos]
+                    if processed[lp_ex] == ("OP", "("):
+                        rp_ex = _find_matching_paren(processed, lp_ex)
+                        for ex_tok_i in range(lp_ex + 1, rp_ex):
+                            if processed[ex_tok_i][0] in ("IDENT", "DQUOTE"):
+                                table_alias_idxs.add(ex_tok_i)
+                    elif processed[lp_ex][0] in ("IDENT", "DQUOTE"):
+                        table_alias_idxs.add(lp_ex)
+                    s_pos = ex_pos + 1
                     continue
                 if (
                     in_from
@@ -6161,10 +6277,17 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                         return False
                     tu = tt.upper()
                     if tu == "EXCEPT" and t_off + 1 < len(it_idxs):
-                        nk, nt = processed[it_idxs[t_off + 1]]
+                        ex_off = t_off + 1
+                        if (
+                            ex_off + 1 < len(it_idxs)
+                            and processed[it_idxs[ex_off]][0] == "IDENT"
+                            and processed[it_idxs[ex_off]][1].upper() == "STRICT"
+                        ):
+                            ex_off += 1
+                        nk, nt = processed[it_idxs[ex_off]]
                         if nk == "OP" and nt == "(":
-                            rp_e = _find_matching_paren(processed, it_idxs[t_off + 1])
-                            t_off += 2
+                            rp_e = _find_matching_paren(processed, it_idxs[ex_off])
+                            t_off = ex_off + 1
                             while t_off < len(it_idxs) and it_idxs[t_off] < rp_e:
                                 t_off += 1
                             if t_off < len(it_idxs) and it_idxs[t_off] == rp_e:
@@ -6172,19 +6295,28 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                             matched_any = True
                             continue
                         if nk in ("IDENT", "DQUOTE", "STR"):
-                            t_off += 2
+                            t_off = ex_off + 1
                             matched_any = True
                             continue
                         return False
-                    if tu == "REPLACE" and t_off + 1 < len(it_idxs) and processed[it_idxs[t_off + 1]] == ("OP", "("):
-                        rp_r = _find_matching_paren(processed, it_idxs[t_off + 1])
-                        t_off += 2
-                        while t_off < len(it_idxs) and it_idxs[t_off] < rp_r:
-                            t_off += 1
-                        if t_off < len(it_idxs) and it_idxs[t_off] == rp_r:
-                            t_off += 1
-                        matched_any = True
-                        continue
+                    if tu == "REPLACE" and t_off + 1 < len(it_idxs):
+                        rep_off = t_off + 1
+                        if (
+                            rep_off + 1 < len(it_idxs)
+                            and processed[it_idxs[rep_off]][0] == "IDENT"
+                            and processed[it_idxs[rep_off]][1].upper() == "STRICT"
+                        ):
+                            rep_off += 1
+                        if processed[it_idxs[rep_off]] == ("OP", "("):
+                            rp_r = _find_matching_paren(processed, it_idxs[rep_off])
+                            t_off = rep_off + 1
+                            while t_off < len(it_idxs) and it_idxs[t_off] < rp_r:
+                                t_off += 1
+                            if t_off < len(it_idxs) and it_idxs[t_off] == rp_r:
+                                t_off += 1
+                            matched_any = True
+                            continue
+                        return False
                     return False
                 return matched_any
 
@@ -6196,10 +6328,17 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                         break
                     tu = tt.upper()
                     if tu == "EXCEPT" and t_off + 1 < len(it_idxs):
-                        nk, nt = processed[it_idxs[t_off + 1]]
+                        ex_off = t_off + 1
+                        if (
+                            ex_off + 1 < len(it_idxs)
+                            and processed[it_idxs[ex_off]][0] == "IDENT"
+                            and processed[it_idxs[ex_off]][1].upper() == "STRICT"
+                        ):
+                            ex_off += 1
+                        nk, nt = processed[it_idxs[ex_off]]
                         if nk == "OP" and nt == "(":
-                            rp_e = _find_matching_paren(processed, it_idxs[t_off + 1])
-                            t_off += 2
+                            rp_e = _find_matching_paren(processed, it_idxs[ex_off])
+                            t_off = ex_off + 1
                             while t_off < len(it_idxs) and it_idxs[t_off] < rp_e:
                                 if processed[it_idxs[t_off]][0] == "IDENT":
                                     star_except_ident_idxs.add(it_idxs[t_off])
@@ -6208,17 +6347,26 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                                 t_off += 1
                             continue
                         if nk == "IDENT":
-                            star_except_ident_idxs.add(it_idxs[t_off + 1])
-                        t_off += 2
+                            star_except_ident_idxs.add(it_idxs[ex_off])
+                        t_off = ex_off + 1
                         continue
-                    if tu == "REPLACE" and t_off + 1 < len(it_idxs) and processed[it_idxs[t_off + 1]] == ("OP", "("):
-                        rp_r = _find_matching_paren(processed, it_idxs[t_off + 1])
-                        t_off += 2
-                        while t_off < len(it_idxs) and it_idxs[t_off] < rp_r:
-                            t_off += 1
-                        if t_off < len(it_idxs) and it_idxs[t_off] == rp_r:
-                            t_off += 1
-                        continue
+                    if tu == "REPLACE" and t_off + 1 < len(it_idxs):
+                        rep_off = t_off + 1
+                        if (
+                            rep_off + 1 < len(it_idxs)
+                            and processed[it_idxs[rep_off]][0] == "IDENT"
+                            and processed[it_idxs[rep_off]][1].upper() == "STRICT"
+                        ):
+                            rep_off += 1
+                        if processed[it_idxs[rep_off]] == ("OP", "("):
+                            rp_r = _find_matching_paren(processed, it_idxs[rep_off])
+                            t_off = rep_off + 1
+                            while t_off < len(it_idxs) and it_idxs[t_off] < rp_r:
+                                t_off += 1
+                            if t_off < len(it_idxs) and it_idxs[t_off] == rp_r:
+                                t_off += 1
+                            continue
+                        break
                     break
 
             for it_idxs in proj_items:

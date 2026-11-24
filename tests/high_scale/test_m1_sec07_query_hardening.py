@@ -5405,9 +5405,10 @@ def test_sec_t5_iter37_scrub_ip_text_ipv6_colon_ipv4_dot_and_ua_url() -> None:
     assert "2001:db8:1234:5678::1" not in r_ipv6_key
     assert r_ipv6_key.startswith("ipv6:2001:db8:1234::")
 
-    # Invalid 9-group hex & 5-digit hex prefix must NOT be partially matched:
+    # Invalid 9-group hex (4-char hextet prefix) must NOT be partially matched,
+    # while 5+ digit numeric/hex prefixes (port/ID, impossible as a 1-4 hex IPv6 hextet) DO mask the IPv6:
     assert scrub_ip_text("2001:db8:1:2:3:4:5:6:7") == "2001:db8:1:2:3:4:5:6:7"
-    assert scrub_ip_text("11111:2001:db8::1") == "11111:2001:db8::1"
+    assert scrub_ip_text("11111:2001:db8::1") == "11111:2001:db8::"
 
     # 2. IPv4 immediately after '.' (hostname/DNS label) while preserving 5+ part OIDs
     r_host = scrub_ip_text("host.203.0.113.42.example.com")
@@ -5510,3 +5511,320 @@ def test_sec_t5_iter37_ch_strip_brackets_parity_and_live_chdb() -> None:
                     f"Real chdb Iter37 suite failed:\nSTDOUT:\n{run_res.stdout}\nSTDERR:\n{run_res.stderr}"
                 )
                 assert "ITER37_CHDB_ALL_OK" in run_res.stdout
+
+
+_REAL_CHDB_ITER39_SCRIPT = r"""
+import chdb.session
+from backend.high_scale import query as hs_query
+from backend.high_scale.postgres_control import console_access
+from backend.models.analytics import QueryRequest as DashboardQueryRequest
+
+for analyzer_val in (0, 1):
+    s = chdb.session.Session()
+    s.query(f"SET allow_experimental_analyzer = {analyzer_val}")
+    s.query("CREATE DATABASE IF NOT EXISTS fla_test")
+    s.query("USE fla_test")
+    s.query("DROP VIEW IF EXISTS fla_test.v_req")
+    s.query("DROP TABLE IF EXISTS fla_test.request_facts")
+    s.query("DROP TABLE IF EXISTS fla_test.high_scale_batch_publications")
+    s.query(
+        "CREATE TABLE fla_test.high_scale_batch_publications ("
+        "service_id String, domain String, batch_id String, publication_state String) "
+        "ENGINE = ReplacingMergeTree ORDER BY (service_id, domain, batch_id)"
+    )
+    s.query(
+        "INSERT INTO fla_test.high_scale_batch_publications VALUES ('svc_alpha', 'request', 'b1', 'visible')"
+    )
+    s.query(
+        "CREATE TABLE fla_test.request_facts ("
+        "service_id String, batch_id String, publication_state String, "
+        "event_timestamp DateTime64(3, 'UTC'), client_ip String, status UInt16, url String, "
+        "custom_fields Map(String, String)) ENGINE = Memory"
+    )
+    s.query(
+        "INSERT INTO fla_test.request_facts VALUES ("
+        "'svc_alpha', 'b1', 'visible', toDateTime64('2026-11-19 00:05:00.000', 3, 'UTC'), "
+        "'203.0.113.42', 200, '/iter39', {'geo_city': 'Denver'})"
+    )
+    cols = [
+        ("service_id", "String"),
+        ("batch_id", "String"),
+        ("publication_state", "String"),
+        ("event_timestamp", "DateTime64(3, 'UTC')"),
+        ("client_ip", "String"),
+        ("status", "UInt16"),
+        ("url", "String"),
+        ("custom_fields", "Map(String, String)"),
+    ]
+    view_sql = console_access._view_select("fla_test", "request_facts", cols, "svc_alpha", masked=True)
+    s.query(f"CREATE VIEW fla_test.v_req AS {view_sql}")
+
+    class _ChdbClient:
+        _table_filters_verified = True
+
+        def __init__(self, sess):
+            self._s = sess
+
+        def execute(self, sql, settings=None, **kwargs):
+            import json as _json
+
+            s_parts = [f"allow_experimental_analyzer = {analyzer_val}"]
+            for k, v in (settings or {}).items():
+                val_esc = str(v).replace("\\", "\\\\").replace("'", "\\'")
+                s_parts.append(f"{k} = '{val_esc}'")
+            full_sql = f"{sql} SETTINGS {', '.join(s_parts)}"
+            raw = self._s.query(full_sql, "JSON").bytes()
+            return _json.loads(raw.decode("utf-8"))["data"] if raw else []
+
+    class _Svc:
+        service_id = "svc_alpha"
+
+        def __init__(self, cli):
+            self.client = cli
+
+    cli = _ChdbClient(s)
+    svc = _Svc(cli)
+    masked_tables = {"request_facts": "v_req"}
+
+    # 1. All 7 live APPLY bypasses must be blocked before reaching ClickHouse:
+    for atk in (
+        "SELECT * APPLY left -> left APPLY file FROM (SELECT '/etc/passwd' AS a FROM logs)",
+        "SELECT * APPLY asc -> asc APPLY url FROM (SELECT 'http://169.254.169.254/' AS a FROM logs)",
+        "SELECT * APPLY nulls -> nulls APPLY sleep FROM (SELECT 1 AS a FROM logs)",
+        "SELECT * EXCEPT STRICT b APPLY file FROM (SELECT '/etc/hosts' AS a, 1 AS b)",
+        "SELECT * EXCEPT STRICT 'b' APPLY file FROM (SELECT '/etc/hosts' AS a, 1 AS b)",
+        "SELECT a.* EXCEPT STRICT b APPLY file FROM (SELECT '/etc/hosts' AS a, 1 AS b) a",
+        "SELECT * REPLACE (a AS a) EXCEPT STRICT b APPLY file FROM (SELECT '/etc/hosts' AS a, 1 AS b)",
+    ):
+        try:
+            hs_query.query_endpoint(
+                svc,
+                DashboardQueryRequest(sql=atk, max_rows=10),
+                "2026-11-19T00:00:00Z", "2026-11-19T01:00:00Z", mask_ips=True, tables=masked_tables,
+            )
+            raise AssertionError(f"query_endpoint failed to block APPLY bypass (analyzer={analyzer_val}): {atk}")
+        except PermissionError:
+            pass
+
+    # 2. Chained REPLACE (...) EXCEPT <col> and EXCEPT STRICT / REPLACE STRICT execute cleanly in chdb:
+    for ok_sql, expected_cols in (
+        (
+            "WITH t AS (SELECT * REPLACE ('/x' AS url) EXCEPT status FROM logs) SELECT ip, timestamp FROM t",
+            {"client_ip", "event_timestamp"},
+        ),
+        (
+            "SELECT * REPLACE ('/x' AS url) EXCEPT status FROM logs",
+            {"client_ip", "event_timestamp", "url"},
+        ),
+        (
+            "SELECT * EXCEPT STRICT status FROM logs",
+            {"client_ip", "event_timestamp", "url"},
+        ),
+        (
+            "WITH t AS (SELECT * REPLACE STRICT ('/x' AS url) EXCEPT STRICT status FROM logs) SELECT ip, timestamp FROM t",
+            {"client_ip", "event_timestamp"},
+        ),
+    ):
+        res = hs_query.query_endpoint(
+            svc,
+            DashboardQueryRequest(sql=ok_sql, max_rows=10),
+            "2026-11-19T00:00:00Z", "2026-11-19T01:00:00Z", mask_ips=True, tables=masked_tables,
+        )
+        rows = res["data"]
+        assert len(rows) == 1, f"Expected 1 row (analyzer={analyzer_val}) for {ok_sql}: got {rows}"
+        assert expected_cols.issubset(set(rows[0].keys())), (
+            f"Missing expected columns (analyzer={analyzer_val}) for {ok_sql}: got={set(rows[0].keys())}"
+        )
+
+    s.close()
+
+print("ITER39_CHDB_ALL_OK")
+"""
+
+
+@pytest.mark.security_regression
+def test_sec_t5_iter39_apply_lambda_and_except_strict_blocked() -> None:
+    """ITER39 Objective 1: Block unparenthesized lambda APPLY <stopword> -> ... and EXCEPT STRICT ... APPLY."""
+    from types import SimpleNamespace
+
+    from backend.core.sql_validator import SQLValidationError, validate_user_sql
+    from backend.models.analytics import QueryRequest as DashboardQueryRequest
+
+    apply_bypasses = (
+        "SELECT * APPLY left -> left APPLY file FROM (SELECT '/etc/passwd' AS a FROM logs)",
+        "SELECT * APPLY asc -> asc APPLY url FROM (SELECT 'http://169.254.169.254/' AS a FROM logs)",
+        "SELECT * APPLY nulls -> nulls APPLY sleep FROM (SELECT 1 AS a FROM logs)",
+        "SELECT * EXCEPT STRICT b APPLY file FROM (SELECT '/etc/hosts' AS a, 1 AS b)",
+        "SELECT * EXCEPT STRICT 'b' APPLY file FROM (SELECT '/etc/hosts' AS a, 1 AS b)",
+        "SELECT a.* EXCEPT STRICT b APPLY file FROM (SELECT '/etc/hosts' AS a, 1 AS b) a",
+        "SELECT * REPLACE (a AS a) EXCEPT STRICT b APPLY file FROM (SELECT '/etc/hosts' AS a, 1 AS b)",
+        "SELECT * APPLY from -> from APPLY file FROM (SELECT '/etc/passwd' AS a FROM logs)",
+        "SELECT * APPLY x -> x + 1 APPLY file FROM (SELECT 1 AS a FROM logs)",
+        "SELECT * APPLY x -> 'a' APPLY file FROM (SELECT 1 AS a FROM logs)",
+        "SELECT * EXCEPT STRICT (b) APPLY file FROM (SELECT '/etc/hosts' AS a, 1 AS b)",
+        "SELECT * APPLY left ->+1 APPLY file FROM (SELECT 1 AS a FROM logs)",
+    )
+
+    class _DenyClient:
+        _table_filters_verified = True
+
+        def execute(self, *_args: object, **_kwargs: object) -> list[dict[str, object]]:
+            raise AssertionError("APPLY bypass must never reach ClickHouse")
+
+    svc = SimpleNamespace(service_id="svc_alpha", client=_DenyClient())
+    masked_tables = {"request_facts": "fla_cv_svc_m_request_facts"}
+
+    for atk in apply_bypasses:
+        with pytest.raises(SQLValidationError):
+            validate_user_sql(atk, allowed_tables=frozenset({"logs"}), case_sensitive_ctes=True)
+        with pytest.raises(PermissionError):
+            hs_query._reject_unsafe_functions(atk, parse_tree=None)
+        with pytest.raises(PermissionError):
+            hs_query.query_endpoint(
+                svc,
+                DashboardQueryRequest(sql=atk, max_rows=10),
+                "2026-11-19T00:00:00Z",
+                "2026-11-19T01:00:00Z",
+                mask_ips=True,
+                tables=masked_tables,
+            )
+
+    # Legitimate ordinary uses of 'apply' must remain allowed in both layers:
+    for ok_sql in (
+        "SELECT apply FROM logs",
+        "SELECT apply alias FROM logs",
+        "SELECT status apply FROM logs",
+        "SELECT status AS apply FROM logs",
+        "SELECT count(*) apply FROM logs",
+        "SELECT 2 * apply FROM logs",
+        "SELECT t.apply FROM logs t",
+        "SELECT * FROM (SELECT 1) apply ARRAY JOIN [1] AS arr",
+        "SELECT * FROM logs apply ARRAY JOIN [1] AS arr",
+        "WITH apply AS (SELECT 1 AS x FROM logs) SELECT a.x FROM apply a",
+    ):
+        assert validate_user_sql(ok_sql, allowed_tables=frozenset({"logs"}), case_sensitive_ctes=True).parse_tree
+        hs_query._reject_unsafe_functions(ok_sql, parse_tree=None)
+
+
+@pytest.mark.security_regression
+def test_sec_t5_iter39_replace_then_except_and_strict_star_transformers() -> None:
+    """ITER39 Objective 2: Recognize EXCEPT after REPLACE (...), EXCEPT STRICT, and REPLACE STRICT."""
+    from backend.core.sql_validator import validate_user_sql
+
+    names = {"request_facts": "fla_cv_svc_m_request_facts"}
+
+    for cte_sql in (
+        "WITH t AS (SELECT * REPLACE ('/x' AS url) EXCEPT status FROM logs) SELECT ip, timestamp FROM t",
+        "WITH t AS (SELECT * REPLACE STRICT ('/x' AS url) EXCEPT STRICT status FROM logs) SELECT ip, timestamp FROM t",
+        "WITH t AS (SELECT r.* REPLACE ('/x' AS url) EXCEPT STRICT status FROM logs r) SELECT ip, timestamp FROM t",
+    ):
+        assert validate_user_sql(cte_sql, allowed_tables=frozenset({"logs"}), case_sensitive_ctes=True).parse_tree
+        rw = hs_query._rewrite_console_sql(cte_sql, svc_table="request_facts", names=names)
+        assert "custom_fields['status']" not in rw, f"EXCEPT status corrupted: {rw}"
+        assert "client_ip" in rw and "event_timestamp" in rw, f"projects_star failed: {rw}"
+
+    for cf_sql in (
+        "SELECT * REPLACE (geo_city AS status) EXCEPT geo_city FROM logs",
+        "SELECT * REPLACE STRICT (geo_city AS status) EXCEPT STRICT geo_city FROM logs",
+        "SELECT * EXCEPT STRICT geo_city FROM logs",
+        "SELECT * EXCEPT STRICT (geo_city, bot_score) FROM logs",
+    ):
+        assert validate_user_sql(cf_sql, allowed_tables=frozenset({"logs"}), case_sensitive_ctes=True).parse_tree
+        rw = hs_query._rewrite_console_sql(cf_sql, svc_table="request_facts", names=names)
+        assert "EXCEPT custom_fields['geo_city']" not in rw, f"EXCEPT col corrupted into custom_fields: {rw}"
+        assert "EXCEPT STRICT custom_fields['geo_city']" not in rw, f"EXCEPT STRICT col corrupted: {rw}"
+        assert "custom_fields['bot_score']" not in rw, f"EXCEPT STRICT tuple col corrupted: {rw}"
+
+    # Set operation EXCEPT must NOT be mistaken for star-except (both unparenthesized and parenthesized):
+    from backend.core.sql_validator import _is_star_except_clause, _tokenize_sql
+
+    setop_sql = "SELECT ip FROM logs EXCEPT SELECT ip FROM logs"
+    tree = validate_user_sql(setop_sql, allowed_tables=frozenset({"logs"}), case_sensitive_ctes=True).parse_tree
+    assert tree["statements"][0]["node"]["type"] == "SET_OPERATION_NODE"
+    rw_setop = hs_query._rewrite_console_sql(setop_sql, svc_table="request_facts", names=names)
+    assert rw_setop.count("client_ip") == 2
+
+    paren_setop_sql = "(SELECT ip FROM logs) EXCEPT (SELECT ip FROM logs)"
+    paren_toks, _ = _tokenize_sql(paren_setop_sql)
+    assert paren_toks is not None
+    ex_idx = next(i for i, t in enumerate(paren_toks) if t.val == "EXCEPT")
+    assert not _is_star_except_clause(paren_toks, ex_idx)
+    rw_paren_setop = hs_query._rewrite_console_sql(paren_setop_sql, svc_table="request_facts", names=names)
+    assert rw_paren_setop.count("client_ip") == 2
+
+
+@pytest.mark.security_regression
+def test_sec_t5_iter39_scrub_ip_text_long_hex_and_dcolon_prefixes() -> None:
+    """ITER39 Objective 3: scrub_ip_text masks IPv6 after 5+ hex/digit ':' prefix or non-hex '::' prefix."""
+    from backend.core.share_db import scrub_ip_text
+
+    assert scrub_ip_text("12345:2001:db8:85a3::8a2e:370:7334") == "12345:2001:db8:85a3::"
+    assert scrub_ip_text("deadbeef:2001:db8:85a3::8a2e:370:7334") == "deadbeef:2001:db8:85a3::"
+    assert scrub_ip_text("abcdef:fe80::1") == "abcdef:fe80::"
+    assert scrub_ip_text("foo::2001:db8::1") == "foo::2001:db8::"
+    assert scrub_ip_text("deadbeef::2001:db8::1") == "deadbeef::2001:db8::"
+
+    # Malformed 9-group IPv6 with 1-4 hex hextet prefix stays unmasked:
+    assert scrub_ip_text("2001:db8:1:2:3:4:5:6:7") == "2001:db8:1:2:3:4:5:6:7"
+    assert scrub_ip_text("2001::1:2:3:4:5:6:7") == "2001::1:2:3:4:5:6:7"
+
+
+@pytest.mark.security_regression
+def test_sec_t5_iter39_live_chdb_apply_and_replace_except() -> None:
+    """ITER39 live chdb verification (analyzer=0 & 1) for Objectives 1 & 2."""
+    import os
+    import shutil
+    import site
+    import subprocess
+    from pathlib import Path
+
+    repo_root = str(Path(hs_query.__file__).resolve().parents[2])
+    try:
+        import chdb as _chdb  # noqa: F401
+
+        exec(_REAL_CHDB_ITER39_SCRIPT, {})
+    except ImportError:
+        uv_bin = shutil.which("uv")
+        if uv_bin is not None:
+            py_paths = [repo_root, *site.getsitepackages()]
+            env = {k: v for k, v in os.environ.items() if k != "VIRTUAL_ENV"}
+            env["PYTHONPATH"] = os.pathsep.join(py_paths)
+            probe = subprocess.run(
+                [
+                    uv_bin,
+                    "run",
+                    "--offline",
+                    "--no-project",
+                    "--with",
+                    "chdb",
+                    "python",
+                    "-c",
+                    "import chdb",
+                ],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            if probe.returncode == 0:
+                run_res = subprocess.run(
+                    [
+                        uv_bin,
+                        "run",
+                        "--offline",
+                        "--no-project",
+                        "--with",
+                        "chdb",
+                        "python",
+                        "-c",
+                        _REAL_CHDB_ITER39_SCRIPT,
+                    ],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                )
+                assert run_res.returncode == 0, (
+                    f"Real chdb Iter39 suite failed:\nSTDOUT:\n{run_res.stdout}\nSTDERR:\n{run_res.stderr}"
+                )
+                assert "ITER39_CHDB_ALL_OK" in run_res.stdout

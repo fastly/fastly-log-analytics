@@ -2711,7 +2711,7 @@ impl<R: Runtime> Ctx<'_, '_, R> {
                 if !self.room(3) {
                     return Ok(None);
                 }
-                let day: super::catalog::Day = super::catalog::read(self.store, key)?;
+                let day = super::catalog::read_day(self.store, key)?;
                 day.hours.get(&hour).cloned()
             } else {
                 None
@@ -2795,7 +2795,7 @@ impl<R: Runtime> Ctx<'_, '_, R> {
                     return Ok(None);
                 }
                 let hours = if let Some(key) = self.catalog.days.get(&day) {
-                    let index: super::catalog::Day = super::catalog::read(self.store, key)?;
+                    let index = super::catalog::read_day(self.store, key)?;
                     index.hours.keys().copied().collect()
                 } else {
                     BTreeSet::new()
@@ -4791,5 +4791,212 @@ mod tests {
         assert_eq!(buckets.get("1h - 1d"), Some(&200));
         assert_eq!(buckets.get("> 1d"), Some(&200));
         assert_eq!(buckets.len(), 4);
+    }
+
+    #[test]
+    fn iter39_f1_bundle_ctx_catalog_windows_and_present_validate_day_version_and_service_id() {
+        use crate::{
+            admin::{FosRequest, FosResponse, Record, Service},
+            ingest::catalog::{Day, Head, Reference, VERSION},
+            setup::SetupStores,
+            shell::Runtime,
+        };
+        use serde_json::{json, Value};
+        use std::{
+            cell::{Cell, RefCell},
+            time::Instant,
+        };
+
+        struct MockRt {
+            objects: RefCell<BTreeMap<String, Vec<u8>>>,
+            remaining: Cell<u32>,
+        }
+        impl SetupStores for MockRt {
+            fn config_present(&self, _: &str) -> Result<bool, String> {
+                Ok(true)
+            }
+            fn secret_present(&self, _: &str) -> Result<bool, String> {
+                Ok(true)
+            }
+            fn state_linked(&self) -> Result<bool, String> {
+                Ok(true)
+            }
+        }
+        impl Runtime for MockRt {
+            fn config(&self, _: &str) -> Result<Option<String>, String> {
+                Ok(None)
+            }
+            fn secret(&self, _: &str) -> Result<Option<String>, String> {
+                Ok(Some("tok".into()))
+            }
+            fn random(&self) -> Result<[u8; 32], String> {
+                Ok([0; 32])
+            }
+            fn now(&self) -> u64 {
+                1_800_003_600
+            }
+            fn checks(&self, _: bool) -> Result<Value, String> {
+                Ok(json!({}))
+            }
+            fn versions(&self) -> Result<Value, String> {
+                Ok(json!({}))
+            }
+            fn compute_service_id(&self) -> Option<String> {
+                None
+            }
+            fn compute_service_version(&self) -> Option<String> {
+                None
+            }
+            fn admin_get(&self, _: &str) -> Result<Option<Record>, String> {
+                Ok(None)
+            }
+            fn admin_cas(&self, _: &str, _: Option<&str>, _: &Value) -> Result<bool, String> {
+                Ok(true)
+            }
+            fn admin_fos(&self, request: FosRequest<'_>) -> Result<FosResponse, String> {
+                let rem = self.remaining.get();
+                if rem == 0 {
+                    return Err("backend_budget_exhausted".into());
+                }
+                self.remaining.set(rem - 1);
+                let key = request.key.trim_start_matches('/');
+                match self.objects.borrow().get(key) {
+                    Some(body) => Ok(FosResponse {
+                        status: 200,
+                        body: body.clone(),
+                        cdn_cache: None,
+                        retry_after: None,
+                    }),
+                    None => Ok(FosResponse {
+                        status: 404,
+                        body: Vec::new(),
+                        cdn_cache: None,
+                        retry_after: None,
+                    }),
+                }
+            }
+            fn admin_remaining_calls(&self) -> u32 {
+                self.remaining.get()
+            }
+        }
+
+        let svc: Service = serde_json::from_value(json!({
+            "service_id": "svc", "name": "n", "status": "active", "created_at": 0, "updated_at": 0,
+            "config_version": 1, "logging_enabled": true, "logging_endpoint_name": "e",
+            "log_period": 120, "sample_rate": 1, "edge_only": false, "custom_condition": "",
+            "fos_bucket": "fos-abcdefghijklmnopqrst12-logs", "fos_prefix": "", "fos_region": "us-east-1",
+            "fos_endpoint": "x", "log_fields": [], "field_limits": {}, "fastly_token_ref": "t",
+            "fos_access_key_ref": "ak", "fos_secret_key_ref": "sk", "owner": "o",
+            "bucket_adopted": false, "bucket_checked": false, "last_activated_version": null,
+            "last_reconcile": null, "pending_job_id": null
+        }))
+        .unwrap();
+
+        let hour = 1_800_000_000i64;
+        let day = hour - hour.rem_euclid(DAY_S);
+        let day_key = "processed/_catalog/day-iter39-bundle.json".to_owned();
+        let catalog = Head {
+            version: VERSION,
+            generation: 5,
+            days: BTreeMap::from([(day, day_key.clone())]),
+            ..Default::default()
+        };
+
+        let cases: Vec<(&str, Day, Option<&str>)> = vec![
+            (
+                "foreign_service_id",
+                Day {
+                    version: VERSION,
+                    service_id: Some("foreign-svc".into()),
+                    ..Default::default()
+                },
+                Some("catalog_manifest_invalid"),
+            ),
+            (
+                "unsupported_version",
+                Day {
+                    version: VERSION + 1,
+                    service_id: Some(svc.service_id.clone()),
+                    ..Default::default()
+                },
+                Some("catalog_version_unsupported"),
+            ),
+            (
+                "legacy_service_id_none",
+                Day {
+                    version: VERSION,
+                    service_id: None,
+                    hours: BTreeMap::from([(
+                        hour + HOUR_S,
+                        Reference {
+                            key: "processed/_catalog/blk-other-hour.json".into(),
+                            generation: 5,
+                        },
+                    )]),
+                    ..Default::default()
+                },
+                None,
+            ),
+        ];
+
+        for (label, day_obj, expected_err) in cases {
+            let rt = MockRt {
+                objects: RefCell::new(BTreeMap::from([(
+                    day_key.clone(),
+                    serde_json::to_vec(&day_obj).unwrap(),
+                )])),
+                remaining: Cell::new(32),
+            };
+            let store = Store {
+                runtime: &rt,
+                service: &svc,
+                access_key: "ak".into(),
+                secret_key: "sk".into(),
+                started: Instant::now(),
+                vcpu_start: 0,
+            };
+            let mut ctx = Ctx {
+                store: &store,
+                cdn_key: "cdn",
+                reserve: 0,
+                windows: "processed/summary/".into(),
+                bundles: "processed/summary_bundles/".into(),
+                marker: "summary=",
+                now: 1_800_003_600,
+                present: HashMap::new(),
+                report: BundleReport::default(),
+                catalog: catalog.clone(),
+                publication: None,
+                referenced: None,
+                vcpu_seen: 0,
+            };
+
+            // 1. Ctx::catalog_windows
+            let mut state = State::default();
+            let cw_res = ctx.catalog_windows(&mut state, hour, true);
+            assert_eq!(
+                cw_res.err().as_deref(),
+                expected_err,
+                "iter39 ({label}): Ctx::catalog_windows Day validation mismatch"
+            );
+
+            // 2. Ctx::present
+            let present_res = ctx.present(day);
+            match expected_err {
+                Some(expected) => assert_eq!(
+                    present_res.err().as_deref(),
+                    Some(expected),
+                    "iter39 ({label}): Ctx::present Day validation mismatch"
+                ),
+                None => {
+                    let hours = present_res
+                        .expect(
+                            "iter39: Ctx::present must accept legacy v2 Day with service_id: None",
+                        )
+                        .expect("iter39: Ctx::present must have budget");
+                    assert!(hours.contains(&(hour + HOUR_S)));
+                }
+            }
+        }
     }
 }

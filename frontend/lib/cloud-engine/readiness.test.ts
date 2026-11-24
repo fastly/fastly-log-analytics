@@ -2634,3 +2634,130 @@ it("SEC-T5-ITER37-FE-05: maintains strict O(N) performance (<10ms median) on 64 
     window.removeEventListener("fla:cloud-query", listener);
   }
 }, 30000);
+
+it("SEC-T5-ITER39-FE-01: prevents non-E backslash-quote phase inversion with trailing apostrophes or truncated quotes", async () => {
+  setCloudModeRuntime(true);
+  const events: { state?: string; error?: string }[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    const cases: readonly [string, readonly string[], string][] = [
+      [
+        "error: 'a\\'memory' in user's query",
+        ["memory", "user", "query"],
+        "Error: error: [redacted] in [redacted]",
+      ],
+      [
+        "error: 'a\\'select' for O'Brien",
+        ["select", "Brien"],
+        "Error: error: [redacted] for [redacted]",
+      ],
+      [
+        "error: 'a\\'memory' 'truncated",
+        ["memory", "truncated"],
+        "Error: error: [redacted]",
+      ],
+      [
+        "error: 'a\\' memory ' in user's query",
+        ["memory", "user", "query"],
+        "Error: error: [redacted] in [redacted]",
+      ],
+      [
+        "error: 'a\\' select ' for O'Brien",
+        ["select", "Brien"],
+        "Error: error: [redacted] for [redacted]",
+      ],
+    ];
+    for (const [msg, forbidden, expectedExact] of cases) {
+      const err = new Error(msg);
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+      const got = events.at(-1)?.error ?? "";
+      for (const frag of forbidden) {
+        expect(got, `msg=${msg} got=${got}`).not.toContain(frag);
+      }
+      expect(got, `msg=${msg}`).toBe(expectedExact);
+    }
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+  }
+});
+
+it("SEC-T5-ITER39-FE-02: prevents double-quote and backtick trailing-backslash quote desync while preserving JSON escapes", async () => {
+  setCloudModeRuntime(true);
+  const events: { state?: string; error?: string }[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    const cases: readonly [string, readonly string[], string][] = [
+      [
+        'Parser Error: near "a\\" and "select update delete session 500ms"',
+        ["select", "update", "delete", "session", "500ms"],
+        "Error: Parser Error: near [redacted] and [redacted]",
+      ],
+      [
+        "Parser Error: near `a\\` and `session 500ms 404 B`",
+        ["session", "500ms", "404"],
+        "Error: Parser Error: near [redacted] and [redacted]",
+      ],
+      [
+        'Parser Error: near "a\\\\" and "select update delete"',
+        ["select", "update", "delete"],
+        "Error: Parser Error: near [redacted] and [redacted]",
+      ],
+      [
+        'JSON Error: bad value "foo\\"bar" and "select"',
+        ["foo", "bar", "select"],
+        "Error: JSON Error: bad value [redacted] and [redacted]",
+      ],
+      [
+        'JSON Error: bad value "foo\\" bar " and "select"',
+        ["foo", "bar", "select"],
+        "Error: JSON Error: bad value [redacted] and [redacted]",
+      ],
+    ];
+    for (const [msg, forbidden, expectedExact] of cases) {
+      const err = new Error(msg);
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+      const got = events.at(-1)?.error ?? "";
+      for (const frag of forbidden) {
+        expect(got, `msg=${msg} got=${got}`).not.toContain(frag);
+      }
+      expect(got, `msg=${msg}`).toBe(expectedExact);
+    }
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+  }
+});
+
+it("SEC-T5-ITER39-FE-03: maintains strict O(N) performance (<10ms median, <150ms max) on 64 KiB Wave 39 adversarial quote payloads", async () => {
+  setCloudModeRuntime(true);
+  const events: { state?: string; error?: string }[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    const perfPayloads64k = [
+      `error: '${"a\\'b".repeat(16000)}' in user's query`,
+      `Parser Error: near "${'a\\"'.repeat(21000)}" and "select update delete session 500ms"`,
+      `Parser Error: near \`${"a\\`".repeat(21000)}\` and \`session 500ms 404 B\``,
+      `Parser Error: ${'"a\\" '.repeat(12800)}"select"`,
+      `Parser Error: ${"`a\\` ".repeat(12800)}\`session\``,
+    ];
+    for (const payload of perfPayloads64k) {
+      const err = new Error(payload);
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+      const trials: number[] = [];
+      for (let k = 0; k < 5; k += 1) {
+        const t0 = performance.now();
+        await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+        trials.push(performance.now() - t0);
+      }
+      const sorted = [...trials].sort((a, b) => a - b);
+      const median = sorted[Math.floor(sorted.length / 2)]!;
+      const max = sorted.at(-1)!;
+      expect(median, `len=${payload.length} trials=${trials.map((v) => v.toFixed(2)).join(",")}`).toBeLessThan(10);
+      expect(max, `len=${payload.length} trials=${trials.map((v) => v.toFixed(2)).join(",")}`).toBeLessThan(150);
+    }
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+  }
+}, 30000);
