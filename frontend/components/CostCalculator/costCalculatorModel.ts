@@ -104,7 +104,10 @@ export function reducer(state: CalcState, action: CalcAction): CalcState {
   switch (action.type) {
     case 'SET': {
       const next = { ...state, [action.key]: action.value }
-      if (action.key === 'reqDay' && !state.userEditedNodes) next.logNodes = suggestNodes(action.value as number)
+      if (action.key === 'reqDay' || action.key === 'edgeReqDay' || action.key === 'edgeOnly') {
+        const effectiveReq = next.edgeOnly ? next.edgeReqDay : next.reqDay
+        next.logNodes = suggestNodes(effectiveReq)
+      }
       if (action.key === 'logNodes') next.userEditedNodes = true
       if (action.key === 'billingZone') {
         const zone = action.value as BillingZone
@@ -123,6 +126,7 @@ export function reducer(state: CalcState, action: CalcAction): CalcState {
       const req = p.requests_per_day ?? state.reqDay
       const edgeReq = p.edge_requests_per_day ?? state.edgeReqDay
       const lp = p.log_period_seconds ?? state.logPeriod
+      const edgeOnly = p.edge_only ?? state.edgeOnly
 
       const rawZone = p.billing_zone
       const resolvedZone: BillingZone =
@@ -153,7 +157,7 @@ export function reducer(state: CalcState, action: CalcAction): CalcState {
         fosRegion: p.fos_region ?? state.fosRegion,
         ...(p.storage_rate_per_gb_month != null && { rateStorage: p.storage_rate_per_gb_month }),
         ...(p.min_billed_days != null && { minDays: p.min_billed_days }),
-        logNodes: suggestNodes(req),
+        logNodes: suggestNodes(edgeOnly ? edgeReq : req),
         userEditedNodes: false,
       }
     }

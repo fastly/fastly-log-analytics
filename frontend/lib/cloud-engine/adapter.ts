@@ -2275,6 +2275,7 @@ async function dispatchCloudRequest(
 
   // Page 5: Usage & Cost (/api/usage/*)
   if (pathname === "/api/usage/rum-breakdown" && method === "GET") {
+    const startedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
     const startOpsEpoch = currentOpsCacheEpoch();
     assertAdapterEpoch(request, entryMetaEpoch);
     assertOpsEpoch(startOpsEpoch, request.signal);
@@ -2292,9 +2293,22 @@ async function dispatchCloudRequest(
     );
     assertAdapterEpoch(request, entryMetaEpoch);
     assertOpsEpoch(startOpsEpoch, request.signal);
-    return jsonResponse(rumUsage, request);
+    const elapsed = Math.max(0, Math.round((typeof performance !== "undefined" ? performance.now() : Date.now()) - startedAt));
+    return jsonResponse(rumUsage, request, {
+      sql: `cloud-usage: ${pathname}`,
+      duration_ms: elapsed,
+      rows: Array.isArray((rumUsage as { data?: unknown[] }).data) ? (rumUsage as { data: unknown[] }).data.length : 0,
+      engine: "Ops-Worker",
+    });
   }
   if (pathname.startsWith("/api/usage/")) {
+    const startedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+    const usageDebug = (rows: number) => ({
+      sql: `cloud-usage: ${pathname}`,
+      duration_ms: Math.max(0, Math.round((typeof performance !== "undefined" ? performance.now() : Date.now()) - startedAt)),
+      rows,
+      engine: "Ops-Worker",
+    });
     const startOpsEpoch = currentOpsCacheEpoch();
     const checkUsageEpoch = () => {
       assertAdapterEpoch(request, entryMetaEpoch);
@@ -2319,7 +2333,7 @@ async function dispatchCloudRequest(
         },
       );
       checkUsageEpoch();
-      return jsonResponse(settings, request);
+      return jsonResponse(settings, request, usageDebug(1));
     }
     if (pathname === "/api/usage/prefill") {
       const prefill = await fetchEstimatePrefill(
@@ -2332,7 +2346,7 @@ async function dispatchCloudRequest(
         return null;
       });
       checkUsageEpoch();
-      return jsonResponse(prefill ?? { rates: LIST_RATES }, request);
+      return jsonResponse(prefill ?? { rates: LIST_RATES }, request, usageDebug(1));
     }
     if (pathname === "/api/usage/compute") {
       const computed = await computeUsage(
@@ -2346,7 +2360,7 @@ async function dispatchCloudRequest(
         },
       );
       checkUsageEpoch();
-      return jsonResponse(computed, request);
+      return jsonResponse(computed, request, usageDebug(computed.source === "fastly" ? computed.data.length : 0));
     }
 
     // Shares the Compute charts' Platform Metrics read; resolves to null (logged lines) on failure.
@@ -2436,6 +2450,7 @@ async function dispatchCloudRequest(
           seven_line_table: costLines.lines,
         },
         request,
+        usageDebug(storageBilling.intervals.length),
       );
     }
     if (pathname === "/api/usage/operations") {
@@ -2456,6 +2471,7 @@ async function dispatchCloudRequest(
           })),
         },
         request,
+        usageDebug(points.length),
       );
     }
     if (pathname === "/api/usage/bandwidth") {
@@ -2468,6 +2484,7 @@ async function dispatchCloudRequest(
           })),
         },
         request,
+        usageDebug(points.length),
       );
     }
     if (pathname === "/api/usage/log-activity") {
@@ -2480,6 +2497,7 @@ async function dispatchCloudRequest(
           })),
         },
         request,
+        usageDebug(points.length),
       );
     }
   }

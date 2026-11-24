@@ -8,13 +8,19 @@ type JobMessage = {
   options: Omit<ReadLogsOptions, "signal" | "onProgress">;
   pageLoadId?: string | null;
   identity?: OpsIdentity;
+  reportApiCalls?: boolean;
 };
 
 self.onmessage = createWorkerRpcHost<JobMessage>(async (msg, ctx) => {
   const source = browserOpsSource(
     self.location.origin,
     msg.identity,
-    { getPageLoadId: () => msg.pageLoadId ?? "" },
+    {
+      getPageLoadId: () => msg.pageLoadId ?? "",
+      onApiCall: msg.reportApiCalls
+        ? (call) => ctx.post({ id: msg.id, type: "apiCall", call })
+        : undefined,
+    },
   );
   const result = await readLogs(source, {
     ...msg.options,

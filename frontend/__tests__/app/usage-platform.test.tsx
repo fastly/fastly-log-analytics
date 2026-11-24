@@ -342,8 +342,9 @@ describe('High-Scale cost calculator UI fixes', () => {
     expect(container.textContent).not.toContain('~15×')
   })
 
-  it('allows log nodes up to the 120-node suggestion cap', () => {
+  it('renders auto-derived read-only log nodes instead of an editable input', () => {
     render(<CostCalculator />)
-    expect(screen.getByRole('spinbutton', { name: 'Log nodes / fan-out' })).toHaveAttribute('max', '120')
+    expect(screen.queryByRole('spinbutton', { name: 'Log nodes / fan-out' })).not.toBeInTheDocument()
+    expect(screen.getByText('Log nodes / fan-out')).toBeInTheDocument()
   })
 })

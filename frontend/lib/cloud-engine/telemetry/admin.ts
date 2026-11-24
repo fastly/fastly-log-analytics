@@ -1,3 +1,6 @@
+import { getPageLoadId } from "@/lib/api";
+import { parseServerTiming } from "@/lib/call-timeline";
+import { useDebugStore } from "@/stores/filterStore";
 import type { components, paths } from "../cloud-api.generated";
 import { isNetworkFailure, retryNetwork } from "../fetch-retry";
 import type { OpsKind } from "./kinds";
@@ -113,7 +116,34 @@ export async function adminRequest<T>(
   const method = request.method?.toUpperCase() ?? "GET";
   const idempotent = method === "GET" || method === "HEAD";
   const readResponse = async () => {
+    const startMs =
+      typeof performance !== "undefined" ? performance.timeOrigin + performance.now() : Date.now();
+    const startPerf = typeof performance !== "undefined" ? performance.now() : Date.now();
     const response = await fetch(base() + path, request);
+    try {
+      const debugState = useDebugStore.getState();
+      if (debugState.apiCallsEnabled) {
+        const endPerf = typeof performance !== "undefined" ? performance.now() : Date.now();
+        const vcpuHeader = response?.headers?.get?.("x-flp-vcpu-ms");
+        const vcpuMs = vcpuHeader != null && vcpuHeader !== "" ? Number(vcpuHeader) : null;
+        const pathOnly = path.split("?")[0] ?? path;
+        debugState.addApiCall({
+          source: "Compute API",
+          method,
+          path,
+          endpoint: `${method} ${pathOnly}`,
+          status: response?.status ?? null,
+          duration_ms: Math.max(0, Math.round(endPerf - startPerf)),
+          start_ms: startMs,
+          server_timing: parseServerTiming(response?.headers?.get?.("server-timing") ?? null),
+          vcpu_ms: vcpuMs !== null && Number.isFinite(vcpuMs) ? vcpuMs : null,
+          page_load_id: getPageLoadId() ?? undefined,
+          timestamp: new Date().toISOString(),
+        });
+      }
+    } catch {
+      /* ignore debug telemetry errors */
+    }
     if (
       method === "HEAD" ||
       response.status === 204 ||

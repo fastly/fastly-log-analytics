@@ -195,8 +195,8 @@ export function Inputs({ s, r, set }: InputsProps) {
         <Row label='Average bytes per log line' tooltip="The average uncompressed bytes per request based on your selected fields. Compressed ~5× with ZSTD (.zst) in Object Storage and ~4× in Parquet.">
           <NumInput value={s.bytesPerLine} onChange={set('bytesPerLine')} min={1} />
         </Row>
-        <Row label='Log nodes / fan-out' tooltip="Estimated number of Fastly aggregators/cache nodes flushing per period. Higher traffic = more nodes.">
-          <NumInput value={s.logNodes} onChange={set('logNodes')} min={1} max={120} />
+        <Row label='Log nodes / fan-out' tooltip="Expected number of Fastly aggregators/cache nodes flushing per period, automatically derived from traffic volume (~1 node per 8k req/day, capped at 120).">
+          <ReadOnlyValue value={s.logNodes} />
         </Row>
         <Row label='Manual log checks per day' tooltip="Each click of 'Refresh' on the Ingestion tab performs 1 Class A list operation against FOS.">
           <NumInput value={s.logsChecksPerDay} onChange={set('logsChecksPerDay')} />

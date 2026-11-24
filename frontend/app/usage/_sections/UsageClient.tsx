@@ -215,16 +215,18 @@ export function UsagePageContent({
   const estimatorRef = useRef<HTMLDivElement>(null)
   const estimatorVisible = useInViewOnce(estimatorRef, { rootMargin: '600px' })
 
+  const cloudMode = isCloudMode()
+
   const { data: prefillFull, isLoading: loadingPrefillFull, isError: prefillFullFailed } = useQuery({
     queryKey: ['usage', 'prefill-full', activeServiceId],
     queryFn: async ({ signal }) => {
       return unwrapClient(client.GET('/api/usage/prefill', { signal }))
     },
-    enabled: isReady && estimatorVisible,
+    // On Cloud, start prefill in the initial wave alongside the 24h/30d reads so the
+    // loading popup doesn't finish and then jump into a second file-loading wave.
+    enabled: isReady && (cloudMode || estimatorVisible),
     staleTime: 5 * 60_000,
   })
-
-  const cloudMode = isCloudMode()
 
   const { data: cloudLogFields } = useQuery({
     queryKey: ['usage', 'cloud-log-fields', activeServiceId],
@@ -234,7 +236,7 @@ export function UsagePageContent({
         signal,
       }))
     },
-    enabled: isReady && cloudMode && estimatorVisible && Boolean(activeServiceId),
+    enabled: isReady && cloudMode && Boolean(activeServiceId),
     staleTime: 5 * 60_000,
   })
 
@@ -243,7 +245,7 @@ export function UsagePageContent({
     queryFn: async ({ signal }) => {
       return unwrapClient(client.GET('/api/log-fields/catalog', { signal }))
     },
-    enabled: isReady && cloudMode && estimatorVisible && Boolean(activeServiceId),
+    enabled: isReady && cloudMode && Boolean(activeServiceId),
     staleTime: 5 * 60_000,
   })
 

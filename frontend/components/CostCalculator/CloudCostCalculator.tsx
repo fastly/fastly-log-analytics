@@ -37,9 +37,18 @@ import {
 } from './CostCalculator'
 
 export function applyWhatIfs(base: EstimateInputs, edits: Partial<EstimateInputs>, lineBytes?: number): EstimateInputs {
-  const inputs = { ...base, ...edits, deleteAfter: true }
+  const inputs = { ...base, ...edits }
   if (edits.requestsPerDay != null && !('edgeRequestsPerDay' in edits) && base.requestsPerDay > 0) {
     inputs.edgeRequestsPerDay = base.edgeRequestsPerDay * (edits.requestsPerDay / base.requestsPerDay)
+  }
+  if (
+    !('filesPerPeriod' in edits) &&
+    ('requestsPerDay' in edits || 'edgeRequestsPerDay' in edits || 'edgeOnly' in edits)
+  ) {
+    const effectiveReqs = inputs.edgeOnly ? inputs.edgeRequestsPerDay : inputs.requestsPerDay
+    if (effectiveReqs > 0) {
+      inputs.filesPerPeriod = Math.max(1, Math.min(DEFAULT_INPUTS.filesPerPeriod, Math.ceil(effectiveReqs / 8000)))
+    }
   }
   const baseLineBytes = base.gzBytesPerLine * base.rawBytesPerGzByte
   if (lineBytes != null && baseLineBytes > 0) {
@@ -197,6 +206,7 @@ export function CloudCostCalculator({ prefillData, prefillNote, rates: configure
     if (prefillInputs.samplePct !== undefined) base.samplePct = prefillInputs.samplePct
     if (prefillInputs.logPeriodS !== undefined) base.logPeriodS = prefillInputs.logPeriodS
     if (prefillInputs.edgeOnly !== undefined) base.edgeOnly = prefillInputs.edgeOnly
+    if (prefillInputs.deleteAfter !== undefined) base.deleteAfter = prefillInputs.deleteAfter
     if (prefillInputs.retentionDays !== undefined) base.retentionDays = prefillInputs.retentionDays
     if (prefillInputs.rumLogPeriodS !== undefined) base.rumLogPeriodS = prefillInputs.rumLogPeriodS
     if (prefillInputs.rumSamplePct !== undefined) base.rumSamplePct = prefillInputs.rumSamplePct
@@ -284,14 +294,17 @@ export function CloudCostCalculator({ prefillData, prefillNote, rates: configure
               <Row label="Log file period (seconds)" tooltip="How often Fastly closes and uploads a log file. Controlled by the Fastly logging configuration.">
                 <NumInput aria-label="Log file period (seconds)" value={inputs.logPeriodS} onChange={set('logPeriodS')} min={1} />
               </Row>
-              <Row label="Log nodes / fan-out" tooltip="Active Fastly POPs/nodes flushing a log file per period. Higher traffic uses more nodes; derived from request volume (~1 node per 8k req/day) when pre-filled.">
-                <NumInput aria-label="Log nodes / fan-out" value={inputs.filesPerPeriod} onChange={set('filesPerPeriod')} min={1} max={109} />
+              <Row label="Log nodes / fan-out" tooltip="Expected Fastly POPs/nodes flushing a log file per period, automatically derived from live ingest or request volume (~1 node per 8k req/day, capped at 109).">
+                <ReadOnlyValue value={Math.round(inputs.filesPerPeriod)} />
               </Row>
               <Row label="Average bytes per log line" tooltip="Average uncompressed bytes per logged request. Compressed in Object Storage (.zst) and Parquet.">
                 <NumInput aria-label="Average bytes per log line" value={lineBytesUncompressed} onChange={setLineBytes} min={1} wide />
               </Row>
               <Row label="Data retention (days)" tooltip="How many days Parquet logs and summary bundles are kept in Object Storage. Deleted objects are still billed for the 30-day FOS minimum.">
                 <NumInput aria-label="Data retention (days)" value={inputs.retentionDays} onChange={set('retentionDays')} min={1} />
+              </Row>
+              <Row label="Auto-delete raw .zst logs after ingest" tooltip="Delete raw .zst log files after ingest into Parquet. Objects are still billed for the FOS minimum 30 days, but this prevents redundant long-term storage.">
+                <Switch aria-label="Auto-delete raw .zst logs after ingest" checked={inputs.deleteAfter} onCheckedChange={set('deleteAfter')} />
               </Row>
               {prefillData?.rumEnabled && (
                 <>

@@ -128,9 +128,11 @@ describe('Cloud cost calculator', () => {
     expect(total?.textContent).not.toBe(before)
   })
 
-  it('exposes an editable log nodes / fan-out input defaulting to the canonical node count', () => {
+  it('displays read-only auto-derived log nodes defaulting to the canonical node count', () => {
     render(<CloudCostCalculator />)
-    expect(screen.getByRole('spinbutton', { name: 'Log nodes / fan-out' })).toHaveValue(DEFAULT_INPUTS.filesPerPeriod)
+    expect(screen.queryByRole('spinbutton', { name: 'Log nodes / fan-out' })).not.toBeInTheDocument()
+    const row = screen.getByText('Log nodes / fan-out').closest('div')!.parentElement!
+    expect(row).toHaveTextContent(String(DEFAULT_INPUTS.filesPerPeriod))
   })
 
   it('derives log nodes from request volume when pre-filled (req / 8000, capped at 109)', () => {
@@ -138,25 +140,39 @@ describe('Cloud cost calculator', () => {
       inputs: { ...DEFAULT_INPUTS, edgeOnly: true, requestsPerDay: 200_000, edgeRequestsPerDay: 200_000 },
     }} />)
     // ceil(200000 / 8000) = 25 POPs.
-    expect(screen.getByRole('spinbutton', { name: 'Log nodes / fan-out' })).toHaveValue(25)
+    const row = screen.getByText('Log nodes / fan-out').closest('div')!.parentElement!
+    expect(row).toHaveTextContent('25')
   })
 
   it('caps derived log nodes at the DEFAULT_INPUTS maximum', () => {
     render(<CloudCostCalculator prefillData={{
       inputs: { ...DEFAULT_INPUTS, edgeOnly: true, requestsPerDay: 100_000_000, edgeRequestsPerDay: 100_000_000 },
     }} />)
-    expect(screen.getByRole('spinbutton', { name: 'Log nodes / fan-out' })).toHaveValue(DEFAULT_INPUTS.filesPerPeriod)
+    const row = screen.getByText('Log nodes / fan-out').closest('div')!.parentElement!
+    expect(row).toHaveTextContent(String(DEFAULT_INPUTS.filesPerPeriod))
   })
 
-  it('updates the estimate when the log nodes input is edited', () => {
+  it('re-derives log nodes automatically when traffic volume changes', () => {
     render(<CloudCostCalculator prefillData={{
       inputs: { ...DEFAULT_INPUTS, edgeOnly: true, requestsPerDay: 200_000, edgeRequestsPerDay: 200_000 },
     }} />)
-    const total = screen.getByText('Total Estimated Monthly Cost').parentElement?.nextElementSibling
-    const before = total?.textContent
-    fireEvent.change(screen.getByRole('spinbutton', { name: 'Log nodes / fan-out' }), { target: { value: '100' } })
-    expect(screen.getByRole('spinbutton', { name: 'Log nodes / fan-out' })).toHaveValue(100)
-    expect(total?.textContent).not.toBe(before)
+    const row = () => screen.getByText('Log nodes / fan-out').closest('div')!.parentElement!
+    expect(row()).toHaveTextContent('25')
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Total requests per day' }), { target: { value: '800000' } })
+    expect(row()).toHaveTextContent('100')
+  })
+
+  it('exposes Auto-delete raw .zst logs after ingest matching High-Scale and updates storage when toggled', () => {
+    render(<CloudCostCalculator prefillData={{
+      inputs: { ...DEFAULT_INPUTS, retentionDays: 90, deleteAfter: true },
+    }} />)
+    const toggle = screen.getByRole('switch', { name: 'Auto-delete raw .zst logs after ingest' })
+    expect(toggle).toHaveAttribute('aria-checked', 'true')
+    const storage = () => screen.getByText('Object Storage').closest('[data-estimate-line]')!.textContent
+    const before = storage()
+    fireEvent.click(toggle)
+    expect(toggle).toHaveAttribute('aria-checked', 'false')
+    expect(storage()).not.toBe(before)
   })
 
   it('auto-derives Delivery Billing Zone from fosRegion when rate is untouched default', () => {

@@ -1,4 +1,5 @@
 import { getPageLoadId } from "@/lib/api";
+import { useDebugStore, type ApiCallEntry } from "@/stores/filterStore";
 import { BaseWorkerRpcClient } from "../worker-rpc";
 import { beginCloudLoading } from "../loading-progress";
 import { createSharedRequests } from "../shared-request";
@@ -24,11 +25,13 @@ type WorkerRequest = {
   options: Omit<ReadLogsOptions, "signal" | "onProgress">;
   pageLoadId: string | null;
   identity: OpsIdentity;
+  reportApiCalls?: boolean;
 };
 
 type WorkerMessage =
   | { id: number; type: "result"; result: LogResult }
   | { id: number; type: "progress"; progress: RunProgress }
+  | { id: number; type: "apiCall"; call: ApiCallEntry }
   | { id: number; type: "error"; message: string };
 
 class OpsWorkerClient extends BaseWorkerRpcClient<
@@ -50,6 +53,11 @@ class OpsWorkerClient extends BaseWorkerRpcClient<
   private handleMessage = (msg: WorkerMessage) => {
     if (msg.type === "progress") {
       this.progressCallbacks.get(msg.id)?.(msg.progress);
+      return;
+    }
+    if (msg.type === "apiCall") {
+      const state = useDebugStore.getState();
+      if (state.apiCallsEnabled) state.addApiCall(msg.call);
       return;
     }
     if (msg.type === "result") {
@@ -89,12 +97,21 @@ class OpsWorkerClient extends BaseWorkerRpcClient<
       return Promise.reject(new DOMException("Aborted", "AbortError"));
     }
     const worker = this.getWorker(this.handleMessage);
+    const reportApiCalls = useDebugStore.getState().apiCallsEnabled;
     if (!worker) {
       return readLogsInline(
         browserOpsSource(
           typeof window !== "undefined" ? window.location.origin : "",
           identity,
-          { getPageLoadId: () => getPageLoadId() ?? "" },
+          {
+            getPageLoadId: () => getPageLoadId() ?? "",
+            onApiCall: reportApiCalls
+              ? (call) => {
+                  const state = useDebugStore.getState();
+                  if (state.apiCallsEnabled) state.addApiCall(call);
+                }
+              : undefined,
+          },
         ),
         options,
       );
@@ -114,6 +131,7 @@ class OpsWorkerClient extends BaseWorkerRpcClient<
         options: serializable,
         pageLoadId: getPageLoadId(),
         identity,
+        reportApiCalls,
       };
       worker.postMessage(req);
     });

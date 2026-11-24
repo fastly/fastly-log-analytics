@@ -100,4 +100,32 @@ describe("API telemetry hook", () => {
     await client.GET("/api/services");
     expect(useDebugStore.getState().apiCalls[0]?.vcpu_ms).toBeNull();
   });
+
+  it("records adminRequest calls into useDebugStore when apiCallsEnabled is true", async () => {
+    const { adminRequest } = await import("./telemetry/admin");
+    useDebugStore.setState({ apiCallsEnabled: true, apiCalls: [] });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+            "x-flp-vcpu-ms": "12.5",
+          },
+        }),
+      ),
+    );
+    await adminRequest("/api/admin/usage/settings?service_id=svc-1");
+    const calls = useDebugStore.getState().apiCalls;
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      source: "Compute API",
+      method: "GET",
+      path: "/api/admin/usage/settings?service_id=svc-1",
+      endpoint: "GET /api/admin/usage/settings",
+      status: 200,
+      vcpu_ms: 12.5,
+    });
+  });
 });
