@@ -203,6 +203,14 @@ export function CloudCostCalculator({ prefillData, prefillNote, rates: configure
     if (prefillData?.rumEnabled && prefillInputs.rumPageviewsPerDay !== undefined) {
       base.rumPageviewsPerDay = prefillInputs.rumPageviewsPerDay
     }
+    if (prefillData?.measuredInputs?.filesPerPeriod && prefillInputs.filesPerPeriod !== undefined) {
+      base.filesPerPeriod = prefillInputs.filesPerPeriod
+    } else if (prefillInputs.requestsPerDay !== undefined || prefillInputs.edgeRequestsPerDay !== undefined) {
+      const effectiveReqs = base.edgeOnly ? base.edgeRequestsPerDay : base.requestsPerDay
+      if (effectiveReqs > 0) {
+        base.filesPerPeriod = Math.max(1, Math.min(DEFAULT_INPUTS.filesPerPeriod, Math.ceil(effectiveReqs / 8000)))
+      }
+    }
   }
 
   const inputs = applyWhatIfs(base, edits, lineBytes)
@@ -266,6 +274,9 @@ export function CloudCostCalculator({ prefillData, prefillNote, rates: configure
               )}
               <Row label="Log file period (seconds)" tooltip="How often Fastly closes and uploads a log file. Controlled by the Fastly logging configuration.">
                 <NumInput aria-label="Log file period (seconds)" value={inputs.logPeriodS} onChange={set('logPeriodS')} min={1} />
+              </Row>
+              <Row label="Log nodes / fan-out" tooltip="Active Fastly POPs/nodes flushing a log file per period. Higher traffic uses more nodes; derived from request volume (~1 node per 8k req/day) when pre-filled.">
+                <NumInput aria-label="Log nodes / fan-out" value={inputs.filesPerPeriod} onChange={set('filesPerPeriod')} min={1} max={109} />
               </Row>
               <Row label="Average bytes per log line" tooltip="Average uncompressed bytes per logged request. Compressed in Object Storage (.zst) and Parquet.">
                 <NumInput aria-label="Average bytes per log line" value={lineBytesUncompressed} onChange={setLineBytes} min={1} wide />

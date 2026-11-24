@@ -113,4 +113,35 @@ describe('Cloud cost calculator', () => {
     })
     expect(total?.textContent).not.toBe(before)
   })
+
+  it('exposes an editable log nodes / fan-out input defaulting to the canonical node count', () => {
+    render(<CloudCostCalculator />)
+    expect(screen.getByRole('spinbutton', { name: 'Log nodes / fan-out' })).toHaveValue(DEFAULT_INPUTS.filesPerPeriod)
+  })
+
+  it('derives log nodes from request volume when pre-filled (req / 8000, capped at 109)', () => {
+    render(<CloudCostCalculator prefillData={{
+      inputs: { ...DEFAULT_INPUTS, edgeOnly: true, requestsPerDay: 200_000, edgeRequestsPerDay: 200_000 },
+    }} />)
+    // ceil(200000 / 8000) = 25 POPs.
+    expect(screen.getByRole('spinbutton', { name: 'Log nodes / fan-out' })).toHaveValue(25)
+  })
+
+  it('caps derived log nodes at the DEFAULT_INPUTS maximum', () => {
+    render(<CloudCostCalculator prefillData={{
+      inputs: { ...DEFAULT_INPUTS, edgeOnly: true, requestsPerDay: 100_000_000, edgeRequestsPerDay: 100_000_000 },
+    }} />)
+    expect(screen.getByRole('spinbutton', { name: 'Log nodes / fan-out' })).toHaveValue(DEFAULT_INPUTS.filesPerPeriod)
+  })
+
+  it('updates the estimate when the log nodes input is edited', () => {
+    render(<CloudCostCalculator prefillData={{
+      inputs: { ...DEFAULT_INPUTS, edgeOnly: true, requestsPerDay: 200_000, edgeRequestsPerDay: 200_000 },
+    }} />)
+    const total = screen.getByText('Total Estimated Monthly Cost').parentElement?.nextElementSibling
+    const before = total?.textContent
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Log nodes / fan-out' }), { target: { value: '100' } })
+    expect(screen.getByRole('spinbutton', { name: 'Log nodes / fan-out' })).toHaveValue(100)
+    expect(total?.textContent).not.toBe(before)
+  })
 })

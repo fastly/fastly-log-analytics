@@ -20,6 +20,7 @@ import {
   type EstimateMeasurements,
   type UnitCosts,
 } from "./estimate";
+import { INGEST_LIMITS } from "./ingestShape";
 import {
   incurredCost,
   summarizeUsage,
@@ -435,6 +436,30 @@ describe("compaction", () => {
     expect(plan.filesLeft).toBe(13);
   });
 
+  it("counts multipart parts from output bytes over the FOS part size", () => {
+    const plan = compactionPlan(24, 1e6, on);
+    // Level 1: a 13-source merge (13 MB → 2 parts) and an 11-source merge (11 MB → 2 parts);
+    // level 2: a 2-source merge of 12 MB compacts (24 MB → 3 parts). 2 + 2 + 3 = 7 parts.
+    const part = (bytes: number) =>
+      Math.max(1, Math.ceil(bytes / INGEST_LIMITS.partBytes));
+    expect(plan.partsUploaded).toBe(part(13e6) + part(11e6) + part(24e6));
+    expect(plan.partsUploaded).toBe(7);
+    // Parts track output size, not the raw source count.
+    expect(plan.partsUploaded).toBeLessThan(plan.sourcesRead);
+  });
+
+  it("prices compaction Class A from parts and the two multipart calls, not free deletes or reads", () => {
+    const estimate = estimateMonthly(inputs, units, LIST_PRICE_RATES, on);
+    const hour = compactionPlan(24, 1e6, on);
+    const c = estimate.compaction!;
+    // create + complete (2) per execution plus one PUT per uploaded part, and a LIST per hour.
+    // DeleteObjects is free in FOS and the source reads stay on Class B.
+    expect(c.classAPerDay).toBe((hour.partsUploaded + 2 * hour.executions) * 24 + 24);
+    expect(c.classBPerDay).toBe(hour.sourcesRead * 24);
+    // The old model charged sourcesRead + 3 executions; the fix is strictly cheaper here.
+    expect(c.classAPerDay).toBeLessThan((hour.sourcesRead + 3 * hour.executions) * 24 + 24);
+  });
+
   it("bills every merged-away source and intermediate compact its minimum days", () => {
     const estimate = estimateMonthly(inputs, units, LIST_PRICE_RATES, on);
     const c = estimate.compaction!;
@@ -442,8 +467,9 @@ describe("compaction", () => {
     // Every source and the intermediate compacts are deleted early.
     expect(c.extraStoredGb).toBeCloseTo(((parquetGb * 48) / 24) * 30, 6);
     expect(c.executionsPerDay).toBe(3 * 24);
-    // Per execution: create, complete, DeleteObjects plus one part per source; and a LIST per hour.
-    expect(c.classAPerDay).toBe((26 + 3 * 3) * 24 + 24);
+    // Per execution: create + complete multipart upload (2) plus one part per 8 MiB of output; and a
+    // LIST per hour. 24 → (13,11) merges then a (2) merge: 2+2 parts, then 3 parts = 7 parts/hour.
+    expect(estimate.compaction!.classAPerDay).toBe((7 + 2 * 3) * 24 + 24);
     expect(c.classBPerDay).toBe(26 * 24);
     expect(c.vcpuMsPerDay - c.dispatchesPerDay * COMPACT_DISPATCH_VCPU_MS).toBeCloseTo(
       48 * 20 * 24,
@@ -503,6 +529,61 @@ describe("compaction", () => {
     expect(
       without.total - estimate.total,
     ).toBeCloseTo((saved / 10_000) * 0.01 + (saved / 10_000) * 0.004);
+  });
+});
+
+describe("usage audit fixes", () => {
+  it("charges 1.17 Class A ops per raw file, not 3", () => {
+    // 1 Fastly raw-log PUT + windowFilesPerFile window PUTs + ~1/22 shard intent-manifest PUT.
+    expect(DEFAULT_UNITS.fosClassAPerFile).toBeCloseTo(1.17, 10);
+    expect(DEFAULT_UNITS.fosClassAPerFile).not.toBe(3);
+  });
+
+  it("keeps SE-demo Class A spend realistic (~$3-4/mo, not $25-70)", () => {
+    // SE demo: 200k req/day, 60 s log period, 25 writing POPs.
+    const seDemo = {
+      ...DEFAULT_INPUTS,
+      requestsPerDay: 200_000,
+      edgeRequestsPerDay: 200_000,
+      logPeriodS: 60,
+      filesPerPeriod: 25,
+    };
+    const classA = (units: UnitCosts) =>
+      line(estimateMonthly(seDemo, units, LIST_PRICE_RATES), "storage").parts!.find(
+        (p) => p.label === "Class A",
+      )!.usd;
+    const fixed = classA(DEFAULT_UNITS);
+    expect(fixed).toBeGreaterThan(3);
+    expect(fixed).toBeLessThan(4);
+    // The old per-file count overstated Class A on both the derived and the uncapped node count.
+    expect(classA({ ...DEFAULT_UNITS, fosClassAPerFile: 3 })).toBeGreaterThan(fixed);
+    const uncapped = { ...seDemo, filesPerPeriod: 109 };
+    expect(
+      line(
+        estimateMonthly(uncapped, { ...DEFAULT_UNITS, fosClassAPerFile: 3 }, LIST_PRICE_RATES),
+        "storage",
+      ).parts!.find((p) => p.label === "Class A")!.usd,
+    ).toBeGreaterThan(25);
+  });
+
+  it("keeps every priced line's parts summing to its total and lines summing to the grand total", () => {
+    const est = estimateMonthly(
+      {
+        ...DEFAULT_INPUTS,
+        requestsPerDay: 200_000,
+        edgeRequestsPerDay: 200_000,
+        logPeriodS: 60,
+        filesPerPeriod: 25,
+        rumPageviewsPerDay: 50_000,
+      },
+      DEFAULT_UNITS,
+      LIST_PRICE_RATES,
+    );
+    for (const l of est.lines) {
+      if (!l.parts) continue;
+      expect(l.parts.reduce((sum, p) => sum + p.usd, 0)).toBeCloseTo(l.usd, 9);
+    }
+    expect(est.lines.reduce((sum, l) => sum + l.usd, 0)).toBeCloseTo(est.total, 9);
   });
 });
 

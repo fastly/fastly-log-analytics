@@ -214,7 +214,10 @@ export const DEFAULT_UNITS: UnitCosts = {
   secrets: 1,
   workerRequestsPerFile: 0.125,
   frontRequestsPerFile: 1,
-  fosClassAPerFile: 3,
+  // 1 Fastly raw-log PUT + windowFilesPerFile window Parquet PUTs + ~1/22 shard intent-manifest
+  // PUT (1 + 0.125 + ~0.045 ≈ 1.17). Deletes are free in FOS, and per-window summaries and
+  // compaction PUTs are counted separately in their own feature records.
+  fosClassAPerFile: 1.17,
   fosClassBPerFile: 1,
   kvClassAPerFile: 0.25,
   kvClassBPerFile: 0.5,
@@ -255,6 +258,8 @@ export function summaryBytes(rows: number, maxKb: number): number {
 export interface CompactionHour {
   executions: number;
   sourcesRead: number;
+  /** Multipart parts uploaded across all merge executions (output bytes / part size). */
+  partsUploaded: number;
   mbRewritten: number;
   /** Bytes of sources and intermediate compacts deleted after merging. */
   deletedBytes: number;
@@ -274,6 +279,7 @@ export function compactionPlan(
   const out: CompactionHour = {
     executions: 0,
     sourcesRead: 0,
+    partsUploaded: 0,
     mbRewritten: 0,
     deletedBytes: 0,
     filesLeft: Math.max(0, Math.round(files)),
@@ -294,6 +300,9 @@ export function compactionPlan(
     const executions = full + (rest > 1 ? 1 : 0);
     out.executions += executions;
     out.sourcesRead += merged;
+    out.partsUploaded +=
+      full * Math.max(1, Math.ceil((fanIn * size) / INGEST_LIMITS.partBytes)) +
+      (rest > 1 ? Math.max(1, Math.ceil((rest * size) / INGEST_LIMITS.partBytes)) : 0);
     out.mbRewritten += (merged * size) / 1e6;
     out.deletedBytes += merged * size;
     out.filesLeft = out.filesLeft - merged + executions;
@@ -580,15 +589,16 @@ export function estimateMonthly(
       filesPerHour > 0 ? (L * inputs.parquetBytesPerRow) / windowFiles : 0,
       compaction,
     );
-    // Per execution: create, complete and a DeleteObjects after the reader grace, plus one
-    // part per source; one LIST per closed hour finds the sources. The job itself runs every
-    // COMPACT_JOB_INTERVAL_S, reading the installed service and the catalog head each time.
+    // Per execution: create and complete the multipart upload (2 Class A), plus one part PUT per
+    // uploaded part; one LIST per closed hour finds the sources. DeleteObjects is free in FOS, and
+    // the source reads stay on Class B. The job itself runs every COMPACT_JOB_INTERVAL_S, reading
+    // the installed service and the catalog head each time.
     const dispatches = 86_400 / COMPACT_JOB_INTERVAL_S;
     compactionDay = {
       dispatchesPerDay: dispatches,
       executionsPerDay: hour.executions * 24,
       classAPerDay:
-        (hour.sourcesRead + 3 * hour.executions) * 24 +
+        (hour.partsUploaded + 2 * hour.executions) * 24 +
         (hour.executions > 0 ? 24 : 0),
       classBPerDay: hour.sourcesRead * 24,
       kvClassAPerDay: 2 * hour.executions * 24,

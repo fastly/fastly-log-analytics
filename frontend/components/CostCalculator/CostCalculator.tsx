@@ -190,11 +190,11 @@ export function Inputs({ s, r, set }: InputsProps) {
         <Row label='Raw objects per archive batch' tooltip="Upper bound of source objects per consolidated archive flush (HIGH_SCALE_SNAPSHOT_MAX_OBJECTS, default 500). Quiet services flush once per snapshot interval. Each flush costs 3 writes (Parquet artifact, manifest, commit marker) and 3 verification reads.">
           <NumInput value={s.archiveBatchObjects} onChange={set('archiveBatchObjects')} min={1} max={2000} />
         </Row>
-        <Row label='Average bytes per log line' tooltip="The average uncompressed bytes per request based on your selected fields. Compressed ~15× with ZSTD (.zst) in Object Storage and ~4× in Parquet.">
+        <Row label='Average bytes per log line' tooltip="The average uncompressed bytes per request based on your selected fields. Compressed ~5× with ZSTD (.zst) in Object Storage and ~4× in Parquet.">
           <NumInput value={s.bytesPerLine} onChange={set('bytesPerLine')} min={1} />
         </Row>
         <Row label='Log nodes / fan-out' tooltip="Estimated number of Fastly aggregators/cache nodes flushing per period. Higher traffic = more nodes.">
-          <NumInput value={s.logNodes} onChange={set('logNodes')} min={1} max={72} />
+          <NumInput value={s.logNodes} onChange={set('logNodes')} min={1} max={120} />
         </Row>
         <Row label='Manual log checks per day' tooltip="Each click of 'Refresh' on the Ingestion tab performs 1 Class A list operation against FOS.">
           <NumInput value={s.logsChecksPerDay} onChange={set('logsChecksPerDay')} />
@@ -256,7 +256,7 @@ const OPS_SECTIONS = [
     valCls: 'text-right',
     rows: [
       ['Read each .zst during ingest', '1 op/file'],
-      ['Archive publish verification reads', '3 ops/batch'],
+      ['Archive publish verification reads', '5 ops/batch'],
     ],
   },
   {

@@ -4,6 +4,7 @@ import { UsageStatCards, type StorageUsageData } from '@/app/usage/_sections/Usa
 import { costAxisTickFormat, UsageChartsGrid } from '@/app/usage/_sections/UsageChartsGrid'
 import { CostCalculator } from '@/components/CostCalculator/CostCalculator'
 import { CloudCostCalculator } from '@/components/CostCalculator/CloudCostCalculator'
+import { calculate, DEFAULTS, type CalcState } from '@/components/CostCalculator/costCalculatorModel'
 
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: vi.fn() }),
@@ -248,8 +249,7 @@ describe('observed Platform usage', () => {
     expect(costAxisTickFormat(0.0002)).toBe('.5f')
   })
 
-  it('reserves full chart-grid height in Cloud mode and Cloud stat-card height to prevent CLS', () => {
-    const { container: gridContainer } = render(
+  it('reserves full chart-grid height in Cloud mode and Cloud stat-card height to prevent CLS', () => {    const { container: gridContainer } = render(
       <UsageChartsGrid
         ops={undefined}
         loadingOps={true}
@@ -291,5 +291,53 @@ describe('observed Platform usage', () => {
     const statsGrid = statsContainer.firstElementChild as HTMLElement
     expect(statsGrid.className).toContain('min-h-[420px]')
     expect(statsGrid.className).toContain('[contain-intrinsic-size:420px]')
+  })
+})
+
+describe('High-Scale cost calculator model fixes', () => {
+  const base = (over: Partial<CalcState> = {}): CalcState => ({
+    ...DEFAULTS,
+    edgeOnly: false,
+    sampleRate: 100,
+    rumBeaconsDay: 0,
+    ...over,
+  })
+
+  it('caps log files per day with the Poisson coupon-collector formula at low volume', () => {
+    const r = calculate(base({ reqDay: 10_000, logNodes: 100, logPeriod: 60 }))
+    expect(r.logFilesPerMonth / 30).toBeCloseTo(9660.7, 0)
+    expect(r.logFilesPerMonth / 30).toBeLessThan(10_000)
+  })
+
+  it('produces zero log files (no NaN) at zero requests', () => {
+    const r = calculate(base({ reqDay: 0, logNodes: 100, logPeriod: 60 }))
+    expect(r.logFilesPerMonth).toBe(0)
+    expect(Number.isNaN(r.totalGBStored)).toBe(false)
+    expect(Number.isNaN(r.classBPerMonth)).toBe(false)
+    expect(Number.isNaN(r.totalCost)).toBe(false)
+  })
+
+  it('computes cdnEgressGB with decimal 1e9 (Fastly egress billing), not binary 1024^3', () => {
+    const r = calculate(base({ reqDay: 1_000_000, cdnEnabled: true }))
+    expect(r.cdnEgressGB).toBeCloseTo(r.totalGzBytesPerMonth / 1e9, 6)
+    expect(r.cdnEgressGB).not.toBeCloseTo(r.totalGzBytesPerMonth / 1024 ** 3, 6)
+  })
+
+  it('charges 5 archive Class B verification reads per batch', () => {
+    const r = calculate(base({ reqDay: 1_000_000, rumBeaconsDay: 0 }))
+    expect(r.classBPerMonth).toBeCloseTo(r.logFilesPerMonth + r.parquetFilesPerMonth * 5, 6)
+  })
+})
+
+describe('High-Scale cost calculator UI fixes', () => {
+  it('shows the corrected ~5× ZSTD ratio (not the stale ~15×)', () => {
+    const { container } = render(<CostCalculator />)
+    expect(container.textContent).toContain('~5×')
+    expect(container.textContent).not.toContain('~15×')
+  })
+
+  it('allows log nodes up to the 120-node suggestion cap', () => {
+    render(<CostCalculator />)
+    expect(screen.getByRole('spinbutton', { name: 'Log nodes / fan-out' })).toHaveAttribute('max', '120')
   })
 })

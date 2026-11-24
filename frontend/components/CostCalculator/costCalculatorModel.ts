@@ -199,14 +199,18 @@ export function calculate(s: CalcState): CalcResults {
   const baseReqs = s.edgeOnly ? s.edgeReqDay : s.reqDay
   const reqDayEffective = baseReqs * (s.sampleRate / 100)
 
-  const logFilesPerDay = (86400 / s.logPeriod) * s.logNodes
+  const periods = 86400 / s.logPeriod
+  const nodes = Math.max(1, s.logNodes)
+  const logFilesPerDay = reqDayEffective > 0
+    ? periods * nodes * -Math.expm1(-reqDayEffective / periods / nodes)
+    : 0
   const logFilesPerMonth = logFilesPerDay * 30
 
   const totalBytesPerDay = reqDayEffective * s.bytesPerLine
   const totalBytesPerMonth = totalBytesPerDay * 30
   const totalGzBytesPerDay = totalBytesPerDay / RAW_LOG_COMPRESSION_RATIO
   const totalGzBytesPerMonth = totalGzBytesPerDay * 30
-  const logSizeKB = (totalGzBytesPerDay / logFilesPerDay) / 1024
+  const logSizeKB = logFilesPerDay > 0 ? (totalGzBytesPerDay / logFilesPerDay) / 1024 : 0
 
   const ingestSeconds = Math.max(10, Math.floor(s.logPeriod / 2))
   const syncsPerDay = (24 * 60 * 60) / ingestSeconds
@@ -253,7 +257,7 @@ export function calculate(s: CalcState): CalcResults {
     stateSyncClassA + rumBeaconsMonth + (archivePagesPerDay + rumPagesPerDay) * 30 * 3
 
   // Queries read ClickHouse, so FOS reads are raw .zst ingest plus archive publish verification reads.
-  const classBPerMonth = logFilesPerMonth + (archivePagesPerDay + rumPagesPerDay) * 30 * 3
+  const classBPerMonth = logFilesPerMonth + (archivePagesPerDay + rumPagesPerDay) * 30 * 5
 
   const logGBPerFile = logSizeKB / (1024 * 1024)
   const logActualH = s.deleteLogs ? rawSteadyStateHours : s.retentionDays * 24
@@ -278,7 +282,7 @@ export function calculate(s: CalcState): CalcResults {
   if (rumArchiveGBMonths > 0) storageTiers.push({ label: 'RUM archive', gbMonths: rumArchiveGBMonths, flagged: rumArchiveBilledH > (s.rumRetentionDays + ARCHIVE_RETENTION_MARGIN_DAYS) * 24 })
 
   // With a CDN fronting FOS, the raw .zst objects read during ingest are the egress.
-  const cdnEgressGB = s.cdnEnabled ? totalGzBytesPerMonth / (1024 * 1024 * 1024) : 0
+  const cdnEgressGB = s.cdnEnabled ? totalGzBytesPerMonth / 1e9 : 0
 
   const { costA, costB, costStorage, costEgress, totalCost } = priceQuantities(s, {
     classAPerMonth, classBPerMonth, gbMonthsStored: totalGBStored, cdnEgressGB,
