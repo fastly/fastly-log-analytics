@@ -1,6 +1,6 @@
 # Crons
 
-`flp`'s tick-driven background jobs. Two health-check probes run from every Fastly POP at the clock interval: half the shortest log period, 1–30 s, so 30 s for every Cloud install (log periods are at least 60 s). The IAD shield lets about one probe a second through to Compute, and a turn that stops with work left starts the next one itself. On `/_tick` a dispatcher decides from a Core Cache schedule whether ingest, raw delete or a maintenance stage on `flp-worker` is due; on `/_flush` it decides whether the operational-log flush is due. Idle probes do nothing and write nothing.
+`flp`'s tick-driven background jobs. Two health-check probes run from every Fastly POP at the clock interval: half the shortest log period, clamped to 1–30 s, so **30 s** for every saved Cloud install (log periods are at least 60 s). The IAD shield caches each answer for the sleep TTL Compute returns (up to 60 s while idle, dropping to a 1 s floor only while active/due), and a turn that stops with work left starts the next one itself. On `/_tick` a dispatcher decides from a Core Cache schedule whether ingest (driven by the service's `log_period`), raw delete or a maintenance stage on `flp-worker` is due; on `/_flush` it decides whether the operational-log flush is due. Idle probes do nothing and write nothing.
 
 This directory documents the code under `compute/cloud/` at `540813619`, not the plans. Each file cites `file:line`; bare paths such as `admin/mod.rs` are relative to `compute/cloud/src/`.
 
@@ -27,11 +27,11 @@ The clock and the tick orchestration are documented in [clock.md](clock.md). In 
 
 | Cron | `cron_kind` | Runs when | File |
 |---|---|---|---|
-| The clock (`/_tick`) | none (idle ticks counted on the next `cron_runs` row) | Probes every 30 s from each POP, about once a second at the IAD shield, and at once after a turn that left work; decides what is due | [clock.md](clock.md) |
+| The clock (`/_tick`) | none (idle ticks counted on the next `cron_runs` row) | Probes every 30 s from each POP; shield-cached up to 60 s when idle (1 s floor while active/due), and self-continues at once after a turn that left work; decides what is due from `log_period` & maintenance intervals | [clock.md](clock.md) |
 | Request ingest | `request_ingest` | Once per log period after its grace, and every tick while a backlog remains | [request-ingest.md](request-ingest.md) |
 | Ingest worker (`/_internal/ingest`) | none (reported by request_ingest) | Per ingest shard, dispatched by the coordinator to `flp-worker` | [ingest-worker.md](ingest-worker.md) |
 | Raw delete | `raw_delete` | After a successful ingest, and every tick while deletes remain queued | [raw-delete.md](raw-delete.md) |
-| The flush probe (`/_flush`) → log flush | `log_flush` | Every second at the shield; flushes at most once a minute when idle, back to back while work remains | [log-flush.md](log-flush.md) |
+| The flush probe (`/_flush`) → log flush | `log_flush` | Probes every 30 s from each POP (shield-cached up to 60 s when idle); flushes at most once a minute when idle, back to back via continuation while work remains | [log-flush.md](log-flush.md) |
 | Stage worker (`/_internal/stage`) | none (each stage writes its own row) | At most once per 120 s, dispatched with the ingest shards (or alone) to `flp-worker` | [stage-worker.md](stage-worker.md) |
 | Request and RUM compaction | `request_compact`, `rum_compact` | Every 30 s on its own `flp-worker` execution when the `compaction` setting is on. RUM tables (`client_vitals`, `client_errors`) each keep their own state (`ingest:compact_state:rum:{table}`), take passes after request compaction in the same execution, and are listed at most every 5 min once caught up | `compute/cloud/src/ingest/compaction.rs` |
 | Log compact | `log_compact` | Its round-robin turn on the stage worker, when a day has work | [log-compact.md](log-compact.md) |
@@ -67,6 +67,6 @@ Cross-cutting items (plan checkboxes, the wanted tick view and per-tick counters
 
 ## Code
 
-- `compute/cloud/src/admin/schedule.rs`: the 1 s dispatcher's claim, due rules and release.
+- `compute/cloud/src/admin/schedule.rs`: the Core Cache dispatcher's claim, due rules, sleep TTL (`next_ttl_s`), and release.
 - `compute/cloud/src/admin/mod.rs:1800-1836`, `2083-3157`: `record_flush`, `record_tick` and `dispatch`.
 - `compute/cloud/src/admin/stage.rs`; `compute/cloud/src/admin/logs.rs:736-808`: the stage worker and `maintenance_stage`.

@@ -14,6 +14,14 @@ Ownership checks, the preflight and teardown read both endpoint types and act on
 
 Cloud still creates its own bucket-scoped Object Storage key: ingest, the RUM assets and the CDN front service use it. The provisioning token needs the Engineer role with access to all services, or Superuser; Fastly requires one of those to create a `logging/fos` endpoint.
 
+## Opaque resource naming (SEC-22)
+
+Newly provisioned system-generated resources default to independent 96-bit CSPRNG opaque labels (`fla-<24 lowercase hex chars>`) rather than install-name or `service_id`-derived names:
+
+- **FOS buckets** (`compute/cloud/src/admin/fos.rs`), **session scorer `.edgecompute.app` domains** (`compute/cloud/src/admin/scoring.rs`), and **internal Compute (`flp`) & Worker (`flp-worker`) `.edgecompute.app` domains** (plus default `.global.ssl.fastly.net` front domains when no custom public host is supplied, `compute/cloud/infra/provision.py`).
+- Generated names are persisted to local inventory / KV before remote Fastly or FOS creation and retried up to 5 times on `409` (or bucket collision) responses.
+- Existing legacy installs keep their persisted bucket and domain names unchanged across deploys and reconciles, and explicit operator-supplied public front or custom bucket names are preserved as given.
+
 ## Capture modes
 
 `Provision.capture` picks how the service's request data is captured. The service record stores `capture` only when it is `attached`, and it can't be changed after provisioning; tear down and provision again to switch.

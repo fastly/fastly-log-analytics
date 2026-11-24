@@ -33,7 +33,9 @@ You'll need:
 
 ## Server Specifications
 
-Fastly Log Analytics uses a single unified architecture — **ClickHouse + PostgreSQL 16 + stateless ingest worker (`python -m backend.high_scale.worker`) + Fastly Object Storage (FOS)** — that scales from a laptop Docker Compose stack up to multi-node Kubernetes clusters:
+Fastly Log Analytics ships in **two editions** — **Cloud Serverless** (`compute/cloud/`, zero origin servers, running 100% on Fastly Compute, VCL, FOS, and browser DuckDB-WASM) and **High-Scale** (**ClickHouse + PostgreSQL 16 + stateless ingest worker + Fastly Object Storage**), which scales from a laptop Docker Compose stack up to multi-node Kubernetes clusters. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full dual-edition architecture reference.
+
+For **High-Scale** deployments:
 
 - **Laptop / Local Evaluation (Docker Compose):**
   - Runs comfortably in **~2–4 GiB RAM** with a single stateless worker configured with lightweight defaults (`HIGH_SCALE_WORKER_THREADS=1`, `HIGH_SCALE_MAX_BATCH_BYTES=6291456`, `HIGH_SCALE_MAX_BATCH_OBJECTS=10`, `2G` worker memory ceiling, `2G`–`4G` ClickHouse memory limit).
@@ -48,7 +50,7 @@ Fastly Log Analytics uses a single unified architecture — **ClickHouse + Postg
 
 ## Architecture & Throughput Sizing
 
-A single unified architecture powers every deployment topology:
+Choose between **Cloud Serverless** (zero origin servers) and **High-Scale** (Docker Compose or Kubernetes):
 
 | Deployment Topology | Intended Throughput (requests/sec at your VCL service, 100% logged) | Analytical & Control Plane | Ingest Topology | Best For |
 |---|---|---|---|---|
