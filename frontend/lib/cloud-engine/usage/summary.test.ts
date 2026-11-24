@@ -294,6 +294,49 @@ describe("fetchCloudStorageInventory", () => {
       provenance: "cloud:inventory_incomplete",
     });
   });
+
+  it("probes a 2-day lookback first and avoids a 30-day scan when a complete snapshot is found", async () => {
+    const now = Date.parse("2026-11-22T12:00:00.000Z");
+    const calls: Array<{ from: number; to: number }> = [];
+    const read = vi.fn(async (_kind: unknown, range: { from: string; to: string }) => {
+      calls.push({ from: Date.parse(range.from), to: Date.parse(range.to) });
+      return {
+        rows: snapshotRows("2026-11-22T11:10:00.000Z"),
+        liveTruncated: false,
+      };
+    });
+
+    const result = await fetchCloudStorageInventory({ now, identity, read });
+
+    expect(result.complete).toBe(true);
+    expect(result.snapshotId).toBe("snap-1");
+    expect(calls).toHaveLength(1);
+    expect(calls[0].to - calls[0].from).toBe(2 * 86_400_000);
+  });
+
+  it("falls back to the 30-day lookback when no complete snapshot exists in the last 2 days", async () => {
+    const now = Date.parse("2026-11-22T12:00:00.000Z");
+    const calls: Array<{ from: number; to: number }> = [];
+    const read = vi.fn(async (_kind: unknown, range: { from: string; to: string }) => {
+      calls.push({ from: Date.parse(range.from), to: Date.parse(range.to) });
+      if (calls.length === 1) {
+        return { rows: [], liveTruncated: false };
+      }
+      return {
+        rows: snapshotRows("2026-11-10T11:10:00.000Z"),
+        liveTruncated: false,
+      };
+    });
+
+    const result = await fetchCloudStorageInventory({ now, identity, read });
+
+    expect(calls).toHaveLength(2);
+    expect(calls[0].to - calls[0].from).toBe(2 * 86_400_000);
+    expect(calls[1].to - calls[1].from).toBe(30 * 86_400_000);
+    expect(result.snapshotId).toBe("snap-1");
+    expect(result.complete).toBe(false);
+    expect(result.provenance).toBe("cloud:inventory_stale");
+  });
 });
 
 describe("fetchIngestDeletedIntervals", () => {

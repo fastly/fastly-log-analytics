@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from backend.config import get_fastly_api_key
 from backend.core.clickhouse import get_clickhouse_client
@@ -53,6 +53,13 @@ logger = logging.getLogger(__name__)
 
 usage_router = APIRouter(prefix="/api/usage", tags=["usage"], responses=DEFAULT_ERROR_RESPONSES)
 router = usage_router
+
+_USAGE_CACHE_CONTROL = "private, max-age=30, stale-while-revalidate=120"
+
+
+def _set_usage_cache_control(response: Response) -> None:
+    response.headers["Cache-Control"] = _USAGE_CACHE_CONTROL
+
 
 _FASTLY_STATS_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=60.0)
 _STORAGE_INSPECTION_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=64, ttl_seconds=60.0)
@@ -351,7 +358,11 @@ def _compute_prefill_rates(
     return result, prov
 
 
-@usage_router.get("/prefill/rates", response_model=PrefillRatesResponse)
+@usage_router.get(
+    "/prefill/rates",
+    response_model=PrefillRatesResponse,
+    dependencies=[Depends(_set_usage_cache_control)],
+)
 @query_errors()
 def prefill_rates(source: dict[str, Any] = Depends(get_source)) -> PrefillRatesResponse:
     """Instant prefill subset for stat cards."""
@@ -360,7 +371,11 @@ def prefill_rates(source: dict[str, Any] = Depends(get_source)) -> PrefillRatesR
     return resp
 
 
-@usage_router.get("/prefill", response_model=PrefillResponse)
+@usage_router.get(
+    "/prefill",
+    response_model=PrefillResponse,
+    dependencies=[Depends(_set_usage_cache_control)],
+)
 @query_errors()
 async def prefill(source: dict[str, Any] = Depends(get_source)) -> PrefillResponse:
     import asyncio
@@ -586,7 +601,11 @@ def _get_log_activity(src: dict[str, Any], start_str: str, end_str: str, by: str
     return {**out, "_debug_queries": [], "_debug_calls": []}
 
 
-@usage_router.get("/current-storage", response_model=CurrentStorageResponse)
+@usage_router.get(
+    "/current-storage",
+    response_model=CurrentStorageResponse,
+    dependencies=[Depends(_set_usage_cache_control)],
+)
 @query_errors()
 def usage_current_storage(
     start: str = Query(default=""),
@@ -1047,7 +1066,11 @@ def geography(
     )
 
 
-@usage_router.get("/operations", response_model=UsageOperationsResponse)
+@usage_router.get(
+    "/operations",
+    response_model=UsageOperationsResponse,
+    dependencies=[Depends(_set_usage_cache_control)],
+)
 @query_errors()
 def usage_operations(
     start: str = Query(default=""),
@@ -1127,7 +1150,11 @@ def usage_operations(
     return resp
 
 
-@usage_router.get("/bandwidth", response_model=UsageBandwidthResponse)
+@usage_router.get(
+    "/bandwidth",
+    response_model=UsageBandwidthResponse,
+    dependencies=[Depends(_set_usage_cache_control)],
+)
 @query_errors()
 def usage_bandwidth(
     start: str = Query(default=""),
@@ -1144,46 +1171,77 @@ def usage_bandwidth(
         by = "hour"
 
     start_str, end_str, from_ts, to_ts = window_to_epoch(start, end)
-
+    service_id = str(src.get("service_id") or src.get("name") or "")
     cdn_svc = src.get("cdn_service_id", "").strip()
-    agg: dict[int, dict[str, int]] = {}
+    token_scope = sha256(str(api_key).encode()).hexdigest()[:16]
 
-    def _merge(payload: dict[str, Any]) -> None:
-        for record in payload.get("data", []):
-            ts = record.get("start_time")
-            if ts is None:
-                continue
-            if ts not in agg:
-                agg[ts] = {"bandwidth_bytes": 0, "requests": 0}
-            agg[ts]["bandwidth_bytes"] += int(record.get("bandwidth") or 0)
-            agg[ts]["requests"] += int(record.get("requests") or 0)
-
-    if cdn_svc:
-        try:
-            payload = _fastly_api(
-                cdn_svc,
-                by,
-                from_ts,
-                to_ts,
-                ("bandwidth", "requests"),
-                api_key,
-            )
-            _merge(payload)
-        except Exception as e:
-            raise_internal(logger, e, code="fastly_stats_service_failed", status=502)
-
-    fmt = "%Y-%m-%dT%H:00" if by == "hour" else "%Y-%m-%dT%H:%M" if by == "minute" else "%Y-%m-%d"
-    points = [{"time": datetime.fromtimestamp(ts, tz=UTC).strftime(fmt), **v} for ts, v in sorted(agg.items())]
-    resp: UsageBandwidthResponse = UsageBandwidthResponse.with_telemetry(
-        data=points,
-        total_bytes=sum(p["bandwidth_bytes"] for p in points),
-        total_log_bytes=0,
-        granularity=by,
+    bw_digest = digest_cache_key(
+        {
+            "ep": "usage_bandwidth",
+            "cdn_svc": cdn_svc,
+            "s": bucket_time_to_minute(start_str),
+            "e": bucket_time_to_minute(end_str),
+            "by": by,
+            "tok": token_scope,
+        },
+        {"service_id": service_id},
     )
+    bw_memo_key = f"{service_id}:{bw_digest}"
+    cached_bw = _USAGE_RESPONSE_MEMO.get_with_telemetry(bw_memo_key)
+    if cached_bw is not None:
+        return UsageBandwidthResponse.with_telemetry(**cached_bw)
+
+    def _compute_bandwidth() -> dict[str, Any]:
+        if (cached_inner := _USAGE_RESPONSE_MEMO.get_with_telemetry(bw_memo_key)) is not None:
+            return dict(cached_inner)
+
+        agg: dict[int, dict[str, int]] = {}
+
+        def _merge(payload: dict[str, Any]) -> None:
+            for record in payload.get("data", []):
+                ts = record.get("start_time")
+                if ts is None:
+                    continue
+                if ts not in agg:
+                    agg[ts] = {"bandwidth_bytes": 0, "requests": 0}
+                agg[ts]["bandwidth_bytes"] += int(record.get("bandwidth") or 0)
+                agg[ts]["requests"] += int(record.get("requests") or 0)
+
+        if cdn_svc:
+            try:
+                payload = _fastly_api(
+                    cdn_svc,
+                    by,
+                    from_ts,
+                    to_ts,
+                    ("bandwidth", "requests"),
+                    api_key,
+                )
+                _merge(payload)
+            except Exception as e:
+                raise_internal(logger, e, code="fastly_stats_service_failed", status=502)
+
+        fmt = "%Y-%m-%dT%H:00" if by == "hour" else "%Y-%m-%dT%H:%M" if by == "minute" else "%Y-%m-%d"
+        points = [{"time": datetime.fromtimestamp(ts, tz=UTC).strftime(fmt), **v} for ts, v in sorted(agg.items())]
+        result_payload = {
+            "data": points,
+            "total_bytes": sum(v["bandwidth_bytes"] for v in agg.values()),
+            "total_log_bytes": 0,
+            "granularity": by,
+        }
+        _USAGE_RESPONSE_MEMO.put(bw_memo_key, result_payload)
+        return result_payload
+
+    bw_payload = _USAGE_RESPONSE_MEMO.coalesce(f"usage_bandwidth:{bw_memo_key}", _compute_bandwidth)
+    resp: UsageBandwidthResponse = UsageBandwidthResponse.with_telemetry(**bw_payload)
     return resp
 
 
-@usage_router.get("/log-activity", response_model=UsageLogActivityResponse)
+@usage_router.get(
+    "/log-activity",
+    response_model=UsageLogActivityResponse,
+    dependencies=[Depends(_set_usage_cache_control)],
+)
 @query_errors()
 def usage_log_activity(
     source: dict[str, Any] = Depends(get_source),
@@ -1311,7 +1369,11 @@ def usage_log_activity(
     return resp
 
 
-@usage_router.get("/rum-breakdown", response_model=UsageRumBreakdownResponse)
+@usage_router.get(
+    "/rum-breakdown",
+    response_model=UsageRumBreakdownResponse,
+    dependencies=[Depends(_set_usage_cache_control)],
+)
 @query_errors()
 def usage_rum_breakdown(
     start: str = Query(default=""),

@@ -20,7 +20,7 @@ import { estimateLogLineBytes, type LogFieldsCatalogLike } from '@/lib/apiLogFie
 import type { LogFieldsConfig } from '@/types/api'
 import { queryKeys } from '@/lib/apiQueryKeys'
 import type { ChartInterval } from '@/lib/utils'
-import { useServiceStore } from '@/stores/filterStore'
+import { useFilterStore, useServiceStore } from '@/stores/filterStore'
 import {
   FosOperationsHelp,
   UsageChartsGrid,
@@ -62,6 +62,13 @@ export function UsagePage() {
   )
 }
 
+function quantizeUsageTime(value: string | null, shouldQuantize: boolean): string | null {
+  if (!value || !shouldQuantize) return value
+  const ms = Date.parse(value)
+  if (!Number.isFinite(ms) || ms % 60_000 === 0) return value
+  return new Date(Math.floor(ms / 60_000) * 60_000).toISOString()
+}
+
 export function UsagePageContent({
   startTime,
   endTime,
@@ -79,6 +86,9 @@ export function UsagePageContent({
   const isDark = theme === 'dark'
   const router = useRouter()
   const services = useServiceStore((s) => s.services)
+  const shouldQuantizeWindow = useFilterStore((s) => s.relativeRange !== null || s.isAutoRange)
+  const queryStartTime = quantizeUsageTime(startTime, shouldQuantizeWindow)
+  const queryEndTime = quantizeUsageTime(endTime, shouldQuantizeWindow)
   const activeSvc = services.find((s) => s.id === activeServiceId)
   const isRumEnabled = activeSvc?.rum_enabled ?? false
   const isReady = useIsDataReady()
@@ -90,12 +100,12 @@ export function UsagePageContent({
     isFetching: fetchingStorage,
     error: errorStorage,
   } = useQuery({
-    queryKey: ['usage', 'storage', activeServiceId, startTime, endTime],
+    queryKey: ['usage', 'storage', activeServiceId, queryStartTime, queryEndTime],
     queryFn: async ({ signal }) => {
       return unwrapClient(
         client.GET('/api/usage/current-storage', {
           signal,
-          params: { query: { start: startTime ?? undefined, end: endTime ?? undefined } },
+          params: { query: { start: queryStartTime ?? undefined, end: queryEndTime ?? undefined } },
         }),
       )
     },
@@ -109,15 +119,15 @@ export function UsagePageContent({
     isFetching: fetchingOps,
     error: errorOps,
   } = useQuery({
-    queryKey: ['usage', 'operations', activeServiceId, startTime, endTime, activityBy],
+    queryKey: ['usage', 'operations', activeServiceId, queryStartTime, queryEndTime, activityBy],
     queryFn: async ({ signal }) => {
       return unwrapClient(
         client.GET('/api/usage/operations', {
           signal,
           params: {
             query: {
-              start: startTime ?? undefined,
-              end: endTime ?? undefined,
+              start: queryStartTime ?? undefined,
+              end: queryEndTime ?? undefined,
               by: activityBy,
             },
           },
@@ -134,15 +144,15 @@ export function UsagePageContent({
     isFetching: fetchingBw,
     error: errorBw,
   } = useQuery({
-    queryKey: ['usage', 'bandwidth', activeServiceId, startTime, endTime, activityBy],
+    queryKey: ['usage', 'bandwidth', activeServiceId, queryStartTime, queryEndTime, activityBy],
     queryFn: async ({ signal }) => {
       return unwrapClient(
         client.GET('/api/usage/bandwidth', {
           signal,
           params: {
             query: {
-              start: startTime ?? undefined,
-              end: endTime ?? undefined,
+              start: queryStartTime ?? undefined,
+              end: queryEndTime ?? undefined,
               by: activityBy,
             },
           },
@@ -159,15 +169,15 @@ export function UsagePageContent({
     isFetching: fetchingActivity,
     error: errorActivity,
   } = useQuery({
-    queryKey: ['usage', 'log-activity', activeServiceId, startTime, endTime, activityBy],
+    queryKey: ['usage', 'log-activity', activeServiceId, queryStartTime, queryEndTime, activityBy],
     queryFn: async ({ signal }) => {
       return unwrapClient(
         client.GET('/api/usage/log-activity', {
           signal,
           params: {
             query: {
-              start: startTime ?? undefined,
-              end: endTime ?? undefined,
+              start: queryStartTime ?? undefined,
+              end: queryEndTime ?? undefined,
               by: activityBy,
             },
           },
@@ -184,13 +194,13 @@ export function UsagePageContent({
     isFetching: fetchingRumBreakdown,
     error: errorRumBreakdown,
   } = useQuery({
-    queryKey: ['usage', 'rum-breakdown', activeServiceId, startTime, endTime],
+    queryKey: ['usage', 'rum-breakdown', activeServiceId, queryStartTime, queryEndTime],
     queryFn: async ({ signal }) => {
       return unwrapClient(
         client.GET('/api/usage/rum-breakdown', {
           signal,
           params: {
-            query: { start: startTime ?? undefined, end: endTime ?? undefined, by: 'day' },
+            query: { start: queryStartTime ?? undefined, end: queryEndTime ?? undefined, by: 'day' },
           },
         }),
       )
@@ -274,11 +284,11 @@ export function UsagePageContent({
     isFetching: fetchingCompute,
     error: errorCompute,
   } = useQuery({
-    queryKey: ['usage', 'compute', activeServiceId, startTime, endTime],
+    queryKey: ['usage', 'compute', activeServiceId, queryStartTime, queryEndTime],
     queryFn: async ({ signal }): Promise<ComputeUsageResponse> => {
       const params = new URLSearchParams()
-      if (startTime) params.set('start_time', startTime)
-      if (endTime) params.set('end_time', endTime)
+      if (queryStartTime) params.set('start_time', queryStartTime)
+      if (queryEndTime) params.set('end_time', queryEndTime)
       const response = await adminFetch(`/api/usage/compute?${params}`, { signal })
       if (!response.ok) throw new Error(`Compute usage failed (${response.status})`)
       return response.json()

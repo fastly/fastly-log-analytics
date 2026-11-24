@@ -285,6 +285,63 @@ describe('SecurityClient, BotsSection, HeaderAnomaliesSection, NetworkSection & 
     expect(errorSpy).not.toHaveBeenCalled()
   })
 
+  test('unfiltered High-Scale SecurityClient fetches via cacheable GET /api/security/bundle and filtered falls back to POST', async () => {
+    setCloudModeRuntime(false)
+    mockIsDataReady = true
+    mockGet.mockReset().mockResolvedValue({ data: securityData() })
+    mockPost.mockReset().mockResolvedValue({ data: securityData() })
+    reportLayoutChildArgs = {
+      startTime: '2026-11-24T10:00:00Z',
+      endTime: '2026-11-24T11:00:00Z',
+      activeServiceId: 'test-svc',
+      filterPayload: undefined,
+      bucketSeconds: 300,
+      intervalButtons: null,
+      timezone: 'UTC',
+      getFieldLabel: (f: string) => f,
+      relativeRange: '1h',
+      isAutoRange: false,
+      anchor: '2026-11-24T11:00:00Z',
+    } as unknown as ReportLayoutChildArgs
+
+    renderWithQuery(<SecurityClient />, { queryClient })
+
+    await waitFor(() => {
+      expect(mockGet).toHaveBeenCalledWith(
+        '/api/security/bundle',
+        expect.objectContaining({
+          params: expect.objectContaining({
+            query: expect.objectContaining({
+              sections: expect.arrayContaining(['wellknown_bots', 'proxies']),
+            }),
+          }),
+        }),
+      )
+    })
+    expect(mockPost).not.toHaveBeenCalledWith('/api/security/aggregates', expect.anything())
+
+    queryClient.clear()
+    mockGet.mockClear()
+    mockPost.mockClear()
+    reportLayoutChildArgs = {
+      ...reportLayoutChildArgs,
+      filterPayload: [{ field: 'client_ip', value: '1.2.3.4', operator: 'eq' }],
+    } as unknown as ReportLayoutChildArgs
+
+    renderWithQuery(<SecurityClient />, { queryClient })
+
+    await waitFor(() => {
+      expect(mockPost).toHaveBeenCalledWith(
+        '/api/security/aggregates',
+        expect.objectContaining({
+          body: expect.objectContaining({
+            filters: expect.arrayContaining([expect.objectContaining({ field: 'client_ip', value: '1.2.3.4' })]),
+          }),
+        }),
+      )
+    })
+  })
+
   test('BotsSection renders Bot & Crawler Value vs. Cost table with bandwidth and referral metrics', async () => {
     renderWithQuery(
       <BotsSection

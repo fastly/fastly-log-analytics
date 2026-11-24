@@ -2427,24 +2427,22 @@ async function dispatchCloudRequest(
     checkUsageEpoch();
     const resolvedStorageBilling = storageBillingRead ? await storageBillingRead : null;
     checkUsageEpoch();
-    const costLines = buildSevenLineCostTable({
-      hours: (toMs - fromMs) / 3_600_000,
-      settings: input.settings,
-      billedGbHours: resolvedStorageBilling
-        ? resolvedStorageBilling.summary.totalGbHours
-        : summary.storage.billedGbMonths * 720,
-      classA: summary.totals.classA,
-      classB: summary.totals.classB,
-      cdnHits: summary.totals.cdnHit,
-      loggedCdnBytes: summary.bytesRead,
-      loggedComputeRequests: summary.computeRequests,
-      loggedComputeVcpuMs: summary.computeVcpuMs,
-      loggedComputeSegments: summary.computeSegments,
-      billing: resolvedBilling,
-    });
 
     if (pathname === "/api/usage/current-storage") {
       const storageBilling = resolvedStorageBilling!;
+      const costLines = buildSevenLineCostTable({
+        hours: (toMs - fromMs) / 3_600_000,
+        settings: input.settings,
+        billedGbHours: storageBilling.summary.totalGbHours,
+        classA: summary.totals.classA,
+        classB: summary.totals.classB,
+        cdnHits: summary.totals.cdnHit,
+        loggedCdnBytes: summary.bytesRead,
+        loggedComputeRequests: summary.computeRequests,
+        loggedComputeVcpuMs: summary.computeVcpuMs,
+        loggedComputeSegments: summary.computeSegments,
+        billing: resolvedBilling,
+      });
       const observedAtMs = storageBilling.observedAt ?? summary.storage.snapshotAt;
       const liveIntervalBytes = storageBilling.intervals
         .filter((interval) => interval.kind === "live")

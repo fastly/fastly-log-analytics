@@ -13,7 +13,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { mergeRollupMeta, RawWindowNote, readRawWindow, readRollupMeta, RollupDataThroughSlot } from '@/components/network/rollupLabels'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { hasFilterValues } from '@/lib/cloud-engine/rollup-sections'
-import type { components } from '@/types/api.generated'
+import type { components, operations } from '@/types/api.generated'
 import { BotsSection, type SecurityData, type SummaryQueryState } from './BotsSection'
 import { ProxyWatchdogSection } from './ProxyWatchdogSection'
 import { ThreatIntelPanel, HeaderAnomaliesSection, NetworkSection } from './ThreatIntelSection'
@@ -83,9 +83,26 @@ function SecurityBody({
   const [botEfficiencyVisibility, setBotEfficiencyVisibility, onBotEfficiencyVisChange] = useColumnVisibility()
   const [ngwafBotVisibility, setNgwafBotVisibility] = useColumnVisibility()
 
-  const rollupFirst = isCloudMode() && !hasFilterValues(filterPayload)
+  const unfiltered = !hasFilterValues(filterPayload)
+  const rollupFirst = isCloudMode() && unfiltered
   const range = { relativeRange, isAutoRange, startTime, endTime, anchor }
-  const postSecurity = async (sections: SecuritySections, rangeBody: RangeWire['rangeBody'], signal: AbortSignal | undefined) => {
+  const fetchSecurity = async (sections: SecuritySections, rangeBody: RangeWire['rangeBody'], signal: AbortSignal | undefined) => {
+    if (!isCloudMode() && unfiltered) {
+      type BundleQuery = NonNullable<
+        operations['security_bundle_get_api_security_bundle_get']['parameters']['query']
+      > & { sections?: SecuritySections }
+      const query: BundleQuery = {
+        bucket_seconds: bucketSeconds,
+        sections,
+        ...rangeBody,
+      }
+      const { data, error } = await client.GET('/api/security/bundle', {
+        signal,
+        params: { query },
+      })
+      if (error) throw new Error(extractApiError(error))
+      return data
+    }
     const { data, error } = await client.POST('/api/security/aggregates', {
       signal,
       body: { filters: filterPayload, bucket_seconds: bucketSeconds, sections, ...rangeBody },
@@ -100,7 +117,7 @@ function SecurityBody({
     filterPayload,
     range,
     keyParts: rollupFirst ? [bucketSeconds, RAW_SECTIONS] : [bucketSeconds],
-    queryFn: ({ rangeBody, signal }) => postSecurity(rollupFirst ? RAW_SECTIONS : SECURITY_SECTIONS, rangeBody, signal),
+    queryFn: ({ rangeBody, signal }) => fetchSecurity(rollupFirst ? RAW_SECTIONS : SECURITY_SECTIONS, rangeBody, signal),
   })
 
   const rollupQuery = useAnalyticsReportQuery<SecurityData | undefined>({
@@ -110,7 +127,7 @@ function SecurityBody({
     range,
     keyParts: [bucketSeconds],
     queryOptions: { enabled: rollupFirst },
-    queryFn: ({ rangeBody, signal }) => postSecurity(SUMMARY_SECTIONS, rangeBody, signal),
+    queryFn: ({ rangeBody, signal }) => fetchSecurity(SUMMARY_SECTIONS, rangeBody, signal),
   })
 
   const rawData = securityQuery.data

@@ -22,6 +22,8 @@ export type { LogRow, LogsRange, LogsResult, LogsStats, OpsKind };
 export type LogResult = LogsResult;
 
 export type OpsSource = {
+  /** Optional cache partition key enabling in-memory reuse of decoded immutable ops Parquet files. */
+  cacheScope?: string;
   fetchJson: FetchJson;
   fetchFile: (
     key: string,
@@ -30,6 +32,44 @@ export type OpsSource = {
   cachedKeys: () => Promise<string[]>;
   evict: (key: string) => Promise<void>;
 };
+
+const MAX_DECODED_PARQUET_ENTRIES = 512;
+const decodedParquetCache = new Map<string, Record<string, unknown>[]>();
+
+export function clearOpsDecodedCache(): void {
+  decodedParquetCache.clear();
+}
+
+function decodedCacheKey(scope: string, key: string): string {
+  return `${scope}\0${key}`;
+}
+
+function getDecodedParquet(
+  scope: string,
+  key: string,
+): Record<string, unknown>[] | undefined {
+  const full = decodedCacheKey(scope, key);
+  const hit = decodedParquetCache.get(full);
+  if (hit !== undefined) {
+    decodedParquetCache.delete(full);
+    decodedParquetCache.set(full, hit);
+  }
+  return hit;
+}
+
+function setDecodedParquet(
+  scope: string,
+  key: string,
+  rows: Record<string, unknown>[],
+): void {
+  const full = decodedCacheKey(scope, key);
+  decodedParquetCache.delete(full);
+  decodedParquetCache.set(full, rows);
+  if (decodedParquetCache.size > MAX_DECODED_PARQUET_ENTRIES) {
+    const oldest = decodedParquetCache.keys().next().value;
+    if (oldest !== undefined) decodedParquetCache.delete(oldest);
+  }
+}
 
 export type ReadLogsOptions = {
   kind: OpsKind;
@@ -247,11 +287,29 @@ export async function readLogs(
     const parsed = parseKey(key);
     return !!parsed && parsed.spanFrom < toMs && parsed.spanTo > fromMs;
   });
-  await Promise.all(evictions.map((key) => source.evict(key)));
+  await Promise.all(
+    evictions.map(async (key) => {
+      if (source.cacheScope) {
+        decodedParquetCache.delete(decodedCacheKey(source.cacheScope, key));
+      }
+      await source.evict(key);
+    }),
+  );
   stats.evicted = evictions.length;
 
   const fileRows: Record<string, unknown>[] = [];
   const load = async (file: ManifestFile) => {
+    if (source.cacheScope) {
+      const decoded = getDecodedParquet(source.cacheScope, file.key);
+      if (decoded !== undefined) {
+        stats.cached++;
+        stats.read++;
+        progress.cached++;
+        progress.done++;
+        onProgress?.({ ...progress });
+        return decoded;
+      }
+    }
     const { bytes, cached, cdn } = await source.fetchFile(file.key, signal);
     if (cached) stats.cached++;
     if (isCdnHit(cdn)) stats.cdnHits++;
@@ -263,6 +321,9 @@ export async function readLogs(
       progress.downloadedBytes += bytes.byteLength;
     }
     const rows = await readRows(bytes);
+    if (source.cacheScope) {
+      setDecodedParquet(source.cacheScope, file.key, rows);
+    }
     progress.done++;
     onProgress?.({ ...progress });
     return rows;

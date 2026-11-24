@@ -64,6 +64,9 @@ export interface CloudStorageInventoryResult {
   provenance: "cloud:inventory" | "cloud:inventory_incomplete" | "cloud:inventory_stale";
 }
 
+const INITIAL_INVENTORY_LOOKBACK_DAYS = 2;
+const DEFAULT_INVENTORY_LOOKBACK_DAYS = 30;
+
 export async function fetchCloudStorageInventory(
   options: {
     now?: number;
@@ -77,148 +80,161 @@ export async function fetchCloudStorageInventory(
   const scope = dashboardCacheIdentity();
   assertOpsEpoch(startOpsEpoch, options.signal);
   const now = options.now ?? Date.now();
-  const lookbackDays = options.lookbackDays ?? 30;
   const identity = options.identity ?? currentOpsIdentity();
   const read = options.read ?? readLogs;
-  const result = await read(
-    "storage_inventory",
-    {
-      from: new Date(now - lookbackDays * DAY_MS).toISOString(),
-      to: new Date(now).toISOString(),
-    },
-    { ...identity, signal: options.signal },
-  );
-  assertOpsEpoch(startOpsEpoch, options.signal);
-  if (dashboardCacheIdentity() !== scope) {
-    throw settingsAbortError();
-  }
 
-  type InventoryObject = {
-    dataset: string;
-    key: string;
-    size: number;
-    lastModifiedMs: number | null;
-  };
-  const snapshots = new Map<
-    string,
-    {
-      latestTs: number;
-      terminalTs: number | null;
+  const readInventoryWindow = async (
+    lookbackDays: number,
+  ): Promise<CloudStorageInventoryResult> => {
+    const result = await read(
+      "storage_inventory",
+      {
+        from: new Date(now - lookbackDays * DAY_MS).toISOString(),
+        to: new Date(now).toISOString(),
+      },
+      { ...identity, signal: options.signal },
+    );
+    assertOpsEpoch(startOpsEpoch, options.signal);
+    if (dashboardCacheIdentity() !== scope) {
+      throw settingsAbortError();
+    }
+
+    type InventoryObject = {
+      dataset: string;
+      key: string;
+      size: number;
+      lastModifiedMs: number | null;
+    };
+    const snapshots = new Map<
+      string,
+      {
+        latestTs: number;
+        terminalTs: number | null;
+        objects: Map<string, InventoryObject>;
+        hasIncompleteRow: boolean;
+      }
+    >();
+
+    for (const row of result.rows) {
+      const snapshotId =
+        typeof row.snapshot_id === "string" ? row.snapshot_id.trim() : "";
+      if (!snapshotId) continue;
+      const rowTs = parseTimestampMs(row.timestamp) ?? 0;
+      let snap = snapshots.get(snapshotId);
+      if (!snap) {
+        snap = {
+          latestTs: rowTs,
+          terminalTs: null,
+          objects: new Map(),
+          hasIncompleteRow: false,
+        };
+        snapshots.set(snapshotId, snap);
+      } else if (rowTs > snap.latestTs) {
+        snap.latestTs = rowTs;
+      }
+      if (row.complete === true) {
+        snap.terminalTs =
+          snap.terminalTs === null ? rowTs : Math.max(snap.terminalTs, rowTs);
+        continue;
+      }
+      const dataset = typeof row.dataset === "string" ? row.dataset : "";
+      const key = typeof row.key === "string" ? row.key : "";
+      if (!dataset || !key) {
+        snap.hasIncompleteRow = true;
+        continue;
+      }
+      const size = Number(row.size);
+      const lastModifiedMs = parseTimestampMs(row.last_modified);
+      if (!Number.isFinite(size) || size < 0 || lastModifiedMs === null) {
+        snap.hasIncompleteRow = true;
+      }
+      snap.objects.set(`${dataset}:${key}`, {
+        dataset,
+        key,
+        size: Number.isFinite(size) && size >= 0 ? size : 0,
+        lastModifiedMs,
+      });
+    }
+
+    let newestOverall: { id: string; latestTs: number } | null = null;
+    let newestComplete: {
+      id: string;
+      terminalTs: number;
       objects: Map<string, InventoryObject>;
       hasIncompleteRow: boolean;
-    }
-  >();
+    } | null = null;
 
-  for (const row of result.rows) {
-    const snapshotId =
-      typeof row.snapshot_id === "string" ? row.snapshot_id.trim() : "";
-    if (!snapshotId) continue;
-    const rowTs = parseTimestampMs(row.timestamp) ?? 0;
-    let snap = snapshots.get(snapshotId);
-    if (!snap) {
-      snap = {
-        latestTs: rowTs,
-        terminalTs: null,
-        objects: new Map(),
-        hasIncompleteRow: false,
+    for (const [id, snap] of snapshots) {
+      if (!newestOverall || snap.latestTs > newestOverall.latestTs) {
+        newestOverall = { id, latestTs: snap.latestTs };
+      }
+      if (
+        snap.terminalTs !== null &&
+        (!newestComplete || snap.terminalTs > newestComplete.terminalTs)
+      ) {
+        newestComplete = {
+          id,
+          terminalTs: snap.terminalTs,
+          objects: snap.objects,
+          hasIncompleteRow: snap.hasIncompleteRow,
+        };
+      }
+    }
+
+    if (!newestComplete) {
+      return {
+        intervals: [],
+        complete: false,
+        snapshotId: null,
+        observedAt: null,
+        provenance: "cloud:inventory_incomplete",
       };
-      snapshots.set(snapshotId, snap);
-    } else if (rowTs > snap.latestTs) {
-      snap.latestTs = rowTs;
     }
-    if (row.complete === true) {
-      snap.terminalTs =
-        snap.terminalTs === null ? rowTs : Math.max(snap.terminalTs, rowTs);
-      continue;
-    }
-    const dataset = typeof row.dataset === "string" ? row.dataset : "";
-    const key = typeof row.key === "string" ? row.key : "";
-    if (!dataset || !key) {
-      snap.hasIncompleteRow = true;
-      continue;
-    }
-    const size = Number(row.size);
-    const lastModifiedMs = parseTimestampMs(row.last_modified);
-    if (!Number.isFinite(size) || size < 0 || lastModifiedMs === null) {
-      snap.hasIncompleteRow = true;
-    }
-    snap.objects.set(`${dataset}:${key}`, {
-      dataset,
-      key,
-      size: Number.isFinite(size) && size >= 0 ? size : 0,
-      lastModifiedMs,
-    });
-  }
 
-  let newestOverall: { id: string; latestTs: number } | null = null;
-  let newestComplete: {
-    id: string;
-    terminalTs: number;
-    objects: Map<string, InventoryObject>;
-    hasIncompleteRow: boolean;
-  } | null = null;
-
-  for (const [id, snap] of snapshots) {
-    if (!newestOverall || snap.latestTs > newestOverall.latestTs) {
-      newestOverall = { id, latestTs: snap.latestTs };
-    }
-    if (
-      snap.terminalTs !== null &&
-      (!newestComplete || snap.terminalTs > newestComplete.terminalTs)
-    ) {
-      newestComplete = {
+    // The schedule retakes the snapshot every 6 hours; a newer one still listing doesn't make this one
+    // wrong, but a complete snapshot older than two runs means the schedule stopped.
+    const stale = now - newestComplete.terminalTs > INVENTORY_STALE_MS;
+    const intervals: StorageBillingInterval[] = [];
+    for (const [id, obj] of newestComplete.objects) {
+      const rowComplete = obj.lastModifiedMs !== null;
+      const billedFrom = obj.lastModifiedMs ?? newestComplete.terminalTs;
+      intervals.push({
         id,
-        terminalTs: snap.terminalTs,
-        objects: snap.objects,
-        hasIncompleteRow: snap.hasIncompleteRow,
-      };
+        dataset: obj.dataset,
+        kind: "live",
+        bytes: obj.size,
+        createdAt: obj.lastModifiedMs,
+        deletedAt: null,
+        billedFrom,
+        billedUntil: now,
+        complete: rowComplete,
+        provenance: "cloud:inventory",
+      });
     }
-  }
 
-  if (!newestComplete) {
+    const complete =
+      result.liveTruncated !== true && !stale && !newestComplete.hasIncompleteRow;
     return {
-      intervals: [],
-      complete: false,
-      snapshotId: null,
-      observedAt: null,
-      provenance: "cloud:inventory_incomplete",
+      intervals,
+      complete,
+      snapshotId: newestComplete.id,
+      observedAt: newestComplete.terminalTs,
+      provenance: complete
+        ? "cloud:inventory"
+        : stale
+          ? "cloud:inventory_stale"
+          : "cloud:inventory_incomplete",
     };
-  }
-
-  // The schedule retakes the snapshot every 6 hours; a newer one still listing doesn't make this one
-  // wrong, but a complete snapshot older than two runs means the schedule stopped.
-  const stale = now - newestComplete.terminalTs > INVENTORY_STALE_MS;
-  const intervals: StorageBillingInterval[] = [];
-  for (const [id, obj] of newestComplete.objects) {
-    const rowComplete = obj.lastModifiedMs !== null;
-    const billedFrom = obj.lastModifiedMs ?? newestComplete.terminalTs;
-    intervals.push({
-      id,
-      dataset: obj.dataset,
-      kind: "live",
-      bytes: obj.size,
-      createdAt: obj.lastModifiedMs,
-      deletedAt: null,
-      billedFrom,
-      billedUntil: now,
-      complete: rowComplete,
-      provenance: "cloud:inventory",
-    });
-  }
-
-  const complete =
-    result.liveTruncated !== true && !stale && !newestComplete.hasIncompleteRow;
-  return {
-    intervals,
-    complete,
-    snapshotId: newestComplete.id,
-    observedAt: newestComplete.terminalTs,
-    provenance: complete
-      ? "cloud:inventory"
-      : stale
-        ? "cloud:inventory_stale"
-        : "cloud:inventory_incomplete",
   };
+
+  if (options.lookbackDays !== undefined) {
+    return readInventoryWindow(options.lookbackDays);
+  }
+  const recent = await readInventoryWindow(INITIAL_INVENTORY_LOOKBACK_DAYS);
+  if (recent.snapshotId !== null) {
+    return recent;
+  }
+  return readInventoryWindow(DEFAULT_INVENTORY_LOOKBACK_DAYS);
 }
 
 /** Two of the server's 6-hour snapshot intervals (`retention::RECONCILE_INTERVAL_S`). */
@@ -2424,49 +2440,67 @@ export function filterRowsInWindow<
   });
 }
 
+type UsageSummaryResult = UsageSummary & {
+  input: UsageInput;
+  summary: UsageSummary;
+  lines: IncurredLine[];
+  totalUsd: number;
+};
+
+const sharedUsageSummaries = createSharedRequests<UsageSummaryResult>();
+
 export async function fetchUsageSummary(options: {
   from: string | number;
   to: string | number;
   signal?: AbortSignal;
-}): Promise<
-  UsageSummary & {
-    input: UsageInput;
-    summary: UsageSummary;
-    lines: IncurredLine[];
-    totalUsd: number;
-  }
-> {
+}): Promise<UsageSummaryResult> {
   const fromMs =
     typeof options.from === "number" ? options.from : Date.parse(options.from);
   const toMs =
     typeof options.to === "number" ? options.to : Date.parse(options.to);
-  const days = Math.max(1, (toMs - fromMs) / DAY_MS);
-  const input = await fetchUsageInput(
-    days,
-    currentOpsIdentity(),
-    readLogs,
-    options.signal,
-    { from: fromMs, to: toMs },
+  const identity = currentOpsIdentity();
+  const key = JSON.stringify([
+    fromMs,
+    toMs,
+    identity.user,
+    identity.role,
+    activeOpsUser(),
+    dashboardCacheIdentity(),
+    currentOpsCacheEpoch(),
+  ]);
+  return sharedUsageSummaries(
+    key,
+    async (sharedSignal) => {
+      const days = Math.max(1, (toMs - fromMs) / DAY_MS);
+      const input = await fetchUsageInput(
+        days,
+        identity,
+        readLogs,
+        sharedSignal,
+        { from: fromMs, to: toMs },
+      );
+      const summary = summarizeUsage(input);
+      const incurred = incurredCost({
+        hours: days * 24,
+        settings: input.settings,
+        billedGbHours: summary.storage.billedGbMonths * 720,
+        classA: summary.totals.classA,
+        classB: summary.totals.classB,
+        cdnHits: summary.totals.cdnHit,
+        loggedCdnBytes: summary.bytesRead,
+        loggedComputeRequests: summary.computeRequests,
+        loggedComputeVcpuMs: summary.computeVcpuMs,
+        loggedComputeSegments: summary.computeSegments,
+        billing: null,
+      });
+      return {
+        ...summary,
+        input,
+        summary,
+        lines: incurred.lines,
+        totalUsd: incurred.total,
+      };
+    },
+    { signal: options.signal },
   );
-  const summary = summarizeUsage(input);
-  const incurred = incurredCost({
-    hours: days * 24,
-    settings: input.settings,
-    billedGbHours: summary.storage.billedGbMonths * 720,
-    classA: summary.totals.classA,
-    classB: summary.totals.classB,
-    cdnHits: summary.totals.cdnHit,
-    loggedCdnBytes: summary.bytesRead,
-    loggedComputeRequests: summary.computeRequests,
-    loggedComputeVcpuMs: summary.computeVcpuMs,
-    loggedComputeSegments: summary.computeSegments,
-    billing: null,
-  });
-  return {
-    ...summary,
-    input,
-    summary,
-    lines: incurred.lines,
-    totalUsd: incurred.total,
-  };
 }

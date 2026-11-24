@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
 import { parquetWriteBuffer } from "hyparquet-writer";
-import { fnv1a32, readLogs, type OpsSource } from "./engine";
+import { clearOpsDecodedCache, fnv1a32, readLogs, type OpsSource } from "./engine";
 import type { ManifestFile } from "../dashboard/manifest";
 import type { RunProgress } from "../dashboard/engine";
 
@@ -314,6 +314,28 @@ describe("readLogs", () => {
     });
     await readLogs(src, "fos_usage", range);
     expect(log.evicted).toEqual([mine]);
+  });
+
+  it("reuses decoded Parquet rows across reads when cacheScope is set and clears on clearOpsDecodedCache", async () => {
+    clearOpsDecodedCache();
+    const key = windowKey(10, minute(10), 2);
+    const buf = await parquet([row(1, "a"), row(5, "b")]);
+    const { src, log } = source({
+      live: noLive,
+      manifest: [{ files: [entry(key, 2)], next_cursor: null }],
+      files: { [key]: buf },
+    });
+    src.cacheScope = "epoch-1:svc:admin";
+
+    const r1 = await readLogs(src, "fos_usage", range);
+    const r2 = await readLogs(src, "fos_usage", range);
+    expect(r1.rows.map((r) => r.event_id)).toEqual(["b", "a"]);
+    expect(r2.rows.map((r) => r.event_id)).toEqual(["b", "a"]);
+    expect(log.files).toEqual([key]);
+
+    clearOpsDecodedCache();
+    await readLogs(src, "fos_usage", range);
+    expect(log.files).toEqual([key, key]);
   });
 });
 

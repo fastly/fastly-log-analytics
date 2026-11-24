@@ -3989,6 +3989,41 @@
             }
           },
           {
+            "name": "sections",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "enum": [
+                      "verified_bots_ts",
+                      "ngwaf_verified_bots",
+                      "ngwaf_verified_bots_ts",
+                      "wellknown_bots",
+                      "bot_efficiency",
+                      "tls_fingerprints",
+                      "fingerprint_coverage",
+                      "req_size_dist",
+                      "top_ips_header",
+                      "ipv6_adoption",
+                      "proxy_dist",
+                      "conn_reuse_dist",
+                      "proxies",
+                      "top_bots"
+                    ],
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Sections"
+            }
+          },
+          {
             "name": "service",
             "in": "query",
             "required": false,

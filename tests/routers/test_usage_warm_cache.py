@@ -312,3 +312,66 @@ def test_usage_rum_breakdown_high_scale_warm_hit_across_seconds_in_same_minute(m
 
     # Suppress unused import warning check
     assert metadata_db is not None
+
+
+def test_usage_bandwidth_warm_cache_and_invalidation(monkeypatch):
+    src_a = {"name": "svc-a", "service_id": "svc-a", "logging_service_id": "log-a", "cdn_service_id": "cdn-a"}
+    src_b = {"name": "svc-b", "service_id": "svc-b", "logging_service_id": "log-b", "cdn_service_id": "cdn-b"}
+    bw_calls = 0
+
+    def fake_fastly_api(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal bw_calls
+        bw_calls += 1
+        return {"data": [{"start_time": 1_795_514_400, "bandwidth": 1000, "requests": 50}]}
+
+    monkeypatch.setattr(usage, "get_fastly_api_key", lambda _sid: "tok-a")
+    monkeypatch.setattr(usage, "api_key_or_mock", lambda k: k)
+    monkeypatch.setattr(usage, "_fastly_api", fake_fastly_api)
+
+    b1 = usage.usage_bandwidth(start="2026-11-24T10:00:05Z", end="2026-11-24T11:00:05Z", by="hour", source=src_a)
+    b2 = usage.usage_bandwidth(start="2026-11-24T10:00:45Z", end="2026-11-24T11:00:45Z", by="hour", source=src_a)
+    assert bw_calls == 1
+    assert b1.total_bytes == b2.total_bytes == 1000
+    assert b2.is_cached is True
+
+    # Different granularity misses
+    usage.usage_bandwidth(start="2026-11-24T10:00:45Z", end="2026-11-24T11:00:45Z", by="day", source=src_a)
+    assert bw_calls == 2
+
+    # Different service misses
+    usage.usage_bandwidth(start="2026-11-24T10:00:05Z", end="2026-11-24T11:00:05Z", by="hour", source=src_b)
+    assert bw_calls == 3
+
+    invalidate_service_cache("svc-a")
+    usage.usage_bandwidth(start="2026-11-24T10:00:45Z", end="2026-11-24T11:00:45Z", by="hour", source=src_a)
+    assert bw_calls == 4
+
+
+def test_usage_get_endpoints_emit_cache_control(monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    src = {"name": "svc-a", "service_id": "svc-a", "logging_service_id": "log-a", "cdn_service_id": "cdn-a"}
+    app = FastAPI()
+    app.include_router(usage.router)
+    app.dependency_overrides[usage.get_source] = lambda: src
+
+    monkeypatch.setattr(usage, "get_fastly_api_key", lambda _sid: "tok-a")
+    monkeypatch.setattr(usage, "api_key_or_mock", lambda k: k)
+    monkeypatch.setattr(usage, "_fastly_api", lambda *_a, **_kw: {"data": []})
+    monkeypatch.setattr(
+        fos_usage,
+        "get_usage_operation_buckets",
+        lambda *_a, **_kw: {"data": [], "total_class_a": 0, "total_class_b": 0},
+    )
+    monkeypatch.setattr(svcconfig, "load_usage_logging_config", lambda: {"class_a_rate_per_1k": 0.0025})
+
+    client = TestClient(app)
+    for path in (
+        "/api/usage/prefill/rates",
+        "/api/usage/operations?start=2026-11-24T10:00:00Z&end=2026-11-24T11:00:00Z&by=hour",
+        "/api/usage/bandwidth?start=2026-11-24T10:00:00Z&end=2026-11-24T11:00:00Z&by=hour",
+    ):
+        resp = client.get(path)
+        assert resp.status_code == 200, (path, resp.text)
+        assert resp.headers.get("cache-control") == usage._USAGE_CACHE_CONTROL

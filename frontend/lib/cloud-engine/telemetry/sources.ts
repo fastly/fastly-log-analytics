@@ -10,7 +10,7 @@ import {
   type BrowserSourceOptions,
 } from "../dashboard/sources";
 import { createSharedRequests } from "../shared-request";
-import type { OpsSource } from "./engine";
+import { clearOpsDecodedCache, type OpsSource } from "./engine";
 
 export const OPS_CACHE_PREFIX = "flp-ops-parquet-v1:";
 
@@ -149,6 +149,7 @@ export async function clearOpsCaches(
     activeUserRole = null;
   }
   opsCacheEpoch += 1;
+  clearOpsDecodedCache();
   volatileOpsScope = `volatile-ops-${++volatileOpsScopeCounter}`;
   for (const controller of activeOpsControllers) {
     controller.abort(opsAbortError());
@@ -301,7 +302,9 @@ export function browserOpsSource(
       throw opsAbortError();
     }
   };
+  const cacheScope = `${opsCacheEpoch}:${baseUrl}:${name}`;
   return {
+    cacheScope,
     async fetchJson(url, signal) {
       return withOpsController(signal, async (callEpoch, controller) => {
         const headers = buildRequestHeaders();

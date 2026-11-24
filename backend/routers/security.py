@@ -47,6 +47,13 @@ _expand_security_sections = make_section_expander(
 )
 
 
+_SECURITY_CACHE_CONTROL = "private, max-age=30, stale-while-revalidate=120"
+
+
+def _set_security_cache_control(response: Response) -> None:
+    response.headers["Cache-Control"] = _SECURITY_CACHE_CONTROL
+
+
 @router.post("/aggregates", response_model=SecurityAggregatesResponse)
 @router.post("/bundle", response_model=SecurityAggregatesResponse)
 @query_errors()
@@ -59,7 +66,7 @@ def security_aggregates(
     sections = _expand_security_sections(req.sections)
     mask_ips = mask_ips_for(ctx.analyst_session)
     high_scale_service = require_high_scale(ctx)
-    response.headers["Cache-Control"] = "private, max-age=30, stale-while-revalidate=120"
+    response.headers["Cache-Control"] = _SECURITY_CACHE_CONTROL
     return hs_aggregates(high_scale_service, req, start_time, end_time, sections=sections, mask_ips=mask_ips)
 
 
@@ -72,6 +79,7 @@ def security_bundle_get(
     range_token: str | None = None,
     anchor: str | None = None,
     bucket_seconds: int = 300,
+    sections: list[SecuritySectionName] | None = Query(default=None),
     ctx: RequestContext = Depends(build_request_context),
 ):
     req = SecurityAggregatesRequest(
@@ -80,6 +88,7 @@ def security_bundle_get(
         range_token=range_token,
         anchor=anchor,
         bucket_seconds=bucket_seconds,
+        sections=sections,
     )
     return security_aggregates(req, response, ctx)
 
@@ -155,7 +164,11 @@ def export_proxies_csv(
     )
 
 
-@router.get("/threat-intel", response_model=ThreatIntelListResponse)
+@router.get(
+    "/threat-intel",
+    response_model=ThreatIntelListResponse,
+    dependencies=[Depends(_set_security_cache_control)],
+)
 @query_errors()
 def get_security_threat_intel(
     ctx: RequestContext = Depends(build_request_context),

@@ -21702,6 +21702,7 @@ export interface operations {
                 range_token?: string | null;
                 anchor?: string | null;
                 bucket_seconds?: number;
+                sections?: ("verified_bots_ts" | "ngwaf_verified_bots" | "ngwaf_verified_bots_ts" | "wellknown_bots" | "bot_efficiency" | "tls_fingerprints" | "fingerprint_coverage" | "req_size_dist" | "top_ips_header" | "ipv6_adoption" | "proxy_dist" | "conn_reuse_dist" | "proxies" | "top_bots")[] | null;
                 service?: string | null;
                 service_id?: string | null;
             };
