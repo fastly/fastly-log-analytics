@@ -12,6 +12,7 @@ import {
 } from "./ingestShape";
 import { DAY_MS, LIST_RATES } from "./rates";
 import {
+  KV_BINARY_GIB,
   priceCdnEgress,
   priceCdnRequests,
   priceComputeRequests,
@@ -20,6 +21,7 @@ import {
   priceFosClassB,
   priceKvClassA,
   priceKvClassB,
+  priceKvStorageGb,
   priceSecrets,
   priceStorageGb,
 } from "./pricing";
@@ -842,8 +844,9 @@ export function estimateMonthly(
     {
       id: "kv",
       label: "KV Store",
-      detail: `A ${count(all.kvA)} · B ${count(all.kvB)}`,
+      detail: `${gb(0.005 + (windowFiles * storedDays * 250) / KV_BINARY_GIB)} GiB · A ${count(all.kvA)} · B ${count(all.kvB)}`,
       ...priced([
+        { label: "Storage", usd: priceKvStorageGb(0.005 + (windowFiles * storedDays * 250) / KV_BINARY_GIB) },
         { label: "Class A", usd: priceKvClassA(all.kvA, rates.kv_class_a_rate_per_million) },
         { label: "Class B", usd: priceKvClassB(all.kvB, rates.kv_class_b_rate_per_million) },
       ]),

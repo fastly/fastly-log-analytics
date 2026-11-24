@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  KV_BINARY_GIB,
+  kvStorageGibMonthsFromHourlyMax,
   priceCdnEgress,
   priceCdnRequests,
   priceComputeRequests,
@@ -8,6 +10,7 @@ import {
   priceFosClassB,
   priceKvClassA,
   priceKvClassB,
+  priceKvStorageGb,
   priceSecrets,
   priceStorageGb,
 } from "./pricing";
@@ -23,6 +26,9 @@ describe("Fastly tiered monthly pricing", () => {
     expect(priceComputeVcpuMs(100_000_000)).toBe(0);
     expect(priceKvClassA(100_000)).toBe(0);
     expect(priceKvClassB(1_000_000)).toBe(0);
+    expect(priceKvStorageGb(1)).toBe(0);
+    expect(priceKvStorageGb(3)).toBeCloseTo(1.0, 6);
+    expect(kvStorageGibMonthsFromHourlyMax(Array.from({ length: 720 }, () => 2 * KV_BINARY_GIB))).toBeCloseTo(2, 6);
     expect(priceSecrets(10)).toBe(0);
   });
 

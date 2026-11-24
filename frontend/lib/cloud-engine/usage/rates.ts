@@ -19,6 +19,7 @@ export const LIST_RATES = {
   cdn_request_rate_per_10k: 0.01,
   kv_class_a_rate_per_million: 6.5,
   kv_class_b_rate_per_million: 0.55,
+  kv_storage_rate_per_gb_month: 0.5,
   secret_rate_per_month: 5,
 } as const;
 

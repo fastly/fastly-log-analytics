@@ -86,7 +86,7 @@ describe("estimateMonthly", () => {
     expect(labels("storage")).toEqual(["Storage", "Class A", "Class B"]);
     expect(labels("delivery")).toEqual(["Egress", "Requests"]);
     expect(labels("compute")).toEqual(["Requests", "vCPU"]);
-    expect(labels("kv")).toEqual(["Class A", "Class B"]);
+    expect(labels("kv")).toEqual(["Storage", "Class A", "Class B"]);
     for (const l of est.lines) {
       if (!l.parts) continue;
       expect(l.parts.length).toBeGreaterThan(1);

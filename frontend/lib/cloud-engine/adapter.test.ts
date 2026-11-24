@@ -434,7 +434,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
         });
         expect(line(storageBody, "kv")).toMatchObject({
           source: "fastly",
-          detail: "A 7 · B 8",
+          detail: expect.stringContaining("A 7 · B 8"),
         });
         expect(line(storageBody, "secrets")).toMatchObject({
           source: "fastly",

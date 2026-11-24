@@ -108,6 +108,11 @@ const KV_CLASS_B_TIERS: readonly PricingTier[] = [
   { upTo: Infinity, rate: 0.45 },
 ];
 
+const KV_STORAGE_TIERS: readonly PricingTier[] = [
+  { upTo: 1, rate: 0 },
+  { upTo: Infinity, rate: 0.5 },
+];
+
 const SECRET_TIERS: readonly PricingTier[] = [
   { upTo: 10, rate: 0 },
   { upTo: 100, rate: 5.0 },
@@ -175,6 +180,26 @@ export function priceKvClassA(ops: number, ratePerMillion: number = LIST_RATES.k
 
 export function priceKvClassB(ops: number, ratePerMillion: number = LIST_RATES.kv_class_b_rate_per_million): number {
   return priceProgressive(ops, 1_000_000, KV_CLASS_B_TIERS, ratePerMillion, LIST_RATES.kv_class_b_rate_per_million);
+}
+
+export function priceKvStorageGb(
+  gbMonths: number,
+  ratePerGb: number = LIST_RATES.kv_storage_rate_per_gb_month,
+): number {
+  return priceProgressive(gbMonths, 1, KV_STORAGE_TIERS, ratePerGb, LIST_RATES.kv_storage_rate_per_gb_month);
+}
+
+export const KV_BINARY_GIB = 1_073_741_824;
+
+export function kvStorageGibMonthsFromHourlyMax(hourlyMaxBytes: readonly number[], hoursInMonth = 720): number {
+  if (hourlyMaxBytes.length === 0 || hoursInMonth <= 0) return 0;
+  let total = 0;
+  for (const bytes of hourlyMaxBytes) {
+    if (Number.isFinite(bytes) && bytes > 0) {
+      total += bytes / KV_BINARY_GIB / hoursInMonth;
+    }
+  }
+  return total;
 }
 
 export function priceSecrets(secrets: number, ratePerMonth: number = LIST_RATES.secret_rate_per_month): number {

@@ -9,6 +9,7 @@ import {
   currentOpsIdentity,
 } from "../telemetry/sources";
 import { DAY_MS, FREE_SECRETS, LIST_RATES } from "./rates";
+import { priceKvStorageGb } from "./pricing";
 import type {
   StorageBillingInterval,
   StorageBillingIntervalKind,
@@ -1938,6 +1939,7 @@ export interface ComputeBilling {
   cdnRequests: number | null;
   kvClassA: number;
   kvClassB: number;
+  kvStorageGb?: number | null;
   kvByHour?: Array<{ t: number; classA: number; classB: number }>;
   /** Hourly app and worker Compute, merged by hour; absent when the response has no buckets. */
   computeByHour?: ComputeHour[];
@@ -2294,9 +2296,10 @@ export function incurredCost(input: IncurredInput): {
         id: "kv",
         label: "KV Store operations",
         usd:
+          priceKvStorageGb(billing.kvStorageGb ?? 0.005) * months +
           (billing.kvClassA / 1e6) * r.kv_class_a_rate_per_million +
           (billing.kvClassB / 1e6) * r.kv_class_b_rate_per_million,
-        detail: `A ${fmt(billing.kvClassA)} · B ${fmt(billing.kvClassB)}`,
+        detail: `${(billing.kvStorageGb ?? 0.005).toFixed(2)} GB (est.) · A ${fmt(billing.kvClassA)} · B ${fmt(billing.kvClassB)}`,
         source: "fastly",
       },
     );
