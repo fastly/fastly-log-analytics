@@ -5,27 +5,111 @@ import { Database, RefreshCw, Loader2, ChevronDown, X } from 'lucide-react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { cn } from '@/lib/utils'
 import { useSSE, useDateFormat } from '@/hooks/useSSE'
+import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
 import type { CronRun } from './useLogsPageState'
+
+type ConsoleLine = { _id?: string; type: string; message?: string; file_name?: string; [key: string]: unknown }
+
+function formatCloudCronRunLines(job?: CronRun): ConsoleLine[] {
+  if (!job) {
+    return [{ _id: 'cloud-empty', type: 'status', message: 'No details recorded for this Cloud cron run.' }]
+  }
+  const out: ConsoleLine[] = []
+  const raw = job as Record<string, unknown>
+  const summary = typeof job.summary === 'string' && job.summary.trim() ? job.summary : `${job.task}: ${job.status ?? 'unknown'}`
+  out.push({ _id: 'cloud-summary', type: job.status === 'error' ? 'error' : 'status', message: summary })
+
+  const meta: string[] = []
+  if (typeof raw.run_id === 'string' && raw.run_id) meta.push(`run_id=${raw.run_id}`)
+  if (typeof raw.outcome === 'string' && raw.outcome) meta.push(`outcome=${raw.outcome}`)
+  if (typeof job.duration_s === 'number') meta.push(`duration=${Math.round(job.duration_s * 1000)}ms`)
+  if (typeof raw.vcpu_ms === 'number') meta.push(`vcpu=${raw.vcpu_ms}ms`)
+  if (typeof raw.trigger === 'string' && raw.trigger) meta.push(`trigger=${raw.trigger}`)
+  if (meta.length > 0) {
+    out.push({ _id: 'cloud-meta', type: 'log', message: meta.join('  ') })
+  }
+
+  const counts: string[] = []
+  if (typeof raw.listed_files === 'number') counts.push(`listed=${raw.listed_files}`)
+  const converted = job.files_downloaded ?? (typeof raw.converted_files === 'number' ? raw.converted_files : null)
+  if (typeof converted === 'number') counts.push(`converted=${converted}`)
+  const deleted = job.files_deleted_fos ?? (typeof raw.deleted_files === 'number' ? raw.deleted_files : null)
+  if (typeof deleted === 'number') counts.push(`deleted=${deleted}`)
+  if (typeof job.rows_ingested === 'number') counts.push(`rows=${job.rows_ingested}`)
+  const parquet = job.parquet_files_created ?? (typeof raw.parquet_files_written === 'number' ? raw.parquet_files_written : null)
+  if (typeof parquet === 'number') counts.push(`parquet=${parquet}`)
+  if (typeof job.corrupt_rows === 'number' && job.corrupt_rows > 0) counts.push(`bad_lines=${job.corrupt_rows}`)
+  if (typeof raw.more_pending === 'boolean') counts.push(`more_pending=${raw.more_pending}`)
+  if (counts.length > 0) {
+    out.push({ _id: 'cloud-counts', type: 'file_done', message: counts.join('  ') })
+  }
+
+  const resourceBits: string[] = []
+  if (typeof raw.backend_requests_used === 'number') resourceBits.push(`backend_calls=${raw.backend_requests_used}`)
+  if (typeof raw.kv_ops === 'number') resourceBits.push(`kv_ops=${raw.kv_ops}`)
+  let details: Record<string, unknown> | null = null
+  if (typeof raw.details_json === 'string' && raw.details_json.trim()) {
+    try {
+      const parsed = JSON.parse(raw.details_json)
+      if (parsed && typeof parsed === 'object') details = parsed as Record<string, unknown>
+    } catch {
+      // Ignore malformed details_json
+    }
+  }
+  const exec = details?.execution_metrics as Record<string, unknown> | undefined
+  if (exec && typeof exec.heap_mib === 'number') resourceBits.push(`heap=${exec.heap_mib}MiB`)
+  if (resourceBits.length > 0) {
+    out.push({ _id: 'cloud-res', type: 'log', message: resourceBits.join('  ') })
+  }
+
+  const workers = Array.isArray(details?.worker_executions_metrics)
+    ? (details.worker_executions_metrics as Array<Record<string, unknown>>)
+    : []
+  workers.forEach((w, idx) => {
+    const parts = [
+      `worker [${String(w.kind ?? 'worker')}${w.shard != null ? ` shard=${String(w.shard)}` : ''}]`,
+      `status=${String(w.status ?? 'unknown')}`,
+    ]
+    if (typeof w.duration_ms === 'number') parts.push(`duration=${w.duration_ms}ms`)
+    if (typeof w.vcpu_ms === 'number') parts.push(`vcpu=${w.vcpu_ms}ms`)
+    if (typeof w.calls === 'number') parts.push(`calls=${w.calls}`)
+    out.push({
+      _id: `cloud-worker-${idx}`,
+      type: w.status === 'error' ? 'error' : 'file_done',
+      message: parts.join('  '),
+    })
+  })
+
+  if (typeof job.error_message === 'string' && job.error_message.trim()) {
+    out.push({ _id: 'cloud-error', type: 'error', message: `Error: ${job.error_message}` })
+  }
+  out.push({ _id: 'cloud-done', type: 'done', message: 'Completed.' })
+  return out
+}
 
 export function CronLiveLog({
   runId,
+  job,
   singleLine = false,
   terminalMode = !singleLine,
   startedAt,
   onDone,
 }: {
   runId: number | string | undefined
+  job?: CronRun
   singleLine?: boolean
   terminalMode?: boolean
   startedAt?: string
   onDone?: () => void
 }) {
-  const { lines, status, start, stop } = useSSE()
+  const isPersistedCloudRun = IS_CLOUD_MODE && runId !== undefined && runId !== 'cloud-tick'
+  const { lines: sseLines, status: sseStatus, start, stop } = useSSE()
   const startedForRunId = useRef<number | string | undefined>(undefined)
   const doneFiredForRunId = useRef<number | string | undefined>(undefined)
   const { full, abbr } = useDateFormat()
 
   useEffect(() => {
+    if (isPersistedCloudRun) return
     if (runId && startedForRunId.current !== runId) {
       startedForRunId.current = runId
       doneFiredForRunId.current = undefined
@@ -37,7 +121,10 @@ export function CronLiveLog({
         startedForRunId.current = undefined
       }
     }
-  }, [runId, start, stop])
+  }, [isPersistedCloudRun, runId, start, stop])
+
+  const lines: ConsoleLine[] = isPersistedCloudRun ? formatCloudCronRunLines(job) : (sseLines as ConsoleLine[])
+  const status = isPersistedCloudRun ? 'done' : sseStatus
 
   useEffect(() => {
     if ((status === 'done' || status === 'error') && onDone && doneFiredForRunId.current !== runId) {
@@ -81,7 +168,11 @@ export function CronLiveLog({
               : undefined
     return {
       text,
-      node: <span className={cls}>{line.type === 'file_done' ? `Processed ${String(line.file_name)}` : text}</span>,
+      node: (
+        <span className={cls}>
+          {line.type === 'file_done' && line.file_name ? `Processed ${String(line.file_name)}` : text}
+        </span>
+      ),
     }
   }
 
@@ -308,6 +399,7 @@ export function FloatingOperationsDock({
                 <CronLiveLog
                   key={activeJob?.id}
                   runId={activeJob?.id}
+                  job={activeJob}
                   singleLine={false}
                   startedAt={activeJob?.started_at}
                   onDone={() => {
