@@ -39,6 +39,7 @@ function rowCount(data: unknown): number | null {
 
 const MESSAGE_LIMIT = 200;
 const MAX_SCAN_INPUT_LEN = 65_536;
+const MAX_URL_SCHEME_LEN = 32;
 
 const SQL_KEYWORD_LIST = [
   "SELECT", "WHERE", "AS", "VALUES", "LIKE", "ILIKE", "SIMILAR", "IS", "IN", "EXISTS",
@@ -93,7 +94,7 @@ const SAFE_HEADER_WORDS = new Set<string>([
 
 const SAFE_CLAUSE_START_WORDS = new Set<string>([
   ...SAFE_HEADER_WORDS,
-  "Backend", "Header", "Failed", "Template", "Could", "Malformed", "Unexpected",
+  "Backend", "Header", "Failed", "Template", "Could", "Casting", "Interval", "Malformed", "Unexpected",
   "Expected", "Cannot", "Unable", "No", "Function", "Scalar", "Aggregate", "Table",
   "Column", "View", "Schema", "Database", "Index", "Macro", "Referenced", "Overflow",
   "Candidate", "Did", "Line", "Like", "Map", "List", "Struct", "Duplicate",
@@ -135,7 +136,7 @@ const DIAGNOSTIC_VOCAB = new Set<string>([
   // Closed DuckDB / HTTP / Parquet / OPFS / Cloud-Engine diagnostic vocabulary
   "abort", "aborted", "access", "according", "add", "addition", "aggregate", "allocate",
   "allocation", "allowed", "ambiguous", "appear", "argument", "arguments", "array", "ascii", "assertion",
-  "available", "backend", "bad", "base64", "batch", "begin", "big", "binary", "binder", "bit",
+  "available", "backend", "bad", "base64", "batch", "begin", "big", "bignum", "binary", "binder", "bit",
   "blob", "block", "blocked", "body", "boolean", "bound", "bounds", "bracket", "browser",
   "budget", "buffer", "build", "byte", "bytes", "cache", "cached", "call", "cancel", "canceled",
   "cancelled", "candidate", "capture", "cast", "casting", "casts", "catalog", "char",
@@ -252,7 +253,9 @@ function stripDiagnosticLineTail(raw: string): string {
         let k = j + 5;
         while (k < len && isAsciiDigit(raw[k])) k += 1;
         if (k > j + 5 && raw[k] === ":") {
-          return raw.slice(0, i);
+          let cut = i;
+          while (cut > 0 && (raw[cut - 1] === "\n" || raw[cut - 1] === "\r")) cut -= 1;
+          return raw.slice(0, cut);
         }
       }
     }
@@ -424,6 +427,11 @@ function canonicalizeDuckDbTemplates(rawInput: string): { text: string; canonica
   const prefix = s.slice(0, bodyStart);
   const bodyLine1 = headLine.slice(bodyStart);
   const bodyLine1Lower = bodyLine1.toLowerCase();
+  let bodyEnd = s.length;
+  while (bodyEnd > bodyStart && (s[bodyEnd - 1] === "\n" || s[bodyEnd - 1] === "\r")) {
+    bodyEnd -= 1;
+  }
+  const sTrimEnd = bodyEnd === s.length ? s : s.slice(0, bodyEnd);
 
   if (s.startsWith("Malformed JSON", bodyStart)) {
     const inputIdx = headLine.indexOf("Input:", bodyStart + 14);
@@ -445,24 +453,108 @@ function canonicalizeDuckDbTemplates(rawInput: string): { text: string; canonica
     return { text: `${prefix}Failed to parse format specifier [redacted]`, canonicalized: true };
   }
 
-  const cncsMarker = "Could not convert string ";
-  if (s.startsWith(cncsMarker, bodyStart)) {
-    const lastNl = Math.max(s.lastIndexOf("\n"), s.lastIndexOf("\r"));
-    const finalLineStart = Math.max(bodyStart + cncsMarker.length, lastNl + 1);
-    const toIdx = s.lastIndexOf(" to ");
+  const cncstMarker = "Could not cast string to ";
+  if (s.startsWith(cncstMarker, bodyStart)) {
+    const parsed = parseSanitizedDuckDbType(sTrimEnd, bodyStart + cncstMarker.length);
+    if (parsed && sTrimEnd[parsed.end] === ":") {
+      return { text: `${prefix}${cncstMarker}${parsed.text}: [redacted]`, canonicalized: true };
+    }
+    return { text: `${prefix}${cncstMarker}[redacted]`, canonicalized: true };
+  }
+
+  const valueCastMarkers = [
+    "Could not convert string ",
+    "Could not cast value ",
+    "Could not convert value ",
+    "Could not convert bignum ",
+  ] as const;
+  let matchedCastMarker: string | null = null;
+  for (const marker of valueCastMarkers) {
+    if (s.startsWith(marker, bodyStart)) {
+      matchedCastMarker = marker;
+      break;
+    }
+  }
+  if (
+    matchedCastMarker === null
+    && s.startsWith("Could not cast ", bodyStart)
+    && !s.startsWith("Could not cast lambda expression ", bodyStart)
+  ) {
+    matchedCastMarker = "Could not cast ";
+  }
+  if (matchedCastMarker !== null) {
+    const lastNl = Math.max(sTrimEnd.lastIndexOf("\n"), sTrimEnd.lastIndexOf("\r"));
+    const finalLineStart = Math.max(bodyStart + matchedCastMarker.length, lastNl + 1);
+    const toIdx = sTrimEnd.lastIndexOf(" to ");
     if (toIdx >= finalLineStart) {
-      const parsed = parseSanitizedDuckDbType(s, toIdx + 4);
+      const parsed = parseSanitizedDuckDbType(sTrimEnd, toIdx + 4);
       if (parsed) {
-        const afterLine = s.slice(parsed.end);
+        const afterLine = sTrimEnd.slice(parsed.end);
         if (afterLine === "" || afterLine.startsWith(" when casting") || /^[,.;:)\s]*$/.test(afterLine)) {
           return {
-            text: `${prefix}${cncsMarker}[redacted] to ${parsed.text}${sanitizeCastingSuffix(afterLine)}`,
+            text: `${prefix}${matchedCastMarker}[redacted] to ${parsed.text}${sanitizeCastingSuffix(afterLine)}`,
             canonicalized: true,
           };
         }
       }
     }
-    return { text: `${prefix}${cncsMarker}[redacted] to [redacted]`, canonicalized: true };
+    return { text: `${prefix}${matchedCastMarker}[redacted] to [redacted]`, canonicalized: true };
+  }
+
+  if (s.startsWith("Could not convert DATE (", bodyStart)) {
+    return { text: `${prefix}Could not convert DATE ([redacted])`, canonicalized: true };
+  }
+
+  const fcdvMarker = "Failed to cast decimal value ";
+  if (s.startsWith(fcdvMarker, bodyStart)) {
+    const lastNl = Math.max(sTrimEnd.lastIndexOf("\n"), sTrimEnd.lastIndexOf("\r"));
+    const finalLineStart = Math.max(bodyStart + fcdvMarker.length, lastNl + 1);
+    const toTypeMarker = " to type ";
+    const toIdx = sTrimEnd.lastIndexOf(toTypeMarker);
+    if (toIdx >= finalLineStart) {
+      const parsed = parseSanitizedDuckDbType(sTrimEnd, toIdx + toTypeMarker.length);
+      if (parsed) {
+        const afterLine = sTrimEnd.slice(parsed.end);
+        if (afterLine === "" || afterLine.startsWith(" when casting") || /^[,.;:)\s]*$/.test(afterLine)) {
+          return {
+            text: `${prefix}${fcdvMarker}[redacted]${toTypeMarker}${parsed.text}${sanitizeCastingSuffix(afterLine)}`,
+            canonicalized: true,
+          };
+        }
+      }
+    }
+    return { text: `${prefix}${fcdvMarker}[redacted] to type [redacted]`, canonicalized: true };
+  }
+
+  if (s.startsWith("Failed to cast value:", bodyStart)) {
+    return { text: `${prefix}Failed to cast value: [redacted]`, canonicalized: true };
+  }
+
+  const cvMarker = "Casting value ";
+  if (s.startsWith(cvMarker, bodyStart)) {
+    const lastNl = Math.max(sTrimEnd.lastIndexOf("\n"), sTrimEnd.lastIndexOf("\r"));
+    const finalLineStart = Math.max(bodyStart + cvMarker.length, lastNl + 1);
+    const toTypeMarker = " to type ";
+    const toIdx = sTrimEnd.lastIndexOf(toTypeMarker);
+    if (toIdx >= finalLineStart) {
+      const parsed = parseSanitizedDuckDbType(sTrimEnd, toIdx + toTypeMarker.length);
+      if (parsed) {
+        const afterLine = sTrimEnd.slice(parsed.end);
+        if (afterLine.startsWith(" failed: value is out of range!")) {
+          return {
+            text: `${prefix}${cvMarker}[redacted]${toTypeMarker}${parsed.text} failed: value is out of range!`,
+            canonicalized: true,
+          };
+        }
+        if (afterLine === "" || afterLine.startsWith(" failed") || afterLine.startsWith(" when casting")) {
+          return {
+            text: `${prefix}${cvMarker}[redacted]${toTypeMarker}${parsed.text}${afterLine.startsWith(" failed") ? " failed" : sanitizeCastingSuffix(afterLine)}`,
+            canonicalized: true,
+          };
+        }
+      }
+    }
+    return { text: `${prefix}${cvMarker}[redacted] to type [redacted]`, canonicalized: true };
   }
 
   if (s.startsWith("Type ", bodyStart)) {
@@ -550,15 +642,15 @@ function canonicalizeDuckDbTemplates(rawInput: string): { text: string; canonica
 
   const cndsMarker = "Could not decode string ";
   if (s.startsWith(cndsMarker, bodyStart)) {
-    const lastNl = Math.max(s.lastIndexOf("\n"), s.lastIndexOf("\r"));
+    const lastNl = Math.max(sTrimEnd.lastIndexOf("\n"), sTrimEnd.lastIndexOf("\r"));
     const finalLineStart = Math.max(bodyStart + cndsMarker.length, lastNl + 1);
-    const asIdx = s.lastIndexOf(" as ");
+    const asIdx = sTrimEnd.lastIndexOf(" as ");
     if (asIdx >= finalLineStart) {
       let k = asIdx + 4;
-      const encLimit = Math.min(s.length, k + 16);
-      while (k < encLimit && (isAsciiAlpha(s[k]) || isAsciiDigit(s[k]) || s[k] === "_")) k += 1;
-      const enc = s.slice(asIdx + 4, k).toLowerCase();
-      if (SAFE_DECODE_ENCODINGS.has(enc) && (k === s.length || s[k] === ":" || /\s/.test(s[k]!))) {
+      const encLimit = Math.min(sTrimEnd.length, k + 16);
+      while (k < encLimit && (isAsciiAlpha(sTrimEnd[k]) || isAsciiDigit(sTrimEnd[k]) || sTrimEnd[k] === "_")) k += 1;
+      const enc = sTrimEnd.slice(asIdx + 4, k).toLowerCase();
+      if (SAFE_DECODE_ENCODINGS.has(enc) && (k === sTrimEnd.length || sTrimEnd[k] === ":" || /\s/.test(sTrimEnd[k]!))) {
         return { text: `${prefix}${cndsMarker}[redacted] as ${enc}`, canonicalized: true };
       }
     }
@@ -613,12 +705,31 @@ function canonicalizeDuckDbTemplates(rawInput: string): { text: string; canonica
   }
 
   if (s.startsWith("Overflow in ", bodyStart)) {
+    if (s.startsWith("Overflow in division of ", bodyStart)) {
+      return { text: `${prefix}Overflow in division of [redacted]`, canonicalized: true };
+    }
+    const colonIdx = headLine.indexOf(":", bodyStart + 12);
     const lp = headLine.indexOf("(", bodyStart + 12);
+    if (colonIdx !== -1 && (lp === -1 || colonIdx < lp)) {
+      return { text: `${headLine.slice(0, colonIdx + 1)} [redacted]`, canonicalized: true };
+    }
     const rp = lp !== -1 ? headLine.lastIndexOf(")") : -1;
-    if (lp !== -1 && rp > lp && !headLine.slice(bodyStart + 12, lp).includes(":")) {
-      const bang = headLine[rp + 1] === "!" ? "!" : "";
+    if (lp !== -1) {
+      const bang = rp > lp && headLine[rp + 1] === "!" ? "!" : "";
       return { text: `${headLine.slice(0, lp)}([redacted])${bang}`, canonicalized: true };
     }
+  }
+
+  if (s.startsWith("Left-shift value ", bodyStart)) {
+    return { text: `${prefix}Left-shift value [redacted] is out of range`, canonicalized: true };
+  }
+
+  if (s.startsWith("Interval value ", bodyStart)) {
+    return { text: `${prefix}Interval value [redacted] out of range`, canonicalized: true };
+  }
+
+  if (s.startsWith("input value ", bodyStart) && bodyLine1Lower.includes(" is out of range")) {
+    return { text: `${prefix}input value [redacted] is out of range`, canonicalized: true };
   }
 
   const noFuncMarker = "No function matches the given name and argument types '";
@@ -723,6 +834,7 @@ function redactPostColonDiagnosticTail(line1: string): string {
   let afterHeader = -1;
   if (lower.startsWith("invalid input error:")) afterHeader = 20;
   else if (lower.startsWith("conversion error:")) afterHeader = 17;
+  else if (lower.startsWith("out of range error:")) afterHeader = 19;
   else if (lower.startsWith("regex error:")) afterHeader = 12;
   if (afterHeader === -1) return line1;
   for (let i = afterHeader; i < line1.length; i += 1) {
@@ -780,8 +892,9 @@ function redactQuotesAndUrlsLine(line1: string): string {
     }
     if (isAsciiAlpha(line1[i]) && (i === 0 || !WORD_CHAR_RE.test(line1[i - 1]!))) {
       let j = i + 1;
+      const schemeLimit = Math.min(len, i + MAX_URL_SCHEME_LEN);
       while (
-        j < len
+        j < schemeLimit
         && (isAsciiAlpha(line1[j]) || isAsciiDigit(line1[j]) || line1[j] === "+" || line1[j] === "." || line1[j] === "-")
       ) {
         j += 1;
@@ -1110,7 +1223,37 @@ function emitAllowlistedTokens(line: string): string {
     const rawTok = line.slice(tokStart, i);
 
     const eqIdx = rawTok.indexOf("=");
-    if (eqIdx > 0 && isSecretKeyStem(rawTok.slice(0, eqIdx))) {
+    const colIdx = rawTok.indexOf(":");
+    const sepIdx = eqIdx > 0 && (colIdx === -1 || eqIdx < colIdx)
+      ? eqIdx
+      : colIdx > 0
+        ? colIdx
+        : -1;
+    if (sepIdx > 0 && isSecretKeyStem(rawTok.slice(0, sepIdx))) {
+      const postSep = rawTok.slice(sepIdx + 1).toLowerCase();
+      if (postSep === "" || AUTH_SCHEMES.has(postSep)) {
+        let p = i;
+        while (p < len && (line[p] === " " || line[p] === "\t")) p += 1;
+        if (p > i && p < len && !line.startsWith("[redacted]", p) && !line.startsWith("[url]", p)) {
+          if (postSep === "") {
+            let sEnd = p;
+            while (sEnd < len && isAsciiAlpha(line[sEnd])) sEnd += 1;
+            const maybeScheme = line.slice(p, sEnd).toLowerCase();
+            if (AUTH_SCHEMES.has(maybeScheme) && (line[sEnd] === " " || line[sEnd] === "\t")) {
+              p = sEnd;
+              while (p < len && (line[p] === " " || line[p] === "\t")) p += 1;
+            }
+          }
+          if (p < len && !line.startsWith("[redacted]", p) && !line.startsWith("[url]", p)) {
+            let valEnd = p;
+            while (valEnd < len && !/[\s,;]/.test(line[valEnd]!)) {
+              if (line.startsWith("[redacted]", valEnd) || line.startsWith("[url]", valEnd)) break;
+              valEnd += 1;
+            }
+            if (valEnd > p) i = valEnd;
+          }
+        }
+      }
       parts.push("[redacted]");
       isClauseStart = false;
       prevTokLower = "";
@@ -1120,18 +1263,32 @@ function emitAllowlistedTokens(line: string): string {
     const isSqlKeyPhrase = rawLower === "key" && line[i] !== ":" && line[i] !== "=" && SAFE_KEY_PREFIX_WORDS.has(prevTokLower);
     if (isSecretKeyStem(rawTok) && !isSqlKeyPhrase) {
       let p = i;
-      if (line[p] === ":" || line[p] === "=") p += 1;
-      while (p < len && line[p] === " ") p += 1;
+      while (p < len && (line[p] === " " || line[p] === "\t")) p += 1;
+      if (line[p] === ":" || line[p] === "=") {
+        p += 1;
+        while (p < len && (line[p] === " " || line[p] === "\t")) p += 1;
+      }
       if (p < len && !line.startsWith("[redacted]", p) && !line.startsWith("[url]", p)) {
         let sEnd = p;
         while (sEnd < len && isAsciiAlpha(line[sEnd])) sEnd += 1;
         const maybeScheme = line.slice(p, sEnd).toLowerCase();
-        if (AUTH_SCHEMES.has(maybeScheme) && line[sEnd] === " ") {
+        if (AUTH_SCHEMES.has(maybeScheme) && (line[sEnd] === " " || line[sEnd] === "\t")) {
+          const afterScheme = sEnd;
           p = sEnd;
-          while (p < len && line[p] === " ") p += 1;
+          while (p < len && (line[p] === " " || line[p] === "\t")) p += 1;
+          if (line.startsWith("[redacted]", p) || line.startsWith("[url]", p)) {
+            parts.push("[redacted]");
+            i = afterScheme;
+            isClauseStart = false;
+            prevTokLower = "";
+            continue;
+          }
         }
         let valEnd = p;
-        while (valEnd < len && !/[\s,;]/.test(line[valEnd]!)) valEnd += 1;
+        while (valEnd < len && !/[\s,;]/.test(line[valEnd]!)) {
+          if (line.startsWith("[redacted]", valEnd) || line.startsWith("[url]", valEnd)) break;
+          valEnd += 1;
+        }
         if (valEnd > p) {
           parts.push("[redacted]");
           i = valEnd;

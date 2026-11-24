@@ -111,6 +111,14 @@ pub struct Cursor {
     #[serde(default)]
     pub svc_zero_virtual_base: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub svc_kv_archived: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub svc_rebased_base: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub svc_archived_anchor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub svc_head_anchor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_svc_flush_s: Option<u64>,
     pub last_flush_s: u64,
     pub expired: u64,
@@ -169,6 +177,12 @@ struct Manifest {
     svc_zero_virtual_base: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     svc_observed_base: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    svc_kv_archived: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    svc_archived_anchor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    svc_head_anchor: Option<String>,
     #[serde(default)]
     svc_caught_up: bool,
     notes: Notes,
@@ -485,34 +499,123 @@ fn svc_entry_anchor(entry: &Value) -> String {
     hex::encode(Sha256::digest(canonical.to_string().as_bytes()))
 }
 
-fn svc_is_reset(svc_val: &Value, cursor: &Cursor) -> bool {
+#[derive(Clone, Copy, Debug)]
+struct SvcEpoch {
+    is_reset: bool,
+    effective_seq_base: u64,
+    archived_in_kv: usize,
+}
+
+fn classify_svc_outbox(svc_val: &Value, cursor: &Cursor) -> SvcEpoch {
     let raw_base = svc_val["_audit_outbox_base"].as_u64().unwrap_or(0);
-    let entries = svc_val["_audit_outbox"].as_array();
-    let len = entries.map_or(0, Vec::len) as u64;
-    if len == 0 || cursor.svc_outbox_archived == 0 {
-        return false;
+    let entries = svc_val["_audit_outbox"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let len = entries.len() as u64;
+    let archived = cursor.svc_outbox_archived;
+    if len == 0 || archived == 0 {
+        return SvcEpoch {
+            is_reset: false,
+            effective_seq_base: raw_base,
+            archived_in_kv: 0,
+        };
     }
-    let first_entry = entries.and_then(|arr| arr.first());
-    let cur_anchor = first_entry.map(svc_entry_anchor);
     let eff_last_svc_s = cursor.last_svc_flush_s.unwrap_or(cursor.last_flush_s);
-    if raw_base == 0 {
-        if cursor.svc_last_base.is_some_and(|lb| lb > 0) {
-            return true;
-        }
-        match (&cursor.svc_zero_anchor, &cur_anchor) {
-            (Some(prev), Some(cur)) => {
-                prev != cur || cursor.svc_outbox_archived > cursor.svc_zero_virtual_base + len
+    let cur_head_anchor = entries.first().map(svc_entry_anchor);
+
+    // 1a. Un-rebased KV epoch from a prior reset where `trim_svc_outbox` has not yet advanced
+    // `_audit_outbox_base` into Parquet sequence space (`svc_kv_archived < archived`).
+    if let Some(kv_arch) = cursor.svc_kv_archived {
+        if kv_arch < archived
+            && cursor.svc_last_base.is_none_or(|lb| raw_base >= lb)
+            && raw_base < kv_arch
+            && kv_arch <= raw_base + len
+        {
+            let boundary_pos = (kv_arch - 1 - raw_base) as usize;
+            let boundary_ok = cursor.svc_archived_anchor.as_deref()
+                == Some(svc_entry_anchor(&entries[boundary_pos]).as_str());
+            let head_ok = cursor.svc_last_base != Some(raw_base)
+                || cursor.svc_head_anchor.is_none()
+                || cursor.svc_head_anchor == cur_head_anchor;
+            if boundary_ok && head_ok {
+                let archived_in_kv = (kv_arch - raw_base) as usize;
+                return SvcEpoch {
+                    is_reset: false,
+                    effective_seq_base: archived - archived_in_kv as u64,
+                    archived_in_kv,
+                };
             }
-            (None, _) => {
-                let first_at = first_entry.and_then(|e| e["at"].as_u64()).unwrap_or(0);
-                cursor.svc_outbox_archived > cursor.svc_zero_virtual_base + len
-                    || (eff_last_svc_s > 0 && first_at > eff_last_svc_s)
-            }
-            _ => false,
         }
-    } else {
-        cursor.svc_outbox_archived > raw_base + len
-            || cursor.svc_last_base.is_some_and(|lb| raw_base < lb)
+    } else if raw_base == 0 && cursor.svc_zero_virtual_base > 0 {
+        // 1b. Legacy cursor with `svc_zero_virtual_base > 0` (no `svc_kv_archived`).
+        let vb = cursor.svc_zero_virtual_base;
+        if cursor.svc_last_base.is_none_or(|lb| lb == 0)
+            && cursor.svc_zero_anchor.is_some()
+            && cursor.svc_zero_anchor == cur_head_anchor
+            && archived >= vb
+            && archived <= vb + len
+        {
+            let archived_in_kv = (archived - vb) as usize;
+            let boundary_ok = archived_in_kv == 0
+                || eff_last_svc_s == 0
+                || entries[archived_in_kv - 1]["at"].as_u64().unwrap_or(0) <= eff_last_svc_s;
+            if boundary_ok {
+                return SvcEpoch {
+                    is_reset: false,
+                    effective_seq_base: vb,
+                    archived_in_kv,
+                };
+            }
+        }
+    }
+
+    // 2a. Normal or rebased space where `raw_base >= archived`: 0 entries in KV are claimed
+    // archived, so every entry in KV will be archived at `raw_base + i >= archived`.
+    if raw_base >= archived {
+        return SvcEpoch {
+            is_reset: false,
+            effective_seq_base: raw_base,
+            archived_in_kv: 0,
+        };
+    }
+
+    // 2b. Normal or rebased space where `raw_base < archived`: KV claims `archived - raw_base`
+    // prefix entries are already archived. Verify bounds, base monotonicity, and entry anchor.
+    let min_expected_base = cursor.svc_rebased_base.or(cursor.svc_last_base);
+    let bounds_ok = archived <= raw_base + len && min_expected_base.is_none_or(|lb| raw_base >= lb);
+    if bounds_ok {
+        let boundary_pos = (archived - 1 - raw_base) as usize;
+        let verified = if let Some(ref exp_arch) = cursor.svc_archived_anchor {
+            svc_entry_anchor(&entries[boundary_pos]) == *exp_arch
+                && (min_expected_base != Some(raw_base)
+                    || cursor.svc_head_anchor.is_none()
+                    || cursor.svc_head_anchor == cur_head_anchor)
+        } else if raw_base == 0 && cursor.svc_zero_anchor.is_some() {
+            cursor.svc_zero_virtual_base == 0
+                && cursor.svc_zero_anchor == cur_head_anchor
+                && (eff_last_svc_s == 0
+                    || entries[boundary_pos]["at"].as_u64().unwrap_or(0) <= eff_last_svc_s)
+        } else {
+            eff_last_svc_s == 0
+                || (entries[0]["at"].as_u64().unwrap_or(0) <= eff_last_svc_s
+                    && entries[boundary_pos]["at"].as_u64().unwrap_or(0) <= eff_last_svc_s)
+        };
+        if verified {
+            return SvcEpoch {
+                is_reset: false,
+                effective_seq_base: raw_base,
+                archived_in_kv: (archived - raw_base) as usize,
+            };
+        }
+    }
+
+    // 3. Reset, replacement, or rollback/truncation detected: archive ALL KV entries at
+    // monotonic `source_seq = archived + i` and rebase `_audit_outbox_base` on trim.
+    SvcEpoch {
+        is_reset: true,
+        effective_seq_base: archived,
+        archived_in_kv: 0,
     }
 }
 
@@ -866,6 +969,10 @@ fn build_next_cursor(cursor: &Cursor, manifest: &Manifest, now: u64) -> Cursor {
         .or((cursor.last_flush_s > 0).then_some(cursor.last_flush_s));
     if manifest.svc_range.0 < manifest.svc_range.1 {
         next.svc_outbox_archived = manifest.svc_range.1;
+        next.svc_kv_archived = manifest.svc_kv_archived;
+        next.svc_rebased_base = manifest.svc_virtual_base;
+        next.svc_archived_anchor = manifest.svc_archived_anchor.clone();
+        next.svc_head_anchor = manifest.svc_head_anchor.clone();
         if let Some(obs_base) = manifest.svc_observed_base {
             next.svc_last_base = Some(obs_base);
             if obs_base == 0 {
@@ -883,6 +990,10 @@ fn build_next_cursor(cursor: &Cursor, manifest: &Manifest, now: u64) -> Cursor {
         }
         next.last_svc_flush_s = Some(now);
     } else if manifest.svc_caught_up {
+        next.svc_kv_archived = manifest.svc_kv_archived;
+        next.svc_rebased_base = manifest.svc_virtual_base;
+        next.svc_archived_anchor = manifest.svc_archived_anchor.clone();
+        next.svc_head_anchor = manifest.svc_head_anchor.clone();
         if let Some(obs_base) = manifest.svc_observed_base {
             next.svc_last_base = Some(obs_base);
             if obs_base == 0 {
@@ -1008,6 +1119,7 @@ fn collect(
     let mut svc_observed_base: Option<u64> = None;
     let mut svc_caught_up = false;
     let mut effective_svc_base: u64 = 0;
+    let mut svc_epoch_archived_in_kv: usize = 0;
     let mut queues: [std::collections::VecDeque<SourceId>; CLASSES] = Default::default();
     queues[0].extend(buckets.into_iter().map(SourceId::Bucket));
     queues[1].extend(outbox.into_iter().map(SourceId::Outbox));
@@ -1019,33 +1131,21 @@ fn collect(
             let len = entries.map_or(0, Vec::len) as u64;
             let first_entry = entries.and_then(|arr| arr.first());
             let cur_anchor = first_entry.map(svc_entry_anchor);
-            let is_reset = svc_is_reset(&record.value, cursor);
-            effective_svc_base = if base == 0 && len > 0 {
-                let vb = if is_reset {
-                    cursor.svc_outbox_archived
-                } else if cursor.svc_zero_anchor.is_some() && cursor.svc_zero_anchor == cur_anchor {
-                    cursor.svc_zero_virtual_base
-                } else {
-                    0
-                };
+            let epoch = classify_svc_outbox(&record.value, cursor);
+            effective_svc_base = epoch.effective_seq_base;
+            svc_epoch_archived_in_kv = epoch.archived_in_kv;
+            if len > 0 && effective_svc_base != base {
+                svc_virtual_base = Some(effective_svc_base);
+            }
+            if base == 0 && len > 0 {
                 svc_zero_anchor = cur_anchor;
-                svc_zero_virtual_base = vb;
-                if vb > 0 {
-                    svc_virtual_base = Some(vb);
-                }
-                vb
-            } else if len > 0 && is_reset {
-                let vb = cursor.svc_outbox_archived;
-                svc_virtual_base = Some(vb);
-                vb
-            } else {
-                base
-            };
+                svc_zero_virtual_base = effective_svc_base;
+            }
             svc_observed_base = Some(base);
             let total = effective_svc_base + len;
-            svc_effective_archived = cursor.svc_outbox_archived.max(effective_svc_base);
+            svc_effective_archived = effective_svc_base + epoch.archived_in_kv as u64;
             let end = total.min(svc_effective_archived + MAX_SVC_ENTRIES);
-            svc_caught_up = svc_effective_archived == end && !is_reset;
+            svc_caught_up = len > 0 && svc_effective_archived == end && !epoch.is_reset;
             let mut seg_start = svc_effective_archived;
             while seg_start < end {
                 let hour_of = |idx: u64| -> u64 {
@@ -1180,6 +1280,31 @@ fn collect(
                     }
                 }
             }
+        }
+    }
+    if let Some(ref value) = svc {
+        let raw_base = value["_audit_outbox_base"].as_u64().unwrap_or(0);
+        let entries = value["_audit_outbox"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        if manifest.svc_range.0 < manifest.svc_range.1 {
+            let archived_in_kv_after = (manifest.svc_range.1 - effective_svc_base) as usize;
+            manifest.svc_kv_archived = Some(raw_base + archived_in_kv_after as u64);
+            manifest.svc_archived_anchor = entries
+                .get(archived_in_kv_after.saturating_sub(1))
+                .map(svc_entry_anchor);
+            manifest.svc_head_anchor = entries.first().map(svc_entry_anchor);
+        } else if manifest.svc_caught_up {
+            manifest.svc_kv_archived = Some(raw_base + svc_epoch_archived_in_kv as u64);
+            manifest.svc_archived_anchor = if svc_epoch_archived_in_kv > 0 {
+                entries
+                    .get(svc_epoch_archived_in_kv - 1)
+                    .map(svc_entry_anchor)
+            } else {
+                cursor.svc_archived_anchor.clone()
+            };
+            manifest.svc_head_anchor = entries.first().map(svc_entry_anchor);
         }
     }
     let svc_end = svc.as_ref().map_or(0, |value| {
@@ -1343,14 +1468,7 @@ fn gc(
     let mut done = manifest.gc_next >= manifest.outbox_keys.len();
     if done && trim > 0 {
         done = runtime.admin_remaining_calls() >= trim + tail
-            && trim_svc_outbox(
-                runtime,
-                sid,
-                manifest.svc_range.1,
-                manifest.svc_virtual_base,
-                manifest.svc_zero_anchor.as_deref(),
-                manifest.svc_observed_base,
-            )?;
+            && trim_svc_outbox(runtime, sid, manifest)?;
     }
     if done {
         manifest.gc_done = true;
@@ -1362,15 +1480,11 @@ fn gc(
 }
 
 /// Keeps the newest `SVC_OUTBOX_KEEP` entries, never removing one that is not archived.
+/// Verifies the exact observed base and entry fingerprint anchor before trimming or rebasing,
+/// so `GcPending` or same-tick DR replacements (including same-base `10 -> 10` and shifted-base
+/// `10 -> 20` or `10 -> 0`) never lose unarchived entries.
 /// A generation conflict leaves the outbox intact; the next tick retries.
-fn trim_svc_outbox(
-    runtime: &impl Runtime,
-    sid: &str,
-    archived: u64,
-    virtual_base: Option<u64>,
-    expected_zero_anchor: Option<&str>,
-    expected_observed_base: Option<u64>,
-) -> Result<bool, String> {
+fn trim_svc_outbox(runtime: &impl Runtime, sid: &str, manifest: &Manifest) -> Result<bool, String> {
     let key = format!("svc:{sid}");
     let Some(record) = runtime.admin_get(&key)? else {
         return Ok(true);
@@ -1380,33 +1494,36 @@ fn trim_svc_outbox(
         .as_array()
         .cloned()
         .unwrap_or_default();
-    if expected_observed_base.is_some_and(|ob| raw_base < ob) {
+    let Some(exp_arch_anchor) = manifest.svc_archived_anchor.as_deref() else {
         return Ok(true);
-    }
-    if expected_observed_base == Some(0)
-        && raw_base > 0
-        && virtual_base.is_some_and(|vb| vb > raw_base)
-    {
-        return Ok(true);
-    }
-    if raw_base > 0 && virtual_base.is_some_and(|vb| vb > raw_base) {
-        return Ok(true);
-    }
-    if raw_base == 0
-        && expected_zero_anchor.is_some()
-        && outbox.first().map(svc_entry_anchor).as_deref() != expected_zero_anchor
-    {
-        return Ok(true);
-    }
-    let eff_base = if raw_base == 0 {
-        virtual_base.unwrap_or(0)
-    } else {
-        raw_base
     };
+    let Some(obs_base) = manifest.svc_observed_base else {
+        return Ok(true);
+    };
+    if raw_base != obs_base {
+        return Ok(true);
+    }
+    let eff_base = manifest.svc_virtual_base.unwrap_or(obs_base);
+    let kv_archived = manifest
+        .svc_kv_archived
+        .unwrap_or_else(|| obs_base.saturating_add(manifest.svc_range.1.saturating_sub(eff_base)));
+    if kv_archived <= raw_base || kv_archived > raw_base + outbox.len() as u64 {
+        return Ok(true);
+    }
+    let anchor_pos = (kv_archived - 1 - raw_base) as usize;
+    if outbox.get(anchor_pos).map(svc_entry_anchor).as_deref() != Some(exp_arch_anchor) {
+        return Ok(true);
+    }
+    if let Some(exp_head) = manifest.svc_head_anchor.as_deref() {
+        if outbox.first().map(svc_entry_anchor).as_deref() != Some(exp_head) {
+            return Ok(true);
+        }
+    }
+    let archived_in_kv = (kv_archived - raw_base) as usize;
     let removable = outbox
         .len()
         .saturating_sub(SVC_OUTBOX_KEEP)
-        .min(archived.saturating_sub(eff_base) as usize);
+        .min(archived_in_kv);
     let new_base = eff_base + removable as u64;
     if removable == 0 && new_base == raw_base {
         return Ok(true);

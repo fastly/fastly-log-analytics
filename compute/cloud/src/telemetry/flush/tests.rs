@@ -2267,3 +2267,527 @@ fn bug_cloud_outbox_dr_31a_and_31b_trim_observed_base_guards_and_matching_anchor
         );
     }
 }
+
+#[test]
+fn bug_cloud_outbox_33a_epoch_anchor_rebase_and_gc_pending_continuity() {
+    let make_entries = |prefix: &str, count: usize, start_ts: u64| -> Vec<Value> {
+        (0..count)
+            .map(|i| {
+                json!({
+                    "actor": "admin",
+                    "at": start_ts + i as u64,
+                    "event": format!("{prefix}.{i}"),
+                    "config_version": i + 1,
+                })
+            })
+            .collect()
+    };
+    let audit_rows = |r: &Rt| -> Vec<Value> {
+        r.objects
+            .borrow()
+            .iter()
+            .filter(|(k, _)| k.contains("/admin_audit/"))
+            .flat_map(|(_, body)| schema::from_parquet(LogKind::AdminAudit, body.clone()).unwrap())
+            .collect()
+    };
+
+    // === PROBE-1A: Nonzero-to-smaller-nonzero reset (100 -> 10) across Flush 1, 2, 3 ===
+    {
+        let rt = Rt::new();
+        rt.put_kv(
+            &cursor_key(SID),
+            json!({
+                "scan_min": NOW_MIN - 2,
+                "cache_min": NOW_MIN - 2,
+                "svc_outbox_archived": 105,
+                "svc_last_base": 100,
+                "last_flush_s": NOW_S - 600,
+                "last_svc_flush_s": NOW_S - 600,
+            }),
+        );
+        let mut entries = make_entries("post10", 3, NOW_S - 50);
+        rt.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": 10,
+                "_audit_outbox": entries,
+            }),
+        );
+        rt.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("f1")),
+            cron_line("f1-tick"),
+        );
+        rt.budget.set(rt.calls.get() + 64);
+        assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+        assert_eq!(
+            rt.get_kv("svc:svc1").unwrap()["_audit_outbox_base"].as_u64(),
+            Some(105),
+            "PROBE-1A: Flush 1 must rebase _audit_outbox_base from 10 to 105"
+        );
+        assert_eq!(rt.cursor().svc_outbox_archived, 108);
+        assert_eq!(audit_rows(&rt).len(), 3);
+
+        // Append 1 new entry (post10.3) and run Flush 2, then Flush 3 (0 new entries).
+        entries.push(
+            json!({"actor": "admin", "at": NOW_S - 10, "event": "post10.3", "config_version": 4}),
+        );
+        let mut svc_val = rt.get_kv("svc:svc1").unwrap();
+        svc_val["_audit_outbox"] = Value::Array(entries);
+        rt.put_kv("svc:svc1", svc_val);
+        rt.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 39, Some("f2")),
+            cron_line("f2-tick"),
+        );
+        rt.budget.set(rt.calls.get() + 64);
+        assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+        assert_eq!(rt.cursor().svc_outbox_archived, 109);
+        assert_eq!(audit_rows(&rt).len(), 4);
+
+        rt.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 38, Some("f3")),
+            cron_line("f3-tick"),
+        );
+        rt.budget.set(rt.calls.get() + 64);
+        assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+        let rows = audit_rows(&rt);
+        let unique_eids: BTreeSet<String> = rows
+            .iter()
+            .filter_map(|r| r["event_id"].as_str().map(str::to_owned))
+            .collect();
+        let p0_count = rows.iter().filter(|r| r["action"] == "post10.0").count();
+        assert_eq!(
+            p0_count, 1,
+            "PROBE-1A: post10.0 must be archived exactly once (got {p0_count})"
+        );
+        assert_eq!(rows.len(), 4, "PROBE-1A: expected exactly 4 audit rows");
+        assert_eq!(unique_eids.len(), 4);
+        assert_eq!(rt.cursor().svc_outbox_archived, 109);
+    }
+
+    // === PROBE-1B: 100 -> 10 reset + 100 new entries (BOTH rebased AND un-rebased CAS-conflict variant) ===
+    for keep_unrebased_after_f1 in [false, true] {
+        let rt = Rt::new();
+        rt.put_kv(
+            &cursor_key(SID),
+            json!({
+                "scan_min": NOW_MIN - 2,
+                "cache_min": NOW_MIN - 2,
+                "svc_outbox_archived": 105,
+                "svc_last_base": 100,
+                "last_flush_s": NOW_S - 600,
+                "last_svc_flush_s": NOW_S - 600,
+            }),
+        );
+        let mut entries = make_entries("loss", 3, NOW_S - 200);
+        rt.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": 10,
+                "_audit_outbox": entries,
+            }),
+        );
+        rt.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("l1")),
+            cron_line("l1-tick"),
+        );
+        rt.budget.set(rt.calls.get() + 64);
+        assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+
+        for i in 3..103usize {
+            entries.push(json!({
+                "actor": "admin",
+                "at": NOW_S - 190 + i as u64,
+                "event": format!("loss.{i}"),
+                "config_version": i + 1,
+            }));
+        }
+        let mut svc_val = rt.get_kv("svc:svc1").unwrap();
+        if keep_unrebased_after_f1 {
+            // Simulate Flush 1 trim_svc_outbox losing a CAS conflict while cursor already committed!
+            svc_val["_audit_outbox_base"] = json!(10);
+        }
+        svc_val["_audit_outbox"] = Value::Array(entries);
+        rt.put_kv("svc:svc1", svc_val);
+        rt.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 39, Some("l2")),
+            cron_line("l2-tick"),
+        );
+        rt.budget.set(rt.calls.get() + 64);
+        assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+
+        let rows = audit_rows(&rt);
+        let archived_actions: BTreeSet<String> = rows
+            .iter()
+            .filter_map(|r| r["action"].as_str().map(str::to_owned))
+            .collect();
+        let missing_from_archive: Vec<String> = (0..103)
+            .map(|i| format!("loss.{i}"))
+            .filter(|a| !archived_actions.contains(a))
+            .collect();
+        let kv_after = rt.get_kv("svc:svc1").unwrap();
+        let kv_actions: BTreeSet<String> = kv_after["_audit_outbox"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e["event"].as_str().map(str::to_owned))
+            .collect();
+        let permanently_destroyed: Vec<String> = missing_from_archive
+            .iter()
+            .filter(|a| !kv_actions.contains(*a))
+            .cloned()
+            .collect();
+        assert_eq!(
+            missing_from_archive.len(),
+            0,
+            "PROBE-1B (unrebased={keep_unrebased_after_f1}): missing {} entries from archive",
+            missing_from_archive.len()
+        );
+        assert_eq!(
+            permanently_destroyed.len(),
+            0,
+            "PROBE-1B (unrebased={keep_unrebased_after_f1}): permanently destroyed {} entries",
+            permanently_destroyed.len()
+        );
+        assert_eq!(rows.len(), 103);
+        assert_eq!(archived_actions.len(), 103);
+        assert_eq!(kv_after["_audit_outbox"].as_array().unwrap().len(), 50);
+        assert_eq!(kv_after["_audit_outbox_base"].as_u64(), Some(158));
+        assert_eq!(rt.cursor().svc_outbox_archived, 208);
+    }
+
+    // === PROBE-1C: 100 -> 10 reset with len=250 (> MAX_SVC_ENTRIES=200) -> ZERO livelock ===
+    {
+        let rt = Rt::new();
+        rt.put_kv(
+            &cursor_key(SID),
+            json!({
+                "scan_min": NOW_MIN - 2,
+                "cache_min": NOW_MIN - 2,
+                "svc_outbox_archived": 105,
+                "svc_last_base": 100,
+                "last_flush_s": NOW_S - 600,
+                "last_svc_flush_s": NOW_S - 600,
+            }),
+        );
+        rt.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": 10,
+                "_audit_outbox": make_entries("live", 250, NOW_S - 300),
+            }),
+        );
+        rt.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("lv")),
+            cron_line("lv-tick"),
+        );
+        let mut statuses = Vec::new();
+        for _ in 0..5 {
+            rt.budget.set(rt.calls.get() + 64);
+            let rep = run(&rt, false);
+            statuses.push((rep.status, rep.behind, rt.cursor().svc_outbox_archived));
+        }
+        let rows = audit_rows(&rt);
+        let archived_actions: BTreeSet<String> = rows
+            .iter()
+            .filter_map(|r| r["action"].as_str().map(str::to_owned))
+            .collect();
+        assert_eq!(
+            rows.len(),
+            250,
+            "PROBE-1C: expected exactly 250 archived rows without livelock, got {} (statuses={statuses:?})",
+            rows.len()
+        );
+        assert_eq!(archived_actions.len(), 250);
+        assert!(archived_actions.contains("live.200"));
+        assert!(archived_actions.contains("live.249"));
+        assert_eq!(statuses[0], (FlushStatus::Committed, true, 305));
+        assert_eq!(statuses[1], (FlushStatus::Committed, false, 355));
+        assert_eq!(statuses[2].0, FlushStatus::NotDue);
+    }
+
+    // === PROBE-1D: GcPending nonzero-base race (10->10 and 10->20) -> 0 unarchived DR events dropped ===
+    for post_base in [10u64, 20u64] {
+        // 1D-i: Legacy GcPending manifest (no entry anchor)
+        {
+            let rt = Rt::new();
+            rt.put_kv(
+                &cursor_key(SID),
+                json!({
+                    "scan_min": NOW_MIN - 2,
+                    "cache_min": NOW_MIN - 2,
+                    "svc_outbox_archived": 90,
+                    "svc_last_base": 10,
+                    "last_flush_s": NOW_S,
+                    "last_svc_flush_s": NOW_S,
+                    "txn_id": "txn-pre-dr",
+                }),
+            );
+            let manifest = Manifest {
+                txn_id: "txn-pre-dr".into(),
+                start_min: NOW_MIN,
+                svc_range: (10, 90),
+                svc_virtual_base: None,
+                svc_observed_base: Some(10),
+                committed: true,
+                gc_done: false,
+                ..Default::default()
+            };
+            rt.put_kv(&manifest_key(SID), to_value(&manifest));
+            rt.put_kv(
+                "svc:svc1",
+                json!({
+                    "service_id": SID,
+                    "_audit_outbox_base": post_base,
+                    "_audit_outbox": make_entries("dr_unarchived", 80, NOW_S),
+                }),
+            );
+            rt.budget.set(rt.calls.get() + 64);
+            let _ = run(&rt, false);
+            assert!(rt.get_kv(&manifest_key(SID)).is_none());
+            let after = rt.get_kv("svc:svc1").unwrap();
+            assert_eq!(
+                after["_audit_outbox"].as_array().unwrap().len(),
+                80,
+                "PROBE-1D-legacy (post_base={post_base}): must preserve all 80 unarchived DR events"
+            );
+            assert_eq!(after["_audit_outbox"][0]["event"], "dr_unarchived.0");
+            assert_eq!(after["_audit_outbox_base"].as_u64(), Some(post_base));
+        }
+
+        // 1D-ii: Real same-tick race where collect() writes anchors and DR replaces svc:svc1 right after cursor commit
+        {
+            struct SameOrUpBaseRaceRt {
+                inner: Rt,
+                post_base: u64,
+                post_entries: Vec<Value>,
+                triggered: Cell<bool>,
+            }
+            impl SetupStores for SameOrUpBaseRaceRt {
+                fn config_present(&self, n: &str) -> Result<bool, String> {
+                    self.inner.config_present(n)
+                }
+                fn secret_present(&self, n: &str) -> Result<bool, String> {
+                    self.inner.secret_present(n)
+                }
+                fn state_linked(&self) -> Result<bool, String> {
+                    self.inner.state_linked()
+                }
+            }
+            impl Runtime for SameOrUpBaseRaceRt {
+                fn config(&self, n: &str) -> Result<Option<String>, String> {
+                    self.inner.config(n)
+                }
+                fn secret(&self, n: &str) -> Result<Option<String>, String> {
+                    self.inner.secret(n)
+                }
+                fn random(&self) -> Result<[u8; 32], String> {
+                    self.inner.random()
+                }
+                fn now(&self) -> u64 {
+                    self.inner.now()
+                }
+                fn checks(&self, l: bool) -> Result<Value, String> {
+                    self.inner.checks(l)
+                }
+                fn versions(&self) -> Result<Value, String> {
+                    self.inner.versions()
+                }
+                fn compute_service_id(&self) -> Option<String> {
+                    self.inner.compute_service_id()
+                }
+                fn compute_service_version(&self) -> Option<String> {
+                    self.inner.compute_service_version()
+                }
+                fn admin_get(&self, key: &str) -> Result<Option<Record>, String> {
+                    self.inner.admin_get(key)
+                }
+                fn admin_cas(
+                    &self,
+                    key: &str,
+                    generation: Option<&str>,
+                    value: &Value,
+                ) -> Result<bool, String> {
+                    let ok = self.inner.admin_cas(key, generation, value)?;
+                    if ok && key == cursor_key(SID) && !self.triggered.replace(true) {
+                        self.inner.put_kv(
+                            "svc:svc1",
+                            json!({
+                                "service_id": SID,
+                                "_audit_outbox_base": self.post_base,
+                                "_audit_outbox": self.post_entries,
+                            }),
+                        );
+                    }
+                    Ok(ok)
+                }
+                fn kv_list(
+                    &self,
+                    prefix: &str,
+                    cursor: Option<&str>,
+                    limit: u32,
+                ) -> Result<KvPage, String> {
+                    self.inner.kv_list(prefix, cursor, limit)
+                }
+                fn kv_delete(&self, key: &str) -> Result<(), String> {
+                    self.inner.kv_delete(key)
+                }
+                fn admin_fos(&self, req: FosRequest<'_>) -> Result<FosResponse, String> {
+                    self.inner.admin_fos(req)
+                }
+                fn admin_remaining_calls(&self) -> u32 {
+                    self.inner.admin_remaining_calls()
+                }
+                fn core_cache_lookup(
+                    &self,
+                    key: &str,
+                ) -> Result<Option<CoreCacheEntry>, CoreCacheError> {
+                    self.inner.core_cache_lookup(key)
+                }
+                fn core_cache_replace(
+                    &self,
+                    key: &str,
+                    surrogate_keys: &[&str],
+                    ttl: Duration,
+                    update: &dyn Fn(Option<CoreCacheEntry>) -> CoreCacheEntry,
+                ) -> Result<(), CoreCacheError> {
+                    self.inner
+                        .core_cache_replace(key, surrogate_keys, ttl, update)
+                }
+                fn core_cache_purge(&self, surrogate: &str) -> Result<(), CoreCacheError> {
+                    self.inner.core_cache_purge(surrogate)
+                }
+                fn vcpu_ms(&self) -> u64 {
+                    self.inner.vcpu_ms()
+                }
+                fn admin_elapsed(&self, started: Instant) -> Duration {
+                    self.inner.admin_elapsed(started)
+                }
+            }
+
+            let inner = Rt::new();
+            inner.put_kv(
+                &cursor_key(SID),
+                json!({
+                    "scan_min": NOW_MIN - 2,
+                    "cache_min": NOW_MIN - 2,
+                    "svc_outbox_archived": 10,
+                    "svc_last_base": 10,
+                    "last_flush_s": NOW_S - 600,
+                    "last_svc_flush_s": NOW_S - 600,
+                }),
+            );
+            inner.put_kv(
+                "svc:svc1",
+                json!({
+                    "service_id": SID,
+                    "_audit_outbox_base": 10,
+                    "_audit_outbox": make_entries("pre_dr", 80, NOW_S - 200),
+                }),
+            );
+            inner.put_kv(
+                &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("r1d")),
+                cron_line("r1d-tick"),
+            );
+            inner.budget.set(inner.calls.get() + 64);
+
+            let race_rt = SameOrUpBaseRaceRt {
+                inner,
+                post_base,
+                post_entries: make_entries("dr_unarchived", 80, NOW_S - 100),
+                triggered: Cell::new(false),
+            };
+            let rep = log_flush(
+                &race_rt,
+                SID,
+                Some(&target()),
+                &OperationalLogSettings::default(),
+                true,
+                Instant::now(),
+            )
+            .unwrap();
+            assert_eq!(rep.status, FlushStatus::Committed);
+            assert!(race_rt.triggered.get());
+            let after = race_rt.inner.get_kv("svc:svc1").unwrap();
+            assert_eq!(
+                after["_audit_outbox"].as_array().unwrap().len(),
+                80,
+                "PROBE-1D-real-race (post_base={post_base}): must preserve all 80 unarchived DR events"
+            );
+            assert_eq!(after["_audit_outbox"][0]["event"], "dr_unarchived.0");
+            assert_eq!(after["_audit_outbox_base"].as_u64(), Some(post_base));
+
+            // Subsequent flush must detect replacement via anchor mismatch and archive all 80!
+            race_rt.inner.put_kv(
+                &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 39, Some("r1d2")),
+                cron_line("r1d2-tick"),
+            );
+            race_rt.inner.budget.set(race_rt.inner.calls.get() + 64);
+            assert_eq!(run(&race_rt.inner, true).status, FlushStatus::Committed);
+            let dr_rows: Vec<Value> = audit_rows(&race_rt.inner)
+                .into_iter()
+                .filter(|r| {
+                    r["action"]
+                        .as_str()
+                        .is_some_and(|a| a.starts_with("dr_unarchived."))
+                })
+                .collect();
+            assert_eq!(
+                dr_rows.len(),
+                80,
+                "PROBE-1D-real-race (post_base={post_base}): next flush must archive all 80 replaced entries"
+            );
+            assert_eq!(race_rt.inner.cursor().svc_outbox_archived, 170);
+        }
+    }
+
+    // === PROBE-1E: Same-base (100 -> 100) truncation (archived=105 > 100 + 2) across 3 flushes ===
+    {
+        let rt = Rt::new();
+        rt.put_kv(
+            &cursor_key(SID),
+            json!({
+                "scan_min": NOW_MIN - 2,
+                "cache_min": NOW_MIN - 2,
+                "svc_outbox_archived": 105,
+                "svc_last_base": 100,
+                "last_flush_s": NOW_S - 600,
+                "last_svc_flush_s": NOW_S - 600,
+            }),
+        );
+        rt.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": 100,
+                "_audit_outbox": make_entries("trunc100", 2, NOW_S - 50),
+            }),
+        );
+        for i in 0..3 {
+            rt.put_kv(
+                &outbox_key(
+                    SID,
+                    NOW_S / OUTBOX_BUCKET_S - 40 + i,
+                    Some(&format!("t{i}")),
+                ),
+                cron_line(&format!("t{i}-tick")),
+            );
+            rt.budget.set(rt.calls.get() + 64);
+            assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+        }
+        let rows = audit_rows(&rt);
+        let t0_count = rows.iter().filter(|r| r["action"] == "trunc100.0").count();
+        assert_eq!(
+            t0_count, 1,
+            "PROBE-1E: trunc100.0 must be archived exactly once (got {t0_count})"
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rt.get_kv("svc:svc1").unwrap()["_audit_outbox_base"].as_u64(),
+            Some(105)
+        );
+        assert_eq!(rt.cursor().svc_outbox_archived, 107);
+    }
+}

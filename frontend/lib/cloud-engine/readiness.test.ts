@@ -856,3 +856,317 @@ it("SEC-T5-ITER31-FE-01: closed DIAGNOSTIC_VOCAB, anchored Stage-1 templates, co
     await backend.dispose();
   }
 }, 45000);
+
+it("SEC-T5-ITER32-FE-01: redacts real DuckDB numeric cast/overflow/range row values and Stage-2B auth=Scheme credentials", async () => {
+  const { createNodeBackend } = await import("./dashboard/duckdb");
+  const backend = await createNodeBackend();
+  setCloudModeRuntime(true);
+  const events: { state?: string; error?: string }[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    await backend.query("CREATE TABLE t_num (pin INT, neg INT, dec_v DOUBLE, txt VARCHAR)");
+    await backend.query("INSERT INTO t_num VALUES (847291, -847291, 847.29, '847291' || chr(10) || 'line2')");
+
+    const realDuckNumericCases: readonly [string, readonly string[], string][] = [
+      [
+        "SELECT CAST(pin AS DECIMAL(4, 0)) FROM t_num",
+        ["847291", "pin"],
+        "Error: Conversion Error: Could not cast value [redacted] to DECIMAL(4,0) when casting from source column [redacted]",
+      ],
+      [
+        "SELECT CAST(code AS DECIMAL(4, 0)) FROM (SELECT 847291 AS code)",
+        ["847291", "code"],
+        "Error: Conversion Error: Could not cast value [redacted] to DECIMAL(4,0) when casting from source column [redacted]",
+      ],
+      [
+        "SELECT CAST(neg AS DECIMAL(4, 0)) FROM t_num",
+        ["847291", "neg"],
+        "Error: Conversion Error: Could not cast value [redacted] to DECIMAL(4,0) when casting from source column [redacted]",
+      ],
+      [
+        "SELECT CAST(dec_v AS DECIMAL(4, 2)) FROM t_num",
+        ["847.29", "847", "dec_v"],
+        "Error: Conversion Error: Could not cast value [redacted] to DECIMAL(4,2) when casting from source column [redacted]",
+      ],
+      [
+        "SELECT CAST(txt AS DECIMAL(4, 0)) FROM t_num",
+        ["847291", "line2", "txt"],
+        "Error: Conversion Error: Could not convert string [redacted] to DECIMAL(4,0) when casting from source column [redacted]",
+      ],
+      [
+        "SELECT CAST(999999 AS DECIMAL(4, 0))",
+        ["999999"],
+        "Error: Conversion Error: Could not cast value [redacted] to DECIMAL(4,0)",
+      ],
+      [
+        "SELECT CAST(CAST(847291 AS DECIMAL(10, 0)) AS TINYINT)",
+        ["847291"],
+        "Error: Conversion Error: Failed to cast decimal value [redacted] to type INT8",
+      ],
+      [
+        "SELECT CAST(CAST(847291 AS DECIMAL(10, 0)) AS DECIMAL(4, 0))",
+        ["847291"],
+        "Error: Conversion Error: Casting value [redacted] to type DECIMAL(4,0) failed: value is out of range!",
+      ],
+      [
+        "SELECT CAST(1 AS INT) << pin FROM t_num",
+        ["847291"],
+        "Error: Out of Range Error: [redacted] value [redacted] is out of range",
+      ],
+      [
+        "SELECT to_millennia(pin) FROM t_num",
+        ["847291"],
+        "Error: Out of Range Error: Interval value [redacted] out of range",
+      ],
+      [
+        "SELECT CAST(-32768 AS SMALLINT) // CAST(-1 AS SMALLINT)",
+        ["32768"],
+        "Error: Out of Range Error: Overflow in division of [redacted]",
+      ],
+    ];
+    for (const [sql, forbidden, expectedExact] of realDuckNumericCases) {
+      await expect(measureCloudQuery("query.console", () => backend.query(sql))).rejects.toThrow();
+      const got = events.at(-1)?.error ?? "";
+      for (const frag of forbidden) {
+        expect(got, `sql=${sql} got=${got}`).not.toContain(frag);
+      }
+      expect(got, `sql=${sql}`).toBe(expectedExact);
+    }
+
+    const syntheticWave32: readonly [string, readonly string[], string][] = [
+      [
+        "Conversion Error: Could not cast value 847291 to DECIMAL(4,0) when casting from source column pin",
+        ["847291", "pin"],
+        "Error: Conversion Error: Could not cast value [redacted] to DECIMAL(4,0) when casting from source column [redacted]",
+      ],
+      [
+        "Conversion Error: Could not cast value 847291 to CustomSecretType",
+        ["847291", "CustomSecretType"],
+        "Error: Conversion Error: Could not cast value [redacted] to [redacted]",
+      ],
+      [
+        "Conversion Error: Could not cast value 'bad\n847291' to INT32",
+        ["847291", "bad"],
+        "Error: Conversion Error: Could not cast value [redacted] to INT32",
+      ],
+      [
+        "Conversion Error: Could not convert value 847291 to DECIMAL(4,0) when casting from source column code",
+        ["847291", "code"],
+        "Error: Conversion Error: Could not convert value [redacted] to DECIMAL(4,0) when casting from source column [redacted]",
+      ],
+      [
+        "Conversion Error: Could not cast 847291 to DECIMAL(4,0)",
+        ["847291"],
+        "Error: Conversion Error: Could not cast [redacted] to DECIMAL(4,0)",
+      ],
+      [
+        "Conversion Error: Could not convert bignum '847291' to Double",
+        ["847291"],
+        "Error: Conversion Error: Could not convert bignum [redacted] to DOUBLE",
+      ],
+      [
+        "Conversion Error: Could not cast string to double: \"847291\"",
+        ["847291"],
+        "Error: Conversion Error: Could not cast string to DOUBLE: [redacted]",
+      ],
+      [
+        "Conversion Error: Could not convert DATE (847291) to microseconds",
+        ["847291"],
+        "Error: Conversion Error: Could not convert DATE ([redacted])",
+      ],
+      [
+        "Out of Range Error: Overflow in division of 847291 / 0",
+        ["847291"],
+        "Error: Out of Range Error: Overflow in division of [redacted]",
+      ],
+      [
+        "Out of Range Error: Overflow in HUGEINT addition: 170141183460469231731687303715884105727 + 847291",
+        ["847291", "170141"],
+        "Error: Out of Range Error: Overflow in HUGEINT addition: [redacted]",
+      ],
+      [
+        "Out of Range Error: Overflow in addition of INT128 (847291\n+ 1)",
+        ["847291"],
+        "Error: Out of Range Error: Overflow in addition of INT128 ([redacted])",
+      ],
+      [
+        "Out of Range Error: Timestamp microseconds out of range: 847291",
+        ["847291"],
+        "Error: Out of Range Error: [redacted] out of range: [redacted]",
+      ],
+      [
+        "Out of Range Error: input value 847291 is out of range for numeric function cotangent",
+        ["847291", "cotangent"],
+        "Error: Out of Range Error: input value [redacted] is out of range",
+      ],
+      [
+        "Out of Range Error: Failed to cast value: 847291",
+        ["847291"],
+        "Error: Out of Range Error: Failed to cast value: [redacted]",
+      ],
+    ];
+    for (const [msg, forbidden, expectedExact] of syntheticWave32) {
+      const err = new Error(msg);
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+      const got = events.at(-1)?.error ?? "";
+      for (const frag of forbidden) {
+        expect(got, `msg=${msg} got=${got}`).not.toContain(frag);
+      }
+      expect(got, `msg=${msg}`).toBe(expectedExact);
+    }
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+    await backend.dispose();
+  }
+}, 45000);
+
+it("SEC-T5-ITER32-FE-02: redacts Stage-2B auth-scheme credentials after = and : separators without swallowing [url]", async () => {
+  setCloudModeRuntime(true);
+  const events: { state?: string; error?: string }[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    const authCases: readonly [string, readonly string[], string][] = [
+      [
+        "Runtime Error: authorization=Bearer 847291 rejected",
+        ["847291", "Bearer"],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: Authorization=BEARER 847291 failed",
+        ["847291", "BEARER"],
+        "Error: Runtime Error: [redacted] failed",
+      ],
+      [
+        "Runtime Error: api_auth=Basic 123456 rejected",
+        ["123456", "Basic"],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: x_token=Digest 654321 rejected",
+        ["654321", "Digest"],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: auth=Token 987654 rejected",
+        ["987654", "Token"],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: authorization:Bearer 847291 rejected",
+        ["847291", "Bearer"],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: authorization= Bearer 847291 rejected",
+        ["847291", "Bearer"],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: token= 847291 rejected",
+        ["847291"],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: authorization = Bearer 847291 rejected",
+        ["847291", "Bearer"],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: authorization=Bearer https://secret.example/path rejected",
+        ["secret.example", "Bearer"],
+        "Error: Runtime Error: [redacted] [url] rejected",
+      ],
+      [
+        "Runtime Error: authorization=Bearer '847291' rejected",
+        ["847291", "Bearer"],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+    ];
+    for (const [msg, forbidden, expectedExact] of authCases) {
+      const err = new Error(msg);
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+      const got = events.at(-1)?.error ?? "";
+      for (const frag of forbidden) {
+        expect(got, `msg=${msg} got=${got}`).not.toContain(frag);
+      }
+      expect(got, `msg=${msg}`).toBe(expectedExact);
+    }
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+  }
+});
+
+it("SEC-T5-ITER32-FE-03: caps RFC 3986 URL-scheme lookahead so valid schemes redact to [url] while 64 KiB DoS inputs finish in <5ms", async () => {
+  setCloudModeRuntime(true);
+  const events: { state?: string; error?: string }[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    const dosInputs = [
+      "a+".repeat(32768),
+      "a+".repeat(164) + "a".repeat(65000),
+    ];
+    for (const payload of dosInputs) {
+      const err = new Error(payload);
+      // Warm up once before measuring 5-trial median & max:
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+      const trials: number[] = [];
+      for (let k = 0; k < 5; k += 1) {
+        const t0 = performance.now();
+        await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+        trials.push(performance.now() - t0);
+      }
+      const sorted = [...trials].sort((a, b) => a - b);
+      const median = sorted[Math.floor(sorted.length / 2)]!;
+      const max = sorted.at(-1)!;
+      expect(median, `len=${payload.length} trials=${trials.map((v) => v.toFixed(2)).join(",")}`).toBeLessThan(5);
+      expect(max, `len=${payload.length} trials=${trials.map((v) => v.toFixed(2)).join(",")}`).toBeLessThan(5);
+    }
+
+    const validSchemeCases: readonly [string, readonly string[], string][] = [
+      [
+        "IO Error: failed fetching https://user:pass@secret.example/a.parquet",
+        ["secret.example", "pass"],
+        "Error: IO Error: failed fetching [url]",
+      ],
+      [
+        "IO Error: failed reading s3://private-bucket/prefix/file.parquet",
+        ["private-bucket", "file.parquet"],
+        "Error: IO Error: failed reading [url]",
+      ],
+      [
+        "IO Error: connect postgres+asyncpg://admin:secret@db.internal:5432/prod",
+        ["postgres", "db.internal", "secret"],
+        "Error: IO Error: connect [url]",
+      ],
+      [
+        "IO Error: open custom-scheme.v1+test://internal.host/resource?tok=847291",
+        ["custom-scheme", "internal.host", "847291"],
+        "Error: IO Error: open [url]",
+      ],
+      [
+        `IO Error: open ${"a".repeat(32)}://secret.host/path`,
+        ["secret.host", "path"],
+        "Error: IO Error: open [url]",
+      ],
+      [
+        `IO Error: open ${"a".repeat(33)}://secret.host/path`,
+        ["secret.host", "path"],
+        "Error: IO Error: open [redacted]",
+      ],
+    ];
+    for (const [msg, forbidden, expectedExact] of validSchemeCases) {
+      const err = new Error(msg);
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+      const got = events.at(-1)?.error ?? "";
+      for (const frag of forbidden) {
+        expect(got, `msg=${msg} got=${got}`).not.toContain(frag);
+      }
+      expect(got, `msg=${msg}`).toBe(expectedExact);
+    }
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+  }
+}, 30000);

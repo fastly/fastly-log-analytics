@@ -9,7 +9,7 @@ import threading
 import time
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
-from typing import Any, NoReturn
+from typing import Any, NamedTuple, NoReturn
 
 
 def escape_sql_literal(value: str) -> str:
@@ -112,6 +112,22 @@ _BLOCKED_FUNCTIONS = frozenset(
         "sleepeachrow",
         "getsetting",
         "getmacro",
+        "in",
+        "notin",
+        "globalin",
+        "globalnotin",
+        "nullin",
+        "notnullin",
+        "globalnullin",
+        "globalnotnullin",
+        "inignoreset",
+        "notinignoreset",
+        "globalinignoreset",
+        "globalnotinignoreset",
+        "nullinignoreset",
+        "notnullinignoreset",
+        "globalnullinignoreset",
+        "globalnotnullinignoreset",
     }
 )
 _BLOCKED_FUNCTION_PREFIXES = ("read_", "parquet_", "iceberg_", "sniff_", "glob")
@@ -272,7 +288,7 @@ def _check_table_reference(
     table_name = (node.get("table_name") or "").strip()
     schema_name = (node.get("schema_name") or "").strip().lower()
     catalog_name = (node.get("catalog_name") or "").strip().lower()
-    if any(ch in table_name for ch in ("/", "\\", ".")):
+    if "/" in table_name or "\\" in table_name or "." in table_name:
         _reject(
             original_sql,
             "catalog_blocklist:table_name_path",
@@ -289,7 +305,8 @@ def _check_table_reference(
             session_id,
             service_id,
         )
-    if blocked_pfx := next((p for p in _BLOCKED_TABLE_PREFIXES if name_lower.startswith(p)), None):
+    if name_lower.startswith(_BLOCKED_TABLE_PREFIXES):
+        blocked_pfx = next(p for p in _BLOCKED_TABLE_PREFIXES if name_lower.startswith(p))
         _reject(
             original_sql,
             f"catalog_blocklist:table_name_prefix:{blocked_pfx}",
@@ -440,15 +457,16 @@ def _walk_and_validate(
         if node.get("class") == "FUNCTION":
             _check_function_node(node, original_sql, session_id, service_id)
         for key, value in node.items():
-            if not (key == "cte_map" and allowed_tables is not None):
+            if isinstance(value, (dict, list)) and not (key == "cte_map" and allowed_tables is not None):
                 _walk_and_validate(
                     value, original_sql, session_id, service_id, allowed_tables=allowed_tables, cte_aliases=cte_aliases
                 )
     elif isinstance(node, list):
         for item in node:
-            _walk_and_validate(
-                item, original_sql, session_id, service_id, allowed_tables=allowed_tables, cte_aliases=cte_aliases
-            )
+            if isinstance(item, (dict, list)):
+                _walk_and_validate(
+                    item, original_sql, session_id, service_id, allowed_tables=allowed_tables, cte_aliases=cte_aliases
+                )
 
 
 # ── Pure-Python SQL tokenizer & AST builder ──────────────────────────────────
@@ -739,8 +757,7 @@ _DISALLOWED_CTRL_OR_SEP_RE = re.compile(r"[\x00-\x08\x0b\x0e-\x1f\x7f-\x9f\u1680
 _DOLQ_TAG_RE = re.compile(r"\$(?:[A-Za-z_\u0080-\uffff][A-Za-z0-9_\u0080-\uffff]*)?[$]")
 
 
-@dataclass(slots=True)
-class _Tok:
+class _Tok(NamedTuple):
     kind: str  # "WORD" | "STRING" | "QIDENT" | "LPAREN" | "RPAREN" | "LBRACK" | "RBRACK" | "LBRACE" | "RBRACE" | "COMMA" | "DOT" | "SEMI" | "OTHER"
     val: str
 
@@ -851,12 +868,132 @@ def _find_quote_continuation(sql: str, pos: int) -> int:
     return j if (saw_newline and j < n and sql[j] == "'") else -1
 
 
+_FAST_ASCII_STEP_RE = re.compile(
+    r"(?P<WS>[ \t\n\r\f]+)|(?P<PUNCT>[()\[\]{},;])|(?P<WORD>[A-Za-z_][A-Za-z0-9_$]*)|(?P<DOT>\.)|(?P<NUM>[0-9]+)"
+)
+_FAST_PURE_ASCII_SPECIAL_RE = re.compile(r"['\"`$\\]|--|/\*|\.[0-9]|[0-9][.eExXbBoO_]|[\x00-\x08\x0b\x0e-\x1f\x7f]")
+_FAST_PURE_ASCII_RE = re.compile(
+    r"(?P<WS>[ \t\n\r\f]+)"
+    r"|(?P<WORD>[A-Za-z_][A-Za-z0-9_]*)"
+    r"|(?P<DOT>\.)"
+    r"|(?P<PUNCT>[()\[\]{},;])"
+    r"|(?P<NUM>[0-9]+)"
+    r"|(?P<OTHER>[-/]|[^ \t\n\r\f()\[\]{},;.\-/$A-Za-z0-9_]+)"
+)
+_PUNCT_TO_KIND = {
+    "(": "LPAREN",
+    ")": "RPAREN",
+    "[": "LBRACK",
+    "]": "RBRACK",
+    "{": "LBRACE",
+    "}": "RBRACE",
+    ",": "COMMA",
+    ";": "SEMI",
+}
+_DOT_TOK = _Tok("DOT", ".")
+_PUNCT_TOKS = {ch: _Tok(kind, ch) for ch, kind in _PUNCT_TO_KIND.items()}
+
+
 def _tokenize_sql(sql: str) -> tuple[list[_Tok] | None, str | None]:
+    punct_toks = _PUNCT_TOKS
+    if sql.isascii() and _FAST_PURE_ASCII_SPECIAL_RE.search(sql) is None:
+        tok_new = tuple.__new__
+        tok_cls = _Tok
+        dot_tok = _DOT_TOK
+        tokens_fast: list[_Tok] = []
+        append_f = tokens_fast.append
+        word_cache: dict[str, _Tok] = {}
+        other_cache: dict[str, _Tok] = {}
+        for m in _FAST_PURE_ASCII_RE.finditer(sql):
+            grp = m.lastgroup
+            if grp == "WS":
+                continue
+            if grp == "DOT":
+                append_f(dot_tok)
+                continue
+            val = m.group(0)
+            if grp == "WORD":
+                wtok = word_cache.get(val)
+                if wtok is None:
+                    if len(val) == 7 and val.lower() == "uescape":
+                        return None, "UESCAPE is not allowed"
+                    wtok = tok_new(tok_cls, ("WORD", val))
+                    word_cache[val] = wtok
+                append_f(wtok)
+            elif grp == "PUNCT":
+                append_f(punct_toks[val])
+            else:
+                otok = other_cache.get(val)
+                if otok is None:
+                    otok = tok_new(tok_cls, ("OTHER", val))
+                    other_cache[val] = otok
+                append_f(otok)
+        return tokens_fast, None
+    punct_to_kind = _PUNCT_TO_KIND
     tokens: list[_Tok] = []
+    append_tok = tokens.append
+    fast_match = _FAST_ASCII_STEP_RE.match
     i = 0
     n = len(sql)
     prev_was_ident_or_num = False
     while i < n:
+        m_fast = fast_match(sql, i)
+        if m_fast is not None:
+            grp = m_fast.lastgroup
+            end_i = m_fast.end()
+            if grp == "WS":
+                i = end_i
+                prev_was_ident_or_num = False
+                continue
+            if grp == "PUNCT":
+                ch_p = m_fast.group(0)
+                append_tok(_Tok(punct_to_kind[ch_p], ch_p))
+                i = end_i
+                prev_was_ident_or_num = False
+                continue
+            if grp == "DOT":
+                if not (
+                    not prev_was_ident_or_num
+                    and (not tokens or tokens[-1].kind not in ("RPAREN", "RBRACK", "RBRACE", "QIDENT"))
+                    and end_i < n
+                    and "0" <= sql[end_i] <= "9"
+                ):
+                    append_tok(_Tok("DOT", "."))
+                    i = end_i
+                    prev_was_ident_or_num = False
+                    continue
+            elif grp == "WORD":
+                word = m_fast.group(0)
+                if not (
+                    (
+                        not prev_was_ident_or_num
+                        and len(word) == 1
+                        and word in ("E", "e")
+                        and end_i < n
+                        and sql[end_i] == "'"
+                    )
+                    or (
+                        not prev_was_ident_or_num
+                        and len(word) == 1
+                        and word in ("U", "u")
+                        and end_i + 1 < n
+                        and sql[end_i] == "&"
+                        and sql[end_i + 1] in ("'", '"')
+                    )
+                    or (end_i < n and ord(sql[end_i]) >= 0x80)
+                ):
+                    if len(word) == 7 and word.lower() == "uescape":
+                        return None, "UESCAPE is not allowed"
+                    append_tok(_Tok("WORD", word))
+                    i = end_i
+                    prev_was_ident_or_num = True
+                    continue
+            elif grp == "NUM":
+                if not (end_i < n and sql[end_i] in ".eExXbBoO_"):
+                    append_tok(_Tok("OTHER", m_fast.group(0)))
+                    i = end_i
+                    prev_was_ident_or_num = True
+                    continue
         ch = sql[i]
         at_word_start = not prev_was_ident_or_num
         if _is_sql_whitespace(ch):
@@ -1088,36 +1225,58 @@ def _build_tok_meta(tokens: list[_Tok]) -> tuple[dict[int, int], list[int], dict
     stack: list[tuple[int, str]] = []
     as_run: list[int] = [0] * n
     run = 0
+    delim_pairs = _DELIM_PAIRS
+    closing_delims = _CLOSING_DELIMS
     for idx, tk in enumerate(tokens):
-        as_run[idx] = run
-        if tk.kind == "WORD" and tk.val.upper() == "AS":
-            run += 1
+        if run:
+            as_run[idx] = run
+        k = tk.kind
+        if k == "WORD":
+            if len(tk.val) == 2 and tk.val.upper() == "AS":
+                run += 1
+            else:
+                run = 0
         else:
             run = 0
-        if tk.kind in _DELIM_PAIRS:
-            stack.append((idx, _DELIM_PAIRS[tk.kind]))
-        elif tk.kind in _CLOSING_DELIMS:
-            if stack and stack[-1][1] == tk.kind:
-                open_idx, _ = stack.pop()
-                match_map[open_idx] = idx
-                match_map[idx] = open_idx
-            else:
-                stack.clear()
+            if k in delim_pairs:
+                stack.append((idx, delim_pairs[k]))
+            elif k in closing_delims:
+                if stack and stack[-1][1] == k:
+                    open_idx, _ = stack.pop()
+                    match_map[open_idx] = idx
+                    match_map[idx] = open_idx
+                else:
+                    stack.clear()
     return match_map, as_run, {}
 
 
-def _get_tok_meta(tokens: list[_Tok]) -> tuple[dict[int, int], list[int], dict[int, bool]]:
-    cache: dict[int, tuple[list[_Tok], dict[int, int], list[int], dict[int, bool]]] | None = getattr(
+def _get_tok_meta_entry(
+    tokens: list[_Tok],
+) -> tuple[dict[int, int], list[int], dict[int, bool], dict[str, Any] | None]:
+    cache: dict[int, tuple[list[_Tok], dict[int, int], list[int], dict[int, bool], dict[str, Any]]] | None = getattr(
         _TOK_META_TLS, "cache", None
     )
     if cache is not None:
+        last = getattr(_TOK_META_TLS, "last", None)
+        if last is not None and last[0] is tokens:
+            return last[1], last[2], last[3], last[4]
         entry = cache.get(id(tokens))
         if entry is not None and entry[0] is tokens:
-            return entry[1], entry[2], entry[3]
+            _TOK_META_TLS.last = entry
+            return entry[1], entry[2], entry[3], entry[4]
         match_map, as_run, memo = _build_tok_meta(tokens)
-        cache[id(tokens)] = (tokens, match_map, as_run, memo)
-        return match_map, as_run, memo
-    return _build_tok_meta(tokens)
+        case_state: dict[str, Any] = {"ready": False, "building": False, "map": {}}
+        new_entry = (tokens, match_map, as_run, memo, case_state)
+        cache[id(tokens)] = new_entry
+        _TOK_META_TLS.last = new_entry
+        return match_map, as_run, memo, case_state
+    match_map, as_run, memo = _build_tok_meta(tokens)
+    return match_map, as_run, memo, None
+
+
+def _get_tok_meta(tokens: list[_Tok]) -> tuple[dict[int, int], list[int], dict[int, bool]]:
+    match_map, as_run, memo, _ = _get_tok_meta_entry(tokens)
+    return match_map, as_run, memo
 
 
 def _find_matching_rdelim(tokens: list[_Tok], open_idx: int) -> int:
@@ -1264,7 +1423,9 @@ def _cannot_end_aliasable_tok(tokens: list[_Tok], pos: int, r: int, after_as_idx
         if tk.val == "!" and (r % 2) == 0:
             return False
         return not _is_postfix_factorial_tok(tokens, pos)
-    if _is_select_head_modifier_end_tok(tokens, pos):
+    if (
+        tk.kind in ("OTHER", "RPAREN") or (tk.kind == "WORD" and len(tk.val) == 4 and tk.val.upper() == "TIES")
+    ) and _is_select_head_modifier_end_tok(tokens, pos):
         if (r % 2) == 0:
             return False
         if r == 1 and _is_select_head_signed_top_end_tok(tokens, pos):
@@ -1318,9 +1479,12 @@ def _cannot_end_aliasable_tok(tokens: list[_Tok], pos: int, r: int, after_as_idx
     if wu in _AS_CLAUSE_OPENING_WORDS:
         if pos == 0:
             return True
-        if _is_select_head_modifier_end_tok(tokens, pos - 1):
-            return False
         prev = tokens[pos - 1]
+        if (
+            prev.kind in ("OTHER", "RPAREN")
+            or (prev.kind == "WORD" and len(prev.val) == 4 and prev.val.upper() == "TIES")
+        ) and _is_select_head_modifier_end_tok(tokens, pos - 1):
+            return False
         if prev.kind in ("COMMA", "LPAREN", "LBRACK", "LBRACE", "DOT") or (
             prev.kind == "OTHER" and not _is_num_tok_val(prev.val) and not _is_postfix_factorial_tok(tokens, pos - 1)
         ):
@@ -1356,9 +1520,15 @@ def _cannot_end_aliasable_tok(tokens: list[_Tok], pos: int, r: int, after_as_idx
 def _is_non_keyword_ident_pos(tokens: list[_Tok], idx: int) -> bool:
     if idx <= 0:
         return False
-    if _is_dot_or_typecast_tok(tokens, idx - 1):
+    prev = tokens[idx - 1]
+    pk = prev.kind
+    if pk == "DOT":
         return True
-    _, as_run, memo = _get_tok_meta(tokens)
+    if pk == "OTHER" and prev.val.endswith("::") and not prev.val.endswith(":::"):
+        return True
+    if pk != "WORD" or len(prev.val) != 2 or prev.val.upper() != "AS":
+        return False
+    _, as_run, memo, _ = _get_tok_meta_entry(tokens)
     cached = memo.get(idx)
     if cached is not None:
         return cached
@@ -1435,49 +1605,51 @@ def _validate_select_syntax(tokens: list[_Tok]) -> str | None:
             if match_map.get(i, -1) < 0:
                 return "unmatched closing parenthesis"
             continue
-        if (
-            tok.kind == "WORD"
-            and not _is_non_keyword_ident_pos(tokens, i)
-            and not _is_dot_qualifier_at(tokens, i)
-            and not (i > 0 and tokens[i - 1].kind == "OTHER" and not _is_num_tok_val(tokens[i - 1].val))
-        ):
+        if tok.kind == "WORD":
             wu = tok.val.upper()
-            if wu == "SELECT":
-                nxt = i + 1
-                if nxt < n and tokens[nxt].kind == "WORD" and tokens[nxt].val.upper() in ("DISTINCT", "ALL"):
-                    nxt += 1
-                if (
-                    nxt >= n
-                    or tokens[nxt].kind == "RPAREN"
-                    or (
+            if (
+                wu in ("SELECT", "WHERE")
+                and not _is_non_keyword_ident_pos(tokens, i)
+                and not _is_dot_qualifier_at(tokens, i)
+                and not (i > 0 and tokens[i - 1].kind == "OTHER" and not _is_num_tok_val(tokens[i - 1].val))
+            ):
+                if wu == "SELECT":
+                    nxt = i + 1
+                    if nxt < n and tokens[nxt].kind == "WORD" and tokens[nxt].val.upper() in ("DISTINCT", "ALL"):
+                        nxt += 1
+                    if (
+                        nxt >= n
+                        or tokens[nxt].kind == "RPAREN"
+                        or (
+                            tokens[nxt].kind == "WORD"
+                            and not _is_dot_qualifier_at(tokens, nxt)
+                            and tokens[nxt].val.upper()
+                            in ("FROM", "WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "UNION")
+                        )
+                    ):
+                        return "empty SELECT projection list"
+                else:
+                    nxt = i + 1
+                    if (
+                        nxt >= n
+                        or tokens[nxt].kind == "RPAREN"
+                        or (tokens[nxt].kind == "OTHER" and tokens[nxt].val.startswith("*"))
+                    ):
+                        return "invalid WHERE clause"
+                    if (
                         tokens[nxt].kind == "WORD"
                         and not _is_dot_qualifier_at(tokens, nxt)
-                        and tokens[nxt].val.upper() in ("FROM", "WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "UNION")
-                    )
-                ):
-                    return "empty SELECT projection list"
-            elif wu == "WHERE":
-                nxt = i + 1
-                if (
-                    nxt >= n
-                    or tokens[nxt].kind == "RPAREN"
-                    or (tokens[nxt].kind == "OTHER" and tokens[nxt].val.startswith("*"))
-                ):
-                    return "invalid WHERE clause"
-                if (
-                    tokens[nxt].kind == "WORD"
-                    and not _is_dot_qualifier_at(tokens, nxt)
-                    and tokens[nxt].val.upper()
-                    in (
-                        "FROM",
-                        "WHERE",
-                        "GROUP",
-                        "HAVING",
-                        "ORDER",
-                        "LIMIT",
-                    )
-                ):
-                    return "empty WHERE clause"
+                        and tokens[nxt].val.upper()
+                        in (
+                            "FROM",
+                            "WHERE",
+                            "GROUP",
+                            "HAVING",
+                            "ORDER",
+                            "LIMIT",
+                        )
+                    ):
+                        return "empty WHERE clause"
     return None
 
 
@@ -1654,7 +1826,7 @@ def _parse_query_tokens(tokens: list[_Tok]) -> dict[str, Any]:
             break
         node["cte_map"] = {"map": cte_entries}
 
-    _scan_body_tokens(tokens[i:], node)
+    _scan_body_tokens(tokens if i == 0 else tokens[i:], node)
     return node
 
 
@@ -1681,57 +1853,85 @@ def _is_within_group_at(tokens: list[_Tok], idx: int) -> bool:
 _CASE_SCAN_GUARD = threading.local()
 
 
+def _build_case_when_end_map(tokens: list[_Tok]) -> dict[int, bool]:
+    match_map, _, _ = _get_tok_meta(tokens)
+    case_map: dict[int, bool] = {}
+    frames: list[list[list[Any]]] = [[]]
+    for k, tk in enumerate(tokens):
+        if tk.kind in _DELIM_PAIRS:
+            if match_map.get(k, -1) <= k:
+                frames[-1].clear()
+            frames.append([])
+            continue
+        if tk.kind in _CLOSING_DELIMS:
+            if len(frames) > 1:
+                frames.pop()
+            else:
+                frames[0].clear()
+            continue
+        if tk.kind == "SEMI":
+            frames[-1].clear()
+            continue
+        if tk.kind == "WORD" and len(tk.val) in (3, 4):
+            wu = tk.val.upper()
+            if (
+                wu in ("CASE", "WHEN", "END")
+                and not _is_non_keyword_ident_pos(tokens, k)
+                and not _is_dot_qualifier_at(tokens, k)
+            ):
+                if wu == "CASE":
+                    frames[-1].append([k, False])
+                elif wu == "WHEN":
+                    if frames[-1]:
+                        frames[-1][-1][1] = True
+                elif wu == "END":
+                    if frames[-1]:
+                        c_idx, saw_when = frames[-1].pop()
+                        if saw_when:
+                            case_map[c_idx] = True
+    return case_map
+
+
 def _has_matching_case_when_end_ahead(tokens: list[_Tok], case_idx: int) -> bool:
-    active: set[tuple[int, int]] | None = getattr(_CASE_SCAN_GUARD, "active", None)
+    if getattr(_TOK_META_TLS, "has_end", True) is False:
+        return False
+    _, _, _, case_state = _get_tok_meta_entry(tokens)
+    if case_state is not None:
+        if case_state["ready"]:
+            return bool(case_state["map"].get(case_idx, False))
+        if case_state["building"]:
+            return False
+        case_state["building"] = True
+        try:
+            case_map = _build_case_when_end_map(tokens)
+            case_state["map"] = case_map
+            case_state["ready"] = True
+        finally:
+            case_state["building"] = False
+        return bool(case_state["map"].get(case_idx, False))
+
+    active: set[int] | None = getattr(_CASE_SCAN_GUARD, "active", None)
     if active is None:
         active = set()
         _CASE_SCAN_GUARD.active = active
-    key = (len(tokens), case_idx)
-    if key in active:
+    tok_id = id(tokens)
+    if tok_id in active:
         return False
-    active.add(key)
+    active.add(tok_id)
     try:
-        depth = 1
-        saw_top_when = False
-        k = case_idx + 1
-        n = len(tokens)
-        while k < n:
-            tk = tokens[k]
-            if tk.kind in _DELIM_PAIRS:
-                rp = _find_matching_rdelim(tokens, k)
-                if rp == -1:
-                    return False
-                k = rp + 1
-                continue
-            if tk.kind in _CLOSING_DELIMS or tk.kind == "SEMI":
-                return False
-            if tk.kind == "WORD":
-                wu = tk.val.upper()
-                if (
-                    wu in ("CASE", "WHEN", "END")
-                    and not _is_non_keyword_ident_pos(tokens, k)
-                    and not _is_dot_qualifier_at(tokens, k)
-                ):
-                    if wu == "CASE":
-                        depth += 1
-                    elif wu == "WHEN" and depth == 1:
-                        saw_top_when = True
-                    elif wu == "END":
-                        depth -= 1
-                        if depth == 0:
-                            return saw_top_when
-            k += 1
-        return False
+        return bool(_build_case_when_end_map(tokens).get(case_idx, False))
     finally:
-        active.discard(key)
+        active.discard(tok_id)
 
 
 def _is_on_operator_tok_at(tokens: list[_Tok], pos: int) -> bool:
     if pos < 0:
         return True
-    if _is_select_head_modifier_end_tok(tokens, pos):
-        return True
     tk = tokens[pos]
+    if (
+        tk.kind in ("OTHER", "RPAREN") or (tk.kind == "WORD" and len(tk.val) == 4 and tk.val.upper() == "TIES")
+    ) and _is_select_head_modifier_end_tok(tokens, pos):
+        return True
     if tk.kind in ("COMMA", "SEMI", "LPAREN", "LBRACK", "LBRACE", "DOT"):
         return True
     if tk.kind == "OTHER" and not _is_num_tok_val(tk.val):
@@ -1845,9 +2045,11 @@ def _is_prev_word_operator_at(tokens: list[_Tok], prev_idx: int, nxt_tok: _Tok |
 
 
 def _is_multi_token_post_on_exit(tokens: list[_Tok], idx: int) -> bool:
-    if _is_within_group_at(tokens, idx):
-        return False
     wu = tokens[idx].val.upper()
+    if wu not in ("GROUP", "ORDER", "FETCH", "INTO", "UNION", "INTERSECT", "EXCEPT"):
+        return False
+    if wu == "GROUP" and _is_within_group_at(tokens, idx):
+        return False
     nxt_tok = tokens[idx + 1] if idx + 1 < len(tokens) else None
     if nxt_tok is None:
         return False
@@ -1858,25 +2060,23 @@ def _is_multi_token_post_on_exit(tokens: list[_Tok], idx: int) -> bool:
         return nxt_is_kw and nxt_tok.val.upper() in ("FIRST", "NEXT")
     if wu == "INTO":
         return nxt_is_kw and nxt_tok.val.upper() == "OUTFILE"
-    if wu in ("UNION", "INTERSECT", "EXCEPT"):
-        if nxt_tok.kind == "LPAREN":
-            return True
-        return (
-            nxt_is_kw
-            and not _is_dot_qualifier_at(tokens, idx + 1)
-            and nxt_tok.val.upper() in ("ALL", "DISTINCT", "BY", "SELECT", "WITH", "FROM", "VALUES", "TABLE")
-        )
-    return False
+    if nxt_tok.kind == "LPAREN":
+        return True
+    return (
+        nxt_is_kw
+        and not _is_dot_qualifier_at(tokens, idx + 1)
+        and nxt_tok.val.upper() in ("ALL", "DISTINCT", "BY", "SELECT", "WITH", "FROM", "VALUES", "TABLE")
+    )
 
 
 def _is_on_expr_ident_at(tokens: list[_Tok], idx: int) -> bool:
     if _is_dot_qualifier_at(tokens, idx):
         return True
-    if _is_within_group_at(tokens, idx):
+    wu = tokens[idx].val.upper()
+    if wu == "GROUP" and _is_within_group_at(tokens, idx):
         return True
     if _is_multi_token_post_on_exit(tokens, idx):
         return False
-    wu = tokens[idx].val.upper()
     prev_tok = tokens[idx - 1] if idx > 0 else None
     nxt_tok = tokens[idx + 1] if idx + 1 < len(tokens) else None
     if prev_tok is not None:
@@ -1954,10 +2154,93 @@ def _is_subquery_token_list(tokens: list[_Tok], *, enclosing_special_call: str |
     return w0 in _NON_SELECT_STATEMENTS and not (len(unwrapped) > 1 and unwrapped[1].kind == "LPAREN")
 
 
-def _is_valid_position_in_frame(tokens: list[_Tok], in_idx: int) -> bool:
-    if in_idx > 0 and tokens[in_idx - 1].kind == "WORD" and tokens[in_idx - 1].val.upper() in ("NOT", "GLOBAL"):
+_POSITION_FRAME_DISALLOWED_KEYWORDS = frozenset(
+    {"AND", "OR", "XOR", "NOT", "IS", "LIKE", "ILIKE", "RLIKE", "REGEXP", "GLOB", "SIMILAR", "BETWEEN"}
+)
+_IN_LHS_ABSENT_EXTRA_WORDS = frozenset(
+    {
+        "BY",
+        "LIMIT",
+        "OFFSET",
+        "FETCH",
+        "RETURN",
+        "SET",
+        "VALUES",
+        "PARTITION",
+        "USING",
+        "OVER",
+        "FILTER",
+        "AS",
+        "FROM",
+        "JOIN",
+        "UNION",
+        "INTERSECT",
+        "EXCEPT",
+        "WITH",
+        "WINDOW",
+        "CASE",
+    }
+)
+
+
+def _is_prefix_in_call(tokens: list[_Tok], in_idx: int) -> bool:
+    """Return True when ``IN(...)`` at ``in_idx`` has no LHS operand (ClickHouse ``in(x, set)``)."""
+    if in_idx + 1 >= len(tokens) or tokens[in_idx + 1].kind != "LPAREN":
         return False
+    p = in_idx - 1
+    if (
+        p >= 0
+        and tokens[p].kind == "WORD"
+        and tokens[p].val.upper() == "NOT"
+        and not _is_non_keyword_ident_pos(tokens, p)
+    ):
+        p -= 1
+    if (
+        p >= 0
+        and tokens[p].kind == "WORD"
+        and tokens[p].val.upper() == "GLOBAL"
+        and not _is_non_keyword_ident_pos(tokens, p)
+    ):
+        p -= 1
+    if p < 0:
+        return True
+    if _is_on_operator_tok_at(tokens, p):
+        return True
+    pt = tokens[p]
+    return (
+        pt.kind == "WORD" and pt.val.upper() in _IN_LHS_ABSENT_EXTRA_WORDS and not _is_non_keyword_ident_pos(tokens, p)
+    )
+
+
+def _parse_in_rhs_table_ref(rhs_tokens: list[_Tok]) -> dict[str, Any] | None:
+    """Detect bare or schema/catalog-qualified table identifiers inside ``IN (...)``."""
+    unwrapped = _strip_outer_parens(rhs_tokens)
+    if not unwrapped or len(unwrapped) % 2 == 0:
+        return None
+    for idx, tk in enumerate(unwrapped):
+        if idx % 2 == 0:
+            if tk.kind not in ("WORD", "QIDENT"):
+                return None
+        elif tk.kind != "DOT":
+            return None
+    if len(unwrapped) == 1 and unwrapped[0].kind == "WORD" and unwrapped[0].val.upper() in ("TRUE", "FALSE", "NULL"):
+        return None
+    parts = [unwrapped[idx].val for idx in range(0, len(unwrapped), 2)]
+    if len(parts) == 1:
+        return {"type": "BASE_TABLE", "table_name": parts[0], "schema_name": "", "catalog_name": ""}
+    if len(parts) == 2:
+        return {"type": "BASE_TABLE", "table_name": parts[1], "schema_name": parts[0], "catalog_name": ""}
+    if len(parts) == 3:
+        return {"type": "BASE_TABLE", "table_name": parts[2], "schema_name": parts[1], "catalog_name": parts[0]}
+    return {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: invalid table reference in IN clause"}
+
+
+def _is_valid_position_in_frame(tokens: list[_Tok], in_idx: int) -> bool:
     n = len(tokens)
+    if in_idx <= 0 or in_idx >= n - 1:
+        return False
+    if tokens[in_idx - 1].kind == "WORD" and tokens[in_idx - 1].val.upper() in ("NOT", "GLOBAL"):
+        return False
     match_map, _, _ = _get_tok_meta(tokens)
     case_depth = 0
     top_in_count = 0
@@ -1973,6 +2256,8 @@ def _is_valid_position_in_frame(tokens: list[_Tok], in_idx: int) -> bool:
             continue
         if tk.kind == "COMMA":
             return False
+        if case_depth == 0 and tk.kind == "OTHER" and any(ch in tk.val for ch in ("=", "<", ">", "!")):
+            return False
         if tk.kind == "WORD" and not _is_non_keyword_ident_pos(tokens, k) and not _is_dot_qualifier_at(tokens, k):
             wu = tk.val.upper()
             if wu == "CASE":
@@ -1983,6 +2268,8 @@ def _is_valid_position_in_frame(tokens: list[_Tok], in_idx: int) -> bool:
                 top_in_count += 1
                 if k == in_idx:
                     in_at_case_zero = case_depth == 0
+            elif case_depth == 0 and wu in _POSITION_FRAME_DISALLOWED_KEYWORDS:
+                return False
         k += 1
     return in_at_case_zero and top_in_count == 1
 
@@ -2040,11 +2327,24 @@ def _scan_expr_tokens(
                 and not _is_non_keyword_ident_pos(cur_tokens, i)
                 and not _is_dot_qualifier_at(cur_tokens, i)
             ):
+                is_valid_pos_in = cur_special == "position" and _is_valid_position_in_frame(cur_tokens, i)
                 nxt_is_lparen = i + 1 < n and cur_tokens[i + 1].kind == "LPAREN"
-                if not nxt_is_lparen and not (
-                    (cur_special == "position" and _is_valid_position_in_frame(cur_tokens, i))
-                    or _is_list_comp_in_at(cur_tokens, i, in_bracket=cur_in_brack)
-                ):
+                if nxt_is_lparen:
+                    if not is_valid_pos_in:
+                        rp = _find_matching_rparen(cur_tokens, i + 1)
+                        if _is_prefix_in_call(cur_tokens, i):
+                            node["children"].append({"class": "FUNCTION", "function_name": tok.val})
+                            if rp != -1:
+                                work.append((cur_tokens[i + 2 : rp], None, True, False))
+                                i = rp + 1
+                                continue
+                        elif rp != -1:
+                            rhs = cur_tokens[i + 2 : rp]
+                            if not _is_subquery_token_list(rhs):
+                                tbl_ref = _parse_in_rhs_table_ref(rhs)
+                                if tbl_ref is not None:
+                                    node["children"].append(tbl_ref)
+                elif not (is_valid_pos_in or _is_list_comp_in_at(cur_tokens, i, in_bracket=cur_in_brack)):
                     node["children"].append(
                         {
                             "type": "PARSE_ERROR_NODE",
@@ -2107,6 +2407,31 @@ _DISALLOWED_UNQUOTED_AS_TABLE_ALIASES = (
     )
 )
 _DISALLOWED_BARE_TABLE_ALIASES = _DISALLOWED_UNQUOTED_AS_TABLE_ALIASES | frozenset({"SELECT", "UNION", "SAMPLE"})
+_OUTSIDE_FROM_KEYWORDS = (
+    frozenset(
+        {
+            "FROM",
+            "TABLE",
+            "JOIN",
+            "IN",
+            "UNION",
+            "INTERSECT",
+            "EXCEPT",
+            "PIVOT",
+            "UNPIVOT",
+            "PIVOT_WIDER",
+            "PIVOT_LONGER",
+        }
+    )
+    | _JOIN_MODIFIERS
+)
+_SCAN_BODY_WORD_KEYWORDS = (
+    _OUTSIDE_FROM_KEYWORDS
+    | _CLAUSE_STOP_KEYWORDS
+    | _SHOW_REF_STATEMENTS
+    | _NON_SELECT_STATEMENTS
+    | frozenset({"SELECT", "ARRAY", "FINAL", "TABLESAMPLE", "ON", "USING", "SET", "ONLY", "LATERAL", "WITH", "VALUES"})
+)
 
 
 def _scan_body_tokens(
@@ -2126,6 +2451,7 @@ def _scan_body_tokens(
     saw_final = False
     in_join_mod = False
     saw_join = False
+    outside_from_kws = _OUTSIDE_FROM_KEYWORDS
 
     def _starts_join_modifier_seq(idx: int) -> bool:
         k = idx
@@ -2141,6 +2467,16 @@ def _scan_body_tokens(
 
     while i < n:
         tok = tokens[i]
+        if not in_from:
+            tk_q = tok.kind
+            if tk_q not in ("WORD", "QIDENT", "LPAREN", "LBRACK", "LBRACE"):
+                at_branch_start = False
+                i += 1
+                continue
+            if tk_q == "WORD" and not at_branch_start and (i + 1 >= n or tokens[i + 1].kind != "LPAREN"):
+                if tok.val.upper() not in outside_from_kws:
+                    i += 1
+                    continue
         if (
             in_from
             and not expect_table
@@ -2217,7 +2553,12 @@ def _scan_body_tokens(
                 i = rp_alias + 1
             continue
 
-        if tok.kind == "WORD" and not _is_non_keyword_ident_pos(tokens, i):
+        if (
+            tok.kind == "WORD"
+            and len(tok.val) >= 2
+            and tok.val.upper() in _SCAN_BODY_WORD_KEYWORDS
+            and not _is_non_keyword_ident_pos(tokens, i)
+        ):
             wu = tok.val.upper()
             if wu in ("PIVOT", "UNPIVOT", "PIVOT_WIDER", "PIVOT_LONGER"):
                 node["children"].append(
@@ -2250,7 +2591,7 @@ def _scan_body_tokens(
                         }
                     )
                     return
-            is_dot_qual = _is_dot_qualifier_at(tokens, i)
+            is_dot_qual = i + 2 < n and tokens[i + 1].kind == "DOT" and _is_dot_qualifier_at(tokens, i)
             is_on_ident = (
                 in_on_clause
                 and not expect_table
@@ -2790,7 +3131,21 @@ def _scan_body_tokens(
             and not _is_non_keyword_ident_pos(tokens, i)
             and not _is_dot_qualifier_at(tokens, i)
         ):
-            if not (i + 1 < n and tokens[i + 1].kind == "LPAREN"):
+            if i + 1 < n and tokens[i + 1].kind == "LPAREN":
+                rp = _find_matching_rparen(tokens, i + 1)
+                if _is_prefix_in_call(tokens, i):
+                    node["children"].append({"class": "FUNCTION", "function_name": tok.val})
+                    if rp != -1:
+                        _scan_expr_tokens(tokens[i + 2 : rp], node)
+                        i = rp + 1
+                        continue
+                elif rp != -1:
+                    rhs = tokens[i + 2 : rp]
+                    if not _is_subquery_token_list(rhs):
+                        tbl_ref = _parse_in_rhs_table_ref(rhs)
+                        if tbl_ref is not None:
+                            node["children"].append(tbl_ref)
+            else:
                 node["children"].append(
                     {
                         "type": "PARSE_ERROR_NODE",
@@ -2844,29 +3199,33 @@ def _parse_single_select_node(
 
     # Split into statements on top-level semicolons and enforce matched ()/[]/{} delimiters
     stmts: list[list[_Tok]] = []
-    cur: list[_Tok] = []
-    delim_stack: list[str] = []
-    for tok in tokens:
-        if tok.kind in _DELIM_PAIRS:
-            delim_stack.append(_DELIM_PAIRS[tok.kind])
-            if len(delim_stack) > MAX_PAREN_DEPTH:
-                return None, None, "nesting_depth_exceeded", "SQL nesting depth limit exceeded"
-            cur.append(tok)
-        elif tok.kind in _CLOSING_DELIMS:
-            if not delim_stack or delim_stack[-1] != tok.kind:
-                return None, None, "parse_error:SYNTAX", "SQL parse error: unmatched closing delimiter"
-            delim_stack.pop()
-            cur.append(tok)
-        elif tok.kind == "SEMI" and not delim_stack:
-            if cur:
-                stmts.append(cur)
-                cur = []
-        else:
-            cur.append(tok)
-    if delim_stack:
-        return None, None, "parse_error:SYNTAX", "SQL parse error: unbalanced delimiters"
-    if cur:
-        stmts.append(cur)
+    if not any(ch in sql for ch in ";()[]{}"):
+        if tokens:
+            stmts.append(tokens)
+    else:
+        cur: list[_Tok] = []
+        delim_stack: list[str] = []
+        for tok in tokens:
+            if tok.kind in _DELIM_PAIRS:
+                delim_stack.append(_DELIM_PAIRS[tok.kind])
+                if len(delim_stack) > MAX_PAREN_DEPTH:
+                    return None, None, "nesting_depth_exceeded", "SQL nesting depth limit exceeded"
+                cur.append(tok)
+            elif tok.kind in _CLOSING_DELIMS:
+                if not delim_stack or delim_stack[-1] != tok.kind:
+                    return None, None, "parse_error:SYNTAX", "SQL parse error: unmatched closing delimiter"
+                delim_stack.pop()
+                cur.append(tok)
+            elif tok.kind == "SEMI" and not delim_stack:
+                if cur:
+                    stmts.append(cur)
+                    cur = []
+            else:
+                cur.append(tok)
+        if delim_stack:
+            return None, None, "parse_error:SYNTAX", "SQL parse error: unbalanced delimiters"
+        if cur:
+            stmts.append(cur)
 
     if not stmts:
         return None, None, "no_statements", "no parseable statements"
@@ -2874,7 +3233,11 @@ def _parse_single_select_node(
         return None, None, "multi_statement", f"only one statement allowed, got {len(stmts)}"
 
     prev_cache = getattr(_TOK_META_TLS, "cache", None)
+    prev_last = getattr(_TOK_META_TLS, "last", None)
+    prev_has_end = getattr(_TOK_META_TLS, "has_end", True)
     _TOK_META_TLS.cache = {}
+    _TOK_META_TLS.last = None
+    _TOK_META_TLS.has_end = "END" in sql.upper()
     try:
         stmt_tokens = _strip_outer_parens(stmts[0])
         if not stmt_tokens:
@@ -2907,6 +3270,8 @@ def _parse_single_select_node(
         return parsed, node, None, None
     finally:
         _TOK_META_TLS.cache = prev_cache
+        _TOK_META_TLS.last = prev_last
+        _TOK_META_TLS.has_end = prev_has_end
 
 
 def is_simple_select_statement(sql: str, *, parser_con: Any | None = None) -> bool:
