@@ -12,11 +12,15 @@ describe('Cloud cost calculator', () => {
     render(<CloudCostCalculator />)
     expect(screen.getByText('Your Traffic & Config')).toBeInTheDocument()
     expect(screen.getByText('Minimum Charge per Object')).toBeInTheDocument()
-    expect(screen.getByText('Pricing (per 1,000 ops)')).toBeInTheDocument()
+    expect(screen.getByText('Pricing')).toBeInTheDocument()
+    expect(screen.queryByText('Pricing (per 1,000 ops)')).not.toBeInTheDocument()
     expect(screen.getByText('Delivery Billing Zone')).toBeInTheDocument()
     expect(screen.getByText('What generates operations')).toBeInTheDocument()
     expect(screen.getByText('Monthly Estimate Breakdown')).toBeInTheDocument()
     expect(screen.getByText('Volume Estimates')).toBeInTheDocument()
+    // KV Store Class A is displayed per 100,000 ops ($0.65) and Class B per 1M ops ($0.55), matching fastly.com/pricing.
+    expect(screen.getByText('KV Store Class A ($/100,000 ops)').closest('div')!.parentElement).toHaveTextContent('0.65')
+    expect(screen.getByText('KV Store Class B ($/1M ops)').closest('div')!.parentElement).toHaveTextContent('0.55')
 
     expect(screen.getByText('Object Storage')).toBeInTheDocument()
     const storage = screen.getByText('Object Storage').closest('[data-estimate-line]') as HTMLElement

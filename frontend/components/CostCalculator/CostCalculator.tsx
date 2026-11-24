@@ -324,7 +324,7 @@ export function Pricing({ s, setZone }: PricingProps) {
     <>
       <section>
         <div className="flex items-center justify-between mb-3">
-          <h3 className='text-xs font-semibold text-muted-foreground uppercase tracking-wider'>Pricing (per 1,000 ops)</h3>
+          <h3 className='text-xs font-semibold text-muted-foreground uppercase tracking-wider'>Pricing</h3>
           <Button
             variant="link"
             size="sm"
@@ -385,10 +385,10 @@ export function Pricing({ s, setZone }: PricingProps) {
         </div>
 
         <div className='space-y-0'>
-          <Row label='Class A rate (writes, lists)'><ReadOnlyValue value={s.rateA} /></Row>
-          <Row label='Class B rate (reads/downloads)'><ReadOnlyValue value={s.rateB} /></Row>
-          <Row label='Storage rate (per GB/month)'><ReadOnlyValue value={s.rateStorage} /></Row>
-          <Row label='CDN egress rate (per GB)'><ReadOnlyValue value={s.rateEgress} /></Row>
+          <Row label='Object Storage Class A ($/1,000 ops)'><ReadOnlyValue value={s.rateA} /></Row>
+          <Row label='Object Storage Class B ($/1,000 ops)'><ReadOnlyValue value={s.rateB} /></Row>
+          <Row label='Object Storage ($/GB/month)'><ReadOnlyValue value={s.rateStorage} /></Row>
+          <Row label='CDN bandwidth ($/GB)'><ReadOnlyValue value={s.rateEgress} /></Row>
         </div>
         <div className='mt-2 text-[11px] text-muted-foreground'>
           Rates are global defaults. Update them on the <a href={buildServiceHref('/admin', activeServiceId)} className='underline font-medium hover:text-foreground'>admin page</a>.

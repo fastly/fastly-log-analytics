@@ -59,17 +59,27 @@ export function applyWhatIfs(base: EstimateInputs, edits: Partial<EstimateInputs
   return inputs
 }
 
-const CLOUD_RATE_ROWS: [keyof EstimateRates, string][] = [
-  ['cdn_request_rate_per_10k', 'CDN requests ($/10k, >1M free)'],
-  ['compute_request_rate_per_million', 'Compute requests ($/million)'],
-  ['compute_vcpu_rate_per_million_ms', 'Compute vCPU ($/million ms)'],
-  ['compute_vcpu_free_ms_per_request', 'Included vCPU (ms/request)'],
-  ['compute_vcpu_excess_rate_per_second', 'Excess vCPU ($/second)'],
-  ['compute_vcpu_rounding_ms', 'vCPU billing increment (ms)'],
-  ['kv_class_a_rate_per_million', 'KV Class A ($/million)'],
-  ['kv_class_b_rate_per_million', 'KV Class B ($/million)'],
-  ['secret_rate_per_month', 'Secret Store ($/secret-month)'],
+const CLOUD_RATE_ROWS: Array<{
+  key: keyof EstimateRates
+  label: string
+  /** Converts stored rate into Fastly's published pricing unit (e.g. KV Class A: $/1M → $/100k). */
+  displayScale?: number
+}> = [
+  { key: 'cdn_request_rate_per_10k', label: 'CDN requests ($/10,000 reqs)' },
+  { key: 'compute_request_rate_per_million', label: 'Compute requests ($/1M reqs)' },
+  { key: 'compute_vcpu_rate_per_million_ms', label: 'Compute vCPU ($/1M vCPU ms)' },
+  { key: 'compute_vcpu_free_ms_per_request', label: 'Included vCPU (ms/request)' },
+  { key: 'compute_vcpu_excess_rate_per_second', label: 'Excess vCPU ($/second)' },
+  { key: 'compute_vcpu_rounding_ms', label: 'vCPU billing increment (ms)' },
+  { key: 'kv_class_a_rate_per_million', label: 'KV Store Class A ($/100,000 ops)', displayScale: 0.1 },
+  { key: 'kv_class_b_rate_per_million', label: 'KV Store Class B ($/1M ops)' },
+  { key: 'secret_rate_per_month', label: 'Secret Store ($/secret/month)' },
 ]
+
+function formatScaledRate(value: number, scale?: number): number {
+  if (!scale || scale === 1) return value
+  return Number((value * scale).toPrecision(12))
+}
 
 const CLOUD_OPS_SECTIONS = [
   {
@@ -334,7 +344,7 @@ export function CloudCostCalculator({ prefillData, prefillNote, rates: configure
         <div className="space-y-6">
           <section>
             <div className="flex items-center justify-between mb-3">
-              <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Pricing (per 1,000 ops)</h3>
+              <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Pricing</h3>
               <Button
                 variant="link"
                 size="sm"
@@ -395,12 +405,12 @@ export function CloudCostCalculator({ prefillData, prefillNote, rates: configure
             </div>
 
             <div className="space-y-0">
-              <Row label="Class A rate (writes, lists)"><ReadOnlyValue value={rates.class_a_rate_per_1k} /></Row>
-              <Row label="Class B rate (reads/downloads)"><ReadOnlyValue value={rateBPer1k} /></Row>
-              <Row label="Storage rate (per GB/month)"><ReadOnlyValue value={rates.storage_rate_per_gb_month} /></Row>
-              <Row label="CDN egress rate (per GB)"><ReadOnlyValue value={rates.cdn_egress_rate_per_gb} /></Row>
-              {CLOUD_RATE_ROWS.map(([key, label]) => (
-                <Row key={key} label={label}><ReadOnlyValue value={rates[key]} /></Row>
+              <Row label="Object Storage Class A ($/1,000 ops)"><ReadOnlyValue value={rates.class_a_rate_per_1k} /></Row>
+              <Row label="Object Storage Class B ($/1,000 ops)"><ReadOnlyValue value={rateBPer1k} /></Row>
+              <Row label="Object Storage ($/GB/month)"><ReadOnlyValue value={rates.storage_rate_per_gb_month} /></Row>
+              <Row label="CDN bandwidth ($/GB)"><ReadOnlyValue value={rates.cdn_egress_rate_per_gb} /></Row>
+              {CLOUD_RATE_ROWS.map(({ key, label, displayScale }) => (
+                <Row key={key} label={label}><ReadOnlyValue value={formatScaledRate(rates[key], displayScale)} /></Row>
               ))}
             </div>
             <div className="mt-2 text-[11px] text-muted-foreground">

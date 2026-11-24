@@ -868,8 +868,8 @@ describe('PricingSettings', () => {
       })),
     )
     renderWithQuery(<PricingSettings />)
-    const rateA = await screen.findByLabelText('Class A Ops ($/1k)')
-    const rateB = screen.getByLabelText('Class B Ops ($/10k)')
+    const rateA = await screen.findByLabelText('Object Storage Class A ($/1,000 ops)')
+    const rateB = screen.getByLabelText('Object Storage Class B ($/1,000 ops)')
     expect(rateA).toHaveTextContent('0.001')
     expect(rateB).toHaveTextContent('')
 
@@ -877,8 +877,8 @@ describe('PricingSettings', () => {
     expect(pricingLink).toHaveAttribute('href', 'https://www.fastly.com/pricing')
 
     await user.click(screen.getByRole('button', { name: /edit/i }))
-    expect(screen.getByLabelText('Class A Ops ($/1k)')).toHaveValue('0.001')
-    expect(screen.getByLabelText('Class B Ops ($/10k)')).toHaveValue('')
+    expect(screen.getByLabelText('Object Storage Class A ($/1,000 ops)')).toHaveValue('0.001')
+    expect(screen.getByLabelText('Object Storage Class B ($/1,000 ops)')).toHaveValue('')
   })
 
   test('rejects invalid values, permits zero rates, and preserves the numeric payload', async () => {
@@ -892,10 +892,11 @@ describe('PricingSettings', () => {
       }),
     )
     renderWithQuery(<PricingSettings />)
-    await screen.findByLabelText('Class A Ops ($/1k)')
+    await screen.findByLabelText('Object Storage Class A ($/1,000 ops)')
     await user.click(screen.getByRole('button', { name: /edit/i }))
 
-    const rateA = screen.getByLabelText('Class A Ops ($/1k)')
+    const rateA = screen.getByLabelText('Object Storage Class A ($/1,000 ops)')
+    const rateB = screen.getByLabelText('Object Storage Class B ($/1,000 ops)')
     const minDays = screen.getByLabelText('Min. Days Billed/Object')
     await user.clear(rateA)
     await user.type(rateA, 'invalid')
@@ -903,6 +904,8 @@ describe('PricingSettings', () => {
 
     await user.clear(rateA)
     await user.type(rateA, '0')
+    await user.clear(rateB)
+    await user.type(rateB, '0.0005')
     await user.clear(minDays)
     await user.type(minDays, '0')
     expect(screen.getByRole('button', { name: /save changes/i })).toBeDisabled()
@@ -912,6 +915,7 @@ describe('PricingSettings', () => {
     await user.click(screen.getByRole('button', { name: /save changes/i }))
     await waitFor(() => expect(body).toMatchObject({
       class_a_rate_per_1k: 0,
+      class_b_rate_per_10k: 0.005,
       min_billed_days: 1,
     }))
   })
@@ -924,7 +928,7 @@ describe('PricingSettings', () => {
         HttpResponse.json({ detail: 'Pricing update rejected' }, { status: 400 })),
     )
     renderWithQuery(<PricingSettings />)
-    await screen.findByLabelText('Class A Ops ($/1k)')
+    await screen.findByLabelText('Object Storage Class A ($/1,000 ops)')
     await user.click(screen.getByRole('button', { name: /edit/i }))
     await user.click(screen.getByRole('button', { name: /save changes/i }))
 

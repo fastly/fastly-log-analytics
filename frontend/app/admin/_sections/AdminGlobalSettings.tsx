@@ -188,24 +188,34 @@ interface PricingFieldDef {
   label: string
   integer?: boolean
   cloudOnly?: boolean
+  /** Converts stored rate into Fastly's published display unit (e.g. $/10k → $/1k, $/1M → $/100k). */
+  displayScale?: number
 }
 
 const PRICING_FIELDS: PricingFieldDef[] = [
-  { key: 'class_a_rate_per_1k', label: 'Class A Ops ($/1k)' },
-  { key: 'class_b_rate_per_10k', label: 'Class B Ops ($/10k)' },
-  { key: 'cdn_egress_rate_per_gb', label: 'CDN Egress ($/GB)' },
-  { key: 'storage_rate_per_gb_month', label: 'Storage ($/GB/mo)' },
+  { key: 'class_a_rate_per_1k', label: 'Object Storage Class A ($/1,000 ops)' },
+  { key: 'class_b_rate_per_10k', label: 'Object Storage Class B ($/1,000 ops)', displayScale: 0.1 },
+  { key: 'cdn_egress_rate_per_gb', label: 'CDN Bandwidth ($/GB)' },
+  { key: 'storage_rate_per_gb_month', label: 'Object Storage ($/GB/mo)' },
   { key: 'min_billed_days', label: 'Min. Days Billed/Object', integer: true },
-  { key: 'cdn_request_rate_per_10k', label: 'CDN Requests ($/10k)', cloudOnly: true },
-  { key: 'compute_request_rate_per_million', label: 'Compute Requests ($/1M)', cloudOnly: true },
-  { key: 'compute_vcpu_rate_per_million_ms', label: 'Compute vCPU ($/1M ms)', cloudOnly: true },
+  { key: 'cdn_request_rate_per_10k', label: 'CDN Requests ($/10,000 reqs)', cloudOnly: true },
+  { key: 'compute_request_rate_per_million', label: 'Compute Requests ($/1M reqs)', cloudOnly: true },
+  { key: 'compute_vcpu_rate_per_million_ms', label: 'Compute vCPU ($/1M vCPU ms)', cloudOnly: true },
   { key: 'compute_vcpu_free_ms_per_request', label: 'Included vCPU (ms/req)', cloudOnly: true },
   { key: 'compute_vcpu_excess_rate_per_second', label: 'Excess vCPU ($/s)', cloudOnly: true },
   { key: 'compute_vcpu_rounding_ms', label: 'vCPU Rounding (ms)', cloudOnly: true },
-  { key: 'kv_class_a_rate_per_million', label: 'KV Class A ($/1M)', cloudOnly: true },
-  { key: 'kv_class_b_rate_per_million', label: 'KV Class B ($/1M)', cloudOnly: true },
+  { key: 'kv_class_a_rate_per_million', label: 'KV Store Class A ($/100,000 ops)', cloudOnly: true, displayScale: 0.1 },
+  { key: 'kv_class_b_rate_per_million', label: 'KV Store Class B ($/1M ops)', cloudOnly: true },
   { key: 'secret_rate_per_month', label: 'Secret Store ($/secret/mo)', cloudOnly: true },
 ]
+
+function toDisplayRate(val: number, scale?: number): string {
+  return String(scale && scale !== 1 ? Number((val * scale).toPrecision(12)) : val)
+}
+
+function fromDisplayRate(val: number, scale?: number): number {
+  return scale && scale !== 1 ? Number((val / scale).toPrecision(12)) : val
+}
 
 function isDefaultRate(value: unknown, fallback: number): boolean {
   if (value == null || typeof value !== 'number' || !Number.isFinite(value)) return true
@@ -245,7 +255,10 @@ export const PricingSettings = () => {
     return Object.fromEntries(
       PRICING_FIELDS.map((f) => {
         const val = raw[f.key]
-        return [f.key, isDefaultRate(val, LIST_RATES[f.key]) ? '' : String(val)]
+        return [
+          f.key,
+          isDefaultRate(val, LIST_RATES[f.key]) ? '' : toDisplayRate(val as number, f.displayScale),
+        ]
       }),
     ) as PricingFormValues
   }, [settings])
@@ -261,7 +274,7 @@ export const PricingSettings = () => {
       const body: Record<string, number> = {}
       for (const f of visibleFields) {
         const trimmed = (next[f.key] ?? '').trim()
-        body[f.key] = trimmed === '' ? LIST_RATES[f.key] : Number(trimmed)
+        body[f.key] = trimmed === '' ? LIST_RATES[f.key] : fromDisplayRate(Number(trimmed), f.displayScale)
       }
       await unwrapClient(client.PATCH('/api/admin/usage-logging', { body: body as components['schemas']['UsageLoggingUpdateBody'] }))
     },
