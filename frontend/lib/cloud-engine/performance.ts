@@ -15,6 +15,7 @@ import { sqlEscape } from "@/lib/sqlBuilder";
 import { compileFiltersToSql, getDuckDBEngine, type DuckDBReadContext, type DuckDBColumnType } from "./dashboard/duckdb";
 import type { DashboardFilter } from "./dashboard/filters";
 import { readJsonObjectBody, roundTo, toNum } from "./engine-utils";
+import { formatAsnDisplayLabel, getCachedAsnName, loadAsnNames } from "./asn-names";
 
 export type PerformanceSectionName =
   | "top_urls"
@@ -75,6 +76,8 @@ const KNOWN_ASN_LABELS: Readonly<Record<string, string>> = {
 export function formatAsnLabel(asn: string | number): string {
   const clean = String(asn ?? "").replace(/^AS/i, "").trim();
   if (!clean) return "Unknown ASN";
+  const cached = getCachedAsnName(clean);
+  if (cached) return formatAsnDisplayLabel(clean, cached);
   return KNOWN_ASN_LABELS[clean] ?? `AS${clean}`;
 }
 
@@ -542,15 +545,17 @@ export async function executePerformanceAggregates(
   if (sections.has("top_asns")) {
     tasks.push(
       (async () => {
+        const asnNamesReady = loadAsnNames();
         if (!filtered && typeof client.tryRollup === "function") {
           const rollupRows = await client.tryRollup(PERFORMANCE_ROLLUPS.perf_top_asns, window);
           if (rollupRows) {
+            await asnNamesReady;
             response.top_asns = shapePerformanceAsnRows(rollupRows);
             return;
           }
         }
         const { sql, params } = buildPerfTopAsnsSql(req, availableColumns);
-        const rows = await client.query(sql, params);
+        const [rows] = await Promise.all([client.query(sql, params), asnNamesReady]);
         response.top_asns = shapePerformanceAsnRows(rows);
       })(),
     );

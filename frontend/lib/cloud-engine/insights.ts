@@ -11,6 +11,7 @@
 import { escapeSqlLiteral, requireSafeIdent } from "./sql-validator";
 import type { InsightsBaselineSource } from "./insights-rollup";
 import type { Schema } from "@/types/api";
+import { formatAsnDisplayLabel, loadAsnNames } from "./asn-names";
 
 export const INSIGHTS_ROLLUP_MIN_COVERAGE = 0.8; // 80% hourly rollup coverage threshold
 export const min_Baseline = 24;
@@ -556,6 +557,7 @@ export async function handleInsights(
   body: InsightsRequest = {},
   ctx: CloudInsightsContext = {},
 ): Promise<InsightsEnvelope> {
+  await loadAsnNames();
   const { windowHours, baselineHours, end, windowStart: windowStartMs, start } = resolveInsightWindow(body, ctx.now);
   const windowEnd = new Date(end).toISOString();
   const windowStart = new Date(windowStartMs).toISOString();
@@ -734,7 +736,7 @@ export async function handleInsights(
       case "asn_hosting_shift":
         for (const r of scan(ctx.asnAggregateRows)) {
           if (r.asn == null) continue;
-          const label = `AS${r.asn}`, w = n(r, "w_cnt"), b = n(r, "b_cnt");
+          const label = formatAsnDisplayLabel(r.asn as string | number), w = n(r, "w_cnt"), b = n(r, "b_cnt");
           const meta = { window_requests: w, baseline_requests: b, filters: { asn: r.asn } };
           if (d.id === "new_asn_traffic") {
             if (w >= 20 && b === 0) add(label, w, 0, "requests", meta, "info");

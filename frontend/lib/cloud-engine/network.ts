@@ -9,6 +9,8 @@ import { cloudActiveLogFieldIds } from "./active-log-fields";
 import { buildOriginShieldingAnalysisSql, enrichShieldingRouteWithPopDistance } from "./origin";
 import { parseEpochMs, roundTo } from "./engine-utils";
 import { analyticsFiltersToSql, rangeServiceSql } from "./query-params";
+import { formatAsnDisplayLabel, formatCityCountryLabel, loadAsnNames } from "./asn-names";
+import { resolveCountryName } from "@/lib/format";
 export { parseEpochMs, roundTo };
 
 export const TCP_FIELDS = [
@@ -476,7 +478,7 @@ async function queryNetworkBuckets(
   const byAsn = new Map<number, { asn: number; label: string; total_reqs: number; buckets: Record<string, unknown>[] }>();
   for (const row of asnRows) {
     const asn = Number(row.asn);
-    const entry = byAsn.get(asn) ?? { asn, label: `AS${asn}`, total_reqs: 0, buckets: [] };
+    const entry = byAsn.get(asn) ?? { asn, label: formatAsnDisplayLabel(asn), total_reqs: 0, buckets: [] };
     const bucket = new Date(Number(row.bucket_ms)).toISOString();
     entry.total_reqs += Number(row.reqs);
     entry.buckets.push({ ...cell(row), bucket, bucket_idx: bucketIndexes.get(bucket) });
@@ -587,6 +589,7 @@ export async function queryNetworkHealth(params: NetworkQueryParams = {}) {
   }
 
   // One pass for the summary and the country, ASN and metro tables; quantiles stay exact per grouping set.
+  const asnNamesReady = loadAsnNames();
   const coreRows = await engine.executeSql<Record<string, unknown>>(
     `WITH scoped AS (
       SELECT
@@ -682,14 +685,17 @@ export async function queryNetworkHealth(params: NetworkQueryParams = {}) {
       ...row, asn: row.asn_key, as_name: row.as_name_key, rtt_med_us: row.med_rtt_us, rtt_base_us: row.p10_rtt_us,
     }));
 
+  await asnNamesReady;
+
   const by_asn = byAsnRows.map((row) => {
     const rttMedUs = Number(row.rtt_med_us ?? 0);
     const rttBaseUs = Math.max(1, Number(row.rtt_base_us ?? rttMedUs ?? 1));
     const ploss = Number(row.avg_ploss ?? 0);
     const errPct = Number(row.error_pct ?? 0);
+    const asnNum = Number(row.asn ?? 0);
     return {
-      asn: Number(row.asn ?? 0),
-      as_name: String(row.as_name ?? ""),
+      asn: asnNum,
+      as_name: formatAsnDisplayLabel(asnNum, row.as_name == null ? null : String(row.as_name)),
       reqs: Number(row.reqs ?? 0),
       rtt_med_us: roundTo(rttMedUs, 1),
       rtt_med_ms: roundTo(rttMedUs / 1000, 2),
@@ -740,7 +746,10 @@ export async function queryNetworkHealth(params: NetworkQueryParams = {}) {
     };
   });
 
-  const metro_leaderboard = deduplicateMetroLeaderboard(scoredMetros);
+  const metro_leaderboard = deduplicateMetroLeaderboard(scoredMetros).map((row) => ({
+    ...row,
+    city: formatCityCountryLabel(String(row.raw_city ?? row.city ?? ""), String(row.country ?? "")),
+  }));
   const popHealth = params.sections?.length ? null : await queryPopHealth(params);
   const bucketData = await queryNetworkBuckets(params, where, engine);
   const shielding = wantShielding(params.sections)
@@ -767,7 +776,7 @@ export async function queryNetworkHealth(params: NetworkQueryParams = {}) {
       total_reqs: totalRequests,
       global_health_score: healthScore,
       worst_asn: worstAsn ? { label: worstAsn.as_name, score: worstAsn.health_score } : null,
-      worst_country: worstCountry ? { label: worstCountry.country, score: worstCountry.health_score } : null,
+      worst_country: worstCountry ? { label: resolveCountryName(worstCountry.country), score: worstCountry.health_score } : null,
       avg_rtt_ms: roundTo(Number(s.avg_rtt_us ?? 0) / 1000, 2),
       median_rtt_ms: roundTo(medRttUs / 1000, 2),
       p95_rtt_ms: roundTo(Number(s.p95_rtt_us ?? 0) / 1000, 2),
@@ -839,6 +848,7 @@ export async function queryNetworkQuality(params: NetworkQueryParams = {}) {
   const where = buildWhereClause(params);
 
   const regionCountrySql = duckSqlString(String(params.region_country ?? "US"));
+  const asnNamesReady = loadAsnNames();
   // One pass for the summary and every grouped table except the scatter sample.
   const qualityRows = await engine.executeSql<Record<string, unknown>>(
     `WITH scoped AS (
@@ -896,6 +906,8 @@ export async function queryNetworkQuality(params: NetworkQueryParams = {}) {
     return emptyNetworkQuality(missingTcpFields);
   }
 
+  await asnNamesReady;
+
   const byRegionRows = qualitySet("region").map((row): Record<string, unknown> => ({ ...row, region: row.country_key }));
 
   const by_region = byRegionRows.map((r) => ({
@@ -911,15 +923,18 @@ export async function queryNetworkQuality(params: NetworkQueryParams = {}) {
     .filter((row) => Number(row.asn_key ?? 0) > 0)
     .map((row): Record<string, unknown> => ({ ...row, asn: row.asn_key, as_name: row.as_name_key }));
 
-  const by_asn = byAsnRows.map((r) => ({
-    asn: Number(r.asn ?? 0),
-    as_name: String(r.as_name ?? ""),
-    requests: Number(r.requests ?? 0),
-    avg_rtt_ms: roundTo(Number(r.avg_rtt_us ?? 0) / 1000, 2),
-    avg_rttvar_ms: roundTo(Number(r.avg_rttvar_us ?? 0) / 1000, 2),
-    avg_ploss_pct: roundTo(Number(r.avg_ploss ?? 0) * 100, 2),
-    avg_cwnd: roundTo(Number(r.avg_cwnd ?? 0), 1),
-  }));
+  const by_asn = byAsnRows.map((r) => {
+    const asnNum = Number(r.asn ?? 0);
+    return {
+      asn: asnNum,
+      as_name: formatAsnDisplayLabel(asnNum, r.as_name == null ? null : String(r.as_name)),
+      requests: Number(r.requests ?? 0),
+      avg_rtt_ms: roundTo(Number(r.avg_rtt_us ?? 0) / 1000, 2),
+      avg_rttvar_ms: roundTo(Number(r.avg_rttvar_us ?? 0) / 1000, 2),
+      avg_ploss_pct: roundTo(Number(r.avg_ploss ?? 0) * 100, 2),
+      avg_cwnd: roundTo(Number(r.avg_cwnd ?? 0), 1),
+    };
+  });
 
   const scatter = await engine.executeSql<Record<string, unknown>>(`SELECT
     COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt) / 1000.0 AS rtt_ms,
@@ -972,7 +987,7 @@ export async function queryNetworkQuality(params: NetworkQueryParams = {}) {
   const regionRows = qualitySet("region_country").map((row) => ({ value: row.region_key, rtt_ms: row.rtt_ms, reqs: row.reqs }));
   return {
     available: s.avg_rtt_us != null,
-    by_country: by_region.map((row) => bar(row.region, row.region, row)),
+    by_country: by_region.map((row) => bar(row.region, resolveCountryName(row.region), row)),
     by_pop: byPopRows.map((row) => ({ ...row, value: String(row.pop ?? "Unknown"), label: String(row.pop ?? "Unknown") })),
     countries: by_region.map((row) => row.region),
     region_country: params.region_country ?? "US",

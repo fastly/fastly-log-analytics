@@ -19,6 +19,7 @@ import {
   queryNetworkBundle,
   queryNetworkHealth,
 } from "./network";
+import { resetAsnNamesForTest, setAsnNamesForTest } from "./asn-names";
 
 describe("Feature F21 — Network cloud-engine", () => {
   it("returns ISO-aligned ASN timeline buckets with actual native health scores", async () => {
@@ -210,7 +211,7 @@ describe("Feature F21 — Network cloud-engine", () => {
       expect(bundle.health.leaderboard[0]).toMatchObject({ asn: 64500, total_reqs: 1 });
       expect(bundle.health.summary).toMatchObject({
         worst_asn: { label: "AS64500", score: 100 },
-        worst_country: { label: "US", score: 100 },
+        worst_country: { label: "United States", score: 100 },
       });
       expect(bundle.health.cities[0]).toMatchObject({ name: "Denver", lat: 39.74 });
       expect(bundle.health.map_buckets[0]).toMatchObject({ cities: [expect.objectContaining({ reqs: 1 })] });
@@ -386,6 +387,49 @@ describe("Feature F21 — Network cloud-engine", () => {
     } finally {
       lease.release();
       await parquetEngine.reset();
+    }
+  });
+
+  it("formats ASN names and full country/city labels while keeping raw filter values", async () => {
+    const engine = new DuckDBAnalyticalEngine();
+    setAsnNamesForTest([[64500, "Example Fiber, US"]]);
+    try {
+      await engine.executeSql(`INSERT INTO requests
+        (scoped_key, ts_ms, ip, country, city, lat, lon, asn, pop, status, resp_bytes, cache, ttfb, tcp_rtt, proto)
+        VALUES ('native', 1700000100000, '192.0.2.1', 'US', 'council bluffs', 41.26, -95.86, 64500, 'OMA', 200, 20000, 'HIT', 0.05, 10000, 'HTTP/2')`);
+      const bundle = await queryNetworkBundle({ engine, bucket_seconds: 300 });
+      expect(bundle.health.summary).toMatchObject({
+        worst_asn: { label: "Example Fiber, US (64500)" },
+        worst_country: { label: "United States" },
+      });
+      expect(bundle.health.leaderboard[0]).toMatchObject({
+        asn: 64500,
+        as_name: "Example Fiber, US (64500)",
+        label: "Example Fiber, US (64500)",
+      });
+      expect(bundle.health.heatmap[0]).toMatchObject({
+        asn: 64500,
+        label: "Example Fiber, US (64500)",
+      });
+      expect(bundle.health.metro_leaderboard[0]).toMatchObject({
+        city: "Council Bluffs, United States",
+        raw_city: "council bluffs",
+        country: "US",
+      });
+      expect(bundle.quality).toMatchObject({
+        by_country: [expect.objectContaining({
+          value: "US",
+          label: "United States",
+        })],
+        by_asn: [expect.objectContaining({
+          asn: 64500,
+          value: "64500",
+          label: "Example Fiber, US (64500)",
+        })],
+      });
+    } finally {
+      resetAsnNamesForTest();
+      await engine.reset();
     }
   });
 });

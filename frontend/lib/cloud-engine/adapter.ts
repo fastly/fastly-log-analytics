@@ -14,6 +14,7 @@ import { assetsRollupEligible } from "./assets-rollup";
 import { classifyUserAgentCounts } from "./bots/classify";
 import { cmcdScanColumns, handleCmcdRequest, type CmcdQueryParams } from "./cmcd";
 import { cmcdRollupEligible } from "./cmcd-rollup";
+import { formatAsnDisplayLabel, getCachedAsnName, loadAsnNames } from "./asn-names";
 import type { MinuteBucket } from "./dashboard/engine";
 import { currentStoreMetaEpoch } from "./dashboard/file-store";
 import { dashboardCacheIdentity, parseVcpuMsHeader } from "./dashboard/sources";
@@ -2021,6 +2022,7 @@ async function dispatchCloudRequest(
     if (filterFields instanceof Response) return filterFields;
 
     assertAdapterEpoch(request, entryMetaEpoch);
+    const asnNamesReady = loadAsnNames();
     const result = await runInWorker(
       {
         from: new Date(fromMs).toISOString(),
@@ -2119,9 +2121,19 @@ async function dispatchCloudRequest(
       engine: engineName,
       endpoint: pathname,
     }, searchParams.get("service_id") ?? request.headers.get("x-service-id"), origin);
+    await asnNamesReady;
+    const decorateCardTop = <T extends { value: unknown; count: number; label?: string }>(field: string, top: T[]): T[] => {
+      if (field !== "asn" && field !== "client_asn") return top;
+      return top.map((row) => {
+        const val = typeof row.value === "string" || typeof row.value === "number" ? row.value : null;
+        return row.label || val == null || !getCachedAsnName(val)
+          ? row
+          : { ...row, label: formatAsnDisplayLabel(val) };
+      });
+    };
     const aggregates = {
       data: Object.fromEntries(Object.entries(result.cards).map(([field, card]) =>
-        [field, { top: card.top, total: card.total }],
+        [field, { top: decorateCardTop(field, card.top), total: card.total }],
       )),
       map_data: (result.cards.country?.all ?? result.cards.country?.top ?? [])
         .map((row) => ({ country: String(row.value), count: row.count })),

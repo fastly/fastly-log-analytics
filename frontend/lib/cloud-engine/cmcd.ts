@@ -8,6 +8,7 @@ import type { FiltersPayload } from "@/types/api";
 import { parseEpochMs, roundTo } from "./engine-utils";
 import { cmcdFromRollup, cmcdRollupEligible, type CmcdRollupSource } from "./cmcd-rollup";
 import { analyticsFiltersToSql, rangeServiceSql } from "./query-params";
+import { formatAsnDisplayLabel, loadAsnNames } from "./asn-names";
 
 export const CMCD_COLUMNS = [
   "cmcd_sid",
@@ -256,6 +257,7 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
     const rollup = await cmcdFromRollup(params, params.rollupSource, params.signal);
     if (rollup) return rollup;
   }
+  const asnNamesReady = loadAsnNames();
   const engine = params.engine ?? getDuckDBEngine().readContext();
   params = { ...params, customColumnTypes: engine.getCustomColumnTypes?.() };
   const where = buildCmcdWhere(params);
@@ -538,6 +540,7 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
       params.signal,
     ),
   ]);
+  await asnNamesReady;
 
   return {
     available: true,
@@ -594,19 +597,24 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
       rebuffer_events: Number(r.rebuffer_events ?? 0),
       rebuffer_rate: nullable(r.rebuffer_rate),
     })),
-    rebuffer_by_asn: !hasBsEffective ? [] : asnRows.map((r) => ({
-      asn: Number(r.asn ?? 0),
-      as_name: String(r.as_name ?? ""),
-      label: String(r.as_name ?? ""),
-      session_count: Number(r.sessions ?? 0),
-      avg_bitrate: nullable(r.avg_bitrate),
-      avg_buffer_length: nullable(r.avg_buffer_length),
-      sessions: Number(r.sessions ?? 0),
-      requests: Number(r.requests ?? 0),
-      rebuffer_events: Number(r.rebuffer_events ?? 0),
-      rebuffer_rate: nullable(r.rebuffer_rate),
-      avg_throughput_kbps: roundTo(Number(r.avg_throughput_kbps ?? 0), 1),
-    })),
+    rebuffer_by_asn: !hasBsEffective ? [] : asnRows.map((r) => {
+      const asn = Number(r.asn ?? 0);
+      const rawName = String(r.as_name ?? "").trim();
+      const label = formatAsnDisplayLabel(asn, rawName);
+      return {
+        asn,
+        as_name: rawName && !/^AS\d+$/i.test(rawName) ? rawName : label,
+        label,
+        session_count: Number(r.sessions ?? 0),
+        avg_bitrate: nullable(r.avg_bitrate),
+        avg_buffer_length: nullable(r.avg_buffer_length),
+        sessions: Number(r.sessions ?? 0),
+        requests: Number(r.requests ?? 0),
+        rebuffer_events: Number(r.rebuffer_events ?? 0),
+        rebuffer_rate: nullable(r.rebuffer_rate),
+        avg_throughput_kbps: roundTo(Number(r.avg_throughput_kbps ?? 0), 1),
+      };
+    }),
     object_type_dist: otRows.map((r) => ({
       object_type: String(r.object_type ?? "unknown"),
       request_count: Number(r.requests ?? 0),

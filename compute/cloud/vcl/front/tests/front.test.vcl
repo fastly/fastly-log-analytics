@@ -709,6 +709,42 @@ sub geo_has_day_ttl_and_revalidates {
 }
 
 
+// @scope: recv
+sub geo_asn_names_strips_cookie_query_and_normalizes_encoding_for_lookup {
+  testing.inject_variable("req.is_ssl", true);
+  set req.http.Cookie = "flp_session=user-session";
+  set req.http.Fastly-Orig-Accept-Encoding = "gzip, deflate, br";
+  set req.url = "/geo/asn-names.tsv?v=1";
+  testing.call_subroutine("vcl_recv");
+  assert.equal(req.url, "/geo/asn-names.tsv");
+  assert.is_notset(req.http.Cookie);
+  assert.equal(req.http.Accept-Encoding, "br, gzip");
+  assert.state(lookup);
+}
+
+
+// @scope: fetch
+sub geo_asn_names_from_compute_is_cached_in_vcl {
+  set req.url = "/geo/asn-names.tsv";
+  set beresp.status = 200;
+  set beresp.http.Content-Type = "text/tab-separated-values; charset=utf-8";
+  set beresp.http.Content-Encoding = "br";
+  set beresp.http.Vary = "Accept-Encoding";
+  set beresp.http.Set-Cookie = "must-not-cache=1";
+  testing.call_subroutine("vcl_fetch");
+  assert.true(beresp.cacheable);
+  assert.equal(beresp.ttl, 86400s);
+  assert.equal(
+    beresp.http.Cache-Control,
+    "public, max-age=86400, must-revalidate"
+  );
+  assert.equal(beresp.http.Vary, "Accept-Encoding");
+  assert.is_notset(beresp.http.Set-Cookie);
+  assert.equal(beresp.http.Surrogate-Key, "flp-static");
+  assert.state(deliver);
+}
+
+
 // @scope: fetch
 sub maplibre_worker_has_day_ttl_and_revalidates {
   set req.url = "/maplibre-gl-worker.mjs";

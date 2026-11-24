@@ -33,6 +33,7 @@ fn mime_for(ext: Option<&str>) -> &'static str {
         Some("woff2") => "font/woff2",
         Some("woff") => "font/woff",
         Some("txt") => "text/plain",
+        Some("tsv") => "text/tab-separated-values; charset=utf-8",
         Some("wasm") => "application/wasm",
         _ => "application/octet-stream",
     }
@@ -142,8 +143,12 @@ fn asset_entry(root: &Path, path: &Path, cache_dir: &Path) -> AssetEntry {
         // DuckDB's 36 MB module is ~8 MB gzipped but ~5.4 MB as Brotli 11; the encode is slow
         // (about a minute, build scripts run at opt-level 3) but cached by content digest.
         br = precompress(&raw, cache_dir, &digest, Codec::Brotli);
-        // The wasm identity copy would dominate the package, so it ships only compressed.
-        if mime == "application/wasm" && (gzip.is_some() || br.is_some()) {
+        // Large binary/tabular assets (DuckDB wasm, ASN lookup table) would bloat the Compute
+        // package if shipped uncompressed, so ship only Brotli/gzip variants (front VCL always
+        // negotiates br/gzip and caches the compressed response).
+        let omit_identity = mime == "application/wasm"
+            || relative == Path::new("geo/asn-names.tsv");
+        if omit_identity && (gzip.is_some() || br.is_some()) {
             keep_identity = false;
         }
     }

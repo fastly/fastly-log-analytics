@@ -11,6 +11,7 @@ import { mapLimit } from "./dashboard/sources";
 import { parseEpochMs, roundTo } from "./engine-utils";
 import { fetchLanes } from "./fetch-lanes";
 import { hasFilterValues } from "./rollup-sections";
+import { formatAsnDisplayLabel, loadAsnNames } from "./asn-names";
 
 const CMCD_FETCH_CONCURRENCY = 16;
 const CMCD_ROLLUP_BUCKET_MS = 300_000;
@@ -347,6 +348,7 @@ async function cmcdFromFiles(
   source: CmcdRollupSource,
   signal?: AbortSignal,
 ) {
+  const asnNamesReady = loadAsnNames();
   const buckets = new Map<number, BucketAgg>();
   const sessions = new Map<string, { firstTs: number; lastTs: number; reqs: number }>();
   const contents = new Map<string, ContentAgg>();
@@ -818,19 +820,22 @@ async function cmcdFromFiles(
         .sort((a, b) => b.sessions - a.sessions || a.country.localeCompare(b.country))
         .slice(0, topN);
 
+  await asnNamesReady;
   const rebuffer_by_asn = !hasBsEffective
     ? []
     : [...asns.entries()]
         .map(([asn, a]) => {
           const sess = Math.round(a.sidHll.count());
           const rebSess = Math.round(a.rebufferSidHll.count());
-          const as_name = a.label || `AS${asn}`;
+          const rawName = (a.label ?? "").trim();
+          const label = formatAsnDisplayLabel(asn, rawName);
+          const as_name = rawName && !/^AS\d+$/i.test(rawName) ? rawName : label;
           const brAvg = hasOt ? (a.vBrN > 0 ? a.vBrSum / a.vBrN : null) : (a.brN > 0 ? a.brSum / a.brN : null);
           const blAvg = hasOt ? (a.vBlN > 0 ? a.vBlSum / a.vBlN : null) : (a.blN > 0 ? a.blSum / a.blN : null);
           return {
             asn,
             as_name,
-            label: as_name,
+            label,
             session_count: sess,
             avg_bitrate: brAvg,
             avg_buffer_length: blAvg,

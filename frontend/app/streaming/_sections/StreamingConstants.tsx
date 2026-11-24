@@ -1,5 +1,5 @@
 import React from 'react'
-import { formatCount } from '@/lib/format'
+import { formatCount, resolveCountryName } from '@/lib/format'
 import type { PlotlyLayout } from '@/types/api'
 
 export const OBJECT_TYPE_LABELS: Record<string, string> = {
@@ -160,7 +160,11 @@ export const CONTENT_COLUMNS = [
   { accessorKey: 'avg_buffer_length', header: 'Avg Buffer (ms)', cell: ({ getValue }: { getValue: () => unknown }) => formatRoundedMetric(getValue()) },
 ]
 export const REBUFFER_COUNTRY_COLUMNS = [
-  { accessorKey: 'country', header: 'Country' },
+  {
+    accessorKey: 'country',
+    header: 'Country',
+    cell: ({ getValue }: { getValue: () => unknown }) => resolveCountryName(String(getValue() ?? '')),
+  },
   { accessorKey: 'rebuffer_rate', header: 'Rebuffer Rate %', cell: ({ getValue }: { getValue: () => unknown }) => formatRebufferRate(getValue()) },
   { accessorKey: 'session_count', header: 'Sessions' },
   { accessorKey: 'median_throughput', header: 'Median Throughput (kbps)', cell: ({ getValue }: { getValue: () => unknown }) => formatRoundedMetric(getValue()) },

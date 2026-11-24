@@ -22,6 +22,7 @@ import {
 } from "./bots/classify";
 import { summarizeBotEfficiencyRows, summarizeWellKnownBotRows } from "./bots/summarize";
 import { hasFilterValues, SECURITY_ROLLUP_SECTIONS } from "./rollup-sections";
+import { loadAsnNames } from "./asn-names";
 import {
   expandSecuritySections,
   maskIpValue,
@@ -850,8 +851,12 @@ export async function securityFromRollup(
   const toMs = parseEpochMs(body.end_time ?? undefined);
   if (fromMs === null || toMs === null || fromMs >= toMs) return null;
   const threatIntel = THREAT_INTEL_PATH.test(path);
-  const hourly = !threatIntel && expandSecuritySections(body.sections).has("ipv6_adoption");
-  const rollup = await querySecurityRollup(source, { fromMs, toMs, hourly, signal, spec });
+  const expanded = threatIntel ? null : expandSecuritySections(body.sections);
+  const hourly = Boolean(expanded?.has("ipv6_adoption"));
+  const [rollup] = await Promise.all([
+    querySecurityRollup(source, { fromMs, toMs, hourly, signal, spec }),
+    expanded?.has("proxies") ? loadAsnNames() : Promise.resolve(null),
+  ]);
   if (!rollup) return null;
   return threatIntel ? threatIntelFromRollup(rollup) : securityAggregatesFromRollup(rollup, body);
 }

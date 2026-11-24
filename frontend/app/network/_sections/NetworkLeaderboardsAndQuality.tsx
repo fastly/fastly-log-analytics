@@ -10,7 +10,7 @@ import {
 } from '@/components/DataTable'
 import { Badge } from '@/components/ui/badge'
 import type { components, PlotlyLayout, PlotlyTrace } from '@/types/api'
-import { cn, formatCount } from '@/lib/utils'
+import { cn, formatCount, resolveCountryName } from '@/lib/utils'
 import { Skeleton, SkeletonGrid } from '@/components/ui/skeleton'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { StatCard } from '@/components/ui/confirm-dialog'
@@ -147,10 +147,17 @@ export function RttBarList({ rows, filterColumn }: { rows: readonly QualityBarRo
     <div className="space-y-1.5 p-3">
       {rows.map((r) => {
         const filterVal = r.value ?? r.label
-        const display = filterColumn === 'pop' ? <PopLabel code={filterVal} /> : r.label
+        const display =
+          filterColumn === 'pop' ? (
+            <PopLabel code={filterVal} />
+          ) : filterColumn === 'country' ? (
+            resolveCountryName(r.label)
+          ) : (
+            r.label
+          )
         return (
           <div key={filterVal} className="flex items-center gap-2 text-xs">
-            <div className="w-48 truncate shrink-0" title={r.label}>
+            <div className="w-48 truncate shrink-0" title={typeof display === 'string' ? display : r.label}>
               {filterColumn ? <FilterValueCell filters={[{ column: filterColumn, value: filterVal }]} display={display} /> : <span>{display}</span>}
             </div>
             <div className="flex-1 h-4 bg-muted/40 rounded-sm overflow-hidden">
@@ -304,8 +311,8 @@ export function NetworkQualitySection({
           aria-label="Region breakdown country" value={regionCountry}
           onChange={(e) => setRegionCountry(e.target.value)} className="h-7 rounded-md border bg-background px-2 text-xs"
         >
-          {(qualityData?.countries ?? []).length === 0 && <option value={regionCountry}>{regionCountry}</option>}
-          {(qualityData?.countries ?? []).map((c) => <option key={c} value={c}>{c}</option>)}
+          {(qualityData?.countries ?? []).length === 0 && <option value={regionCountry}>{resolveCountryName(regionCountry)}</option>}
+          {(qualityData?.countries ?? []).map((c) => <option key={c} value={c}>{resolveCountryName(c)}</option>)}
         </select>
       ),
     },

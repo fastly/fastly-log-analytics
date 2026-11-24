@@ -22,6 +22,8 @@ import {
 import { defineSummarySpec, type SummarySpec } from "./dashboard/summary-projection";
 import { shieldingFromRollup } from "./origin-rollup";
 import { hasFilterValues, singleLowCardFilter, type FilteredRollupFilter } from "./rollup-sections";
+import { formatAsnDisplayLabel, formatCityCountryLabel, loadAsnNames } from "./asn-names";
+import { resolveCountryName } from "@/lib/format";
 
 /**
  * How a response answered from v3 summaries differs from the raw scan: it
@@ -172,14 +174,17 @@ export function networkHealthFromRollup(
     .filter(([asn]) => Number(asn) > 0)
     .map(([asn, agg]) => {
       const { avg_ploss_pct: _pct, ...row } = scored(stats(agg));
-      return { asn: Number(asn), as_name: agg.label ?? `AS${asn}`, ...row };
+      return { asn: Number(asn), as_name: formatAsnDisplayLabel(asn, agg.label), ...row };
     });
   const metros = ranked(rollup.dims.get("city"), 400).map(([key, agg]): MetroRow => {
     const [country, city] = JSON.parse(key) as [string, string];
     const row = scored(stats(agg));
     return { city, country, raw_city: city, region: "", ...row, total_reqs: row.reqs };
   });
-  const metro_leaderboard = deduplicateMetroLeaderboard(metros);
+  const metro_leaderboard = deduplicateMetroLeaderboard(metros).map((row) => ({
+    ...row,
+    city: formatCityCountryLabel(String(row.raw_city ?? row.city ?? ""), String(row.country ?? "")),
+  }));
 
   const buckets = [...overall.get("")?.keys() ?? []].sort((a, b) => a - b);
   const bucketIndexes = new Map(buckets.map((t, index) => [t, index]));
@@ -187,7 +192,7 @@ export function networkHealthFromRollup(
     .filter(([asn]) => Number(asn) > 0)
     .map(([asn, cells]) => ({
     asn: Number(asn),
-    label: `AS${asn}`,
+    label: formatAsnDisplayLabel(asn),
     total_reqs: sumAggs(cells.values()).requests,
     buckets: [...cells].sort((a, b) => a[0] - b[0]).map(([t, agg]) => {
       const s = stats(agg);
@@ -235,7 +240,7 @@ export function networkHealthFromRollup(
       total_reqs: total.reqs,
       global_health_score: healthScore,
       worst_asn: worstAsn ? { label: worstAsn.as_name, score: worstAsn.health_score } : null,
-      worst_country: worstCountry ? { label: worstCountry.country, score: worstCountry.health_score } : null,
+      worst_country: worstCountry ? { label: resolveCountryName(worstCountry.country), score: worstCountry.health_score } : null,
       avg_rtt_ms: roundTo((total.avgRttUs ?? 0) / 1000, 2),
       median_rtt_ms: roundTo(medRttUs / 1000, 2),
       p95_rtt_ms: roundTo((total.p95RttUs ?? 0) / 1000, 2),
@@ -392,7 +397,7 @@ function qualityAnswer(result: RollupResult, regionCountry: string, rollupMeta: 
 
   const rttMs = (agg: RollupAgg) => roundTo((avg(agg.rttSum, agg.rttCount) ?? 0) / 1000, 2);
   const by_country = ranked(rollup.dims.get("country"), 100).map(([country, agg]) => ({
-    value: country, label: country, rtt_ms: rttMs(agg), reqs: agg.requests,
+    value: country, label: resolveCountryName(country), rtt_ms: rttMs(agg), reqs: agg.requests,
   }));
   const by_asn = ranked(rollup.dims.get("asn"), 100)
     .filter(([asn]) => Number(asn) > 0)
@@ -400,7 +405,7 @@ function qualityAnswer(result: RollupResult, regionCountry: string, rollupMeta: 
     const client = asnClient?.get(asn);
     const row = {
       asn: Number(asn),
-      as_name: agg.label ?? `AS${asn}`,
+      as_name: formatAsnDisplayLabel(asn, agg.label),
       requests: agg.requests,
       avg_rtt_ms: rttMs(agg),
       avg_rttvar_ms: roundTo((avg(client?.rttvarSum ?? 0, client?.rttvarCount ?? 0) ?? 0) / 1000, 2),
@@ -761,7 +766,10 @@ export async function networkFromRollup(
   const fromMs = parseEpochMs(params.start_time);
   const toMs = parseEpochMs(params.end_time);
   if (fromMs === null || toMs === null || fromMs >= toMs) return null;
-  const result = await queryRollup(source, { fromMs, toMs, signal, spec: spec ?? undefined });
+  const [result] = await Promise.all([
+    queryRollup(source, { fromMs, toMs, signal, spec: spec ?? undefined }),
+    loadAsnNames(),
+  ]);
   if (!result) return null;
   if (hasAnyNetworkFilter(params)) {
     const filter = networkSingleFilter(params);

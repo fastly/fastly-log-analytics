@@ -23,6 +23,7 @@ import {
   type SessionsRead,
 } from "./sessions-window";
 import type { Schema } from "@/types/api";
+import { formatAsnDisplayLabel, getCachedAsnName, loadAsnNames } from "./asn-names";
 
 export const SESSIONS_INACTIVITY_GAP_SECONDS = 1800; // 30 * 60 seconds (INTERVAL 30 MINUTES)
 export const SESSIONS_MAX_WINDOW_DAYS = 7;
@@ -581,6 +582,7 @@ export async function handleSessionsList(
     ]);
 
   const t0 = typeof performance !== "undefined" ? performance.now() : Date.now();
+  const asnNamesReady = loadAsnNames();
   const loadRange = ctx.loadRange;
   const sqlFor = (sliceFromMs?: number) => buildSessionsCteSql({
     tableName: ctx.tableName ?? "requests",
@@ -703,6 +705,14 @@ export async function handleSessionsList(
     };
   });
 
+  await asnNamesReady;
+  const asnNames: Record<string, string> = {};
+  for (const s of sessions) {
+    if (s.asn != null && getCachedAsnName(s.asn)) {
+      asnNames[String(s.asn)] = formatAsnDisplayLabel(s.asn);
+    }
+  }
+
   const elapsedMs = Math.max(
     0,
     Math.round(
@@ -726,7 +736,7 @@ export async function handleSessionsList(
       has_cmcd: cols.has("cmcd_sid"),
       min_reqs_flag: minReqsFlag,
       min_4xx_pct_flag: min4xxPctFlag,
-      asn_names: {},
+      asn_names: asnNames,
       section_timings: [{ name: "sessions", duration_ms: elapsedMs }],
       ...(rawWindow ? { raw_window: rawWindow } : {}),
     },

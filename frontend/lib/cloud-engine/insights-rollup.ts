@@ -13,6 +13,7 @@ import {
 import type { NetworkRollupMeta } from "./network-rollup";
 import { defineSummarySpec, type SummarySpec } from "./dashboard/summary-projection";
 import { INSIGHTS_RESIDUAL, INSIGHTS_RESIDUAL_FIELDS } from "./insights-residual";
+import { loadAsnNames } from "./asn-names";
 
 /**
  * How an /insights response whose baseline came from v3 summaries differs from
@@ -434,6 +435,7 @@ export async function insightsFromRollup(
     queryRollup(source, {
       fromMs: start, toMs: windowStart, signal, spec: spec ?? undefined, residual: INSIGHTS_RESIDUAL,
     }),
+    loadAsnNames(),
   ]);
   if (!windowResult || !baselineResult) return null;
 

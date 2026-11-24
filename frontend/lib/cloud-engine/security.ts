@@ -28,6 +28,7 @@ import { POP_COORDINATES, haversineKm } from "./origin";
 import { buildBaseWhere, formatAsnLabel, type FilterSpec } from "./performance";
 import type { components } from "@/types/api";
 import { readJsonObjectBody, roundTo, toNum } from "./engine-utils";
+import { loadAsnNames } from "./asn-names";
 
 export type SecuritySectionName =
   | "tls_fingerprints"
@@ -1128,7 +1129,7 @@ export async function executeSecurityAggregates(
     tasks.push(
       (async () => {
         const { sql, params } = buildSecurityProxiesSql(req, availableColumns);
-        const rows = await client.query(sql, params);
+        const [rows] = await Promise.all([client.query(sql, params), loadAsnNames()]);
         Object.assign(response, shapeSecurityProxiesFromRawRows(rows, maskIps));
       })(),
     );
