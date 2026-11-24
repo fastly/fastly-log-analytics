@@ -127,6 +127,8 @@ export type Rollup = {
   value?: Map<string, Map<string, Map<number, RollupValue>>>;
   /** `value` `dim_totals` counts: field → requests over every value, kept or cut. */
   valueTotals?: Map<string, number>;
+  /** `bins` `dim_totals` counts: field → requests (e.g. `verified_bot`). */
+  binsTotals?: Map<string, number>;
 };
 
 /**
@@ -207,6 +209,7 @@ export type RollupOverview = {
   hitElapsedCount: number;
   missElapsedSum: number;
   missElapsedCount: number;
+  threatsBlocked: number;
 };
 
 const OVERVIEW_COLUMNS = {
@@ -216,6 +219,7 @@ const OVERVIEW_COLUMNS = {
   hitElapsedCount: "hit_elapsed_count",
   missElapsedSum: "miss_elapsed_sum",
   missElapsedCount: "miss_elapsed_count",
+  threatsBlocked: "threats_blocked",
 } as const;
 const OVERVIEW_KEYS = Object.keys(OVERVIEW_COLUMNS) as (keyof RollupOverview)[];
 
@@ -460,6 +464,7 @@ function guard(rollup: Rollup, loaded: ReadonlySet<string> | undefined): Rollup 
   unloaded("series1", "series1");
   unloaded("value", "value");
   unloaded("valueTotals", "value", "dim_totals");
+  unloaded("binsTotals", "dim_totals");
   return rollup;
 }
 
@@ -575,6 +580,9 @@ export async function decodeRollup(
         if (truncated[i] === true) rollup.truncated.add(`${String(value[i])}/${name}`);
         if (value[i] === "value") {
           const totals = (rollup.valueTotals ??= new Map());
+          totals.set(name, (totals.get(name) ?? 0) + num(col("requests")[i]));
+        } else if (value[i] === "bins") {
+          const totals = (rollup.binsTotals ??= new Map());
           totals.set(name, (totals.get(name) ?? 0) + num(col("requests")[i]));
         }
         break;
@@ -699,6 +707,10 @@ export function mergeRollups(rollups: readonly Rollup[], keys?: ReadonlySet<stri
     }
     for (const [field, n] of own(rollup, "valueTotals") ?? []) {
       const totals = (out.valueTotals ??= new Map());
+      totals.set(field, (totals.get(field) ?? 0) + n);
+    }
+    for (const [field, n] of own(rollup, "binsTotals") ?? []) {
+      const totals = (out.binsTotals ??= new Map());
       totals.set(field, (totals.get(field) ?? 0) + n);
     }
     const waterfall = own(rollup, "waterfall");

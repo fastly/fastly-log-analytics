@@ -5,6 +5,7 @@ import { DuckDBAnalyticalEngine as ParquetEngine } from "./dashboard/duckdb";
 import type { ManifestFile } from "./dashboard/manifest";
 import { decodeRollup, mergeRollups, type RollupResult } from "./dashboard/rollup-query";
 import { FIXTURE_START, fixturePage, loadSummaryFixtures } from "./dashboard/summary-fixtures";
+import { editSummaryRows } from "./dashboard/summary-layout-fixture";
 import { fixtureSource } from "./dashboard/test-fixtures";
 import { queryValueSummary } from "./value";
 import { VALUE_ROLLUP_SECTIONS } from "./rollup-sections";
@@ -246,7 +247,7 @@ describe("valueSummaryFromRollup", () => {
   });
 
   it("answers an empty range with the raw scan's empty sections", () => {
-    const overview = { requests: 0, totalBandwidth: 0, hitElapsedSum: 0, hitElapsedCount: 0, missElapsedSum: 0, missElapsedCount: 0 };
+    const overview = { requests: 0, totalBandwidth: 0, hitElapsedSum: 0, hitElapsedCount: 0, missElapsedSum: 0, missElapsedCount: 0, threatsBlocked: 0 };
     const out = valueSummaryFromRollup({
       rollup: { dims: new Map(), series: new Map(), seriesStepMs: 300_000, fields: new Map(), truncated: new Set(), overview },
       dataFromMs: T0, dataThroughMs: T1,
@@ -288,7 +289,7 @@ describe("valueFromRollup", () => {
     expect(served!.security!.waf_logged).toBeNull();
     expect(served!.security!.waf_passed).toBeNull();
     expect(served!.security!.threat_time_series).toEqual([]);
-    expect(served!.bots!.verified_bots).toBeNull();
+    expect(served!.bots!.verified_bots).toBe(1028);
 
     const full = await rollupOf("securityValue", sv.files("window"));
     for (const [alias, section] of [
@@ -371,5 +372,41 @@ describe("valueFromRollup", () => {
     expect(valueRollupEligible("/api/value/summary", { ...reqBody, start_time: new Date(hourStart + 60_000).toISOString() })).toBe(false);
     expect(valueRollupEligible("/api/value/summary", { ...reqBody, sections: ["overview", "caching"] })).toBe(false);
     expect(valueRollupEligible("/api/value/summary", { ...reqBody, custom_filters: { tenant: { mode: "include", values: ["a"] } } })).toBe(false);
+  });
+
+  it("reads overview.threats_blocked and UA bots from rollups when waf/ua are logged, leaving active waf security to raw scan", async () => {
+    const net = FIXTURES.network;
+    const windowFiles = net.files("window");
+    const editedBuffers: Record<string, ArrayBuffer> = { ...net.buffers };
+    const editedWindows = await Promise.all(windowFiles.map(async (f, idx) => {
+      const bytes = await editSummaryRows(net.buffers[f.key], (rows) => {
+        const next = rows.map((row) =>
+          row.bundle === "overview" ? { ...row, threats_blocked: BigInt(idx === 0 ? 7 : 0) } : { ...row },
+        );
+        const bucket = rows.find((row) => row.bundle === "overview")?.bucket ?? BigInt(T0 * 1000);
+        next.push(
+          { bundle: "all_fields", bucket, field: "waf", value: "true", count: BigInt(7) },
+          { bundle: "all_fields", bucket, field: "waf", value: "false", count: BigInt(10) },
+          { bundle: "all_fields", bucket, field: "ua", value: "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)", count: BigInt(5) },
+          { bundle: "all_fields", bucket, field: "ua", value: "Mozilla/5.0", count: BigInt(20) },
+        );
+        return next;
+      });
+      editedBuffers[f.key] = bytes;
+      return { ...f, size: bytes.byteLength };
+    }));
+    const src = fixtureSource([fixturePage(net.files("raw"))], editedBuffers, { json: [], files: [] }, [fixturePage(editedWindows)]);
+
+    const ov = await valueFromRollup("/api/value/summary", body({ sections: ["overview"] }), src);
+    expect(ov?.overview?.threats_blocked).toBe(7);
+
+    const bots = await valueFromRollup("/api/value/summary", body({ sections: ["bots"] }), src);
+    expect(bots?.bots).toMatchObject({
+      bot_requests: 40,
+      top_bots: [{ name: "Google Crawler", count: 40 }],
+    });
+
+    const sec = await valueFromRollup("/api/value/summary", body({ sections: ["security"] }), src);
+    expect(sec).toBeNull();
   });
 });

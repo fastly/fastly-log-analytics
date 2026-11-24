@@ -16,6 +16,7 @@ export const BOT_UA_CLASSIFY_LIMIT = 2000;
 const UA_CACHE_LIMIT = 10_000;
 
 let bots: Promise<WellKnownBot[]> | undefined;
+let cachedBots: readonly WellKnownBot[] | undefined;
 const matchCache = new Map<string, readonly WellKnownBot[]>();
 
 // Python str.title(): upper-case the first letter of every letter run.
@@ -35,8 +36,8 @@ function compile(pattern: string): RegExp[] {
 
 // The seed is ~40 KB, so it loads only when a page first classifies.
 export function loadWellKnownBots(): Promise<WellKnownBot[]> {
-  bots ??= import("./well-known-bots.generated").then(({ WELL_KNOWN_BOTS }) =>
-    WELL_KNOWN_BOTS.map(([id, category, patterns, referralStems, verificationDomains, aliases]) => ({
+  bots ??= import("./well-known-bots.generated").then(({ WELL_KNOWN_BOTS }) => {
+    const parsed = WELL_KNOWN_BOTS.map(([id, category, patterns, referralStems, verificationDomains, aliases]) => ({
       id,
       name: titleCase(id),
       category,
@@ -45,9 +46,43 @@ export function loadWellKnownBots(): Promise<WellKnownBot[]> {
       referralStems,
       verificationDomains,
       aliases,
-    })),
-  );
+    }));
+    cachedBots = parsed;
+    return parsed;
+  });
   return bots;
+}
+
+/** Returns already-loaded well-known bots synchronously, or undefined before `loadWellKnownBots()` settles. */
+export function getCachedWellKnownBots(): readonly WellKnownBot[] | undefined {
+  return cachedBots;
+}
+
+/** Synchronous twin of `classifyUserAgentCounts` given preloaded bot rules, returning both rows and distinct matched requests. */
+export function classifyUserAgentCountsSync(
+  rows: Iterable<readonly [ua: string, count: number]>,
+  n: number,
+  all: readonly WellKnownBot[],
+): { top: BotRow[]; matchedRequests: number } {
+  const counts = new Map<string, BotRow>();
+  let matchedRequests = 0;
+  for (const [ua, count] of rows) {
+    const matches = matchWellKnownBots(all, ua);
+    if (!matches.length) continue;
+    matchedRequests += count;
+    for (const bot of matches) {
+      let row = counts.get(bot.id);
+      if (!row) {
+        row = { id: bot.id, name: bot.name, category: bot.category, request_count: 0 };
+        counts.set(bot.id, row);
+      }
+      row.request_count += count;
+    }
+  }
+  return {
+    top: [...counts.values()].sort((a, b) => b.request_count - a.request_count).slice(0, n),
+    matchedRequests,
+  };
 }
 
 /** Every entry whose patterns match the user agent, in catalog order. */

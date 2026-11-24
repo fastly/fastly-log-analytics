@@ -578,13 +578,10 @@ def value_summary(
         shield_cond = (
             "(lower(custom_fields['is_shield']) IN ('true', '1') OR lower(custom_fields['edge']) IN ('false', '0'))"
         )
-        waf_cond = "custom_fields['waf'] IN ('1', 'true', 'TRUE')"
-        waf_block_cond = "custom_fields['waf'] IN ('1', 'true', 'TRUE') AND custom_fields['waf_resp'] = '406'"
-        waf_log_cond = (
-            "custom_fields['waf'] IN ('1', 'true', 'TRUE') "
-            "AND custom_fields['waf_resp'] != '406' AND custom_fields['waf_sig'] != ''"
-        )
-        waf_pass_cond = "custom_fields['waf'] IN ('1', 'true', 'TRUE') AND custom_fields['waf_resp'] = '200'"
+        waf_cond = "lower(custom_fields['waf']) IN ('1', 'true')"
+        waf_block_cond = f"{waf_cond} AND custom_fields['waf_resp'] = '406'"
+        waf_log_cond = f"{waf_cond} AND custom_fields['waf_resp'] != '406' AND custom_fields['waf_sig'] != ''"
+        waf_pass_cond = f"{waf_cond} AND custom_fields['waf_resp'] = '200'"
         elapsed_us_expr = f"({_ELAPSED_MS} * 1000.0)"
         bytes_expr = "toInt64OrZero(coalesce(nullIf(custom_fields['resp_bytes'], ''), custom_fields['bytes']))"
         proto_expr = "coalesce(nullIf(custom_fields['proto'], ''), custom_fields['protocol'])"
@@ -611,7 +608,8 @@ def value_summary(
         def _run_bucket_scan() -> list[dict[str, Any]]:
             bot_select = (
                 ", countIf(custom_fields['_bot_name'] != '') AS bot_requests, "
-                "countIf(positionCaseInsensitive(custom_fields['waf_sig'], 'VERIFIED-BOT.') > 0) AS verified_bots "
+                "countIf(positionCaseInsensitive(custom_fields['waf_sig'], 'VERIFIED-BOT.') > 0) AS verified_bots, "
+                "countIf(custom_fields['ua'] != '') AS ua_cnt "
                 if is_real_ch
                 else " "
             )
@@ -770,16 +768,24 @@ def value_summary(
             )
 
         if "bots" in wanted:
+            from backend.high_scale import security as hs_security
+            from backend.repositories.security import _BOT_UA_CLASSIFY_LIMIT
+            from backend.utils.bot_sources import build_matcher, build_well_known_bots_matcher, load_source
+
             if is_real_ch:
                 bot_req = sum(int(b.get("bot_requests", 0) or 0) for b in buckets)
                 ver_bots = sum(int(b.get("verified_bots", 0) or 0) for b in buckets)
+                ua_cnt = sum(int(b.get("ua_cnt", 0) or 0) for b in buckets)
+                waf_sig_cnt = sum(int(b.get("waf_sig_cnt", 0) or 0) for b in buckets)
             else:
                 bot_rows = trace.run(
                     "bots",
                     lambda: service.client.execute(
                         f"/* value:bots */ SELECT "
                         f"countIf(custom_fields['_bot_name'] != '') AS bot_requests, "
-                        f"countIf(positionCaseInsensitive(custom_fields['waf_sig'], 'VERIFIED-BOT.') > 0) AS verified_bots "
+                        f"countIf(positionCaseInsensitive(custom_fields['waf_sig'], 'VERIFIED-BOT.') > 0) AS verified_bots, "
+                        f"countIf(custom_fields['ua'] != '') AS ua_cnt, "
+                        f"countIf(custom_fields['waf_sig'] != '') AS waf_sig_cnt "
                         f"FROM request_facts WHERE {where}",
                         params,
                     ),
@@ -787,6 +793,12 @@ def value_summary(
                 )
                 bot_req = int(bot_rows[0].get("bot_requests") or 0) if bot_rows else 0
                 ver_bots = int(bot_rows[0].get("verified_bots") or 0) if bot_rows else 0
+                ua_cnt = int(bot_rows[0].get("ua_cnt") or 0) if bot_rows else 0
+                waf_sig_cnt = (
+                    int(bot_rows[0].get("waf_sig_cnt") or 0)
+                    if bot_rows and "waf_sig_cnt" in bot_rows[0]
+                    else sum(int(b.get("waf_sig_cnt", 0) or 0) for b in buckets)
+                )
             top_bots_list: list[dict[str, Any]] = []
             if bot_req > 0:
                 tb_rows = trace.run(
@@ -800,10 +812,28 @@ def value_summary(
                     source="fact",
                 )
                 top_bots_list = [{"name": str(r["name"]), "count": int(r["cnt"])} for r in tb_rows]
+            elif ua_cnt > 0:
+                ua_rows = trace.run(
+                    "bot_uas",
+                    lambda: service.client.execute(
+                        f"/* value:bot_uas */ SELECT custom_fields['ua'] AS ua, count() AS cnt "
+                        f"FROM request_facts WHERE {where} AND custom_fields['ua'] != '' "
+                        f"GROUP BY ua ORDER BY cnt DESC, ua ASC LIMIT {int(_BOT_UA_CLASSIFY_LIMIT)}",
+                        params,
+                    ),
+                    source="fact",
+                )
+                if ua_rows:
+                    classified = hs_security.classify_ua_counts(ua_rows, 20)
+                    top_bots_list = [{"name": str(b["name"]), "count": int(b["request_count"])} for b in classified]
+                    use_primary = hasattr(build_matcher, "_mock_name") or bool(load_source("well-known-bots"))
+                    match_ua = build_matcher() if use_primary else build_well_known_bots_matcher()
+                    bot_req = sum(int(r.get("cnt") or 0) for r in ua_rows if r.get("ua") and match_ua(str(r["ua"])))
+            ver_out = ver_bots if (has_waf or waf_sig_cnt > 0 or ver_bots > 0) else None
             result["bots"] = {
                 "total_requests": total_requests,
                 "bot_requests": bot_req,
-                "verified_bots": ver_bots,
+                "verified_bots": ver_out,
                 "top_bots": top_bots_list,
             }
 

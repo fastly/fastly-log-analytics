@@ -149,4 +149,46 @@ describe("Feature F22 — Fastly Value cloud-engine", () => {
       await engine.reset();
     }
   });
+
+  it("derives WAF outcomes from waf/waf_resp and classifies ua/verified-bot signals when legacy bot columns are absent", async () => {
+    const engine = new DuckDBAnalyticalEngine();
+    try {
+      await engine.executeSql(`
+        INSERT INTO requests (
+          scoped_key, ts_ms, "timestamp", cache, resp_bytes, waf, waf_resp, waf_sig, ua
+        ) VALUES
+          ('waf-ua', 1700000000000, epoch_ms(1700000000000), 'MISS', 100, TRUE, 406, 'SQLI', 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'),
+          ('waf-ua', 1700000001000, epoch_ms(1700000001000), 'MISS', 100, TRUE, NULL, 'XSS,VERIFIED-BOT.googlebot', 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'),
+          ('waf-ua', 1700000002000, epoch_ms(1700000002000), 'HIT', 100, TRUE, 200, 'VERIFIED-BOT.bingbot', 'Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)'),
+          ('waf-ua', 1700000003000, epoch_ms(1700000003000), 'HIT', 100, FALSE, NULL, NULL, 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)')
+      `);
+      const res = await queryValueSummary({
+        engine,
+        start_time: "2023-11-14T22:00:00Z",
+        end_time: "2023-11-14T23:00:00Z",
+        sections: ["overview", "security", "bots"],
+      });
+      expect(res.overview?.threats_blocked).toBe(1);
+      expect(res.security).toMatchObject({
+        waf_blocked: 1,
+        waf_logged: 2,
+        waf_passed: 1,
+      });
+      expect(res.security?.threat_time_series).toEqual([
+        { time: "2023-11-14T00:00:00.000Z", value: 1, category: "blocked" },
+        { time: "2023-11-14T00:00:00.000Z", value: 2, category: "logged" },
+      ]);
+      expect(res.bots).toMatchObject({
+        total_requests: 4,
+        bot_requests: 3,
+        verified_bots: 2,
+        top_bots: [
+          { name: "Google Crawler", count: 2 },
+          { name: "Bing Crawler", count: 1 },
+        ],
+      });
+    } finally {
+      await engine.reset();
+    }
+  });
 });

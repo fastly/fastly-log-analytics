@@ -1,3 +1,10 @@
+import {
+  BOT_UA_CLASSIFY_LIMIT,
+  classifyUserAgentCountsSync,
+  getCachedWellKnownBots,
+  loadWellKnownBots,
+  type WellKnownBot,
+} from "./bots/classify";
 import type { Rollup, RollupResult, RollupValue } from "./dashboard/rollup-query";
 import { emptyAgg, queryRollup, rebucketSeries, rollupGroup, sumAggs } from "./dashboard/rollup-query";
 import { parseEpochMs, roundTo } from "./network";
@@ -147,6 +154,7 @@ const isH11 = (p: string) => p.startsWith("HTTP/1.1") || p === "1.1";
 export function valueSummaryFromRollup(
   result: RollupResult,
   body: ValueRollupBody,
+  preloadedBots?: readonly WellKnownBot[],
 ): (Partial<ValueSummary> & { rollup: NetworkRollupMeta & { logged_hours?: LoggedHour[] } }) | null {
   const { rollup } = result;
   const { fields, truncated, overview } = rollup;
@@ -162,6 +170,10 @@ export function valueSummaryFromRollup(
   }
   const byClass = hasValue("cache") ? valueTotals(rollup, "cache") : null;
   if (byClass && ["cache", "shield", "io"].some((field) => truncated.has(`value/${field}`))) return null;
+  const wafMap = fields.get("waf");
+  const hasWafField = (wafMap?.size ?? 0) > 0;
+  if ((want("overview") || want("security")) && truncated.has("all_fields/waf")) return null;
+  if (want("security") && (wafMap?.get("true") ?? 0) > 0) return null;
   const needed = [
     ...(want("overview") && !byClass ? ["cache"] : []),
     ...(want("network") ? ["proto", "tls", "is_ipv6"] : []),
@@ -198,6 +210,7 @@ export function valueSummaryFromRollup(
   const days = byClass ? [...valueByDay(rollup, "cache")].sort(([a], [b]) => a - b) : [];
 
   if (want("overview")) {
+    const threatsBlocked = hasWafField ? overview.threatsBlocked : null;
     if (byClass) {
       const bytes = sumOf(byClass.values());
       out.overview = {
@@ -205,7 +218,7 @@ export function valueSummaryFromRollup(
         total_bandwidth_bytes: bytes.bytesCount ? roundTo(bytes.respBytes, 2) : null,
         origin_offload_pct: offload,
         cache_acceleration_factor: acceleration,
-        threats_blocked: null,
+        threats_blocked: threatsBlocked,
         edge_hit_requests: hasCache ? hits : null,
         origin_requests: hasCache ? cls("MISS").requests + cls("PASS").requests : null,
       };
@@ -228,7 +241,7 @@ export function valueSummaryFromRollup(
         total_bandwidth_bytes: roundTo(overview.totalBandwidth, 2),
         origin_offload_pct: hasCache ? roundTo(hits * 100 / total, 2) : null,
         cache_acceleration_factor: avgHit !== null && avgHit > 0 && avgMiss !== null ? roundTo(avgMiss / avgHit, 2) : null,
-        threats_blocked: null,
+        threats_blocked: threatsBlocked,
         edge_hit_requests: hasCache ? hits : null,
         origin_requests: hasCache ? state("MISS") + state("PASS") : null,
       };
@@ -291,6 +304,11 @@ export function valueSummaryFromRollup(
 
   if (want("security")) {
     out.security.total_requests = total;
+    if (hasWafField) {
+      out.security.waf_blocked = 0;
+      out.security.waf_logged = 0;
+      out.security.waf_passed = 0;
+    }
     out.security.top_waf_signals = topByRequests(valueTotals(rollup, "waf_signal"), 20)
       .map(([signal, count]) => ({ signal, count }));
     if (truncated.has("value/waf_signal")) meta.lower_bound.push("security.top_waf_signals");
@@ -299,11 +317,32 @@ export function valueSummaryFromRollup(
   if (want("bots")) {
     const names = valueTotals(rollup, "bot_name");
     const bots = rollup.valueTotals?.get("bot_name") ?? sumOf(names.values()).requests;
+    const verifiedCount = rollup.binsTotals?.get("verified_bot") ?? 0;
+    const hasWafSig = valueTotals(rollup, "waf_signal").size > 0 || verifiedCount > 0;
+    let botRequests: number | null = bots || null;
+    let topBots = topByRequests(names, 20).map(([name, count]) => ({ name, count }));
+    if (bots === 0) {
+      const uaEntries = [...fields.get("ua") ?? []]
+        .filter(([ua, cnt]) => ua !== "" && cnt > 0)
+        .sort(([a, x], [b, y]) => y - x || (a < b ? -1 : a > b ? 1 : 0));
+      if (uaEntries.length > 0) {
+        if (truncated.has("all_fields/ua")) return null;
+        const wellKnown = preloadedBots ?? getCachedWellKnownBots();
+        if (!wellKnown) return null;
+        const classified = classifyUserAgentCountsSync(
+          uaEntries.slice(0, BOT_UA_CLASSIFY_LIMIT),
+          20,
+          wellKnown,
+        );
+        botRequests = classified.matchedRequests;
+        topBots = classified.top.map((b) => ({ name: b.name, count: b.request_count }));
+      }
+    }
     out.bots = {
       total_requests: total,
-      bot_requests: bots || null,
-      verified_bots: null,
-      top_bots: topByRequests(names, 20).map(([name, count]) => ({ name, count })),
+      bot_requests: botRequests,
+      verified_bots: hasWafSig ? verifiedCount : null,
+      top_bots: topBots,
     };
     if (truncated.has("value/bot_name")) meta.lower_bound.push("bots.top_bots");
   }
@@ -441,12 +480,13 @@ function filteredValueOverview(
 
 /** The summary groups and columns /fastly-value reads unfiltered. */
 export const VALUE_SUMMARY_SPEC = defineSummarySpec({
-  groups: ["overview", "series5", "all_fields", "field_totals", "dim_totals", "value"],
+  groups: ["overview", "series5", "all_fields", "field_totals", "dim_totals", "value", "bins"],
   columns: [
-    "count", "requests", "resp_bytes_sum", "total_bandwidth_bytes", "hit_elapsed_sum", "hit_elapsed_count",
-    "miss_elapsed_sum", "miss_elapsed_count", "elapsed_hist", "elapsed_sum", "elapsed_count", "io_in_sum",
-    "io_out_sum", "ratio_sum", "ratio_count",
+    "count", "requests", "resp_bytes_sum", "total_bandwidth_bytes", "threats_blocked",
+    "hit_elapsed_sum", "hit_elapsed_count", "miss_elapsed_sum", "miss_elapsed_count",
+    "elapsed_hist", "elapsed_sum", "elapsed_count", "io_in_sum", "io_out_sum", "ratio_sum", "ratio_count",
   ],
+  only: { threats_blocked: ["overview"] },
 });
 
 /** The summary groups and columns /fastly-value reads for a filtered overview. */
@@ -481,6 +521,7 @@ export async function valueFromRollup(
     const result = await queryRollup(source, { fromMs, toMs, signal, spec: filteredSpec ?? undefined });
     return result ? filteredValueOverview(result, filter) : null;
   }
+  const preloadedBots = body.sections?.includes("bots") ? await loadWellKnownBots() : undefined;
   const result = await queryRollup(source, { fromMs, toMs, signal, spec: spec ?? undefined });
-  return result ? valueSummaryFromRollup(result, body) : null;
+  return result ? valueSummaryFromRollup(result, body, preloadedBots) : null;
 }

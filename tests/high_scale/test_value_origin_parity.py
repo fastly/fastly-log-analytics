@@ -186,3 +186,73 @@ def test_value_summary_populates_io_section() -> None:
     assert len(res.io.format_distribution) == 2
     assert len(res.io.optimization_opportunities) == 1
     assert len(res.io.io_format_conversion_pairs) == 1
+
+
+def test_value_summary_waf_case_insensitive_and_ua_bot_fallback() -> None:
+    calls: list[str] = []
+
+    class _Client:
+        def execute(self, sql: str, params: dict | None = None) -> list[dict[str, Any]]:
+            calls.append(sql)
+            if "value:combined_buckets" in sql:
+                return [
+                    {
+                        "bucket": "2026-11-24T16:00:00Z",
+                        "total": 10,
+                        "hit_cnt": 5,
+                        "miss_cnt": 5,
+                        "pass_cnt": 0,
+                        "synth_cnt": 0,
+                        "bandwidth_saved": 500,
+                        "total_bytes": 1000,
+                        "origin_cnt": 5,
+                        "shield_hit": 0,
+                        "shield_total": 0,
+                        "threats_cnt": 2,
+                        "sum_hit_elapsed": 5000.0,
+                        "cnt_hit_elapsed": 5,
+                        "sum_miss_elapsed": 25000.0,
+                        "cnt_miss_elapsed": 5,
+                        "waf_sample_cnt": 10,
+                        "waf_inspected": 9,
+                        "waf_blocked": 2,
+                        "waf_logged": 1,
+                        "waf_passed": 6,
+                        "waf_sig_cnt": 3,
+                        "http3_cnt": 2,
+                        "h2_cnt": 8,
+                        "h11_cnt": 0,
+                        "other_proto_cnt": 0,
+                        "tls_cnt": 10,
+                        "ipv6_cnt": 0,
+                    }
+                ]
+            if "value:bots" in sql:
+                return [{"bot_requests": 0, "verified_bots": 1, "ua_cnt": 10, "waf_sig_cnt": 3}]
+            if "value:bot_uas" in sql:
+                return [
+                    {"ua": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)", "cnt": 4},
+                    {"ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)", "cnt": 6},
+                ]
+            return []
+
+    svc = _empty_service(_Client(), service_id="svc-waf-bots")
+    req = ValueSummaryRequest(
+        filters={},
+        sections=["overview", "security", "bots"],
+        start_time="2026-11-24T16:00:00Z",
+        end_time="2026-11-24T18:00:00Z",
+    )
+    res = value_summary(
+        svc, req, "2026-11-24T16:00:00Z", "2026-11-24T18:00:00Z", sections={"overview", "security", "bots"}
+    )
+    bucket_sql = next(sql for sql in calls if "value:combined_buckets" in sql)
+    assert "lower(custom_fields['waf']) IN ('1', 'true')" in bucket_sql
+    assert res.overview is not None and res.overview.threats_blocked == 2
+    assert res.security is not None
+    assert (res.security.waf_blocked, res.security.waf_logged, res.security.waf_passed) == (2, 1, 6)
+    assert res.bots is not None
+    assert res.bots.bot_requests == 4
+    assert res.bots.verified_bots == 1
+    assert [b.name for b in res.bots.top_bots] == ["Google Crawler"]
+    assert res.bots.top_bots[0].count == 4

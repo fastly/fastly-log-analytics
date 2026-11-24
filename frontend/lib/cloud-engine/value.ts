@@ -1,4 +1,5 @@
 import type { components } from "@/types/api";
+import { BOT_UA_CLASSIFY_LIMIT, classifyUserAgentCountsSync, loadWellKnownBots } from "./bots/classify";
 import {
   compileFiltersToSql, duckSqlString, getDuckDBEngine, type DuckDBAnalyticalEngine, type DuckDBColumnType,
 } from "./dashboard/duckdb";
@@ -133,10 +134,14 @@ export async function queryValueSummary(params: ValueQueryParams = {}): Promise<
       COALESCE(fastly_is_shield, is_shield, NOT edge) AS shield_flag,
       LOWER(COALESCE(NULLIF(content_type, ''), resp_header_content_type, '')) AS content_type,
       COALESCE(NULLIF(waf_action, ''), NULLIF(ngwaf_decision, '')) AS waf_decision,
+      waf AS waf_flag,
+      waf_resp AS waf_resp_code,
       NULLIF(waf_sig, '') AS waf_signals,
-      COALESCE(bot_verified, verified_bot) AS bot_verified,
+      COALESCE(bot_verified, verified_bot, CASE WHEN waf_sig IS NOT NULL THEN regexp_matches(waf_sig, '(?i)verified-bot\\.') END) AS bot_verified,
+      COALESCE(bot_verified, verified_bot) AS bot_verified_col,
       COALESCE(NULLIF(_bot_name, ''), NULLIF(ngwaf_bot_name, ''), NULLIF(bot_category, '')) AS bot_name,
       is_bot,
+      NULLIF(TRIM(CAST(ua AS VARCHAR)), '') AS ua_norm,
       NULLIF(COALESCE(NULLIF(io_output_format, ''), ofmt), '') AS output_format,
       NULLIF(COALESCE(NULLIF(io_input_format, ''), ifmt), '') AS input_format,
       io_input_bytes, io_output_bytes
@@ -160,14 +165,24 @@ export async function queryValueSummary(params: ValueQueryParams = {}): Promise<
     QUANTILE_CONT(latency_ms, 0.99) AS p99,
     COUNT(*) FILTER (WHERE shield_flag) AS shield_requests,
     COUNT(*) FILTER (WHERE shield_flag AND starts_with(cache_state, 'HIT')) AS shield_hits,
-    COUNT(waf_decision) AS waf_samples,
-    COUNT(*) FILTER (WHERE UPPER(waf_decision) IN ('BLOCK', 'BLOCKED', 'DENY')) AS blocked,
-    COUNT(*) FILTER (WHERE UPPER(waf_decision) IN ('LOG', 'LOGGED')) AS logged,
-    COUNT(*) FILTER (WHERE UPPER(waf_decision) IN ('ALLOW', 'ALLOWED', 'PASS', 'PASSED')) AS passed,
-    COUNT(*) FILTER (WHERE bot_name IS NOT NULL OR is_bot OR bot_verified) AS bots,
+    COUNT(*) FILTER (WHERE waf_decision IS NOT NULL OR waf_flag IS NOT NULL) AS waf_samples,
+    COUNT(*) FILTER (WHERE CASE
+      WHEN waf_decision IS NOT NULL THEN UPPER(waf_decision) IN ('BLOCK', 'BLOCKED', 'DENY')
+      ELSE waf_flag IS TRUE AND waf_resp_code = 406
+    END) AS blocked,
+    COUNT(*) FILTER (WHERE CASE
+      WHEN waf_decision IS NOT NULL THEN UPPER(waf_decision) IN ('LOG', 'LOGGED')
+      ELSE waf_flag IS TRUE AND COALESCE(waf_resp_code, 0) != 406 AND waf_signals IS NOT NULL
+    END) AS logged,
+    COUNT(*) FILTER (WHERE CASE
+      WHEN waf_decision IS NOT NULL THEN UPPER(waf_decision) IN ('ALLOW', 'ALLOWED', 'PASS', 'PASSED')
+      ELSE waf_flag IS TRUE AND waf_resp_code = 200
+    END) AS passed,
+    COUNT(*) FILTER (WHERE bot_name IS NOT NULL OR is_bot OR bot_verified_col) AS bots,
     COUNT(*) FILTER (WHERE bot_verified) AS verified,
     COUNT(bot_verified) AS verified_samples,
-    COUNT(bot_name) + COUNT(is_bot) + COUNT(bot_verified) AS bot_samples,
+    COUNT(bot_name) + COUNT(is_bot) + COUNT(bot_verified_col) AS bot_samples,
+    COUNT(ua_norm) AS ua_samples,
     COUNT(NULLIF(protocol_name, '')) AS protocol_samples,
     COUNT(*) FILTER (WHERE protocol_name LIKE 'HTTP/3%' OR protocol_name IN ('H3', '3')) AS h3,
     COUNT(*) FILTER (WHERE protocol_name LIKE 'HTTP/2%' OR protocol_name IN ('H2', '2')) AS h2,
@@ -223,9 +238,13 @@ export async function queryValueSummary(params: ValueQueryParams = {}): Promise<
     waf_logged: hasWaf ? count(r, "logged") : null, waf_passed: hasWaf ? count(r, "passed") : null,
     threat_time_series: [], top_waf_signals: [],
   };
+  const hasBotCol = count(r, "bot_samples") > 0;
+  const uaSamples = count(r, "ua_samples");
   result.bots = {
-    total_requests: total, bot_requests: count(r, "bot_samples") ? count(r, "bots") : null,
-    verified_bots: count(r, "verified_samples") ? count(r, "verified") : null, top_bots: [],
+    total_requests: total,
+    bot_requests: hasBotCol ? count(r, "bots") : (uaSamples > 0 ? 0 : null),
+    verified_bots: count(r, "verified_samples") ? count(r, "verified") : null,
+    top_bots: [],
   };
   result.network = {
     total_requests: total,
@@ -258,8 +277,14 @@ export async function queryValueSummary(params: ValueQueryParams = {}): Promise<
     COUNT(*) FILTER (WHERE protocol_name LIKE 'HTTP/3%' OR protocol_name IN ('H3', '3')) AS h3,
     COUNT(*) FILTER (WHERE protocol_name LIKE 'HTTP/2%' OR protocol_name IN ('H2', '2')) AS h2,
     COUNT(*) FILTER (WHERE protocol_name LIKE 'HTTP/1.1%' OR protocol_name = '1.1') AS h11,
-    COUNT(*) FILTER (WHERE UPPER(waf_decision) IN ('BLOCK', 'BLOCKED', 'DENY')) AS blocked,
-    COUNT(*) FILTER (WHERE UPPER(waf_decision) IN ('LOG', 'LOGGED')) AS logged,
+    COUNT(*) FILTER (WHERE CASE
+      WHEN waf_decision IS NOT NULL THEN UPPER(waf_decision) IN ('BLOCK', 'BLOCKED', 'DENY')
+      ELSE waf_flag IS TRUE AND waf_resp_code = 406
+    END) AS blocked,
+    COUNT(*) FILTER (WHERE CASE
+      WHEN waf_decision IS NOT NULL THEN UPPER(waf_decision) IN ('LOG', 'LOGGED')
+      ELSE waf_flag IS TRUE AND COALESCE(waf_resp_code, 0) != 406 AND waf_signals IS NOT NULL
+    END) AS logged,
     COUNT(*) FILTER (WHERE output_format IS NOT NULL) AS io_count,
     SUM(body_bytes) FILTER (WHERE output_format IS NOT NULL) AS io_bytes,
     SUM(io_input_bytes - io_output_bytes) AS actual_saved
@@ -296,9 +321,20 @@ export async function queryValueSummary(params: ValueQueryParams = {}): Promise<
 
   const want = (section: ValueSection) => !params.sections?.length || params.sections.includes(section);
   if (want("bots")) {
-    result.bots.top_bots = (await query(`SELECT bot_name, COUNT(*) AS count FROM normalized
+    const namedBots = (await query(`SELECT bot_name, COUNT(*) AS count FROM normalized
       WHERE bot_name IS NOT NULL GROUP BY bot_name ORDER BY count DESC LIMIT 20`))
       .map((row) => ({ name: String(row.bot_name), count: count(row, "count") }));
+    if (namedBots.length > 0) {
+      result.bots.top_bots = namedBots;
+    } else if (uaSamples > 0) {
+      const uaRows = (await query(`SELECT ua_norm AS ua, COUNT(*) AS count FROM normalized
+        WHERE ua_norm IS NOT NULL GROUP BY ua_norm ORDER BY count DESC, ua_norm ASC LIMIT ${BOT_UA_CLASSIFY_LIMIT}`))
+        .map((row) => [String(row.ua), count(row, "count")] as const);
+      const allBots = await loadWellKnownBots();
+      const classified = classifyUserAgentCountsSync(uaRows, 20, allBots);
+      result.bots.bot_requests = classified.matchedRequests;
+      result.bots.top_bots = classified.top.map((b) => ({ name: b.name, count: b.request_count }));
+    }
   }
   if (want("security")) {
     result.security.top_waf_signals = (await query(`SELECT signal, COUNT(*) AS count
@@ -339,7 +375,7 @@ export const VALUE_SCAN_COLUMNS = [
   "timestamp", "ts_ms", "service_id", "url", "cache_status", "cache", "resp_body_size", "resp_body_bytes", "resp_bytes",
   "time_elapsed_usec", "elapsed", "protocol", "proto", "is_ssl", "tls_version", "tls", "is_ipv6", "ipv6",
   "fastly_is_shield", "is_shield", "edge", "content_type", "resp_header_content_type", "waf_action", "ngwaf_decision",
-  "waf_sig", "bot_verified", "verified_bot", "_bot_name", "ngwaf_bot_name", "bot_category", "is_bot",
+  "waf", "waf_resp", "waf_sig", "bot_verified", "verified_bot", "_bot_name", "ngwaf_bot_name", "bot_category", "is_bot", "ua",
   "io_output_format", "ofmt", "io_input_format", "ifmt", "io_input_bytes", "io_output_bytes",
 ] as const;
 
@@ -347,15 +383,15 @@ export const VALUE_SCAN_COLUMNS = [
 const VALUE_SECTION_COLUMNS: Record<ValueSection, readonly (typeof VALUE_SCAN_COLUMNS)[number][]> = {
   overview: [
     "cache_status", "cache", "resp_body_size", "resp_body_bytes", "resp_bytes", "time_elapsed_usec", "elapsed",
-    "waf_action", "ngwaf_decision",
+    "waf_action", "ngwaf_decision", "waf", "waf_resp",
   ],
   caching: [
     "cache_status", "cache", "resp_body_size", "resp_body_bytes", "resp_bytes", "fastly_is_shield", "is_shield", "edge",
   ],
   performance: ["cache_status", "cache", "time_elapsed_usec", "elapsed"],
   network: ["protocol", "proto", "is_ssl", "tls_version", "tls", "is_ipv6", "ipv6"],
-  security: ["waf_action", "ngwaf_decision", "waf_sig"],
-  bots: ["bot_verified", "verified_bot", "_bot_name", "ngwaf_bot_name", "bot_category", "is_bot"],
+  security: ["waf_action", "ngwaf_decision", "waf", "waf_resp", "waf_sig"],
+  bots: ["bot_verified", "verified_bot", "_bot_name", "ngwaf_bot_name", "bot_category", "is_bot", "waf_sig", "ua"],
   io: [
     "url", "content_type", "resp_header_content_type", "resp_body_size", "resp_body_bytes", "resp_bytes",
     "fastly_is_shield", "is_shield", "edge", "io_output_format", "ofmt", "io_input_format", "ifmt", "io_input_bytes",

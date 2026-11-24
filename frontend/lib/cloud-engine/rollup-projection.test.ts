@@ -145,6 +145,7 @@ const PAGES: Record<string, Page> = {
   value: {
     spec: VALUE_SUMMARY_SPEC,
     fixtures: ["network", "origin", "securityValue", "preValue"],
+    inert: { threats_blocked: ["overview"] },
     answers: [
       value({}),
       value({ chart_interval: "1 hour" } as Partial<ValueRollupBody>),
