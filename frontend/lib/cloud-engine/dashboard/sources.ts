@@ -613,6 +613,40 @@ export function keyFromFileUrl(rawUrl: string): string | null {
   return null;
 }
 
+export const CATALOG_503_RETRY_DELAYS_MS: readonly number[] = [250, 1000];
+
+function isRetryableCatalog503(
+  endpointPath: string,
+  status: number,
+  code: string | undefined,
+): boolean {
+  return (
+    endpointPath === "/api/files" &&
+    status === 503 &&
+    (code === undefined ||
+      code === "catalog_head_behind" ||
+      code.toLowerCase().includes("retry"))
+  );
+}
+
+function waitRetryDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal?.reason);
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 export function browserSource(
   baseUrl: string,
   defaultOptions?: BrowserSourceOptions,
@@ -620,6 +654,7 @@ export function browserSource(
     maxMemoryRollupBytes?: number;
     foldFileTelemetry?: boolean;
     cacheScope?: string;
+    catalog503RetryDelays?: readonly number[];
   } = {},
 ): BrowserFileSource {
   const currentCacheScope = () =>
@@ -1480,53 +1515,66 @@ export function browserSource(
           url = `${scopedUrl.pathname}${scopedUrl.search}`;
         }
         const pageLoadId = options?.getPageLoadId?.();
-        const start =
-          typeof performance !== "undefined" ? performance.now() : Date.now();
-        const response = await fetchRetrying(baseUrl + url, {
-          credentials: "same-origin",
-          ...(headers ? { headers } : {}),
-          signal,
-        });
-        const end =
-          typeof performance !== "undefined" ? performance.now() : Date.now();
-        const durationMs = Math.max(0, Math.round(end - start));
-        const endpoint = `GET ${url.split("?")[0]}`;
-        const vcpuMs = parseVcpuMsHeader(response?.headers);
-        options?.onApiCall?.({
-          source: "Compute API",
-          method: "GET",
-          path: url,
-          status: response?.status ?? null,
-          duration_ms: durationMs,
-          vcpu_ms: vcpuMs,
-          endpoint,
-          server_timing: parseServerTiming(
-            response?.headers?.get?.("server-timing"),
-          ),
-          page_load_id: pageLoadId,
-        });
-        emitDebugSubCalls(response, endpoint, pageLoadId, options?.onApiCall);
-        if (!response.ok) {
-          let code: string | undefined;
-          if (response.status === 409 || response.status === 503) {
-            try {
-              const body = (await manifestJson(response)) as {
-                code?: unknown;
-                error?: unknown;
-                detail?: unknown;
-              };
-              if (typeof body.code === "string") code = body.code;
-              else if (typeof body.error === "string") code = body.error;
-              else if (typeof body.detail === "string") code = body.detail;
-            } catch {
-              // Non-JSON error response; preserve HTTP status without a code.
+        const endpointPath = url.split("?", 1)[0];
+        const endpoint = `GET ${endpointPath}`;
+        const retryDelays =
+          limits.catalog503RetryDelays ?? CATALOG_503_RETRY_DELAYS_MS;
+        for (let attempt = 0; ; attempt += 1) {
+          const start =
+            typeof performance !== "undefined" ? performance.now() : Date.now();
+          const response = await fetchRetrying(baseUrl + url, {
+            credentials: "same-origin",
+            ...(headers ? { headers } : {}),
+            signal,
+          });
+          const end =
+            typeof performance !== "undefined" ? performance.now() : Date.now();
+          const durationMs = Math.max(0, Math.round(end - start));
+          const vcpuMs = parseVcpuMsHeader(response?.headers);
+          options?.onApiCall?.({
+            source: "Compute API",
+            method: "GET",
+            path: url,
+            status: response?.status ?? null,
+            duration_ms: durationMs,
+            vcpu_ms: vcpuMs,
+            endpoint,
+            server_timing: parseServerTiming(
+              response?.headers?.get?.("server-timing"),
+            ),
+            page_load_id: pageLoadId,
+          });
+          emitDebugSubCalls(response, endpoint, pageLoadId, options?.onApiCall);
+          if (!response.ok) {
+            let code: string | undefined;
+            if (response.status === 409 || response.status === 503) {
+              try {
+                const body = (await manifestJson(response)) as {
+                  code?: unknown;
+                  error?: unknown;
+                  detail?: unknown;
+                };
+                if (typeof body.code === "string") code = body.code;
+                else if (typeof body.error === "string") code = body.error;
+                else if (typeof body.detail === "string") code = body.detail;
+              } catch {
+                // Non-JSON error response; preserve HTTP status without a code.
+              }
             }
+            if (
+              isRetryableCatalog503(endpointPath, response.status, code) &&
+              !signal?.aborted &&
+              attempt < retryDelays.length
+            ) {
+              await waitRetryDelay(retryDelays[attempt], signal);
+              continue;
+            }
+            throw new ManifestRequestError(response.status, code);
           }
-          throw new ManifestRequestError(response.status, code);
+          return endpointPath === "/api/files"
+            ? manifestJson(response)
+            : response.json();
         }
-        return url.split("?", 1)[0] === "/api/files"
-          ? manifestJson(response)
-          : response.json();
       },
       {
         manifestCacheScope: () =>

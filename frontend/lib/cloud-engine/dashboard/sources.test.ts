@@ -838,6 +838,99 @@ describe("browserSource", () => {
     }
     expect(matchMock).not.toHaveBeenCalled();
   });
+
+  it("retries transient 503 catalog discovery responses on /api/files and returns the eventual listing", async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(
+        Response.json(
+          { error: "Catalog discovery unavailable; retry" },
+          { status: 503 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        Response.json({ code: "catalog_head_behind" }, { status: 503 }),
+      )
+      .mockResolvedValueOnce(Response.json({ files: [], complete: true }));
+    vi.stubGlobal("fetch", fetcher);
+    const source = browserSource("", undefined, {
+      catalog503RetryDelays: [0, 0],
+    });
+    const body = await source.fetchJson("/api/files?from=2026-10-29&to=2026-10-30");
+    expect(body).toEqual({ files: [], complete: true });
+    expect(fetcher).toHaveBeenCalledTimes(3);
+  });
+
+  it("gives up after bounded retries on persistent 503 catalog discovery errors", async () => {
+    const fetcher = vi.fn(async () =>
+      Response.json(
+        { error: "Catalog discovery unavailable; retry" },
+        { status: 503 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetcher);
+    const source = browserSource("", undefined, {
+      catalog503RetryDelays: [0, 0],
+    });
+    await expect(
+      source.fetchJson("/api/files?from=2026-10-29&to=2026-10-30"),
+    ).rejects.toMatchObject({
+      status: 503,
+      code: "Catalog discovery unavailable; retry",
+    });
+    expect(fetcher).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not retry 409 or non-catalog 503 responses", async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(
+        Response.json({ code: "catalog_resync_required" }, { status: 409 }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({ error: "Maintenance" }, { status: 503 }),
+      );
+    vi.stubGlobal("fetch", fetcher);
+    const source = browserSource("", undefined, {
+      catalog503RetryDelays: [0, 0],
+    });
+    await expect(
+      source.fetchJson("/api/files?from=2026-10-29&to=2026-10-30"),
+    ).rejects.toMatchObject({ status: 409, code: "catalog_resync_required" });
+    await expect(
+      source.fetchJson("/api/other"),
+    ).rejects.toMatchObject({ status: 503, code: "Maintenance" });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it("aborts immediately during a catalog 503 retry backoff", async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      const fetcher = vi.fn(async () =>
+        Response.json(
+          { error: "Catalog discovery unavailable; retry" },
+          { status: 503 },
+        ),
+      );
+      vi.stubGlobal("fetch", fetcher);
+      const source = browserSource("", undefined, {
+        catalog503RetryDelays: [60_000],
+      });
+      const pending = source.fetchJson(
+        "/api/files?from=2026-10-29&to=2026-10-30",
+        controller.signal,
+      );
+      const settled = pending.catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(10);
+      controller.abort(new DOMException("Aborted", "AbortError"));
+      const error = await settled;
+      expect(error).toBeInstanceOf(DOMException);
+      expect(fetcher).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 function fakeCacheStorage(names: Record<string, string[]>) {
