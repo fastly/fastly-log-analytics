@@ -10,7 +10,13 @@ import {
   ingestShape,
   ingestTick,
 } from "./ingestShape";
-import { DAY_MS, FREE_SECRETS, LIST_RATES } from "./rates";
+import {
+  DAY_MS,
+  FREE_SECRETS,
+  LIST_RATES,
+  billableCdnEgressGb,
+  billableCdnRequests,
+} from "./rates";
 
 export const MONTH_DAYS = 30;
 export const DEFAULT_MIN_BILLED_DAYS = LIST_RATES.min_billed_days;
@@ -535,7 +541,10 @@ export function estimateMonthly(
   const storedDays = Math.max(inputs.retentionDays, inputs.minBilledDays);
   const classAUsd = (n: number) => (n / 1000) * rates.class_a_rate_per_1k;
   const classBUsd = (n: number) => (n / 10_000) * rates.class_b_rate_per_10k;
-  const frontUsd = (n: number) => (n / 10_000) * rates.cdn_request_rate_per_10k;
+  const egressUsd = (egressGb: number) =>
+    billableCdnEgressGb(egressGb) * rates.cdn_egress_rate_per_gb;
+  const frontUsd = (n: number) =>
+    (billableCdnRequests(n) / 10_000) * rates.cdn_request_rate_per_10k;
   const requestUsd = (n: number) =>
     (n / 1e6) * rates.compute_request_rate_per_million;
   const vcpuExecUsd = (dailyVcpuMs: number, dailyExecutions: number) =>
@@ -642,16 +651,6 @@ export function estimateMonthly(
   const record = (id: EstimateFeature, usage: Partial<ProductUsage>) => {
     features[id] = { ...NO_USAGE, ...usage };
   };
-  const featureUsd = (u: ProductUsage) =>
-    u.storageGb * rates.storage_rate_per_gb_month +
-    classAUsd(u.fosA) +
-    classBUsd(u.fosB) +
-    u.egressGb * rates.cdn_egress_rate_per_gb +
-    frontUsd(u.frontRequests) +
-    requestUsd(u.computeRequests) +
-    u.vcpuUsd +
-    (u.kvA / 1e6) * rates.kv_class_a_rate_per_million +
-    (u.kvB / 1e6) * rates.kv_class_b_rate_per_million;
 
   // One worker execution writes both the window Parquet and its summary (worker.rs:582-602), so
   // price their combined vCPU-ms once across the worker executions instead of applying the
@@ -815,9 +814,9 @@ export function estimateMonthly(
     {
       id: "delivery",
       label: "CDN delivery",
-      detail: `${gb(all.egressGb)} GB · ${count(all.frontRequests)} front reqs, incl. ${count(probesPerDay)} clock probes/day every ${probeIntervalS} s`,
+      detail: `${gb(all.egressGb)} GB (100 GB free) · ${count(all.frontRequests)} front reqs (1M free), incl. ${count(probesPerDay)} clock probes/day every ${probeIntervalS} s`,
       ...priced([
-        { label: "Egress", usd: all.egressGb * rates.cdn_egress_rate_per_gb },
+        { label: "Egress", usd: egressUsd(all.egressGb) },
         { label: "Requests", usd: frontUsd(all.frontRequests) },
       ]),
     },
@@ -852,6 +851,22 @@ export function estimateMonthly(
       usd: 0,
     },
   ];
+  const totalEgressUsd = egressUsd(all.egressGb);
+  const effectiveEgressUsdPerGb =
+    all.egressGb > 0 ? totalEgressUsd / all.egressGb : 0;
+  const totalFrontRequestUsd = frontUsd(all.frontRequests);
+  const effectiveFrontUsdPerReq =
+    all.frontRequests > 0 ? totalFrontRequestUsd / all.frontRequests : 0;
+  const featureUsd = (u: ProductUsage) =>
+    u.storageGb * rates.storage_rate_per_gb_month +
+    classAUsd(u.fosA) +
+    classBUsd(u.fosB) +
+    u.egressGb * effectiveEgressUsdPerGb +
+    u.frontRequests * effectiveFrontUsdPerReq +
+    requestUsd(u.computeRequests) +
+    u.vcpuUsd +
+    (u.kvA / 1e6) * rates.kv_class_a_rate_per_million +
+    (u.kvB / 1e6) * rates.kv_class_b_rate_per_million;
   const byFeature = Object.fromEntries(
     Object.entries(features).map(([id, u]) => [id, featureUsd(u)]),
   ) as Partial<Record<EstimateFeature, number>>;

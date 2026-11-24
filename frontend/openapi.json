@@ -73758,6 +73758,17 @@
               }
             ],
             "title": "Avg Nodes Per Flush"
+          },
+          "fos_region": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fos Region"
           }
         },
         "type": "object",
@@ -73963,6 +73974,17 @@
               }
             ],
             "title": "Avg Nodes Per Flush"
+          },
+          "fos_region": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fos Region"
           },
           "requests_per_day": {
             "anyOf": [

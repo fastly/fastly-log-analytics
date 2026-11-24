@@ -48,9 +48,9 @@ describe("high-RPS ingest costs", () => {
       NO_COMPACTION,
       { relay: 0 },
     );
-    // Includes the front clock probes: 2 checks × 53 POPs every 30 s (half the default 300 s log
-    // period, capped) ≈ $9.16 of requests and $2.20 of bytes a month.
-    expect(defaults.total).toBeCloseTo(26.55134152593651, 9);
+    // Includes the front clock probes minus the Full Site Delivery free tier (100 GB & 1M reqs/mo)
+    // and the 10-secret Secret Store free tier ($5 saved on 1 secret).
+    expect(defaults.total).toBeCloseTo(16.463325525936515, 9);
     expect(defaults.lines.map((l) => l.id)).toEqual(BASE_IDS);
     const tenK = estimateMonthly(
       atRps(10_000),
@@ -59,8 +59,8 @@ describe("high-RPS ingest costs", () => {
       NO_COMPACTION,
       { relay: 0 },
     );
-    // Plus the clock probes every 30 s (half the 60 s log period): ≈ $9.16 + $2.20.
-    expect(tenK.total).toBeCloseTo(544.6170493881453, 9);
+    // Plus the clock probes every 30 s, minus the 100 GB ($12) + 1M reqs ($1) + 1 secret ($5) free tiers.
+    expect(tenK.total).toBeCloseTo(544.6170493881453 - 18, 9);
     expect(tenK.lines.map((l) => l.id)).toEqual(BASE_IDS);
   });
 
@@ -124,11 +124,13 @@ describe("high-RPS ingest costs", () => {
       DEFAULT_COMPACTION,
       { relay: 0 },
     );
-    expect(feature(estimate, "segments")!).toBeCloseTo(19_160.064, 3);
-    // Delivery carries the base download plus every segment's re-download.
+    // 100 GB monthly free delivery bandwidth ($12) is shared proportionally across base + segment egress.
+    expect(feature(estimate, "segments")!).toBeCloseTo(19_149.564, 3);
+    // Delivery carries the base download plus every segment's re-download minus 100 GB free.
+    const totalEgressGb = ((inputs.edgeRequestsPerDay * 88) / 1e9) * MONTH_DAYS * 8;
     expect(line(estimate, "delivery")!.usd).toBeCloseTo(
-      ((inputs.edgeRequestsPerDay * 88) / 1e9) * 0.12 * MONTH_DAYS + feature(estimate, "segments")!,
-      6,
+      Math.max(0, totalEgressGb - 100) * 0.12,
+      3,
     );
   });
 

@@ -14431,6 +14431,8 @@ export interface components {
             snapshot_interval_minutes: number;
             /** Avg Nodes Per Flush */
             avg_nodes_per_flush?: number | null;
+            /** Fos Region */
+            fos_region?: string | null;
         };
         /** PrefillResponse */
         PrefillResponse: {
@@ -14512,6 +14514,8 @@ export interface components {
             snapshot_interval_minutes: number;
             /** Avg Nodes Per Flush */
             avg_nodes_per_flush?: number | null;
+            /** Fos Region */
+            fos_region?: string | null;
             /** Requests Per Day */
             requests_per_day?: number | null;
             /** Edge Requests Per Day */

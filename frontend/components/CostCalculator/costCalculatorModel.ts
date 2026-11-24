@@ -11,6 +11,12 @@ export const BILLING_ZONE_RATES: Record<BillingZone, number> = {
   Global: 0.18,
 }
 
+export function billingZoneForFosRegion(region?: string | null): BillingZone {
+  const r = (region ?? '').trim().toLowerCase()
+  if (r.startsWith('us-') || r.startsWith('uk-') || r.startsWith('eu-')) return 'MBZ100'
+  return 'MBZ200'
+}
+
 export const BILLING_ZONE_DESCRIPTIONS: Record<BillingZone, string> = {
   MBZ100: 'This zone includes North America, Hawaii and European POPs only. They have the lowest egress charges ($0.08/GB).',
   MBZ200: 'All Fastly POPs except Africa, India, and South Korea where egress charges are highest ($0.12/GB standard default).',
@@ -61,6 +67,7 @@ export interface CalcState {
   rateEgress: number
   minDays: number
   billingZone: BillingZone
+  fosRegion: string | null
 }
 
 export type CalcAction =
@@ -80,6 +87,7 @@ export const DEFAULTS: CalcState = {
   archiveBatchObjects: 500,
   rateA: 0.0025, rateB: 0.0004, rateStorage: 0.02, rateEgress: 0.12, minDays: 30,
   billingZone: 'MBZ200',
+  fosRegion: null,
 }
 
 function suggestNodes(reqDay: number) {
@@ -111,7 +119,12 @@ export function reducer(state: CalcState, action: CalcAction): CalcState {
       const lp = p.log_period_seconds ?? state.logPeriod
 
       const rawZone = p.billing_zone
-      const resolvedZone: BillingZone = rawZone && rawZone in BILLING_ZONE_RATES ? (rawZone as BillingZone) : state.billingZone
+      const resolvedZone: BillingZone =
+        rawZone && rawZone in BILLING_ZONE_RATES
+          ? (rawZone as BillingZone)
+          : p.fos_region
+            ? billingZoneForFosRegion(p.fos_region)
+            : state.billingZone
       const resolvedEgress = p.cdn_egress_rate_per_gb ?? BILLING_ZONE_RATES[resolvedZone] ?? state.rateEgress
 
       return {
@@ -131,6 +144,7 @@ export function reducer(state: CalcState, action: CalcAction): CalcState {
         ...(p.class_b_rate_per_10k != null && { rateB: p.class_b_rate_per_10k / 10 }),
         rateEgress: resolvedEgress,
         billingZone: resolvedZone,
+        fosRegion: p.fos_region ?? state.fosRegion,
         ...(p.storage_rate_per_gb_month != null && { rateStorage: p.storage_rate_per_gb_month }),
         ...(p.min_billed_days != null && { minDays: p.min_billed_days }),
         logNodes: suggestNodes(req),
@@ -186,12 +200,15 @@ export interface PricedQuantities {
   totalCost: number
 }
 
+// Fastly Full Site Delivery includes 100 GB free bandwidth per month (`fastly.com/pricing#full-site-delivery`).
+export const CDN_FREE_EGRESS_GB_PER_MONTH = 100
+
 // Single pricing step shared by calculate() and the shared load-testing tool (the load-test config's `estimator`).
 export function priceQuantities(s: CalcState, q: MonthlyQuantities): PricedQuantities {
   const costA = (q.classAPerMonth / 1000) * s.rateA
   const costB = (q.classBPerMonth / 1000) * s.rateB
   const costStorage = q.gbMonthsStored * s.rateStorage
-  const costEgress = q.cdnEgressGB * s.rateEgress
+  const costEgress = Math.max(0, q.cdnEgressGB - CDN_FREE_EGRESS_GB_PER_MONTH) * s.rateEgress
   return { costA, costB, costStorage, costEgress, totalCost: costA + costB + costStorage + costEgress }
 }
 

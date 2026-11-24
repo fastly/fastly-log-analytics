@@ -27,6 +27,7 @@ import type { MeasuredEstimate } from '@/lib/cloud-engine/usage/estimatePrefill'
 import {
   BILLING_ZONE_DESCRIPTIONS,
   BILLING_ZONE_RATES,
+  billingZoneForFosRegion,
   type BillingZone,
   NumInput,
   ReadOnlyValue,
@@ -50,7 +51,7 @@ export function applyWhatIfs(base: EstimateInputs, edits: Partial<EstimateInputs
 }
 
 const CLOUD_RATE_ROWS: [keyof EstimateRates, string][] = [
-  ['cdn_request_rate_per_10k', 'CDN requests ($/10k)'],
+  ['cdn_request_rate_per_10k', 'CDN requests ($/10k, >1M free)'],
   ['compute_request_rate_per_million', 'Compute requests ($/million)'],
   ['compute_vcpu_rate_per_million_ms', 'Compute vCPU ($/million ms)'],
   ['compute_vcpu_free_ms_per_request', 'Included vCPU (ms/request)'],
@@ -219,9 +220,17 @@ export function CloudCostCalculator({ prefillData, prefillNote, rates: configure
     const value = prefillData?.rates?.[key] ?? configuredRates?.[key]
     if (value != null) rates[key] = value
   }
-  const activeZone = selectedZone ?? zoneForRate(rates.cdn_egress_rate_per_gb)
+  const autoDerivedZone =
+    !selectedZone &&
+    prefillData?.fosRegion &&
+    Math.abs(rates.cdn_egress_rate_per_gb - LIST_PRICE_RATES.cdn_egress_rate_per_gb) < 0.001
+      ? billingZoneForFosRegion(prefillData.fosRegion)
+      : null
+  const activeZone = selectedZone ?? autoDerivedZone ?? zoneForRate(rates.cdn_egress_rate_per_gb)
   if (selectedZone) {
     rates.cdn_egress_rate_per_gb = BILLING_ZONE_RATES[selectedZone]
+  } else if (autoDerivedZone) {
+    rates.cdn_egress_rate_per_gb = BILLING_ZONE_RATES[autoDerivedZone]
   }
 
   const result = estimateMonthly(inputs, DEFAULT_UNITS, rates, prefillData?.compaction, {
@@ -330,6 +339,11 @@ export function CloudCostCalculator({ prefillData, prefillNote, rates: configure
               <div className="flex items-center justify-between">
                 <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
                   Delivery Billing Zone
+                  {autoDerivedZone && prefillData?.fosRegion ? (
+                    <span className="ml-1.5 font-normal normal-case text-muted-foreground/80">
+                      (auto: {prefillData.fosRegion})
+                    </span>
+                  ) : null}
                 </span>
                 <span className="text-xs font-semibold text-primary">
                   ${rates.cdn_egress_rate_per_gb.toFixed(2)} / GB

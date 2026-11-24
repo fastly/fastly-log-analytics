@@ -23,6 +23,7 @@ import {
   type BillingZone,
   BILLING_ZONE_RATES,
   BILLING_ZONE_DESCRIPTIONS,
+  billingZoneForFosRegion,
   RAW_LOG_COMPRESSION_RATIO,
   RUM_COMPRESSED_BYTES_PER_BEACON,
   type CalcState,
@@ -39,6 +40,7 @@ export {
   type BillingZone,
   BILLING_ZONE_RATES,
   BILLING_ZONE_DESCRIPTIONS,
+  billingZoneForFosRegion,
   RAW_LOG_COMPRESSION_RATIO,
   RUM_COMPRESSED_BYTES_PER_BEACON,
   type CalcState,
@@ -340,6 +342,11 @@ export function Pricing({ s, setZone }: PricingProps) {
           <div className="flex items-center justify-between">
             <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
               Delivery Billing Zone
+              {s.fosRegion && s.billingZone === billingZoneForFosRegion(s.fosRegion) ? (
+                <span className="ml-1.5 font-normal normal-case text-muted-foreground/80">
+                  (auto: {s.fosRegion})
+                </span>
+              ) : null}
             </span>
             <span className="text-xs font-semibold text-primary">
               ${s.rateEgress.toFixed(2)} / GB

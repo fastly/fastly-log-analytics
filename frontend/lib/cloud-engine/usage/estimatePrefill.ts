@@ -46,6 +46,8 @@ export interface MeasuredEstimate extends EstimatePrefill {
   rates: EstimateRates;
   /** Object Storage operations were recorded; otherwise those units are defaults. */
   usageLogging: boolean;
+  /** Service's Fastly Object Storage region (e.g. `us-east-1`), used to default the delivery billing zone. */
+  fosRegion?: string;
 }
 
 /** Everything the estimator measures from this install; any source that fails keeps its defaults. */
@@ -124,5 +126,10 @@ export async function fetchEstimatePrefill(
     fixedStoredBytes: runs ? fixedStoredBytes(runs) : null,
     minBilledDays: settings.min_billed_days,
   });
-  return { ...prefill, rates: settings, usageLogging: fos !== null };
+  return {
+    ...prefill,
+    rates: settings,
+    usageLogging: fos !== null,
+    fosRegion: traffic?.logging?.fos_region,
+  };
 }

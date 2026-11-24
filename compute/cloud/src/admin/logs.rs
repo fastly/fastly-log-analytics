@@ -718,6 +718,7 @@ fn logged_traffic(runtime: &impl Runtime) -> Outcome {
                 "log_period": service.log_period, "sample_rate": service.sample_rate,
                 "edge_only": service.edge_only, "delete_after": service.delete_after,
                 "log_retention_days": service.log_retention_days,
+                "fos_region": service.fos_region,
                 "rum_enabled": service.rum.enabled, "rum_log_period": service.rum.log_period,
                 "rum_sample_rate": service.rum.sample_rate,
                 "rum_retention_days": service.rum_retention_days,

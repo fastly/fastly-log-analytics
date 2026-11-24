@@ -5,10 +5,11 @@ import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useRouter } from 'next/navigation'
-import { AlertCircle, CheckCircle2, DollarSign, Loader2, MapPin, Pencil, RefreshCw, Save } from 'lucide-react'
+import { AlertCircle, CheckCircle2, DollarSign, ExternalLink, Loader2, MapPin, Pencil, RefreshCw, Save } from 'lucide-react'
 import type { components } from '@/types/api.generated'
 import { client, extractApiError, unwrapClient, queryKeys } from '@/lib/api'
 import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
+import { LIST_RATES } from '@/lib/cloud-engine/usage/rates'
 import { SERVICE_DEFAULTS } from '@/lib/serviceDefaults'
 import { buildServiceHref, cn, panelDialogContent, panelDialogFooter, panelDialogHeaderMuted } from '@/lib/utils'
 import { useBootstrap, useMounted } from '@/hooks/useBootstrap'
@@ -180,41 +181,89 @@ function UsageLogRetentionInput({ initial, onSave }: { initial: number; onSave: 
   )
 }
 
-const _PRICING_DEFAULTS = { class_a_rate_per_1k: 0.005, class_b_rate_per_10k: 0.01, cdn_egress_rate_per_gb: 0.12, storage_rate_per_gb_month: 0.02, min_billed_days: 30 }
-const pricingSchema = z.object({
-  rateA: z.string().refine((value) => value.trim() !== '' && Number.isFinite(Number(value)) && Number(value) >= 0),
-  rateB: z.string().refine((value) => value.trim() !== '' && Number.isFinite(Number(value)) && Number(value) >= 0),
-  rateCdn: z.string().refine((value) => value.trim() !== '' && Number.isFinite(Number(value)) && Number(value) >= 0),
-  rateStorage: z.string().refine((value) => value.trim() !== '' && Number.isFinite(Number(value)) && Number(value) >= 0),
-  minBilledDays: z.string().refine((value) => Number.isInteger(Number(value)) && Number(value) >= 1),
-})
+type PricingKey = keyof typeof LIST_RATES
+
+interface PricingFieldDef {
+  key: PricingKey
+  label: string
+  integer?: boolean
+  cloudOnly?: boolean
+}
+
+const PRICING_FIELDS: PricingFieldDef[] = [
+  { key: 'class_a_rate_per_1k', label: 'Class A Ops ($/1k)' },
+  { key: 'class_b_rate_per_10k', label: 'Class B Ops ($/10k)' },
+  { key: 'cdn_egress_rate_per_gb', label: 'CDN Egress ($/GB)' },
+  { key: 'storage_rate_per_gb_month', label: 'Storage ($/GB/mo)' },
+  { key: 'min_billed_days', label: 'Min. Days Billed/Object', integer: true },
+  { key: 'cdn_request_rate_per_10k', label: 'CDN Requests ($/10k)', cloudOnly: true },
+  { key: 'compute_request_rate_per_million', label: 'Compute Requests ($/1M)', cloudOnly: true },
+  { key: 'compute_vcpu_rate_per_million_ms', label: 'Compute vCPU ($/1M ms)', cloudOnly: true },
+  { key: 'compute_vcpu_free_ms_per_request', label: 'Included vCPU (ms/req)', cloudOnly: true },
+  { key: 'compute_vcpu_excess_rate_per_second', label: 'Excess vCPU ($/s)', cloudOnly: true },
+  { key: 'compute_vcpu_rounding_ms', label: 'vCPU Rounding (ms)', cloudOnly: true },
+  { key: 'kv_class_a_rate_per_million', label: 'KV Class A ($/1M)', cloudOnly: true },
+  { key: 'kv_class_b_rate_per_million', label: 'KV Class B ($/1M)', cloudOnly: true },
+  { key: 'secret_rate_per_month', label: 'Secret Store ($/secret/mo)', cloudOnly: true },
+]
+
+function isDefaultRate(value: unknown, fallback: number): boolean {
+  if (value == null || typeof value !== 'number' || !Number.isFinite(value)) return true
+  return Math.abs(value - fallback) < 1e-9
+}
+
+function optionalRateField(integer?: boolean) {
+  return z.string().refine((value) => {
+    const trimmed = value.trim()
+    if (trimmed === '') return true
+    const num = Number(trimmed)
+    if (!Number.isFinite(num)) return false
+    return integer ? Number.isInteger(num) && num >= 1 : num >= 0
+  })
+}
+
+const pricingSchema = z.object(
+  Object.fromEntries(PRICING_FIELDS.map((f) => [f.key, optionalRateField(f.integer)])) as Record<
+    PricingKey,
+    ReturnType<typeof optionalRateField>
+  >,
+)
+
+type PricingFormValues = z.infer<typeof pricingSchema>
 
 export const PricingSettings = () => {
   const queryClient = useQueryClient()
   const mounted = useMounted()
   const [editing, setEditing] = useState(false)
+  const visibleFields = useMemo(
+    () => PRICING_FIELDS.filter((f) => !f.cloudOnly || IS_CLOUD_MODE),
+    [],
+  )
   const { data: settings, isLoading } = useQuery({ queryKey: ['usage-logging-settings'], queryFn: async () => (await unwrapClient(client.GET('/api/admin/usage-logging'))) ?? null })
-  const serverForm = useMemo(() => ({
-    rateA: String(settings?.class_a_rate_per_1k ?? _PRICING_DEFAULTS.class_a_rate_per_1k),
-    rateB: String(settings?.class_b_rate_per_10k ?? _PRICING_DEFAULTS.class_b_rate_per_10k),
-    rateCdn: String(settings?.cdn_egress_rate_per_gb ?? _PRICING_DEFAULTS.cdn_egress_rate_per_gb),
-    rateStorage: String(settings?.storage_rate_per_gb_month ?? _PRICING_DEFAULTS.storage_rate_per_gb_month),
-    minBilledDays: String(settings?.min_billed_days ?? _PRICING_DEFAULTS.min_billed_days),
-  }), [settings])
-  const form = useForm<z.infer<typeof pricingSchema>>({
+  const serverForm = useMemo<PricingFormValues>(() => {
+    const raw = (settings ?? {}) as Record<string, unknown>
+    return Object.fromEntries(
+      PRICING_FIELDS.map((f) => {
+        const val = raw[f.key]
+        return [f.key, isDefaultRate(val, LIST_RATES[f.key]) ? '' : String(val)]
+      }),
+    ) as PricingFormValues
+  }, [settings])
+  const form = useForm<PricingFormValues>({
     resolver: zodResolver(pricingSchema),
     defaultValues: serverForm,
     mode: 'onChange',
   })
   React.useEffect(() => form.reset(serverForm), [form, serverForm])
-  const values = useWatch({ control: form.control }) as z.infer<typeof pricingSchema>
-  const { rateA, rateB, rateCdn, rateStorage, minBilledDays } = values
+  const values = useWatch({ control: form.control }) as PricingFormValues
   const saveMutation = useMutation({
-    mutationFn: async (next: z.infer<typeof pricingSchema>) => {
-      await unwrapClient(client.PATCH('/api/admin/usage-logging', { body: {
-        class_a_rate_per_1k: Number(next.rateA), class_b_rate_per_10k: Number(next.rateB), cdn_egress_rate_per_gb: Number(next.rateCdn),
-        storage_rate_per_gb_month: Number(next.rateStorage), min_billed_days: Number(next.minBilledDays),
-      } }))
+    mutationFn: async (next: PricingFormValues) => {
+      const body: Record<string, number> = {}
+      for (const f of visibleFields) {
+        const trimmed = (next[f.key] ?? '').trim()
+        body[f.key] = trimmed === '' ? LIST_RATES[f.key] : Number(trimmed)
+      }
+      await unwrapClient(client.PATCH('/api/admin/usage-logging', { body: body as components['schemas']['UsageLoggingUpdateBody'] }))
     },
     onSuccess: () => {
       for (const k of [['usage-logging-settings'], ['usage'], ['usage-log']]) queryClient.invalidateQueries({ queryKey: k })
@@ -222,30 +271,46 @@ export const PricingSettings = () => {
     },
   })
   const saving = saveMutation.isPending
-  if (!mounted || isLoading) return <AnalyticsCard title="FOS Pricing Defaults" isLoading>{null}</AnalyticsCard>
-  const fields = [
-    { label: 'Class A Ops ($/1k)', name: 'rateA' as const, value: rateA },
-    { label: 'Class B Ops ($/10k)', name: 'rateB' as const, value: rateB },
-    { label: 'CDN Egress ($/GB)', name: 'rateCdn' as const, value: rateCdn },
-    { label: 'Storage ($/GB/mo)', name: 'rateStorage' as const, value: rateStorage },
-    { label: 'Min. Days Billed/Object', name: 'minBilledDays' as const, value: minBilledDays },
-  ]
+  if (!mounted || isLoading) return <AnalyticsCard title="Pricing & Retention Defaults" isLoading>{null}</AnalyticsCard>
   return (
     <AnalyticsCard
-      title="Pricing & Retention Defaults" description="Global rates used for cost estimation across all services. Changes apply to all historical views." icon={<DollarSign className="h-4 w-4" />}
+      title="Pricing & Retention Defaults" description="Global rate overrides used for cost estimation across all services. Changes apply to all historical views." icon={<DollarSign className="h-4 w-4" />}
       headerAction={!editing ? <Button size="sm" variant="outline" onClick={() => setEditing(true)} className="h-8 font-bold uppercase tracking-tight"><Pencil className="h-3 w-3 mr-1.5" />Edit</Button> : null}
     >
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-4 text-xs text-muted-foreground">
+        <span>Leave fields blank to use Fastly&apos;s published default pricing. Enter a value to override with negotiated rates.</span>
+        <a
+          href="https://www.fastly.com/pricing"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1 font-medium text-primary hover:underline shrink-0"
+        >
+          Fastly default pricing
+          <ExternalLink className="h-3 w-3" />
+        </a>
+      </div>
       <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-4">
-        {fields.map((f) => {
+        {visibleFields.map((f) => {
           const inputId = `gs-${f.label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`
+          const currentVal = values?.[f.key] ?? ''
           return (
-            <div key={f.label} className="space-y-1.5">
+            <div key={f.key} className="space-y-1.5">
               <Label htmlFor={inputId} className="text-[10px] uppercase font-bold text-muted-foreground">{f.label}</Label>
               {editing ? (
-                <Controller control={form.control} name={f.name} render={({ field }) => (
-                  <Input id={inputId} inputMode={f.name === 'minBilledDays' ? 'numeric' : 'decimal'} className="h-8 font-mono text-xs" {...field} />
+                <Controller control={form.control} name={f.key} render={({ field }) => (
+                  <Input
+                    id={inputId}
+                    inputMode={f.integer ? 'numeric' : 'decimal'}
+                    placeholder="Default"
+                    className="h-8 font-mono text-xs"
+                    {...field}
+                  />
                 )} />
-              ) : <div aria-label={f.label} className="h-8 flex items-center font-mono text-xs px-3 rounded-md bg-muted/40 border border-transparent">{f.value}</div>}
+              ) : (
+                <div aria-label={f.label} className={cn('h-8 flex items-center font-mono text-xs px-3 rounded-md bg-muted/40 border border-transparent', !currentVal && 'text-muted-foreground/60')}>
+                  {currentVal}
+                </div>
+              )}
             </div>
           )
         })}

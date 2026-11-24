@@ -852,12 +852,34 @@ describe('PricingSettings', () => {
   const settings = {
     enabled: true,
     retention_days: 30,
-    class_a_rate_per_1k: 0.005,
-    class_b_rate_per_10k: 0.01,
+    class_a_rate_per_1k: 0.0025,
+    class_b_rate_per_10k: 0.004,
     cdn_egress_rate_per_gb: 0.12,
     storage_rate_per_gb_month: 0.02,
     min_billed_days: 30,
   }
+
+  test('leaves default rates blank, links to fastly.com/pricing, and shows overridden values', async () => {
+    const user = userEvent.setup()
+    server.use(
+      http.get('*/api/admin/usage-logging', () => HttpResponse.json({
+        ...settings,
+        class_a_rate_per_1k: 0.001,
+      })),
+    )
+    renderWithQuery(<PricingSettings />)
+    const rateA = await screen.findByLabelText('Class A Ops ($/1k)')
+    const rateB = screen.getByLabelText('Class B Ops ($/10k)')
+    expect(rateA).toHaveTextContent('0.001')
+    expect(rateB).toHaveTextContent('')
+
+    const pricingLink = screen.getByRole('link', { name: /fastly default pricing/i })
+    expect(pricingLink).toHaveAttribute('href', 'https://www.fastly.com/pricing')
+
+    await user.click(screen.getByRole('button', { name: /edit/i }))
+    expect(screen.getByLabelText('Class A Ops ($/1k)')).toHaveValue('0.001')
+    expect(screen.getByLabelText('Class B Ops ($/10k)')).toHaveValue('')
+  })
 
   test('rejects invalid values, permits zero rates, and preserves the numeric payload', async () => {
     const user = userEvent.setup()

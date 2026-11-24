@@ -70,7 +70,9 @@ describe('Cloud cost calculator', () => {
   })
 
   it('updates egress cost when switching Delivery Billing Zone', () => {
-    render(<CloudCostCalculator />)
+    render(<CloudCostCalculator prefillData={{
+      inputs: { ...DEFAULT_INPUTS, edgeOnly: true, requestsPerDay: 50_000_000, edgeRequestsPerDay: 50_000_000 },
+    }} />)
     const delivery = screen.getByText('CDN delivery').closest('[data-estimate-line]') as HTMLElement
     const before = delivery.textContent
     fireEvent.click(screen.getByRole('button', { name: 'Global' }))
@@ -145,5 +147,33 @@ describe('Cloud cost calculator', () => {
     fireEvent.change(screen.getByRole('spinbutton', { name: 'Log nodes / fan-out' }), { target: { value: '100' } })
     expect(screen.getByRole('spinbutton', { name: 'Log nodes / fan-out' })).toHaveValue(100)
     expect(total?.textContent).not.toBe(before)
+  })
+
+  it('auto-derives Delivery Billing Zone from fosRegion when rate is untouched default', () => {
+    render(<CloudCostCalculator prefillData={{
+      inputs: { ...DEFAULT_INPUTS, edgeOnly: true, requestsPerDay: 200_000, edgeRequestsPerDay: 200_000 },
+      fosRegion: 'us-east-1',
+    }} />)
+    expect(screen.getByText('(auto: us-east-1)')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /MBZ100/ })).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('auto-derives MBZ200 for APAC fosRegion', () => {
+    render(<CloudCostCalculator prefillData={{
+      inputs: { ...DEFAULT_INPUTS, edgeOnly: true, requestsPerDay: 200_000, edgeRequestsPerDay: 200_000 },
+      fosRegion: 'jp-central-1',
+    }} />)
+    expect(screen.getByText('(auto: jp-central-1)')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /MBZ200/ })).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('respects explicit Admin custom egress rate over fosRegion auto-derivation', () => {
+    render(<CloudCostCalculator prefillData={{
+      inputs: { ...DEFAULT_INPUTS, edgeOnly: true, requestsPerDay: 200_000, edgeRequestsPerDay: 200_000 },
+      rates: { ...LIST_PRICE_RATES, cdn_egress_rate_per_gb: 0.18 },
+      fosRegion: 'us-east-1',
+    }} />)
+    expect(screen.queryByText('(auto: us-east-1)')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Global/ })).toHaveAttribute('aria-pressed', 'true')
   })
 })

@@ -63,9 +63,19 @@ describe("front clock probes", () => {
     const delivery = (logPeriodS: number) =>
       line(estimateMonthly({ ...quiet, logPeriodS }, units, rates), "delivery").usd;
     // 2 checks × 53 POPs × 86,400 s ÷ 30 s = 305,280 probes a day, 30 days a month, ~2 KB each.
+    // Fastly Full Site Delivery includes 100 GB free bandwidth and 1M free requests per month.
     const probes = (2 * 53 * 86_400) / 30 * 30;
-    expect(delivery(60)).toBeCloseTo((probes / 10_000) * 0.01 + ((probes * 2_000) / 1e9) * 0.12);
-    expect(delivery(20)).toBeCloseTo(delivery(60) * 3);
+    const probeGb = (probes * 2_000) / 1e9;
+    expect(delivery(60)).toBeCloseTo(
+      (Math.max(0, probes - 1_000_000) / 10_000) * 0.01 +
+        Math.max(0, probeGb - 100) * 0.12,
+    );
+    const probes20 = probes * 3;
+    const probeGb20 = probeGb * 3;
+    expect(delivery(20)).toBeCloseTo(
+      (Math.max(0, probes20 - 1_000_000) / 10_000) * 0.01 +
+        Math.max(0, probeGb20 - 100) * 0.12,
+    );
     expect(delivery(300)).toBeCloseTo(delivery(60));
     expect(line(estimateMonthly({ ...quiet, logPeriodS: 60 }, units, rates), "delivery").detail)
       .toContain("305,280 clock probes/day every 30 s");
@@ -238,9 +248,12 @@ describe("RUM", () => {
     expect(r.linesPerDay).toBe(50_000);
     expect(r.rowsPerDay).toBe(400_000);
     // 50,000 lines × 200 B raw billed 30 days, 400,000 rows × 50 B kept 30 days.
+    // Fastly Full Site Delivery includes 1,000,000 free requests/mo across all front requests.
     expect(r.storedGb).toBeCloseTo(0.01 * 30 + 0.02 * 30);
+    const rumReqs = 50_000 * 30;
     expect(feature(estimate, "rum")!).toBeCloseTo(
-      r.storedGb + (50_000 * 30) / 10_000,
+      r.storedGb + Math.max(0, rumReqs - 1_000_000) / 10_000,
+      0,
     );
     expect(estimate.total).toBeCloseTo(
       estimate.lines.reduce((sum, l) => sum + l.usd, 0),
@@ -345,12 +358,12 @@ describe("summary bundles", () => {
       1e9;
     expect(s.storedGb).toBeCloseTo(gbPerDay * 30);
     // 100 ms per window summary execution: 80 ms excess above the 20 ms contract allowance across 1,440 runs/day.
+    // Summary front requests are covered by the ingest raw-log egress's 20,000 req/GB included allowance ($0 excess).
     const billedSummaryVcpuPerDay = 80 * 1_440;
     expect(feature(estimate, "summaries")!).toBeCloseTo(
       s.storedGb * 0.02 +
         ((s.classAPerDay * 30) / 1000) * 0.0025 +
         ((s.classBPerDay * 30) / 10_000) * 0.004 +
-        ((s.classBPerDay * 30) / 10_000) * 0.01 +
         ((billedSummaryVcpuPerDay * 30) / 1000) * 0.00005,
     );
   });
@@ -534,9 +547,22 @@ describe("compaction", () => {
       hoursReadPerDay: 0,
     });
     const saved = 230 * 30;
+    // Delivery requests are under the 20,000 req/GB included allowance, so saving reads saves FOS Class B ops.
     expect(
       without.total - estimate.total,
-    ).toBeCloseTo((saved / 10_000) * 0.01 + (saved / 10_000) * 0.004);
+    ).toBeCloseTo((saved / 10_000) * 0.004);
+  });
+
+  it("applies Fastly Full Site Delivery monthly free tiers (100 GB bandwidth and 1M requests)", () => {
+    const rates = { ...zeroRates, cdn_egress_rate_per_gb: 0.12, cdn_request_rate_per_10k: 0.01 };
+    const quiet = { ...DEFAULT_INPUTS, requestsPerDay: 0, edgeRequestsPerDay: 0, rumPageviewsPerDay: 0 };
+    // 3 GB/day (90 GB/mo <= 100 GB free) and 30,000 reqs/day (900k/mo <= 1M free) => $0.
+    const under = estimateMonthly(quiet, { ...zeroUnits, deliveryGbPerDay: 3, frontRequestsPerDay: 30_000 }, rates);
+    expect(line(under, "delivery").usd).toBe(0);
+    // 5 GB/day (150 GB/mo => 50 GB billable = $6.00) and 50,000 reqs/day (1.5M/mo => 500k billable = $0.50).
+    const over = estimateMonthly(quiet, { ...zeroUnits, deliveryGbPerDay: 5, frontRequestsPerDay: 50_000 }, rates);
+    expect(line(over, "delivery").parts!.find((p) => p.label === "Egress")!.usd).toBeCloseTo(6.0);
+    expect(line(over, "delivery").parts!.find((p) => p.label === "Requests")!.usd).toBeCloseTo(0.5);
   });
 });
 

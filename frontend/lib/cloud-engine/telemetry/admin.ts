@@ -64,6 +64,7 @@ export type LoggedTraffic = {
     edge_only: boolean;
     delete_after: boolean;
     log_retention_days: number;
+    fos_region?: string;
   };
 };
 

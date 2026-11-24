@@ -166,6 +166,20 @@ def _extract_fos_ops(record: dict[str, Any]) -> tuple[int, int]:
     return StatsRecord.model_validate(record).fos_ops()
 
 
+_BILLING_ZONE_RATES: dict[str, float] = {
+    "MBZ100": 0.08,
+    "MBZ200": 0.12,
+    "Global": 0.18,
+}
+
+
+def _billing_zone_for_fos_region(region: str | None) -> str:
+    r = (region or "").strip().lower()
+    if r.startswith(("us-", "uk-", "eu-")):
+        return "MBZ100"
+    return "MBZ200"
+
+
 def _compute_prefill_rates(
     source: dict[str, Any], *, include_metadata_averages: bool = True
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -190,6 +204,7 @@ def _compute_prefill_rates(
         "storage_rate_per_gb_month": float(global_rates.get("storage_rate_per_gb_month", 0.02)),
         "min_billed_days": int(global_rates.get("min_billed_days", 30)),
         "billing_zone": str(global_rates.get("billing_zone", "MBZ200")),
+        "fos_region": None,
         "rum_beacons_per_day": 0,
     }
 
@@ -201,6 +216,14 @@ def _compute_prefill_rates(
             prov = raw_prov if isinstance(raw_prov, dict) else {}
             raw_cron_sync = prov.get("cron_sync")
             cron_sync = raw_cron_sync if isinstance(raw_cron_sync, dict) else {}
+            fos_region = cfg.get("fos_region") or prov.get("fos_region")
+            if isinstance(fos_region, str) and fos_region.strip():
+                fos_region_str = fos_region.strip()
+                result["fos_region"] = fos_region_str
+                if result["billing_zone"] in ("", "MBZ200") and abs(result["cdn_egress_rate_per_gb"] - 0.12) < 1e-6:
+                    derived_zone = _billing_zone_for_fos_region(fos_region_str)
+                    result["billing_zone"] = derived_zone
+                    result["cdn_egress_rate_per_gb"] = _BILLING_ZONE_RATES[derived_zone]
             result["sample_rate"] = int(prov.get("sample_rate", 100))
             result["edge_only"] = prov.get("edge_only", True)
             result["delete_after"] = bool(cron_sync.get("delete_after", True))

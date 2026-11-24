@@ -197,3 +197,32 @@ def test_prefill_rates_survives_inf_and_null_provisioning_blocks(monkeypatch, ba
     rates = usage.prefill_rates(source)
     assert rates.snapshot_interval_minutes == 5
     assert rates.log_period_seconds == 60
+
+
+@pytest.mark.no_postgres
+@pytest.mark.parametrize(
+    ("fos_region", "global_rates", "expected_zone", "expected_rate"),
+    [
+        ("us-east-1", {}, "MBZ100", 0.08),
+        ("eu-central-1", {}, "MBZ100", 0.08),
+        ("uk-east-1", {}, "MBZ100", 0.08),
+        ("jp-central-1", {}, "MBZ200", 0.12),
+        ("au-east-1", {}, "MBZ200", 0.12),
+        # Explicit Admin override wins over fos_region auto-derivation.
+        ("us-east-1", {"billing_zone": "Global", "cdn_egress_rate_per_gb": 0.18}, "Global", 0.18),
+    ],
+)
+def test_prefill_rates_auto_derives_billing_zone_from_fos_region(
+    monkeypatch, fos_region, global_rates, expected_zone, expected_rate
+):
+    source = config.config_to_source({"service_id": "s", "cdn_service_id": "cdn-svc"})
+    monkeypatch.setattr(config, "load_config", lambda *args: {"service_id": "s", "fos_region": fos_region})
+    monkeypatch.setattr(config, "get_status", lambda *args: {})
+    monkeypatch.setattr(config, "load_usage_logging_config", lambda: global_rates)
+    monkeypatch.setattr(metadata, "get_node_count_avg", lambda *args: None)
+    monkeypatch.setattr(metadata, "get_rum_beacons_avg_per_day", lambda *args: None)
+
+    rates = usage.prefill_rates(source)
+    assert rates.fos_region == fos_region
+    assert rates.billing_zone == expected_zone
+    assert rates.cdn_egress_rate_per_gb == pytest.approx(expected_rate)

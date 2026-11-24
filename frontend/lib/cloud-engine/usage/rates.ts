@@ -21,3 +21,15 @@ export const LIST_RATES = {
   kv_class_b_rate_per_million: 0.55,
   secret_rate_per_month: 5,
 } as const;
+
+/** Fastly Full Site Delivery monthly free allowances (`fastly.com/pricing#full-site-delivery`). */
+export const CDN_FREE_EGRESS_GB_PER_MONTH = 100;
+export const CDN_FREE_REQUESTS_PER_MONTH = 1_000_000;
+
+export function billableCdnEgressGb(egressGb: number): number {
+  return Math.max(0, egressGb - CDN_FREE_EGRESS_GB_PER_MONTH);
+}
+
+export function billableCdnRequests(requests: number): number {
+  return Math.max(0, requests - CDN_FREE_REQUESTS_PER_MONTH);
+}

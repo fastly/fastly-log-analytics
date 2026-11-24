@@ -164,6 +164,7 @@ class _PrefillRatesBase(_BillingRatesMixin, BaseResponse):
     avg_nodes_per_flush: int | None = None
     min_billed_days: int | None = None
     billing_zone: str | None = "MBZ200"
+    fos_region: str | None = None
 
 
 class PrefillResponse(_PrefillRatesBase):
