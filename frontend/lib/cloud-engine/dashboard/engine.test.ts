@@ -1758,6 +1758,63 @@ describe("dashboard filters", () => {
     }
   });
 
+  it("matches conn_requests display bucket filters across hyparquet, DuckDB, and cached rollups", async () => {
+    const connRows = [
+      row(1),
+      row(2),
+      row(3),
+      row(4),
+      row(5),
+      row(6),
+    ];
+    const connVals = [BigInt(1), BigInt(2), BigInt(5), BigInt(12), BigInt(25), null];
+    const from = "2026-10-29T10:00:00Z";
+    const to = "2026-10-29T10:05:00Z";
+    const key = "pq/conn.parquet";
+    const bytes = await parquetWriteBuffer({
+      codec: "SNAPPY",
+      columnData: [
+        { name: "timestamp", type: "TIMESTAMP", data: connRows.map((r) => new Date(r.timestamp)) },
+        { name: "status", type: "INT32", data: connRows.map((r) => r.status) },
+        { name: "cache", type: "STRING", data: connRows.map((r) => r.cache) },
+        { name: "resp_bytes", type: "INT64", data: connRows.map((r) => BigInt(r.resp_bytes!)) },
+        { name: "conn_requests", type: "INT64", data: connVals },
+      ],
+    });
+    const manifest = [
+      { files: [manifestEntry(key, from, to, connRows.length)], next_cursor: null, complete: true },
+    ];
+    const buffers = { [key]: bytes };
+    const warm = fixtureSource(manifest, buffers);
+    await runDashboard(warm, { from, to });
+
+    const decoded = await readColumns(bytes, ["timestamp", "conn_requests"]);
+    const cases: [DashboardFilter[], number][] = [
+      [[parseFilters(["+conn_requests:1"])[0]!], 1],
+      [[parseFilters(["+conn_requests:2\u20135"])[0]!], 2],
+      [[parseFilters(["+conn_requests:6\u201320"])[0]!], 1],
+      [[parseFilters(["+conn_requests:21+"])[0]!], 1],
+      [[parseFilters(["-conn_requests:2\u20135"])[0]!], 4],
+    ];
+    for (const [filters, expected] of cases) {
+      const hyparquet = new Aggregator(from, to, ["conn_requests"], filters);
+      hyparquet.add(decoded.rows, decoded.columns);
+      const duckdbRun = await runDashboard(fixtureSource(manifest, buffers), { from, to, filters });
+      const rollupRun = await runDashboard(warm, { from, to, filters });
+      expect({
+        filters,
+        hyparquet: hyparquet.totalRequests,
+        duckdb: duckdbRun.totalRequests,
+        rollup: rollupRun.totalRequests,
+      }).toEqual({
+        filters,
+        hyparquet: expected,
+        duckdb: expected,
+        rollup: expected,
+      });
+    }
+  });
+
   it("keeps the filtered range's top user agents beyond the card's top 10 for bot classification", async () => {
     const uas = [
       ...Array.from({ length: 12 }, (_, i) => ({ ua: `Browser/${i}`, country: "US", n: 3 })),

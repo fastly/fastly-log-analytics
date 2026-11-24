@@ -16,7 +16,7 @@ import {
 } from "./manifest";
 import {
   compileFilters,
-  createValueMatcher,
+  createFieldValueMatcher,
   isEdgeValue,
   type DashboardFilter,
   type Matcher,
@@ -985,7 +985,7 @@ export function classifyRollupAgainstFilters(
     if (!field || value === "") continue;
     const target = mode === "include" ? includes : excludes;
     const list = target.get(field) ?? [];
-    list.push(createValueMatcher(value));
+    list.push(createFieldValueMatcher(field, value));
     target.set(field, list);
   }
 
@@ -1068,7 +1068,7 @@ export function classifySummaryAgainstFilters(
     if (!field || value === "") continue;
     const target = mode === "include" ? includes : excludes;
     const list = target.get(field) ?? [];
-    list.push(createValueMatcher(value));
+    list.push(createFieldValueMatcher(field, value));
     target.set(field, list);
   }
 
@@ -1186,10 +1186,10 @@ export function resolveSummaryFromSlices(
     if (own.length === 0 || pivot.truncated) continue;
     const includes = own
       .filter((f) => f.mode === "include")
-      .map((f) => createValueMatcher(f.value));
+      .map((f) => createFieldValueMatcher(field, f.value));
     const excludes = own
       .filter((f) => f.mode === "exclude")
-      .map((f) => createValueMatcher(f.value));
+      .map((f) => createFieldValueMatcher(field, f.value));
     const values = [...pivot.values].map(
       ([text, slice]) => [summaryValue(field, text), slice] as const,
     );

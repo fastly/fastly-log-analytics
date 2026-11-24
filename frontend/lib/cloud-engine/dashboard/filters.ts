@@ -97,6 +97,40 @@ export function createValueMatcher(pattern: string): Matcher {
   };
 }
 
+const CONN_REQUESTS_BUCKET_BOUNDS: Record<string, [number, number]> = {
+  "2\u20135": [2, 5],
+  "2-5": [2, 5],
+  "6\u201320": [6, 20],
+  "6-20": [6, 20],
+  "21+": [21, Infinity],
+};
+
+/**
+ * Field-aware twin of `createValueMatcher`: expands `conn_requests` display
+ * bucket labels (`"2–5"`, `"6–20"`, `"21+"`) into numeric range matches so
+ * clicking a bucket row in TopTenTable filters raw numeric rows accurately.
+ */
+export function createFieldValueMatcher(field: string, pattern: string): Matcher {
+  if (field === "conn_requests" && !pattern.includes("*")) {
+    const bounds = CONN_REQUESTS_BUCKET_BOUNDS[pattern];
+    if (bounds) {
+      const [lo, hi] = bounds;
+      return (value) => {
+        if (typeof value === "number" || typeof value === "bigint") {
+          const n = Number(value);
+          return Number.isFinite(n) && n >= lo && n <= hi;
+        }
+        const text = filterText(value);
+        if (text === null) return false;
+        if (CONN_REQUESTS_BUCKET_BOUNDS[text] === bounds) return true;
+        const numeric = numericFilterValue(text);
+        return numeric !== null && numeric >= lo && numeric <= hi;
+      };
+    }
+  }
+  return createValueMatcher(pattern);
+}
+
 export type RowFilter = {
   /** Columns the filter needs; a missing column never matches. */
   fields: string[];
@@ -127,7 +161,7 @@ export function compileFilters(
   for (const { field, value, mode } of filters) {
     const target = mode === "include" ? includes : excludes;
     const list = target.get(field) ?? [];
-    list.push(createValueMatcher(value));
+    list.push(createFieldValueMatcher(field, value));
     target.set(field, list);
   }
   return {

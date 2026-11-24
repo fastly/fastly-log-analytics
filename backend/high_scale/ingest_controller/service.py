@@ -43,6 +43,7 @@ from backend.high_scale._common import (  # noqa: F401
     format_iso_utc,
     format_iso_utc_or_empty,
     inclusive_minute_end,
+    normalize_request_dimension_values,
     optional_int,
     parse_time_window,
     percentiles,
@@ -398,6 +399,8 @@ DIMENSIONS_BY_DOMAIN: dict[str, tuple[str, ...]] = {
         "waf",
         "waf_resp",
         "waf_ms",
+        "waf_sig",
+        "waf_sig_ind",
         "p_type",
         "p_desc",
         "ja3",
@@ -410,7 +413,7 @@ DIMENSIONS_BY_DOMAIN: dict[str, tuple[str, ...]] = {
     "rum_errors": ("error_message",),
     "cmcd": ("cmcd_session",),
 }
-_SOURCE_FIELD_OVERRIDES: dict[str, str] = {"client_ip": "ip", "cmcd_session": "sid"}
+_SOURCE_FIELD_OVERRIDES: dict[str, str] = {"client_ip": "ip", "cmcd_session": "sid", "waf_sig_ind": "waf_sig"}
 
 
 def compute_dimension_counts(domain: str, rows: tuple[Mapping[str, Any], ...]) -> tuple[dict[str, Any], ...]:
@@ -418,30 +421,71 @@ def compute_dimension_counts(domain: str, rows: tuple[Mapping[str, Any], ...]) -
     if domain not in DIMENSIONS_BY_DOMAIN:
         raise ValueError(f"unsupported aggregate write domain: {domain}")
     dimensions = DIMENSIONS_BY_DOMAIN[domain]
+    if domain == "request":
+        dim_pairs = tuple((dim, _SOURCE_FIELD_OVERRIDES.get(dim, dim)) for dim in dimensions)
+        if len(rows) >= 500:
+            rows_by_bkt: dict[datetime, list[Mapping[str, Any]]] = defaultdict(list)
+            for row in rows:
+                bkt = _bucket(row.get("timestamp"))
+                if bkt is not None:
+                    rows_by_bkt[bkt].append(row)
+            out: list[dict[str, Any]] = []
+            for bkt, bkt_rows in rows_by_bkt.items():
+                bkt_iso = bkt.isoformat()
+                for dimension, src_key in dim_pairs:
+                    col_counts: Counter[str] = Counter()
+                    for r in bkt_rows:
+                        for norm_val in normalize_request_dimension_values(dimension, r.get(src_key)):
+                            col_counts[norm_val] += 1
+                    out.extend(
+                        {"dimension": dimension, "value": val, "bucket_start": bkt_iso, "count": cnt}
+                        for val, cnt in col_counts.items()
+                    )
+            return tuple(out)
+        counts: Counter[tuple[str, str, datetime]] = Counter()
+        for row in rows:
+            bkt = _bucket(row.get("timestamp"))
+            if bkt is None:
+                continue
+            for dimension, src_key in dim_pairs:
+                for norm_val in normalize_request_dimension_values(dimension, row.get(src_key)):
+                    counts[(dimension, norm_val, bkt)] += 1
+        return tuple(
+            {"dimension": dimension, "value": value, "bucket_start": bkt.isoformat(), "count": count}
+            for (dimension, value, bkt), count in counts.items()
+        )
     if len(rows) >= 500:
-        rows_by_bkt: dict[datetime, list[Mapping[str, Any]]] = defaultdict(list)
+        rows_by_bkt = defaultdict(list)
         for row in rows:
             bkt = _bucket(row.get("timestamp"))
             if bkt is not None:
                 rows_by_bkt[bkt].append(row)
         dim_pairs = tuple((dim, _SOURCE_FIELD_OVERRIDES.get(dim, dim)) for dim in dimensions)
-        out: list[dict[str, Any]] = []
+        out = []
         for bkt, bkt_rows in rows_by_bkt.items():
             bkt_iso = bkt.isoformat()
             for dimension, src_key in dim_pairs:
-                col_counts = Counter(v if type(v := r.get(src_key, "")) is str else str(v) for r in bkt_rows)
+                col_counts = Counter(
+                    s
+                    for r in bkt_rows
+                    if (v := r.get(src_key)) is not None and (s := (v if type(v) is str else str(v))) != ""
+                )
                 out.extend(
                     {"dimension": dimension, "value": val, "bucket_start": bkt_iso, "count": cnt}
                     for val, cnt in col_counts.items()
                 )
         return tuple(out)
-    counts: Counter[tuple[str, str, datetime]] = Counter()
+    counts = Counter()
     for row in rows:
         bkt = _bucket(row.get("timestamp"))
         if bkt is None:
             continue
         for dimension in dimensions:
-            counts[(dimension, str(row.get(_SOURCE_FIELD_OVERRIDES.get(dimension, dimension), "")), bkt)] += 1
+            v = row.get(_SOURCE_FIELD_OVERRIDES.get(dimension, dimension))
+            if v is not None:
+                s = v if type(v) is str else str(v)
+                if s != "":
+                    counts[(dimension, s, bkt)] += 1
     return tuple(
         {"dimension": dimension, "value": value, "bucket_start": bkt.isoformat(), "count": count}
         for (dimension, value, bkt), count in counts.items()

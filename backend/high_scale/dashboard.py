@@ -11,7 +11,9 @@ from backend.core.request_telemetry import HighScaleSections
 from backend.high_scale._common import (
     _FIELD_DIMENSIONS,
     _column,
+    coerce_dashboard_card_value,
     normalize_cache_bound,
+    normalize_request_dimension_values,
     request_filter_clauses,
     visible_fact_clauses,
     visible_rollup_publication_fence_sql,
@@ -366,8 +368,94 @@ def _field_sql_column(field: str) -> str:
     if col_name in {"client_ip", "country", "url", "cmcd", "custom_fields"}:
         return col_name
     if col_name in {"age", "ttl"}:
-        return f"toString(toInt32(round(toFloat64OrZero(custom_fields['{col_name}']))))"
+        return (
+            f"if(toFloat64OrNull(custom_fields['{col_name}']) IS NULL, '', "
+            f"toString(toInt64(round(toFloat64OrNull(custom_fields['{col_name}'])))))"
+        )
     return f"custom_fields['{col_name}']"
+
+
+_MERGE_CARD_FIELDS: frozenset[str] = frozenset(
+    {
+        "ttl",
+        "age",
+        "conn_requests",
+        "c_speed",
+        "p_type",
+        "p_desc",
+        "waf",
+        "edge",
+        "is_ipv6",
+        "waf_resp",
+        "hits",
+        "metro",
+    }
+)
+_EXPANDED_AGG_LIMITS: dict[str, int] = {
+    "ttl": 500,
+    "age": 500,
+    "conn_requests": 250,
+    "waf_sig": 200,
+    "waf_sig_ind": 100,
+    "c_speed": 32,
+    "p_type": 32,
+    "p_desc": 64,
+    "waf": 16,
+    "edge": 16,
+    "is_ipv6": 16,
+    "waf_resp": 32,
+    "hits": 64,
+    "metro": 64,
+}
+
+
+def _shape_card_aggregate(
+    field: str,
+    raw_entries: Iterable[tuple[Any, Any]],
+    raw_total: int,
+    *,
+    limit: int = 10,
+    subtract_sentinels_from_total: bool = True,
+) -> tuple[list[dict[str, Any]], int]:
+    """Normalize, merge, and type-coerce Top-10 card entries, dropping empty/null sentinels."""
+    merged: dict[str, int] = {}
+    dropped_count = 0
+    for raw_val, raw_cnt in raw_entries:
+        cnt = max(0, int(raw_cnt or 0))
+        norm_vals = normalize_request_dimension_values(field, raw_val)
+        if not norm_vals:
+            dropped_count += cnt
+            continue
+        for nv in norm_vals:
+            merged[nv] = merged.get(nv, 0) + cnt
+    effective_total = max(0, int(raw_total) - (dropped_count if subtract_sentinels_from_total else 0))
+    ranked = sorted(merged.items(), key=lambda item: (-item[1], item[0]))[:limit]
+    rows: list[dict[str, Any]] = [
+        {"value": coerce_dashboard_card_value(field, val), "count": cnt} for val, cnt in ranked
+    ]
+    return rows, effective_total
+
+
+def _enrich_asn_card_entries(rows: list[dict[str, Any]], service_id: str) -> list[dict[str, Any]]:
+    if not rows:
+        return rows
+    try:
+        enrich_asn_rows(rows, service_id, asn_key="value")
+    except Exception:
+        pass
+    return rows
+
+
+def _waf_sig_ind_from_raw_rows(raw_entries: Iterable[tuple[Any, Any]]) -> tuple[list[tuple[str, int]], int]:
+    counts: dict[str, int] = {}
+    total = 0
+    for raw_val, raw_cnt in raw_entries:
+        cnt = max(0, int(raw_cnt or 0))
+        for tok in normalize_request_dimension_values("waf_sig_ind", raw_val):
+            counts[tok] = counts.get(tok, 0) + cnt
+            total += cnt
+    ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    return ranked, total
 
 
 def _fields_to_fetch(req: AggregatesRequest, want_map: bool, want_top_n: bool) -> tuple[list[str], list[str]]:
@@ -537,15 +625,32 @@ def _filtered_aggregates(
     top_fields, fields_to_query = _fields_to_fetch(req, want_map, want_top_n)
     ua_bot_rows: list[tuple[str, int]] = []
     ngwaf_bot_rows: list[tuple[str, int]] = []
+    field_totals: dict[str, int] = {}
 
     def fetch_field(field: str):
+        if field == "waf_sig_ind":
+            rows = service.client.execute(
+                f"SELECT trimBoth(sig) AS v, count() AS c, sum(count()) OVER () AS nn_total "
+                f"FROM request_facts ARRAY JOIN splitByChar(',', custom_fields['waf_sig']) AS sig "
+                f"WHERE {where_clause} AND custom_fields['waf_sig'] != '' AND trimBoth(sig) != '' "
+                f"GROUP BY v ORDER BY c DESC LIMIT 100",
+                params,
+            )
+            if rows and "nn_total" in rows[0]:
+                field_totals[field] = int(rows[0]["nn_total"] or 0)
+            return field, [(str(r["v"]), int(r["c"])) for r in rows]
         sql_col = _field_sql_column(field)
-        field_limit = 250 if field == "country" and want_map else 10
+        field_limit = 250 if (field == "country" and want_map) or field in _MERGE_CARD_FIELDS else 10
         rows = service.client.execute(
-            f"SELECT {sql_col} AS v, count() AS c FROM request_facts WHERE {where_clause} AND {sql_col} != '' "
+            f"SELECT {sql_col} AS v, count() AS c, sum(count()) OVER () AS nn_total "
+            f"FROM request_facts WHERE {where_clause} AND {sql_col} != '' "
             f"GROUP BY v ORDER BY c DESC LIMIT {field_limit}",
             params,
         )
+        if rows and "nn_total" in rows[0] and rows[0]["nn_total"] is not None:
+            field_totals[field] = int(rows[0]["nn_total"])
+        elif not rows:
+            field_totals[field] = 0
         return field, [(str(r["v"]), int(r["c"])) for r in rows]
 
     is_real_ch = (
@@ -564,13 +669,22 @@ def _filtered_aggregates(
     def fetch_field_chunk(
         chunk: list[str], *, include_bots: bool = False, include_ts: bool = False
     ) -> dict[str, list[tuple[str, int]]]:
+        direct_out: dict[str, list[tuple[str, int]]] = {}
+        if "waf_sig_ind" in chunk:
+            _, direct_out["waf_sig_ind"] = fetch_field("waf_sig_ind")
+            chunk = [f for f in chunk if f != "waf_sig_ind"]
+        if not chunk and not include_bots and not include_ts:
+            return direct_out
         if use_approx_top_k:
             exprs: list[str] = ["count() AS __total_count__"]
             for f in chunk:
                 col = _field_sql_column(f)
+                exprs.append(f"countIf({col} != '') AS `_nn_{f}`")
                 if include_bots and f == "ua":
                     exprs.append(f"approx_top_kIf(1000, 3000)({col}, {col} != '') AS `_f_{f}`")
                 elif want_map and f == "country":
+                    exprs.append(f"approx_top_kIf(250, 500)({col}, {col} != '') AS `_f_{f}`")
+                elif f in _MERGE_CARD_FIELDS:
                     exprs.append(f"approx_top_kIf(250, 500)({col}, {col} != '') AS `_f_{f}`")
                 else:
                     exprs.append(f"approx_top_kIf(15, 250)({col}, {col} != '') AS `_f_{f}`")
@@ -594,11 +708,12 @@ def _filtered_aggregates(
             row = rows[0] if rows else {}
             if "__total_count__" in row:
                 chunk_total_counts.append(int(row["__total_count__"] or 0))
-            out: dict[str, list[tuple[str, int]]] = {}
+            out: dict[str, list[tuple[str, int]]] = dict(direct_out)
             for f in chunk:
+                field_totals[f] = int(row.get(f"_nn_{f}") or 0)
                 items = row.get(f"_f_{f}") or []
                 sorted_items = sorted(items, key=lambda x: (-int(x["count"]), str(x["item"])))
-                keep_n = 250 if want_map and f == "country" else 10
+                keep_n = 250 if (want_map and f == "country") or f in _MERGE_CARD_FIELDS else 10
                 out[f] = [(str(x["item"]), int(x["count"])) for x in sorted_items[:keep_n]]
                 if include_bots and f == "ua":
                     for x in sorted_items:
@@ -621,7 +736,8 @@ def _filtered_aggregates(
                 "concat(custom_fields['ngwaf_bot'], '\x1f', custom_fields['ngwaf_bot_category']), ''))"
             )
         pairs_sql = ", ".join(pair_exprs)
-        limit_by = 1000 if include_bots else (250 if want_map and "country" in chunk else 10)
+        has_merge = any(f in _MERGE_CARD_FIELDS for f in chunk)
+        limit_by = 1000 if include_bots else (250 if (want_map and "country" in chunk) or has_merge else 10)
         if "SELECT" not in eff_where:
             sql = (
                 f"SELECT pair.1 AS field_name, pair.2 AS v, count() AS c "
@@ -639,11 +755,12 @@ def _filtered_aggregates(
             )
         rows = service.client.execute(sql, params)
         out = {f: [] for f in chunk}
+        out.update(direct_out)
         for r in rows:
             fn = str(r.get("field_name") or "")
             val_str = str(r["v"])
             cnt_int = int(r["c"])
-            keep_n = 250 if want_map and fn == "country" else 10
+            keep_n = 250 if (want_map and fn == "country") or fn in _MERGE_CARD_FIELDS else 10
             if fn in out and len(out[fn]) < keep_n:
                 out[fn].append((val_str, cnt_int))
             if include_bots:
@@ -651,6 +768,12 @@ def _filtered_aggregates(
                     ua_bot_rows.append((val_str, cnt_int))
                 elif fn == "__ngwaf_bot__":
                     ngwaf_bot_rows.append((val_str, cnt_int))
+        if chunk:
+            nn_exprs = ", ".join(f"countIf({_field_sql_column(f)} != '') AS `_nn_{f}`" for f in chunk)
+            nn_rows = service.client.execute(f"SELECT {nn_exprs} FROM request_facts WHERE {eff_where}", params)
+            if nn_rows:
+                for f in chunk:
+                    field_totals[f] = int(nn_rows[0].get(f"_nn_{f}") or 0)
         return out
 
     if is_real_ch and len(fields_to_query) > 2:
@@ -839,12 +962,22 @@ def _filtered_aggregates(
 
         total_count = int(total_rows_result[0]["c"]) if total_rows_result else 0
 
-    data = {
-        field: FieldAggregate(
-            top=[FieldTopEntry(value=v, count=c) for v, c in field_results.get(field, [])[:10]], total=total_count
+    data: dict[str, FieldAggregate] = {}
+    for field in top_fields:
+        raw_total = field_totals.get(field, total_count)
+        shaped_rows, card_total = _shape_card_aggregate(
+            field,
+            field_results.get(field, ()),
+            raw_total,
+            limit=10,
+            subtract_sentinels_from_total=field not in field_totals,
         )
-        for field in top_fields
-    }
+        if field == "asn":
+            _enrich_asn_card_entries(shaped_rows, service.service_id)
+        data[field] = FieldAggregate(
+            top=[FieldTopEntry(**row) for row in shaped_rows],
+            total=card_total,
+        )
 
     map_data = [MapPoint(country=v, count=c) for v, c in field_results.get("country", [])] if want_map else []
 
@@ -1087,18 +1220,23 @@ def dashboard_aggregates(
         all_fields_to_query = list(fields_to_query)
         if "url" not in all_fields_to_query:
             all_fields_to_query.append("url")
+        if "waf_sig_ind" in top_fields and "waf_sig" not in all_fields_to_query:
+            all_fields_to_query.append("waf_sig")
 
-        map_limits = {"country": 250} if want_map else None
+        agg_limits = {f: _EXPANDED_AGG_LIMITS[f] for f in all_fields_to_query if f in _EXPANDED_AGG_LIMITS}
+        if want_map and "country" in all_fields_to_query:
+            agg_limits["country"] = 250
 
         def _run_agg_batch() -> dict[str, Any]:
-            return _aggregates_batch(
+            batch_res = _aggregates_batch(
                 service,
                 start_time=start_time,
                 end_time=end_time,
                 fields=all_fields_to_query,
                 watermark=request_watermark,
-                limits=map_limits,
+                limits=agg_limits or None,
             )
+            return batch_res
 
         parallel_projection_ts = want_time_series and not (req.chart_metric and req.chart_metric != "requests")
         if parallel_projection_ts and not hasattr(service.client, "responses"):
@@ -1118,17 +1256,19 @@ def dashboard_aggregates(
 
         total_request_count = responses["url"].request_count
 
-        data = {
-            field: FieldAggregate(
-                top=[
-                    FieldTopEntry(value=value, count=count)
-                    for value, count in responses[field].top_values[:10]
-                    if value != ""
-                ],
-                total=responses[field].request_count,
+        data: dict[str, FieldAggregate] = {}
+        for field in top_fields:
+            raw_entries = responses[field].top_values
+            raw_total = responses[field].request_count
+            if field == "waf_sig_ind" and not raw_entries and "waf_sig" in responses:
+                raw_entries, raw_total = _waf_sig_ind_from_raw_rows(responses["waf_sig"].top_values)  # type: ignore[assignment]
+            shaped_rows, card_total = _shape_card_aggregate(field, raw_entries, raw_total, limit=10)
+            if field == "asn":
+                _enrich_asn_card_entries(shaped_rows, service.service_id)
+            data[field] = FieldAggregate(
+                top=[FieldTopEntry(**row) for row in shaped_rows],
+                total=card_total,
             )
-            for field in top_fields
-        }
         map_response = responses.get("country")
         map_top_values = map_response.top_values if map_response is not None else ()
         map_data = (
@@ -1297,25 +1437,61 @@ def field_values(
         and any(bound.second != 0 or bound.microsecond != 0 for bound in (start, end))
     )
     if not req.search and not filter_clauses and key in _FIELD_DIMENSIONS and not partial_minutes:
+        agg_dim = _FIELD_DIMENSIONS[key]
         agg = _aggregate(
             service,
             start_time=start_time,
             end_time=end_time,
-            dimension=_FIELD_DIMENSIONS[key],
+            dimension=agg_dim,
             watermark=service.watermark_for("request"),
         )
-        vals: list[dict[str, Any]] = [{"value": str(val), "count": int(cnt)} for val, cnt in agg.top_values[:limit]]
-        if key == "asn" and vals:
-            try:
-                enrich_asn_rows(vals, service.service_id, asn_key="value")
-            except Exception:
-                pass
+        raw_top = agg.top_values
+        if key == "waf_sig_ind" and not raw_top:
+            sig_agg = _aggregate(
+                service,
+                start_time=start_time,
+                end_time=end_time,
+                dimension="waf_sig",
+                watermark=service.watermark_for("request"),
+            )
+            raw_top, _ = _waf_sig_ind_from_raw_rows(sig_agg.top_values)  # type: ignore[assignment]
+        vals, _ = _shape_card_aggregate(key, raw_top, agg.request_count, limit=limit)
+        if key == "asn":
+            _enrich_asn_card_entries(vals, service.service_id)
         return FieldValuesResponse.with_telemetry(values=[FieldTopEntry(**v) for v in vals], field=req.field)
 
-    if key in {"_bot_name", "_ngwaf_bot_name", "_tunnel_requests", "waf_sig_ind", "edge_score_reason_ind"}:
+    if key in {"_bot_name", "_ngwaf_bot_name", "_tunnel_requests", "edge_score_reason_ind"}:
         return FieldValuesResponse.with_telemetry(values=[], field=req.field)
 
     params: dict[str, Any] = {"service_id": service.service_id, "limit": limit, **filter_params}
+    if key == "waf_sig_ind":
+        clauses = [
+            *visible_fact_clauses("request"),
+            *filter_clauses,
+            "custom_fields['waf_sig'] != ''",
+            "trimBoth(sig) != ''",
+        ]
+        if start is not None:
+            clauses.append("event_timestamp >= {start:DateTime64(3)}")
+            params["start"] = start
+        if end is not None:
+            clauses.append("event_timestamp < {end_upper:DateTime64(3)}")
+            params["end_upper"] = end
+        if req.search:
+            params["search_pat"] = f"%{req.search}%"
+            clauses.append("trimBoth(sig) ILIKE {search_pat:String}")
+        where_clause = " AND ".join(clauses)
+        rows = service.client.execute(
+            f"SELECT trimBoth(sig) AS v, count() AS c FROM request_facts "
+            f"ARRAY JOIN splitByChar(',', custom_fields['waf_sig']) AS sig "
+            f"WHERE {where_clause} GROUP BY v ORDER BY c DESC LIMIT {{limit:UInt32}}",
+            params,
+        )
+        vals_sig, _ = _shape_card_aggregate(
+            key, [(r["v"], r["c"]) for r in rows], 0, limit=limit, subtract_sentinels_from_total=False
+        )
+        return FieldValuesResponse.with_telemetry(values=[FieldTopEntry(**v) for v in vals_sig], field=req.field)
+
     sql_col = _column(key, params, "target_field")
     clauses = [*visible_fact_clauses("request"), *filter_clauses, f"{sql_col} != ''"]
 
@@ -1336,12 +1512,11 @@ def field_values(
         f"WHERE {where_clause} GROUP BY v ORDER BY c DESC LIMIT {{limit:UInt32}}",
         params,
     )
-    vals_facts: list[dict[str, Any]] = [{"value": str(r["v"]), "count": int(r["c"])} for r in rows]
-    if key == "asn" and vals_facts:
-        try:
-            enrich_asn_rows(vals_facts, service.service_id, asn_key="value")
-        except Exception:
-            pass
+    vals_facts, _ = _shape_card_aggregate(
+        key, [(r["v"], r["c"]) for r in rows], 0, limit=limit, subtract_sentinels_from_total=False
+    )
+    if key == "asn":
+        _enrich_asn_card_entries(vals_facts, service.service_id)
     return FieldValuesResponse.with_telemetry(values=[FieldTopEntry(**v) for v in vals_facts], field=req.field)
 
 

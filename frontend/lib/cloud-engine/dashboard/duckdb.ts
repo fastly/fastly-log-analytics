@@ -322,6 +322,11 @@ function compileMatcherSql(
   const type = FIELD_DUCKDB_TYPES[field] ?? customTypes.get(field) ?? "VARCHAR";
   const textExpr = filterTextSql(colSql, type);
   if (!pattern.includes("*")) {
+    if (field === "conn_requests" && (type === "BIGINT" || type === "DOUBLE")) {
+      if (pattern === "2\u20135" || pattern === "2-5") return `${colSql} BETWEEN 2 AND 5`;
+      if (pattern === "6\u201320" || pattern === "6-20") return `${colSql} BETWEEN 6 AND 20`;
+      if (pattern === "21+") return `${colSql} >= 21`;
+    }
     if (type === "BIGINT" || type === "DOUBLE") {
       const numeric = numericFilterValue(pattern);
       return numeric === null

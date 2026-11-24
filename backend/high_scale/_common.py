@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Protocol, overload
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from backend.core.catalog import CONN_SPEED_ENCODE, PROXY_DESC_ENCODE, PROXY_TYPE_ENCODE
 from backend.repositories.utils.filters import filter_spec_attr, normalize_filter_key
 from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
 from backend.utils.date_utils import safe_iso
@@ -419,6 +420,115 @@ def resolve_asn_display_labels(service_id: str, asns: Iterable[int]) -> dict[int
     return {asn: _db.format_asn_label(asn, names.get(asn, "")) for asn in asn_list}
 
 
+_SENTINEL_EMPTY_VALUES: frozenset[str] = frozenset({"", "None", "none", "null", "NULL"})
+_BOOLEAN_DIMENSIONS: frozenset[str] = frozenset({"edge", "is_ipv6", "waf"})
+_ROUNDED_INT_DIMENSIONS: frozenset[str] = frozenset({"ttl", "age"})
+_INT_CARD_FIELDS: frozenset[str] = frozenset({"asn", "status", "ttl", "age", "hits", "metro", "waf_resp", "waf_ms"})
+_VCL_ENUM_DECODE_MAP: dict[str, dict[str, str]] = {
+    "c_speed": {code: name for name, code in CONN_SPEED_ENCODE.items()},
+    "p_type": {code: name for name, code in PROXY_TYPE_ENCODE.items()},
+    "p_desc": {code: name for name, code in PROXY_DESC_ENCODE.items()},
+}
+_CONN_REQUESTS_RANGES: dict[str, tuple[str, str]] = {
+    "2\u20135": ("2\u20135", "BETWEEN 2 AND 5"),
+    "2-5": ("2\u20135", "BETWEEN 2 AND 5"),
+    "6\u201320": ("6\u201320", "BETWEEN 6 AND 20"),
+    "6-20": ("6\u201320", "BETWEEN 6 AND 20"),
+    "21+": ("21+", ">= 21"),
+}
+
+
+def conn_requests_bucket(val: Any) -> str | None:
+    """Map raw positive ``conn_requests`` integers to Cloud's display bucket labels."""
+    if val is None or isinstance(val, bool):
+        return None
+    s = str(val).strip()
+    if s in _SENTINEL_EMPTY_VALUES:
+        return None
+    if s in _CONN_REQUESTS_RANGES:
+        return _CONN_REQUESTS_RANGES[s][0]
+    try:
+        num = float(s)
+    except (ValueError, TypeError):
+        return None
+    if not math.isfinite(num) or num <= 0:
+        return None
+    n = int(round(num))
+    if n <= 0:
+        return None
+    if n == 1:
+        return "1"
+    if n <= 5:
+        return "2\u20135"
+    if n <= 20:
+        return "6\u201320"
+    return "21+"
+
+
+def normalize_request_dimension_values(dimension: str, val: Any) -> tuple[str, ...]:
+    """Normalize a raw request log field into zero or more clean dimension strings."""
+    if val is None:
+        return ()
+    if dimension == "waf_sig_ind":
+        raw_s = str(val).strip()
+        if raw_s in _SENTINEL_EMPTY_VALUES:
+            return ()
+        return tuple(tok for part in raw_s.split(",") if (tok := part.strip()) and tok not in _SENTINEL_EMPTY_VALUES)
+    if dimension == "conn_requests":
+        bucket_val = conn_requests_bucket(val)
+        return (bucket_val,) if bucket_val is not None else ()
+    if dimension in _BOOLEAN_DIMENSIONS:
+        if isinstance(val, bool):
+            return ("true" if val else "false",)
+        s = str(val).strip()
+        if s in _SENTINEL_EMPTY_VALUES:
+            return ()
+        low = s.lower()
+        if low in ("true", "1", "t", "yes"):
+            return ("true",)
+        if low in ("false", "0", "f", "no"):
+            return ("false",)
+        return (s,)
+    if dimension in _ROUNDED_INT_DIMENSIONS:
+        if isinstance(val, bool):
+            return ()
+        s = str(val).strip()
+        if s in _SENTINEL_EMPTY_VALUES:
+            return ()
+        try:
+            f = float(s)
+        except (ValueError, TypeError):
+            return ()
+        if not math.isfinite(f):
+            return ()
+        return (str(int(round(f))),)
+    if dimension in _VCL_ENUM_DECODE_MAP:
+        s = str(val).strip()
+        if s in _SENTINEL_EMPTY_VALUES:
+            return ()
+        return (_VCL_ENUM_DECODE_MAP[dimension].get(s, s),)
+    s = val if type(val) is str else str(val)
+    if s in _SENTINEL_EMPTY_VALUES or s.strip() in _SENTINEL_EMPTY_VALUES:
+        return ()
+    return (s,)
+
+
+def coerce_dashboard_card_value(field: str, norm_str: str) -> str | int | bool:
+    """Coerce a normalized card dimension string to the scalar type expected by UI card tables."""
+    if field in _BOOLEAN_DIMENSIONS:
+        if norm_str == "true":
+            return True
+        if norm_str == "false":
+            return False
+        return norm_str
+    if field in _INT_CARD_FIELDS:
+        try:
+            return int(norm_str)
+        except ValueError:
+            return norm_str
+    return norm_str
+
+
 _COLUMNS = {"client_ip": "client_ip", "ip": "client_ip", "country": "country", "url": "url"}
 _ROUNDED = frozenset({"age", "ttl"})
 _BOOLEAN = frozenset({"edge", "is_ipv6", "waf"})
@@ -456,24 +566,17 @@ def request_filter_clauses(
         if key in _UNSUPPORTED or not key:
             raise ValueError(f"high-scale request readers do not support filtering on {raw_key!r}")
         concrete = [v for v in values if v is not None]
-        names: list[str] = []
-        for j, value in enumerate(concrete):
-            name = f"{prefix}_{i}_{j}"
-            str_val = str(value)
-            if key in _BOOLEAN:
-                lowered = str_val.strip().lower()
-                if lowered in ("true", "1"):
-                    str_val = "true"
-                elif lowered in ("false", "0"):
-                    str_val = "false"
-            params[name] = str_val
-            names.append(f"{{{name}:String}}")
         include = mode != "exclude"
         if key in _VIRTUAL_CSV_COLUMNS:
             backing_key = _VIRTUAL_CSV_COLUMNS[key]
             key_param = f"{prefix}_k{i}"
             params[key_param] = backing_key
             lookup = f"custom_fields[{{{key_param}:String}}]"
+            names: list[str] = []
+            for j, value in enumerate(concrete):
+                name = f"{prefix}_{i}_{j}"
+                params[name] = str(value)
+                names.append(f"{{{name}:String}}")
             parts: list[str] = []
             if names:
                 arr_expr = f"arrayExists(x -> trimBoth(x) IN ({', '.join(names)}), splitByChar(',', {lookup}))"
@@ -484,11 +587,58 @@ def request_filter_clauses(
             joiner = " OR " if include else " AND "
             clauses.append(f"({joiner.join(parts)})")
             continue
+        if key == "conn_requests":
+            column = _column(key, params, f"{prefix}_k{i}")
+            bucket_preds: list[str] = []
+            exact_names: list[str] = []
+            for j, value in enumerate(concrete):
+                str_val = str(value).strip()
+                range_spec = _CONN_REQUESTS_RANGES.get(str_val)
+                if range_spec is not None:
+                    pred = f"toInt64OrNull({column}) {range_spec[1]}"
+                    bucket_preds.append(pred if include else f"NOT coalesce({pred}, false)")
+                else:
+                    name = f"{prefix}_{i}_{j}"
+                    params[name] = str_val
+                    exact_names.append(f"{{{name}:String}}")
+            parts = []
+            if exact_names:
+                op = "IN" if include else "NOT IN"
+                parts.append(f"{column} {op} ({', '.join(exact_names)})")
+            parts.extend(bucket_preds)
+            if len(concrete) != len(values):
+                eq_op = "=" if include else "!="
+                parts.append(f"{column} {eq_op} ''")
+            joiner = " OR " if include else " AND "
+            clauses.append(f"({joiner.join(parts)})")
+            continue
+        names = []
+        has_zero = False
+        for j, value in enumerate(concrete):
+            name = f"{prefix}_{i}_{j}"
+            str_val = str(value)
+            if key in _BOOLEAN:
+                lowered = str_val.strip().lower()
+                if lowered in ("true", "1"):
+                    str_val = "true"
+                elif lowered in ("false", "0"):
+                    str_val = "false"
+            if key in _ROUNDED and str_val == "0":
+                has_zero = True
+            params[name] = str_val
+            names.append(f"{{{name}:String}}")
         column = _column(key, params, f"{prefix}_k{i}")
         parts = []
         if names:
             op = "IN" if include else "NOT IN"
-            parts.append(f"{column} {op} ({', '.join(names)})")
+            if key in _ROUNDED and has_zero:
+                raw_col = f"custom_fields[{{{prefix}_k{i}:String}}]"
+                if include:
+                    parts.append(f"({column} IN ({', '.join(names)}) AND {raw_col} != '')")
+                else:
+                    parts.append(f"({column} NOT IN ({', '.join(names)}) OR {raw_col} = '')")
+            else:
+                parts.append(f"{column} {op} ({', '.join(names)})")
         if len(concrete) != len(values):
             eq_op = "=" if include else "!="
             parts.append(f"{column} {eq_op} ''")
@@ -614,6 +764,8 @@ _FIELD_DIMENSIONS: dict[str, str] = {
     "waf": "waf",
     "waf_resp": "waf_resp",
     "waf_ms": "waf_ms",
+    "waf_sig": "waf_sig",
+    "waf_sig_ind": "waf_sig_ind",
     "p_type": "p_type",
     "p_desc": "p_desc",
     "ja3": "ja3",
