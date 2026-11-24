@@ -300,12 +300,11 @@ def wizard(args) -> dict:
     )
     region = (args.region or ("us-east-1" if args.yes else ask("FOS region", "us-east-1"))).lower()
 
-    safe_id = re.sub(r"[^a-zA-Z0-9]", "-", service_id)
-    safe_id = re.sub(r"-+", "-", safe_id).strip("-")
-    safe_id_lower = safe_id.lower()
-    bucket_name = args.bucket or (
-        f"fos-{safe_id_lower}-logs" if args.yes else ask("FOS bucket name", f"fos-{safe_id_lower}-logs")
-    )
+    from backend.provision.opaque_names import generate_opaque_bucket_name, generate_opaque_cdn_prefix
+
+    default_bucket = generate_opaque_bucket_name()
+    bucket_name = args.bucket or (default_bucket if args.yes else ask("FOS bucket name", default_bucket))
+    system_generated_bucket = not args.bucket and bucket_name == default_bucket
     fos_prefix = ""
     sample_rate = max(
         1,
@@ -326,7 +325,10 @@ def wizard(args) -> dict:
         if args.yes
         else ask("CDN service name", f"Log Analysis CDN Service for {service_id}")
     )
-    cdn_prefix = getattr(args, "cdn_prefix", None) or (safe_id if args.yes else ask("CDN domain prefix", safe_id))
+    default_cdn_prefix = generate_opaque_cdn_prefix()
+    raw_cdn_prefix = getattr(args, "cdn_prefix", None)
+    cdn_prefix = raw_cdn_prefix or (default_cdn_prefix if args.yes else ask("CDN domain prefix", default_cdn_prefix))
+    system_generated_cdn_domain = not raw_cdn_prefix and cdn_prefix == default_cdn_prefix
     cdn_url = f"https://{cdn_prefix}.global.ssl.fastly.net"
     cdn_shield = getattr(args, "shield", None) or (
         SHIELD_MAP.get(region, "iad-va-us")
@@ -347,12 +349,14 @@ def wizard(args) -> dict:
         "endpoint_name": endpoint_name,
         "fos_region": region,
         "fos_bucket_name": bucket_name,
+        "_system_generated_bucket": system_generated_bucket,
         "fos_prefix": fos_prefix,
         "sample_rate": sample_rate,
         "edge_only": edge_only,
         "log_period": period,
         "cdn_service_name": cdn_name,
         "cdn_url": cdn_url,
+        "_system_generated_cdn_domain": system_generated_cdn_domain,
         "cdn_shield": cdn_shield,
         "cdn_secret": cdn_secret,
         "delete_after": not getattr(args, "disable_delete_after", False) if delete_after else False,

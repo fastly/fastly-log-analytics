@@ -212,8 +212,40 @@ def enable_scoring(logging_service_id: str, token: str, *, status_cb=None) -> di
         status_cb(f"⏳ Enabling session scoring for {logging_service_id}...")
         status_cb("Redeploy runs two phases: (1) Compute scorer service, then (2) logging service (VCL + log fields).")
         status_cb("▸ Phase 1/2 — Compute scorer service")
-    prior_scoring = cfg.get("scoring") or {}
-    scoring_meta = ensure_scoring_service(logging_service_id, token, status_cb=status_cb)
+    original_scoring = copy.deepcopy(cfg.get("scoring"))
+    original_scoring_fields = [
+        copy.deepcopy(field)
+        for field in (cfg.get("log_fields") or {}).get("custom_fields") or []
+        if field.get("name") in _SCORING_FIELD_NAMES
+    ]
+    prior_scoring = copy.deepcopy(original_scoring) if isinstance(original_scoring, dict) else {}
+    from backend.provision.opaque_names import generate_opaque_scorer_domain
+
+    prior_domain = (prior_scoring.get("scoring_domain") or prior_scoring.get("domain") or "").strip()
+    candidate_domain = prior_domain or generate_opaque_scorer_domain()
+
+    def _persist_scoring_domain(selected_domain: str) -> None:
+        def _apply(disk_cfg: dict[str, Any]) -> None:
+            s = disk_cfg.setdefault("scoring", {})
+            if isinstance(s, dict):
+                s["scoring_domain"] = selected_domain
+                s["domain"] = selected_domain
+
+        svcconfig.mutate_config(logging_service_id, _apply)
+
+    if not prior_domain:
+        _persist_scoring_domain(candidate_domain)
+
+    import inspect
+
+    ensure_kwargs: dict[str, Any] = {"status_cb": status_cb}
+    sig_params = inspect.signature(ensure_scoring_service).parameters
+    if "preferred_domain" in sig_params:
+        ensure_kwargs["preferred_domain"] = candidate_domain
+        ensure_kwargs["allow_domain_retry"] = not bool(prior_domain)
+        ensure_kwargs["on_domain_selected"] = _persist_scoring_domain
+
+    scoring_meta = ensure_scoring_service(logging_service_id, token, **ensure_kwargs)
     created_resources = dict(scoring_meta.get("created_resources") or {})
     scoring_service_id = scoring_meta["scoring_service_id"]
     scoring_domain = scoring_meta["scoring_domain"]
@@ -224,12 +256,6 @@ def enable_scoring(logging_service_id: str, token: str, *, status_cb=None) -> di
         request_secret = _secrets.token_hex(32)
         info("Generated fresh request_secret (none in store or cfg)")
     persisted = False
-    original_scoring = copy.deepcopy(cfg.get("scoring"))
-    original_scoring_fields = [
-        copy.deepcopy(field)
-        for field in (cfg.get("log_fields") or {}).get("custom_fields") or []
-        if field.get("name") in _SCORING_FIELD_NAMES
-    ]
     try:
         keys_store_id = scoring_meta.get("scoring_keys_store_id") or prior_scoring.get("scoring_keys_store_id")
         if not keys_store_id:

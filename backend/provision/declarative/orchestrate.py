@@ -349,12 +349,39 @@ def reconcile_cdn_service_state(
             fastly("PUT", f"/service/{cdn_service_id}", {"comment": service_comment}, token=token)
             if status_cb:
                 status_cb(f"⏳ Adding domain '{domain}' to CDN service...")
-            fastly(
-                "POST",
-                f"/service/{cdn_service_id}/version/1/domain",
-                {"name": domain, "comment": "Log Analysis CDN"},
-                token=token,
+            from backend.provision.opaque_names import (
+                MAX_COLLISION_ATTEMPTS,
+                generate_opaque_cdn_prefix,
+                is_domain_collision_error,
             )
+
+            retry_cdn_domain = bool(cfg.get("_system_generated_cdn_domain"))
+            cdn_attempts = MAX_COLLISION_ATTEMPTS if retry_cdn_domain else 1
+            for attempt in range(1, cdn_attempts + 1):
+                try:
+                    fastly(
+                        "POST",
+                        f"/service/{cdn_service_id}/version/1/domain",
+                        {"name": domain, "comment": "Log Analysis CDN"},
+                        token=token,
+                    )
+                    break
+                except RuntimeError as exc:
+                    if retry_cdn_domain and attempt < cdn_attempts and is_domain_collision_error(exc):
+                        domain = f"{generate_opaque_cdn_prefix()}.global.ssl.fastly.net"
+                        cdn_url = f"https://{domain}"
+                        if status_cb:
+                            status_cb(
+                                f"⚠️ CDN domain collision (attempt {attempt}/{cdn_attempts}); retrying with '{domain}'..."
+                            )
+
+                        def _persist_retry_cdn(c: dict[str, Any], _u: str = cdn_url) -> None:
+                            c["cdn_url"] = _u
+                            c.setdefault("fos_proxy", {})["domain"] = _u
+
+                        _update_local_config(logging_service_id, _persist_retry_cdn)
+                        continue
+                    raise
             if status_cb:
                 status_cb("✓ Domain added to CDN service")
 
@@ -369,6 +396,7 @@ def reconcile_cdn_service_state(
                 }
             )
             c["cdn_service_id"] = cdn_service_id
+            c["cdn_url"] = cdn_url
 
         _update_local_config(logging_service_id, _persist_cdn)
     result = ReconciliationResult(service_id=cdn_service_id, created=created_cdn_service)
@@ -585,14 +613,32 @@ def build_desired_state(logging_service_id: str, token: str) -> UnifiedDesiredSt
     compute_scorer = None
     kv_stores: dict[str, DeclarativeKVStore] = {}
     if state.scoring.enabled:
+        from backend.provision.opaque_names import generate_opaque_scorer_domain
+        from backend.provision.session_scoring.wasm_deploy import (
+            _fetch_existing_scoring_domain,
+            _persisted_scoring_domain,
+        )
         from backend.provision.session_scoring_orchestrator import _resolve_tenant_matrix_for_deploy
         from backend.scoring import serialize_kv
 
+        scorer_domain = (state.scoring.domain or "").strip() or _persisted_scoring_domain(logging_service_id)
+        if not scorer_domain:
+            existing_scorer = find_service_by_name(f"Session Scoring Service for {logging_service_id}", token)
+            if existing_scorer and existing_scorer.get("id"):
+                scorer_domain = _fetch_existing_scoring_domain(
+                    existing_scorer["id"],
+                    token,
+                    versions=existing_scorer.get("versions")
+                    if isinstance(existing_scorer.get("versions"), list)
+                    else None,
+                )
+        if not scorer_domain:
+            scorer_domain = generate_opaque_scorer_domain()
         store_name = MATRIX_STORE_NAME_TEMPLATE.format(sid=logging_service_id)
         compute_scorer = DeclarativeComputeService(
             name=f"Session Scoring Service for {logging_service_id}",
             package_path=str(_SCORER_PACKAGE),
-            domains=[state.scoring.domain],
+            domains=[scorer_domain],
             linked_kv_stores=[store_name],
         )
         keys: dict[str, str] = {}
@@ -697,7 +743,38 @@ def reconcile_infrastructure(
             if status_cb:
                 status_cb("⏳ Phase 1: Reconciling edge KV Stores...")
                 status_cb("⏳ Phase 2: Reconciling Compute Scorer Service and uploading WASM package...")
-            scoring_meta = ensure_scoring_service(logging_service_id, token, status_cb=status_cb)
+            from backend.provision.opaque_names import generate_opaque_scorer_domain
+
+            cfg_scoring = cfg.get("scoring") or {}
+            persisted_scorer_domain = (cfg_scoring.get("scoring_domain") or cfg_scoring.get("domain") or "").strip()
+            raw_desired_domain = desired.compute_scorer.domains[0] if desired.compute_scorer.domains else ""
+            desired_scorer_domain = raw_desired_domain.strip() if isinstance(raw_desired_domain, str) else ""
+            candidate_scorer_domain = (
+                persisted_scorer_domain or desired_scorer_domain or generate_opaque_scorer_domain()
+            )
+
+            def _persist_scorer_domain(selected_domain: str) -> None:
+                def _apply_dom(disk_cfg: dict[str, Any]) -> None:
+                    s = disk_cfg.setdefault("scoring", {})
+                    if isinstance(s, dict):
+                        s["scoring_domain"] = selected_domain
+                        s["domain"] = selected_domain
+
+                _persist(_apply_dom)
+
+            if not persisted_scorer_domain:
+                _persist_scorer_domain(candidate_scorer_domain)
+
+            import inspect
+
+            ensure_kwargs: dict[str, Any] = {"status_cb": status_cb}
+            ensure_sig = inspect.signature(ensure_scoring_service).parameters
+            if "preferred_domain" in ensure_sig:
+                ensure_kwargs["preferred_domain"] = candidate_scorer_domain
+                ensure_kwargs["allow_domain_retry"] = not bool(persisted_scorer_domain)
+                ensure_kwargs["on_domain_selected"] = _persist_scorer_domain
+
+            scoring_meta = ensure_scoring_service(logging_service_id, token, **ensure_kwargs)
             created_scoring_resources = dict(scoring_meta.get("created_resources") or {})
             scoring_service_id, matrix_store_id = (
                 scoring_meta["scoring_service_id"],

@@ -2071,10 +2071,14 @@ def test_wizard_yes_mode_builds_complete_config_with_defaults():
     assert cfg["logging_service_id"] == "svc-1"
     assert cfg["service_name"] == "Customer Service"
     assert cfg["fos_region"] == "us-east-1"
-    assert cfg["fos_bucket_name"] == "fos-svc-1-logs"
+    assert cfg["fos_bucket_name"].startswith("fla-")
+    assert "svc-1" not in cfg["fos_bucket_name"]
     assert cfg["sample_rate"] == 100
     assert cfg["edge_only"] is True
-    assert cfg["cdn_url"].startswith("https://svc-1.")
+    assert cfg["cdn_url"].startswith("https://fla-")
+    assert cfg["cdn_url"].endswith(".global.ssl.fastly.net")
+    assert "svc-1" not in cfg["cdn_url"]
+    assert cfg["fos_bucket_name"] not in cfg["cdn_url"]
     assert cfg["delete_after"] is True
     assert "cdn_secret" in cfg and len(cfg["cdn_secret"]) >= 16
     assert cfg["log_fields"]["preset"] == "standard"
@@ -2093,19 +2097,24 @@ def test_wizard_exits_1_when_log_format_validation_fails(capsys):
 
 
 def test_wizard_sanitises_service_id_for_bucket_name():
-    """Bucket name derives from service_id with non-alphanumeric chars
-    replaced. Pinned because S3-compatible bucket names reject ``_``,
-    ``.``, uppercase, etc., and a leaked unsafe id would fail at
-    ``CreateBucket`` time."""
+    """Default bucket name is an opaque S3-safe CSPRNG identifier (SEC-22),
+    never deriving from ``service_id`` and containing no invalid chars
+    (``_``, ``.``, uppercase) that would fail at ``CreateBucket`` time."""
     with (
         patch("backend.provision.cli.validate_log_format", return_value=[]),
         patch("backend.provision.cli.fastly", return_value={"name": "x"}),
     ):
         cfg = cli.wizard(_args(token="t", service_id="My_Service.ID_123"))
-    assert cfg["fos_bucket_name"] == "fos-my-service-id-123-logs"
+    bucket = cfg["fos_bucket_name"]
+    assert bucket.startswith("fla-")
+    assert len(bucket) == 28
+    assert "my" not in bucket.lower() or len(bucket) == 28
+    assert "service" not in bucket.lower()
+    assert "123" not in bucket or len(bucket) == 28
     # No invalid bucket-name chars leak through
-    assert "_" not in cfg["fos_bucket_name"]
-    assert "." not in cfg["fos_bucket_name"]
+    assert "_" not in bucket
+    assert "." not in bucket
+    assert bucket == bucket.lower()
 
 
 def test_wizard_clamps_sample_rate_to_1_to_100():

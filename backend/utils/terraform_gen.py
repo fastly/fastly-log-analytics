@@ -80,12 +80,18 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
     if cfg.get("log_fields") is not None and not isinstance(cfg.get("log_fields"), dict):
         raise ValueError("log_fields must be a dict")
 
+    from backend.provision.opaque_names import (
+        generate_opaque_bucket_name,
+        generate_opaque_cdn_prefix,
+        generate_opaque_label,
+    )
+
     raw_logging_sid = _tf_str(cfg.get("logging_service_id"), "logging_service_id").replace("\r", "").replace("\n", "")
     raw_sid = _tf_str(cfg.get("service_id"), "service_id").replace("\r", "").replace("\n", "")
     service_id = raw_logging_sid or raw_sid or "YOUR_SERVICE_ID"
     endpoint_name = _tf_str(prov.get("endpoint_name"), "provisioning.endpoint_name", default="fastly_log_analysis")
     region = _tf_str(cfg.get("fos_region"), "fos_region", default="us-east-1")
-    bucket = _tf_str(cfg.get("fos_bucket_name"), "fos_bucket_name", default="your-bucket-name")
+    bucket = _tf_str(cfg.get("fos_bucket_name"), "fos_bucket_name", default="") or generate_opaque_bucket_name()
     prefix = _tf_str(cfg.get("fos_prefix"), "fos_prefix").strip("/")
 
     raw_lp = cfg.get("log_period")
@@ -112,7 +118,7 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
         rum_period = parse_period(rum_period_val)
 
     cdn_service_name = _tf_str(cfg.get("cdn_service_name"), "cdn_service_name", default="Fastly Log Analysis CDN Proxy")
-    cdn_prefix = _tf_str(cfg.get("cdn_prefix"), "cdn_prefix", default=bucket)
+    cdn_prefix = _tf_str(cfg.get("cdn_prefix"), "cdn_prefix", default="") or generate_opaque_cdn_prefix()
     cdn_domain = f"{cdn_prefix}.global.ssl.fastly.net"
 
     shield_aliases = (
@@ -484,23 +490,36 @@ provider "aws" {{
     if cfg.get("deployment_mode") == "cloud":
         raw_install = str(cfg.get("install_name", "flp")).replace("\x00", "").replace("\r", "").replace("\n", "")
         install_name = _terraform_template_escape(re.sub(r"[^a-zA-Z0-9_-]", "-", raw_install).strip("-") or "flp")
+        compute_domain = (
+            _tf_str(cfg.get("cloud_compute_domain"), "cloud_compute_domain", default="").strip()
+            or f"{generate_opaque_label('fla')}.edgecompute.app"
+        )
+        worker_domain = (
+            _tf_str(cfg.get("cloud_worker_domain"), "cloud_worker_domain", default="").strip()
+            or f"{generate_opaque_label('fla')}.edgecompute.app"
+        )
+        front_domain = (
+            _tf_str(cfg.get("cloud_front_domain"), "cloud_front_domain", default="").strip()
+            or _tf_str(cfg.get("share_domain"), "share_domain", default="").strip()
+            or f"{generate_opaque_label('fla')}.global.ssl.fastly.net"
+        )
         files["cloud_compute.tf.json"] = _dump(
             {
                 "resource": {
                     "fastly_service_compute": {
                         "flp": {
                             "name": install_name,
-                            "domain": [{"name": f"{install_name}.edgecompute.app"}],
+                            "domain": [{"name": compute_domain}],
                         },
                         "flp_worker": {
                             "name": f"{install_name}-worker",
-                            "domain": [{"name": f"{install_name}-worker.edgecompute.app"}],
+                            "domain": [{"name": worker_domain}],
                         },
                     },
                     "fastly_service_vcl": {
                         "flp_front": {
                             "name": f"{install_name}-front",
-                            "domain": [{"name": f"{install_name}.global.ssl.fastly.net"}],
+                            "domain": [{"name": front_domain}],
                         }
                     },
                 }

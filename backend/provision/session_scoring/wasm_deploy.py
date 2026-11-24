@@ -6,12 +6,18 @@ import hashlib
 import json
 import secrets
 import urllib.parse
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from backend.core.fastly.client import fastly, fastly_raw, get_active_version, list_vcl_snippets
 from backend.core.vcl_generator import VclSafetyError, validate_quoted_literal
 from backend.provision.cli import BOLD, _c, draft_version, info, ok, warn
+from backend.provision.opaque_names import (
+    MAX_COLLISION_ATTEMPTS,
+    generate_opaque_scorer_domain,
+    is_domain_collision_error,
+)
 from backend.provision.orchestrator import product_enabled
 from backend.provision.session_scoring.stores import (
     _SCORER_PACKAGE,
@@ -63,7 +69,51 @@ def _scoring_service_name(logging_service_id: str) -> str:
 
 
 def _scoring_domain(logging_service_id: str) -> str:
+    """Return the legacy deterministic scoring domain for backwards-compatible lookups."""
     return SCORING_DOMAIN_TEMPLATE.format(sid_lower=logging_service_id.lower())
+
+
+def _persisted_scoring_domain(logging_service_id: str) -> str:
+    """Return a persisted scoring domain from local service config, if any."""
+    try:
+        from backend import config as svcconfig
+
+        cfg = svcconfig.load_config(logging_service_id) or {}
+        scoring_cfg = cfg.get("scoring") or {}
+        if isinstance(scoring_cfg, dict):
+            dom = scoring_cfg.get("scoring_domain") or scoring_cfg.get("domain") or ""
+            if isinstance(dom, str) and dom.strip():
+                return dom.strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _fetch_existing_scoring_domain(
+    scoring_service_id: str,
+    token: str,
+    *,
+    versions: list[dict[str, Any]] | None = None,
+) -> str:
+    """Read the first configured domain from an existing Fastly Compute scorer service."""
+    try:
+        ver_list = versions
+        if ver_list is None:
+            ver_list = fastly("GET", f"/service/{scoring_service_id}/version", token=token) or []
+        active_ver = next((v.get("number") for v in ver_list if v.get("active")), None)
+        target_ver = active_ver or (
+            max((v.get("number", 0) for v in ver_list if isinstance(v.get("number"), int)), default=0) or None
+        )
+        if not target_ver:
+            return ""
+        domains = fastly("GET", f"/service/{scoring_service_id}/version/{target_ver}/domain", token=token) or []
+        for entry in domains:
+            name = (entry or {}).get("name", "")
+            if isinstance(name, str) and name.strip():
+                return name.strip()
+    except RuntimeError:
+        return ""
+    return ""
 
 
 def _find_scoring_service(logging_service_id: str, token: str) -> dict | None:
@@ -79,10 +129,17 @@ def _find_scoring_service(logging_service_id: str, token: str) -> dict | None:
     return None
 
 
-def ensure_scoring_service(logging_service_id: str, token: str, *, status_cb=None) -> dict[str, Any]:
+def ensure_scoring_service(
+    logging_service_id: str,
+    token: str,
+    *,
+    status_cb=None,
+    preferred_domain: str | None = None,
+    allow_domain_retry: bool | None = None,
+    on_domain_selected: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
     """Create (or reuse) the per-customer session-scoring Compute service,     its two ConfigStores, the AES-256 key, and resource links from v1 of     the service to the stores."""
     name = _scoring_service_name(logging_service_id)
-    domain = _scoring_domain(logging_service_id)
     info(f"Ensuring scoring service {_c(BOLD, name)}")
     if status_cb:
         status_cb(f"⏳ Ensuring scoring service '{name}'...")
@@ -92,6 +149,11 @@ def ensure_scoring_service(logging_service_id: str, token: str, *, status_cb=Non
         if status_cb:
             status_cb(f"✅ Scoring service '{name}' already exists.")
         scoring_service_id = existing["id"]
+        domain = (preferred_domain or "").strip() or _persisted_scoring_domain(logging_service_id)
+        if not domain and isinstance(existing.get("versions"), list) and existing["versions"]:
+            domain = _fetch_existing_scoring_domain(scoring_service_id, token, versions=existing["versions"])
+        if not domain:
+            domain = _scoring_domain(logging_service_id)
         keys_store = _find_config_store(KEYS_STORE_NAME_TEMPLATE.format(sid=scoring_service_id), token)
         cfg_store = _find_config_store(CONFIG_STORE_NAME_TEMPLATE.format(sid=scoring_service_id), token)
         matrix_store = _find_kv_store(MATRIX_STORE_NAME_TEMPLATE.format(sid=scoring_service_id), token)
@@ -119,6 +181,11 @@ def ensure_scoring_service(logging_service_id: str, token: str, *, status_cb=Non
         }
     # ── Fresh create. The scorer runs on Compute, which needs THREE Fastly
     # botched enable never leaves an orphaned half-built service behind. ───────
+    persisted = (preferred_domain or "").strip() or _persisted_scoring_domain(logging_service_id)
+    domain = persisted or generate_opaque_scorer_domain()
+    retry_on_collision = (not persisted) if allow_domain_retry is None else allow_domain_retry
+    if on_domain_selected:
+        on_domain_selected(domain)
     if not product_enabled(token, "kv_store"):
         raise EntitlementError(
             "kv_store_not_enabled",
@@ -147,7 +214,19 @@ def ensure_scoring_service(logging_service_id: str, token: str, *, status_cb=Non
         ok(f"Created scoring service {scoring_service_id}")
         if status_cb:
             status_cb(f"✅ Created scoring service '{name}'.")
-        fastly("POST", f"/service/{scoring_service_id}/version/1/domain", {"name": domain}, token=token)
+        attempts = MAX_COLLISION_ATTEMPTS if retry_on_collision else 1
+        for attempt in range(1, attempts + 1):
+            try:
+                fastly("POST", f"/service/{scoring_service_id}/version/1/domain", {"name": domain}, token=token)
+                break
+            except RuntimeError as exc:
+                if retry_on_collision and attempt < attempts and is_domain_collision_error(exc):
+                    warn(f"Scoring domain '{domain}' already taken (attempt {attempt}/{attempts}); retrying…")
+                    domain = generate_opaque_scorer_domain()
+                    if on_domain_selected:
+                        on_domain_selected(domain)
+                    continue
+                raise
         ok(f"Added domain {domain}")
         if status_cb:
             status_cb(f"✅ Added domain '{domain}'.")

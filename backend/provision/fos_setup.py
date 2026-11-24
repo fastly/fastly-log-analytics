@@ -195,48 +195,80 @@ def ensure_fos_bucket(
     *,
     service_id: str | None = None,
     on_created=None,
+    system_generated: bool = False,
+    on_name_selected=None,
+    max_attempts: int | None = None,
 ) -> bool:
     """Create the bucket via Boto3 (S3 API). Returns True on success."""
-    s3 = _get_fos_s3_client(
-        access_key, secret_key, region, service_id=service_id, bucket_name=name, context=f"provision:{name}"
+    from backend.provision.opaque_names import (
+        MAX_COLLISION_ATTEMPTS,
+        generate_opaque_bucket_name,
+        is_bucket_collision_error,
     )
-    try:
+
+    attempts = (max_attempts or MAX_COLLISION_ATTEMPTS) if system_generated else 1
+    candidate = name
+    for attempt in range(1, attempts + 1):
+        if on_name_selected:
+            on_name_selected(candidate)
+        s3 = _get_fos_s3_client(
+            access_key,
+            secret_key,
+            region,
+            service_id=service_id,
+            bucket_name=candidate,
+            context=f"provision:{candidate}",
+        )
         try:
-            s3.head_bucket(Bucket=name)
-            ok(f"FOS bucket already exists: {_c(BOLD, name)}")
+            try:
+                s3.head_bucket(Bucket=candidate)
+                if system_generated and attempt < attempts:
+                    warn(f"FOS bucket '{candidate}' already exists (attempt {attempt}/{attempts}); retrying…")
+                    candidate = generate_opaque_bucket_name()
+                    continue
+                ok(f"FOS bucket already exists: {_c(BOLD, candidate)}")
+                if status_cb:
+                    status_cb(f"✅ Bucket '{candidate}' already exists.")
+                return True
+            except ClientError as exc:
+                error_code = exc.response.get("Error", {}).get("Code", "")
+                if error_code == "404":
+                    pass
+                elif error_code in ("403", "Forbidden", "AccessDenied"):
+                    if system_generated and attempt < attempts:
+                        warn(f"FOS bucket '{candidate}' is unavailable (attempt {attempt}/{attempts}); retrying…")
+                        candidate = generate_opaque_bucket_name()
+                        continue
+                    raise RuntimeError(
+                        f"Bucket {_c(BOLD, candidate)} exists but access denied. "
+                        f"Verify FOS credentials have permission to HeadBucket: {exc}"
+                    )
+                else:
+                    raise RuntimeError(f"Could not check FOS bucket status: {exc}")
+            info(f"Creating FOS bucket {_c(BOLD, candidate)} in {_c(BOLD, region)}…")
             if status_cb:
-                status_cb(f"✅ Bucket '{name}' already exists.")
-            return True
-        except ClientError as exc:
-            error_code = exc.response.get("Error", {}).get("Code", "")
-            if error_code == "404":
-                pass
-            elif error_code in ("403", "Forbidden", "AccessDenied"):
-                raise RuntimeError(
-                    f"Bucket {_c(BOLD, name)} exists but access denied. "
-                    f"Verify FOS credentials have permission to HeadBucket: {exc}"
-                )
-            else:
-                raise RuntimeError(f"Could not check FOS bucket status: {exc}")
-        info(f"Creating FOS bucket {_c(BOLD, name)} in {_c(BOLD, region)}…")
-        if status_cb:
-            status_cb(f"⏳ Creating bucket '{name}' in {region}...")
-        try:
-            if region == "us-east-1":
-                s3.create_bucket(Bucket=name)
-            else:
-                s3.create_bucket(Bucket=name, CreateBucketConfiguration={"LocationConstraint": region})
-            ok("FOS bucket created")
-            if on_created:
-                on_created()
-            if status_cb:
-                status_cb("✅ Bucket created.")
-            return True
-        except ClientError as exc:
-            raise RuntimeError(f"Could not create FOS bucket via S3 API: {exc}")
-    finally:
-        if isinstance(s3, _ProvisioningTracker):
-            s3.flush()
+                status_cb(f"⏳ Creating bucket '{candidate}' in {region}...")
+            try:
+                if region == "us-east-1":
+                    s3.create_bucket(Bucket=candidate)
+                else:
+                    s3.create_bucket(Bucket=candidate, CreateBucketConfiguration={"LocationConstraint": region})
+                ok("FOS bucket created")
+                if on_created:
+                    on_created()
+                if status_cb:
+                    status_cb("✅ Bucket created.")
+                return True
+            except ClientError as exc:
+                if system_generated and attempt < attempts and is_bucket_collision_error(exc):
+                    warn(f"FOS bucket '{candidate}' collision on create (attempt {attempt}/{attempts}); retrying…")
+                    candidate = generate_opaque_bucket_name()
+                    continue
+                raise RuntimeError(f"Could not create FOS bucket via S3 API: {exc}")
+        finally:
+            if isinstance(s3, _ProvisioningTracker):
+                s3.flush()
+    raise RuntimeError(f"Could not allocate an available FOS bucket name after {attempts} attempts.")
 
 
 def delete_fos_bucket(

@@ -497,15 +497,33 @@ def provision(cfg: dict, _resume_from_state: bool = False):
         yield {"type": "status", "message": "🪣 Step 3/8: Creating Fastly Object Storage bucket..."}
         step(3, total, "Creating Fastly Object Storage bucket")
 
+        from backend.provision.opaque_names import generate_opaque_bucket_name, generate_opaque_cdn_prefix
+
+        if not (cfg.get("fos_bucket_name") or "").strip():
+            cfg["fos_bucket_name"] = generate_opaque_bucket_name()
+            cfg["_system_generated_bucket"] = True
+            state["fos_bucket_name"] = cfg["fos_bucket_name"]
+            save_state(state)
+
+        def _record_bucket_selected(selected_name: str) -> None:
+            cfg["fos_bucket_name"] = selected_name
+            state["fos_bucket_name"] = selected_name
+            save_state(state)
+
         def _record_bucket_created():
             state["_created_resources"]["fos_bucket"] = cfg["fos_bucket_name"]
             save_state(state)
 
         import inspect
 
-        bucket_kwargs = {"service_id": cfg["logging_service_id"]}
-        if "on_created" in inspect.signature(ensure_fos_bucket).parameters:
+        bucket_sig = inspect.signature(ensure_fos_bucket).parameters
+        bucket_kwargs: dict = {"service_id": cfg["logging_service_id"]}
+        if "on_created" in bucket_sig:
             bucket_kwargs["on_created"] = _record_bucket_created
+        if "system_generated" in bucket_sig and cfg.get("_system_generated_bucket"):
+            bucket_kwargs["system_generated"] = True
+        if "on_name_selected" in bucket_sig:
+            bucket_kwargs["on_name_selected"] = _record_bucket_selected
         yield from run_with_events(
             ensure_fos_bucket,
             cfg["fos_bucket_name"],
@@ -556,6 +574,12 @@ def provision(cfg: dict, _resume_from_state: bool = False):
         }
         step(6, total, "Creating Fastly CDN service to front Fastly Object Storage")
 
+        if not (cfg.get("cdn_url") or "").strip():
+            cfg["cdn_url"] = f"https://{generate_opaque_cdn_prefix()}.global.ssl.fastly.net"
+            cfg["_system_generated_cdn_domain"] = True
+            state["cdn_url"] = cfg["cdn_url"]
+            save_state(state)
+
         def _record_cdn_service_id(svc_id):
             state["cdn_service_id"] = svc_id
             state["_created_resources"]["cdn_service_id"] = svc_id
@@ -570,6 +594,9 @@ def provision(cfg: dict, _resume_from_state: bool = False):
             on_created=_record_cdn_service_id,
         )
         state["cdn_service_id"] = cdn_svc["id"]
+        if cdn_svc.get("cdn_url"):
+            cfg["cdn_url"] = cdn_svc["cdn_url"]
+            state["cdn_url"] = cdn_svc["cdn_url"]
         if cdn_svc.get("rate_limiting") is not None:
             state["rate_limiting"] = cdn_svc["rate_limiting"]
         save_state(state)

@@ -689,6 +689,7 @@ def ensure_cdn_service(
     return {
         "id": cdn_sid,
         "name": updated_cfg.get("cdn_service_name") or f"Log Analysis CDN Service for {logging_service_id}",
+        "cdn_url": (updated_cfg.get("fos_proxy") or {}).get("domain") or updated_cfg.get("cdn_url", ""),
         "rate_limiting": account_has_rate_limiting(token, logging_service_id),
         "created": reconciliation.created,
     }

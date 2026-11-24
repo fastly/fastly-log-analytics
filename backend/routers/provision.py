@@ -320,7 +320,8 @@ def provision_validate(body: ProvisionValidateRequest):
             logger.warning("[provision-validate] Failed to fetch token info: %s", e)
 
         svc = fastly("GET", f"/service/{service_id}", token=token)
-        safe_service_id = re.sub(r"-+", "-", re.sub(r"[^a-zA-Z0-9]", "-", service_id)).strip("-")
+        from backend.provision.opaque_names import generate_opaque_bucket_name, generate_opaque_cdn_prefix
+
         return debug_envelope(
             {
                 "service_name": svc.get("name", service_id),
@@ -328,13 +329,13 @@ def provision_validate(body: ProvisionValidateRequest):
                 "defaults": {
                     "endpoint_name": "Fastly Object Storage Logs",
                     "fos_region": "us-east-1",
-                    "fos_bucket_name": f"fos-{safe_service_id.lower()}-logs",
+                    "fos_bucket_name": generate_opaque_bucket_name(),
                     "fos_prefix": "",
                     "sample_rate": 100,
                     "edge_only": True,
                     "log_period": "1 minute",
                     "cdn_service_name": f"Log Analysis CDN Service for {service_id}",
-                    "cdn_prefix": f"fos-{safe_service_id}-logs",
+                    "cdn_prefix": generate_opaque_cdn_prefix(),
                 },
             },
             gated=True,
@@ -1019,6 +1020,11 @@ def provision_execute(req: ProvisionExecuteRequest):
         raise HTTPException(status_code=400, detail=make_error("invalid_log_period", str(e)))
 
     _validate_provision_vcl_inputs(cfg, strict_rum_path=True)
+    from backend.provision.opaque_names import generate_opaque_bucket_name, generate_opaque_cdn_prefix
+
+    if not (cfg.get("fos_bucket_name") or "").strip():
+        cfg["fos_bucket_name"] = generate_opaque_bucket_name()
+        cfg["_system_generated_bucket"] = True
     _validate_fos_bucket_name(cfg["fos_bucket_name"])
     _validate_fos_prefix(cfg.get("fos_prefix", ""))
 
@@ -1030,6 +1036,9 @@ def provision_execute(req: ProvisionExecuteRequest):
                 status_code=400,
                 detail=make_error("domain_unavailable", reason, domain=domain),
             )
+    else:
+        cfg["cdn_url"] = f"https://{generate_opaque_cdn_prefix()}.global.ssl.fastly.net"
+        cfg["_system_generated_cdn_domain"] = True
 
     cfg["cdn_secret"] = secrets.token_urlsafe(24)
 
@@ -1305,8 +1314,20 @@ def provision_ingest(payload: ProvisionConfigRequest):
     fos_key_id = ""
 
     if not fos_access_key or not fos_secret_key:
-        desc = f"fos-log-analysis-{body.get('fos_bucket_name')}"
-        existing = find_fos_key(desc, token)
+        from backend.provision.opaque_names import generate_opaque_label
+
+        bucket_name = body.get("fos_bucket_name")
+        legacy_descs = [
+            *([] if not bucket_name else [f"fos-log-analysis-{bucket_name}"]),
+            f"fos-log-analysis-{logging_service_id}",
+        ]
+        existing = None
+        matched_desc = ""
+        for candidate_desc in legacy_descs:
+            existing = find_fos_key(candidate_desc, token)
+            if existing:
+                matched_desc = candidate_desc
+                break
         existing_secret = existing.get("secret_key") if existing else None
         if existing and existing_secret:
             fos_access_key = existing["access_key"]
@@ -1317,16 +1338,16 @@ def provision_ingest(payload: ProvisionConfigRequest):
                 status_code=409,
                 detail=make_error(
                     "fos_key_secret_unavailable",
-                    f"An access key '{desc}' already exists but its secret is not retrievable; "
+                    f"An access key '{matched_desc}' already exists but its secret is not retrievable; "
                     "provide fos_access_key + fos_secret_key explicitly.",
                 ),
             )
         else:
             try:
-                bucket_name = body.get("fos_bucket_name")
                 if not bucket_name:
                     raise HTTPException(status_code=400, detail={"error": "fos_bucket_name required"})
-                new_key = ensure_fos_access_key(desc, body, token, buckets=[bucket_name])
+                opaque_desc = f"fos-log-analysis-{generate_opaque_label('key')}"
+                new_key = ensure_fos_access_key(opaque_desc, body, token, buckets=[bucket_name])
                 fos_access_key = new_key["access_key"]
                 fos_secret_key = new_key["secret_key"]
                 fos_key_id = new_key["id"]

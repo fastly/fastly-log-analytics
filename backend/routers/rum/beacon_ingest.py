@@ -33,7 +33,13 @@ async def receive_rum_beacon_fallback() -> Response:
 
 
 def _resolve_rum_js_service_id(request: Request, service_id: str | None) -> str | None:
-    """Resolve active service ID from query param, header, cookie, or default configured service."""
+    """Resolve active service ID from query param, header, cookie, or default configured service.
+
+    Unauthenticated remote callers never fall back to the first configured
+    service so ``GET /js/rum.js`` cannot be probed to enumerate raw service IDs.
+    """
+    from backend.utils.remote_access import is_request_remote
+
     sid = service_id
     if not sid:
         sid = request.headers.get("x-service-id")
@@ -44,7 +50,9 @@ def _resolve_rum_js_service_id(request: Request, service_id: str | None) -> str 
         sid = None
 
     if not sid:
-        sid = svcconfig.get_active_service_id(fallback_to_first=True)
+        is_unauth_remote = is_request_remote(request) and getattr(request.state, "analyst_session", None) is None
+        if not is_unauth_remote:
+            sid = svcconfig.get_active_service_id(fallback_to_first=True)
     return sid
 
 
