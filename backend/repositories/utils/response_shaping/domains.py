@@ -762,14 +762,24 @@ def compute_network_global_summary(
     has_country: bool = True,
     zero_as_int: bool = True,
 ) -> dict[str, Any]:
-    """Compute global network health summary (global score, avg RTT, worst ASN, worst country/city)."""
-    from backend.utils.countries import format_city_label
+    """Compute global network health summary (global score, avg RTT, worst ASN, worst country)."""
+    from backend.utils.countries import COUNTRY_MAP
 
     rtts = rtt_values if rtt_values is not None else (all_rtt or ())
     zero_default: int | float = 0 if zero_as_int else 0.0
 
-    all_hs = [le["health_score_now"] for le in leaderboard if le.get("health_score_now") is not None]
-    global_hs = round(sum(all_hs) / len(all_hs), 1) if all_hs else zero_default
+    weighted_hs = [
+        (float(le["health_score_now"]), max(0, int(le.get("total_reqs") or 0)))
+        for le in leaderboard
+        if le.get("health_score_now") is not None
+    ]
+    total_hs_w = sum(w for _, w in weighted_hs)
+    if total_hs_w > 0:
+        global_hs: float | int = round(sum(s * w for s, w in weighted_hs) / total_hs_w, 1)
+    elif weighted_hs:
+        global_hs = round(sum(s for s, _ in weighted_hs) / len(weighted_hs), 1)
+    else:
+        global_hs = zero_default
 
     if rtts:
         if rtt_weights is not None and len(rtt_weights) == len(rtts):
@@ -786,7 +796,7 @@ def compute_network_global_summary(
 
     worst_asn: dict[str, Any] | None = None
     if leaderboard:
-        significant = [le for le in leaderboard if le.get("total_reqs", 0) > total_reqs * 0.01]
+        significant = [le for le in leaderboard if le.get("total_reqs", 0) > total_reqs * 0.01] or list(leaderboard)
         if significant:
             worst = min(
                 significant,
@@ -796,21 +806,27 @@ def compute_network_global_summary(
 
     worst_country: dict[str, Any] | None = None
     if has_country and map_buckets:
-        for b in reversed(map_buckets):
+        country_acc: dict[str, list[float]] = {}
+        for b in map_buckets:
             cities_in_b = b.get("cities")
-            cities_seq = cities_in_b if isinstance(cities_in_b, list) else []
-            sig_countries = [c for c in cities_seq if isinstance(c, Mapping) and c.get("reqs", 0) >= 1]
-            if sig_countries:
-                wc = min(
-                    sig_countries,
-                    key=lambda c: c["health_score"] if c.get("health_score") is not None else 100,
-                )
-                idx = wc.get("city_idx", -1)
-                city_entry = cities_list[idx] if 0 <= idx < len(cities_list) else None
-                city_name = city_entry["name"] if city_entry else ""
-                label = format_city_label(city_name, wc["country"])
-                worst_country = {"label": label, "score": wc["health_score"]}
-                break
+            if not isinstance(cities_in_b, list):
+                continue
+            for c in cities_in_b:
+                if not isinstance(c, Mapping):
+                    continue
+                ctry = str(c.get("country") or "").strip()
+                hs = c.get("health_score")
+                reqs = float(c.get("reqs") or 0)
+                if not ctry or hs is None or reqs <= 0:
+                    continue
+                acc = country_acc.setdefault(ctry, [0.0, 0.0])
+                acc[0] += float(hs) * reqs
+                acc[1] += reqs
+        sig_countries = {k: v for k, v in country_acc.items() if v[1] > total_reqs * 0.01} or country_acc
+        if sig_countries:
+            worst_code, worst_vals = min(sig_countries.items(), key=lambda kv: kv[1][0] / kv[1][1])
+            label = COUNTRY_MAP.get(worst_code, worst_code)
+            worst_country = {"label": label, "score": round(worst_vals[0] / worst_vals[1], 1)}
 
     return {
         "global_health_score": global_hs,

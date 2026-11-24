@@ -1,0 +1,188 @@
+"""Parity tests for High-Scale /origin, /assets-shield, and /fastly-value."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+from backend.high_scale._common import build_published_projection_where
+
+pytestmark = pytest.mark.no_postgres
+from backend.high_scale.ingest_controller.service import assets_aggregates
+from backend.high_scale.performance import value_summary
+from backend.models.analytics import AssetsRequest, ValueSummaryRequest
+
+
+def _empty_service(client: Any, service_id: str = "svc-parity-test") -> SimpleNamespace:
+    empty_wm = SimpleNamespace(coverage_start=None, coverage_end=None, last_visible_event_id=None)
+    return SimpleNamespace(
+        service_id=service_id,
+        client=client,
+        watermark=lambda: empty_wm,
+        watermark_for=lambda domain="request": empty_wm,
+    )
+
+
+def test_projection_where_uses_half_open_end_bound() -> None:
+    sql, params = build_published_projection_where(
+        "svc-parity-test",
+        "origin_summary",
+        "2026-11-24T16:00:00Z",
+        "2026-11-24T18:00:00Z",
+    )
+    assert "bucket_start >= {start:DateTime64(3)}" in sql
+    assert "bucket_start < {end:DateTime64(3)}" in sql
+    assert "bucket_start <=" not in sql
+    assert params["end"] == datetime(2026, 11, 24, 18, 0, tzinfo=UTC)
+
+
+def test_assets_aggregates_uses_half_open_end_bound() -> None:
+    sqls: list[str] = []
+
+    class _Client:
+        def execute(self, sql: str, params: dict | None = None) -> list[dict[str, Any]]:
+            sqls.append(sql)
+            return []
+
+    svc = _empty_service(_Client())
+    req = AssetsRequest(filters={}, start_time="2026-11-24T16:00:00Z", end_time="2026-11-24T18:00:00Z")
+    assets_aggregates(svc, req, "2026-11-24T16:00:00Z", "2026-11-24T18:00:00Z")  # type: ignore[arg-type]
+    assert sqls and all("event_timestamp < {end_time:DateTime64(3)}" in s for s in sqls)
+    assert all("event_timestamp <=" not in s for s in sqls)
+
+
+def test_value_summary_performance_only_prefix_cache_waf_null_and_half_open() -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    class _Client:
+        def execute(self, sql: str, params: dict | None = None) -> list[dict[str, Any]]:
+            calls.append((sql, dict(params or {})))
+            if "value:combined_buckets" in sql:
+                return [
+                    {
+                        "bucket": "2026-11-24T16:00:00Z",
+                        "total": 100,
+                        "hit_cnt": 80,
+                        "miss_cnt": 10,
+                        "pass_cnt": 10,
+                        "synth_cnt": 0,
+                        "bandwidth_saved": 8000,
+                        "total_bytes": 10000,
+                        "origin_cnt": 20,
+                        "shield_hit": 0,
+                        "shield_total": 0,
+                        "threats_cnt": 0,
+                        "sum_hit_elapsed": 80000.0,
+                        "cnt_hit_elapsed": 80,
+                        "sum_miss_elapsed": 100000.0,
+                        "cnt_miss_elapsed": 10,
+                        "waf_sample_cnt": 0,
+                        "waf_inspected": 0,
+                        "waf_blocked": 0,
+                        "waf_logged": 0,
+                        "waf_passed": 0,
+                        "waf_sig_cnt": 0,
+                        "http3_cnt": 10,
+                        "h2_cnt": 80,
+                        "h11_cnt": 10,
+                        "other_proto_cnt": 0,
+                        "tls_cnt": 100,
+                        "ipv6_cnt": 0,
+                    }
+                ]
+            if "value:p99" in sql:
+                return [{"p99_ms": 42.5}]
+            return []
+
+    svc = _empty_service(_Client(), service_id="svc-perf-only")
+    req_perf = ValueSummaryRequest(
+        filters={},
+        sections=["performance"],
+        start_time="2026-11-24T16:00:00Z",
+        end_time="2026-11-24T18:00:00Z",
+    )
+    res_perf = value_summary(svc, req_perf, "2026-11-24T16:00:00Z", "2026-11-24T18:00:00Z", sections={"performance"})
+    assert res_perf.performance is not None
+    assert res_perf.performance.cache_accel_factor == 10.0
+    assert res_perf.performance.avg_hit_latency_ms == 1.0
+    assert res_perf.performance.avg_miss_latency_ms == 10.0
+    assert res_perf.performance.p99_latency_ms == 42.5
+
+    bucket_sql = next(sql for sql, _ in calls if "value:combined_buckets" in sql)
+    assert "event_timestamp < {end:DateTime64(3)}" in bucket_sql
+    assert "startsWith(upper(custom_fields['cache']), 'HIT')" in bucket_sql
+    assert "startsWith(upper(custom_fields['cache']), 'MISS')" in bucket_sql
+
+    req_sec = ValueSummaryRequest(
+        filters={},
+        sections=["overview", "security"],
+        start_time="2026-11-24T16:00:00Z",
+        end_time="2026-11-24T18:00:00Z",
+    )
+    res_sec = value_summary(
+        svc, req_sec, "2026-11-24T16:00:00Z", "2026-11-24T18:00:00Z", sections={"overview", "security"}
+    )
+    assert res_sec.overview is not None and res_sec.overview.threats_blocked is None
+    assert res_sec.security is not None
+    assert res_sec.security.waf_blocked is None
+    assert res_sec.security.waf_logged is None
+    assert res_sec.security.waf_passed is None
+
+
+def test_value_summary_populates_io_section() -> None:
+    class _Client:
+        def execute(self, sql: str, params: dict | None = None) -> list[dict[str, Any]]:
+            if "value:combined_buckets" in sql:
+                return [{"bucket": "2026-11-24T16:00:00Z", "total": 50}]
+            if "value:io_summary" in sql:
+                return [
+                    {
+                        "image_requests": 20,
+                        "image_bytes": 400000,
+                        "io_count": 15,
+                        "io_bytes": 150000,
+                        "io_shield_bytes": 50000,
+                        "input_bytes": 300000,
+                        "output_bytes": 150000,
+                        "actual_saved": 150000,
+                    }
+                ]
+            if "value:io_formats" in sql:
+                return [{"format": "webp", "cnt": 15}, {"format": "png", "cnt": 5}]
+            if "value:io_opportunities" in sql:
+                return [{"url": "/img/hero.png", "request_count": 5, "total_bytes": 250000, "avg_kb": 48.8}]
+            if "value:io_conversions" in sql:
+                return [{"input_format": "png", "output_format": "webp", "cnt": 15, "avg_ratio": 2.0}]
+            if "value:io_series" in sql:
+                return [
+                    {
+                        "bucket": "2026-11-24T16:00:00Z",
+                        "io_count": 15,
+                        "io_bytes": 150000,
+                        "actual_saved": 150000,
+                    }
+                ]
+            return []
+
+    svc = _empty_service(_Client(), service_id="svc-io")
+    req = ValueSummaryRequest(
+        filters={},
+        sections=["io"],
+        start_time="2026-11-24T16:00:00Z",
+        end_time="2026-11-24T18:00:00Z",
+    )
+    res = value_summary(svc, req, "2026-11-24T16:00:00Z", "2026-11-24T18:00:00Z", sections={"io"})
+    assert res.io is not None
+    assert res.io.total_requests == 50
+    assert res.io.image_request_count == 20
+    assert res.io.image_bandwidth_bytes == 400000
+    assert res.io.io_transforms == 15
+    assert res.io.io_actual_bandwidth_saved_bytes == 150000
+    assert res.io.io_actual_compression_ratio == 2.0
+    assert res.io.modern_format_pct == 75.0
+    assert len(res.io.format_distribution) == 2
+    assert len(res.io.optimization_opportunities) == 1
+    assert len(res.io.io_format_conversion_pairs) == 1

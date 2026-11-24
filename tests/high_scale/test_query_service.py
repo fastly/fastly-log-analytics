@@ -1213,8 +1213,12 @@ def test_pop_health_aggregates_and_default_bounds():
     assert (sjc.p50_rtt_us, sjc.p95_ttfb_ms, sjc.cache_hit_rate, sjc.bandwidth_bytes) == (18000.0, 320.5, 75.0, 4096)
     assert (lhr.p50_rtt_us, lhr.p95_ttfb_ms, lhr.cache_hit_rate, lhr.bandwidth_bytes) == (None, None, 0.0, 0)
     ((sql, params),) = client.calls
-    assert "countIf(toInt32OrZero(custom_fields['status']) >= 400 OR toInt32OrZero(custom_fields['status']) = 0)" in sql
-    assert "'HIT', 'HIT-STALE'" in sql and params["start"] == _NET_START and params["end"] == _NET_END
+    assert "countIf(toInt32OrZero(custom_fields['status']) >= 500)" in sql
+    assert (
+        "startsWith(upper(custom_fields['cache']), 'HIT')" in sql
+        and params["start"] == _NET_START
+        and params["end"] == _NET_END
+    )
 
     s_def, c_def = _net_service()
     get_pop_health(s_def, None, None)
@@ -1459,7 +1463,7 @@ def _health_service() -> HighScaleService:
 def test_network_health_and_quality_full_clickhouse_payload():
     svc = _health_service()
     resp = network_health(svc, _Req(), _Req.start_time, _Req.end_time)
-    assert resp.buckets and len(resp.buckets) == 13 and resp.heatmap
+    assert resp.buckets and len(resp.buckets) == 12 and resp.heatmap
     assert resp.heatmap[0].buckets and resp.heatmap[0].asn == 7922 and resp.leaderboard
     lead = {row.asn: row for row in resp.leaderboard}
     assert lead[7922].health_score_now is not None and lead[15169].health_score_now < lead[7922].health_score_now
@@ -1558,9 +1562,9 @@ def test_network_health_real_ch_uses_rollups_subminute_sampling_and_fast_shieldi
     req = NetworkHealthRequest(start_time=start_s, end_time=end_s, bucket_seconds=300, top_n=30)
     resp = network_health(svc, req, start_s, end_s)
 
-    # Full 30x sampling (5m minute stride * 6x sub-minute stride) even when bucket_seconds=300.
-    assert resp.summary is not None and resp.summary.total_reqs == 3000
-    assert resp.heatmap[0].buckets[0].reqs == 3000
+    # Uniform 10x deterministic hash sampling across 24h without periodic minute/sub-minute strides.
+    assert resp.summary is not None and resp.summary.total_reqs == 1000
+    assert resp.heatmap[0].buckets[0].reqs == 1000
     assert resp.cities[0].lat == 37.33 and resp.cities[0].lon == -121.89
     assert resp.leaderboard[0].c_speed_mix == {"fast": 0.833, "medium": 0.167}
     assert resp.leaderboard[0].p95_rtt_us == pytest.approx((40000.0 * 2500 + 44000.0 * 500) / 3000)
@@ -1570,9 +1574,10 @@ def test_network_health_real_ch_uses_rollups_subminute_sampling_and_fast_shieldi
     assert client.matching("FROM network_minute_dimensions")
     assert not client.matching("sumMap(")
 
-    # Heatmap uses single-pass WITH + quantileTDigest + position(..., 'HIT'), and sub-minute slice.
+    # Heatmap uses single-pass WITH + quantileTDigest + position(..., 'HIT'), and deterministic hash sampling.
     ((heatmap_sql, _),) = client.matching("AS throughput_bps")
-    assert "toSecond(event_timestamp) < 10" in heatmap_sql
+    assert "cityHash64(event_id) % 10 = 0" in heatmap_sql
+    assert "toMinute" not in heatmap_sql and "toSecond" not in heatmap_sql
     assert "quantileTDigest(0.5)" in heatmap_sql
     assert "position(custom_fields['cache'], 'HIT') > 0" in heatmap_sql
 

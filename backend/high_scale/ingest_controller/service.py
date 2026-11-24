@@ -709,7 +709,7 @@ def assets_aggregates(
             [
                 *visible_fact_clauses("request"),
                 "event_timestamp >= {start_time:DateTime64(3)}",
-                "event_timestamp <= {end_time:DateTime64(3)}",
+                "event_timestamp < {end_time:DateTime64(3)}",
                 "url != ''",
                 *filter_clauses,
             ]

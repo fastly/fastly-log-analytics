@@ -134,18 +134,18 @@ def test_network_health_map_and_metro_scores_use_rtt_and_baseline(monkeypatch: p
     assert "quantileTDigest(0.5)(_rtt) AS rtt_med_us" in map_sql
     assert "quantileTDigest(0.1)(_rtt) AS rtt_p10_us" in map_sql
 
-    # sample_stride = 30 on 24h window scales heatmap, map_buckets, metro_leaderboard, and summary
-    assert resp.heatmap[0].buckets[0].reqs == 3000
-    assert resp.summary is not None and resp.summary.total_reqs == 3030
+    # sample_stride = 10 (cityHash64) on 24h window scales heatmap, map_buckets, metro_leaderboard, and summary
+    assert resp.heatmap[0].buckets[0].reqs == 1000
+    assert resp.summary is not None and resp.summary.total_reqs == 1010
     city_cell = resp.map_buckets[0].cities[0]
-    assert city_cell.reqs == 1500
-    assert resp.metro_leaderboard[0].total_reqs == 1500
+    assert city_cell.reqs == 500
+    assert resp.metro_leaderboard[0].total_reqs == 500
 
     # Map & metro health score reflect RTT ratio 60k/20k = 3.0 -> 60.0 (not 100.0!)
     assert city_cell.health_score == 60.0
     assert resp.metro_leaderboard[0].health_score == 60.0
 
-    # Summary avg_rtt_ms is request-weighted: (20*3000 + 300*30) / 3030 = 22.77ms -> 22.8ms
+    # Summary avg_rtt_ms is request-weighted: (20*1000 + 300*10) / 1010 = 22.77ms -> 22.8ms
     assert resp.summary.avg_rtt_ms == 22.8
 
 
@@ -205,5 +205,203 @@ def test_network_health_separate_metro_query_scales_and_uses_rtt(monkeypatch: py
     assert "quantileTDigest(0.5)(_rtt) AS rtt_med_us" in metro_sql
     assert "quantileTDigest(0.1)(_rtt) AS rtt_p10_us" in metro_sql
 
-    assert resp.metro_leaderboard[0].total_reqs == 1200
+    assert resp.metro_leaderboard[0].total_reqs == 400
     assert resp.metro_leaderboard[0].health_score == 68.0
+
+
+@pytest.mark.no_postgres
+def test_compute_network_global_summary_country_agg_and_weighted_health() -> None:
+    summary = compute_network_global_summary(
+        leaderboard=[
+            {"label": "Big ISP", "total_reqs": 9900, "health_score_now": 80.0},
+            {"label": "Tiny ISP", "total_reqs": 50, "health_score_now": 20.0},
+        ],
+        rtt_values=[20_000.0],
+        rtt_weights=[9950],
+        total_reqs=9950,
+        map_buckets=[
+            {
+                "bucket_idx": 0,
+                "bucket": "2026-09-14T00:00:00Z",
+                "cities": [
+                    {"country": "US", "city_idx": 0, "health_score": 82.0, "reqs": 8000},
+                    {"country": "FR", "city_idx": 1, "health_score": 55.0, "reqs": 500},
+                    {"country": "KR", "city_idx": 2, "health_score": 10.0, "reqs": 20},
+                ],
+            }
+        ],
+        cities_list=[
+            {"name": "Chicago", "lat": 41.8, "lon": -87.6},
+            {"name": "", "lat": 48.8, "lon": 2.3},
+            {"name": "Seoul", "lat": 37.5, "lon": 126.9},
+        ],
+        zero_as_int=False,
+    )
+    assert summary["global_health_score"] == 79.7
+    assert summary["worst_country"] == {"label": "France", "score": 55.0}
+
+
+@pytest.mark.no_postgres
+def test_network_health_no_periodic_minute_sampling_and_no_trailing_bucket(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_network_caches()
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    start_s, end_s = "2026-09-14T12:00:00Z", "2026-09-14T18:00:00Z"
+    b0 = int(datetime(2026, 9, 14, 12, 0, tzinfo=UTC).timestamp())
+
+    def responder(sql: str, params: dict[str, Any]):
+        if "FROM request_aggregates" in sql:
+            return [{"asn": 7922, "cnt": 5000}]
+        if "FROM network_minute_dimensions" in sql:
+            return []
+        if "AS throughput_bps" in sql:
+            return [
+                {
+                    "asn": 7922,
+                    "bucket_ts": b0,
+                    "reqs": 5000,
+                    "throughput_bps": 1_500_000.0,
+                    "rtt_med_us": 40_000.0,
+                    "rtt_p10_us": 20_000.0,
+                    "rtt_baseline_us": 20_000.0,
+                    "rtt_congestion_us": 20_000.0,
+                    "avg_ploss": 0.01,
+                    "rtt_jitter_us": 1_000.0,
+                    "error_pct": 2.0,
+                }
+            ]
+        if "AS lat" in sql:
+            return [
+                {
+                    "country": "US",
+                    "city": "chicago",
+                    "region": "Illinois",
+                    "metro": "602",
+                    "bucket_ts": b0,
+                    "lat": "41.88",
+                    "lon": "-87.63",
+                    "rtt_med_us": 40_000.0,
+                    "rtt_p10_us": 20_000.0,
+                    "avg_ploss": 0.01,
+                    "error_pct": 2.0,
+                    "reqs": 5000,
+                }
+            ]
+        return []
+
+    client = _RecordingClient(responder)
+    svc = HighScaleService(service_id="svc-6h-exact", client=client, cursor_secret=b"secret", request_watermark=None)
+    req = NetworkHealthRequest(start_time=start_s, end_time=end_s, bucket_seconds=3600, top_n=30)
+    resp = network_health(svc, req, start_s, end_s)
+
+    assert len(resp.buckets) == 6
+    assert resp.buckets[-1] == "2026-09-14T17:00:00"
+    ((hm_sql, _),) = client.matching("AS throughput_bps")
+    assert "toMinute" not in hm_sql
+    assert "toSecond" not in hm_sql
+    assert "quantileTDigest(0.1)" in hm_sql
+    assert resp.heatmap[0].buckets[0].health_score == 68.0
+    assert resp.summary is not None and resp.summary.worst_country is not None
+    assert resp.summary.worst_country.label == "United States"
+
+
+@pytest.mark.no_postgres
+def test_get_pop_health_parity_errors_hits_quantiles_and_no_minute_stride(monkeypatch: pytest.MonkeyPatch) -> None:
+    from backend.high_scale.network import get_pop_health
+
+    _clear_network_caches()
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    start = datetime(2026, 9, 14, 12, 0, tzinfo=UTC)
+    end = datetime(2026, 9, 14, 18, 0, tzinfo=UTC)
+
+    def responder(sql: str, params: dict[str, Any]):
+        if "FROM network_minute_dimensions" in sql:
+            return [{"pop": "SJC", "exact_requests": 1000, "p50_rtt_us": 20000.0, "p95_ttfb_ms": 999.0}]
+        if "FROM request_facts" in sql:
+            return [
+                {
+                    "pop": "SJC",
+                    "requests": 1000,
+                    "errors": 5,
+                    "p50_rtt_us": 20000.0,
+                    "p95_ttfb_ms": 85.0,
+                    "cache_hits": 250,
+                    "bandwidth_bytes": 123456,
+                }
+            ]
+        return []
+
+    client = _RecordingClient(responder)
+    svc = HighScaleService(service_id="svc-pop-parity", client=client, cursor_secret=b"secret", request_watermark=None)
+    resp = get_pop_health(svc, start, end)
+    ((fact_sql, _),) = client.matching("FROM request_facts")
+    assert "toMinute" not in fact_sql
+    assert ">= 500" in fact_sql and ">= 400" not in fact_sql
+    assert "startsWith(upper(custom_fields['cache']), 'HIT')" in fact_sql
+    assert "quantileTDigest(0.5)" in fact_sql and "quantileTDigest(0.95)" in fact_sql
+    assert resp.data[0].p95_ttfb_ms == 85.0
+
+
+@pytest.mark.no_postgres
+def test_get_transport_metrics_retrans_pct_and_no_minute_stride(monkeypatch: pytest.MonkeyPatch) -> None:
+    from backend.high_scale.network import get_transport_metrics
+
+    _clear_network_caches()
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    start_s, end_s = "2026-09-14T12:00:00Z", "2026-09-14T18:00:00Z"
+
+    def responder(sql: str, params: dict[str, Any]):
+        return [
+            {
+                "total_reqs": 1000,
+                "total_bytes": 50000,
+                "rtt_quants": [20000.0, 40000.0, 50000.0, 80000.0],
+                "avg_retrans": 0.4,
+                "avg_ploss_pct": 5.0,
+                "avg_del_rate_mbps": 12.0,
+                "proto_map": {"HTTP/2": 1000},
+            }
+        ]
+
+    client = _RecordingClient(responder)
+    svc = HighScaleService(service_id="svc-tr-parity", client=client, cursor_secret=b"secret", request_watermark=None)
+    resp = get_transport_metrics(svc, start_s, end_s)
+    ((tr_sql, _),) = client.matching("FROM request_facts")
+    assert "toMinute" not in tr_sql
+    assert "countIf(toFloat64OrNull(custom_fields['retrans']) > 0) * 100.0" in tr_sql
+    assert resp.retrans_rate_pct == 0.4
+
+
+@pytest.mark.no_postgres
+def test_network_quality_mean_rtt_country_labels_and_hash_scatter(monkeypatch: pytest.MonkeyPatch) -> None:
+    from backend.high_scale.network import network_quality
+    from backend.models.analytics import NetworkQualityRequest
+
+    _clear_network_caches()
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    start_s, end_s = "2026-09-14T12:00:00Z", "2026-09-14T18:00:00Z"
+
+    def responder(sql: str, params: dict[str, Any]):
+        if "FROM network_minute_dimensions" in sql:
+            return [
+                {"dimension": "country", "label": "US", "rtt_ms": 33.4, "reqs": 500},
+                {"dimension": "asn", "label": "7922", "rtt_ms": 22.1, "reqs": 500},
+                {"dimension": "pop", "label": "SJC", "rtt_ms": 18.2, "reqs": 500},
+            ]
+        if "custom_fields['region']" in sql:
+            return [{"label": "California", "rtt_ms": 19.5, "reqs": 500}]
+        if "cache_state" in sql:
+            return [{"rtt_ms": 20.0, "ttfb_ms": 40.0, "cache_state": "HIT"}]
+        return []
+
+    client = _RecordingClient(responder)
+    svc = HighScaleService(service_id="svc-nq-parity", client=client, cursor_secret=b"secret", request_watermark=None)
+    resp = network_quality(svc, NetworkQualityRequest(), start_s, end_s)
+
+    ((rollup_sql, _),) = client.matching("FROM network_minute_dimensions")
+    assert "tcp_rtt_sum" in rollup_sql
+    ((reg_sql, _),) = client.matching("custom_fields['region']")
+    assert "toMinute" not in reg_sql
+    assert "avg(" in reg_sql and "median(" not in reg_sql
+    sc_sql = client.matching("cache_state")[0][0]
+    assert "cityHash64(event_id)" in sc_sql and "toUnixTimestamp64Milli" not in sc_sql
+    assert resp.by_country[0].label == "United States" and resp.by_country[0].value == "US"

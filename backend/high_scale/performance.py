@@ -566,12 +566,12 @@ def value_summary(
         if cache_key is not None and (cached_inner := _perf_memo.get(cache_key)) is not None:
             return cached_inner
         trace = HighScaleSections(service.service_id, "value_summary")
-        where, params = _facts_where(service.service_id, start_time, end_time, filters)
-        hit_cond = "custom_fields['cache'] IN ('HIT', 'HIT-STALE', 'HIT-CLUSTER')"
-        miss_cond = "custom_fields['cache'] = 'MISS'"
-        pass_cond = "custom_fields['cache'] = 'PASS'"
-        synth_cond = "custom_fields['cache'] = 'SYNTH'"
-        origin_cond = "custom_fields['cache'] IN ('MISS', 'PASS', 'SYNTH', 'ERROR')"
+        where, params = _facts_where(service.service_id, start_time, end_time, filters, end_inclusive=False)
+        hit_cond = "startsWith(upper(custom_fields['cache']), 'HIT')"
+        miss_cond = "startsWith(upper(custom_fields['cache']), 'MISS')"
+        pass_cond = "startsWith(upper(custom_fields['cache']), 'PASS')"
+        synth_cond = "startsWith(upper(custom_fields['cache']), 'SYNTH')"
+        origin_cond = f"({miss_cond} OR {pass_cond} OR {synth_cond} OR upper(custom_fields['cache']) = 'ERROR')"
         shield_cond = (
             "(lower(custom_fields['is_shield']) IN ('true', '1') OR lower(custom_fields['edge']) IN ('false', '0'))"
         )
@@ -630,6 +630,7 @@ def value_summary(
                 f"countIf({elapsed_us_expr} IS NOT NULL AND {hit_cond}) AS cnt_hit_elapsed, "
                 f"sumIf({elapsed_us_expr}, {miss_cond}) AS sum_miss_elapsed, "
                 f"countIf({elapsed_us_expr} IS NOT NULL AND {miss_cond}) AS cnt_miss_elapsed, "
+                f"countIf(custom_fields['waf'] != '' AND custom_fields['waf'] != '-') AS waf_sample_cnt, "
                 f"countIf({waf_cond}) AS waf_inspected, "
                 f"countIf({waf_block_cond}) AS waf_blocked, "
                 f"countIf({waf_log_cond}) AS waf_logged, "
@@ -666,7 +667,14 @@ def value_summary(
             pre_p99_rows = None
 
         total_requests = sum(int(b.get("total", 0) or 0) for b in buckets)
+        has_waf = any(
+            int(b.get("waf_sample_cnt") or 0) > 0
+            or int(b.get("waf_inspected") or 0) > 0
+            or int(b.get("threats_cnt") or 0) > 0
+            for b in buckets
+        )
         result: dict[str, Any] = {}
+        shaped: dict[str, Any] = {}
 
         if {"caching", "overview", "performance"} & wanted:
             shaped = _shape_caching_and_overview_buckets(
@@ -674,7 +682,7 @@ def value_summary(
                 include_overview="overview" in wanted,
                 has_resp_bytes=True,
                 has_shield=True,
-                has_waf=True,
+                has_waf=has_waf,
                 has_elapsed=True,
                 include_performance="performance" in wanted,
             )
@@ -701,20 +709,20 @@ def value_summary(
                 "logged_requests": int(w_row.get("requests") or 0),
                 "logged_bandwidth_bytes": int(w_row.get("bandwidth_bytes") or 0),
             }
-            if "performance" in wanted and "performance_from_buckets" in shaped:
-                pf = shaped["performance_from_buckets"]
-                p99_rows = (
-                    pre_p99_rows if pre_p99_rows is not None else trace.run("performance_p99", _run_p99, source="fact")
-                )
-                p99_val = _finite_float(p99_rows[0].get("p99_ms")) if p99_rows else None
-                result["performance"] = {
-                    "cache_accel_factor": pf["cache_accel_factor"],
-                    "avg_hit_latency_ms": pf["avg_hit_latency_ms"],
-                    "avg_miss_latency_ms": pf["avg_miss_latency_ms"],
-                    "p99_latency_ms": round(p99_val, 2) if p99_val is not None else None,
-                    "total_requests": pf["total_requests"],
-                    "latency_time_series": pf["latency_time_series"],
-                }
+        if "performance" in wanted and "performance_from_buckets" in shaped:
+            pf = shaped["performance_from_buckets"]
+            p99_rows = (
+                pre_p99_rows if pre_p99_rows is not None else trace.run("performance_p99", _run_p99, source="fact")
+            )
+            p99_val = _finite_float(p99_rows[0].get("p99_ms")) if p99_rows else None
+            result["performance"] = {
+                "cache_accel_factor": pf["cache_accel_factor"],
+                "avg_hit_latency_ms": pf["avg_hit_latency_ms"],
+                "avg_miss_latency_ms": pf["avg_miss_latency_ms"],
+                "p99_latency_ms": round(p99_val, 2) if p99_val is not None else None,
+                "total_requests": pf["total_requests"],
+                "latency_time_series": pf["latency_time_series"],
+            }
 
         if "security" in wanted:
             _sec_sum = lambda k: sum(int(b.get(k, 0) or 0) for b in buckets)  # noqa: E731
@@ -741,10 +749,10 @@ def value_summary(
                 top_signals = [{"signal": str(r["signal"]), "count": int(r["cnt"])} for r in sig_rows]
             result["security"] = {
                 "total_requests": total_requests,
-                "waf_inspected": _sec_sum("waf_inspected"),
-                "waf_blocked": _sec_sum("waf_blocked"),
-                "waf_logged": _sec_sum("waf_logged"),
-                "waf_passed": _sec_sum("waf_passed"),
+                "waf_inspected": _sec_sum("waf_inspected") if has_waf else 0,
+                "waf_blocked": _sec_sum("waf_blocked") if has_waf else None,
+                "waf_logged": _sec_sum("waf_logged") if has_waf else None,
+                "waf_passed": _sec_sum("waf_passed") if has_waf else None,
                 "threat_time_series": threat_ts,
                 "top_waf_signals": top_signals,
             }
@@ -794,6 +802,165 @@ def value_summary(
                 "bot_requests": bot_req,
                 "verified_bots": ver_bots,
                 "top_bots": top_bots_list,
+            }
+
+        if "io" in wanted:
+            ctype_expr = (
+                "lower(coalesce(nullIf(custom_fields['resp_header_content_type'], ''), custom_fields['content_type']))"
+            )
+            ofmt_expr = "nullIf(coalesce(nullIf(custom_fields['io_output_format'], ''), custom_fields['ofmt']), '')"
+            ifmt_expr = "nullIf(coalesce(nullIf(custom_fields['io_input_format'], ''), custom_fields['ifmt']), '')"
+            io_in_expr = "toInt64OrNull(nullIf(custom_fields['io_input_bytes'], ''))"
+            io_out_expr = "toInt64OrNull(nullIf(custom_fields['io_output_bytes'], ''))"
+            io_sum_rows = trace.run(
+                "io_summary",
+                lambda: service.client.execute(
+                    f"/* value:io_summary */ SELECT "
+                    f"countIf(startsWith({ctype_expr}, 'image/')) AS image_requests, "
+                    f"sumIf({bytes_expr}, startsWith({ctype_expr}, 'image/')) AS image_bytes, "
+                    f"countIf({ofmt_expr} IS NOT NULL) AS io_count, "
+                    f"sumIf({bytes_expr}, {ofmt_expr} IS NOT NULL) AS io_bytes, "
+                    f"sumIf({bytes_expr}, {ofmt_expr} IS NOT NULL AND {shield_cond}) AS io_shield_bytes, "
+                    f"sumIf({io_in_expr}, {io_out_expr} IS NOT NULL) AS input_bytes, "
+                    f"sumIf({io_out_expr}, {io_in_expr} IS NOT NULL) AS output_bytes, "
+                    f"sumIf({io_in_expr} - {io_out_expr}, {io_in_expr} IS NOT NULL AND {io_out_expr} IS NOT NULL) AS actual_saved, "
+                    f"countIf({io_in_expr} IS NOT NULL AND {io_out_expr} IS NOT NULL) AS io_pair_count "
+                    f"FROM request_facts WHERE {where}",
+                    params,
+                ),
+                source="fact",
+            )
+            io_s = io_sum_rows[0] if io_sum_rows else {}
+            io_count = int(io_s.get("io_count") or 0)
+            img_count = int(io_s.get("image_requests") or 0)
+            has_io_pairs = int(io_s.get("io_pair_count") or 0) > 0 or (
+                io_s.get("io_pair_count") is None and io_s.get("actual_saved") is not None and io_count > 0
+            )
+            in_b = io_s.get("input_bytes")
+            out_b = io_s.get("output_bytes")
+            actual_saved = io_s.get("actual_saved") if has_io_pairs else None
+            fmt_rows = trace.run(
+                "io_formats",
+                lambda: service.client.execute(
+                    f"/* value:io_formats */ SELECT coalesce({ofmt_expr}, nullIf(splitByChar('/', {ctype_expr})[2], '')) AS format, "
+                    f"count() AS cnt FROM request_facts "
+                    f"WHERE {where} AND ({ofmt_expr} IS NOT NULL OR startsWith({ctype_expr}, 'image/')) "
+                    f"GROUP BY format HAVING format IS NOT NULL AND format != '' ORDER BY cnt DESC",
+                    params,
+                ),
+                source="fact",
+            )
+            fmt_total = sum(int(r.get("cnt") or 0) for r in fmt_rows)
+            fmt_dist = [
+                {
+                    "format": str(r["format"]),
+                    "count": int(r["cnt"]),
+                    "pct": round(int(r["cnt"]) * 100.0 / fmt_total, 2),
+                }
+                for r in fmt_rows
+                if int(r.get("cnt") or 0) > 0 and fmt_total > 0
+            ]
+            modern_cnt = sum(
+                int(r["cnt"]) for r in fmt_rows if str(r.get("format", "")).lower() in ("webp", "avif", "jpegxl", "jxl")
+            )
+            opp_rows = trace.run(
+                "io_opportunities",
+                lambda: service.client.execute(
+                    f"/* value:io_opportunities */ SELECT url, count() AS request_count, "
+                    f"sum({bytes_expr}) AS total_bytes, avg({bytes_expr}) / 1024.0 AS avg_kb "
+                    f"FROM request_facts WHERE {where} "
+                    f"AND {ctype_expr} IN ('image/jpeg', 'image/jpg', 'image/png', 'image/gif') "
+                    f"AND {ofmt_expr} IS NULL AND {bytes_expr} > 51200 "
+                    f"GROUP BY url ORDER BY total_bytes DESC LIMIT 20",
+                    params,
+                ),
+                source="fact",
+            )
+            conv_rows = trace.run(
+                "io_conversions",
+                lambda: service.client.execute(
+                    f"/* value:io_conversions */ SELECT {ifmt_expr} AS input_format, {ofmt_expr} AS output_format, "
+                    f"count() AS cnt, avg({io_in_expr} / nullIf(toFloat64({io_out_expr}), 0)) AS avg_ratio "
+                    f"FROM request_facts WHERE {where} AND {ifmt_expr} IS NOT NULL AND {ofmt_expr} IS NOT NULL "
+                    f"GROUP BY input_format, output_format ORDER BY cnt DESC LIMIT 20",
+                    params,
+                ),
+                source="fact",
+            )
+            io_ser_rows = trace.run(
+                "io_series",
+                lambda: service.client.execute(
+                    f"/* value:io_series */ SELECT "
+                    f"toDateTime(intDiv(toUInt32(event_timestamp), {bucket_sec}) * {bucket_sec}, 'UTC') AS bucket, "
+                    f"countIf({ofmt_expr} IS NOT NULL) AS io_count, "
+                    f"sumIf({bytes_expr}, {ofmt_expr} IS NOT NULL) AS io_bytes, "
+                    f"sumIf({io_in_expr} - {io_out_expr}, {io_in_expr} IS NOT NULL AND {io_out_expr} IS NOT NULL) AS actual_saved "
+                    f"FROM request_facts WHERE {where} GROUP BY bucket ORDER BY bucket",
+                    params,
+                ),
+                source="fact",
+            )
+            io_ts = [
+                {"time": safe_iso(r["bucket"]), "value": int(r["io_count"])}
+                for r in io_ser_rows
+                if int(r.get("io_count") or 0) > 0
+            ]
+            io_bw_ts = [
+                {"time": safe_iso(r["bucket"]), "value": int(r["io_bytes"])}
+                for r in io_ser_rows
+                if r.get("io_bytes") is not None and int(r.get("io_bytes") or 0) > 0
+            ]
+            io_comp_ts = [
+                {"time": safe_iso(r["bucket"]), "value": int(r["actual_saved"])}
+                for r in io_ser_rows
+                if r.get("actual_saved") is not None
+            ]
+            result["io"] = {
+                "total_requests": total_requests,
+                "io_transforms": io_count if io_count > 0 else None,
+                "io_bandwidth_bytes": int(io_s["io_bytes"])
+                if io_count > 0 and io_s.get("io_bytes") is not None
+                else None,
+                "io_shield_bandwidth_bytes": int(io_s["io_shield_bytes"])
+                if io_count > 0 and io_s.get("io_shield_bytes") is not None
+                else None,
+                "io_pct_of_traffic": round(io_count * 100.0 / total_requests, 2)
+                if io_count > 0 and total_requests > 0
+                else None,
+                "io_estimated_cost_usd": None,
+                "format_distribution": fmt_dist,
+                "modern_format_pct": round(modern_cnt * 100.0 / fmt_total, 2) if fmt_total > 0 else None,
+                "optimization_opportunities": [
+                    {
+                        "url": str(r.get("url") or ""),
+                        "request_count": int(r.get("request_count") or 0),
+                        "total_bytes": int(r.get("total_bytes") or 0),
+                        "avg_kb": round(float(r["avg_kb"]), 2) if r.get("avg_kb") is not None else None,
+                    }
+                    for r in opp_rows
+                ],
+                "io_actual_bandwidth_saved_bytes": int(actual_saved) if actual_saved is not None else None,
+                "io_actual_compression_ratio": (
+                    round(float(in_b) / float(out_b), 2)
+                    if out_b is not None and float(out_b) > 0 and in_b is not None
+                    else None
+                ),
+                "io_format_conversion_pairs": [
+                    {
+                        "input_format": str(r.get("input_format") or ""),
+                        "output_format": str(r.get("output_format") or ""),
+                        "count": int(r.get("cnt") or 0),
+                        "avg_ratio": round(float(r["avg_ratio"]), 2) if r.get("avg_ratio") is not None else None,
+                    }
+                    for r in conv_rows
+                ],
+                "image_request_count": img_count,
+                "image_bandwidth_bytes": int(io_s["image_bytes"])
+                if img_count > 0 and io_s.get("image_bytes") is not None
+                else None,
+                "io_time_series": io_ts,
+                "io_bandwidth_time_series": io_bw_ts,
+                "io_compression_time_series": io_comp_ts,
             }
 
         payload = {**result, "section_timings": trace.timings()}

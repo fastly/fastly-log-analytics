@@ -521,7 +521,7 @@ def build_published_projection_where(
         clauses.append("bucket_start >= {start:DateTime64(3)}")
         params["start"] = start
     if end is not None:
-        clauses.append("bucket_start <= {end:DateTime64(3)}")
+        clauses.append("bucket_start < {end:DateTime64(3)}")
         params["end"] = end
     if dimension is not None:
         clauses.append("dimension={dimension:String}")

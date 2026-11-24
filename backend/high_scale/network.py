@@ -25,7 +25,6 @@ from backend.high_scale._common import (
     finite_float as _finite_float,
 )
 from backend.high_scale._common import (
-    minute_stride_sql,
     normalize_cache_bound,
     parse_time_window,
     resolve_asn_display_labels,
@@ -146,7 +145,7 @@ from backend.repositories.utils.response_shaping import (
 from backend.repositories.utils.response_shaping import (
     parse_metro_code as _parse_metro_code,
 )
-from backend.utils.countries import format_city_label
+from backend.utils.countries import COUNTRY_MAP, format_city_label
 
 
 def _fmt_ts(ts: int) -> str:
@@ -240,12 +239,7 @@ def _shielding_analysis(service: HighScaleService, start: datetime, end: datetim
     sh_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
     sh_join_stride = 1
     if is_real_ch:
-        sh_probe_stride = (
-            minute_stride_sql(start, end, 15)
-            if sh_span_s >= 21600
-            else (minute_stride_sql(start, end, 5) if sh_span_s >= 3600 else "")
-        )
-        shield_prewhere = f"{_BASE_WHERE}{sh_probe_stride} AND custom_fields['prid'] != ''"
+        shield_prewhere = f"{_BASE_WHERE} AND custom_fields['prid'] != ''"
         shield_rows = service.client.execute(
             f"SELECT count() AS n FROM (SELECT 1 FROM request_facts PREWHERE {shield_prewhere} "
             "WHERE lower(custom_fields['edge']) IN ('false', '0') LIMIT 1)",
@@ -474,29 +468,12 @@ def network_health(
         map_only = sections is not None and len(sections) > 0 and set(sections) <= {"buckets", "cities", "map_buckets"}
         if is_real_ch and not map_only:
             nh_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
-            raw_stride = (
-                30
-                if nh_span_s >= 43200
-                else (
-                    15
-                    if nh_span_s >= 21600
-                    else (5 if nh_span_s >= 1800 and not os.getenv("PYTEST_CURRENT_TEST") else 1)
-                )
-            )
-            minute_stride = min(raw_stride, max(1, bs // 60)) if raw_stride > 1 else 1
-            sub_factor = (
-                max(1, raw_stride // minute_stride)
-                if raw_stride > minute_stride and not os.getenv("PYTEST_CURRENT_TEST")
+            sample_stride = (
+                (10 if nh_span_s >= 43200 else (4 if nh_span_s > 21600 else 1))
+                if not os.getenv("PYTEST_CURRENT_TEST")
                 else 1
             )
-            if sub_factor > 1:
-                sec_cutoff = max(1, 60 // sub_factor)
-                sub_factor = 60 // sec_cutoff
-                sec_slice_sql = f" AND toSecond(event_timestamp) < {sec_cutoff}"
-            else:
-                sec_slice_sql = ""
-            sample_stride = minute_stride * sub_factor
-            stride_sql = (minute_stride_sql(start, end, minute_stride) if minute_stride > 1 else "") + sec_slice_sql
+            stride_sql = f" AND cityHash64(event_id) % {sample_stride} = 0" if sample_stride > 1 else ""
             rtt_prewhere = f"{_BASE_WHERE}{filter_sql}{stride_sql} AND custom_fields['tcp_rtt'] != '' AND custom_fields['tcp_rtt'] != '0'"
             top_asn_ints: list[int] = []
             raw_speed_rows: list[dict[str, Any]] | None = None
@@ -574,7 +551,8 @@ def network_health(
                     f"WITH {_RTT} AS _rtt, {_RTT_MIN} AS _rtt_min, {_RTT_VAR} AS _rtt_var, {_ELAPSED} AS _elapsed "
                     f"SELECT {_ASN} AS asn, {bucket_expr} AS bucket_ts, count() AS reqs, "
                     f"quantileTDigest(0.5)(if(position(custom_fields['cache'], 'HIT') > 0 AND _elapsed > 0, {_RESP_BYTES} * 1000000.0 / _elapsed, NULL)) AS throughput_bps, "
-                    f"quantileTDigest(0.5)(_rtt) AS rtt_med_us, quantileTDigest(0.5)(_rtt_min) AS rtt_baseline_us, "
+                    f"quantileTDigest(0.5)(_rtt) AS rtt_med_us, quantileTDigest(0.1)(_rtt) AS rtt_p10_us, "
+                    f"quantileTDigest(0.5)(_rtt_min) AS rtt_baseline_us, "
                     f"quantileTDigest(0.5)(_rtt - _rtt_min) AS rtt_congestion_us, avg({_PLOSS}) AS avg_ploss, "
                     f"quantileTDigest(0.5)(_rtt_var) AS rtt_jitter_us, {err_pct_expr} "
                     f"FROM request_facts PREWHERE {rtt_prewhere}{asn_in_filter} "
@@ -774,7 +752,8 @@ def network_health(
                     _ch_fact_query(
                         f"{_ASN} AS asn, {bucket_expr} AS bucket_ts, count() AS reqs, "
                         f"median(if({_NET_HIT} AND {_ELAPSED} > 0, {_RESP_BYTES} * 1000000.0 / {_ELAPSED}, NULL)) AS throughput_bps, "
-                        f"median({_RTT}) AS rtt_med_us, median({_RTT_MIN}) AS rtt_baseline_us, "
+                        f"median({_RTT}) AS rtt_med_us, quantile(0.1)({_RTT}) AS rtt_p10_us, "
+                        f"median({_RTT_MIN}) AS rtt_baseline_us, "
                         f"median({_RTT} - {_RTT_MIN}) AS rtt_congestion_us, avg({_PLOSS}) AS avg_ploss, "
                         f"median({_RTT_VAR}) AS rtt_jitter_us, {err_pct_expr}",
                         f"{rtt_where} AND {_ASN} IS NOT NULL AND {_ASN} IN ({top_asn_subquery})",
@@ -857,7 +836,11 @@ def network_health(
         top_asns = sorted(all_asns_seen, key=lambda a: all_asns_seen[a], reverse=True)[:top_n]
         top_asn_set, asn_labels = set(top_asns), resolve_asn_display_labels(service.service_id, top_asns)
 
-        all_buckets = generate_epoch_aligned_buckets(start, end, bs) if start is not None and end is not None else []
+        all_buckets = (
+            generate_epoch_aligned_buckets(start, end - timedelta(microseconds=1), bs)
+            if start is not None and end is not None and end > start
+            else []
+        )
         bucket_idx = {b: i for i, b in enumerate(all_buckets)}
 
         asn_speed_mix = build_asn_speed_mix(
@@ -877,24 +860,33 @@ def network_health(
                 or (bucket := _fmt_ts(int(r["bucket_ts"]))) not in bucket_idx
             ):
                 continue
-            tp, rtt_cong, pkt, jitter, err = (
+            tp, rtt_med, rtt_cong, pkt, jitter, err = (
                 _flt(r.get("throughput_bps")),
+                _flt(r.get("rtt_med_us")),
                 _flt(r["rtt_congestion_us"]),
                 _flt(r["avg_ploss"]),
                 _flt(r["rtt_jitter_us"]),
                 _flt(r["error_pct"]),
             )
+            rtt_base = _flt(r.get("rtt_p10_us"))
+            if rtt_base is None:
+                rtt_base = _flt(r.get("rtt_baseline_us"))
+            hs = (
+                _health_score(rtt_med, max(1.0, rtt_base if rtt_base is not None else rtt_med), pkt, err)
+                if rtt_med is not None
+                else _health_score(tp, rtt_cong, pkt, jitter, err)
+            )
             asn_bucket_data.setdefault(asn, {})[bucket] = {
                 "bucket_idx": bucket_idx[bucket],
                 "bucket": bucket,
                 "throughput_bps": _flt(tp, 0),
-                "rtt_med_us": _flt(r["rtt_med_us"], 0),
+                "rtt_med_us": _flt(rtt_med, 0),
                 "rtt_baseline_us": _flt(r["rtt_baseline_us"], 0),
                 "rtt_congestion_us": _flt(rtt_cong, 0),
                 "avg_ploss": _flt(pkt, 5),
                 "rtt_jitter_us": _flt(jitter, 0),
                 "error_pct": _flt(err, 2),
-                "health_score": _health_score(tp, rtt_cong, pkt, jitter, err),
+                "health_score": hs,
                 "reqs": int(r["reqs"]),
             }
 
@@ -1107,35 +1099,34 @@ def network_quality(
 
         def _bar(group_expr: str, extra_where: str = "") -> list[dict]:
             q_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
-            scale_factor = (30 if q_span_s >= 43200 else (15 if q_span_s >= 21600 else 1)) if is_real_ch else 1
-            use_min_slice = scale_factor > 1
-            min_slice_clause = minute_stride_sql(start, end, scale_factor) if use_min_slice else ""
+            scale_factor = (10 if q_span_s >= 43200 else (4 if q_span_s > 21600 else 1)) if is_real_ch else 1
+            hash_clause = f" AND cityHash64(event_id) % {scale_factor} = 0" if scale_factor > 1 else ""
             if is_real_ch and group_expr != _ASN:
                 sql = (
-                    f"SELECT {group_expr} AS label, median({_RTT} / 1000.0) AS rtt_ms, count() AS reqs "
-                    f"FROM request_facts PREWHERE {_BASE_WHERE}{filter_sql}{extra_where}{min_slice_clause} "
+                    f"SELECT {group_expr} AS label, avg({_RTT} / 1000.0) AS rtt_ms, count() AS reqs "
+                    f"FROM request_facts PREWHERE {_BASE_WHERE}{filter_sql}{extra_where}{hash_clause} "
                     f"AND {group_expr} != '' AND custom_fields['tcp_rtt'] != '' "
                     f"WHERE {_RTT} > 0 GROUP BY label ORDER BY reqs DESC LIMIT 25"
                 )
             elif is_real_ch:
                 sql = (
-                    f"SELECT {group_expr} AS label, median({_RTT} / 1000.0) AS rtt_ms, count() AS reqs "
-                    f"FROM request_facts PREWHERE {_BASE_WHERE}{filter_sql}{extra_where}{min_slice_clause} "
+                    f"SELECT {group_expr} AS label, avg({_RTT} / 1000.0) AS rtt_ms, count() AS reqs "
+                    f"FROM request_facts PREWHERE {_BASE_WHERE}{filter_sql}{extra_where}{hash_clause} "
                     f"AND custom_fields['asn'] != '' AND custom_fields['tcp_rtt'] != '' "
                     f"WHERE {group_expr} IS NOT NULL AND {_RTT} > 0 GROUP BY label ORDER BY reqs DESC LIMIT 25"
                 )
             else:
                 sql = _ch_fact_query(
-                    f"{group_expr} AS label, median({_RTT} / 1000.0) AS rtt_ms, count() AS reqs",
+                    f"{group_expr} AS label, avg({_RTT} / 1000.0) AS rtt_ms, count() AS reqs",
                     f"{rtt_where}{extra_where}",
                     group_by="label",
                     order_by="reqs DESC",
                     limit=25,
                 )
             rows = service.client.execute(sql, params)
-            if use_min_slice and not rows:
+            if scale_factor > 1 and not rows:
                 scale_factor = 1
-                rows = service.client.execute(sql.replace(min_slice_clause, ""), params)
+                rows = service.client.execute(sql.replace(hash_clause, ""), params)
             return [
                 {
                     "value": str(r["label"]),
@@ -1153,7 +1144,7 @@ def network_quality(
             )
             sql = (
                 "SELECT dimension, value AS label, "
-                "sum(tcp_rtt_p50_us * tcp_rtt_count) / nullIf(sum(tcp_rtt_count), 0) / 1000.0 AS rtt_ms, "
+                "coalesce(sum(tcp_rtt_sum), sum(tcp_rtt_p50_us * tcp_rtt_count)) / nullIf(sum(tcp_rtt_count), 0) / 1000.0 AS rtt_ms, "
                 "sum(tcp_rtt_count) AS reqs "
                 "FROM network_minute_dimensions "
                 "WHERE service_id={service_id:String} AND dimension IN ('country', 'asn', 'pop') "
@@ -1191,7 +1182,7 @@ def network_quality(
                     f"SELECT {_RTT} / 1000.0 AS rtt_ms, {_TTFB} * 1000.0 AS ttfb_ms, "
                     "if(custom_fields['cache'] = '', 'UNKNOWN', custom_fields['cache']) AS cache_state "
                     f"FROM request_facts PREWHERE {_BASE_WHERE}{filter_sql} "
-                    "AND toUnixTimestamp64Milli(event_timestamp) % 64 = 0 "
+                    "AND cityHash64(event_id) % 64 = 0 "
                     "AND custom_fields['tcp_rtt'] != '' AND custom_fields['ttfb'] != '' "
                     f"WHERE {_RTT} > 0 AND {_TTFB} > 0 LIMIT {_SCATTER_SAMPLE}"
                 )
@@ -1232,6 +1223,8 @@ def network_quality(
             by_country, by_asn, by_region, by_pop, scatter_rows = (
                 q_res[k] for k in ("country", "asn", "region", "pop", "scatter")
             )
+        for row in by_country:
+            row["label"] = COUNTRY_MAP.get(row["value"], row["label"])
         if by_asn:
             labels = resolve_asn_display_labels(
                 service.service_id, [int(r["value"]) for r in by_asn if r["value"].isdigit()]
@@ -1304,9 +1297,8 @@ def get_pop_health(
                 "network_dimensions", client=service.client, service_id=service.service_id
             )
             pop_span_s = (end - start).total_seconds()
-            pop_stride = 30 if pop_span_s >= 43200 else (15 if pop_span_s >= 21600 else 1)
-            use_min_slice = pop_stride > 1
-            min_slice_clause = minute_stride_sql(start, end, pop_stride) if use_min_slice else ""
+            pop_stride = 10 if pop_span_s >= 43200 else (4 if pop_span_s > 21600 else 1)
+            hash_clause = f" AND cityHash64(event_id) % {pop_stride} = 0" if pop_stride > 1 else ""
             rollup_sql = (
                 "SELECT value AS pop, sum(requests) AS exact_requests, "
                 "sum(tcp_rtt_p50_us * tcp_rtt_count) / nullIf(sum(tcp_rtt_count), 0) AS p50_rtt_us, "
@@ -1317,11 +1309,11 @@ def get_pop_health(
                 "GROUP BY pop"
             )
             fact_sql = (
-                f"SELECT custom_fields['pop'] AS pop, count() AS requests, countIf({_STATUS} >= 400 OR {_STATUS} = 0) AS errors, "
-                f"avg({_RTT}) AS p50_rtt_us, avg({_TTFB}) * 1000.0 AS p95_ttfb_ms, "
-                "countIf(custom_fields['cache'] IN ('HIT', 'HIT-STALE')) AS cache_hits, "
+                f"SELECT custom_fields['pop'] AS pop, count() AS requests, countIf({_STATUS} >= 500) AS errors, "
+                f"quantileTDigest(0.5)({_RTT}) AS p50_rtt_us, quantileTDigest(0.95)({_TTFB}) * 1000.0 AS p95_ttfb_ms, "
+                "countIf(startsWith(upper(custom_fields['cache']), 'HIT')) AS cache_hits, "
                 "sum(toInt64OrZero(custom_fields['resp_bytes'])) AS bandwidth_bytes "
-                f"FROM request_facts PREWHERE {_BASE_WHERE}{min_slice_clause} AND custom_fields['pop'] != '' "
+                f"FROM request_facts PREWHERE {_BASE_WHERE}{hash_clause} AND custom_fields['pop'] != '' "
                 "GROUP BY pop ORDER BY requests DESC"
             )
             q_pop = trace.run_parallel(
@@ -1334,11 +1326,11 @@ def get_pop_health(
                 thread_name_prefix="hs-pop-health",
             )
             fact_rows = q_pop.get("pop_health", [])
-            if use_min_slice and not fact_rows:
-                use_min_slice = False
+            if pop_stride > 1 and not fact_rows:
+                pop_stride = 1
                 fact_rows = trace.run(
                     "pop_health_fallback",
-                    lambda: service.client.execute(fact_sql.replace(min_slice_clause, ""), params),
+                    lambda: service.client.execute(fact_sql.replace(hash_clause, ""), params),
                     source="fact",
                 )
             rollup_by_pop = {
@@ -1355,7 +1347,7 @@ def get_pop_health(
                 pop_key = str(r["pop"])
                 r_entry = rollup_by_pop.get(pop_key, (0, None, None))
                 sampled_reqs = max(1, int(r.get("requests") or 0))
-                if use_min_slice:
+                if pop_stride > 1:
                     exact_reqs = r_entry[0] if r_entry[0] > 0 else sampled_reqs * pop_stride
                     scale = exact_reqs / sampled_reqs
                     row_reqs = exact_reqs
@@ -1374,16 +1366,16 @@ def get_pop_health(
                         "errors": row_errors,
                         "cache_hits": row_hits,
                         "bandwidth_bytes": row_bytes,
-                        "p50_rtt_us": r_entry[1] if r_entry[1] is not None else r.get("p50_rtt_us"),
-                        "p95_ttfb_ms": r_entry[2] if r_entry[2] is not None else r.get("p95_ttfb_ms"),
+                        "p50_rtt_us": r.get("p50_rtt_us") if r.get("p50_rtt_us") is not None else r_entry[1],
+                        "p95_ttfb_ms": r.get("p95_ttfb_ms") if r.get("p95_ttfb_ms") is not None else r_entry[2],
                     }
                 )
             rows.sort(key=lambda x: int(x.get("requests") or 0), reverse=True)
         else:
             sql = _ch_fact_query(
-                f"custom_fields['pop'] AS pop, count() AS requests, countIf({_STATUS} >= 400 OR {_STATUS} = 0) AS errors, "
+                f"custom_fields['pop'] AS pop, count() AS requests, countIf({_STATUS} >= 500) AS errors, "
                 f"quantile(0.5)({_RTT}) AS p50_rtt_us, quantile(0.95)({_TTFB}) * 1000.0 AS p95_ttfb_ms, "
-                "countIf(custom_fields['cache'] IN ('HIT', 'HIT-STALE')) AS cache_hits, "
+                "countIf(startsWith(upper(custom_fields['cache']), 'HIT')) AS cache_hits, "
                 "sum(toInt64OrZero(custom_fields['resp_bytes'])) AS bandwidth_bytes",
                 f"{_BASE_WHERE} AND custom_fields['pop'] != ''",
                 group_by="pop",
@@ -1463,25 +1455,28 @@ def get_transport_metrics(
             "'1.1', 'HTTP/1.1', '1.0', 'HTTP/1.0', if(empty(custom_fields['proto']), 'Other', custom_fields['proto']))"
         )
         trace = HighScaleSections(service.service_id, "network.transport")
+        retrans_expr = (
+            "if(countIf(custom_fields['retrans'] != '') > 0, "
+            "countIf(toFloat64OrNull(custom_fields['retrans']) > 0) * 100.0 / nullIf(count(), 0), NULL)"
+        )
         if is_real_ch:
             tr_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
-            scale_factor = 30 if tr_span_s >= 43200 else (15 if tr_span_s >= 21600 else 1)
-            use_min_slice = scale_factor > 1
-            min_slice_clause = minute_stride_sql(start, end, scale_factor) if use_min_slice else ""
+            scale_factor = 10 if tr_span_s >= 43200 else (4 if tr_span_s > 21600 else 1)
+            hash_clause = f" AND cityHash64(event_id) % {scale_factor} = 0" if scale_factor > 1 else ""
             combined_sql = (
                 f"SELECT count() AS total_reqs, sum(toInt64OrZero(custom_fields['resp_bytes'])) AS total_bytes, "
                 f"quantiles(0.50, 0.90, 0.95, 0.99)({_RTT}) AS rtt_quants, "
-                f"avg(toFloat64OrNull(custom_fields['retrans'])) AS avg_retrans, avg({_PLOSS}) * 100.0 AS avg_ploss_pct, "
+                f"{retrans_expr} AS avg_retrans, avg({_PLOSS}) * 100.0 AS avg_ploss_pct, "
                 f"avg(toFloat64OrNull(custom_fields['delivery_rate'])) * 8.0 / 1e6 AS avg_del_rate_mbps, "
                 f"sumMap([{proto_clean_expr}], [toUInt64(1)]) AS proto_map "
-                f"FROM request_facts PREWHERE {base_where}{min_slice_clause}"
+                f"FROM request_facts PREWHERE {base_where}{hash_clause}"
             )
             rows = trace.run("summary", lambda: service.client.execute(combined_sql, params), source="fact")
-            if use_min_slice and (not rows or int(rows[0].get("total_reqs") or 0) == 0):
+            if scale_factor > 1 and (not rows or int(rows[0].get("total_reqs") or 0) == 0):
                 scale_factor = 1
                 rows = trace.run(
                     "summary_fallback",
-                    lambda: service.client.execute(combined_sql.replace(min_slice_clause, ""), params),
+                    lambda: service.client.execute(combined_sql.replace(hash_clause, ""), params),
                     source="fact",
                 )
             r_raw: Mapping[str, Any] = rows[0] if rows else {}
@@ -1516,7 +1511,7 @@ def get_transport_metrics(
                 f"count() AS total_reqs, sum(toInt64OrZero(custom_fields['resp_bytes'])) AS total_bytes, "
                 f"quantile(0.50)({_RTT}) / 1000.0 AS rtt_p50, quantile(0.90)({_RTT}) / 1000.0 AS rtt_p90, "
                 f"quantile(0.95)({_RTT}) / 1000.0 AS rtt_p95, quantile(0.99)({_RTT}) / 1000.0 AS rtt_p99, "
-                f"avg(toFloat64OrNull(custom_fields['retrans'])) AS avg_retrans, avg({_PLOSS}) * 100.0 AS avg_ploss_pct, "
+                f"{retrans_expr} AS avg_retrans, avg({_PLOSS}) * 100.0 AS avg_ploss_pct, "
                 f"avg(toFloat64OrNull(custom_fields['delivery_rate'])) * 8.0 / 1e6 AS avg_del_rate_mbps",
                 base_where,
             )
