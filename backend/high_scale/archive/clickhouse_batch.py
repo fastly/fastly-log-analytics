@@ -693,7 +693,7 @@ def _rows_for_domain(batch: HighScaleBatch, batch_uuid: str) -> list[tuple[Any, 
         elif batch.domain in {"rum_vitals", "rum_errors"}:
             common = _common_values(batch, row, batch_uuid)
             req_id = row.get("request_event_id")
-            req_uuid = None if req_id is None else _event_uuid(req_id, field="request_event_id")
+            req_uuid = None if req_id is None else _event_uuid(req_id, field="event_id")
             receipt_id = "" if row.get("req_id") is None else _required_string(row, "req_id")
             client_id = _required_string(row, "client_id", default="")
             if batch.domain == "rum_vitals":
@@ -726,7 +726,7 @@ def _rows_for_domain(batch: HighScaleBatch, batch_uuid: str) -> list[tuple[Any, 
                 (
                     batch.service_id,
                     _event_uuid(projection_key, field="projection_key"),
-                    _event_uuid(request_event_id, field="request_event_id"),
+                    _event_uuid(request_event_id, field="event_id"),
                     _timestamp(row, "timestamp"),
                     batch_uuid,
                     "visible",

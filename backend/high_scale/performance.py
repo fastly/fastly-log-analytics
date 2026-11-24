@@ -36,7 +36,6 @@ from backend.repositories.utils.response_cache import (
 )
 from backend.repositories.utils.response_shaping import (
     PERF_TTL_BUCKETS,
-    PERF_TTL_LAST_BUCKET,
     chart_interval_seconds,
     float_or_zero,
     shape_latency_percentiles,
@@ -213,12 +212,16 @@ _MIN_URL_REQUESTS = 5
 _MIN_ASN_REQUESTS = 10
 _TOP_N = 20
 _TTL_EDGES = PERF_TTL_BUCKETS
+_TTL_BUCKET_CASES: tuple[tuple[int, str], ...] = (
+    (60, "< 60s"),
+    (3600, "1m - 1h"),
+    (86400, "1h - 1d"),
+)
 
 
 def _ttl_bucket_expr(column: str) -> str:
-    from backend.high_scale._common import _bucket_case
-
-    return _bucket_case(column, _TTL_EDGES, PERF_TTL_LAST_BUCKET)
+    arms = ", ".join(f"{column} < {limit}, '{label}'" for limit, label in _TTL_BUCKET_CASES)
+    return f"multiIf({arms}, '> 1d')"
 
 
 _ELAPSED_MS = "toFloat64OrNull(custom_fields['elapsed']) / 1000.0"

@@ -3141,7 +3141,6 @@ def test_time_series_are_padded_to_every_bucket_in_the_window() -> None:
         "2026-09-14 10:00:00",
         "2026-09-14 10:05:00",
         "2026-09-14 10:10:00",
-        "2026-09-14 10:15:00",
     ]
     assert result["sessions_ts"][1] == {
         "bucket": "2026-09-14 10:05:00",
@@ -3164,7 +3163,7 @@ def test_time_series_are_padded_to_every_bucket_in_the_window() -> None:
     assert result["bitrate_ts"][1]["utilization_ratio"] == 0.51
     assert result["throughput_ts"][1] == {"bucket": "2026-09-14 10:05:00", "p50": 7000.0, "p95": 9000.0, "p99": 9500.0}
     assert result["startup_ts"][1] == {"bucket": "2026-09-14 10:05:00", "startup_ratio": 2.5}
-    assert result["startup_ts"][3] == {"bucket": "2026-09-14 10:15:00", "startup_ratio": None}
+    assert result["startup_ts"][0] == {"bucket": "2026-09-14 10:00:00", "startup_ratio": None}
 
 
 @pytest.mark.usefixtures("_asn_names")
@@ -3235,7 +3234,7 @@ def test_all_queries_are_scoped_to_the_service_published_batches_and_window() ->
         assert "publication_state='visible'" in sql
         assert "high_scale_batch_publications FINAL" in sql and "domain='cmcd'" in sql
         assert params["service_id"] == "svc"
-        assert "event_timestamp >= {start:DateTime64(3)}" in sql and "event_timestamp <= {end:DateTime64(3)}" in sql
+        assert "event_timestamp >= {start:DateTime64(3)}" in sql and "event_timestamp < {end:DateTime64(3)}" in sql
     assert any(params.get("bucket_seconds") == 300 for _, params in client.calls)
     assert any(params.get("top_n") == 10 for _, params in client.calls)
 
@@ -3263,10 +3262,13 @@ def test_filters_the_projection_cannot_honour_raise_instead_of_being_ignored() -
 
 
 @pytest.mark.usefixtures("_asn_names")
-def test_cmcd_delegates_request_facts_filters_via_event_id_subquery() -> None:
+def test_cmcd_delegates_request_facts_filters_directly() -> None:
     client = _Client_cmcd()
     _run(client, _request(filters={"url": {"mode": "include", "values": ["/a"]}}), sections={"overview"})
-    assert any("request_event_id IN (SELECT event_id FROM request_facts WHERE" in sql for sql, _ in client.calls)
+    assert any(
+        "FROM request_facts" in sql and "domain='request'" in sql and "cmcd['sid'] != ''" in sql
+        for sql, _ in client.calls
+    )
 
 
 @pytest.mark.usefixtures("_asn_names")

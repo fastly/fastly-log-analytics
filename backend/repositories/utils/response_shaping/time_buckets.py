@@ -140,6 +140,7 @@ def pad_timeseries_buckets(
     default_vals: Mapping[str, Any],
     *,
     bucket_fmt: str = "%Y-%m-%d %H:%M:%S",
+    end_inclusive: bool = True,
 ) -> list[dict[str, Any]]:
     """Zero-fill missing time-series buckets between ``start_time`` and ``end_time``.
 
@@ -167,6 +168,10 @@ def pad_timeseries_buckets(
     st_aligned = st_epoch - (st_epoch % bs_arg)
 
     et_epoch = int(et.timestamp())
+    if not end_inclusive:
+        if et_epoch <= st_epoch:
+            return []
+        et_epoch -= 1
     et_aligned = et_epoch - (et_epoch % bs_arg)
     if et_aligned < st_aligned:
         return []

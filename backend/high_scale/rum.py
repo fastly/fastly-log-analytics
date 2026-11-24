@@ -168,7 +168,7 @@ def rum_analytics(
             [
                 *visible_fact_clauses(domain),
                 "event_timestamp >= {start:DateTime64(3, 'UTC')}",
-                "event_timestamp <= {end:DateTime64(3, 'UTC')}",
+                "event_timestamp < {end:DateTime64(3, 'UTC')}",
                 *filter_clauses,
             ]
         )
@@ -299,7 +299,8 @@ def rum_analytics(
         k: [] for k in ("timestamps", "lcp", "cls", "error_rate", "pageviews", "interactions", "errors")
     }
     curr = start.replace(minute=0, second=0, microsecond=0)
-    target = end.replace(minute=0, second=0, microsecond=0)
+    end_incl = end - timedelta(microseconds=1) if end > start else end
+    target = end_incl.replace(minute=0, second=0, microsecond=0)
     step = timedelta(hours=1) if hourly else timedelta(days=1)
     if not hourly:
         curr, target = curr.replace(hour=0), target.replace(hour=0)
@@ -395,7 +396,7 @@ def rum_live_events(
 ) -> list[dict[str, Any]]:
     start_dt, end_dt = parse_time_window(start_time, end_time, now=datetime.now(UTC))
     filter_clauses, filter_params = _filter_clauses(filters)
-    window = ["event_timestamp >= {start_time:DateTime64(3)}", "event_timestamp <= {end_time:DateTime64(3)}"]
+    window = ["event_timestamp >= {start_time:DateTime64(3)}", "event_timestamp < {end_time:DateTime64(3)}"]
 
     def scope(domain: str) -> str:
         return " AND ".join([*visible_fact_clauses(domain), *window, *filter_clauses])

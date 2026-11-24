@@ -230,7 +230,14 @@ def _require_window_bounds(start: datetime | None, end: datetime | None) -> tupl
 
 
 def _query_fact_aggregates(
-    client: AggregateQueryClient, *, service_id: str, domain: str, dimensions: list[str], start: datetime, end: datetime
+    client: AggregateQueryClient,
+    *,
+    service_id: str,
+    domain: str,
+    dimensions: list[str],
+    start: datetime,
+    end: datetime,
+    limit: int = 10,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     table = _FACT_TABLES[domain]
     expressions = _FACT_DIMENSION_EXPRESSIONS[domain]
@@ -260,14 +267,19 @@ def _query_fact_aggregates(
         f"SELECT dimension, value, count() AS aggregate_count FROM ({fact_values}) "
         "GROUP BY dimension, value "
         "ORDER BY dimension ASC, aggregate_count DESC, value ASC "
-        "LIMIT 10 BY dimension",
+        f"LIMIT {max(1, int(limit))} BY dimension",
         params,
     )
     return totals, rows
 
 
 def query_clickhouse_aggregate(
-    client: AggregateQueryClient, request: AggregateRequest, *, watermark: ServingWatermark, now: datetime | None = None
+    client: AggregateQueryClient,
+    request: AggregateRequest,
+    *,
+    watermark: ServingWatermark,
+    now: datetime | None = None,
+    limit: int = 10,
 ) -> AggregateResponse:
     """Read visible aggregate rows while preserving the aggregate contract."""
     request.validate()
@@ -294,6 +306,7 @@ def query_clickhouse_aggregate(
         end_operator = "<" if request.domain == "request" else "<="
         clauses.extend(["bucket_start >= {start:DateTime64(3)}", f"bucket_start {end_operator} {{end:DateTime64(3)}}"])
         params.update({"start": start, "end": end})
+    row_limit = max(1, int(limit))
     try:
         if partial_minute_window:
             start, end = _require_window_bounds(request.start, request.end)
@@ -304,6 +317,7 @@ def query_clickhouse_aggregate(
                 dimensions=[dimension],
                 start=start,
                 end=end,
+                limit=row_limit,
             )
         else:
             hourly_bounds = can_use_hourly_rollup(client, request.domain, request.start, request.end)
@@ -344,7 +358,7 @@ def query_clickhouse_aggregate(
                     totals = client.execute(f"SELECT sum(request_count) AS total_count FROM ({tot_union})", h_params)
                     rows = client.execute(
                         f"SELECT value, sum(request_count) AS aggregate_count FROM ({top_union}) "
-                        "GROUP BY value ORDER BY aggregate_count DESC, value ASC LIMIT 10",
+                        f"GROUP BY value ORDER BY aggregate_count DESC, value ASC LIMIT {row_limit}",
                         h_params,
                     )
                 except ClickHouseError:
@@ -357,7 +371,7 @@ def query_clickhouse_aggregate(
                 rows = client.execute(
                     f"SELECT value, sum({metric}) AS aggregate_count "
                     f"FROM {table} WHERE {' AND '.join(clauses)} "
-                    "GROUP BY value ORDER BY aggregate_count DESC, value ASC LIMIT 10",
+                    f"GROUP BY value ORDER BY aggregate_count DESC, value ASC LIMIT {row_limit}",
                     params,
                 )
     except ClickHouseError as e:
@@ -385,11 +399,13 @@ def query_clickhouse_aggregates_batch(
     end: datetime | None,
     watermark: ServingWatermark,
     now: datetime | None = None,
+    limits: Mapping[str, int] | None = None,
 ) -> dict[str, AggregateResponse]:
     """Read visible aggregate rows for multiple dimensions in two batched ClickHouse queries."""
     unique_dims = list(dict.fromkeys(dimensions))
     if not unique_dims:
         return {}
+    dim_limits = dict(limits or {})
     if len(unique_dims) == 1:
         dim = unique_dims[0]
         return {
@@ -398,8 +414,49 @@ def query_clickhouse_aggregates_batch(
                 AggregateRequest(service_id=service_id, domain=domain, start=start, end=end, dimension=dim),
                 watermark=watermark,
                 now=now,
+                limit=dim_limits.get(dim, 10),
             )
         }
+    custom_dims = [dim for dim in unique_dims if dim_limits.get(dim, 10) != 10]
+    if custom_dims:
+        standard_dims = [dim for dim in unique_dims if dim_limits.get(dim, 10) == 10]
+        custom_out: dict[str, AggregateResponse] = {}
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(4, len(custom_dims) + int(bool(standard_dims)))
+        ) as pool:
+            std_fut = (
+                pool.submit(
+                    contextvars.copy_context().run,
+                    query_clickhouse_aggregates_batch,
+                    client,
+                    service_id=service_id,
+                    domain=domain,
+                    dimensions=standard_dims,
+                    start=start,
+                    end=end,
+                    watermark=watermark,
+                    now=now,
+                )
+                if standard_dims
+                else None
+            )
+            cust_futs = {
+                dim: pool.submit(
+                    contextvars.copy_context().run,
+                    query_clickhouse_aggregate,
+                    client,
+                    AggregateRequest(service_id=service_id, domain=domain, start=start, end=end, dimension=dim),
+                    watermark=watermark,
+                    now=now,
+                    limit=dim_limits[dim],
+                )
+                for dim in custom_dims
+            }
+            if std_fut is not None:
+                custom_out.update(std_fut.result())
+            for dim, fut in cust_futs.items():
+                custom_out[dim] = fut.result()
+        return {dim: custom_out[dim] for dim in unique_dims}
     watermark.validate()
     if watermark.service_id != service_id or watermark.domain != domain:
         raise ValueError("watermark does not belong to this service and domain")

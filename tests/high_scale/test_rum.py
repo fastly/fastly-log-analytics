@@ -121,9 +121,9 @@ def test_default_and_one_sided_bounds_are_always_applied(monkeypatch, start: str
     monkeypatch.setattr("backend.high_scale.rum.datetime", FrozenDatetime)
     client = ChartClient()
     result = rum_analytics(service_for(client), start, end)
-    assert len(result["trends"]["timestamps"]) == 25
+    assert len(result["trends"]["timestamps"]) == 24
     for sql, params in client.calls:
-        assert "event_timestamp >=" in sql and "event_timestamp <=" in sql
+        assert "event_timestamp >=" in sql and "event_timestamp <" in sql
         assert params["start"] == datetime(2026, 9, 1, tzinfo=UTC)
         assert params["end"] == datetime(2026, 9, 2, tzinfo=UTC)
 
@@ -147,8 +147,8 @@ def test_empty_range_distinguishes_no_data_from_older_history(has_history: bool)
     assert res["no_data"] is not has_history
     assert res["beacon_count"] == res["pageview_count"] == res["interaction_count"] == res["error_count"] == 0
     tr = res["trends"]
-    assert tr["lcp"] == tr["cls"] == tr["error_rate"] == ([None] * 3 if has_history else [])
-    assert tr["pageviews"] == ([0] * 3 if has_history else [])
+    assert tr["lcp"] == tr["cls"] == tr["error_rate"] == ([None] * 2 if has_history else [])
+    assert tr["pageviews"] == ([0] * 2 if has_history else [])
     assert res["vitals"]["lcp"]["p75"] is None and res["errors"] == res["worst_pages"] == []
 
 

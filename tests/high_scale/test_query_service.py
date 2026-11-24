@@ -347,7 +347,7 @@ def test_dashboard_fact_readers_preserve_exact_bounds(reader: str, start: str | 
         assert "event_timestamp >= {start:DateTime64(3)}" in sql
         assert params["start"] == datetime.fromisoformat(start)
     if end is not None:
-        assert "event_timestamp <= {end_upper:DateTime64(3)}" in sql
+        assert "event_timestamp < {end_upper:DateTime64(3)}" in sql
         assert params["end_upper"] == datetime.fromisoformat(end)
 
 
@@ -712,7 +712,7 @@ def test_dashboard_matches_exact_half_open_facts(event_window, entrypoint) -> No
     client = service.client
     expected = client.db.execute(
         "SELECT count(*) FROM request_facts WHERE service_id = 'svc' AND publication_state = 'visible' "
-        "AND batch_id = 'facts' AND event_timestamp >= ? AND event_timestamp <= ?",
+        "AND batch_id = 'facts' AND event_timestamp >= ? AND event_timestamp < ?",
         (client.stamp(start), client.stamp(end)),
     ).fetchone()[0]
 
@@ -882,12 +882,12 @@ def test_perf_latencies_thresholds_sections_ttl_and_unfiltered_projections() -> 
     assert (url.avg, url.p50, url.p95, url.p99) == (12.5, 10.0, 20.0, 30.0) and client.sql_for("top_urls")[0].count("/ 1000.0") == 4  # fmt: skip
     assert "HAVING req_count > 5" in client.sql_for("top_urls")[0] and "HAVING req_count > 10" in client.sql_for("top_asns")[0]  # fmt: skip
 
-    c_ttl = _PerfClient({"ttl_dist": [{"bucket": "0s", "count": 3, "min_ttl": 0}, {"bucket": "<30m", "count": 7, "min_ttl": 1201}]})  # fmt: skip
+    c_ttl = _PerfClient({"ttl_dist": [{"bucket": "< 60s", "count": 3, "min_ttl": 0}, {"bucket": "1m - 1h", "count": 7, "min_ttl": 1201}]})  # fmt: skip
     res_ttl = _run_perf(c_ttl, sections={"ttl_dist"})
     assert c_ttl.markers == {"ttl_dist"} and res_ttl.top_urls == [] and res_ttl.top_asns == [] and res_ttl.scatter == [] and res_ttl.waterfall.avg is None  # fmt: skip
-    assert [(b.bucket, b.count) for b in res_ttl.ttl_dist] == [("0s", 3), ("<30m", 7)]
+    assert [(b.bucket, b.count) for b in res_ttl.ttl_dist] == [("< 60s", 3), ("1m - 1h", 7)]
     ttl_sql, _ = c_ttl.sql_for("ttl_dist")
-    assert "FROM request_aggregates" in ttl_sql and "LIMIT" not in ttl_sql and all(edge in ttl_sql for edge in ("'<30m'", "'<3h'", "'<1w'", "'<1y'", "'>1y'"))  # fmt: skip
+    assert "FROM request_aggregates" in ttl_sql and "LIMIT" not in ttl_sql and all(edge in ttl_sql for edge in ("'< 60s'", "'1m - 1h'", "'1h - 1d'", "'> 1d'"))  # fmt: skip
 
     c_all = _PerfClient({"top_urls": [_PERCENTILE_ROW]})
     res_all = _run_perf(c_all, sections=None)
@@ -1864,7 +1864,7 @@ def test_unfiltered_subminute_windows_use_scoped_facts(start_time: str, end_time
     for sql, params in client.calls:
         assert "FROM request_facts" in sql and "high_scale_batch_publications FINAL" in sql
         assert (
-            "event_timestamp >= {start:DateTime64(3)}" in sql and "event_timestamp <= {end_upper:DateTime64(3)}" in sql
+            "event_timestamp >= {start:DateTime64(3)}" in sql and "event_timestamp < {end_upper:DateTime64(3)}" in sql
         )
         assert params["service_id"] == "svc" and params["start"] == start and params["end_upper"] == end
     assert all(row["source"] == "fact" for row in response.section_timings if row["activity"] != "overhead")
@@ -3274,7 +3274,7 @@ def test_high_scale_readers_subminute_windows_do_not_collide_in_memo_cache() -> 
     assert calls_after_w2 > calls_after_w1
 
 
-def test_dashboard_includes_exact_end_time_without_overcounting_later_minute_events() -> None:
+def test_dashboard_uses_half_open_window_excluding_exact_end_time() -> None:
     start = datetime(2026, 10, 23, 0, 20, 0, tzinfo=UTC)
     end = datetime(2026, 10, 23, 0, 21, 0, tzinfo=UTC)
     client = PredicateClient(
@@ -3303,10 +3303,10 @@ def test_dashboard_includes_exact_end_time_without_overcounting_later_minute_eve
             start.isoformat(),
             end.isoformat(),
         )
-        assert res.total_rows == res.total_rows_total == 3
-        assert res.data["url"].total == 3 and sum(r.count for r in res.data["url"].top) == 3
-        assert sum(r.count for r in res.map_data) == 3
-        assert sum(r.value for r in res.time_series) == 3
+        assert res.total_rows == res.total_rows_total == 2
+        assert res.data["url"].total == 2 and sum(r.count for r in res.data["url"].top) == 2
+        assert sum(r.count for r in res.map_data) == 2
+        assert sum(r.value for r in res.time_series) == 2
 
         fv = dashboard.field_values(
             service,
@@ -3314,7 +3314,7 @@ def test_dashboard_includes_exact_end_time_without_overcounting_later_minute_eve
             start.isoformat(),
             end.isoformat(),
         )
-        assert sum(v.count for v in fv.values) == 3
+        assert sum(v.count for v in fv.values) == 2
     finally:
         client.db.close()
 

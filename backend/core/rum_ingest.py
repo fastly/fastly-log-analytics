@@ -6,7 +6,7 @@ import logging
 import math
 import sys as _sys
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 import orjson
 
@@ -397,15 +397,19 @@ def _parse_rum_line(log_data: dict, service_id: str) -> tuple[list[dict], list[d
                 common=common,
             )
     else:
+
+        def _decode_vcl(val: Any) -> Any:
+            return unquote(val) if isinstance(val, str) and "%" in val else val
+
         metric_name = log_data.get("rum_metric_name")
         metric_value = log_data.get("rum_metric_value")
         metric_rating = log_data.get("rum_metric_rating")
-        err_msg = log_data.get("rum_error_message")
-        err_file = log_data.get("rum_error_file")
+        err_msg = _decode_vcl(log_data.get("rum_error_message"))
+        err_file = _decode_vcl(log_data.get("rum_error_file"))
         err_line = log_data.get("rum_error_line")
         err_col = log_data.get("rum_error_col")
         cid_val = log_data.get("rum_cid") or log_data.get("cid") or ""
-        pathname_val = log_data.get("rum_pathname")
+        pathname_val = _decode_vcl(log_data.get("rum_pathname"))
         if qparams:
             metric_name = metric_name or qparams.get("rum_metric_name", [metric_name])[0]
             if metric_value is None or metric_value == "":

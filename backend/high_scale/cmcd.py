@@ -86,23 +86,24 @@ _DEFAULT_WINDOW = timedelta(days=1)
 _BUCKET_FORMAT = "%Y-%m-%d %H:%M:%S"
 _DURATION_BUCKETS = {1: "<30s", 2: "30s–2m", 3: "2–5m", 4: "5–10m", 5: "10–30m", 6: "30m–1h", 7: ">1h"}
 _FILTER_COLUMNS = {"country": "country", "asn": "asn"}
-_EVENTS = """
+_EVENTS_SELECT = """
     SELECT event_timestamp AS ts,
            cmcd['sid'] AS sid,
            cmcd['cid'] AS cid,
            cmcd['ot'] AS ot,
            cmcd['sf'] AS sf,
            country,
-           asn,
+           {asn_expr},
            toFloat64OrNull(cmcd['bl']) AS bl,
            toFloat64OrNull(cmcd['br']) AS br,
            toFloat64OrNull(cmcd['mtp']) AS mtp,
            toFloat64OrNull(cmcd['tb']) AS tb,
            if(cmcd['bs'] = '', NULL, lower(cmcd['bs']) IN ('true', '1')) AS bs,
            if(cmcd['su'] = '', NULL, lower(cmcd['su']) IN ('true', '1')) AS su
-    FROM cmcd_projection_facts
+    FROM {from_table}
     WHERE {where}
 """
+_EVENTS = _EVENTS_SELECT.replace("{from_table}", "cmcd_projection_facts").replace("{asn_expr}", "asn")
 _BUCKET = (
     "formatDateTime(toStartOfInterval({column}, INTERVAL {{bucket_seconds:UInt32}} SECOND), '%Y-%m-%d %H:%i:%S', 'UTC')"
 )
@@ -127,10 +128,11 @@ def _spec(config: Any) -> tuple[str, list[Any]]:
     return str(getattr(config, "mode", "include")), list(getattr(config, "values", None) or [])
 
 
-def _filter_clauses(filters: Mapping[str, Any]) -> tuple[list[str], dict[str, Any]]:
+def _filter_clauses(filters: Mapping[str, Any]) -> tuple[list[str], dict[str, Any], bool]:
     clauses: list[str] = []
     params: dict[str, Any] = {}
     request_filters: dict[str, Any] = {}
+    direct_filters: list[tuple[int, str, str, list[Any]]] = []
     for i, (name, config) in enumerate(filters.items()):
         if name == "filter_mode":
             continue
@@ -140,6 +142,18 @@ def _filter_clauses(filters: Mapping[str, Any]) -> tuple[list[str], dict[str, An
         if name not in _FILTER_COLUMNS:
             request_filters[name] = config
             continue
+        direct_filters.append((i, name, mode, values))
+
+    use_request_facts = bool(request_filters)
+    if use_request_facts:
+        from ._common import request_filter_clauses
+
+        req_clauses, req_params = request_filter_clauses(request_filters, prefix="cmcd_req_flt")
+        params.update(req_params)
+        clauses.extend(req_clauses)
+
+    asn_expr = "toInt32OrNull(nullIf(custom_fields['asn'], ''))" if use_request_facts else "asn"
+    for i, name, mode, values in direct_filters:
         keys: list[str] = []
         for j, value in enumerate(values):
             param = f"flt_{i}_{j}"
@@ -152,38 +166,26 @@ def _filter_clauses(filters: Mapping[str, Any]) -> tuple[list[str], dict[str, An
                 params[param] = str(value)
                 keys.append(f"{{{param}:String}}")
         operator = "NOT IN" if mode == "exclude" else "IN"
-        clauses.append(f"{_FILTER_COLUMNS[name]} {operator} ({', '.join(keys)})")
-    if request_filters:
-        from ._common import VISIBLE_PUBLICATION_FENCE_SQL, request_filter_clauses
-
-        req_clauses, req_params = request_filter_clauses(request_filters, prefix="cmcd_req_flt")
-        if req_clauses:
-            params.update(req_params)
-            req_where = " AND ".join(
-                [
-                    "service_id = {service_id:String}",
-                    "event_timestamp >= {start:DateTime64(3)}",
-                    "event_timestamp <= {end:DateTime64(3)}",
-                    VISIBLE_PUBLICATION_FENCE_SQL,
-                    *req_clauses,
-                ]
-            )
-            clauses.append(f"request_event_id IN (SELECT event_id FROM request_facts WHERE {req_where})")
-    return clauses, params
+        col = asn_expr if name == "asn" else _FILTER_COLUMNS[name]
+        clauses.append(f"{col} {operator} ({', '.join(keys)})")
+    return clauses, params, use_request_facts
 
 
 def _cmcd_scope(
     service: HighScaleService, req: CmcdRequest, start: datetime, end: datetime
-) -> tuple[str, dict[str, Any]]:
-    filter_clauses, filter_params = _filter_clauses(req.filters or {})
+) -> tuple[str, str, str, dict[str, Any]]:
+    filter_clauses, filter_params, use_request_facts = _filter_clauses(req.filters or {})
+    domain = "request" if use_request_facts else "cmcd"
+    from_table = "request_facts" if use_request_facts else "cmcd_projection_facts"
+    asn_expr = "toInt32OrNull(nullIf(custom_fields['asn'], '')) AS asn" if use_request_facts else "asn"
     clauses = [
         "service_id={service_id:String}",
         "publication_state='visible'",
         "batch_id IN ("
         "SELECT batch_id FROM high_scale_batch_publications FINAL "
-        "WHERE service_id={service_id:String} AND domain='cmcd' AND publication_state='visible')",
+        f"WHERE service_id={{service_id:String}} AND domain='{domain}' AND publication_state='visible')",
         "event_timestamp >= {start:DateTime64(3)}",
-        "event_timestamp <= {end:DateTime64(3)}",
+        "event_timestamp < {end:DateTime64(3)}",
         "cmcd['sid'] != ''",
         *filter_clauses,
     ]
@@ -195,7 +197,7 @@ def _cmcd_scope(
         "top_n": int(req.top_n),
         **filter_params,
     }
-    return " AND ".join(clauses), params
+    return from_table, asn_expr, " AND ".join(clauses), params
 
 
 def _round(value: Any) -> float | None:
@@ -205,7 +207,7 @@ def _round(value: Any) -> float | None:
 def _pad(
     start: datetime, end: datetime, bucket_seconds: int, rows: dict[str, dict[str, Any]], default: dict[str, Any]
 ) -> list[dict[str, Any]]:
-    return pad_timeseries_buckets(start, end, bucket_seconds, rows, default)
+    return pad_timeseries_buckets(start, end, bucket_seconds, rows, default, end_inclusive=False)
 
 
 def _sessions_ts(rows: Iterable[dict[str, Any]], new_sessions: Mapping[str, int]) -> dict[str, dict[str, Any]]:
@@ -309,8 +311,8 @@ def _cmcd_aggregates_compute(
     mask_ips: bool,
 ) -> dict[str, Any]:
     start, end = parse_time_window(start_time, end_time, _DEFAULT_WINDOW, utc=True)
-    where, params = _cmcd_scope(service, req, start, end)
-    events = _EVENTS.format(where=where)
+    from_table, asn_expr, where, params = _cmcd_scope(service, req, start, end)
+    events = _EVENTS_SELECT.format(from_table=from_table, asn_expr=asn_expr, where=where)
     execute = service.client.execute
 
     def wanted(name: str) -> bool:

@@ -381,15 +381,50 @@ def _fields_to_fetch(req: AggregatesRequest, want_map: bool, want_top_n: bool) -
     return top_fields, to_query
 
 
-def _facts_time_series(
-    service: HighScaleService,
-    start_time: str | None,
-    end_time: str | None,
-    norm_interval: str,
-    metric: str,
-    where_clause: str,
-    params: dict[str, Any],
-) -> list[TimeSeriesPoint]:
+_STATIC_METRIC_SQL: dict[str, str] = {
+    "5xx": "countIf(custom_fields['status'] >= '500' AND custom_fields['status'] <= '599')",
+    "4xx": "countIf(custom_fields['status'] >= '400' AND custom_fields['status'] <= '499')",
+    "hit_rate": "round(100.0 * countIf(custom_fields['cache'] IN ('HIT', 'HIT-CLUSTER', 'HIT-STALE')) / nullIf(count(), 0), 2)",
+    "error_rate": "round(100.0 * countIf(custom_fields['status'] >= '400' AND custom_fields['status'] <= '599') / nullIf(count(), 0), 2)",
+    "bandwidth": "sum(coalesce(toFloat64OrZero(custom_fields['resp_bytes']), 0.0))",
+    "p50_latency": (
+        "round(ifNull(quantileExactOrNullIf(0.5)("
+        "toFloat64OrNull(custom_fields['elapsed']), toFloat64OrNull(custom_fields['elapsed']) IS NOT NULL"
+        "), 0.0) / 1000.0, 2)"
+    ),
+    "p95_latency": (
+        "round(ifNull(quantileExactOrNullIf(0.95)("
+        "toFloat64OrNull(custom_fields['elapsed']), toFloat64OrNull(custom_fields['elapsed']) IS NOT NULL"
+        "), 0.0) / 1000.0, 2)"
+    ),
+    "p99_latency": (
+        "round(ifNull(quantileExactOrNullIf(0.99)("
+        "toFloat64OrNull(custom_fields['elapsed']), toFloat64OrNull(custom_fields['elapsed']) IS NOT NULL"
+        "), 0.0) / 1000.0, 2)"
+    ),
+    "ttfb": (
+        "round(ifNull(quantileExactOrNullIf(0.95)("
+        "coalesce(toFloat64OrNull(custom_fields['ottfb']) / 1000.0, toFloat64OrNull(custom_fields['ttfb']) * 1000.0), "
+        "toFloat64OrNull(custom_fields['ottfb']) IS NOT NULL OR toFloat64OrNull(custom_fields['ttfb']) IS NOT NULL"
+        "), 0.0), 2)"
+    ),
+    "ttfb_ms": (
+        "round(ifNull(quantileExactOrNullIf(0.5)("
+        "toFloat64OrNull(custom_fields['ttfb']) * 1000.0, toFloat64OrNull(custom_fields['ttfb']) IS NOT NULL"
+        "), 0.0), 2)"
+    ),
+    "req_size": (
+        "round(ifNull(quantileExactOrNullIf(0.5)("
+        "if(toFloat64OrNull(custom_fields['req_bytes']) IS NULL AND toFloat64OrNull(custom_fields['req_header_bytes']) IS NULL, "
+        "CAST(NULL AS Nullable(Float64)), "
+        "coalesce(toFloat64OrNull(custom_fields['req_bytes']), 0.0) + coalesce(toFloat64OrNull(custom_fields['req_header_bytes']), 0.0)), "
+        "toFloat64OrNull(custom_fields['req_bytes']) IS NOT NULL OR toFloat64OrNull(custom_fields['req_header_bytes']) IS NOT NULL"
+        "), 0.0), 2)"
+    ),
+}
+
+
+def _facts_time_series_exprs(norm_interval: str, metric: str) -> tuple[str, str]:
     interval_sql = "toStartOfMinute(event_timestamp)"
     if norm_interval == "1 second":
         interval_sql = "toStartOfSecond(event_timestamp)"
@@ -400,22 +435,37 @@ def _facts_time_series(
     elif norm_interval == "1 day":
         interval_sql = "toStartOfDay(event_timestamp)"
 
-    if metric == "5xx":
-        metric_sql = "countIf(custom_fields['status'] >= '500' AND custom_fields['status'] <= '599')"
-    elif metric == "4xx":
-        metric_sql = "countIf(custom_fields['status'] >= '400' AND custom_fields['status'] <= '499')"
-    elif metric == "hit_rate":
-        metric_sql = "round(100.0 * countIf(custom_fields['cache'] IN ('HIT', 'HIT-CLUSTER', 'HIT-STALE')) / nullIf(count(), 0), 2)"
+    if metric == "throughput":
+        bucket_seconds = max(1, chart_interval_seconds(norm_interval, default=60))
+        metric_sql = (
+            "round(sumIf(coalesce(toFloat64OrZero(custom_fields['resp_bytes']), 0.0), "
+            f"custom_fields['cache'] ILIKE 'HIT%') / {bucket_seconds}, 2)"
+        )
     else:
-        metric_sql = "count()"
+        metric_sql = _STATIC_METRIC_SQL.get(metric, "count()")
+    return interval_sql, metric_sql
 
+
+def _facts_time_series(
+    service: HighScaleService,
+    start_time: str | None,
+    end_time: str | None,
+    norm_interval: str,
+    metric: str,
+    where_clause: str,
+    params: dict[str, Any],
+) -> list[TimeSeriesPoint]:
+    interval_sql, metric_sql = _facts_time_series_exprs(norm_interval, metric)
     ts_rows = service.client.execute(
         f"SELECT {interval_sql} AS bucket_start, {metric_sql} AS value FROM request_facts "
         f"WHERE {where_clause} GROUP BY bucket_start ORDER BY bucket_start",
         params,
     )
     return [
-        TimeSeriesPoint(time=safe_iso(r["bucket_start"]) or str(r["bucket_start"]), value=float(r["value"]))
+        TimeSeriesPoint(
+            time=safe_iso(r["bucket_start"]) or str(r["bucket_start"]),
+            value=float(r["value"]) if r.get("value") is not None else 0.0,
+        )
         for r in ts_rows
     ]
 
@@ -429,25 +479,7 @@ def _facts_time_series_with_count(
     where_clause: str,
     params: dict[str, Any],
 ) -> tuple[list[TimeSeriesPoint], int]:
-    interval_sql = "toStartOfMinute(event_timestamp)"
-    if norm_interval == "1 second":
-        interval_sql = "toStartOfSecond(event_timestamp)"
-    elif norm_interval == "5 minutes":
-        interval_sql = "toStartOfFiveMinutes(event_timestamp)"
-    elif norm_interval == "1 hour":
-        interval_sql = "toStartOfInterval(event_timestamp, INTERVAL 1 hour)"
-    elif norm_interval == "1 day":
-        interval_sql = "toStartOfDay(event_timestamp)"
-
-    if metric == "5xx":
-        metric_sql = "countIf(custom_fields['status'] >= '500' AND custom_fields['status'] <= '599')"
-    elif metric == "4xx":
-        metric_sql = "countIf(custom_fields['status'] >= '400' AND custom_fields['status'] <= '499')"
-    elif metric == "hit_rate":
-        metric_sql = "round(100.0 * countIf(custom_fields['cache'] IN ('HIT', 'HIT-CLUSTER', 'HIT-STALE')) / nullIf(count(), 0), 2)"
-    else:
-        metric_sql = "count()"
-
+    interval_sql, metric_sql = _facts_time_series_exprs(norm_interval, metric)
     ts_rows = service.client.execute(
         f"SELECT {interval_sql} AS bucket_start, {metric_sql} AS value, count() AS _bucket_cnt FROM request_facts "
         f"WHERE {where_clause} GROUP BY bucket_start ORDER BY bucket_start",
@@ -456,7 +488,10 @@ def _facts_time_series_with_count(
     total_cnt = sum(int(r.get("_bucket_cnt") or r.get("value") or 0) for r in ts_rows)
     return (
         [
-            TimeSeriesPoint(time=safe_iso(r["bucket_start"]) or str(r["bucket_start"]), value=float(r["value"]))
+            TimeSeriesPoint(
+                time=safe_iso(r["bucket_start"]) or str(r["bucket_start"]),
+                value=float(r["value"]) if r.get("value") is not None else 0.0,
+            )
             for r in ts_rows
         ],
         total_cnt,
@@ -494,7 +529,7 @@ def _filtered_aggregates(
     if start is not None and end is not None:
         end_upper = end
         clauses.append("event_timestamp >= {start:DateTime64(3)}")
-        clauses.append("event_timestamp <= {end_upper:DateTime64(3)}")
+        clauses.append("event_timestamp < {end_upper:DateTime64(3)}")
         params.update({"start": start, "end_upper": end_upper})
 
     where_clause = " AND ".join(clauses)
@@ -505,9 +540,10 @@ def _filtered_aggregates(
 
     def fetch_field(field: str):
         sql_col = _field_sql_column(field)
+        field_limit = 250 if field == "country" and want_map else 10
         rows = service.client.execute(
             f"SELECT {sql_col} AS v, count() AS c FROM request_facts WHERE {where_clause} AND {sql_col} != '' "
-            "GROUP BY v ORDER BY c DESC LIMIT 10",
+            f"GROUP BY v ORDER BY c DESC LIMIT {field_limit}",
             params,
         )
         return field, [(str(r["v"]), int(r["c"])) for r in rows]
@@ -534,6 +570,8 @@ def _filtered_aggregates(
                 col = _field_sql_column(f)
                 if include_bots and f == "ua":
                     exprs.append(f"approx_top_kIf(1000, 3000)({col}, {col} != '') AS `_f_{f}`")
+                elif want_map and f == "country":
+                    exprs.append(f"approx_top_kIf(250, 500)({col}, {col} != '') AS `_f_{f}`")
                 else:
                     exprs.append(f"approx_top_kIf(15, 250)({col}, {col} != '') AS `_f_{f}`")
             if include_bots:
@@ -560,7 +598,8 @@ def _filtered_aggregates(
             for f in chunk:
                 items = row.get(f"_f_{f}") or []
                 sorted_items = sorted(items, key=lambda x: (-int(x["count"]), str(x["item"])))
-                out[f] = [(str(x["item"]), int(x["count"])) for x in sorted_items[:10]]
+                keep_n = 250 if want_map and f == "country" else 10
+                out[f] = [(str(x["item"]), int(x["count"])) for x in sorted_items[:keep_n]]
                 if include_bots and f == "ua":
                     for x in sorted_items:
                         ua_bot_rows.append((str(x["item"]), int(x["count"])))
@@ -582,7 +621,7 @@ def _filtered_aggregates(
                 "concat(custom_fields['ngwaf_bot'], '\x1f', custom_fields['ngwaf_bot_category']), ''))"
             )
         pairs_sql = ", ".join(pair_exprs)
-        limit_by = 1000 if include_bots else 10
+        limit_by = 1000 if include_bots else (250 if want_map and "country" in chunk else 10)
         if "SELECT" not in eff_where:
             sql = (
                 f"SELECT pair.1 AS field_name, pair.2 AS v, count() AS c "
@@ -604,7 +643,8 @@ def _filtered_aggregates(
             fn = str(r.get("field_name") or "")
             val_str = str(r["v"])
             cnt_int = int(r["c"])
-            if fn in out and len(out[fn]) < 10:
+            keep_n = 250 if want_map and fn == "country" else 10
+            if fn in out and len(out[fn]) < keep_n:
                 out[fn].append((val_str, cnt_int))
             if include_bots:
                 if fn == "ua":
@@ -801,7 +841,7 @@ def _filtered_aggregates(
 
     data = {
         field: FieldAggregate(
-            top=[FieldTopEntry(value=v, count=c) for v, c in field_results.get(field, [])], total=total_count
+            top=[FieldTopEntry(value=v, count=c) for v, c in field_results.get(field, [])[:10]], total=total_count
         )
         for field in top_fields
     }
@@ -921,11 +961,18 @@ def _merge_top_values_with_exact_end(
 
 
 def _aggregates_batch(
-    service: HighScaleService, *, start_time: str | None, end_time: str | None, fields: list[str], watermark
+    service: HighScaleService,
+    *,
+    start_time: str | None,
+    end_time: str | None,
+    fields: list[str],
+    watermark,
+    limits: Mapping[str, int] | None = None,
 ):
     start = _range_value(start_time)
     end = _range_value(end_time)
     dims = [_FIELD_DIMENSIONS[f] for f in fields]
+    dim_limits = {_FIELD_DIMENSIONS[k]: v for k, v in (limits or {}).items() if k in _FIELD_DIMENSIONS}
     by_dim = query_clickhouse_aggregates_batch(
         service.client,
         service_id=service.service_id,
@@ -934,6 +981,7 @@ def _aggregates_batch(
         start=start,
         end=end,
         watermark=watermark,
+        limits=dim_limits or None,
     )
     return {f: by_dim[_FIELD_DIMENSIONS[f]] for f in fields}
 
@@ -1040,47 +1088,17 @@ def dashboard_aggregates(
         if "url" not in all_fields_to_query:
             all_fields_to_query.append("url")
 
-        def _run_agg_batch() -> tuple[dict[str, Any], list[dict[str, Any]]]:
-            if hasattr(service.client, "responses") or (
-                is_real_ch
-                and start is not None
-                and end is not None
-                and (end - start) >= timedelta(hours=24)
-                and end.second == 0
-                and end.microsecond == 0
-            ):
-                return (
-                    _aggregates_batch(
-                        service,
-                        start_time=start_time,
-                        end_time=end_time,
-                        fields=all_fields_to_query,
-                        watermark=request_watermark,
-                    ),
-                    _exact_end_fact_rows(service, start, end, all_fields_to_query, watermark=request_watermark),
-                )
-            from backend.utils.telemetry.metrics import get_queries
+        map_limits = {"country": 250} if want_map else None
 
-            get_queries()
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as inner_pool:
-                agg_fut = inner_pool.submit(
-                    contextvars.copy_context().run,
-                    partial(
-                        _aggregates_batch,
-                        service,
-                        start_time=start_time,
-                        end_time=end_time,
-                        fields=all_fields_to_query,
-                        watermark=request_watermark,
-                    ),
-                )
-                exact_fut = inner_pool.submit(
-                    contextvars.copy_context().run,
-                    partial(
-                        _exact_end_fact_rows, service, start, end, all_fields_to_query, watermark=request_watermark
-                    ),
-                )
-                return agg_fut.result(), exact_fut.result()
+        def _run_agg_batch() -> dict[str, Any]:
+            return _aggregates_batch(
+                service,
+                start_time=start_time,
+                end_time=end_time,
+                fields=all_fields_to_query,
+                watermark=request_watermark,
+                limits=map_limits,
+            )
 
         parallel_projection_ts = want_time_series and not (req.chart_metric and req.chart_metric != "requests")
         if parallel_projection_ts and not hasattr(service.client, "responses"):
@@ -1092,36 +1110,27 @@ def dashboard_aggregates(
                     partial(_time_series, service, start_time, end_time, norm_interval),
                     source="projection",
                 )
-                responses, exact_end_rows = batch_fut.result()
+                responses = batch_fut.result()
                 raw_projection_ts = ts_fut.result()
         else:
-            responses, exact_end_rows = trace.run("aggregates_batch", _run_agg_batch, source="projection")
+            responses = trace.run("aggregates_batch", _run_agg_batch, source="projection")
             raw_projection_ts = None
 
-        extra_end_count = len(exact_end_rows)
-        total_request_count = responses["url"].request_count + extra_end_count
+        total_request_count = responses["url"].request_count
 
         data = {
             field: FieldAggregate(
                 top=[
                     FieldTopEntry(value=value, count=count)
-                    for value, count in (
-                        _merge_top_values_with_exact_end(responses[field].top_values, exact_end_rows, field)
-                        if extra_end_count
-                        else responses[field].top_values
-                    )
+                    for value, count in responses[field].top_values[:10]
                     if value != ""
                 ],
-                total=responses[field].request_count + extra_end_count,
+                total=responses[field].request_count,
             )
             for field in top_fields
         }
         map_response = responses.get("country")
-        map_top_values = (
-            _merge_top_values_with_exact_end(map_response.top_values, exact_end_rows, "country")
-            if map_response is not None and extra_end_count
-            else (map_response.top_values if map_response is not None else ())
-        )
+        map_top_values = map_response.top_values if map_response is not None else ()
         map_data = (
             [MapPoint(country=value, count=count) for value, count in map_top_values if value != ""]
             if want_map and map_response is not None
@@ -1136,7 +1145,7 @@ def dashboard_aggregates(
             params: dict[str, Any] = {"service_id": service.service_id}
             if start_ts is not None and end_ts is not None:
                 clauses.append("event_timestamp >= {start:DateTime64(3)}")
-                clauses.append("event_timestamp <= {end_upper:DateTime64(3)}")
+                clauses.append("event_timestamp < {end_upper:DateTime64(3)}")
                 params.update({"start": start_ts, "end_upper": end_ts})
             time_series = trace.run(
                 "time_series",
@@ -1155,20 +1164,6 @@ def dashboard_aggregates(
                     source="projection",
                 )
             )
-            if extra_end_count and end is not None:
-                end_bucket_dt = _bucket_start_for_interval(end, norm_interval)
-                end_bucket_iso = safe_iso(end_bucket_dt) or end_bucket_dt.isoformat()
-                merged_ts: list[TimeSeriesPoint] = []
-                matched_bucket = False
-                for pt in time_series:
-                    if pt.time == end_bucket_iso:
-                        merged_ts.append(TimeSeriesPoint(time=pt.time, value=float(pt.value) + float(extra_end_count)))
-                        matched_bucket = True
-                    else:
-                        merged_ts.append(pt)
-                if not matched_bucket:
-                    merged_ts.append(TimeSeriesPoint(time=end_bucket_iso, value=float(extra_end_count)))
-                time_series = merged_ts
         resp = AggregatesResponse.with_telemetry(
             data=data,
             time_series=time_series,
@@ -1309,13 +1304,7 @@ def field_values(
             dimension=_FIELD_DIMENSIONS[key],
             watermark=service.watermark_for("request"),
         )
-        exact_end_rows = _exact_end_fact_rows(service, start, end, [key])
-        merged_top = (
-            _merge_top_values_with_exact_end(agg.top_values, exact_end_rows, key, limit=limit)
-            if exact_end_rows
-            else agg.top_values[:limit]
-        )
-        vals: list[dict[str, Any]] = [{"value": str(val), "count": int(cnt)} for val, cnt in merged_top]
+        vals: list[dict[str, Any]] = [{"value": str(val), "count": int(cnt)} for val, cnt in agg.top_values[:limit]]
         if key == "asn" and vals:
             try:
                 enrich_asn_rows(vals, service.service_id, asn_key="value")
@@ -1334,7 +1323,7 @@ def field_values(
         clauses.append("event_timestamp >= {start:DateTime64(3)}")
         params["start"] = start
     if end is not None:
-        clauses.append("event_timestamp <= {end_upper:DateTime64(3)}")
+        clauses.append("event_timestamp < {end_upper:DateTime64(3)}")
         params["end_upper"] = end
 
     if req.search:
@@ -1381,7 +1370,7 @@ def raw_df(
         clauses.append("event_timestamp >= {start:DateTime64(3)}")
         params["start"] = start
     if end is not None:
-        clauses.append("event_timestamp <= {end_upper:DateTime64(3)}")
+        clauses.append("event_timestamp < {end_upper:DateTime64(3)}")
         params["end_upper"] = end
 
     where_clause = " AND ".join(clauses)

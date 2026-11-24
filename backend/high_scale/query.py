@@ -15,7 +15,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
-from urllib.parse import parse_qs, unquote_to_bytes, urlparse
+from urllib.parse import parse_qs, unquote, unquote_to_bytes, urlparse
 
 import orjson
 import zstandard as zstd
@@ -298,11 +298,15 @@ def _normalize_serving_fields(event: dict[str, Any], domain: str) -> None:
             if isinstance(raw_cf, str) and raw_cf in decode_map:
                 custom_fields[field_name] = decode_map[raw_cf]
     elif domain == "rum_vitals":
+
+        def _decode_vcl(val: str) -> str:
+            return unquote(val) if "%" in val else val
+
         client_id = event.get("rum_cid") or event.get("client_id") or ""
         metric_name = event.get("rum_metric_name") or event.get("metric_name") or ""
         raw_metric_value = event.get("rum_metric_value", event.get("metric_value"))
         metric_rating = event.get("rum_metric_rating") or event.get("metric_rating") or ""
-        pathname = event.get("rum_pathname") or event.get("pathname") or ""
+        pathname = _decode_vcl(event.get("rum_pathname") or event.get("pathname") or "")
         if not metric_name or raw_metric_value in (None, ""):
             qparams = _rum_querystring_params(event)
             if qparams:
@@ -325,10 +329,14 @@ def _normalize_serving_fields(event: dict[str, Any], domain: str) -> None:
         event["metric_rating"] = metric_rating
         event["pathname"] = pathname
     elif domain == "rum_errors":
+
+        def _decode_vcl_err(val: str) -> str:
+            return unquote(val) if "%" in val else val
+
         client_id = event.get("rum_cid") or event.get("client_id") or ""
-        error_message = event.get("rum_error_message") or event.get("error_message") or ""
-        error_file = event.get("rum_error_file") or event.get("error_file") or ""
-        pathname = event.get("rum_pathname") or event.get("pathname") or ""
+        error_message = _decode_vcl_err(event.get("rum_error_message") or event.get("error_message") or "")
+        error_file = _decode_vcl_err(event.get("rum_error_file") or event.get("error_file") or "")
+        pathname = _decode_vcl_err(event.get("rum_pathname") or event.get("pathname") or "")
         raw_line = event.get("rum_error_line", event.get("error_line"))
         raw_col = event.get("rum_error_col", event.get("error_col"))
         if event.get("_rum_kind") != "vitals" and (
