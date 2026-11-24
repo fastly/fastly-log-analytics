@@ -817,6 +817,7 @@ async function cmcdFromFiles(
             rebuffer_rate: hasBsEffective && sess > 0 ? (rebSess * 100) / sess : null,
           };
         })
+        .filter((row) => row.sessions > 0)
         .sort((a, b) => b.sessions - a.sessions || a.country.localeCompare(b.country))
         .slice(0, topN);
 
@@ -846,6 +847,7 @@ async function cmcdFromFiles(
             avg_throughput_kbps: roundTo(a.mtpN > 0 ? a.mtpSum / a.mtpN : 0, 1),
           };
         })
+        .filter((row) => row.sessions > 0)
         .sort((a, b) => b.sessions - a.sessions || a.asn - b.asn)
         .slice(0, topN);
 

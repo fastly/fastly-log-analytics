@@ -1087,4 +1087,87 @@ describe("Feature F24 — CMCD Streaming Media cloud-engine", () => {
     expect(rollup?.sessions_ts[1]?.bucket).toBe(new Date(t1).toISOString());
     expect(rollup?.bitrate_ts.map((b) => b.avg_bitrate)).toEqual([2500, null, 3000]);
   });
+
+  it("excludes zero-session countries and ASNs in cmcdFromRollup", async () => {
+    const t0 = 1_800_000_000_000;
+    const t1 = t0 + 300_000;
+    const hllOf = (items: string[]) => {
+      const h = new Hll();
+      for (const item of items) h.add(item);
+      return h.toBytes();
+    };
+    const key = "processed/request/cmcd_summary/window=zero-sess.parquet";
+    const bytes = parquetWriteBuffer({
+      columnData: [
+        { name: "kind", type: "STRING", data: ["bucket", "country", "country", "asn", "asn"] },
+        { name: "bucket", type: "INT64", data: [BigInt(t0), null, null, null, null] },
+        { name: "key", type: "STRING", data: [null, "US", "CA", "7922", "15169"] },
+        { name: "label", type: "STRING", data: [null, null, null, "Comcast", "Google"] },
+        { name: "truncated", type: "BOOLEAN", data: [false, false, false, false, false] },
+        { name: "reqs", type: "INT64", data: [BigInt(5), BigInt(2), BigInt(3), BigInt(2), BigInt(3)] },
+        { name: "sid_hll", type: "BYTE_ARRAY", data: [hllOf(["s1"]), hllOf(["s1"]), hllOf([]), hllOf(["s1"]), hllOf([])] },
+        { name: "rebuffer_events", type: "INT64", data: [BigInt(0), BigInt(0), BigInt(0), BigInt(0), BigInt(0)] },
+        { name: "rebuffer_sid_hll", type: "BYTE_ARRAY", data: [null, null, null, null, null] },
+        { name: "has_bs", type: "INT64", data: [BigInt(0), BigInt(0), BigInt(0), BigInt(0), BigInt(0)] },
+        { name: "has_su", type: "INT64", data: [BigInt(0), BigInt(0), BigInt(0), BigInt(0), BigInt(0)] },
+        { name: "has_ot", type: "INT64", data: [BigInt(5), BigInt(2), BigInt(0), BigInt(2), BigInt(0)] },
+        { name: "has_bl", type: "INT64", data: [BigInt(5), BigInt(2), BigInt(0), BigInt(2), BigInt(0)] },
+        { name: "has_br", type: "INT64", data: [BigInt(5), BigInt(2), BigInt(0), BigInt(2), BigInt(0)] },
+        { name: "has_mtp", type: "INT64", data: [BigInt(5), BigInt(2), BigInt(0), BigInt(2), BigInt(0)] },
+        { name: "has_cid", type: "INT64", data: [BigInt(0), BigInt(0), BigInt(0), BigInt(0), BigInt(0)] },
+        { name: "br_sum", type: "DOUBLE", data: [2000, 2000, 0, 2000, 0] },
+        { name: "br_n", type: "INT64", data: [BigInt(2), BigInt(2), BigInt(0), BigInt(2), BigInt(0)] },
+        { name: "tb_sum", type: "DOUBLE", data: [null, null, null, null, null] },
+        { name: "tb_n", type: "INT64", data: [BigInt(0), BigInt(0), BigInt(0), BigInt(0), BigInt(0)] },
+        { name: "bl_sum", type: "DOUBLE", data: [4000, 4000, 0, 4000, 0] },
+        { name: "bl_n", type: "INT64", data: [BigInt(2), BigInt(2), BigInt(0), BigInt(2), BigInt(0)] },
+        { name: "mtp_sum", type: "DOUBLE", data: [5000, 5000, 0, 5000, 0] },
+        { name: "mtp_n", type: "INT64", data: [BigInt(2), BigInt(2), BigInt(0), BigInt(2), BigInt(0)] },
+        { name: "v_br_sum", type: "DOUBLE", data: [2000, 2000, 0, 2000, 0] },
+        { name: "v_br_n", type: "INT64", data: [BigInt(2), BigInt(2), BigInt(0), BigInt(2), BigInt(0)] },
+        { name: "v_tb_sum", type: "DOUBLE", data: [null, null, null, null, null] },
+        { name: "v_tb_n", type: "INT64", data: [BigInt(0), BigInt(0), BigInt(0), BigInt(0), BigInt(0)] },
+        { name: "v_bl_sum", type: "DOUBLE", data: [4000, 4000, 0, 4000, 0] },
+        { name: "v_bl_n", type: "INT64", data: [BigInt(2), BigInt(2), BigInt(0), BigInt(2), BigInt(0)] },
+        { name: "util_sum", type: "DOUBLE", data: [null, null, null, null, null] },
+        { name: "util_n", type: "INT64", data: [BigInt(0), BigInt(0), BigInt(0), BigInt(0), BigInt(0)] },
+        { name: "util_all_sum", type: "DOUBLE", data: [null, null, null, null, null] },
+        { name: "util_all_n", type: "INT64", data: [BigInt(0), BigInt(0), BigInt(0), BigInt(0), BigInt(0)] },
+        { name: "startup_requests", type: "INT64", data: [BigInt(0), BigInt(0), BigInt(0), BigInt(0), BigInt(0)] },
+        { name: "su_bl_sum", type: "DOUBLE", data: [null, null, null, null, null] },
+        { name: "su_bl_n", type: "INT64", data: [BigInt(0), BigInt(0), BigInt(0), BigInt(0), BigInt(0)] },
+        { name: "su_ttfb_sum", type: "DOUBLE", data: [null, null, null, null, null] },
+        { name: "su_ttfb_n", type: "INT64", data: [BigInt(0), BigInt(0), BigInt(0), BigInt(0), BigInt(0)] },
+        { name: "v_bl_hist", type: "BYTE_ARRAY", data: [null, null, null, null, null] },
+        { name: "bl_hist", type: "BYTE_ARRAY", data: [null, null, null, null, null] },
+        { name: "v_mtp_hist", type: "BYTE_ARRAY", data: [null, null, null, null, null] },
+        { name: "mtp_hist", type: "BYTE_ARRAY", data: [null, null, null, null, null] },
+        { name: "min_ts", type: "INT64", data: [BigInt(t0 + 1000), null, null, null, null] },
+        { name: "max_ts", type: "INT64", data: [BigInt(t0 + 2000), null, null, null, null] },
+        { name: "first_ts", type: "INT64", data: [null, null, null, null, null] },
+        { name: "last_ts", type: "INT64", data: [null, null, null, null, null] },
+      ],
+    });
+    const res = await cmcdFromRollup(
+      {
+        start_time: new Date(t0).toISOString(),
+        end_time: new Date(t1).toISOString(),
+        bucket_seconds: 300,
+      },
+      {
+        async fetchJson() {
+          return {
+            files: [{ key, start: new Date(t0).toISOString(), end: new Date(t1).toISOString(), size: bytes.byteLength, rows: 5 }],
+            next_cursor: null,
+            complete: true,
+          };
+        },
+        async fetchFile() {
+          return { bytes, cached: false };
+        },
+      },
+    );
+    expect(res?.rebuffer_by_country.map((r) => r.country)).toEqual(["US"]);
+    expect(res?.rebuffer_by_asn.map((r) => r.asn)).toEqual([7922]);
+  });
 });
