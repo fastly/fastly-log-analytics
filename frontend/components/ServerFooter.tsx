@@ -42,7 +42,7 @@ export async function ServerFooter() {
     envName = 'k8s'
   } else {
     // Dynamic Google Compute Engine Metadata Detection (only outside Kubernetes,
-    // since GKE/Elevation pods also respond on 169.254.169.254).
+    // since GKE/managed Kubernetes pods also respond on 169.254.169.254).
     const gceHostname = await fetchGceMetadata('instance/name')
     const gceProject = await fetchGceMetadata('project/project-id')
 

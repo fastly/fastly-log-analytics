@@ -1375,6 +1375,16 @@ _SKIP_SUFFIXES = {
 }
 
 
+# Third-party public reference datasets that legitimately contain unrelated
+# real-world organization names (e.g. AS17016 in the public BGP ASN table)
+# which can collide with dictionary-word internal platform names in _DENY_SHA256.
+_SKIP_PATHS = frozenset(
+    {
+        "frontend/public/geo/asn-names.tsv",
+    }
+)
+
+
 def _tracked_files() -> list[Path]:
     out = subprocess.run(
         ["git", "ls-files", "-z"],
@@ -1395,12 +1405,15 @@ def test_no_production_service_id_in_tracked_tree() -> None:
             continue  # the guard stores only digests
         if path.suffix.lower() in _SKIP_SUFFIXES:
             continue
+        rel = path.relative_to(_REPO_ROOT).as_posix()
+        if rel in _SKIP_PATHS:
+            continue
         try:
             text = path.read_text(encoding="utf-8", errors="ignore")
         except (OSError, UnicodeError):
             continue
         if _contains_denied(text):
-            offenders.append(f"{path.relative_to(_REPO_ROOT)} (contains a deployment-private token)")
+            offenders.append(f"{rel} (contains a deployment-private token)")
 
     assert not offenders, (
         "Deployment-private token(s) found in the tracked, world-readable tree.\n"

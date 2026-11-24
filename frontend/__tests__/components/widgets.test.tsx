@@ -394,7 +394,7 @@ describe('ServerFooter', () => {
     expect(await ServerFooter()).toBeNull()
     expect(fetchSpy).not.toHaveBeenCalled()
   })
-  it('prefers Kubernetes over GCE metadata so GKE/Elevation pods are not labeled as gce', async () => {
+  it('prefers Kubernetes over GCE metadata so GKE/managed Kubernetes pods are not labeled as gce', async () => {
     const fetchSpy = vi.fn().mockResolvedValue({ ok: true, text: async () => 'gke-node-1' })
     vi.stubGlobal('fetch', fetchSpy)
     process.env.KUBERNETES_SERVICE_HOST = '10.0.0.1'
