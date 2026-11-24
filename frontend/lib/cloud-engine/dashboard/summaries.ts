@@ -833,11 +833,13 @@ export async function decodeSummary(
   )?.value;
   if (version !== SUMMARY_VERSION) return null;
   const { readSummaryColumns } = await import("./summary-projection");
-  const { rows, columns } = await readSummaryColumns(
-    parts,
-    withSlices ? [...SUMMARY_COLUMNS, ...SLICE_COLUMNS] : SUMMARY_COLUMNS,
-  );
-  const binary = await readSummaryColumns(parts, ["ip_sketch"], false);
+  const [{ rows, columns }, binary] = await Promise.all([
+    readSummaryColumns(
+      parts,
+      withSlices ? [...SUMMARY_COLUMNS, ...SLICE_COLUMNS] : SUMMARY_COLUMNS,
+    ),
+    readSummaryColumns(parts, ["ip_sketch"], false),
+  ]);
   const col = (name: string) => columns.get(name) ?? [];
   const [kind, bucket, field, value, count, truncated] = [
     col("bundle"),

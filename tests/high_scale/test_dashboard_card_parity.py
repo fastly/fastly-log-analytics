@@ -228,3 +228,144 @@ def test_request_filter_clauses_supports_conn_requests_buckets_and_ttl_zero_guar
 
     ttl0_clauses, _ = request_filter_clauses({"ttl": {"mode": "include", "values": [0]}})
     assert len(ttl0_clauses) == 1 and "!= ''" in ttl0_clauses[0]
+
+
+def _normalize_sql_shape(sql: str) -> str:
+    import re
+
+    return re.sub(r"\{[^}]+\}", "?", re.sub(r"\s+", " ", sql)).strip()
+
+
+def test_aggregates_batch_custom_limits_batched_without_duplicates_minute_path() -> None:
+    from datetime import UTC, datetime
+
+    from backend.high_scale.aggregate_query import query_clickhouse_aggregates_batch
+    from backend.high_scale.archive import ServingWatermark
+
+    calls: list[str] = []
+
+    class _MinuteClient:
+        def execute(self, sql: str, params: dict | None = None) -> list[dict]:
+            calls.append(sql)
+            if "request_aggregates_1h" in sql or "max(" in sql.lower() or "min(" in sql.lower():
+                return []
+            if "AS total_count" in sql and "GROUP BY dimension" in sql:
+                return [
+                    {"dimension": "url", "total_count": 100},
+                    {"dimension": "country", "total_count": 200},
+                    {"dimension": "edge", "total_count": 50},
+                    {"dimension": "hits", "total_count": 80},
+                ]
+            rows: list[dict] = []
+            for i in range(15):
+                rows.append({"dimension": "url", "value": f"/p{i}", "aggregate_count": 100 - i})
+            for i in range(15):
+                rows.append({"dimension": "country", "value": f"C{i:02d}", "aggregate_count": 200 - i})
+            for i in range(12):
+                rows.append({"dimension": "edge", "value": f"E{i}", "aggregate_count": 50 - i})
+            for i in range(11):
+                rows.append({"dimension": "hits", "value": str(i), "aggregate_count": 80 - i})
+            return rows
+
+    wm = ServingWatermark(
+        "svc-batch",
+        "request",
+        1,
+        datetime(2026, 10, 23, 0, 0, tzinfo=UTC),
+        datetime(2026, 10, 24, 1, 0, tzinfo=UTC),
+        "cursor",
+        "evt-1",
+        "evt-1",
+        True,
+    )
+    res = query_clickhouse_aggregates_batch(
+        _MinuteClient(),  # type: ignore[arg-type]
+        service_id="svc-batch",
+        domain="request",
+        dimensions=["url", "country", "edge", "hits"],
+        start=datetime(2026, 10, 24, 0, 0, tzinfo=UTC),
+        end=datetime(2026, 10, 24, 1, 0, tzinfo=UTC),
+        watermark=wm,
+        limits={"country": 250, "edge": 16, "hits": 64},
+    )
+
+    agg_calls = [c for c in calls if "request_aggregates" in c and "request_aggregates_1h" not in c]
+    assert len(agg_calls) == 2
+    shapes = [_normalize_sql_shape(c) for c in agg_calls]
+    assert len(shapes) == len(set(shapes))
+    top_sql = next(c for c in agg_calls if "aggregate_count" in c)
+    assert "row_number()" in top_sql and "CASE dimension" in top_sql
+    assert len(res["url"].top_values) == 10
+    assert len(res["country"].top_values) == 15
+    assert len(res["edge"].top_values) == 12
+    assert len(res["hits"].top_values) == 11
+    assert res["country"].request_count == 200
+    assert res["edge"].request_count == 50
+
+
+def test_aggregates_batch_custom_limits_batched_without_duplicates_hourly_path(monkeypatch) -> None:
+    from datetime import UTC, datetime
+
+    import backend.high_scale.aggregate_query as aq
+    from backend.high_scale.archive import ServingWatermark
+
+    start = datetime(2026, 10, 23, 0, 0, tzinfo=UTC)
+    end = datetime(2026, 10, 24, 0, 0, tzinfo=UTC)
+    monkeypatch.setattr(aq, "can_use_hourly_rollup", lambda *_args, **_kwargs: (start, end))
+
+    calls: list[str] = []
+
+    class _HourlyClient:
+        def execute(self, sql: str, params: dict | None = None) -> list[dict]:
+            calls.append(sql)
+            if "UNION ALL (SELECT" in sql or "LIMIT 500)" in sql:
+                return [
+                    {"dimension": "ttl", "value": str(i), "aggregate_count": 500 - i, "total_count": 900}
+                    for i in range(14)
+                ] + [
+                    {"dimension": "age", "value": str(i), "aggregate_count": 400 - i, "total_count": 850}
+                    for i in range(12)
+                ]
+            return [
+                {"dimension": "url", "value": f"/u{i}", "aggregate_count": 100 - i, "total_count": 1000}
+                for i in range(15)
+            ] + [
+                {"dimension": "country", "value": f"C{i:02d}", "aggregate_count": 200 - i, "total_count": 1000}
+                for i in range(18)
+            ]
+
+    wm = ServingWatermark(
+        "svc-hourly",
+        "request",
+        1,
+        start,
+        end,
+        "cursor",
+        "evt-1",
+        "evt-1",
+        True,
+    )
+    res = aq.query_clickhouse_aggregates_batch(
+        _HourlyClient(),  # type: ignore[arg-type]
+        service_id="svc-hourly",
+        domain="request",
+        dimensions=["url", "country", "ttl", "age"],
+        start=start,
+        end=end,
+        watermark=wm,
+        limits={"country": 250, "ttl": 500, "age": 500},
+    )
+
+    assert len(calls) == 2
+    shapes = [_normalize_sql_shape(c) for c in calls]
+    assert len(shapes) == len(set(shapes))
+    heavy_sql = next(c for c in calls if "LIMIT 500)" in c)
+    fast_sql = next(c for c in calls if "CASE dimension" in c)
+    assert "sum(sum(request_count)) OVER () AS total_count" in heavy_sql
+    assert "row_number()" in fast_sql
+    assert len(res["url"].top_values) == 10
+    assert len(res["country"].top_values) == 18
+    assert len(res["ttl"].top_values) == 14
+    assert len(res["age"].top_values) == 12
+    assert res["ttl"].request_count == 900
+    assert res["age"].request_count == 850

@@ -1256,6 +1256,7 @@ type CachedSummaryEntry = {
   variant: string;
   decoded: DecodedSummary;
   byteLength: number;
+  fileSize?: number;
 };
 const summaryListings = new Map<string, Map<string, ManifestFile>>();
 const decodedSummaries = new Map<string, Map<string, CachedSummaryEntry>>();
@@ -1964,7 +1965,16 @@ async function collectAggregator(
   let toDecode = 0;
   const addPending = async (entry: Omit<PendingFile, "local" | "opfs">) => {
     assertActive();
-    const local = Boolean(await source.hasFile?.(entry.file.key));
+    const memSummary = entry.summary
+      ? decodedSummaries.get(scope)?.get(entry.file.key)
+      : undefined;
+    const inMemory = Boolean(
+      memSummary &&
+        memSummary.variant === variant &&
+        (memSummary.fileSize === undefined ||
+          memSummary.fileSize === entry.file.size),
+    );
+    const local = inMemory || Boolean(await source.hasFile?.(entry.file.key));
     assertActive();
     const opfs =
       !local &&
@@ -2154,32 +2164,47 @@ async function collectAggregator(
     assertActive();
     let decoded: DecodedSummary | null = null;
     let summaryBytes = 0;
-    try {
-      const { parts, byteLength, cached, downloadedBytes, cdn } =
-        await readDashboardSummary(source, summary.file, signal);
-      assertActive();
-      stats.bytes += byteLength;
-      summaryBytes = byteLength;
-      countRead(cached, cached ? byteLength : downloadedBytes);
-      if (cached) stats.cached++;
-      else stats.fetched++;
-      if (isCdnHit(cdn)) stats.cdnHits++;
-      const mem = decodedSummaries.get(scope)?.get(summary.file.key);
-      if (
-        mem &&
-        mem.variant === variant &&
-        mem.byteLength === byteLength &&
-        mem.decoded.rollup.buckets.every(
-          (b) => b.t >= fromMs && b.t + MINUTE_MS <= toMs,
-        )
-      ) {
-        decoded = mem.decoded;
-      } else {
-        decoded = await decodeSummary(parts, fromMs, toMs, customFields);
+    const mem = decodedSummaries.get(scope)?.get(summary.file.key);
+    if (
+      mem &&
+      mem.variant === variant &&
+      (mem.fileSize === undefined || mem.fileSize === summary.file.size) &&
+      mem.decoded.rollup.buckets.every(
+        (b) => b.t >= fromMs && b.t + MINUTE_MS <= toMs,
+      )
+    ) {
+      decoded = mem.decoded;
+      summaryBytes = mem.byteLength;
+      stats.bytes += summaryBytes;
+      countRead(true, summaryBytes);
+      stats.cached++;
+    } else {
+      try {
+        const { parts, byteLength, cached, downloadedBytes, cdn } =
+          await readDashboardSummary(source, summary.file, signal);
+        assertActive();
+        stats.bytes += byteLength;
+        summaryBytes = byteLength;
+        countRead(cached, cached ? byteLength : downloadedBytes);
+        if (cached) stats.cached++;
+        else stats.fetched++;
+        if (isCdnHit(cdn)) stats.cdnHits++;
+        if (
+          mem &&
+          mem.variant === variant &&
+          mem.byteLength === byteLength &&
+          mem.decoded.rollup.buckets.every(
+            (b) => b.t >= fromMs && b.t + MINUTE_MS <= toMs,
+          )
+        ) {
+          decoded = mem.decoded;
+        } else {
+          decoded = await decodeSummary(parts, fromMs, toMs, customFields);
+          assertActive();
+        }
+      } catch {
         assertActive();
       }
-    } catch {
-      assertActive();
     }
     assertActive();
     if (decoded) {
@@ -2187,6 +2212,7 @@ async function collectAggregator(
         variant,
         decoded,
         byteLength: summaryBytes,
+        fileSize: summary.file.size,
       });
       aggregator.mergeSummary(decoded);
       let rows = 0;

@@ -48,7 +48,7 @@ export function defineSummarySpec({ groups, columns, only = {} }: {
  * `wholeBelowBytes` are read whole, as are files a projection would fetch
  * more than `wholeAboveShare` of. Mutable for tests.
  */
-export const summaryProjectionLimits = { wholeBelowBytes: 192 * 1024, wholeAboveShare: 0.6 };
+export const summaryProjectionLimits = { wholeBelowBytes: 512 * 1024, wholeAboveShare: 0.6 };
 
 const LAYOUT_KEY = "flp_summary_layout";
 
@@ -215,12 +215,14 @@ export async function readSummaryProjection(
     tail && start >= tail.start && end <= tail.start + tail.bytes.byteLength
       ? Promise.resolve(tail.bytes.slice(start - tail.start, end - tail.start)) : read(start, end));
   assertProjectionActive();
-  if (!tail && footer.tail) {
-    await writeDerivedFile(file.key, footerId, footer.tail.bytes, String(footer.tail.start));
-    assertProjectionActive();
-  }
+  const footerWrite = !tail && footer.tail
+    ? writeDerivedFile(file.key, footerId, footer.tail.bytes, String(footer.tail.start)).catch(() => {})
+    : null;
   const plan = planSummary(footer, spec);
-  if (plan.kind === "whole") return whole();
+  if (plan.kind === "whole") {
+    void footerWrite;
+    return whole();
+  }
   const parts = await Promise.all(plan.plans.map(async (projection) =>
     assembleProjectedParquet(projection, await fetchProjectedRanges(projection, read))));
   assertProjectionActive();
@@ -231,9 +233,8 @@ export async function readSummaryProjection(
     offset += part.byteLength;
   }
   assertProjectionActive();
-  await writeDerivedFile(file.key, partsId, joined.buffer,
-    JSON.stringify({ v: 1, parts: parts.map((part) => part.byteLength) }));
-  assertProjectionActive();
+  void writeDerivedFile(file.key, partsId, joined.buffer,
+    JSON.stringify({ v: 1, parts: parts.map((part) => part.byteLength) })).catch(() => {});
   return { parts, whole: false, cached: downloadedBytes === 0, downloadedBytes };
 }
 

@@ -403,11 +403,15 @@ def query_clickhouse_aggregates_batch(
     now: datetime | None = None,
     limits: Mapping[str, int] | None = None,
 ) -> dict[str, AggregateResponse]:
-    """Read visible aggregate rows for multiple dimensions in two batched ClickHouse queries."""
+    """Read visible aggregate rows for multiple dimensions in batched ClickHouse queries."""
     unique_dims = list(dict.fromkeys(dimensions))
     if not unique_dims:
         return {}
     dim_limits = dict(limits or {})
+
+    def _dim_limit(dim: str) -> int:
+        return max(1, int(dim_limits.get(dim, 10)))
+
     if len(unique_dims) == 1:
         dim = unique_dims[0]
         return {
@@ -416,49 +420,9 @@ def query_clickhouse_aggregates_batch(
                 AggregateRequest(service_id=service_id, domain=domain, start=start, end=end, dimension=dim),
                 watermark=watermark,
                 now=now,
-                limit=dim_limits.get(dim, 10),
+                limit=_dim_limit(dim),
             )
         }
-    custom_dims = [dim for dim in unique_dims if dim_limits.get(dim, 10) != 10]
-    if custom_dims:
-        standard_dims = [dim for dim in unique_dims if dim_limits.get(dim, 10) == 10]
-        custom_out: dict[str, AggregateResponse] = {}
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=min(4, len(custom_dims) + int(bool(standard_dims)))
-        ) as pool:
-            std_fut = (
-                pool.submit(
-                    contextvars.copy_context().run,
-                    query_clickhouse_aggregates_batch,
-                    client,
-                    service_id=service_id,
-                    domain=domain,
-                    dimensions=standard_dims,
-                    start=start,
-                    end=end,
-                    watermark=watermark,
-                    now=now,
-                )
-                if standard_dims
-                else None
-            )
-            cust_futs = {
-                dim: pool.submit(
-                    contextvars.copy_context().run,
-                    query_clickhouse_aggregate,
-                    client,
-                    AggregateRequest(service_id=service_id, domain=domain, start=start, end=end, dimension=dim),
-                    watermark=watermark,
-                    now=now,
-                    limit=dim_limits[dim],
-                )
-                for dim in custom_dims
-            }
-            if std_fut is not None:
-                custom_out.update(std_fut.result())
-            for dim, fut in cust_futs.items():
-                custom_out[dim] = fut.result()
-        return {dim: custom_out[dim] for dim in unique_dims}
     watermark.validate()
     if watermark.service_id != service_id or watermark.domain != domain:
         raise ValueError("watermark does not belong to this service and domain")
@@ -476,9 +440,16 @@ def query_clickhouse_aggregates_batch(
         params[key] = dim
     if partial_minute_window:
         start, end = _require_window_bounds(start, end)
+        max_limit = max(_dim_limit(dim) for dim in unique_dims)
         try:
             totals_rows, top_rows = _query_fact_aggregates(
-                client, service_id=service_id, domain=domain, dimensions=unique_dims, start=start, end=end
+                client,
+                service_id=service_id,
+                domain=domain,
+                dimensions=unique_dims,
+                start=start,
+                end=end,
+                limit=max_limit,
             )
         except ClickHouseError as e:
             raise ValueError(f"ClickHouse server query failed (S3/FOS access credentials may be expired): {e}")
@@ -488,7 +459,7 @@ def query_clickhouse_aggregates_batch(
         fact_tops_by_dim: dict[str, list[tuple[str, int]]] = {dimension: [] for dimension in unique_dims}
         for row in top_rows:
             dimension = str(row.get("dimension") or "")
-            if dimension in fact_tops_by_dim and len(fact_tops_by_dim[dimension]) < 10:
+            if dimension in fact_tops_by_dim and len(fact_tops_by_dim[dimension]) < _dim_limit(dimension):
                 fact_tops_by_dim[dimension].append((str(row["value"]), max(0, int(row["aggregate_count"]))))
         return {
             dimension: _aggregate_response(
@@ -512,19 +483,54 @@ def query_clickhouse_aggregates_batch(
         end_operator = "<" if domain == "request" else "<="
         clauses.extend(["bucket_start >= {start:DateTime64(3)}", f"bucket_start {end_operator} {{end:DateTime64(3)}}"])
         params.update({"start": start_utc, "end": end_utc})
+
+    def _per_dim_limit_expr(dims_subset: tuple[str, ...], sub_params: dict[str, Any]) -> tuple[int | None, str | None]:
+        subset_limits = {_dim_limit(d) for d in dims_subset}
+        if len(subset_limits) == 1:
+            return next(iter(subset_limits)), None
+        default_limit = 10
+        clauses_when: list[str] = []
+        for idx, d in enumerate(dims_subset):
+            lim = _dim_limit(d)
+            if lim != default_limit:
+                k = f"cl_d_{idx}"
+                sub_params[k] = d
+                clauses_when.append(f"WHEN {{{k}:String}} THEN {lim}")
+        return None, f"CASE dimension {' '.join(clauses_when)} ELSE {default_limit} END"
+
+    def _build_minute_top_query(dims_subset: tuple[str, ...]) -> tuple[str, dict[str, Any]]:
+        sub_placeholders, sub_params = _dimension_query_params(params, dims_subset)
+        sub_clauses = [
+            f"dimension IN ({', '.join(sub_placeholders)})" if c.startswith("dimension IN (") else c for c in clauses
+        ]
+        uniform_limit, multi_limit_expr = _per_dim_limit_expr(dims_subset, sub_params)
+        if uniform_limit is not None:
+            sql = (
+                f"SELECT dimension, value, sum({metric}) AS aggregate_count "
+                f"FROM {table} WHERE {' AND '.join(sub_clauses)} "
+                "GROUP BY dimension, value "
+                "ORDER BY dimension ASC, aggregate_count DESC, value ASC "
+                f"LIMIT {uniform_limit} BY dimension"
+            )
+            return sql, sub_params
+        sql = (
+            "SELECT dimension, value, aggregate_count FROM ("
+            f"SELECT dimension, value, sum({metric}) AS aggregate_count, "
+            f"row_number() OVER (PARTITION BY dimension ORDER BY sum({metric}) DESC, value ASC) AS _rn "
+            f"FROM {table} WHERE {' AND '.join(sub_clauses)} "
+            "GROUP BY dimension, value"
+            f") WHERE _rn <= {multi_limit_expr} "
+            "ORDER BY dimension ASC, aggregate_count DESC, value ASC"
+        )
+        return sql, sub_params
+
     try:
         totals_sql = (
             f"SELECT dimension, sum({metric}) AS total_count "
             f"FROM {table} WHERE {' AND '.join(clauses)} "
             "GROUP BY dimension"
         )
-        top_sql = (
-            f"SELECT dimension, value, sum({metric}) AS aggregate_count "
-            f"FROM {table} WHERE {' AND '.join(clauses)} "
-            "GROUP BY dimension, value "
-            "ORDER BY dimension ASC, aggregate_count DESC, value ASC "
-            "LIMIT 10 BY dimension"
-        )
+        top_sql, top_params = _build_minute_top_query(tuple(unique_dims))
         if hasattr(client, "responses"):
             totals_rows = client.execute(totals_sql, params)
             if totals_rows and "dimension" not in totals_rows[0]:
@@ -534,10 +540,11 @@ def query_clickhouse_aggregates_batch(
                         AggregateRequest(service_id=service_id, domain=domain, start=start, end=end, dimension=dim),
                         watermark=watermark,
                         now=now,
+                        limit=_dim_limit(dim),
                     )
                     for dim in unique_dims
                 }
-            top_rows = client.execute(top_sql, params)
+            top_rows = client.execute(top_sql, top_params)
         else:
             from backend.utils.telemetry.metrics import get_queries
 
@@ -568,13 +575,26 @@ def query_clickhouse_aggregates_batch(
                             " UNION ALL SELECT dimension, value, request_count FROM request_aggregates "
                             f"WHERE service_id={{service_id:String}} AND {dim_in} AND {edge_clause} AND {fence}"
                         )
+                    uniform_limit, multi_limit_expr = _per_dim_limit_expr(dims_subset, sub_params)
+                    if uniform_limit is not None:
+                        sql = (
+                            "SELECT dimension, value, sum(request_count) AS aggregate_count, "
+                            "sum(sum(request_count)) OVER (PARTITION BY dimension) AS total_count "
+                            f"FROM ({union_sql}) "
+                            "GROUP BY dimension, value "
+                            "ORDER BY dimension ASC, aggregate_count DESC, value ASC "
+                            f"LIMIT {uniform_limit} BY dimension"
+                        )
+                        return sql, sub_params
                     sql = (
+                        "SELECT dimension, value, aggregate_count, total_count FROM ("
                         "SELECT dimension, value, sum(request_count) AS aggregate_count, "
-                        "sum(sum(request_count)) OVER (PARTITION BY dimension) AS total_count "
+                        "sum(sum(request_count)) OVER (PARTITION BY dimension) AS total_count, "
+                        "row_number() OVER (PARTITION BY dimension ORDER BY sum(request_count) DESC, value ASC) AS _rn "
                         f"FROM ({union_sql}) "
-                        "GROUP BY dimension, value "
-                        "ORDER BY dimension ASC, aggregate_count DESC, value ASC "
-                        "LIMIT 10 BY dimension"
+                        "GROUP BY dimension, value"
+                        f") WHERE _rn <= {multi_limit_expr} "
+                        "ORDER BY dimension ASC, aggregate_count DESC, value ASC"
                     )
                     return sql, sub_params
 
@@ -596,8 +616,9 @@ def query_clickhouse_aggregates_batch(
                                 f"WHERE service_id={{service_id:String}} AND dimension={{{k}:String}} AND {edge_clause} AND {fence}"
                             )
                         branches.append(
-                            f"(SELECT {{{k}:String}} AS dimension, value, sum(request_count) AS aggregate_count "
-                            f"FROM ({u_sql}) GROUP BY value ORDER BY aggregate_count DESC, value ASC LIMIT 10)"
+                            f"(SELECT {{{k}:String}} AS dimension, value, sum(request_count) AS aggregate_count, "
+                            "sum(sum(request_count)) OVER () AS total_count "
+                            f"FROM ({u_sql}) GROUP BY value ORDER BY aggregate_count DESC, value ASC LIMIT {_dim_limit(dim)})"
                         )
                     return " UNION ALL ".join(branches), sub_params
 
@@ -633,9 +654,14 @@ def query_clickhouse_aggregates_batch(
                                     int(r["total_count"]) if r.get("total_count") is not None else dim_sums.get(d, 0)
                                 )
                                 totals_rows.append({"dimension": d, "total_count": tot_val})
+                        heavy_tot_by_dim: dict[str, int] = {}
+                        for r in heavy_res:
+                            d = str(r.get("dimension") or "")
+                            if d and d not in heavy_tot_by_dim and r.get("total_count") is not None:
+                                heavy_tot_by_dim[d] = int(r["total_count"])
                         max_tot = max((int(r.get("total_count") or 0) for r in totals_rows), default=0)
                         for d in heavy_dims:
-                            totals_rows.append({"dimension": d, "total_count": max_tot})
+                            totals_rows.append({"dimension": d, "total_count": heavy_tot_by_dim.get(d, max_tot)})
                     else:
                         h_fast_sql, h_fast_params = _build_hourly_fast_query(tuple(unique_dims))
                         fast_res = list(client.execute(h_fast_sql, h_fast_params))
@@ -660,24 +686,8 @@ def query_clickhouse_aggregates_batch(
                     top_rows = []
             if not totals_rows and not top_rows:
                 if "client_ip" in unique_dims and len(unique_dims) > 2:
-
-                    def _build_top_query(dims_subset: tuple[str, ...]) -> tuple[str, dict[str, Any]]:
-                        sub_placeholders, sub_params = _dimension_query_params(params, dims_subset)
-                        sub_clauses = [
-                            f"dimension IN ({', '.join(sub_placeholders)})" if c.startswith("dimension IN (") else c
-                            for c in clauses
-                        ]
-                        sql = (
-                            f"SELECT dimension, value, sum({metric}) AS aggregate_count "
-                            f"FROM {table} WHERE {' AND '.join(sub_clauses)} "
-                            "GROUP BY dimension, value "
-                            "ORDER BY dimension ASC, aggregate_count DESC, value ASC "
-                            "LIMIT 10 BY dimension"
-                        )
-                        return sql, sub_params
-
-                    fast_sql, fast_params = _build_top_query(tuple(d for d in unique_dims if d != "client_ip"))
-                    ip_sql, ip_params = _build_top_query(("client_ip",))
+                    fast_sql, fast_params = _build_minute_top_query(tuple(d for d in unique_dims if d != "client_ip"))
+                    ip_sql, ip_params = _build_minute_top_query(("client_ip",))
                     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
                         totals_fut = pool.submit(contextvars.copy_context().run, client.execute, totals_sql, params)
                         fast_fut = pool.submit(contextvars.copy_context().run, client.execute, fast_sql, fast_params)
@@ -687,7 +697,7 @@ def query_clickhouse_aggregates_batch(
                 else:
                     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
                         totals_fut = pool.submit(contextvars.copy_context().run, client.execute, totals_sql, params)
-                        top_fut = pool.submit(contextvars.copy_context().run, client.execute, top_sql, params)
+                        top_fut = pool.submit(contextvars.copy_context().run, client.execute, top_sql, top_params)
                         totals_rows = totals_fut.result()
                         top_rows = top_fut.result()
             if totals_rows and "dimension" not in totals_rows[0]:
@@ -697,6 +707,7 @@ def query_clickhouse_aggregates_batch(
                         AggregateRequest(service_id=service_id, domain=domain, start=start, end=end, dimension=dim),
                         watermark=watermark,
                         now=now,
+                        limit=_dim_limit(dim),
                     )
                     for dim in unique_dims
                 }
@@ -707,6 +718,7 @@ def query_clickhouse_aggregates_batch(
                     AggregateRequest(service_id=service_id, domain=domain, start=start, end=end, dimension=dim),
                     watermark=watermark,
                     now=now,
+                    limit=_dim_limit(dim),
                 )
                 for dim in unique_dims
             }
@@ -719,7 +731,7 @@ def query_clickhouse_aggregates_batch(
     tops_by_dim: dict[str, list[tuple[str, int]]] = {d: [] for d in unique_dims}
     for row in top_rows:
         d = str(row.get("dimension") or "")
-        if d in tops_by_dim and len(tops_by_dim[d]) < 10:
+        if d in tops_by_dim and len(tops_by_dim[d]) < _dim_limit(d):
             tops_by_dim[d].append((str(row["value"]), max(0, int(row["aggregate_count"]))))
     out: dict[str, AggregateResponse] = {}
     for dim in unique_dims:

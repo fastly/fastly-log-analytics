@@ -225,6 +225,59 @@ describe("summary readers", () => {
     expect(warm.stats.cached).toBe(warm.stats.listed);
   });
 
+  it("serves warm summaries from decodedSummaries memory cache without re-reading storage when openParquet is present", async () => {
+    const from = "2027-01-15T07:00:00Z";
+    const to = "2027-01-15T10:00:00Z";
+    const files = RAW.map((file) => ({ ...file, size: 1024 * 1024 }));
+    const summaryFiles = pick("window");
+    const fetchCounts = new Map<string, number>();
+    const hasFileCalls: string[] = [];
+    const source = {
+      ...fixtureSource([page(files)], BUFFERS, undefined, [page(summaryFiles)]),
+      cacheScope: "summary-warm-memory-cache",
+      hasFile: async (key: string) => {
+        hasFileCalls.push(key);
+        return fetchCounts.has(key);
+      },
+      fetchFile: async (key: string) => {
+        const prev = fetchCounts.get(key) ?? 0;
+        fetchCounts.set(key, prev + 1);
+        return { bytes: BUFFERS[key], cached: prev > 0 };
+      },
+      openParquet: async (file: ManifestFile) => ({
+        kind: "buffer" as const,
+        bytes: BUFFERS[file.key].slice(0),
+        cached: true,
+      }),
+    };
+    const options = {
+      from,
+      to,
+      wallNow: () => Date.parse(to),
+      manifest: { files, summaryFiles, complete: true },
+    };
+    const cold = await runDashboard(source, options);
+    const summaryKeys = summaryFiles.map((f) => f.key);
+    const coldSummaryFetches = summaryKeys.reduce(
+      (sum, k) => sum + (fetchCounts.get(k) ?? 0),
+      0,
+    );
+    expect(coldSummaryFetches).toBeGreaterThan(0);
+
+    hasFileCalls.length = 0;
+    const warm = await runDashboard(source, options);
+    const warmSummaryFetches = summaryKeys.reduce(
+      (sum, k) => sum + (fetchCounts.get(k) ?? 0),
+      0,
+    );
+    expect(warmSummaryFetches).toBe(coldSummaryFetches);
+    expect(hasFileCalls.filter((k) => summaryKeys.includes(k))).toEqual([]);
+    expect(warm.totalRequests).toBe(cold.totalRequests);
+    expect(warm.cards).toEqual(cold.cards);
+    expect(warm.stats.fetched).toBe(0);
+    expect(warm.stats.cached).toBe(warm.stats.listed);
+  });
+
   it("restores each card field's raw type from the catalog", () => {
     const catalog = JSON.parse(
       readFileSync(

@@ -236,6 +236,31 @@ describe("readSummaryProjection", () => {
     expect(read.whole).toBe(true);
     expect(source.net.whole).toEqual([KEY]);
   });
+
+  it("does not block returning projected parts on slow derived cache writes", async () => {
+    anySize();
+    const file = manifestFile(layoutBytes);
+    const base = fakeSource(layoutBytes);
+    let writeCalls = 0;
+    const pendingWrites: Array<() => void> = [];
+    const slowSource: typeof base = {
+      ...base,
+      writeDerivedFile: (key: string, id: string, bytes: ArrayBuffer, meta: string) => {
+        writeCalls++;
+        return new Promise<void>((resolve) => {
+          pendingWrites.push(() => {
+            void base.writeDerivedFile!(key, id, bytes, meta).then(resolve);
+          });
+        });
+      },
+    };
+    const read = await readSummaryProjection(slowSource, file, HEAD);
+    expect(read.whole).toBe(false);
+    expect(read.parts.length).toBeGreaterThan(0);
+    expect(writeCalls).toBe(2);
+    for (const flush of pendingWrites) flush();
+    expect(await hasSummaryProjection(base, file, HEAD)).toBe(true);
+  });
 });
 
 describe("summaryLayout", () => {
