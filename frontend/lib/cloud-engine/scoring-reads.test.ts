@@ -3,7 +3,8 @@ import { parquetWriteBuffer } from "hyparquet-writer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getDuckDBEngine } from "./dashboard/duckdb";
 import { parquetFixture } from "./dashboard/test-fixtures";
-import { cloudScoringRead, queryCloudScoring } from "./scoring-reads";
+import { cloudScoringRead, queryCloudScoring, scoringScanColumns } from "./scoring-reads";
+import { CloudBudgetError } from "./range-loader";
 
 const settings = vi.hoisted(() => ({ ids: new Set(["edge_score"]), asked: [] as (string | undefined)[] }));
 vi.mock("./active-log-fields", () => ({
@@ -109,6 +110,133 @@ describe("Cloud scoring reads", () => {
       latency_timeseries: { rows: [{ rtt_p50_us: 2000, rtt_p95_us: 2900, exec_p50_us: 200 }] },
       health: { latency: { available: true, rtt_p50_us: 2000 },
         matrix_staleness: { l2_evaluated: 2, l2_high_count: 1, l2_high_pct: 50, is_stale: false } },
+    });
+  });
+
+  it("projects narrow scoring columns without wide request strings (url, ua, ip) for overview routes", () => {
+    for (const route of [
+      "analytics", "top-flagged", "health", "score-distribution",
+      "compliance-breakdown", "latency-timeseries", "threshold-preview",
+      "evaluation", "evaluation/per-reason", "curves",
+    ]) {
+      const cols = scoringScanColumns(route);
+      for (const heavy of ["url", "ua", "ip", "status", "country"]) {
+        expect(cols, `${route} should not project ${heavy}`).not.toContain(heavy);
+      }
+      expect(cols, `${route} should project edge_score`).toContain("edge_score");
+    }
+    const eventCols = scoringScanColumns("sessions/sid-a/events");
+    expect(eventCols).toContain("url");
+    expect(eventCols).toContain("status");
+    for (const unused of ["ua", "ip", "country", "edge_score_rtt_us", "edge_score_exec_us"]) {
+      expect(eventCols, `events should not project ${unused}`).not.toContain(unused);
+    }
+  });
+
+  it("enriches top-flagged rows via a bounded pass-2 range load and skips pass-2 when no scored rows match", async () => {
+    // Pass-1 table has ONLY narrow scoring columns (no ip, ua, url, status, country).
+    const narrowBytes = parquetWriteBuffer({ columnData: [
+      { name: "timestamp", type: "TIMESTAMP", data: [new Date(at), new Date(at - 1000)] },
+      { name: "edge", type: "BOOLEAN", data: [true, true] },
+      { name: "edge_score", type: "INT32", data: [85, 15] },
+      { name: "edge_sid", type: "STRING", data: ["sid-a", "sid-b"] },
+      { name: "edge_score_reason", type: "STRING", data: ["burst", "clean"] },
+    ] });
+    const fullBytes = parquetWriteBuffer({ columnData: [
+      { name: "timestamp", type: "TIMESTAMP", data: [new Date(at), new Date(at - 1000)] },
+      { name: "edge_score", type: "INT32", data: [85, 15] },
+      { name: "edge_sid", type: "STRING", data: ["sid-a", "sid-b"] },
+      { name: "ip", type: "STRING", data: ["198.51.100.1", "198.51.100.2"] },
+      { name: "ua", type: "STRING", data: ["BotUA/1.0", "Mozilla/5.0"] },
+      { name: "url", type: "STRING", data: ["/login", "/home"] },
+      { name: "status", type: "INT32", data: [403, 200] },
+      { name: "country", type: "STRING", data: ["US", "GB"] },
+    ] });
+
+    await engine.syncWindow([{ key: "narrow", bytes: narrowBytes }]);
+    const loads: { fromMs: number; toMs: number; columns: readonly string[] | null }[] = [];
+    const loadRange = vi.fn(async (fromMs: number, toMs: number, columns: readonly string[] | null) => {
+      loads.push({ fromMs, toMs, columns });
+      await engine.syncWindow([{ key: "enrich", bytes: fullBytes }]);
+      await engine.retainFiles({ request: ["enrich"], vitals: [], errors: [] });
+      return {
+        runSql: (sql: string) => engine.executeSql<Record<string, unknown>>(sql),
+        presentColumns: () => engine.getPresentColumns(),
+      };
+    });
+
+    const result = await queryCloudScoring(request("analytics"), "analytics", { loadRange });
+    expect(loadRange).toHaveBeenCalledTimes(1);
+    expect(loads[0].fromMs).toBe(at - 1000);
+    expect(loads[0].toMs).toBe(at + 2);
+    expect(loads[0].columns).toEqual(expect.arrayContaining(["ip", "ua", "url", "status", "country"]));
+    expect(result).toMatchObject({
+      available: true,
+      top_flagged: {
+        rows: [
+          { edge_sid: "sid-a", edge_score: 85, ip: "198.51.100.1", ua: "BotUA/1.0", url: "/login", status: 403, country: "US" },
+          { edge_sid: "sid-b", edge_score: 15, ip: "198.51.100.2", ua: "Mozilla/5.0", url: "/home", status: 200, country: "GB" },
+        ],
+      },
+    });
+
+    // Masked request omits ip from pass-2 projection and returns 0.0.0.0.
+    await engine.reset();
+    await engine.syncWindow([{ key: "narrow", bytes: narrowBytes }]);
+    loads.length = 0;
+    loadRange.mockClear();
+    const masked = await queryCloudScoring(
+      new Request(request("top-flagged"), { headers: { "x-mask-ips": "1" } }),
+      "top-flagged",
+      { loadRange },
+    );
+    expect(loads[0].columns).not.toContain("ip");
+    expect(masked).toMatchObject({
+      rows: [
+        { edge_sid: "sid-a", ip: "0.0.0.0", url: "/login" },
+        { edge_sid: "sid-b", ip: "0.0.0.0", url: "/home" },
+      ],
+    });
+
+    // Zero scored rows in window: pass-2 must never run.
+    const emptyScored = parquetWriteBuffer({ columnData: [
+      { name: "timestamp", type: "TIMESTAMP", data: [new Date(at)] },
+      { name: "edge", type: "BOOLEAN", data: [true] },
+      { name: "edge_score", type: "INT32", data: [null] },
+    ] });
+    await engine.reset();
+    await engine.syncWindow([{ key: "empty-scored", bytes: emptyScored }]);
+    loadRange.mockClear();
+    const emptyRes = await queryCloudScoring(request("analytics"), "analytics", { loadRange });
+    expect(loadRange).not.toHaveBeenCalled();
+    expect(emptyRes).toMatchObject({ available: true, top_flagged: { rows: [] } });
+
+    // Budget error during pass-2 degrades gracefully instead of failing analytics.
+    await engine.reset();
+    await engine.syncWindow([{ key: "narrow", bytes: narrowBytes }]);
+    const budgetFail = vi.fn(async () => {
+      throw new CloudBudgetError("over", { unit: "bytes", needed: 80 * 1024 * 1024, limit: 64 * 1024 * 1024 });
+    });
+    const degraded = await queryCloudScoring(request("analytics"), "analytics", { loadRange: budgetFail });
+    expect(degraded).toMatchObject({
+      available: true,
+      top_flagged: {
+        rows: [
+          { edge_sid: "sid-a", edge_score: 85, ip: null, ua: null, url: null, status: null, country: null },
+          { edge_sid: "sid-b", edge_score: 15, ip: null, ua: null, url: null, status: null, country: null },
+        ],
+      },
+    });
+  });
+
+  it("includes evaluation and evaluation_per_reason in analytics when labels are fetched", async () => {
+    await engine.syncWindow([{ key: "scored", bytes: scoringFixture() }]);
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ labels: [] })));
+    const result = await queryCloudScoring(request("analytics"), "analytics");
+    expect(result).toMatchObject({
+      available: true,
+      evaluation: { n_good: 0, n_bad: 0, min_per_class: 5, has_min_samples: false, auc: null, passed: false },
+      evaluation_per_reason: { rows: [], n_good: 0, n_bad: 0, has_min_samples: false },
     });
   });
 });

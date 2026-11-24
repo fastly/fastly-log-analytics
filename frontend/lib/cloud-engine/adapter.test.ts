@@ -1686,6 +1686,10 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       ["GET", "/api/services/svc-1/scoring/analytics", null],
     ] as const)("narrows %s %s to the widest newest window that fits rather than refusing", async (method, path, body) => {
       overAbove(5);
+      if (path.includes("/scoring/")) {
+        vi.mocked(cloudActiveLogFieldIds).mockResolvedValueOnce(new Set(["edge_score"]))
+          .mockResolvedValueOnce(new Set(["edge_score"]));
+      }
       const res = await handleCloudAnalyticalRequest(new Request(`http://localhost${path}`, body ? {
         method, headers: { "content-type": "application/json", "x-service-id": "svc-1" },
         body: JSON.stringify({ start_time: "2026-11-05T00:00:00Z", end_time: "2026-11-06T00:00:00Z", ...body }),
@@ -3760,5 +3764,53 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       }),
     );
     expect(badInsightsRes?.status).toBe(400);
+  });
+
+  it("short-circuits scoring scans with zero Parquet reads when edge_score is disabled or labels lack minimum samples", async () => {
+    vi.mocked(ensureCloudRange).mockClear();
+    vi.mocked(cloudActiveLogFieldIds).mockResolvedValue(new Set(["status"]));
+    for (const route of ["analytics", "threshold-preview?threshold=75", "evaluation", "evaluation/per-reason", "curves"]) {
+      const res = await handleCloudAnalyticalRequest(
+        new Request(`http://localhost/api/services/svc-1/scoring/${route}`),
+      );
+      expect(res?.status).toBe(200);
+      expect(await res!.json()).toEqual({
+        supported: false, available: false, reason: "scoring_fields_not_present",
+      });
+    }
+    expect(ensureCloudRange).not.toHaveBeenCalled();
+
+    // When edge_score is enabled but labels have < 5 good or < 5 bad, evaluation / curves / per-reason skip Parquet scans.
+    vi.mocked(cloudActiveLogFieldIds).mockResolvedValue(new Set(["edge_score"]));
+    const prevFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes("/scoring/labels")) return Response.json({ labels: [] });
+      return prevFetch(input, init);
+    }));
+    const evalRes = await handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/services/svc-1/scoring/evaluation"),
+    );
+    expect(await evalRes!.json()).toMatchObject({ n_good: 0, n_bad: 0, has_min_samples: false, auc: null });
+    const perReasonRes = await handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/services/svc-1/scoring/evaluation/per-reason"),
+    );
+    expect(await perReasonRes!.json()).toEqual({ rows: [], n_good: 0, n_bad: 0, has_min_samples: false });
+    const curvesRes = await handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/services/svc-1/scoring/curves"),
+    );
+    expect(await curvesRes!.json()).toMatchObject({ available: false, n_good: 0, n_bad: 0, auc: null });
+    expect(ensureCloudRange).not.toHaveBeenCalled();
+
+    // When analytics runs with edge_score enabled, pass-1 projects ONLY narrow scoring columns (no url/ua/ip).
+    await handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/services/svc-1/scoring/analytics?since_hours=24"),
+    );
+    expect(ensureCloudRange).toHaveBeenCalledTimes(1);
+    const projectedCols = vi.mocked(ensureCloudRange).mock.calls[0]?.[4]?.projection?.columns ?? [];
+    for (const heavy of ["url", "ua", "ip", "status", "country"]) {
+      expect(projectedCols).not.toContain(heavy);
+    }
+    vi.mocked(cloudActiveLogFieldIds).mockResolvedValue(new Set<string>());
   });
 });

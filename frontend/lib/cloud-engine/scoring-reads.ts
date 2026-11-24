@@ -1,5 +1,5 @@
 import { cloudActiveLogFieldIds } from "./active-log-fields";
-import { cloudReadContext } from "./range-loader";
+import { CloudBudgetError, cloudReadContext } from "./range-loader";
 import { computeRocAuc } from "./scoring-train";
 import { buildScoringSourceSql } from "./sessions";
 import { duckSqlString } from "./dashboard/duckdb";
@@ -20,14 +20,46 @@ export const CLOUD_SCORING_SCAN_ROUTES = new Set([
   "latency-timeseries", "health", "evaluation", "evaluation/per-reason", "curves", "threshold-preview",
 ]);
 
-/** Every column a scoring scan reads; optional edge_score* fields are skipped in files that lack them. */
-export const SCORING_SCAN_COLUMNS = [
-  "timestamp", "ts_ms", "edge", "edge_sid", "edge_score", "edge_score_l1", "edge_score_l2", "edge_score_reason",
-  "edge_cookie_compliance", "edge_score_rtt_us", "edge_score_exec_us", "ip", "ua", "url", "status", "country",
+/** Narrow scoring columns read in pass 1 for overview/aggregate/evaluation scoring routes.
+ * Excludes wide request strings (url, ua, ip, status, country) so range-loader uses HTTP range
+ * reads instead of falling back to whole-file Parquet downloads. */
+export const SCORING_CORE_COLUMNS = [
+  "timestamp", "ts_ms", "edge", "edge_sid", "edge_score", "edge_score_l1", "edge_score_l2",
+  "edge_score_reason", "edge_cookie_compliance", "edge_score_rtt_us", "edge_score_exec_us",
 ] as const;
 
-export function scoringScanColumns(): string[] {
-  return [...SCORING_SCAN_COLUMNS];
+/** Wide request detail columns fetched in a bounded pass-2 range load only for top-flagged rows. */
+export const SCORING_ENRICH_COLUMNS = [
+  "timestamp", "ts_ms", "edge_sid", "edge_score", "ip", "ua", "url", "status", "country",
+] as const;
+
+/** Columns read by the single-session event drill-down (`sessions/{sid}/events`). */
+export const SCORING_EVENTS_COLUMNS = [
+  "timestamp", "ts_ms", "edge_sid", "edge_score", "edge_score_l1", "edge_score_l2",
+  "edge_score_reason", "edge_cookie_compliance", "url", "status",
+] as const;
+
+export const SCORING_SCAN_COLUMNS = SCORING_CORE_COLUMNS;
+
+export type ScoringRangeLoader = (
+  fromMs: number,
+  toMs: number,
+  columns: readonly string[] | null,
+) => Promise<{
+  runSql: (sql: string) => Promise<Record<string, unknown>[]>;
+  release?: () => void;
+  presentColumns?: () => Promise<Set<string>>;
+}>;
+
+export interface ScoringReadOptions {
+  loadRange?: ScoringRangeLoader;
+}
+
+export function scoringScanColumns(route?: string): string[] {
+  if (route && /^sessions\/[^/]+\/events$/.test(route)) {
+    return [...SCORING_EVENTS_COLUMNS];
+  }
+  return [...SCORING_CORE_COLUMNS];
 }
 
 function unavailable(reason: string) {
@@ -39,9 +71,160 @@ function bounded(value: string | null, fallback: number, max: number): number {
   return Number.isFinite(parsed) ? Math.min(max, Math.max(1, Math.floor(parsed))) : fallback;
 }
 
-export async function queryCloudScoring(request: Request, route: string) {
+type ScoringLabel = { edge_sid: string; label: string };
+
+function decodeScoringServiceId(pathname: string): string {
+  const match = pathname.match(/^\/api\/services\/([^/]+)\/scoring\//);
+  if (!match) return "";
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return "";
+  }
+}
+
+async function fetchScoringLabels(serviceId: string, signal?: AbortSignal): Promise<ScoringLabel[]> {
+  if (!serviceId) return [];
+  try {
+    const resp = await fetch(`/api/services/${encodeURIComponent(serviceId)}/scoring/labels`, { signal });
+    if (!resp.ok) return [];
+    const data = (await resp.json()) as { labels?: ScoringLabel[] };
+    return Array.isArray(data.labels) ? data.labels : [];
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    return [];
+  }
+}
+
+function emptyEvaluation(nGood: number, nBad: number, hasMinSamples: boolean, auc: number | null = null) {
+  return {
+    evaluation: {
+      n_good: nGood,
+      n_bad: nBad,
+      min_per_class: 5,
+      has_min_samples: hasMinSamples,
+      auc,
+      threshold: 0.85,
+      passed: auc !== null && auc >= 0.85,
+    },
+    evaluation_per_reason: {
+      rows: [] as unknown[],
+      n_good: nGood,
+      n_bad: nBad,
+      has_min_samples: hasMinSamples,
+    },
+    curves: {
+      available: hasMinSamples && auc !== null,
+      n_good: nGood,
+      n_bad: nBad,
+      auc,
+      roc: [] as unknown[],
+      pr: [] as unknown[],
+    },
+  };
+}
+
+/** Short-circuit scoring routes before any Parquet scan when edge_score is disabled or
+ * evaluation/curves/per-reason do not need raw log data. */
+export async function cloudScoringPreflight(request: Request): Promise<Response | null> {
   const url = new URL(request.url);
-  const serviceId = decodeURIComponent(url.pathname.split("/")[3] ?? "") || undefined;
+  const match = url.pathname.match(/^\/api\/services\/([^/]+)\/scoring\/(.+)$/);
+  if (!match || request.method !== "GET") return null;
+  const [, , route] = match;
+  if (!CLOUD_SCORING_SCAN_ROUTES.has(route) && !/^sessions\/[^/]+\/events$/.test(route)) return null;
+  const serviceId = decodeScoringServiceId(url.pathname);
+  if (!(await cloudActiveLogFieldIds(serviceId || undefined, request.signal)).has("edge_score")) {
+    return Response.json(unavailable("scoring_fields_not_present"));
+  }
+  if (route === "evaluation" || route === "evaluation/per-reason" || route === "curves") {
+    const labels = await fetchScoringLabels(serviceId, request.signal);
+    const nGood = labels.filter((l) => l.label === "good").length;
+    const nBad = labels.filter((l) => l.label === "bad").length;
+    const hasMinSamples = nGood >= 5 && nBad >= 5;
+    const empty = emptyEvaluation(nGood, nBad, hasMinSamples);
+    if (route === "evaluation/per-reason") return Response.json(empty.evaluation_per_reason);
+    if (!hasMinSamples) {
+      return Response.json(route === "curves" ? empty.curves : empty.evaluation);
+    }
+  }
+  return null;
+}
+
+function rowEnrichKey(tsMs: unknown, sid: unknown, score: unknown): string {
+  return `${Number(tsMs)}|${sid == null ? "" : String(sid)}|${Number(score)}`;
+}
+
+async function enrichTopFlaggedRows(
+  baseRows: Record<string, unknown>[],
+  loadRange: ScoringRangeLoader,
+  maskIps: boolean,
+): Promise<Record<string, unknown>[]> {
+  if (baseRows.length === 0) return [];
+  const stripTsMs = (row: Record<string, unknown>, detail?: Record<string, unknown>) => {
+    const rest = { ...row };
+    delete rest.ts_ms;
+    return {
+      ...rest,
+      ip: maskIps ? "0.0.0.0" : (detail?.ip ?? null),
+      ua: detail?.ua ?? null,
+      url: detail?.url ?? null,
+      status: detail?.status ?? null,
+      country: detail?.country ?? null,
+    };
+  };
+  const timestamps = baseRows.map((row) => Number(row.ts_ms)).filter((ms) => Number.isFinite(ms));
+  if (timestamps.length === 0) return baseRows.map((row) => stripTsMs(row));
+  let minTs = timestamps[0];
+  let maxTs = timestamps[0];
+  for (const ts of timestamps) {
+    if (ts < minTs) minTs = ts;
+    if (ts > maxTs) maxTs = ts;
+  }
+  const enrichCols = maskIps
+    ? SCORING_ENRICH_COLUMNS.filter((c) => c !== "ip")
+    : [...SCORING_ENRICH_COLUMNS];
+  let loaded: Awaited<ReturnType<ScoringRangeLoader>> | undefined;
+  try {
+    loaded = await loadRange(minTs, maxTs + 2, enrichCols);
+  } catch (error) {
+    if (error instanceof CloudBudgetError) {
+      return baseRows.map((row) => stripTsMs(row));
+    }
+    throw error;
+  }
+  try {
+    const present = loaded.presentColumns ? await loaded.presentColumns() : new Set<string>(enrichCols);
+    const enrichSource = buildScoringSourceSql("requests", present);
+    const distinctTs = [...new Set(timestamps)];
+    const detailRows = await loaded.runSql(`SELECT ts_ms, edge_sid, edge_score,
+      ${maskIps ? "'0.0.0.0' AS ip" : "ip"}, ua, url, status, country FROM ${enrichSource}
+      WHERE ts_ms >= ${minTs} AND ts_ms <= ${maxTs}
+        AND ts_ms IN (${distinctTs.join(", ")})
+        AND edge_score IS NOT NULL`);
+    const byKey = new Map<string, Record<string, unknown>[]>();
+    for (const detail of detailRows) {
+      const key = rowEnrichKey(detail.ts_ms, detail.edge_sid, detail.edge_score);
+      const list = byKey.get(key);
+      if (list) list.push(detail);
+      else byKey.set(key, [detail]);
+    }
+    return baseRows.map((row) => {
+      const key = rowEnrichKey(row.ts_ms, row.edge_sid, row.edge_score);
+      const detail = byKey.get(key)?.shift();
+      return stripTsMs(row, detail);
+    });
+  } finally {
+    loaded.release?.();
+  }
+}
+
+export async function queryCloudScoring(
+  request: Request,
+  route: string,
+  options?: ScoringReadOptions,
+) {
+  const url = new URL(request.url);
+  const serviceId = decodeScoringServiceId(url.pathname) || undefined;
   // The log field settings say whether scoring is on; the column check only keeps the SQL off
   // files written before edge_score was logged.
   if (!(await cloudActiveLogFieldIds(serviceId, request.signal)).has("edge_score")) {
@@ -66,17 +249,29 @@ export async function queryCloudScoring(request: Request, route: string) {
   }
   const source = buildScoringSourceSql("requests", cols);
   const where = `ts_ms >= ${start} AND ts_ms <= ${end}`;
-  const query = (sql: string) => engine.executeSql(sql, [], request.signal);
+  const query = (sql: string) => engine.executeSql<Record<string, unknown>>(sql, [], request.signal);
   const hour = "strftime(timestamp, '%Y-%m-%dT%H:00:00Z')";
   const hasRtt = cols.has("edge_score_rtt_us");
   const hasExec = cols.has("edge_score_exec_us");
   const hasCompliance = cols.has("edge_cookie_compliance");
   const envelope = async (sql: string) => ({ rows: await query(sql), since_hours: sinceHours });
-  const top = () => envelope(`SELECT timestamp::VARCHAR AS timestamp, edge_sid,
-    edge_score, edge_score_l1, edge_score_l2, edge_cookie_compliance,
-    edge_score_reason, ${maskIps ? "'0.0.0.0' AS ip" : "ip"}, ua, url, status, country FROM ${source}
-    WHERE ${where} AND edge_score IS NOT NULL ORDER BY edge_score DESC, timestamp DESC
-    LIMIT ${bounded(url.searchParams.get("limit"), route === "analytics" ? 200 : 50, 500)}`);
+  const topLimit = bounded(url.searchParams.get("limit"), route === "analytics" ? 200 : 50, 500);
+  const loadRange = options?.loadRange;
+  const topPass1 = () => loadRange
+    ? query(`SELECT timestamp::VARCHAR AS timestamp, ts_ms, edge_sid,
+        edge_score, edge_score_l1, edge_score_l2, edge_cookie_compliance,
+        edge_score_reason FROM ${source}
+        WHERE ${where} AND edge_score IS NOT NULL ORDER BY edge_score DESC, timestamp DESC
+        LIMIT ${topLimit}`)
+    : query(`SELECT timestamp::VARCHAR AS timestamp, edge_sid,
+        edge_score, edge_score_l1, edge_score_l2, edge_cookie_compliance,
+        edge_score_reason, ${maskIps ? "'0.0.0.0' AS ip" : "ip"}, ua, url, status, country FROM ${source}
+        WHERE ${where} AND edge_score IS NOT NULL ORDER BY edge_score DESC, timestamp DESC
+        LIMIT ${topLimit}`);
+  const finishTop = async (rows: Record<string, unknown>[]) => ({
+    rows: loadRange ? await enrichTopFlaggedRows(rows, loadRange, maskIps) : rows,
+    since_hours: sinceHours,
+  });
   const distribution = () => envelope(`SELECT ${hour} AS hour,
     CASE WHEN edge_score < 25 THEN '0-25' WHEN edge_score < 50 THEN '25-50'
       WHEN edge_score < 75 THEN '50-75' ELSE '75-100' END AS bucket, COUNT(*) AS count
@@ -144,55 +339,7 @@ export async function queryCloudScoring(request: Request, route: string) {
       l2_enforce: null,
     };
   };
-  if (route === "analytics") {
-    const [topFlagged, scoreDistribution, complianceBreakdown, latencyTimeseries, snapshot] =
-      await Promise.all([top(), distribution(), compliance(), latency(), health()]);
-    return {
-      available: true, capabilities: CLOUD_SCORING_CAPABILITIES,
-      top_flagged: topFlagged, score_distribution: scoreDistribution,
-      compliance_breakdown: complianceBreakdown, latency_timeseries: latencyTimeseries, health: snapshot,
-    };
-  }
-  if (route === "top-flagged") return top();
-  if (route === "score-distribution") return distribution();
-  if (route === "compliance-breakdown") return compliance();
-  if (route === "latency-timeseries") return latency();
-  if (route === "health") return health();
-  if (route === "threshold-preview") {
-    const threshold = bounded(url.searchParams.get("threshold"), 50, 100);
-    const [row] = await query(`SELECT COUNT(*) AS total_scored,
-      COUNT(*) FILTER (WHERE edge_score >= ${threshold}) AS flagged_count
-      FROM ${source} WHERE ${where} AND edge_score IS NOT NULL`);
-    const total = Number(row?.total_scored ?? 0);
-    const flagged = Number(row?.flagged_count ?? 0);
-    return {
-      threshold,
-      since_hours: sinceHours,
-      total_scored: total,
-      flagged_count: flagged,
-      flagged_pct: total > 0 ? (flagged / total) * 100 : 0,
-    };
-  }
-  if (route === "evaluation" || route === "evaluation/per-reason" || route === "curves") {
-    const match = url.pathname.match(/^\/api\/services\/([^/]+)\/scoring\//);
-    let serviceId = "";
-    if (match) {
-      try {
-        serviceId = decodeURIComponent(match[1]);
-      } catch {
-        serviceId = "";
-      }
-    }
-    let labels: Array<{ edge_sid: string; label: string }> = [];
-    if (serviceId) {
-      const resp = await fetch(`/api/services/${encodeURIComponent(serviceId)}/scoring/labels`, {
-        signal: request.signal,
-      });
-      if (resp.ok) {
-        const data = (await resp.json()) as { labels?: Array<{ edge_sid: string; label: string }> };
-        labels = data.labels ?? [];
-      }
-    }
+  const evaluateLabels = async (labels: ScoringLabel[]) => {
     const labelMap = new Map(labels.map((l) => [l.edge_sid, l.label]));
     const goodSids = labels.filter((l) => l.label === "good");
     const badSids = labels.filter((l) => l.label === "bad");
@@ -215,28 +362,51 @@ export async function queryCloudScoring(request: Request, route: string) {
       }
       auc = computeRocAuc(badScores, goodScores);
     }
-    if (route === "evaluation/per-reason") {
-      return { rows: [], n_good: goodSids.length, n_bad: badSids.length, has_min_samples: hasMinSamples };
-    }
-    if (route === "curves") {
-      return {
-        available: hasMinSamples && auc !== null,
-        n_good: goodSids.length,
-        n_bad: badSids.length,
-        auc,
-        roc: [],
-        pr: [],
-      };
-    }
+    return emptyEvaluation(goodSids.length, badSids.length, hasMinSamples, auc);
+  };
+  if (route === "analytics") {
+    const [topBaseRows, scoreDistribution, complianceBreakdown, latencyTimeseries, snapshot, labels] =
+      await Promise.all([
+        topPass1(), distribution(), compliance(), latency(), health(),
+        fetchScoringLabels(serviceId ?? "", request.signal),
+      ]);
+    const evalBundle = await evaluateLabels(labels);
+    // Pass-2 enrichment runs after all Pass-1 queries finish so DuckDB's active window isn't mutated mid-scan.
+    const topFlagged = await finishTop(topBaseRows);
     return {
-      n_good: goodSids.length,
-      n_bad: badSids.length,
-      min_per_class: 5,
-      has_min_samples: hasMinSamples,
-      auc,
-      threshold: 0.85,
-      passed: auc !== null && auc >= 0.85,
+      available: true, capabilities: CLOUD_SCORING_CAPABILITIES,
+      top_flagged: topFlagged, score_distribution: scoreDistribution,
+      compliance_breakdown: complianceBreakdown, latency_timeseries: latencyTimeseries, health: snapshot,
+      evaluation: evalBundle.evaluation,
+      evaluation_per_reason: evalBundle.evaluation_per_reason,
     };
+  }
+  if (route === "top-flagged") return finishTop(await topPass1());
+  if (route === "score-distribution") return distribution();
+  if (route === "compliance-breakdown") return compliance();
+  if (route === "latency-timeseries") return latency();
+  if (route === "health") return health();
+  if (route === "threshold-preview") {
+    const threshold = bounded(url.searchParams.get("threshold"), 50, 100);
+    const [row] = await query(`SELECT COUNT(*) AS total_scored,
+      COUNT(*) FILTER (WHERE edge_score >= ${threshold}) AS flagged_count
+      FROM ${source} WHERE ${where} AND edge_score IS NOT NULL`);
+    const total = Number(row?.total_scored ?? 0);
+    const flagged = Number(row?.flagged_count ?? 0);
+    return {
+      threshold,
+      since_hours: sinceHours,
+      total_scored: total,
+      flagged_count: flagged,
+      flagged_pct: total > 0 ? (flagged / total) * 100 : 0,
+    };
+  }
+  if (route === "evaluation" || route === "evaluation/per-reason" || route === "curves") {
+    const labels = await fetchScoringLabels(serviceId ?? "", request.signal);
+    const evalBundle = await evaluateLabels(labels);
+    if (route === "evaluation/per-reason") return evalBundle.evaluation_per_reason;
+    if (route === "curves") return evalBundle.curves;
+    return evalBundle.evaluation;
   }
   const events = route.match(/^sessions\/([^/]+)\/events$/);
   if (events) {
@@ -256,10 +426,13 @@ export async function queryCloudScoring(request: Request, route: string) {
   throw new Error("Unsupported scoring scan route");
 }
 
-export async function cloudScoringRead(request: Request): Promise<Response | null> {
+export async function cloudScoringRead(
+  request: Request,
+  options?: ScoringReadOptions,
+): Promise<Response | null> {
   const match = new URL(request.url).pathname.match(/^\/api\/services\/([^/]+)\/scoring\/(.+)$/);
   if (!match || request.method !== "GET") return null;
   const [, , route] = match;
   if (!CLOUD_SCORING_SCAN_ROUTES.has(route) && !/^sessions\/[^/]+\/events$/.test(route)) return null;
-  return Response.json(await queryCloudScoring(request, route));
+  return Response.json(await queryCloudScoring(request, route, options));
 }

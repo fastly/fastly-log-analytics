@@ -25,7 +25,13 @@ import {
 } from "./insights";
 import { insightScanColumns, insightsOverBudget, queryCloudInsights, queryCloudCacheCollapse } from "./insight-scans";
 import { insightsDeferredDetectors } from "./insights-rollup";
-import { CLOUD_SCORING_SCAN_ROUTES, cloudScoringRead, scoringScanColumns } from "./scoring-reads";
+import {
+  CLOUD_SCORING_SCAN_ROUTES,
+  cloudScoringPreflight,
+  cloudScoringRead,
+  scoringScanColumns,
+  type ScoringRangeLoader,
+} from "./scoring-reads";
 import { handleNetworkRequest, networkScanColumns, networkScans, type NetworkQueryParams } from "./network";
 import { isNetworkPartial, mergeNetworkPartial, networkRollupEligible } from "./network-rollup";
 import type { RollupResult } from "./dashboard/rollup-query";
@@ -926,6 +932,7 @@ type QueryScan = {
 const queryScans = new WeakMap<Request, QueryScan>();
 /** A prepared /api/sessions list: where its first read begins, and how to load more. */
 const sessionScans = new WeakMap<Request, { loadedFromMs: number; loadRange: SessionsRangeLoader }>();
+const scoringScans = new WeakMap<Request, ScoringRangeLoader>();
 /**
  * The newest window a prepared raw scan narrowed to because its whole range
  * was over the browser budget; the answer is exact over this window.
@@ -1185,7 +1192,8 @@ async function prepareCloudScan(
       ? securityScanColumns(params.filters)
     : url.pathname === "/api/security/threat-intel" ? threatIntelScanColumns(params.filters)
     : url.pathname === "/api/cmcd/aggregates" ? cmcdScanColumns(params.filters)
-    : /^\/api\/services\/[^/]+\/scoring\//.test(url.pathname) ? scoringScanColumns() : null;
+    : /^\/api\/services\/[^/]+\/scoring\/(.+)$/.test(url.pathname)
+      ? scoringScanColumns(url.pathname.match(/^\/api\/services\/[^/]+\/scoring\/(.+)$/)?.[1]) : null;
   const detectors = Array.isArray(params.detectors) ? params.detectors as string[] : undefined;
   const queryPlan = url.pathname === "/api/query" ? await planCloudQueryScan(params as unknown as QueryRequest, {
     tableName: rum ? String(dataset) : "requests",
@@ -1309,6 +1317,16 @@ async function prepareCloudScan(
     if (decodedServiceId && !url.searchParams.has("service_id")) url.searchParams.set("service_id", decodedServiceId);
     const prepared = bindCloudReadContext(new Request(url, request), read);
     if (rawWindow) rawWindows.set(prepared, rawWindow);
+    if (/^\/api\/services\/[^/]+\/scoring\/(?:analytics|top-flagged)$/.test(url.pathname)) {
+      scoringScans.set(prepared, async (fromMs, toMs, columns) => {
+        const loaded = await loadSessions(fromMs, toMs, columns);
+        return {
+          runSql: (sql) => loaded.executeSql<Record<string, unknown>>(sql, [], request.signal),
+          release: () => loaded.release?.(),
+          presentColumns: () => loaded.getPresentColumns(),
+        };
+      });
+    }
     return prepared;
   } catch (error) {
     read.release?.();
@@ -1556,6 +1574,11 @@ async function handleCloudRequestInner(
       const answer = await cloudInsightsRollup(request, entryMetaEpoch);
       if (answer) return answer;
     }
+    if (localScan && /\/scoring\//.test(path)) {
+      const shortCircuit = await cloudScoringPreflight(request);
+      assertAdapterEpoch(request, entryMetaEpoch);
+      if (shortCircuit) return shortCircuit;
+    }
     if (localScan) {
       const previous = analyticalQueue;
       let release!: () => void;
@@ -1579,7 +1602,7 @@ async function handleCloudRequestInner(
         assertAdapterEpoch(request, entryMetaEpoch);
         read = cloudReadContext(prepared);
         const response = await withRawWindow(prepared, /\/scoring\//.test(path)
-          ? await cloudScoringRead(prepared)
+          ? await cloudScoringRead(prepared, { loadRange: scoringScans.get(prepared) })
           : await dispatchCloudRequest(prepared, origin, cloudReadContext(prepared), entryMetaEpoch));
         cloudReadContext(prepared).assertCurrent();
         assertAdapterEpoch(prepared, entryMetaEpoch);

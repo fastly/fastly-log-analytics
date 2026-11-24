@@ -373,10 +373,19 @@ describe("Cloud route column projections", () => {
 
   const scoring = (route: string, query = ""): Variant => ({
     name: `/api/services/svc/scoring/${route}${query}`,
-    columns: scoringScanColumns(),
+    columns: scoringScanColumns(route),
     run: (context) => queryCloudScoring(bindCloudReadContext(new Request(
       `http://localhost/api/services/svc/scoring/${route}?start_time=${RANGE.start_time}&end_time=${RANGE.end_time}${query}`,
-    ), context), route),
+    ), context), route, {
+      loadRange: async (_fromMs, _toMs, cols) => {
+        if (cols) await view(cols, true);
+        return {
+          runSql: (sql) => context.executeSql<Record<string, unknown>>(sql, []),
+          release: () => { void view(all); },
+          presentColumns: () => context.getPresentColumns(),
+        };
+      },
+    }),
   });
 
   const network = (path: string, body: Record<string, unknown>): Variant => ({
