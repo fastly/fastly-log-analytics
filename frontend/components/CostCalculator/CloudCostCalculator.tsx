@@ -294,9 +294,6 @@ export function CloudCostCalculator({ prefillData, prefillNote, rates: configure
               <Row label="Log file period (seconds)" tooltip="How often Fastly closes and uploads a log file. Controlled by the Fastly logging configuration.">
                 <NumInput aria-label="Log file period (seconds)" value={inputs.logPeriodS} onChange={set('logPeriodS')} min={1} />
               </Row>
-              <Row label="Log nodes / fan-out" tooltip="Expected Fastly POPs/nodes flushing a log file per period, automatically derived from live ingest or request volume (~1 node per 8k req/day, capped at 109).">
-                <ReadOnlyValue value={Math.round(inputs.filesPerPeriod)} />
-              </Row>
               <Row label="Average bytes per log line" tooltip="Average uncompressed bytes per logged request. Compressed in Object Storage (.zst) and Parquet.">
                 <NumInput aria-label="Average bytes per log line" value={lineBytesUncompressed} onChange={setLineBytes} min={1} wide />
               </Row>

@@ -128,38 +128,15 @@ describe('Cloud cost calculator', () => {
     expect(total?.textContent).not.toBe(before)
   })
 
-  it('displays read-only auto-derived log nodes defaulting to the canonical node count', () => {
-    render(<CloudCostCalculator />)
-    expect(screen.queryByRole('spinbutton', { name: 'Log nodes / fan-out' })).not.toBeInTheDocument()
-    const row = screen.getByText('Log nodes / fan-out').closest('div')!.parentElement!
-    expect(row).toHaveTextContent(String(DEFAULT_INPUTS.filesPerPeriod))
-  })
-
-  it('derives log nodes from request volume when pre-filled (req / 8000, capped at 109)', () => {
+  it('hides log nodes / fan-out from the UI while still auto-deriving expected node fan-out from traffic', () => {
     render(<CloudCostCalculator prefillData={{
       inputs: { ...DEFAULT_INPUTS, edgeOnly: true, requestsPerDay: 200_000, edgeRequestsPerDay: 200_000 },
     }} />)
-    // ceil(200000 / 8000) = 25 POPs.
-    const row = screen.getByText('Log nodes / fan-out').closest('div')!.parentElement!
-    expect(row).toHaveTextContent('25')
-  })
-
-  it('caps derived log nodes at the DEFAULT_INPUTS maximum', () => {
-    render(<CloudCostCalculator prefillData={{
-      inputs: { ...DEFAULT_INPUTS, edgeOnly: true, requestsPerDay: 100_000_000, edgeRequestsPerDay: 100_000_000 },
-    }} />)
-    const row = screen.getByText('Log nodes / fan-out').closest('div')!.parentElement!
-    expect(row).toHaveTextContent(String(DEFAULT_INPUTS.filesPerPeriod))
-  })
-
-  it('re-derives log nodes automatically when traffic volume changes', () => {
-    render(<CloudCostCalculator prefillData={{
-      inputs: { ...DEFAULT_INPUTS, edgeOnly: true, requestsPerDay: 200_000, edgeRequestsPerDay: 200_000 },
-    }} />)
-    const row = () => screen.getByText('Log nodes / fan-out').closest('div')!.parentElement!
-    expect(row()).toHaveTextContent('25')
+    expect(screen.queryByText('Log nodes / fan-out')).not.toBeInTheDocument()
+    const total = screen.getByText('Total Estimated Monthly Cost').parentElement?.nextElementSibling
+    const before = total?.textContent
     fireEvent.change(screen.getByRole('spinbutton', { name: 'Total requests per day' }), { target: { value: '800000' } })
-    expect(row()).toHaveTextContent('100')
+    expect(total?.textContent).not.toBe(before)
   })
 
   it('exposes Auto-delete raw .zst logs after ingest matching High-Scale and updates storage when toggled', () => {

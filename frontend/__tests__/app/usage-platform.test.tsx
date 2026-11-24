@@ -342,9 +342,8 @@ describe('High-Scale cost calculator UI fixes', () => {
     expect(container.textContent).not.toContain('~15×')
   })
 
-  it('renders auto-derived read-only log nodes instead of an editable input', () => {
+  it('hides log nodes / fan-out from the UI since it is auto-derived', () => {
     render(<CostCalculator />)
-    expect(screen.queryByRole('spinbutton', { name: 'Log nodes / fan-out' })).not.toBeInTheDocument()
-    expect(screen.getByText('Log nodes / fan-out')).toBeInTheDocument()
+    expect(screen.queryByText('Log nodes / fan-out')).not.toBeInTheDocument()
   })
 })
