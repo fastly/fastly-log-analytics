@@ -71,14 +71,86 @@ _CANNED: dict[str, list[dict[str, Any]]] = {
             "startup_ratio": 2.5,
         }
     ],
-    "cmcd:new_sessions": [{"bucket": "2026-09-14 10:05:00", "new_sessions": 2}],
-    "cmcd:top_content": [
-        {"content_id": "movie-1", "session_count": 3, "rebuffer_rate": 33.33, "avg_br": 3000.0, "avg_bl": 9.5}
+    "cmcd:sessions": [
+        {
+            "kind": "new_sessions",
+            "k": "2026-09-14 10:05:00",
+            "session_count": 2,
+            "positive_duration_sum": 0.0,
+            "positive_duration_count": 0,
+        },
+        {
+            "kind": "duration",
+            "k": "2",
+            "session_count": 1,
+            "positive_duration_sum": 61.6,
+            "positive_duration_count": 1,
+        },
+        {
+            "kind": "duration",
+            "k": "5",
+            "session_count": 3,
+            "positive_duration_sum": 440.0,
+            "positive_duration_count": 3,
+        },
     ],
-    "cmcd:rebuffer_by_country": [{"country": "US", "rebuffer_rate": 10.0, "session_count": 3, "median_mtp": 7500.0}],
-    "cmcd:rebuffer_by_asn": [{"asn": 7922, "rebuffer_rate": 50.0, "session_count": 2, "avg_br": 2000.0, "avg_bl": 8.0}],
-    "cmcd:object_type_dist": [{"object_type": "v", "request_count": 30}, {"object_type": "a", "request_count": 10}],
-    "cmcd:streaming_format_dist": [{"streaming_format": "h", "session_count": 4}],
+    "cmcd:breakdowns": [
+        {
+            "kind": "content",
+            "k": "movie-1",
+            "session_count": 3,
+            "rebuffer_rate": 33.33,
+            "avg_br": 3000.0,
+            "avg_bl": 9.5,
+            "median_mtp": None,
+        },
+        {
+            "kind": "country",
+            "k": "US",
+            "session_count": 3,
+            "rebuffer_rate": 10.0,
+            "avg_br": None,
+            "avg_bl": None,
+            "median_mtp": 7500.0,
+        },
+        {
+            "kind": "asn",
+            "k": "7922",
+            "session_count": 2,
+            "rebuffer_rate": 50.0,
+            "avg_br": 2000.0,
+            "avg_bl": 8.0,
+            "median_mtp": None,
+        },
+        {
+            "kind": "ot",
+            "k": "v",
+            "session_count": 30,
+            "rebuffer_rate": None,
+            "avg_br": None,
+            "avg_bl": None,
+            "median_mtp": None,
+        },
+        {
+            "kind": "ot",
+            "k": "a",
+            "session_count": 10,
+            "rebuffer_rate": None,
+            "avg_br": None,
+            "avg_bl": None,
+            "median_mtp": None,
+        },
+        {
+            "kind": "sf",
+            "k": "h",
+            "session_count": 4,
+            "rebuffer_rate": None,
+            "avg_br": None,
+            "avg_bl": None,
+            "median_mtp": None,
+        },
+    ],
+    "cmcd:new_sessions": [{"bucket": "2026-09-14 10:05:00", "new_sessions": 2}],
     "cmcd:session_duration_dist": [
         {"sort_order": 2, "session_count": 1, "positive_duration_sum": 61.6, "positive_duration_count": 1},
         {"sort_order": 5, "session_count": 3, "positive_duration_sum": 440.0, "positive_duration_count": 3},
@@ -149,10 +221,8 @@ def test_cmcd_consolidates_overview_into_probe_timeseries_and_session_duration()
 
     res = cmcd_aggregates(svc, req, "2026-09-14T10:00:00Z", "2026-09-14T10:20:00Z", ALL_SECTIONS, False)
     markers = [sql.split("*/")[0].split("/*")[1].strip() for sql, _ in client.calls]
-    assert len(markers) == 9
-    assert "cmcd:overview" not in markers
-    assert "cmcd:overview_peak" not in markers
-    assert "cmcd:overview_duration" not in markers
+    assert len(markers) == 4
+    assert set(markers) == {"cmcd:probe", "cmcd:timeseries", "cmcd:sessions", "cmcd:breakdowns"}
     assert res["overview"] == {
         "active_sessions": 4,
         "rebuffer_rate": 25.0,
@@ -162,6 +232,15 @@ def test_cmcd_consolidates_overview_into_probe_timeseries_and_session_duration()
         "peak_viewers": 4,
         "avg_session_duration": 125,
     }
+    bucket_1005 = next(p for p in res["sessions_ts"] if p["bucket"].startswith("2026-09-14 10:05:00"))
+    assert bucket_1005["new_sessions"] == 2
+    assert len(res["session_duration_dist"]) == 2
+    assert res["top_content"][0]["content_id"] == "movie-1"
+    assert res["rebuffer_by_country"][0]["country"] == "US"
+    assert res["rebuffer_by_asn"][0]["asn"] == 7922
+    assert res["rebuffer_by_asn"][0]["label"] == "Comcast (7922)"
+    assert len(res["object_type_dist"]) == 2
+    assert res["streaming_format_dist"][0]["streaming_format"] == "h"
 
 
 def test_cmcd_overview_only_skips_redundant_overview_scan() -> None:

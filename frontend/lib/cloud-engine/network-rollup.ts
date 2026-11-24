@@ -736,16 +736,52 @@ export function networkRollupEligible(path: string, params: NetworkQueryParams):
 }
 
 /**
- * The summary groups and columns /network reads: one spec for all its paths,
- * so they share one projection per file.
+ * The summary groups and columns unfiltered /network reads: one spec for all
+ * its paths, so they share one projection per file, with per-group column
+ * narrowing so heavy histograms and group-specific columns are only read from
+ * the row groups that hold them.
  */
 export const NETWORK_SUMMARY_SPEC = defineSummarySpec({
-  groups: ["dims", "series5", "quality", "transport", "sample", "shield_routes", "filtered_rollups", "dim_totals"],
+  groups: ["dims", "series5", "quality", "transport", "sample", "shield_routes", "dim_totals"],
   columns: [
     "label", "requests", "status_5xx", "cache_hits", "resp_bytes_sum", "rtt_sum", "rtt_count", "ploss_sum",
     "ploss_count", "cwnd_sum", "cwnd_count", "rttvar_sum", "rttvar_count", "retrans_count", "lat_sum", "lon_sum",
     "geo_count", "delivery_rate_sum", "delivery_rate_count", "throughput_sum", "throughput_count", "ttfb_sum",
     "sample_key", "rtt_hist", "ttfb_hist", "overhead_hist",
+  ],
+  only: {
+    label: ["dims", "series5", "quality"],
+    status_5xx: ["dims", "series5", "transport"],
+    cache_hits: ["dims"],
+    resp_bytes_sum: ["dims", "transport"],
+    ploss_sum: ["dims", "series5", "quality", "transport"],
+    ploss_count: ["dims", "series5", "quality", "transport"],
+    cwnd_sum: ["dims", "transport"],
+    cwnd_count: ["dims", "transport"],
+    rttvar_sum: ["dims", "quality", "transport"],
+    rttvar_count: ["dims", "quality", "transport"],
+    retrans_count: ["dims", "transport"],
+    lat_sum: ["series5"],
+    lon_sum: ["series5"],
+    geo_count: ["series5"],
+    delivery_rate_sum: ["transport"],
+    delivery_rate_count: ["transport"],
+    throughput_sum: ["quality"],
+    throughput_count: ["quality"],
+    ttfb_sum: ["sample"],
+    sample_key: ["sample"],
+    rtt_hist: ["dims", "series5", "quality", "transport"],
+    ttfb_hist: ["dims"],
+    overhead_hist: ["shield_routes"],
+  },
+});
+
+/** Summary spec for single-filter /network summary reads (`filtered_rollups` only). */
+export const NETWORK_FILTERED_SUMMARY_SPEC = defineSummarySpec({
+  groups: ["filtered_rollups", "dim_totals"],
+  columns: [
+    "requests", "status_5xx", "rtt_sum", "rtt_count", "ploss_sum", "ploss_count",
+    "cwnd_count", "rttvar_count", "rtt_hist",
   ],
 });
 
@@ -763,19 +799,23 @@ export async function networkFromRollup(
   params: NetworkQueryParams,
   source: Parameters<typeof queryRollup>[0],
   signal?: AbortSignal,
-  /** Null reads whole files. */
-  spec: SummarySpec | null = NETWORK_SUMMARY_SPEC,
+  /** Null reads whole files; undefined picks the unfiltered or filtered spec. */
+  spec?: SummarySpec | null,
 ) {
   if (!networkRollupEligible(path, params)) return null;
   const fromMs = parseEpochMs(params.start_time);
   const toMs = parseEpochMs(params.end_time);
   if (fromMs === null || toMs === null || fromMs >= toMs) return null;
+  const filtered = hasAnyNetworkFilter(params);
+  const effectiveSpec = spec === undefined
+    ? (filtered ? NETWORK_FILTERED_SUMMARY_SPEC : NETWORK_SUMMARY_SPEC)
+    : spec;
   const [result] = await Promise.all([
-    queryRollup(source, { fromMs, toMs, signal, spec: spec ?? undefined }),
+    queryRollup(source, { fromMs, toMs, signal, spec: effectiveSpec ?? undefined }),
     loadAsnNames(),
   ]);
   if (!result) return null;
-  if (hasAnyNetworkFilter(params)) {
+  if (filtered) {
     const filter = networkSingleFilter(params);
     if (!filter) return null;
     const core = filteredNetworkHealthSummary(result, filter);

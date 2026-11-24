@@ -453,26 +453,13 @@ def _cmcd_aggregates_compute(
                     default,
                 )
 
+            if want_ts["sessions_ts"] and want_overview:
+                overview_extras["peak_viewers"] = max(
+                    (int(row.get("concurrent_sessions") or 0) for row in rows),
+                    default=0,
+                )
             if want_ts["sessions_ts"]:
-                if want_overview:
-                    overview_extras["peak_viewers"] = max(
-                        (int(row.get("concurrent_sessions") or 0) for row in rows),
-                        default=0,
-                    )
-                first_seen = execute(
-                    "/* cmcd:new_sessions */ SELECT "
-                    f"{_BUCKET.format(column='first_ts')} AS bucket, count() AS new_sessions FROM ("
-                    f"SELECT sid, min(ts) AS first_ts FROM ({events}) GROUP BY sid) GROUP BY bucket",
-                    params,
-                )
-                new_sessions = {str(row["bucket"]): int(row["new_sessions"] or 0) for row in first_seen}
-                ts_out["sessions_ts"] = _pad(
-                    start,
-                    end,
-                    int(req.bucket_seconds),
-                    _sessions_ts(rows, new_sessions),
-                    CMCD_TS_DEFAULTS["sessions_ts"],
-                )
+                ts_out["_sessions_ts_rows"] = rows
             if want_ts["buffer_health_ts"]:
                 ts_out["buffer_health_ts"] = padded(
                     {
@@ -504,119 +491,66 @@ def _cmcd_aggregates_compute(
             return ts_out
 
         tasks.append(("timeseries", _run_timeseries))
-    if wanted("top_content") and has["cid"]:
 
-        def _run_top_content() -> dict[str, Any]:
+    # Consolidate per-session aggregations (new_sessions + session_duration_dist) into one scan.
+    if want_ts["sessions_ts"] and want_duration_dist:
+
+        def _run_sessions() -> dict[str, Any]:
             rows = execute(
-                "/* cmcd:top_content */ SELECT cid AS content_id, count() AS session_count, "
-                "sum(had_rebuffer) * 100.0 / nullIf(count(), 0) AS rebuffer_rate, avg(avg_br) AS avg_br, "
-                "avg(avg_bl) AS avg_bl FROM ("
-                "SELECT cid, sid, max(if(bs = 1, 1, 0)) AS had_rebuffer, "
-                f"avgIf(br, {video}) AS avg_br, avgIf(bl, {video}) AS avg_bl "
-                f"FROM ({events}) WHERE cid != '' GROUP BY cid, sid) "
-                "GROUP BY cid ORDER BY session_count DESC, content_id LIMIT {top_n:UInt32}",
+                "/* cmcd:sessions */ WITH sess AS ("
+                "SELECT sid, min(ts) AS first_ts, "
+                "(toUnixTimestamp64Milli(max(ts)) - toUnixTimestamp64Milli(min(ts))) / 1000.0 AS duration "
+                f"FROM ({events}) GROUP BY sid) "
+                f"SELECT 'new_sessions' AS kind, {_BUCKET.format(column='first_ts')} AS k, "
+                "toUInt64(count()) AS session_count, toFloat64(0) AS positive_duration_sum, "
+                "toUInt64(0) AS positive_duration_count FROM sess GROUP BY k "
+                "UNION ALL "
+                "SELECT 'duration' AS kind, toString(multiIf(duration < 30, 1, duration < 120, 2, "
+                "duration < 300, 3, duration < 600, 4, duration < 1800, 5, duration < 3600, 6, 7)) AS k, "
+                "toUInt64(count()) AS session_count, toFloat64(sumIf(duration, duration > 0)) AS positive_duration_sum, "
+                "toUInt64(countIf(duration > 0)) AS positive_duration_count FROM sess GROUP BY k",
                 params,
             )
+            new_sessions: dict[str, int] = {}
+            dur_rows: list[dict[str, Any]] = []
+            for row in rows:
+                if row.get("kind") == "new_sessions":
+                    new_sessions[str(row["k"])] = int(row.get("session_count") or 0)
+                elif row.get("kind") == "duration":
+                    dur_rows.append(row)
+            dur_rows.sort(key=lambda r: int(r["k"]))
+            if want_overview:
+                pos_count = sum(int(row.get("positive_duration_count") or 0) for row in dur_rows)
+                if pos_count > 0:
+                    pos_sum = sum(float(row.get("positive_duration_sum") or 0.0) for row in dur_rows)
+                    overview_extras["avg_duration"] = pos_sum / pos_count
+                else:
+                    overview_extras["avg_duration"] = None
             return {
-                "top_content": [
+                "_new_sessions": new_sessions,
+                "session_duration_dist": [
                     {
-                        "content_id": row["content_id"],
+                        "duration_bucket": _DURATION_BUCKETS[int(row["k"])],
                         "session_count": int(row["session_count"]),
-                        "rebuffer_rate": _round(row.get("rebuffer_rate")),
-                        "avg_bitrate": _round(row.get("avg_br")),
-                        "avg_buffer_length": _round(row.get("avg_bl")),
                     }
-                    for row in rows
-                ]
+                    for row in dur_rows
+                ],
             }
 
-        tasks.append(("top_content", _run_top_content))
-    if wanted("rebuffer_by_country") and has_country and has_bs_effective:
+        tasks.append(("sessions", _run_sessions))
+    elif want_ts["sessions_ts"]:
 
-        def _run_rebuffer_country() -> dict[str, Any]:
-            rows = execute(
-                "/* cmcd:rebuffer_by_country */ SELECT country, "
-                "sum(had_rebuffer) * 100.0 / nullIf(count(), 0) AS rebuffer_rate, count() AS session_count, "
-                "avg(median_mtp) AS median_mtp FROM ("
-                "SELECT country, sid, max(if(bs = 1, 1, 0)) AS had_rebuffer, "
-                f"quantileTDigestIf(0.5)(mtp, {video}) AS median_mtp "
-                f"FROM ({events}) WHERE country != '' GROUP BY country, sid) "
-                "GROUP BY country ORDER BY session_count DESC, country LIMIT {top_n:UInt32}",
+        def _run_new_sessions() -> dict[str, Any]:
+            first_seen = execute(
+                "/* cmcd:new_sessions */ SELECT "
+                f"{_BUCKET.format(column='first_ts')} AS bucket, count() AS new_sessions FROM ("
+                f"SELECT sid, min(ts) AS first_ts FROM ({events}) GROUP BY sid) GROUP BY bucket",
                 params,
             )
-            return {
-                "rebuffer_by_country": [
-                    {
-                        "country": row["country"],
-                        "rebuffer_rate": _round(row.get("rebuffer_rate")),
-                        "session_count": int(row["session_count"]),
-                        "median_throughput": _round(row.get("median_mtp")),
-                    }
-                    for row in rows
-                ]
-            }
+            return {"_new_sessions": {str(row["bucket"]): int(row["new_sessions"] or 0) for row in first_seen}}
 
-        tasks.append(("rebuffer_country", _run_rebuffer_country))
-    if wanted("rebuffer_by_asn") and has_asn and has_bs_effective:
-
-        def _run_rebuffer_asn() -> dict[str, Any]:
-            rows = execute(
-                "/* cmcd:rebuffer_by_asn */ SELECT asn, "
-                "sum(had_rebuffer) * 100.0 / nullIf(count(), 0) AS rebuffer_rate, count() AS session_count, "
-                "avg(avg_br) AS avg_br, avg(avg_bl) AS avg_bl FROM ("
-                "SELECT asn, sid, max(if(bs = 1, 1, 0)) AS had_rebuffer, "
-                f"avgIf(br, {video}) AS avg_br, avgIf(bl, {video}) AS avg_bl "
-                f"FROM ({events}) WHERE asn IS NOT NULL GROUP BY asn, sid) "
-                "GROUP BY asn ORDER BY session_count DESC, asn LIMIT {top_n:UInt32}",
-                params,
-            )
-            return {
-                "rebuffer_by_asn": [
-                    {
-                        "asn": int(row["asn"]),
-                        "label": "",
-                        "rebuffer_rate": _round(row.get("rebuffer_rate")),
-                        "session_count": int(row["session_count"]),
-                        "avg_bitrate": _round(row.get("avg_br")),
-                        "avg_buffer_length": _round(row.get("avg_bl")),
-                    }
-                    for row in rows
-                ]
-            }
-
-        tasks.append(("rebuffer_asn", _run_rebuffer_asn))
-    if wanted("object_type_dist") and has["ot"]:
-
-        def _run_object_type() -> dict[str, Any]:
-            rows = execute(
-                "/* cmcd:object_type_dist */ SELECT ot AS object_type, count() AS request_count "
-                f"FROM ({events}) WHERE ot != '' GROUP BY ot ORDER BY request_count DESC, ot",
-                params,
-            )
-            return {
-                "object_type_dist": [
-                    {"object_type": row["object_type"], "request_count": int(row["request_count"])} for row in rows
-                ]
-            }
-
-        tasks.append(("object_type", _run_object_type))
-    if wanted("streaming_format_dist") and has["sf"]:
-
-        def _run_streaming_format() -> dict[str, Any]:
-            rows = execute(
-                "/* cmcd:streaming_format_dist */ SELECT sf AS streaming_format, uniqExact(sid) AS session_count "
-                f"FROM ({events}) WHERE sf != '' GROUP BY sf ORDER BY session_count DESC, sf",
-                params,
-            )
-            return {
-                "streaming_format_dist": [
-                    {"streaming_format": row["streaming_format"], "session_count": int(row["session_count"])}
-                    for row in rows
-                ]
-            }
-
-        tasks.append(("streaming_format", _run_streaming_format))
-    if want_duration_dist:
+        tasks.append(("new_sessions", _run_new_sessions))
+    elif want_duration_dist:
 
         def _run_session_duration() -> dict[str, Any]:
             rows = execute(
@@ -647,8 +581,145 @@ def _cmcd_aggregates_compute(
             }
 
         tasks.append(("session_duration", _run_session_duration))
+
+    # Consolidate requested breakdown queries into one UNION ALL query.
+    want_content = wanted("top_content") and has["cid"]
+    want_country = wanted("rebuffer_by_country") and has_country and has_bs_effective
+    want_asn = wanted("rebuffer_by_asn") and has_asn and has_bs_effective
+    want_ot = wanted("object_type_dist") and has["ot"]
+    want_sf = wanted("streaming_format_dist") and has["sf"]
+    breakdown_branches: list[str] = []
+    if want_content:
+        breakdown_branches.append(
+            "SELECT * FROM (SELECT 'content' AS kind, cid AS k, toUInt64(count()) AS session_count, "
+            "toNullable(sum(had_rebuffer) * 100.0 / nullIf(count(), 0)) AS rebuffer_rate, "
+            "toNullable(avg(avg_br)) AS avg_br, toNullable(avg(avg_bl)) AS avg_bl, "
+            "CAST(NULL, 'Nullable(Float64)') AS median_mtp FROM ("
+            "SELECT cid, sid, max(if(bs = 1, 1, 0)) AS had_rebuffer, "
+            f"avgIf(br, {video}) AS avg_br, avgIf(bl, {video}) AS avg_bl "
+            f"FROM ({events}) WHERE cid != '' GROUP BY cid, sid) "
+            "GROUP BY cid ORDER BY session_count DESC, k LIMIT {top_n:UInt32})"
+        )
+    if want_country:
+        breakdown_branches.append(
+            "SELECT * FROM (SELECT 'country' AS kind, country AS k, toUInt64(count()) AS session_count, "
+            "toNullable(sum(had_rebuffer) * 100.0 / nullIf(count(), 0)) AS rebuffer_rate, "
+            "CAST(NULL, 'Nullable(Float64)') AS avg_br, CAST(NULL, 'Nullable(Float64)') AS avg_bl, "
+            "toNullable(avg(median_mtp)) AS median_mtp FROM ("
+            "SELECT country, sid, max(if(bs = 1, 1, 0)) AS had_rebuffer, "
+            f"quantileTDigestIf(0.5)(mtp, {video}) AS median_mtp "
+            f"FROM ({events}) WHERE country != '' GROUP BY country, sid) "
+            "GROUP BY country ORDER BY session_count DESC, k LIMIT {top_n:UInt32})"
+        )
+    if want_asn:
+        breakdown_branches.append(
+            "SELECT * FROM (SELECT 'asn' AS kind, toString(asn) AS k, toUInt64(count()) AS session_count, "
+            "toNullable(sum(had_rebuffer) * 100.0 / nullIf(count(), 0)) AS rebuffer_rate, "
+            "toNullable(avg(avg_br)) AS avg_br, toNullable(avg(avg_bl)) AS avg_bl, "
+            "CAST(NULL, 'Nullable(Float64)') AS median_mtp FROM ("
+            "SELECT asn, sid, max(if(bs = 1, 1, 0)) AS had_rebuffer, "
+            f"avgIf(br, {video}) AS avg_br, avgIf(bl, {video}) AS avg_bl "
+            f"FROM ({events}) WHERE asn IS NOT NULL GROUP BY asn, sid) "
+            "GROUP BY asn ORDER BY session_count DESC, k LIMIT {top_n:UInt32})"
+        )
+    if want_ot:
+        breakdown_branches.append(
+            "SELECT 'ot' AS kind, ot AS k, toUInt64(count()) AS session_count, "
+            "CAST(NULL, 'Nullable(Float64)') AS rebuffer_rate, CAST(NULL, 'Nullable(Float64)') AS avg_br, "
+            "CAST(NULL, 'Nullable(Float64)') AS avg_bl, CAST(NULL, 'Nullable(Float64)') AS median_mtp "
+            f"FROM ({events}) WHERE ot != '' GROUP BY ot"
+        )
+    if want_sf:
+        breakdown_branches.append(
+            "SELECT 'sf' AS kind, sf AS k, toUInt64(uniqExact(sid)) AS session_count, "
+            "CAST(NULL, 'Nullable(Float64)') AS rebuffer_rate, CAST(NULL, 'Nullable(Float64)') AS avg_br, "
+            "CAST(NULL, 'Nullable(Float64)') AS avg_bl, CAST(NULL, 'Nullable(Float64)') AS median_mtp "
+            f"FROM ({events}) WHERE sf != '' GROUP BY sf"
+        )
+    if breakdown_branches:
+
+        def _run_breakdowns() -> dict[str, Any]:
+            rows = execute("/* cmcd:breakdowns */ " + " UNION ALL ".join(breakdown_branches), params)
+            by_kind: dict[str, list[dict[str, Any]]] = {}
+            for row in rows:
+                by_kind.setdefault(str(row.get("kind") or ""), []).append(row)
+            out: dict[str, Any] = {}
+            if want_content:
+                c_rows = sorted(
+                    by_kind.get("content", []),
+                    key=lambda r: (-int(r["session_count"]), str(r["k"])),
+                )
+                out["top_content"] = [
+                    {
+                        "content_id": row["k"],
+                        "session_count": int(row["session_count"]),
+                        "rebuffer_rate": _round(row.get("rebuffer_rate")),
+                        "avg_bitrate": _round(row.get("avg_br")),
+                        "avg_buffer_length": _round(row.get("avg_bl")),
+                    }
+                    for row in c_rows
+                ]
+            if want_country:
+                co_rows = sorted(
+                    by_kind.get("country", []),
+                    key=lambda r: (-int(r["session_count"]), str(r["k"])),
+                )
+                out["rebuffer_by_country"] = [
+                    {
+                        "country": row["k"],
+                        "rebuffer_rate": _round(row.get("rebuffer_rate")),
+                        "session_count": int(row["session_count"]),
+                        "median_throughput": _round(row.get("median_mtp")),
+                    }
+                    for row in co_rows
+                ]
+            if want_asn:
+                a_rows = sorted(
+                    by_kind.get("asn", []),
+                    key=lambda r: (-int(r["session_count"]), int(r["k"])),
+                )
+                out["rebuffer_by_asn"] = [
+                    {
+                        "asn": int(row["k"]),
+                        "label": "",
+                        "rebuffer_rate": _round(row.get("rebuffer_rate")),
+                        "session_count": int(row["session_count"]),
+                        "avg_bitrate": _round(row.get("avg_br")),
+                        "avg_buffer_length": _round(row.get("avg_bl")),
+                    }
+                    for row in a_rows
+                ]
+            if want_ot:
+                ot_rows = sorted(
+                    by_kind.get("ot", []),
+                    key=lambda r: (-int(r["session_count"]), str(r["k"])),
+                )
+                out["object_type_dist"] = [
+                    {"object_type": row["k"], "request_count": int(row["session_count"])} for row in ot_rows
+                ]
+            if want_sf:
+                sf_rows = sorted(
+                    by_kind.get("sf", []),
+                    key=lambda r: (-int(r["session_count"]), str(r["k"])),
+                )
+                out["streaming_format_dist"] = [
+                    {"streaming_format": row["k"], "session_count": int(row["session_count"])} for row in sf_rows
+                ]
+            return out
+
+        tasks.append(("breakdowns", _run_breakdowns))
     for d in trace.run_parallel(tasks, source="projected_fact", max_workers=8).values():
         result.update(d)
+    if want_ts["sessions_ts"]:
+        ts_rows = result.pop("_sessions_ts_rows", [])
+        new_sessions = result.pop("_new_sessions", {})
+        result["sessions_ts"] = _pad(
+            start,
+            end,
+            int(req.bucket_seconds),
+            _sessions_ts(ts_rows, new_sessions),
+            CMCD_TS_DEFAULTS["sessions_ts"],
+        )
     if want_overview:
         active_sessions = int(probe["sessions"] or 0)
         rebuffer_sessions = int(probe.get("rebuffer_sessions") or 0)

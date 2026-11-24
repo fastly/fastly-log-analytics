@@ -448,10 +448,13 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
       ? roundTo(totalDurationSec / sessionRows.length, 1)
       : 0;
   const durations = sessionRows.map((row) => Number(row.duration)).filter((duration) => duration > 0);
+  const newSessionsByBucket = new Map<string, number>();
+  for (const row of sessionRows) {
+    const bucketIso = new Date(Math.floor(Number(row.first_ts) / bucketMs) * bucketMs).toISOString();
+    newSessionsByBucket.set(bucketIso, (newSessionsByBucket.get(bucketIso) ?? 0) + 1);
+  }
   for (const point of sessions_ts) {
-    point.new_sessions = sessionRows.filter((row) =>
-      new Date(Math.floor(Number(row.first_ts) / bucketMs) * bucketMs).toISOString() === point.bucket,
-    ).length;
+    point.new_sessions = newSessionsByBucket.get(String(point.bucket)) ?? 0;
   }
   const session_duration_dist = CMCD_SESSION_DURATION_BUCKETS.filter((bucket) => durationBucketCounts.get(bucket)).map((bucket) => {
     const count = durationBucketCounts.get(bucket) ?? 0;

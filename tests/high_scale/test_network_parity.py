@@ -390,7 +390,7 @@ def test_network_quality_mean_rtt_country_labels_and_hash_scatter(monkeypatch: p
         if "custom_fields['region']" in sql:
             return [{"label": "California", "rtt_ms": 19.5, "reqs": 500}]
         if "cache_state" in sql:
-            return [{"rtt_ms": 20.0, "ttfb_ms": 40.0, "cache_state": "HIT"}]
+            return [{"rtt_ms": 20.0, "ttfb_ms": 40.0, "cache_state": "HIT"}] * 200
         return []
 
     client = _RecordingClient(responder)
@@ -402,6 +402,94 @@ def test_network_quality_mean_rtt_country_labels_and_hash_scatter(monkeypatch: p
     ((reg_sql, _),) = client.matching("custom_fields['region']")
     assert "toMinute" not in reg_sql
     assert "avg(" in reg_sql and "median(" not in reg_sql
+    assert rollup_sql == reg_sql
     sc_sql = client.matching("cache_state")[0][0]
     assert "cityHash64(event_id)" in sc_sql and "toUnixTimestamp64Milli" not in sc_sql
     assert resp.by_country[0].label == "United States" and resp.by_country[0].value == "US"
+    assert len(client.calls) == 2
+
+
+@pytest.mark.no_postgres
+def test_network_page_query_consolidation_counts(monkeypatch: pytest.MonkeyPatch) -> None:
+    from backend.high_scale.network import get_pop_health
+
+    _clear_network_caches()
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    start_s, end_s = "2026-09-14T00:00:00Z", "2026-09-15T00:00:00Z"
+    b0 = int(datetime(2026, 9, 14, 0, 0, tzinfo=UTC).timestamp())
+
+    def health_responder(sql: str, params: dict[str, Any]):
+        if "FROM request_aggregates" in sql:
+            return [{"asn": 7922, "cnt": 1000}]
+        if "AS throughput_bps" in sql:
+            return [
+                {
+                    "asn": 7922,
+                    "bucket_ts": b0,
+                    "reqs": 1000,
+                    "throughput_bps": 1_500_000.0,
+                    "rtt_med_us": 40_000.0,
+                    "rtt_p10_us": 20_000.0,
+                    "rtt_p95_us": 90_000.0,
+                    "rtt_p99_us": 120_000.0,
+                    "rtt_baseline_us": 20_000.0,
+                    "rtt_congestion_us": 20_000.0,
+                    "avg_ploss": 0.01,
+                    "rtt_jitter_us": 1_000.0,
+                    "error_pct": 1.0,
+                    "speed_map": {"broadband": 800, "cable": 200},
+                }
+            ]
+        if "AS lat" in sql:
+            return []
+        return []
+
+    health_client = _RecordingClient(health_responder)
+    svc = HighScaleService(
+        service_id="svc-nq-count", client=health_client, cursor_secret=b"secret", request_watermark=None
+    )
+    resp = network_health(
+        svc, NetworkHealthRequest(start_time=start_s, end_time=end_s, bucket_seconds=3600, top_n=30), start_s, end_s
+    )
+    assert len(health_client.calls) == 4
+    assert resp.leaderboard[0].p95_rtt_us == 90000.0
+    assert resp.leaderboard[0].p99_rtt_us == 120000.0
+    assert resp.leaderboard[0].c_speed_mix == {"broadband": 0.8, "cable": 0.2}
+
+    # get_pop_health on 7d (pop_stride > 1) merges rollup + facts into 1 UNION ALL query.
+    def pop_responder(sql: str, params: dict[str, Any]):
+        if "UNION ALL" in sql:
+            return [
+                {
+                    "kind": "rollup",
+                    "pop": "SJC",
+                    "requests": 5000,
+                    "errors": 0,
+                    "p50_rtt_us": 21_000.0,
+                    "p95_ttfb_ms": 0.0,
+                    "cache_hits": 0,
+                    "bandwidth_bytes": 0,
+                },
+                {
+                    "kind": "fact",
+                    "pop": "SJC",
+                    "requests": 500,
+                    "errors": 10,
+                    "p50_rtt_us": 25_000.0,
+                    "p95_ttfb_ms": 80.0,
+                    "cache_hits": 250,
+                    "bandwidth_bytes": 10000,
+                },
+            ]
+        return []
+
+    pop_client = _RecordingClient(pop_responder)
+    pop_svc = HighScaleService(
+        service_id="svc-pop-7d", client=pop_client, cursor_secret=b"secret", request_watermark=None
+    )
+    pop_resp = get_pop_health(pop_svc, datetime(2026, 9, 8, 0, 0, tzinfo=UTC), datetime(2026, 9, 15, 0, 0, tzinfo=UTC))
+    assert len(pop_client.calls) == 1
+    assert pop_resp.data[0].requests == 5000
+    assert pop_resp.data[0].errors == 100
+    assert pop_resp.data[0].p50_rtt_us == 25000.0
+    assert pop_resp.data[0].p95_ttfb_ms == 80.0

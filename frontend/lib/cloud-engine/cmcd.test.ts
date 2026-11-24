@@ -8,7 +8,7 @@ import {
   handleCmcdRequest,
   queryCmcdAggregates,
 } from "./cmcd";
-import { cmcdFromRollup, MAX_CMCD_ROLLUP_FILES } from "./cmcd-rollup";
+import { clearCmcdRollupCache, cmcdFromRollup, MAX_CMCD_ROLLUP_FILES } from "./cmcd-rollup";
 import { MissingCloudFileError } from "./dashboard/file-errors";
 import { BOUNDS, Histogram } from "./dashboard/histogram";
 import { Hll } from "./dashboard/hll";
@@ -729,6 +729,43 @@ describe("Feature F24 — CMCD Streaming Media cloud-engine", () => {
     expect(views).toEqual(["summary", "summary"]);
     expect([...new Set(fetched)].sort()).toEqual([hour.key, stale.key, fresh.key, ...tail.map((w) => w.key)].sort());
     expect(res?.summary.total_requests).toBe(127);
+  });
+
+  it("caches decoded cmcd_summary files across repeat queries on the same source", async () => {
+    clearCmcdRollupCache();
+    const t0 = Date.parse("2026-01-01T00:00:00Z");
+    const file = {
+      kind: "hour" as const,
+      key: "processed/summary_bundle/cmcd_summary/hour_bundle=cache.parquet",
+      start: new Date(t0).toISOString(),
+      end: new Date(t0 + 3_600_000).toISOString(),
+      size: 1024,
+      rows: 1,
+    };
+    let fetched = 0;
+    const source = {
+      async fetchJson() {
+        return { files: [file], next_cursor: null, complete: true };
+      },
+      async fetchFile() {
+        fetched++;
+        return { bytes: oneBucketSummary(t0, 42), cached: false };
+      },
+    };
+    const params = {
+      start_time: new Date(t0).toISOString(),
+      end_time: new Date(t0 + 3_600_000).toISOString(),
+      bucket_seconds: 300,
+    };
+    const first = await cmcdFromRollup(params, source);
+    const second = await cmcdFromRollup(params, source);
+    expect(first?.summary.total_requests).toBe(42);
+    expect(second?.summary.total_requests).toBe(42);
+    expect(fetched).toBe(1);
+
+    clearCmcdRollupCache();
+    await cmcdFromRollup(params, source);
+    expect(fetched).toBe(2);
   });
 
   it("filters out cmcd_summary buckets outside [fromMs, toMs) and reports has_data=false when none remain", async () => {

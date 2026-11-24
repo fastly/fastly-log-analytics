@@ -13,7 +13,7 @@ import type { InsightsRequest } from "./insights";
 import {
   INSIGHTS_SUMMARY_SPEC, insightsBaselineFromRollup, insightsBaselineRollup, rollupInsightsBaseline,
 } from "./insights-rollup";
-import { NETWORK_SUMMARY_SPEC, networkFromRollup } from "./network-rollup";
+import { NETWORK_FILTERED_SUMMARY_SPEC, NETWORK_SUMMARY_SPEC, networkFromRollup } from "./network-rollup";
 import { ORIGIN_SUMMARY_SPEC, originFromRollup, type OriginRollupBody } from "./origin-rollup";
 import { PERFORMANCE_SUMMARY_SPEC, performanceFromRollup, type PerformanceRollupBody } from "./performance-rollup";
 import type { RollupAnswerSource } from "./rollup-answer";
@@ -109,7 +109,11 @@ const PAGES: Record<string, Page> = {
   network: {
     spec: NETWORK_SUMMARY_SPEC,
     fixtures: ["network", "dashboard"],
-    inert: Object.fromEntries(["cwnd_sum", "cwnd_count", "label"].map((column) => [column, [...NETWORK_SUMMARY_SPEC.groups]])),
+    inert: {
+      cwnd_sum: ["transport"],
+      cwnd_count: ["transport"],
+      label: ["dims", "series5", "quality"],
+    },
     answers: [
       network("/api/network/bundle", { sections: [...HEALTH, "pop_health", "transport"] }),
       network("/api/network-health", { sections: [...HEALTH, "cities", "map_buckets"] }),
@@ -117,6 +121,13 @@ const PAGES: Record<string, Page> = {
       network("/api/network-quality", { region_country: "US" }),
       network("/api/network/pop-health", {}),
       network("/api/network-health", { sections: ["shielding_analysis"] }),
+    ],
+  },
+  networkFiltered: {
+    spec: NETWORK_FILTERED_SUMMARY_SPEC,
+    fixtures: ["network", "dashboard"],
+    inert: { cwnd_count: ["filtered_rollups"] },
+    answers: [
       network("/api/network/bundle", { sections: ["summary"], filters: { status: { mode: "include", values: ["200"] } } }),
     ],
   },

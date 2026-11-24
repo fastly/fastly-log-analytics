@@ -537,14 +537,6 @@ def network_health(
             asn_str_in = ", ".join(repr(str(a)) for a in top_asn_ints)
             asn_in_filter = f" AND custom_fields['asn'] IN ({asn_str_in})" if top_asn_ints else " AND 1=0"
             combine_metro_in_map = map_asn == "all"
-            use_net_dim_rollup = not filter_sql and bool(top_asn_ints) and start is not None and end is not None
-            pct_fallback_sql = (
-                f"SELECT {_ASN} AS asn, quantile(0.95)({_RTT}) AS p95, quantile(0.99)({_RTT}) AS p99, "
-                "sumMap(if(custom_fields['c_speed'] != '', [custom_fields['c_speed']], []), "
-                "if(custom_fields['c_speed'] != '', [toUInt64(1)], [])) AS speed_map "
-                f"FROM request_facts PREWHERE {rtt_prewhere}{asn_in_filter} "
-                f"WHERE {_ASN} IS NOT NULL AND {_RTT} > 0 GROUP BY asn ORDER BY count() DESC LIMIT {top_n * 5}"
-            )
             fast_queries_list: list[tuple[str, str]] = [
                 (
                     "heatmap",
@@ -552,9 +544,12 @@ def network_health(
                     f"SELECT {_ASN} AS asn, {bucket_expr} AS bucket_ts, count() AS reqs, "
                     f"quantileTDigest(0.5)(if(position(custom_fields['cache'], 'HIT') > 0 AND _elapsed > 0, {_RESP_BYTES} * 1000000.0 / _elapsed, NULL)) AS throughput_bps, "
                     f"quantileTDigest(0.5)(_rtt) AS rtt_med_us, quantileTDigest(0.1)(_rtt) AS rtt_p10_us, "
+                    f"quantileTDigest(0.95)(_rtt) AS rtt_p95_us, quantileTDigest(0.99)(_rtt) AS rtt_p99_us, "
                     f"quantileTDigest(0.5)(_rtt_min) AS rtt_baseline_us, "
                     f"quantileTDigest(0.5)(_rtt - _rtt_min) AS rtt_congestion_us, avg({_PLOSS}) AS avg_ploss, "
-                    f"quantileTDigest(0.5)(_rtt_var) AS rtt_jitter_us, {err_pct_expr} "
+                    f"quantileTDigest(0.5)(_rtt_var) AS rtt_jitter_us, {err_pct_expr}, "
+                    "sumMap(if(custom_fields['c_speed'] != '', [custom_fields['c_speed']], []), "
+                    "if(custom_fields['c_speed'] != '', [toUInt64(1)], [])) AS speed_map "
                     f"FROM request_facts PREWHERE {rtt_prewhere}{asn_in_filter} "
                     f"WHERE {_ASN} IS NOT NULL AND _rtt > 0 GROUP BY asn, bucket_ts ORDER BY reqs DESC LIMIT {top_n * 200}",
                 ),
@@ -572,26 +567,6 @@ def network_health(
                     "GROUP BY country, city, region, metro, bucket_ts ORDER BY bucket_ts ASC, reqs DESC LIMIT 100 BY bucket_ts LIMIT 20000",
                 ),
             ]
-            if use_net_dim_rollup:
-                net_dim_fence = visible_publication_fence_sql(
-                    "network_dimensions", client=service.client, service_id=service.service_id
-                )
-                fast_queries_list.append(
-                    (
-                        "net_dim_pct",
-                        "SELECT toInt32OrNull(value) AS asn, c_speed, sum(requests) AS cnt, "
-                        "sum(if(tcp_rtt_p95_us IS NOT NULL, tcp_rtt_p95_us * tcp_rtt_count, 0)) AS p95_sum, "
-                        "sumIf(tcp_rtt_count, tcp_rtt_p95_us IS NOT NULL) AS p95_w, "
-                        "sum(if(tcp_rtt_p99_us IS NOT NULL, tcp_rtt_p99_us * tcp_rtt_count, 0)) AS p99_sum, "
-                        "sumIf(tcp_rtt_count, tcp_rtt_p99_us IS NOT NULL) AS p99_w "
-                        "FROM network_minute_dimensions "
-                        f"WHERE service_id={{service_id:String}} AND dimension='asn' AND value IN ({asn_str_in}) "
-                        "AND bucket_start >= toStartOfMinute({start:DateTime64(3)}) AND bucket_start < {end:DateTime64(3)} "
-                        f"AND {net_dim_fence} GROUP BY asn, c_speed HAVING asn IS NOT NULL ORDER BY cnt DESC",
-                    )
-                )
-            else:
-                fast_queries_list.append(("percentiles", pct_fallback_sql))
             if not combine_metro_in_map:
                 fast_queries_list.append(
                     (
@@ -624,34 +599,41 @@ def network_health(
             )
             shielding = q_results.get("shielding_analysis") if _want_shielding(sections) else None
             heatmap_rows, raw_map_rows = (q_results.get(k, []) for k in ("heatmap", "map"))
-            net_dim_rows = q_results.get("net_dim_pct", []) if use_net_dim_rollup else []
-            if use_net_dim_rollup and net_dim_rows:
-                pct_acc: dict[int, list[float]] = {}
-                for nr in net_dim_rows:
-                    if nr.get("asn") is None:
-                        continue
-                    a_int = int(nr["asn"])
+            pct_acc: dict[int, list[float]] = {}
+            speed_acc: dict[tuple[int, str], int] = {}
+            for hr in heatmap_rows:
+                if hr.get("asn") is None:
+                    continue
+                a_int = int(hr["asn"])
+                rq = float(hr.get("reqs") or 0)
+                if rq > 0:
                     acc = pct_acc.setdefault(a_int, [0.0, 0.0, 0.0, 0.0])
-                    acc[0] += float(nr.get("p95_sum") or 0.0)
-                    acc[1] += float(nr.get("p95_w") or 0.0)
-                    acc[2] += float(nr.get("p99_sum") or 0.0)
-                    acc[3] += float(nr.get("p99_w") or 0.0)
-                pct_rows = [
-                    {
-                        "asn": a_int,
-                        "p95": (v[0] / v[1]) if v[1] > 0 else None,
-                        "p99": (v[2] / v[3]) if v[3] > 0 else None,
-                    }
-                    for a_int, v in pct_acc.items()
-                ]
-            elif use_net_dim_rollup and top_asn_ints:
-                pct_rows = trace.run(
-                    "percentiles_fallback",
-                    lambda: service.client.execute(pct_fallback_sql, params),
-                    source="fact",
-                )
-            else:
-                pct_rows = q_results.get("percentiles", [])
+                    if hr.get("rtt_p95_us") is not None:
+                        acc[0] += float(hr["rtt_p95_us"]) * rq
+                        acc[1] += rq
+                    if hr.get("rtt_p99_us") is not None:
+                        acc[2] += float(hr["rtt_p99_us"]) * rq
+                        acc[3] += rq
+                sm = hr.get("speed_map")
+                pairs: list[tuple[Any, Any]]
+                if isinstance(sm, Mapping):
+                    pairs = list(sm.items())
+                elif isinstance(sm, (list, tuple)) and len(sm) == 2 and isinstance(sm[0], (list, tuple)):
+                    pairs = list(zip(sm[0], sm[1], strict=False))
+                else:
+                    pairs = []
+                for cs, cnt in pairs:
+                    if cs:
+                        k_cs = (a_int, str(cs))
+                        speed_acc[k_cs] = speed_acc.get(k_cs, 0) + int(cnt) * sample_stride
+            pct_rows = [
+                {
+                    "asn": a_int,
+                    "p95": (v[0] / v[1]) if v[1] > 0 else None,
+                    "p99": (v[2] / v[3]) if v[3] > 0 else None,
+                }
+                for a_int, v in pct_acc.items()
+            ]
             if sample_stride > 1:
                 heatmap_rows = [{**r, "reqs": int(r.get("reqs") or 0) * sample_stride} for r in heatmap_rows]
                 raw_map_rows = [{**mr, "reqs": int(mr.get("reqs") or 0) * sample_stride} for mr in raw_map_rows]
@@ -677,26 +659,8 @@ def network_health(
                 speed_rows = [
                     {**r, "cnt": int(r.get("cnt") or 0) * sample_stride} for r in raw_speed_rows if r.get("c_speed")
                 ]
-            elif use_net_dim_rollup and net_dim_rows:
-                speed_rows = [
-                    {"asn": r["asn"], "c_speed": str(r["c_speed"]), "cnt": int(r.get("cnt") or 0)}
-                    for r in net_dim_rows
-                    if r.get("asn") is not None and r.get("c_speed")
-                ]
             else:
-                speed_rows = []
-                for pr in pct_rows:
-                    sm = pr.get("speed_map")
-                    pairs: list[tuple[Any, Any]]
-                    if isinstance(sm, Mapping):
-                        pairs = list(sm.items())
-                    elif isinstance(sm, (list, tuple)) and len(sm) == 2 and isinstance(sm[0], (list, tuple)):
-                        pairs = list(zip(sm[0], sm[1], strict=False))
-                    else:
-                        pairs = []
-                    for cs, cnt in pairs:
-                        if cs:
-                            speed_rows.append({"asn": pr["asn"], "c_speed": str(cs), "cnt": int(cnt) * sample_stride})
+                speed_rows = [{"asn": a_int, "c_speed": cs, "cnt": cnt} for (a_int, cs), cnt in speed_acc.items()]
             metro_rows: list[dict[str, Any]]
             if combine_metro_in_map:
                 metro_acc: dict[tuple[str, str, str, str], list[float]] = {}
@@ -1138,22 +1102,33 @@ def network_quality(
                 if r["label"] is not None and r["label"] != ""
             ]
 
-        def _bars_from_rollup() -> dict[str, list[dict]]:
+        def _bars_from_rollup_and_region() -> dict[str, list[dict]]:
             fence = visible_publication_fence_sql(
                 "network_dimensions", client=service.client, service_id=service.service_id
             )
+            q_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
+            region_scale = 10 if q_span_s >= 43200 else (4 if q_span_s > 21600 else 1)
+            region_hash = f" AND cityHash64(event_id) % {region_scale} = 0" if region_scale > 1 else ""
             sql = (
+                "SELECT * FROM ("
                 "SELECT dimension, value AS label, "
                 "coalesce(sum(tcp_rtt_sum), sum(tcp_rtt_p50_us * tcp_rtt_count)) / nullIf(sum(tcp_rtt_count), 0) / 1000.0 AS rtt_ms, "
-                "sum(tcp_rtt_count) AS reqs "
+                "toUInt64(sum(tcp_rtt_count)) AS reqs "
                 "FROM network_minute_dimensions "
                 "WHERE service_id={service_id:String} AND dimension IN ('country', 'asn', 'pop') "
                 "AND bucket_start >= {start:DateTime64(3)} AND bucket_start < {end:DateTime64(3)} "
                 f"AND tcp_rtt_count > 0 AND value != '' AND {fence} "
                 "GROUP BY dimension, label HAVING reqs > 0 "
-                "ORDER BY dimension ASC, reqs DESC LIMIT 25 BY dimension"
+                "ORDER BY dimension ASC, reqs DESC LIMIT 25 BY dimension) "
+                "UNION ALL "
+                "SELECT * FROM ("
+                f"SELECT 'region' AS dimension, custom_fields['region'] AS label, avg({_RTT} / 1000.0) AS rtt_ms, "
+                f"toUInt64(count() * {region_scale}) AS reqs "
+                f"FROM request_facts PREWHERE {_BASE_WHERE} AND country = {{region_country:String}}{region_hash} "
+                "AND custom_fields['region'] != '' AND custom_fields['tcp_rtt'] != '' "
+                f"WHERE {_RTT} > 0 GROUP BY label ORDER BY reqs DESC LIMIT 25)"
             )
-            out: dict[str, list[dict]] = {"country": [], "asn": [], "pop": []}
+            out: dict[str, list[dict]] = {"country": [], "asn": [], "pop": [], "region": []}
             for r in service.client.execute(sql, params):
                 dim = str(r.get("dimension") or "")
                 lbl = str(r.get("label") or "")
@@ -1166,6 +1141,8 @@ def network_quality(
                             "reqs": int(r["reqs"]),
                         }
                     )
+            for dim_rows in out.values():
+                dim_rows.sort(key=lambda row: row["reqs"], reverse=True)
             return out
 
         scatter_sql = _ch_fact_query(
@@ -1195,19 +1172,18 @@ def network_quality(
         if is_real_ch and not filter_sql:
             q_res_mixed: dict[str, Any] = trace.run_parallel(
                 [
-                    ("rollup_bars", _bars_from_rollup),
-                    ("region", partial(_bar, "custom_fields['region']", " AND country = {region_country:String}")),
+                    ("rollup_bars", _bars_from_rollup_and_region),
                     ("scatter", _run_scatter),
                 ],
                 source="projection",
-                max_workers=3,
+                max_workers=2,
                 thread_name_prefix="hs-net-quality",
             )
             rollup_bars = q_res_mixed["rollup_bars"]
             by_country = rollup_bars.get("country", [])
             by_asn = rollup_bars.get("asn") or _bar(_ASN, "")
             by_pop = rollup_bars.get("pop", [])
-            by_region = q_res_mixed["region"]
+            by_region = rollup_bars.get("region", [])
             scatter_rows = q_res_mixed["scatter"]
         else:
             q_tasks: list[tuple[str, Callable[[], list[dict[str, Any]]]]] = [
@@ -1293,21 +1269,9 @@ def get_pop_health(
         trace = HighScaleSections(service.service_id, "network")
         params = {"service_id": service.service_id, "start": start, "end": end}
         if is_real_ch:
-            fence = visible_publication_fence_sql(
-                "network_dimensions", client=service.client, service_id=service.service_id
-            )
             pop_span_s = (end - start).total_seconds()
             pop_stride = 10 if pop_span_s >= 43200 else (4 if pop_span_s > 21600 else 1)
             hash_clause = f" AND cityHash64(event_id) % {pop_stride} = 0" if pop_stride > 1 else ""
-            rollup_sql = (
-                "SELECT value AS pop, sum(requests) AS exact_requests, "
-                "sum(tcp_rtt_p50_us * tcp_rtt_count) / nullIf(sum(tcp_rtt_count), 0) AS p50_rtt_us, "
-                "sum(ttfb_p95_us * requests) / nullIf(sumIf(requests, ttfb_p95_us IS NOT NULL), 0) * 1000.0 AS p95_ttfb_ms "
-                "FROM network_minute_dimensions "
-                "WHERE service_id={service_id:String} AND dimension='pop' AND value != '' "
-                f"AND bucket_start >= {{start:DateTime64(3)}} AND bucket_start < {{end:DateTime64(3)}} AND {fence} "
-                "GROUP BY pop"
-            )
             fact_sql = (
                 f"SELECT custom_fields['pop'] AS pop, count() AS requests, countIf({_STATUS} >= 500) AS errors, "
                 f"quantileTDigest(0.5)({_RTT}) AS p50_rtt_us, quantileTDigest(0.95)({_TTFB}) * 1000.0 AS p95_ttfb_ms, "
@@ -1316,32 +1280,59 @@ def get_pop_health(
                 f"FROM request_facts PREWHERE {_BASE_WHERE}{hash_clause} AND custom_fields['pop'] != '' "
                 "GROUP BY pop ORDER BY requests DESC"
             )
-            q_pop = trace.run_parallel(
-                [
-                    ("pop_rollup", lambda: service.client.execute(rollup_sql, params)),
-                    ("pop_health", lambda: service.client.execute(fact_sql, params)),
-                ],
-                source="fact",
-                max_workers=2,
-                thread_name_prefix="hs-pop-health",
-            )
-            fact_rows = q_pop.get("pop_health", [])
-            if pop_stride > 1 and not fact_rows:
-                pop_stride = 1
-                fact_rows = trace.run(
-                    "pop_health_fallback",
-                    lambda: service.client.execute(fact_sql.replace(hash_clause, ""), params),
+            rollup_by_pop: dict[str, tuple[int, Any, Any]] = {}
+            if pop_stride > 1:
+                fence = visible_publication_fence_sql(
+                    "network_dimensions", client=service.client, service_id=service.service_id
+                )
+                combined_sql = (
+                    "SELECT 'rollup' AS kind, value AS pop, toUInt64(sum(requests)) AS requests, "
+                    "toUInt64(0) AS errors, "
+                    "sum(tcp_rtt_p50_us * tcp_rtt_count) / nullIf(sum(tcp_rtt_count), 0) AS p50_rtt_us, "
+                    "sum(ttfb_p95_us * requests) / nullIf(sumIf(requests, ttfb_p95_us IS NOT NULL), 0) * 1000.0 AS p95_ttfb_ms, "
+                    "toUInt64(0) AS cache_hits, toInt64(0) AS bandwidth_bytes "
+                    "FROM network_minute_dimensions "
+                    "WHERE service_id={service_id:String} AND dimension='pop' AND value != '' "
+                    f"AND bucket_start >= {{start:DateTime64(3)}} AND bucket_start < {{end:DateTime64(3)}} AND {fence} "
+                    "GROUP BY pop "
+                    "UNION ALL "
+                    f"SELECT 'fact' AS kind, custom_fields['pop'] AS pop, toUInt64(count()) AS requests, "
+                    f"toUInt64(countIf({_STATUS} >= 500)) AS errors, "
+                    f"quantileTDigest(0.5)({_RTT}) AS p50_rtt_us, quantileTDigest(0.95)({_TTFB}) * 1000.0 AS p95_ttfb_ms, "
+                    "toUInt64(countIf(startsWith(upper(custom_fields['cache']), 'HIT'))) AS cache_hits, "
+                    "toInt64(sum(toInt64OrZero(custom_fields['resp_bytes']))) AS bandwidth_bytes "
+                    f"FROM request_facts PREWHERE {_BASE_WHERE}{hash_clause} AND custom_fields['pop'] != '' "
+                    "GROUP BY pop"
+                )
+                combined_rows = trace.run(
+                    "pop_health",
+                    lambda: service.client.execute(combined_sql, params),
                     source="fact",
                 )
-            rollup_by_pop = {
-                str(rr["pop"]): (
-                    int(rr.get("exact_requests") or 0),
-                    rr.get("p50_rtt_us"),
-                    rr.get("p95_ttfb_ms"),
+                fact_rows = []
+                for cr in combined_rows:
+                    if cr.get("kind") == "rollup":
+                        if cr.get("pop"):
+                            rollup_by_pop[str(cr["pop"])] = (
+                                int(cr.get("requests") or 0),
+                                cr.get("p50_rtt_us"),
+                                cr.get("p95_ttfb_ms"),
+                            )
+                    else:
+                        fact_rows.append(cr)
+                if not fact_rows:
+                    pop_stride = 1
+                    fact_rows = trace.run(
+                        "pop_health_fallback",
+                        lambda: service.client.execute(fact_sql.replace(hash_clause, ""), params),
+                        source="fact",
+                    )
+            else:
+                fact_rows = trace.run(
+                    "pop_health",
+                    lambda: service.client.execute(fact_sql, params),
+                    source="fact",
                 )
-                for rr in q_pop.get("pop_rollup", [])
-                if rr.get("pop")
-            }
             rows = []
             for r in fact_rows:
                 pop_key = str(r["pop"])

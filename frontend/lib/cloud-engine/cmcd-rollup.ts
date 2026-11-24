@@ -16,6 +16,7 @@ import { formatAsnDisplayLabel, loadAsnNames } from "./asn-names";
 const CMCD_FETCH_CONCURRENCY = 16;
 const CMCD_ROLLUP_BUCKET_MS = 300_000;
 const MAX_CMCD_LIST_PAGES = 64;
+const MAX_DECODED_CMCD_FILES = 256;
 /**
  * Cap per-window cmcd_summary files before falling back to compacted raw Parquet. Hour and day
  * bundles do not count: each stands for a whole hour or day of windows, so 24h of bundles plus
@@ -24,6 +25,54 @@ const MAX_CMCD_LIST_PAGES = 64;
 export const MAX_CMCD_ROLLUP_FILES = 250;
 
 export type CmcdRollupSource = Pick<FileSource, "fetchJson" | "fetchFile">;
+
+type DecodedCmcdFile = {
+  rows: number;
+  textNum: Map<string, ArrayLike<unknown>>;
+  bin: Map<string, ArrayLike<unknown>>;
+};
+
+const decodedCmcdFileCache = new Map<string, DecodedCmcdFile>();
+const cmcdSourceIds = new WeakMap<object, number>();
+let nextCmcdSourceId = 1;
+
+export function clearCmcdRollupCache(): void {
+  decodedCmcdFileCache.clear();
+}
+
+function cmcdFileCacheKey(source: CmcdRollupSource, file: ManifestFile): string {
+  const scopeFn = (source.fetchJson as { manifestCacheScope?: () => string }).manifestCacheScope;
+  let scope: string;
+  if (scopeFn) {
+    scope = scopeFn();
+  } else {
+    let id = cmcdSourceIds.get(source.fetchFile);
+    if (id === undefined) {
+      id = nextCmcdSourceId++;
+      cmcdSourceIds.set(source.fetchFile, id);
+    }
+    scope = `src:${id}`;
+  }
+  return `${scope}\0${file.key}\0${file.etag ?? file.size}\0${file.rows}`;
+}
+
+function getCachedCmcdFile(key: string): DecodedCmcdFile | undefined {
+  const hit = decodedCmcdFileCache.get(key);
+  if (!hit) return undefined;
+  decodedCmcdFileCache.delete(key);
+  decodedCmcdFileCache.set(key, hit);
+  return hit;
+}
+
+function setCachedCmcdFile(key: string, value: DecodedCmcdFile): void {
+  if (decodedCmcdFileCache.has(key)) {
+    decodedCmcdFileCache.delete(key);
+  } else if (decodedCmcdFileCache.size >= MAX_DECODED_CMCD_FILES) {
+    const oldest = decodedCmcdFileCache.keys().next().value;
+    if (oldest !== undefined) decodedCmcdFileCache.delete(oldest);
+  }
+  decodedCmcdFileCache.set(key, value);
+}
 
 const TEXT_AND_NUM_COLS = [
   "kind", "bucket", "key", "label", "truncated", "reqs",
@@ -360,16 +409,23 @@ async function cmcdFromFiles(
 
   await mapLimit(files, CMCD_FETCH_CONCURRENCY, async (file) => {
     signal?.throwIfAborted();
-    const { bytes } = await fetchLanes.run("summary", () => {
-      signal?.throwIfAborted();
-      return source.fetchFile(file.key, signal);
-    });
-    const [textNum, bin] = await Promise.all([
-      readColumns(bytes, TEXT_AND_NUM_COLS, true),
-      readColumns(bytes, BINARY_COLS, false),
-    ]);
-    const c = textNum.columns;
-    const b = bin.columns;
+    const cacheKey = cmcdFileCacheKey(source, file);
+    let decoded = getCachedCmcdFile(cacheKey);
+    if (!decoded) {
+      const { bytes } = await fetchLanes.run("summary", () => {
+        signal?.throwIfAborted();
+        return source.fetchFile(file.key, signal);
+      });
+      const [textNum, bin] = await Promise.all([
+        readColumns(bytes, TEXT_AND_NUM_COLS, true),
+        readColumns(bytes, BINARY_COLS, false),
+      ]);
+      decoded = { rows: textNum.rows, textNum: textNum.columns, bin: bin.columns };
+      setCachedCmcdFile(cacheKey, decoded);
+    }
+    const c = decoded.textNum;
+    const b = decoded.bin;
+    const rowCount = decoded.rows;
     const kindCol = c.get("kind");
     const bucketCol = c.get("bucket");
     const keyCol = c.get("key");
@@ -418,7 +474,7 @@ async function cmcdFromFiles(
     const firstTsCol = c.get("first_ts");
     const lastTsCol = c.get("last_ts");
 
-    for (let i = 0; i < textNum.rows; i++) {
+    for (let i = 0; i < rowCount; i++) {
       const kind = str(kindCol, i);
       const key = str(keyCol, i);
       if (kind === "totals") {
