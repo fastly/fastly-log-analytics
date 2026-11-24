@@ -245,6 +245,7 @@ export function CdnFrontSection({
               <Input
                 value={cdnPrefix}
                 onChange={(e) => onChangePrefix(e.target.value.toLowerCase())}
+                placeholder="fla-a1b2c3d4e5f6..."
                 className={cn(
                   "h-9 font-mono text-sm",
                   domainStatus === "available" && "border-green-500 focus-visible:ring-green-500",

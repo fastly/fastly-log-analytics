@@ -3,6 +3,7 @@ import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { client, unwrapClient, queryKeys, adminFetch } from '@/lib/api'
 import { downloadBlob } from '@/lib/utils'
 import { SERVICE_DEFAULTS, effectiveLogPeriod } from '@/lib/serviceDefaults'
+import { generateOpaqueBucketName, generateOpaqueSubdomainPrefix } from '@/lib/opaqueNames'
 import type { Service } from '@/stores/filterStore'
 import type { components } from '@/types/api.generated'
 import { WizardDraftHeaderSchema } from './wizardSchemas'
@@ -310,17 +311,21 @@ export function buildValidateOnSuccess(deps: ValidateMutationDeps) {
     }
     const defaults = data?.defaults
     if (defaults) {
+      const isIngest = deps.mode === "ingest"
       deps.setConfig((prev) => ({
         ...prev,
         endpoint_name: defaults.endpoint_name || "Fastly Object Storage Logs",
         fos_region: defaults.fos_region || "us-east-1",
-        fos_bucket_name: defaults.fos_bucket_name?.toLowerCase() || "",
+        fos_bucket_name:
+          defaults.fos_bucket_name?.trim().toLowerCase() ||
+          prev.fos_bucket_name ||
+          (isIngest ? "" : generateOpaqueBucketName()),
         fos_prefix: defaults.fos_prefix || "",
         cdn_service_name: defaults.cdn_service_name || `${data.service_name} (CDN)`,
-        cdn_prefix: (
-          defaults.cdn_prefix ||
-          (defaults.fos_bucket_name ? `fos-${defaults.fos_bucket_name.split("-").slice(0, 2).join("-")}` : "")
-        ).toLowerCase(),
+        cdn_prefix:
+          defaults.cdn_prefix?.trim().toLowerCase() ||
+          prev.cdn_prefix ||
+          (isIngest ? "" : generateOpaqueSubdomainPrefix()),
       }))
     }
     deps.setStep(deps.mode === "ingest" ? "connect" : "features")

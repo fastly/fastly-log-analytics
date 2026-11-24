@@ -453,4 +453,17 @@ describe('SEC-02 & SEC-10.3 frontend proxy gating and cookie hardening', () => {
       else process.env.ADMIN_GATEWAY_REQUIRED = prevReq
     }
   })
+
+  it('SEC-22: public proxy responses do not leak service_id, fos_bucket, or .edgecompute.app headers', () => {
+    const pubReq = new NextRequest('https://share.example.com/dashboard?service=svc-prod-1', {
+      headers: { 'x-fla-public-gateway': 'true' },
+    })
+    const pubRes = proxy(pubReq)
+    expect(pubRes.status).toBe(200)
+    expect(pubRes.headers.get('x-service-id')).toBeNull()
+    expect(pubRes.headers.get('x-fos-bucket')).toBeNull()
+    for (const [, val] of pubRes.headers.entries()) {
+      expect(val.toLowerCase()).not.toContain('.edgecompute.app')
+    }
+  })
 })

@@ -18,6 +18,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { client, extractApiError } from '@/lib/api'
+import { generateOpaqueSubdomainPrefix } from '@/lib/opaqueNames'
 import { cn, panelDialogContent, panelDialogHeaderSolid, panelDialogFooter } from '@/lib/utils'
 import { useOpenGeneration } from '@/hooks/useSSE'
 import type { Schema } from '@/types/api'
@@ -75,8 +76,9 @@ export function DeployStepDomain({
             role="radio"
             aria-checked={!isCustom}
             onClick={() => {
+              if (!isCustom) return
               setValue('isCustom', false)
-              setValue('prefix', '')
+              setValue('prefix', generateOpaqueSubdomainPrefix())
               setDomainCheckResult(null)
             }}
             className={cn(
@@ -97,6 +99,7 @@ export function DeployStepDomain({
             role="radio"
             aria-checked={isCustom}
             onClick={() => {
+              if (isCustom) return
               setValue('isCustom', true)
               setValue('prefix', '')
               setDomainCheckResult(null)
@@ -127,7 +130,7 @@ export function DeployStepDomain({
                 setValue('prefix', e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))
                 setDomainCheckResult(null)
               }}
-              placeholder="my-dashboard-prefix"
+              placeholder="fla-a1b2c3d4e5f6..."
               className="rounded-r-none border-r-0 h-10"
             />
             <span className="inline-flex h-10 items-center rounded-r-md border border-input bg-muted px-3 text-xs text-muted-foreground font-mono select-none">

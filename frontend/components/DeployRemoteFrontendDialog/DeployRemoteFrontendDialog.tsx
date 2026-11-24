@@ -15,6 +15,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle, DialogT
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { client, extractApiError } from '@/lib/api'
+import { generateOpaqueSubdomainPrefix } from '@/lib/opaqueNames'
 import { cn, panelDialogContent, panelDialogHeaderSolid, panelDialogFooter } from '@/lib/utils'
 import { useOpenGeneration } from '@/hooks/useSSE'
 import type { Schema } from '@/types/api'
@@ -59,12 +60,13 @@ function DeployRemoteFrontendDialogBody({ onClose }: { onClose: () => void }) {
   const [domainCheckResult, setDomainCheckResult] = React.useState<Schema<'ProvisionCheckDomainResponse'> | null>(null)
   const [deployError, setDeployError] = React.useState('')
   const [deployResult, setDeployResult] = React.useState<Schema<'SharingDeployResponse'> | null>(null)
+  const [initialPrefix] = React.useState(() => generateOpaqueSubdomainPrefix())
 
   const { control, setValue } = useForm<DeployRemoteFrontendValues>({
     resolver: zodResolver(deployRemoteFrontendSchema),
     defaultValues: {
       isCustom: false,
-      prefix: '',
+      prefix: initialPrefix,
       originHost: typeof window !== 'undefined' ? window.location.hostname : '',
       originPort: typeof window !== 'undefined' && window.location.protocol === 'https:' ? 443 : 80,
       useSsl: typeof window !== 'undefined' && window.location.protocol === 'https:',

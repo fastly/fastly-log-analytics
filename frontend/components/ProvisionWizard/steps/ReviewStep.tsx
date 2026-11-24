@@ -177,7 +177,14 @@ export function ExecuteStep({ s }: { s: WizardState }) {
                 <ReviewCard>
                   <ReviewHeader icon={Globe}>CDN Edge Proxy</ReviewHeader>
                   <ReviewContent>
-                    <ReviewItem label="Domain" value={`${config.cdn_prefix}.global.ssl.fastly.net`} />
+                    <ReviewItem
+                      label="Domain"
+                      value={
+                        config.cdn_prefix
+                          ? `${config.cdn_prefix}.global.ssl.fastly.net`
+                          : "Auto-generated opaque name"
+                      }
+                    />
                     <ReviewItem label="Shield POP" value={SHIELD_LABELS[config.cdn_shield] || "None"} />
                   </ReviewContent>
                 </ReviewCard>
@@ -185,7 +192,7 @@ export function ExecuteStep({ s }: { s: WizardState }) {
               <ReviewCard>
                 <ReviewHeader icon={Database}>Object Storage</ReviewHeader>
                 <ReviewContent>
-                  <ReviewItem label="Bucket" value={config.fos_bucket_name} />
+                  <ReviewItem label="Bucket" value={config.fos_bucket_name || "Auto-generated opaque name"} />
                   <ReviewItem label="Region" value={REGION_LABELS[config.fos_region]} />
                   <ReviewItem label="Edge Only" value={config.edge_only ? "Yes" : "No"} />
                 </ReviewContent>

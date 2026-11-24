@@ -265,6 +265,7 @@ export function LoggingSetupSection({ config, update, updateMany }: StorageSecti
       <Input
         value={config.fos_bucket_name}
         onChange={(e) => update("fos_bucket_name", e.target.value.toLowerCase())}
+        placeholder="fla-a1b2c3d4e5f6..."
         className="h-9 font-mono text-sm"
       />
     </div>

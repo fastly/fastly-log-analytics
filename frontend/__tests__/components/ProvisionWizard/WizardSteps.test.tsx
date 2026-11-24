@@ -773,22 +773,53 @@ describe('buildValidateOnSuccess', () => {
     expect(emptyDeps.setStep).toHaveBeenCalled()
   })
 
-  it('applies defaults via setConfig and honours fallback vs explicit values', () => {
+  it('applies defaults via setConfig with independent opaque names and never derives cdn_prefix from fos_bucket_name', () => {
+    const opaqueRe = /^fla-[0-9a-f]{24}$/
     const deps = makeDeps()
     buildValidateOnSuccess(deps)({ service_name: 'my-svc', defaults: { fos_bucket_name: 'MyBucket-Logs-Prod', fos_prefix: 'logs/' } })
-    expect(deps.setConfig.mock.calls[0][0](INITIAL_CONFIG)).toMatchObject({
-      endpoint_name: 'Fastly Object Storage Logs', fos_region: 'us-east-1',
-      fos_bucket_name: 'mybucket-logs-prod', cdn_service_name: 'my-svc (CDN)', cdn_prefix: 'fos-mybucket-logs',
+    const cfgFromBucket = deps.setConfig.mock.calls[0][0](INITIAL_CONFIG)
+    expect(cfgFromBucket).toMatchObject({
+      endpoint_name: 'Fastly Object Storage Logs',
+      fos_region: 'us-east-1',
+      fos_bucket_name: 'mybucket-logs-prod',
+      cdn_service_name: 'my-svc (CDN)',
     })
+    expect(cfgFromBucket.cdn_prefix).toMatch(opaqueRe)
+    expect(cfgFromBucket.cdn_prefix).not.toContain('mybucket')
+    expect(cfgFromBucket.cdn_prefix).not.toContain('my-svc')
+    expect(cfgFromBucket.cdn_prefix.startsWith('fos-')).toBe(false)
 
+    // When both bucket and cdn_prefix are omitted in provision mode, both get independent opaque names
+    const blankDeps = makeDeps('provision')
+    buildValidateOnSuccess(blankDeps)({ service_name: 'acme-edge-svc', defaults: { fos_prefix: 'logs/' } })
+    const cfgBlank = blankDeps.setConfig.mock.calls[0][0](INITIAL_CONFIG)
+    expect(cfgBlank.fos_bucket_name).toMatch(opaqueRe)
+    expect(cfgBlank.cdn_prefix).toMatch(opaqueRe)
+    expect(cfgBlank.fos_bucket_name).not.toBe(cfgBlank.cdn_prefix)
+    expect(cfgBlank.fos_bucket_name).not.toContain('acme')
+    expect(cfgBlank.cdn_prefix).not.toContain('acme')
+
+    // Re-running validate against already-generated state preserves stability across retries
+    const cfgRetry = blankDeps.setConfig.mock.calls[0][0](cfgBlank)
+    expect(cfgRetry.fos_bucket_name).toBe(cfgBlank.fos_bucket_name)
+    expect(cfgRetry.cdn_prefix).toBe(cfgBlank.cdn_prefix)
+
+    // Explicit overrides are preserved intact
     const explicitDeps = makeDeps()
     buildValidateOnSuccess(explicitDeps)({
       service_name: 'svc',
       defaults: { endpoint_name: 'Custom EP', fos_region: 'us-west-2', fos_bucket_name: 'override', cdn_service_name: 'explicit cdn', cdn_prefix: 'EXPLICIT' },
     })
     expect(explicitDeps.setConfig.mock.calls[0][0](INITIAL_CONFIG)).toMatchObject({
-      endpoint_name: 'Custom EP', fos_region: 'us-west-2', cdn_service_name: 'explicit cdn', cdn_prefix: 'explicit',
+      endpoint_name: 'Custom EP', fos_region: 'us-west-2', fos_bucket_name: 'override', cdn_service_name: 'explicit cdn', cdn_prefix: 'explicit',
     })
+
+    // Ingest mode does not invent random names for existing storage
+    const ingestDeps = makeDeps('ingest')
+    buildValidateOnSuccess(ingestDeps)({ service_name: 'svc', defaults: {} })
+    const cfgIngest = ingestDeps.setConfig.mock.calls[0][0](INITIAL_CONFIG)
+    expect(cfgIngest.fos_bucket_name).toBe('')
+    expect(cfgIngest.cdn_prefix).toBe('')
   })
 
   it.each([

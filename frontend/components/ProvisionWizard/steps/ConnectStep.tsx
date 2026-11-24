@@ -87,7 +87,7 @@ export function ConnectStep({ s }: { s: WizardState }) {
           <div className="grid grid-cols-2 gap-6">
             <div className="space-y-1.5">
               <LabelWithInfo label="FOS Bucket Name" info="The name of the existing Fastly Object Storage bucket." />
-              <Input value={config.fos_bucket_name} onChange={(e) => setConfig({ ...config, fos_bucket_name: e.target.value.toLowerCase() })} onBlur={(e) => setError("fos_bucket_name", validateBucketName(e.target.value))} aria-invalid={fieldErrors.fos_bucket_name != null} className="h-9 font-mono text-sm" placeholder="e.g. my-service-logs" />
+              <Input value={config.fos_bucket_name} onChange={(e) => setConfig({ ...config, fos_bucket_name: e.target.value.toLowerCase() })} onBlur={(e) => setError("fos_bucket_name", validateBucketName(e.target.value))} aria-invalid={fieldErrors.fos_bucket_name != null} className="h-9 font-mono text-sm" placeholder="e.g. fla-a1b2c3d4e5f6..." />
               {fieldErrors.fos_bucket_name && <p role="alert" className="text-[11px] text-destructive">{fieldErrors.fos_bucket_name}</p>}
             </div>
             <div className="space-y-1.5">
@@ -112,7 +112,7 @@ export function ConnectStep({ s }: { s: WizardState }) {
           <div className="grid grid-cols-2 gap-6">
             <div className="space-y-1.5">
               <LabelWithInfo label="CDN API URL (Optional)" info="The Fastly CDN URL used to proxy API requests (bypasses CORS)." />
-              <Input value={config.cdn_url || ""} onChange={(e) => setConfig({ ...config, cdn_url: e.target.value })} className="h-9 font-mono text-sm" placeholder="e.g. https://fos-xyz.global.ssl.fastly.net" />
+              <Input value={config.cdn_url || ""} onChange={(e) => setConfig({ ...config, cdn_url: e.target.value })} className="h-9 font-mono text-sm" placeholder="e.g. https://fla-a1b2c3d4e5f6.global.ssl.fastly.net" />
             </div>
             <div className="space-y-1.5">
               <LabelWithInfo label="CDN Secret (Optional)" info="The pre-shared secret required by the CDN API proxy." />

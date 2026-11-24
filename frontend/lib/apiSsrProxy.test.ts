@@ -281,4 +281,36 @@ describe('SEC-02 apiSsrProxy trust-boundary header sanitization', () => {
       })
     }
   })
+
+  it('SEC-22: strips internal service_id, fos_bucket, and .edgecompute.app headers from public proxied responses', async () => {
+    const server = await withUpstreamServer((_req, res) => {
+      res.writeHead(200, {
+        'Content-Type': 'application/json',
+        'X-Service-Id': 'svc-internal-123',
+        'X-FOS-Bucket': 'fos-svc-internal-123-logs',
+        'X-Upstream-Host': 'secret-app.edgecompute.app',
+        'X-Custom-Edge': 'https://backend.edgecompute.app/v1',
+        'X-Safe-Header': 'keep-me',
+      })
+      res.end('{"ok":true}')
+    })
+
+    try {
+      const publicReq = new Request('https://share.example.com/api/bootstrap', {
+        headers: {
+          host: 'share.example.com',
+          'x-fla-public-gateway': 'true',
+        },
+      })
+      const publicRes = await proxyUpstreamRequest(publicReq)
+      expect(publicRes.status).toBe(200)
+      expect(publicRes.headers.get('x-service-id')).toBeNull()
+      expect(publicRes.headers.get('x-fos-bucket')).toBeNull()
+      expect(publicRes.headers.get('x-upstream-host')).toBeNull()
+      expect(publicRes.headers.get('x-custom-edge')).toBeNull()
+      expect(publicRes.headers.get('x-safe-header')).toBe('keep-me')
+    } finally {
+      await server.close()
+    }
+  })
 })

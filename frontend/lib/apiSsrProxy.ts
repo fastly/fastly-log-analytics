@@ -28,6 +28,16 @@ const STRIPPED_FORWARDED_HEADERS = new Set([
   "x-proxied-by-caddy",
   "x-fla-public-gateway",
 ]);
+const STRIPPED_PUBLIC_RESPONSE_HEADERS = new Set([
+  "x-service-id",
+  "x-fos-bucket",
+  "x-fos-bucket-name",
+  "x-upstream-host",
+  "x-backend-host",
+  "x-served-by",
+  "x-edgecompute-host",
+]);
+const INTERNAL_HOST_LEAK_RE = /\.edgecompute\.app(?:[:/\s]|$)/i;
 const IDEMPOTENT_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 const SSR_TIMEOUT_MS = 5000;
 
@@ -72,7 +82,11 @@ function isBenignDisconnectError(err: unknown): boolean {
   );
 }
 
-function buildUpstreamHeaders(request: Request, targetUrl: URL, bodyBuffer?: Buffer): Record<string, string> {
+function buildUpstreamHeaders(
+  request: Request,
+  targetUrl: URL,
+  bodyBuffer?: Buffer,
+): { headers: Record<string, string>; isAdmin: boolean } {
   const out: Record<string, string> = {};
   request.headers.forEach((value, key) => {
     const lower = key.toLowerCase();
@@ -112,7 +126,7 @@ function buildUpstreamHeaders(request: Request, targetUrl: URL, bodyBuffer?: Buf
   }
   out["connection"] = "close";
   if (bodyBuffer && bodyBuffer.byteLength > 0) out["content-length"] = String(bodyBuffer.byteLength);
-  return out;
+  return { headers: out, isAdmin: admin };
 }
 
 function sendUpstreamOnce(
@@ -121,6 +135,7 @@ function sendUpstreamOnce(
   headers: Record<string, string>,
   bodyBuffer: Buffer | undefined,
   signal: AbortSignal | undefined,
+  isAdmin: boolean,
 ): Promise<Response> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
@@ -146,11 +161,14 @@ function sendUpstreamOnce(
           if (rawVal === undefined) continue;
           const lower = rawKey.toLowerCase();
           if (HOP_BY_HOP_HEADERS.has(lower)) continue;
+          if (!isAdmin && STRIPPED_PUBLIC_RESPONSE_HEADERS.has(lower)) continue;
           if (lower === "set-cookie") {
             for (const c of Array.isArray(rawVal) ? rawVal : [String(rawVal)]) resHeaders.append("set-cookie", c);
             continue;
           }
-          resHeaders.set(rawKey, Array.isArray(rawVal) ? rawVal.join(", ") : String(rawVal));
+          const joined = Array.isArray(rawVal) ? rawVal.join(", ") : String(rawVal);
+          if (!isAdmin && INTERNAL_HOST_LEAK_RE.test(joined)) continue;
+          resHeaders.set(rawKey, joined);
         }
         if (method === "HEAD" || status === 204 || status === 205 || status === 304) {
           upstreamRes.resume();
@@ -269,14 +287,14 @@ export async function proxyUpstreamRequest(request: Request): Promise<Response> 
     const ab = await request.arrayBuffer();
     if (ab.byteLength > 0) bodyBuffer = Buffer.from(ab);
   }
-  const headers = buildUpstreamHeaders(request, targetUrl, bodyBuffer);
+  const { headers, isAdmin } = buildUpstreamHeaders(request, targetUrl, bodyBuffer);
   try {
-    return await sendUpstreamOnce(targetUrl, method, headers, bodyBuffer, request.signal);
+    return await sendUpstreamOnce(targetUrl, method, headers, bodyBuffer, request.signal, isAdmin);
   } catch (firstErr) {
     const code = (firstErr as NodeJS.ErrnoException | undefined)?.code;
     if (IDEMPOTENT_METHODS.has(method) && !request.signal?.aborted && (code === "ECONNRESET" || code === "EPIPE")) {
       try {
-        return await sendUpstreamOnce(targetUrl, method, headers, bodyBuffer, request.signal);
+        return await sendUpstreamOnce(targetUrl, method, headers, bodyBuffer, request.signal, isAdmin);
       } catch (retryErr) {
         if (isBenignDisconnectError(retryErr) && request.signal?.aborted) return new Response(null, { status: 499 });
         return Response.json({ detail: "Upstream service unavailable" }, { status: 502 });
