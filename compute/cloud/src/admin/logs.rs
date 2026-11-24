@@ -1315,19 +1315,28 @@ fn rum_compact_due<R: Runtime>(store: &Store<'_, R>) -> Vec<&'static str> {
         || service.data_reset.is_some()
         || !enough(
             runtime,
-            MIN_COMPACT_CALLS + compaction::RUM_TABLES.len() as u32,
+            MIN_COMPACT_CALLS + compaction::RUM_TABLES.len() as u32 + 1,
         )
     {
         return Vec::new();
     }
     let now = runtime.now();
+    let rum_watermark_gen = runtime
+        .admin_get(&crate::ingest::watermark_key(crate::ingest::rum::STREAM))
+        .ok()
+        .flatten()
+        .map(|r| r.generation);
     compaction::RUM_TABLES
         .into_iter()
         .filter(|table| {
             let key = compaction::Dataset::Rum(table).state_key();
-            runtime
-                .admin_get(key)
-                .is_ok_and(|record| compaction::rum_due(record.as_ref().map(|r| &r.value), now))
+            runtime.admin_get(key).is_ok_and(|record| {
+                compaction::rum_due(
+                    record.as_ref().map(|r| &r.value),
+                    rum_watermark_gen.as_deref(),
+                    now,
+                )
+            })
         })
         .collect()
 }
@@ -1813,12 +1822,7 @@ mod tests {
                 generation: "1".into(),
             }))
         }
-        fn admin_cas(
-            &self,
-            key: &str,
-            _: Option<&str>,
-            value: &Value,
-        ) -> Result<bool, String> {
+        fn admin_cas(&self, key: &str, _: Option<&str>, value: &Value) -> Result<bool, String> {
             self.kv.borrow_mut().insert(key.into(), value.clone());
             Ok(true)
         }
@@ -1826,12 +1830,7 @@ mod tests {
             self.kv.borrow_mut().remove(key);
             Ok(())
         }
-        fn kv_list(
-            &self,
-            prefix: &str,
-            _: Option<&str>,
-            _: u32,
-        ) -> Result<KvPage, String> {
+        fn kv_list(&self, prefix: &str, _: Option<&str>, _: u32) -> Result<KvPage, String> {
             let keys = self
                 .kv
                 .borrow()
@@ -1850,7 +1849,11 @@ mod tests {
         ) -> Result<crate::admin::FosResponse, String> {
             Err("unused".into())
         }
-        fn worker_dispatch(&self, _: &[(String, Value)], _: Duration) -> Vec<Result<Value, String>> {
+        fn worker_dispatch(
+            &self,
+            _: &[(String, Value)],
+            _: Duration,
+        ) -> Vec<Result<Value, String>> {
             Vec::new()
         }
         fn admin_event(&self, _: Value) {}

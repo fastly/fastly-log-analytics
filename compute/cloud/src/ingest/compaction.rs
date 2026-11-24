@@ -138,13 +138,20 @@ impl Dataset {
 }
 
 /// Whether a RUM table's state (`None` when it has none yet) asks for a pass at `now`.
-pub fn rum_due(state: Option<&Value>, now: u64) -> bool {
+pub fn rum_due(state: Option<&Value>, rum_watermark_gen: Option<&str>, now: u64) -> bool {
     let Some(value) = state else { return true };
     serde_json::from_value::<State>(value.clone()).map_or(true, |state| {
+        let grace_due = state
+            .queue
+            .iter()
+            .any(|queued| queued.at.saturating_add(DELETE_GRACE_S) <= now);
         state.job.is_some()
             || state.upload.is_some()
             || state.list_after.is_some()
-            || state.next_check <= now
+            || grace_due
+            || !state.rum_scanned
+            || state.rum_watermark_gen.as_deref() != rum_watermark_gen
+            || state.rum_recheck_at.is_some_and(|at| at <= now)
     })
 }
 
@@ -333,6 +340,18 @@ pub struct State {
     /// RUM: when the table next needs a pass (see [`rum_due`]).
     #[serde(default)]
     pub next_check: u64,
+    /// RUM: whether at least one full scan has completed.
+    #[serde(default)]
+    pub rum_scanned: bool,
+    /// RUM: `ingest:rum:watermark` generation observed at the start of the last completed scan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rum_watermark_gen: Option<String>,
+    /// RUM: `ingest:rum:watermark` generation observed when the in-progress scan started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rum_scan_watermark_gen: Option<String>,
+    /// RUM: earliest timestamp at which skipped/open-hour files seen during scanning may become eligible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rum_recheck_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -389,6 +408,8 @@ struct Run<'s, 'a, R: Runtime> {
     bump: bool,
     /// vCPU spent restoring a resumed job's checkpoint, exempt from [`VCPU_STOP_MS`].
     restore_vcpu: u64,
+    /// RUM: `ingest:rum:watermark` generation read at the start of this pass.
+    rum_watermark_gen: Option<String>,
 }
 
 /// One bounded compaction pass: abort a stale upload, delete sources past the grace, then merge
@@ -496,10 +517,13 @@ pub fn compact_pass<R: Runtime>(
         .filter(|token| !token.is_empty())
         .ok_or("fastly_token_missing")?;
     let (record, state) = read_state(runtime, dataset.state_key(), &token)?;
-    let watermark = if rum {
-        None
+    let (watermark, rum_watermark_gen) = if rum {
+        let gen = runtime
+            .admin_get(&watermark_key(super::rum::STREAM))?
+            .map(|r| r.generation);
+        (None, gen)
     } else {
-        runtime.admin_get(WATERMARK_KEY)?
+        (runtime.admin_get(WATERMARK_KEY)?, None)
     };
     // [`VCPU_STOP_MS`] bounds the pass's own work. Live workers have spent 45-60 ms on startup
     // and these state reads by now, so counting from the execution start admits nothing.
@@ -529,6 +553,7 @@ pub fn compact_pass<R: Runtime>(
         changed: false,
         bump: false,
         restore_vcpu: 0,
+        rum_watermark_gen,
     };
     // Only the final state write sets a handoff, so a stale read can't show one meant for this
     // pass: an earlier pass's handoff names an earlier pass.
@@ -573,6 +598,8 @@ pub fn compact_pass<R: Runtime>(
     let mut pending = Vec::new();
     let scanned = if run.state.job.is_some() {
         run.resume_job(&mut pending)
+    } else if rum && !run.rum_scan_due() {
+        Ok(())
     } else {
         run.scan().map(|found| pending = found)
     };
@@ -722,7 +749,7 @@ pub fn compact_pass<R: Runtime>(
         run.state.next_check = if busy {
             now
         } else {
-            now.saturating_add(RUM_CHECK_S).min(grace_end)
+            grace_end.min(run.state.rum_recheck_at.unwrap_or(u64::MAX))
         };
     }
     // The turn's next pass gets at most this pass's remaining wall time, so a handed-on lease
@@ -1161,7 +1188,9 @@ impl<R: Runtime> Run<'_, '_, R> {
         };
         self.report.deleted += result.deleted.len() as u64;
         self.report.failed += result.failed.len() as u64;
-        self.report.deleted_keys.extend(result.deleted.iter().cloned());
+        self.report
+            .deleted_keys
+            .extend(result.deleted.iter().cloned());
         if let (Some(usage), Some(first)) = (self.store.runtime.usage_agg(), result.deleted.first())
         {
             if result.failed.is_empty()
@@ -1340,6 +1369,20 @@ impl<R: Runtime> Run<'_, '_, R> {
         Ok(pending)
     }
 
+    fn rum_scan_due(&self) -> bool {
+        self.state.list_after.is_some()
+            || !self.state.rum_scanned
+            || self.state.rum_watermark_gen != self.rum_watermark_gen
+            || self.state.rum_recheck_at.is_some_and(|at| at <= self.now)
+    }
+
+    fn note_rum_recheck(&mut self, at: u64) {
+        if self.state.rum_recheck_at.is_none_or(|prev| at < prev) {
+            self.state.rum_recheck_at = Some(at);
+            self.changed = true;
+        }
+    }
+
     /// Lists the RUM table folder from the scan's cursor and merges it hour by hour.
     fn rum_scan(&mut self) -> Result<Vec<Queued>, String> {
         let mut pending = Vec::new();
@@ -1347,6 +1390,15 @@ impl<R: Runtime> Run<'_, '_, R> {
             self.report.more_pending = true;
             self.report.stopped.get_or_insert_with(|| stop.into());
             return Ok(pending);
+        }
+        if self.state.list_after.is_none() {
+            if self.state.rum_recheck_at.take().is_some() {
+                self.changed = true;
+            }
+            if self.state.rum_scan_watermark_gen != self.rum_watermark_gen {
+                self.state.rum_scan_watermark_gen = self.rum_watermark_gen.clone();
+                self.changed = true;
+            }
         }
         let uncommitted = uncommitted_rum_plan(self.store.runtime)?;
         loop {
@@ -1407,6 +1459,8 @@ impl<R: Runtime> Run<'_, '_, R> {
                 let floor = now - now.rem_euclid(3600) - RUM_REVISIT_S;
                 self.state.list_after = None;
                 self.state.next_hour = Some(floor);
+                self.state.rum_scanned = true;
+                self.state.rum_watermark_gen = self.state.rum_scan_watermark_gen.take();
                 self.state
                     .skip
                     .retain(|key| file_hour(key).is_some_and(|hour| hour >= floor));
@@ -1466,22 +1520,31 @@ impl<R: Runtime> Run<'_, '_, R> {
             }
         }
         let uncovered: BTreeSet<String> = uncovered.into_iter().collect();
-        let candidates: Vec<Object> = objects
-            .iter()
-            .filter(|object| {
-                if parse_processed(&object.key).is_some() {
-                    let token = file_name_run(&object.key);
-                    uncovered.contains(&object.key)
-                        && mtime(object).is_some_and(|at| at.saturating_add(MIN_AGE_S) <= self.now)
-                        && uncommitted
-                            .is_none_or(|plan| !token.is_some_and(|t| t.starts_with(plan)))
-                } else {
-                    valid.iter().any(|(key, _)| *key == object.key)
-                        && !superseded.contains(&object.key)
+        let mut candidates = Vec::with_capacity(objects.len());
+        for object in objects {
+            if parse_processed(&object.key).is_some() {
+                let token = file_name_run(&object.key);
+                if !uncovered.contains(&object.key) {
+                    continue;
                 }
-            })
-            .cloned()
-            .collect();
+                let Some(at) = mtime(object) else {
+                    continue;
+                };
+                if at.saturating_add(MIN_AGE_S) > self.now {
+                    self.note_rum_recheck(at.saturating_add(MIN_AGE_S));
+                    continue;
+                }
+                if uncommitted.is_some_and(|plan| token.is_some_and(|t| t.starts_with(plan))) {
+                    self.note_rum_recheck(self.now.saturating_add(RUM_CHECK_S));
+                    continue;
+                }
+                candidates.push(object.clone());
+            } else if valid.iter().any(|(key, _)| *key == object.key)
+                && !superseded.contains(&object.key)
+            {
+                candidates.push(object.clone());
+            }
+        }
         self.hour_keys = objects.iter().map(|object| object.key.clone()).collect();
         self.hour(hour, &candidates, pending)
     }
@@ -1537,6 +1600,10 @@ impl<R: Runtime> Run<'_, '_, R> {
         let closed = (hour + 3600).saturating_add(MIN_AGE_S as i64) <= self.now as i64;
         let closing = windows < 2 && (closed || compacts >= COMPACT_TRIGGER);
         if !closing {
+            if matches!(self.dataset, Dataset::Rum(_)) && compacts >= 2 {
+                let closes_at = (hour + 3600).max(0) as u64;
+                self.note_rum_recheck(closes_at.saturating_add(MIN_AGE_S));
+            }
             candidates.retain(|(c, _)| compact::parse_compact_name(&c.key).is_none());
         }
         let oldest = candidates
@@ -1552,6 +1619,13 @@ impl<R: Runtime> Run<'_, '_, R> {
                 && candidates.len() < FILE_TRIGGER
                 && oldest.saturating_add(MIN_AGE_S) > self.now)
         {
+            if matches!(self.dataset, Dataset::Rum(_))
+                && candidates.len() >= 2
+                && !closing
+                && oldest.saturating_add(MIN_AGE_S) > self.now
+            {
+                self.note_rum_recheck(oldest.saturating_add(MIN_AGE_S));
+            }
             return Ok(true);
         }
         let prefix = format!("{}{}", self.root, hour_dir(hour));
@@ -2171,5 +2245,223 @@ impl<R: Runtime> Run<'_, '_, R> {
         }
         self.upload_parts(job, writer)?;
         Ok(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+
+    struct TestRt {
+        now: Cell<u64>,
+        kv: RefCell<BTreeMap<String, (u64, Value)>>,
+        fos_lists: Cell<u32>,
+    }
+
+    impl TestRt {
+        fn new(now: u64) -> Self {
+            Self {
+                now: Cell::new(now),
+                kv: RefCell::new(BTreeMap::new()),
+                fos_lists: Cell::new(0),
+            }
+        }
+    }
+
+    impl crate::setup::SetupStores for TestRt {
+        fn config_present(&self, _: &str) -> Result<bool, String> {
+            Ok(true)
+        }
+        fn secret_present(&self, _: &str) -> Result<bool, String> {
+            Ok(true)
+        }
+        fn state_linked(&self) -> Result<bool, String> {
+            Ok(true)
+        }
+    }
+
+    impl Runtime for TestRt {
+        fn config(&self, _: &str) -> Result<Option<String>, String> {
+            Ok(None)
+        }
+        fn secret(&self, _: &str) -> Result<Option<String>, String> {
+            Ok(Some("tok".into()))
+        }
+        fn random(&self) -> Result<[u8; 32], String> {
+            Ok([0; 32])
+        }
+        fn now(&self) -> u64 {
+            self.now.get()
+        }
+        fn checks(&self, _: bool) -> Result<Value, String> {
+            Ok(serde_json::json!({}))
+        }
+        fn versions(&self) -> Result<Value, String> {
+            Ok(serde_json::json!({}))
+        }
+        fn compute_service_id(&self) -> Option<String> {
+            None
+        }
+        fn compute_service_version(&self) -> Option<String> {
+            None
+        }
+        fn admin_get(&self, key: &str) -> Result<Option<crate::admin::Record>, String> {
+            Ok(self
+                .kv
+                .borrow()
+                .get(key)
+                .map(|(g, v)| crate::admin::Record {
+                    generation: g.to_string(),
+                    value: v.clone(),
+                }))
+        }
+        fn admin_get_fresh(
+            &self,
+            key: &str,
+            _: &str,
+        ) -> Result<Option<crate::admin::Record>, String> {
+            self.admin_get(key)
+        }
+        fn admin_cas(
+            &self,
+            key: &str,
+            generation: Option<&str>,
+            value: &Value,
+        ) -> Result<bool, String> {
+            let mut kv = self.kv.borrow_mut();
+            let current = kv.get(key).map(|(g, _)| *g);
+            if current.map(|g| g.to_string()).as_deref() != generation {
+                return Ok(false);
+            }
+            let next = current.unwrap_or(0) + 1;
+            kv.insert(key.into(), (next, value.clone()));
+            Ok(true)
+        }
+        fn admin_fos(
+            &self,
+            request: crate::admin::FosRequest<'_>,
+        ) -> Result<crate::admin::FosResponse, String> {
+            if request.method == "GET" && request.query.contains("list-type=2") {
+                self.fos_lists.set(self.fos_lists.get() + 1);
+                let xml = b"<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>";
+                return Ok(crate::admin::FosResponse {
+                    status: 200,
+                    body: xml.to_vec(),
+                    cdn_cache: None,
+                    retry_after: None,
+                });
+            }
+            Err(format!(
+                "unexpected fos call: {} {}",
+                request.method, request.query
+            ))
+        }
+    }
+
+    fn test_service() -> crate::admin::Service {
+        serde_json::from_value(serde_json::json!({
+            "service_id": "svc", "name": "n", "status": "active", "created_at": 0, "updated_at": 0,
+            "config_version": 1, "logging_enabled": true, "logging_endpoint_name": "e",
+            "log_period": 60, "sample_rate": 1, "edge_only": false, "custom_condition": "",
+            "fos_bucket": "fos-abcdefghijklmnopqrst12-logs", "fos_prefix": "", "fos_region": "us-east-1",
+            "fos_endpoint": "x", "log_fields": [], "field_limits": {}, "fastly_token_ref": "t",
+            "fos_access_key_ref": "ak", "fos_secret_key_ref": "sk", "owner": "o",
+            "bucket_adopted": false, "bucket_checked": false, "last_activated_version": null,
+            "last_reconcile": null, "pending_job_id": null,
+            "compaction": {"mode": "size_target", "size_target_mb": 64},
+            "rum": {"enabled": true}
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn rum_compact_performs_zero_fos_lists_when_idle() {
+        let rt = TestRt::new(1_700_000_000);
+        let svc = test_service();
+        let store = Store {
+            runtime: &rt,
+            service: &svc,
+            access_key: "ak".into(),
+            secret_key: "sk".into(),
+            started: std::time::Instant::now(),
+            vcpu_start: 0,
+        };
+
+        // First pass performs the initial scan (1 LIST) and records rum_scanned = true.
+        compact_pass(
+            &store,
+            "ck",
+            64 << 20,
+            0,
+            None,
+            Dataset::Rum(super::super::rum::ERRORS),
+        )
+        .unwrap();
+        assert_eq!(rt.fos_lists.get(), 1);
+
+        // Even after RUM_CHECK_S (and much longer) elapses, idle state must be not due and
+        // subsequent passes must perform 0 FOS LISTs when ingest:rum:watermark has not changed.
+        rt.now.set(rt.now.get() + RUM_CHECK_S * 10);
+        let state = rt
+            .admin_get(Dataset::Rum(super::super::rum::ERRORS).state_key())
+            .unwrap()
+            .unwrap();
+        assert!(!rum_due(Some(&state.value), None, rt.now()));
+
+        rt.fos_lists.set(0);
+        compact_pass(
+            &store,
+            "ck",
+            64 << 20,
+            0,
+            None,
+            Dataset::Rum(super::super::rum::ERRORS),
+        )
+        .unwrap();
+        assert_eq!(rt.fos_lists.get(), 0, "idle rum_compact must not LIST FOS");
+
+        // When ingest:rum:watermark changes (new RUM commit), rum_due becomes true and it scans once.
+        rt.admin_cas(
+            &watermark_key(super::super::rum::STREAM),
+            None,
+            &serde_json::json!({"run_id": "r1"}),
+        )
+        .unwrap();
+        let wm = rt
+            .admin_get(&watermark_key(super::super::rum::STREAM))
+            .unwrap()
+            .unwrap();
+        assert!(rum_due(Some(&state.value), Some(&wm.generation), rt.now()));
+
+        compact_pass(
+            &store,
+            "ck",
+            64 << 20,
+            0,
+            None,
+            Dataset::Rum(super::super::rum::ERRORS),
+        )
+        .unwrap();
+        assert_eq!(rt.fos_lists.get(), 1);
+
+        // Once caught up at that watermark generation, it goes back to 0 FOS LISTs.
+        rt.now.set(rt.now.get() + RUM_CHECK_S * 10);
+        let state = rt
+            .admin_get(Dataset::Rum(super::super::rum::ERRORS).state_key())
+            .unwrap()
+            .unwrap();
+        assert!(!rum_due(Some(&state.value), Some(&wm.generation), rt.now()));
+        rt.fos_lists.set(0);
+        compact_pass(
+            &store,
+            "ck",
+            64 << 20,
+            0,
+            None,
+            Dataset::Rum(super::super::rum::ERRORS),
+        )
+        .unwrap();
+        assert_eq!(rt.fos_lists.get(), 0);
     }
 }
