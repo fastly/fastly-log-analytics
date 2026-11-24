@@ -10,7 +10,7 @@ import {
   ingestShape,
   ingestTick,
 } from "./ingestShape";
-import { DAY_MS, LIST_RATES } from "./rates";
+import { DAY_MS, FREE_SECRETS, LIST_RATES } from "./rates";
 
 export const MONTH_DAYS = 30;
 export const DEFAULT_MIN_BILLED_DAYS = LIST_RATES.min_billed_days;
@@ -843,7 +843,7 @@ export function estimateMonthly(
       id: "secrets",
       label: "Secret Store",
       detail: `${count(units.secrets)} secrets`,
-      usd: units.secrets * rates.secret_rate_per_month,
+      usd: Math.max(0, units.secrets - FREE_SECRETS) * rates.secret_rate_per_month,
     },
     {
       id: "config",

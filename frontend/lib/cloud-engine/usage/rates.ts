@@ -1,4 +1,5 @@
 export const DAY_MS = 86_400_000;
+export const FREE_SECRETS = 10;
 
 /**
  * Published Fastly marginal list rates (`docs/research/09-usage-and-cost-visibility.md`),

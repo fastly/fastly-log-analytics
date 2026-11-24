@@ -63,7 +63,9 @@ describe('Cloud cost calculator', () => {
     expect(screen.getByText(/Pre-filled with this service's live request volume/)).toBeInTheDocument()
     const delivery = screen.getByText('CDN delivery').closest('[data-estimate-line]') as HTMLElement
     expect(delivery).not.toHaveTextContent(/15,0\d\d GB/)
-    expect(screen.getByText('$7.00')).toBeInTheDocument()
+    const secretsRow = screen.getByText('Secret Store').closest('[data-estimate-line]') as HTMLElement
+    expect(secretsRow).toHaveTextContent('1 secrets')
+    expect(secretsRow).not.toHaveTextContent('$7.00')
     expect(screen.queryByText(/ClickHouse/)).not.toBeInTheDocument()
   })
 

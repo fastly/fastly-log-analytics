@@ -8,7 +8,7 @@ import {
   currentOpsCacheEpoch,
   currentOpsIdentity,
 } from "../telemetry/sources";
-import { DAY_MS, LIST_RATES } from "./rates";
+import { DAY_MS, FREE_SECRETS, LIST_RATES } from "./rates";
 import type {
   StorageBillingInterval,
   StorageBillingIntervalKind,
@@ -2348,7 +2348,10 @@ export function incurredCost(input: IncurredInput): {
     {
       id: "secrets",
       label: "Secret Store",
-      usd: secrets === null ? null : secrets * r.secret_rate_per_month * months,
+      usd:
+        secrets === null
+          ? null
+          : Math.max(0, secrets - FREE_SECRETS) * r.secret_rate_per_month * months,
       detail:
         secrets === null
           ? "Admin only (Fastly API)"

@@ -157,7 +157,7 @@ describe("estimateMonthly", () => {
       workerRequestsPerFile: 0.5,
       vcpuMsPer1kLines: 10,
       fosClassAPerFile: 3,
-      secrets: 2,
+      secrets: 12,
     };
     const inputs = {
       ...DEFAULT_INPUTS,

@@ -1461,7 +1461,7 @@ describe("incurredCost", () => {
         cdnRequests: 1e6,
         kvClassA: 1e6,
         kvClassB: 2e6,
-        secrets: 10,
+        secrets: 20,
       },
     });
     const usd = Object.fromEntries(lines.map((l) => [l.id, l.usd]));

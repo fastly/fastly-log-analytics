@@ -396,7 +396,7 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     expect(screen.getByText('KV Store')).toBeInTheDocument()
     expect(screen.getByText('Secret Store')).toBeInTheDocument()
     expect(screen.getByText('1 secrets')).toBeInTheDocument()
-    expect(screen.getByText('$7.00')).toBeInTheDocument()
+    expect(screen.getByText('$0.00')).toBeInTheDocument()
     expect(screen.getByText(/front reqs/)).toBeInTheDocument()
     expect(screen.getByRole('spinbutton', { name: 'Total requests per day' })).toHaveValue(12345)
     expect(screen.queryByTestId('cost-calculator')).not.toBeInTheDocument()
@@ -739,7 +739,7 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     test('correctly calculates RUM beacon costs and storage when rumBeaconsDay is set', () => {
       const results = calculate({ ...DEFAULTS, rumBeaconsDay: 10000, rumRetentionDays: 90 })
       expect(results.rumBeaconsMonth).toBe(300000)
-      const expected30dRumGbMonths = (10000 * 30 * RUM_COMPRESSED_BYTES_PER_BEACON) / (1024 * 1024 * 1024)
+      const expected30dRumGbMonths = (10000 * 30 * RUM_COMPRESSED_BYTES_PER_BEACON) / 1e9
       // RUM storage follows the RUM retention: 90 days is three times the 30-day monthly volume.
       expect(results.rumParquetGBMonths).toBeCloseTo(expected30dRumGbMonths * 3, 5)
       const rumTier = results.storageTiers.find(t => t.label === 'RUM data')
@@ -747,7 +747,7 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
       expect(rumTier).toBeDefined()
       expect(rumArchiveTier).toBeDefined()
       expect(rumTier?.gbMonths).toBeCloseTo(expected30dRumGbMonths * 3, 5)
-      expect(results.costRum).toBeCloseTo(1.5 + (expected30dRumGbMonths * 3 + (rumArchiveTier?.gbMonths ?? 0)) * 0.02, 5)
+      expect(results.costRum).toBeCloseTo(0.75 + (expected30dRumGbMonths * 3 + (rumArchiveTier?.gbMonths ?? 0)) * 0.02, 5)
       // A shorter RUM retention shrinks RUM storage but not the request archive.
       const short = calculate({ ...DEFAULTS, rumBeaconsDay: 10000, rumRetentionDays: 30 })
       expect(short.rumParquetGBMonths).toBeCloseTo(expected30dRumGbMonths, 5)
@@ -759,7 +759,7 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
       expect(RAW_LOG_COMPRESSION_RATIO).toBe(5)
       const results = calculate(DEFAULTS)
       expect(results.totalGzBytesPerMonth).toBeCloseTo(results.totalBytesPerMonth / RAW_LOG_COMPRESSION_RATIO, 2)
-      expect(results.cdnEgressGB).toBeCloseTo(results.totalGzBytesPerMonth / (1024 * 1024 * 1024), 6)
+      expect(results.cdnEgressGB).toBeCloseTo(results.totalGzBytesPerMonth / 1e9, 6)
       // PREFILL keeps canonical DEFAULTS.bytesPerLine (1320) unless estimated_bytes_per_line is provided
       const prefilledDefault = reducer(DEFAULTS, {
         type: 'PREFILL',
@@ -783,9 +783,11 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
       const filesPerDay = (86400 / DEFAULTS.logPeriod) * DEFAULTS.logNodes
       const pagesPerDay = Math.ceil(filesPerDay / Math.min(DEFAULTS.archiveBatchObjects, (filesPerDay * snapshotSeconds) / 86400))
       expect(pagesPerDay).toBe(288)
-      expect(defaults.classBPerMonth).toBeCloseTo((filesPerDay + pagesPerDay * 3) * 30, 6)
+      expect(defaults.classBPerMonth).toBeCloseTo((filesPerDay + pagesPerDay * 5) * 30, 6)
       const busy = calculate({ ...DEFAULTS, logNodes: 60 })
-      const busyFiles = (86400 / DEFAULTS.logPeriod) * 60
+      const busyPeriods = 86400 / DEFAULTS.logPeriod
+      const busyReqEffective = (DEFAULTS.edgeOnly ? DEFAULTS.edgeReqDay : DEFAULTS.reqDay) * (DEFAULTS.sampleRate / 100)
+      const busyFiles = busyPeriods * 60 * -Math.expm1(-busyReqEffective / busyPeriods / 60)
       const busyPages = Math.ceil(busyFiles / Math.min(DEFAULTS.archiveBatchObjects, (busyFiles * snapshotSeconds) / 86400))
       expect(busy.parquetFilesPerMonth).toBeCloseTo(busyPages * 30, 6)
       expect(busyPages).toBeLessThan(busyFiles)
