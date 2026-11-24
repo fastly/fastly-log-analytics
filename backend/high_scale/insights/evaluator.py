@@ -71,12 +71,13 @@ from backend.repositories.utils.response_shaping import (
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 
+from .batches import DetectionBatch, plan_execution
 from .rollup import ROLLUP_DETECTIONS, baseline_hours_span, coverage_sql, covered_span, hour_totals, rollup_base_sql
 from .sql_queries import Detection, _base_sql, _detection_for
 
 logger = logging.getLogger(__name__)
 
-_MAX_WORKERS = 4
+_MAX_WORKERS = 8
 _FIELD_SAMPLE_ROWS = 1000
 _BASE_FIELDS = frozenset({"timestamp", "url", "country", "ip"})
 _ASN_INSIGHT_MARKERS = ("asn", "metro")
@@ -247,16 +248,20 @@ def _evaluate(
     fingerprint = _fingerprint_column(present) or "ja3"
     make_investigate_url = _make_investigate_url(service.service_id, window_start, now)
 
-    def run(definition: InsightDefinition, detection: Detection) -> dict[str, Any]:
-        if detection.needs_baseline and history_hours < baseline_hours:
-            return build_insufficient_baseline_card(
-                definition.id,
-                definition.title,
-                definition.description,
-                str(definition.category),
-                baseline_hours,
-                history_hours,
-            )
+    def _shape(definition: InsightDefinition, rows: list[tuple[Any, ...]]) -> dict[str, Any]:
+        return shape_insight_card_from_rows(
+            definition,
+            rows,
+            service_id=service.service_id,
+            window_hours=window_hours,
+            baseline_hours=baseline_hours,
+            fp_col=fingerprint,
+            actual_cols=sorted(present),
+            mask_ips=mask_ips,
+            investigate_url_builder=make_investigate_url,
+        )
+
+    def run_standalone(definition: InsightDefinition, detection: Detection) -> list[tuple[str, dict[str, Any]]]:
         try:
             shape = ROLLUP_DETECTIONS.get(definition.id)
             span = rollup_spans.get(shape) if shape else None
@@ -277,25 +282,70 @@ def _evaluate(
                 tuple(row.values())
                 for row in trace.run(definition.id, lambda: service.client.execute(sql, query_params), source=source)
             ]
-            return shape_insight_card_from_rows(
-                definition,
-                rows,
-                service_id=service.service_id,
-                window_hours=window_hours,
-                baseline_hours=baseline_hours,
-                fp_col=fingerprint,
-                actual_cols=sorted(present),
-                mask_ips=mask_ips,
-                investigate_url_builder=make_investigate_url,
+            return [(definition.id, _shape(definition, rows))]
+        except Exception as exc:
+            return [
+                (
+                    definition.id,
+                    build_error_insight_card(
+                        definition.id,
+                        definition.title,
+                        str(definition.category),
+                        _failure_message(exc),
+                        description=definition.description,
+                    ),
+                )
+            ]
+
+    def run_batch(
+        batch: DetectionBatch, members: list[tuple[InsightDefinition, Detection]]
+    ) -> list[tuple[str, dict[str, Any]]]:
+        active_ids = {definition.id for definition, _ in members}
+        try:
+            span = rollup_spans.get(batch.rollup_shape) if batch.rollup_shape else None
+            sql, source = batch.build_sql(active_ids, present=present, rollup_span=span, filter_clause=filter_clause)
+            query_params = (
+                {**params, "rollup_start": span[0], "rollup_end": span[1]} if (batch.rollup_shape and span) else params
+            )
+            raw_rows = trace.run(
+                f"batch_{batch.name}", lambda: service.client.execute(sql, query_params), source=source
+            )
+            per_detector = batch.extract_rows(
+                raw_rows, active_ids, window_hours=window_hours, baseline_hours=baseline_hours
             )
         except Exception as exc:
-            return build_error_insight_card(
-                definition.id,
-                definition.title,
-                str(definition.category),
-                _failure_message(exc),
-                description=definition.description,
-            )
+            msg = _failure_message(exc)
+            return [
+                (
+                    definition.id,
+                    build_error_insight_card(
+                        definition.id,
+                        definition.title,
+                        str(definition.category),
+                        msg,
+                        description=definition.description,
+                    ),
+                )
+                for definition, _ in members
+            ]
+        out: list[tuple[str, dict[str, Any]]] = []
+        for definition, _ in members:
+            try:
+                out.append((definition.id, _shape(definition, per_detector.get(definition.id, []))))
+            except Exception as exc:
+                out.append(
+                    (
+                        definition.id,
+                        build_error_insight_card(
+                            definition.id,
+                            definition.title,
+                            str(definition.category),
+                            _failure_message(exc),
+                            description=definition.description,
+                        ),
+                    )
+                )
+        return out
 
     candidates: list[tuple[InsightDefinition, Detection]] = []
     for definition in registry.get_all():
@@ -341,9 +391,31 @@ def _evaluate(
         )
     coverage = fut_coverage.result() if fut_coverage is not None else []
     rollup_spans = _rollup_spans(history[0] if history else {}, coverage, baseline_start, window_start)
+    cards_by_id: dict[str, dict[str, Any]] = {}
+    eligible: list[tuple[InsightDefinition, Detection]] = []
+    for definition, detection in candidates:
+        if detection.needs_baseline and history_hours < baseline_hours:
+            cards_by_id[definition.id] = build_insufficient_baseline_card(
+                definition.id,
+                definition.title,
+                definition.description,
+                str(definition.category),
+                baseline_hours,
+                history_hours,
+            )
+        else:
+            eligible.append((definition, detection))
+    batches, standalone = plan_execution(eligible, present)
+    tasks: list[Callable[[], list[tuple[str, dict[str, Any]]]]] = [
+        *(lambda b=b, m=m: run_batch(b, m) for b, m in batches),
+        *(lambda d=d, det=det: run_standalone(d, det) for d, det in standalone),
+    ]
     with ThreadPoolExecutor(max_workers=_MAX_WORKERS, thread_name_prefix="hs-insights") as pool:
-        futures = [pool.submit(contextvars.copy_context().run, lambda pair=pair: run(*pair)) for pair in candidates]
-        cards = [future.result() for future in futures]
+        futures = [pool.submit(contextvars.copy_context().run, task) for task in tasks]
+        for future in futures:
+            for insight_id, card in future.result():
+                cards_by_id[insight_id] = card
+    cards = [cards_by_id[definition.id] for definition, _ in candidates]
     computed_at = now.isoformat()
     payload = build_insights_envelope(
         cards,

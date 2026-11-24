@@ -2369,7 +2369,8 @@ def test_every_detection_runs_and_query_is_visible_scoped_and_parameterized() ->
 
     queries = client.queries()
     for insight_id in EVERY_CARD:
-        sql, params = queries[insight_id]
+        qkey = _query_key_for(insight_id, queries)
+        sql, params = queries[qkey]
         assert (
             "FROM request_facts" in sql
             and "service_id={service_id:String}" in sql
@@ -2377,14 +2378,15 @@ def test_every_detection_runs_and_query_is_visible_scoped_and_parameterized() ->
         )
         assert "high_scale_batch_publications FINAL" in sql and "domain='request'" in sql
         assert "event_timestamp <= {window_end:DateTime64(3)}" in sql
-        window_only = (insight_id in DETECTIONS and DETECTIONS[insight_id].window_only) or insight_id in {
-            "repeated_patterns_fp",
-            "impossible_distance",
-        }
+        window_only = (
+            qkey in {"batch_window_url", "batch_beaconing"}
+            or (qkey in DETECTIONS and DETECTIONS[qkey].window_only)
+            or qkey in {"repeated_patterns_fp", "impossible_distance"}
+        )
         lower = "{window_start:DateTime64(3)}" if window_only else "{baseline_start:DateTime64(3)}"
-        # One raw-column-bounded fact scan per detection keeps partition and primary-key pruning available.
-        assert sql.count("FROM request_facts") == 1, insight_id
-        assert f"event_timestamp >= {lower}" in sql, insight_id
+        # One raw-column-bounded fact scan per query keeps partition and primary-key pruning available.
+        assert sql.count("FROM request_facts") == 1, (insight_id, qkey)
+        assert f"event_timestamp >= {lower}" in sql, (insight_id, qkey)
         assert (
             params["service_id"] == "svc" and params["baseline_start"] < params["window_start"] < params["window_end"]
         )
@@ -2455,6 +2457,15 @@ def _ceil_hour(value: datetime) -> datetime:
     return floor if floor == value else floor + timedelta(hours=1)
 
 
+def _query_key_for(insight_id: str, queries: dict[str, tuple[str, dict[str, Any]]]) -> str:
+    from backend.high_scale.insights.batches import BATCH_BY_DETECTION
+
+    batch = BATCH_BY_DETECTION.get(insight_id)
+    if batch is not None and f"batch_{batch.name}" in queries:
+        return f"batch_{batch.name}"
+    return insight_id
+
+
 def test_insights_read_fully_matched_baseline_hours_from_the_rollup() -> None:
     client = _RollupInsightsClient()
     cards = _insight_cards(_run_insights(client))
@@ -2467,7 +2478,7 @@ def test_insights_read_fully_matched_baseline_hours_from_the_rollup() -> None:
     assert (coverage_params["coverage_start"], coverage_params["coverage_end"]) == expected
     assert "high_scale_batch_publications FINAL" in coverage_sql and "FROM request_insight_hourly" in coverage_sql
     for insight_id in EVERY_CARD:
-        sql, detection_params = queries[insight_id]
+        sql, detection_params = queries[_query_key_for(insight_id, queries)]
         if insight_id in ROLLUP_DETECTIONS:
             assert f"shape = '{ROLLUP_DETECTIONS[insight_id]}'" in sql, insight_id
             assert (detection_params["rollup_start"], detection_params["rollup_end"]) == expected
@@ -2504,7 +2515,7 @@ def test_insights_fall_back_to_raw_facts_when_the_rollup_cannot_be_trusted(case:
     if case == "filtered":
         assert "groupArray" not in queries["history"][0]
     for insight_id in ROLLUP_DETECTIONS:
-        sql, params = queries[insight_id]
+        sql, params = queries[_query_key_for(insight_id, queries)]
         assert "request_insight_hourly" not in sql and "rollup_start" not in params, (case, insight_id)
 
 
@@ -2617,7 +2628,7 @@ def _insights_clock(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[float]]:
 def test_partial_insights_results_keep_card_errors_and_refresh_in_background(_insights_clock: list[float]) -> None:
     skew = _insights_clock
     spike = {"error_spikes": [{"url": "/x", "w_rate": 0.9, "b_rate": 0.0, "w_errors": 9, "w_total": 10, "b_total": 99}]}
-    client = _InsightsClient(spike, fail={"latency_regression"})
+    client = _InsightsClient(spike, fail={"batch_url_perf"})
     service = HighScaleService(service_id="svc", client=client, cursor_secret=b"s", request_watermark=None)
     req = InsightsRequest(window_size_hrs=24, baseline_hours=168)
 
@@ -2633,7 +2644,7 @@ def test_partial_insights_results_keep_card_errors_and_refresh_in_background(_in
     assert retry_cards["latency_regression"]["summary"] == "Query failed: RuntimeError"
     assert retry_cards["error_spikes"]["severity"] == "critical"
 
-    client._fail = {"latency_regression"}
+    client._fail = {"batch_url_perf"}
     forced = insights_endpoint(service, req, None, None, force_refresh=True)
     assert not forced.is_cached and len(client.calls) == 2 * computed_calls
 
@@ -2897,10 +2908,12 @@ def test_insufficient_history_and_missing_fields_or_pop_coords(monkeypatch: pyte
     # Omitted TLS fingerprint vs JA3 fallback
     client_no_fp = _InsightsClient(fields=[n for n in ALL_FIELDS if n != "ja4"])
     assert not (FINGERPRINT_DETECTIONS & set(_insight_cards(_run_insights(client_no_fp))))
-    assert "ja4 != ''" in client_no_lat.queries()["botnet_grouping"][0]
+    no_lat_queries = client_no_lat.queries()
+    assert "ja4 != ''" in no_lat_queries[_query_key_for("botnet_grouping", no_lat_queries)][0]
     client_ja3 = _InsightsClient(fields=[n for n in ALL_FIELDS if n != "ja4"] + ["ja3"])
     _run_insights(client_ja3)
-    assert "ja3 != ''" in client_ja3.queries()["botnet_grouping"][0]
+    ja3_queries = client_ja3.queries()
+    assert "ja3 != ''" in ja3_queries[_query_key_for("botnet_grouping", ja3_queries)][0]
 
     # Impossible distance POP code sanitization and empty POP map
     monkeypatch.setattr(
@@ -2919,7 +2932,7 @@ def test_insufficient_history_and_missing_fields_or_pop_coords(monkeypatch: pyte
 def test_insights_failures_masking_asn_and_window_clamping(monkeypatch: pytest.MonkeyPatch) -> None:
     client_fail = _InsightsClient(
         {"error_spikes": [{"url": "/x", "w_rate": 0.9, "b_rate": 0.0, "w_errors": 9, "w_total": 10, "b_total": 99}]},
-        fail={"latency_regression"},
+        fail={"batch_url_perf"},
     )
     cards = _insight_cards(_run_insights(client_fail))
     assert (
@@ -2933,8 +2946,20 @@ def test_insights_failures_masking_asn_and_window_clamping(monkeypatch: pytest.M
 
     # Analyst IP masking
     rows = {
-        "request_size_anomaly": [
-            {"ip": "203.0.113.77", "max_bytes": 9000, "avg_bytes": 4000.0, "w_total": 8, "b_p95": 1000.0}
+        "batch_ip_outlier": [
+            {
+                "ip": "203.0.113.77",
+                "max_bytes": 9000,
+                "avg_bytes": 4000.0,
+                "rs_w_total": 8,
+                "rs_b_p95": 1000.0,
+                "rs_b_total": 50,
+                "max_reqs": 0,
+                "avg_reqs": 0.0,
+                "ca_w_total": 0,
+                "ca_b_p95": 0.0,
+                "ca_b_total": 0,
+            }
         ]
     }
     plain = _insight_cards(_run_insights(_InsightsClient(rows)))["request_size_anomaly"]["items"][0]
@@ -2947,8 +2972,20 @@ def test_insights_failures_masking_asn_and_window_clamping(monkeypatch: pytest.M
         "backend.core.fos_client.get_asn_names",
         lambda sid, asns: (seen.append((sid, list(asns))), {7922: "Comcast"})[1],
     )
-    asn_rows = [{"asn": 7922, "w_cnt": 90, "b_cnt": 5, "b_total": 1000, "w_total": 120}]
-    asn_card = _insight_cards(_run_insights(_InsightsClient({"asn_concentration": asn_rows})))["asn_concentration"]
+    asn_rows = [
+        {
+            "asn": 7922,
+            "w_cnt": 90,
+            "b_cnt": 5,
+            "w_total_all": 120,
+            "b_total_all": 1000,
+            "w_hosting": 0,
+            "w_p_total": 0,
+            "b_hosting": 0,
+            "b_p_total": 0,
+        }
+    ]
+    asn_card = _insight_cards(_run_insights(_InsightsClient({"batch_asn": asn_rows})))["asn_concentration"]
     assert (
         seen == [("svc", [7922])]
         and asn_card["items"][0]["label"] == "AS7922 (Comcast)"
