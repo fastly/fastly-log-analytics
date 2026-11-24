@@ -2407,7 +2407,7 @@ def test_sec_t5_iter31_sql_dos_array_join_on_star_in_pii_and_numeric_parity() ->
     map_view_expr = console_access._redaction("custom_fields", "Map(String, String)", keys_sql)
     assert map_view_expr is not None
     assert "mapApply((k, v) -> (k, if((arrayExists(seg -> seg != '' AND (seg IN (" in map_view_expr
-    assert "decodeURLComponent(" in map_view_expr
+    assert "toValidUTF8(" in map_view_expr and "unhex(" in map_view_expr and "splitByChar('%'" in map_view_expr
 
     iter32_pii_idents = (
         "meta['user.authorization']",
@@ -3202,7 +3202,7 @@ def test_sec_t5_iter33_in_table_bypass_dos_and_pii_3way_parity() -> None:
     map_view_expr = console_access._redaction("custom_fields", "Map(String, String)", keys_sql)
     assert map_view_expr is not None
     assert "mapApply((k, v) -> (k, if((arrayExists(seg -> seg != '' AND (seg IN (" in map_view_expr
-    assert "decodeURLComponent(decodeURLComponent(" in map_view_expr
+    assert "toValidUTF8(" in map_view_expr and "unhex(" in map_view_expr and "splitByChar('%'" in map_view_expr
 
     for pii_k in _ITER33_WAVE32_PII_KEYS:
         assert console_access._is_console_pii_identifier(pii_k), f"console_access missed {pii_k!r}"
@@ -3887,7 +3887,7 @@ def test_sec_t5_iter34_pii_3way_parity_and_live_chdb() -> None:
     map_view_expr = console_access._redaction("custom_fields", "Map(String, String)", keys_sql)
     assert map_view_expr is not None
     assert "mapApply((k, v) -> (k, if((arrayExists(seg -> seg != '' AND (seg IN (" in map_view_expr
-    assert "decodeURLComponent(decodeURLComponent(" in map_view_expr
+    assert "toValidUTF8(" in map_view_expr and "unhex(" in map_view_expr and "splitByChar('%'" in map_view_expr
 
     for pii_k in _ITER34_WAVE33_PII_KEYS:
         assert console_access._is_console_pii_identifier(pii_k), f"console_access missed {pii_k!r}"
@@ -4528,7 +4528,7 @@ def test_sec_t5_iter35_pii_3way_parity_and_live_chdb() -> None:
     keys_sql = ", ".join(f"'{k}'" for k in console_access._MAP_MASKED_KEYS)
     map_view_expr = console_access._redaction("custom_fields", "Map(String, String)", keys_sql)
     assert map_view_expr is not None
-    assert "toValidUTF8(decodeURLComponent(decodeURLComponent(" in map_view_expr
+    assert "toValidUTF8(" in map_view_expr and "unhex(" in map_view_expr and "splitByChar('%'" in map_view_expr
 
     for pii_k in _ITER35_WAVE34_PII_KEYS:
         assert console_access._is_console_pii_identifier(pii_k), f"console_access missed {pii_k!r}"
@@ -4590,3 +4590,496 @@ def test_sec_t5_iter35_pii_3way_parity_and_live_chdb() -> None:
                     f"Real chdb Iter35 suite failed:\nSTDOUT:\n{run_res.stdout}\nSTDERR:\n{run_res.stderr}"
                 )
                 assert "ITER35_CHDB_ALL_OK" in run_res.stdout
+
+
+_ITER36_WAVE35_PII_KEYS = (
+    # Finding 4a: 4+ level bracket nesting
+    "foo.c[[[[0]]]]id",
+    "auth[x[y[z[0]]]]orization",
+    "clie[x[y[z[0]]]]nt_ip",
+    "clie[a[b[c[d]]]]nt_ip",
+    "clie[a[b[c[d[e[f[g]]]]]]]nt_ip",
+    "x_api_[a[b[c[d]]]]key",
+    # Finding 4b: %%XX / %<non-hex>%XX pure-ASCII URL decode parity
+    "cl%%69ent_ip",
+    "x_api_%%6bey",
+    "s%%69d",
+    "cl%!%69ent_ip",
+    "cl%%%69ent_ip",
+    "au%%74horization",
+    # Finding 4b: split-UTF-8 double-encoding
+    "cl%C4%25B0ent_ip",
+    "api_%e2%2584%aaey",
+    "x_api_%e2%2584%aaey",
+)
+
+_ITER36_BENIGN_KEYS = (
+    "items[0].status",
+    "items[0].a[1].status",
+    "items[0][1].status",
+    "req[0]status[1]code",
+    "cl%z%69ent_ip",
+    "status_code",
+    "cache_status",
+)
+
+_REAL_CHDB_ITER36_SCRIPT = r"""
+import chdb
+from backend.high_scale.postgres_control import console_access
+from backend.high_scale import query as hs_query
+from backend.models.analytics import QueryRequest as DashboardQueryRequest
+
+pii_keys = (
+    "foo.c[[[[0]]]]id",
+    "auth[x[y[z[0]]]]orization",
+    "clie[x[y[z[0]]]]nt_ip",
+    "clie[a[b[c[d]]]]nt_ip",
+    "clie[a[b[c[d[e[f[g]]]]]]]nt_ip",
+    "x_api_[a[b[c[d]]]]key",
+    "cl%%69ent_ip",
+    "x_api_%%6bey",
+    "s%%69d",
+    "cl%!%69ent_ip",
+    "cl%%%69ent_ip",
+    "au%%74horization",
+    "cl%C4%25B0ent_ip",
+    "api_%e2%2584%aaey",
+    "x_api_%e2%2584%aaey",
+)
+benign_keys = (
+    "items[0].status",
+    "items[0].a[1].status",
+    "items[0][1].status",
+    "req[0]status[1]code",
+    "cl%z%69ent_ip",
+    "status_code",
+    "cache_status",
+)
+
+keys_sql = ", ".join(console_access._literal(k) for k in console_access._MAP_MASKED_KEYS)
+map_expr = console_access._redaction("custom_fields", "Map(String, String)", keys_sql)
+assert map_expr is not None
+
+for analyzer_val in (0, 1):
+    s = chdb.session.Session()
+    s.query(f"SET allow_experimental_analyzer = {analyzer_val}")
+    s.query("CREATE DATABASE IF NOT EXISTS fla_test")
+    s.query("DROP TABLE IF EXISTS fla_test.request_facts")
+    s.query("DROP TABLE IF EXISTS fla_test.secret_tenant_b")
+    s.query("DROP VIEW IF EXISTS fla_test.v_req")
+    s.query(
+        "CREATE TABLE fla_test.request_facts ("
+        "service_id String, event_timestamp DateTime64(3, 'UTC'), url String, status UInt16, "
+        "custom_fields Map(String, String)"
+        ") ENGINE = MergeTree ORDER BY (service_id, event_timestamp)"
+    )
+    s.query("CREATE TABLE fla_test.secret_tenant_b (v String) ENGINE = Memory")
+    s.query("INSERT INTO fla_test.secret_tenant_b VALUES ('TENANT_B_SECRET_847291')")
+    s.query("USE fla_test")
+
+    all_entries = []
+    pii_secrets = {}
+    for idx, k in enumerate(pii_keys):
+        sec = f"ITER36_SECRET_{idx}_TOKEN"
+        pii_secrets[k] = sec
+        all_entries.append(f"{console_access._literal(k)}: {console_access._literal(sec)}")
+    for idx, k in enumerate(benign_keys):
+        all_entries.append(f"{console_access._literal(k)}: {console_access._literal(f'SAFE_VAL_{idx}')}")
+
+    map_lit = "{" + ", ".join(all_entries) + "}"
+    s.query(
+        "INSERT INTO fla_test.request_facts VALUES "
+        "('svc_alpha', '2026-11-19 00:10:00.000', '/r1', 200, " + map_lit + "), "
+        "('svc_beta', '2026-11-19 00:10:00.000', '/beta_secret', 200, map())"
+    )
+    s.query(
+        f"CREATE VIEW fla_test.v_req AS SELECT service_id, event_timestamp, url, status, {map_expr} "
+        "FROM fla_test.request_facts WHERE service_id = 'svc_alpha'"
+    )
+
+    # 1. Exact 3-way parity on ClickHouse view vs Python console_access vs Python query.py:
+    for k in pii_keys:
+        out = str(s.query(f"SELECT custom_fields[{console_access._literal(k)}] FROM fla_test.v_req", "TabSeparatedRaw")).strip()
+        assert out == "[redacted]", f"CH view failed to redact {k!r} (analyzer={analyzer_val}): got {out!r}"
+        assert console_access._is_console_pii_identifier(k), f"console_access missed {k!r}"
+        assert hs_query._classify_console_pii_key(k) is not None, f"query.py missed {k!r}"
+    for idx, k in enumerate(benign_keys):
+        out = str(s.query(f"SELECT custom_fields[{console_access._literal(k)}] FROM fla_test.v_req", "TabSeparatedRaw")).strip()
+        assert out == f"SAFE_VAL_{idx}", f"CH view FP on {k!r} (analyzer={analyzer_val}): got {out!r}"
+        assert not console_access._is_console_pii_identifier(k), f"console_access FP on {k!r}"
+        assert hs_query._classify_console_pii_key(k) is None, f"query.py FP on {k!r}"
+
+    # Verify live mapValues(custom_fields) via query_endpoint never leaks any PII secret:
+    class _ChdbClient:
+        _table_filters_verified = True
+
+        def __init__(self, sess):
+            self._s = sess
+
+        def execute(self, sql, settings=None, **kwargs):
+            import json as _json
+
+            s_parts = [f"allow_experimental_analyzer = {analyzer_val}"]
+            for k, v in (settings or {}).items():
+                val_esc = str(v).replace("\\", "\\\\").replace("'", "\\'")
+                s_parts.append(f"{k} = '{val_esc}'")
+            full_sql = f"{sql} SETTINGS {', '.join(s_parts)}"
+            raw = self._s.query(full_sql, "JSON").bytes()
+            return _json.loads(raw.decode("utf-8"))["data"] if raw else []
+
+    class _Svc:
+        service_id = "svc_alpha"
+
+        def __init__(self, cli):
+            self.client = cli
+
+    cli = _ChdbClient(s)
+    svc = _Svc(cli)
+    masked_tables = {"request_facts": "v_req"}
+    mv_res = hs_query.query_endpoint(
+        svc,
+        DashboardQueryRequest(sql="SELECT mapValues(custom_fields) AS vals FROM logs", max_rows=10),
+        "2026-11-19T00:00:00Z", "2026-11-19T01:00:00Z", mask_ips=True, tables=masked_tables,
+    )
+    leaked_blob = str(mv_res["data"])
+    for k, sec in pii_secrets.items():
+        assert sec not in leaked_blob, f"query_endpoint mapValues leaked {k!r} secret {sec!r} (analyzer={analyzer_val})"
+
+    # 2. Live chdb check: ClickHouse CTEs ARE case-sensitive, and query_endpoint blocks ALL Wave-35 bypasses:
+    wave35_bypasses = (
+        # Finding 1: Case-sensitive CTE mismatches & shadowed canonical tables
+        "WITH SECRET_TENANT_B AS (SELECT 1 AS a) SELECT * FROM secret_tenant_b",
+        "WITH REQUEST_FACTS AS (SELECT 1 AS a) SELECT * FROM request_facts",
+        "WITH SECRET_TENANT_B AS (SELECT 1 AS a) SELECT * FROM logs JOIN secret_tenant_b ON 1 = 1",
+        "WITH SECRET_TENANT_B AS (SELECT 1 AS a) SELECT * FROM logs UNION ALL SELECT * FROM secret_tenant_b",
+        "WITH `SECRET_TENANT_B` AS (SELECT 1 AS a) SELECT * FROM secret_tenant_b",
+        "WITH logs AS SECRET_TENANT_B SELECT url FROM logs WHERE 'TENANT_B_SECRET_847291' IN (secret_tenant_b)",
+        "SELECT url FROM logs UNION ALL WITH SECRET_TENANT_B AS (SELECT 1 AS a) SELECT v FROM secret_tenant_b",
+        # Finding 2: Bare-alias parity inversion & SELECT-head star wildcards
+        "WITH 1 AS limit SELECT url FROM logs by QUALIFY limit AS as UNION ALL WITH system.tables AS u SELECT url FROM logs",
+        "WITH 1 AS limit SELECT url FROM logs by QUALIFY limit AS as UNION ALL WITH pg_shadow AS u SELECT url FROM logs",
+        "WITH 1 AS limit SELECT url FROM logs by QUALIFY limit AS as UNION ALL WITH evil_cat.default.tbl AS u SELECT url FROM logs",
+        "WITH 1 AS limit SELECT url FROM logs by QUALIFY limit AS as UNION ALL WITH secret_tenant_b AS logs SELECT url FROM logs",
+        "WITH 1 AS limit SELECT 1 by HAVING limit AS as UNION ALL WITH system.tables AS u SELECT 1",
+        "WITH 'TENANT_B_SECRET_847291' AS limit SELECT url FROM logs by PREWHERE limit AS as IN (secret_tenant_b)",
+        "WITH 'TENANT_B_SECRET_847291' AS limit SELECT url FROM logs offset PREWHERE limit AS as IN (secret_tenant_b)",
+        "WITH 'TENANT_B_SECRET_847291' AS limit SELECT url FROM logs qualify PREWHERE limit AS as IN (secret_tenant_b)",
+        "WITH 1 AS limit SELECT url FROM logs by PREWHERE limit AS as UNION ALL WITH secret_tenant_b AS logs SELECT url FROM logs WHERE 'TENANT_B_SECRET_847291' IN (logs)",
+        "WITH limit AS (SELECT url FROM logs) SELECT TOP 1 * FROM limit AS as UNION ALL SELECT v FROM secret_tenant_b",
+        "WITH limit AS (SELECT url FROM logs) SELECT TOP 1 WITH TIES * FROM limit AS as UNION ALL SELECT v FROM secret_tenant_b",
+        "WITH limit AS (SELECT url FROM logs) SELECT DISTINCT ON (url) * FROM limit AS as UNION ALL SELECT v FROM secret_tenant_b",
+        "WITH 1 AS as SELECT url FROM logs by QUALIFY as UNION ALL SELECT v FROM secret_tenant_b",
+        "WITH 1 AS limit SELECT url FROM logs select PREWHERE limit AS as UNION ALL SELECT v FROM secret_tenant_b",
+        "WITH 1 AS limit SELECT url FROM logs table PREWHERE limit AS as UNION ALL SELECT v FROM secret_tenant_b",
+        "WITH 1 AS limit SELECT limit by FROM logs WHERE limit AS as UNION ALL SELECT v FROM secret_tenant_b",
+    )
+    for atk in wave35_bypasses:
+        try:
+            hs_query.query_endpoint(
+                svc,
+                DashboardQueryRequest(sql=atk, max_rows=10),
+                "2026-11-19T00:00:00Z", "2026-11-19T01:00:00Z", mask_ips=True, tables=masked_tables,
+            )
+            raise AssertionError(f"query_endpoint FAILED TO BLOCK Wave-35 bypass (analyzer={analyzer_val}): {atk}")
+        except PermissionError:
+            pass
+
+    # 3. Legitimate same-case CTEs, MixedCase CTEs, TOP 1 *, DISTINCT ON *, and LIMIT 1 BY execute cleanly:
+    for ok_sql, expected in (
+        ("WITH top_paths AS (SELECT url FROM logs) SELECT url FROM top_paths", [{"url": "/r1"}]),
+        ("WITH MixedPaths AS (SELECT url FROM logs) SELECT url FROM MixedPaths", [{"url": "/r1"}]),
+        ("SELECT TOP 1 url FROM logs", [{"url": "/r1"}]),
+        ("SELECT DISTINCT ON (url) url FROM logs", [{"url": "/r1"}]),
+        ("WITH 1 AS limit SELECT url FROM logs LIMIT 1 BY limit AS as UNION ALL SELECT url FROM logs", [{"url": "/r1"}, {"url": "/r1"}]),
+    ):
+        got = hs_query.query_endpoint(
+            svc,
+            DashboardQueryRequest(sql=ok_sql, max_rows=10),
+            "2026-11-19T00:00:00Z", "2026-11-19T01:00:00Z", mask_ips=True, tables=masked_tables,
+        )["data"]
+        assert got == expected, f"Legitimate query failed (analyzer={analyzer_val}) {ok_sql}: got={got}, expected={expected}"
+
+    s.close()
+
+print("ITER36_CHDB_ALL_OK")
+"""
+
+
+@pytest.mark.security_regression
+def test_sec_t5_iter36_case_sensitive_clickhouse_ctes() -> None:
+    """ITER36 remediation (Finding 1): case-sensitive ClickHouse CTE validation & rewriting + no canonical CTE shadowing."""
+    from backend.core.sql_validator import SQLValidationError, validate_user_sql
+
+    cte_case_mismatch_attacks = (
+        "WITH SECRET_TENANT_B AS (SELECT 1 AS a) SELECT * FROM secret_tenant_b",
+        "WITH SECRET_TENANT_B AS (SELECT 1 AS a) SELECT * FROM logs JOIN secret_tenant_b ON 1 = 1",
+        "WITH SECRET_TENANT_B AS (SELECT 1 AS a) SELECT * FROM logs UNION ALL SELECT * FROM secret_tenant_b",
+        'WITH "SECRET_TENANT_B" AS (SELECT 1 AS a) SELECT * FROM secret_tenant_b',
+        "WITH `SECRET_TENANT_B` AS (SELECT 1 AS a) SELECT * FROM secret_tenant_b",
+        "WITH SECRET_TENANT_B AS (SELECT 1 AS a) SELECT * FROM (SELECT * FROM secret_tenant_b) sub",
+        "SELECT url FROM logs UNION ALL WITH SECRET_TENANT_B AS (SELECT 1 AS a) SELECT * FROM secret_tenant_b",
+        "WITH logs AS SECRET_TENANT_B SELECT url FROM logs WHERE 'TENANT_B_SECRET_847291' IN (secret_tenant_b)",
+        "WITH ` secret_tenant_b ` AS (SELECT 1 AS a) SELECT * FROM secret_tenant_b",
+    )
+    for atk in cte_case_mismatch_attacks:
+        with pytest.raises(SQLValidationError):
+            validate_user_sql(atk, allowed_tables=frozenset({"logs"}), case_sensitive_ctes=True)
+
+    # Shadowing any canonical / allowed / fact table name (in ANY case) must be blocked by the high-scale rewriter:
+    shadow_attacks = (
+        "WITH REQUEST_FACTS AS (SELECT 1 AS a) SELECT * FROM request_facts",
+        "WITH Request_Facts AS (SELECT 1 AS a) SELECT * FROM Request_Facts",
+        "WITH LOGS AS (SELECT 1 AS a) SELECT * FROM logs",
+        "WITH `REQUEST_FACTS` AS (SELECT 1 AS a) SELECT * FROM request_facts",
+        "WITH RUM_VITALS AS (SELECT 1 AS a) SELECT * FROM logs",
+        "WITH RUM_ERRORS AS (SELECT 1 AS a) SELECT * FROM logs",
+        "WITH HIGH_SCALE_BATCH_PUBLICATIONS AS (SELECT 1 AS a) SELECT * FROM logs",
+        "WITH 1 AS REQUEST_FACTS SELECT url FROM logs",
+    )
+    for atk in shadow_attacks:
+        with pytest.raises(PermissionError):
+            hs_query._rewrite_console_sql(
+                atk, svc_table="request_facts", names={"request_facts": "fla_cv_svc_m_request_facts"}
+            )
+
+    # Legitimate same-case user CTEs continue to pass both validator and rewriter:
+    for ok_sql in (
+        "WITH top_paths AS (SELECT url FROM logs) SELECT * FROM top_paths",
+        "WITH MixedCase AS (SELECT url FROM logs) SELECT * FROM MixedCase",
+    ):
+        assert validate_user_sql(ok_sql, allowed_tables=frozenset({"logs"}), case_sensitive_ctes=True).parse_tree
+        rw = hs_query._rewrite_console_sql(
+            ok_sql, svc_table="request_facts", names={"request_facts": "fla_cv_svc_m_request_facts"}
+        )
+        assert "fla_cv_svc_m_request_facts" in rw
+
+
+@pytest.mark.security_regression
+def test_sec_t5_iter36_bare_alias_parity_and_select_head_star_wildcard() -> None:
+    """ITER36 remediation (Finding 2): bare-alias parity inversion & TOP/DISTINCT ON * wildcard in validator & rewriter."""
+    from backend.core.sql_validator import SQLValidationError, validate_user_sql
+
+    bare_alias_and_star_attacks = (
+        "WITH 1 AS limit SELECT url FROM logs by QUALIFY limit AS as UNION ALL WITH system.tables AS u SELECT url FROM logs",
+        "WITH 1 AS limit SELECT url FROM logs by QUALIFY limit AS as UNION ALL WITH pg_shadow AS u SELECT url FROM logs",
+        "WITH 1 AS limit SELECT url FROM logs by QUALIFY limit AS as UNION ALL WITH evil_cat.default.tbl AS u SELECT url FROM logs",
+        "WITH 1 AS limit SELECT url FROM logs by QUALIFY limit AS as UNION ALL WITH secret_tenant_b AS logs SELECT url FROM logs",
+        "WITH 1 AS limit SELECT 1 by HAVING limit AS as UNION ALL WITH system.tables AS u SELECT 1",
+        "WITH 'TENANT_B_SECRET_847291' AS limit SELECT url FROM logs by PREWHERE limit AS as IN (secret_tenant_b)",
+        "WITH 'TENANT_B_SECRET_847291' AS limit SELECT url FROM logs offset PREWHERE limit AS as IN (secret_tenant_b)",
+        "WITH 'TENANT_B_SECRET_847291' AS limit SELECT url FROM logs qualify PREWHERE limit AS as IN (secret_tenant_b)",
+        "WITH 1 AS limit SELECT url FROM logs by PREWHERE limit AS as UNION ALL WITH secret_tenant_b AS logs SELECT url FROM logs WHERE 'TENANT_B_SECRET_847291' IN (logs)",
+        "WITH limit AS (SELECT url FROM logs) SELECT TOP 1 * FROM limit AS as UNION ALL SELECT v FROM secret_tenant_b",
+        "WITH limit AS (SELECT url FROM logs) SELECT TOP 1 WITH TIES * FROM limit AS as UNION ALL SELECT v FROM secret_tenant_b",
+        "WITH limit AS (SELECT url FROM logs) SELECT DISTINCT ON (url) * FROM limit AS as UNION ALL SELECT v FROM secret_tenant_b",
+        # Additional r==1 and 5-word-run bare-alias parity inversions:
+        "WITH 1 AS as SELECT url FROM logs by QUALIFY as UNION ALL SELECT v FROM secret_tenant_b",
+        "WITH 1 AS limit SELECT url FROM logs select PREWHERE limit AS as UNION ALL SELECT v FROM secret_tenant_b",
+        "WITH 1 AS limit SELECT url FROM logs table PREWHERE limit AS as UNION ALL SELECT v FROM secret_tenant_b",
+        "WITH 1 AS limit SELECT limit by FROM logs WHERE limit AS as UNION ALL SELECT v FROM secret_tenant_b",
+        "WITH limit AS (SELECT url FROM logs) SELECT url FROM limit by QUALIFY limit AS as UNION ALL SELECT v FROM secret_tenant_b",
+    )
+    from types import SimpleNamespace
+
+    from backend.models.analytics import QueryRequest as DashboardQueryRequest
+
+    class _DenyClient:
+        _table_filters_verified = True
+
+        def execute(self, *_args: object, **_kwargs: object) -> list[dict[str, object]]:
+            raise AssertionError("attacker SQL should never reach ClickHouse client.execute")
+
+    svc = SimpleNamespace(service_id="svc_alpha", client=_DenyClient())
+    masked_tables = {"request_facts": "fla_cv_svc_m_request_facts"}
+
+    for atk in bare_alias_and_star_attacks:
+        with pytest.raises(SQLValidationError):
+            validate_user_sql(atk, allowed_tables=frozenset({"logs"}), case_sensitive_ctes=True)
+        with pytest.raises(PermissionError):
+            hs_query.query_endpoint(
+                svc,
+                DashboardQueryRequest(sql=atk, max_rows=10),
+                "2026-11-19T00:00:00Z",
+                "2026-11-19T01:00:00Z",
+                mask_ips=True,
+                tables=masked_tables,
+            )
+
+    # Direct _rewrite_console_sql defense-in-depth proof for bare-alias AND SELECT-head star wildcard in query.py:
+    rewriter_only_attacks = (
+        "WITH 1 AS limit SELECT url FROM logs by QUALIFY limit AS as UNION ALL WITH system.tables AS u SELECT url FROM logs",
+        "WITH 1 AS limit SELECT url FROM logs by QUALIFY limit AS as UNION ALL WITH pg_shadow AS u SELECT url FROM logs",
+        "WITH 1 AS limit SELECT url FROM logs by QUALIFY limit AS as UNION ALL WITH evil_cat.default.tbl AS u SELECT url FROM logs",
+        "WITH 1 AS limit SELECT url FROM logs by QUALIFY limit AS as UNION ALL WITH secret_tenant_b AS logs SELECT url FROM logs",
+        "WITH 1 AS limit SELECT 1 by HAVING limit AS as UNION ALL WITH system.tables AS u SELECT 1",
+        "WITH limit AS (SELECT url FROM logs) SELECT TOP 1 * FROM limit AS as UNION ALL WITH system.tables AS u SELECT url FROM logs",
+        "WITH limit AS (SELECT url FROM logs) SELECT TOP 1 WITH TIES * FROM limit AS as UNION ALL WITH system.tables AS u SELECT url FROM logs",
+        "WITH limit AS (SELECT url FROM logs) SELECT DISTINCT ON (url) * FROM limit AS as UNION ALL WITH system.tables AS u SELECT url FROM logs",
+        "WITH 1 AS as SELECT url FROM logs by QUALIFY as UNION ALL WITH system.tables AS u SELECT url FROM logs",
+        "WITH 1 AS limit SELECT url FROM logs select PREWHERE limit AS as UNION ALL WITH system.tables AS u SELECT url FROM logs",
+        "WITH 1 AS limit SELECT url FROM logs table PREWHERE limit AS as UNION ALL WITH system.tables AS u SELECT url FROM logs",
+    )
+    for atk in rewriter_only_attacks:
+        with pytest.raises((PermissionError, SQLValidationError)):
+            hs_query._rewrite_console_sql(
+                atk, svc_table="request_facts", names={"request_facts": "fla_cv_svc_m_request_facts"}
+            )
+
+    # Also prove allowed_tables=None blocks system.tables / pg_shadow / evil_cat on bare-alias queries:
+    for atk in (
+        "WITH 1 AS limit SELECT url FROM logs by QUALIFY limit AS as UNION ALL WITH system.tables AS u SELECT url FROM logs",
+        "WITH 1 AS limit SELECT url FROM logs by QUALIFY limit AS as UNION ALL WITH pg_shadow AS u SELECT url FROM logs",
+        "WITH 1 AS limit SELECT url FROM logs by QUALIFY limit AS as UNION ALL WITH evil_cat.default.tbl AS u SELECT url FROM logs",
+        "WITH 1 AS limit SELECT 1 by HAVING limit AS as UNION ALL WITH system.tables AS u SELECT 1",
+    ):
+        with pytest.raises(SQLValidationError):
+            validate_user_sql(atk, allowed_tables=None)
+
+    # Legitimate queries with LIMIT BY, TOP 1 *, DISTINCT ON *, and `SELECT as AS from` still pass:
+    for ok_sql in (
+        "WITH 1 AS limit SELECT url FROM logs LIMIT 1 BY limit AS as UNION ALL SELECT url FROM logs",
+        "WITH 1 AS as SELECT as AS from FROM logs",
+        "SELECT TOP 1 * FROM logs",
+        "SELECT DISTINCT ON (url) * FROM logs",
+    ):
+        assert validate_user_sql(ok_sql, allowed_tables=frozenset({"logs"}), case_sensitive_ctes=True).parse_tree
+        assert hs_query._rewrite_console_sql(
+            ok_sql, svc_table="request_facts", names={"request_facts": "fla_cv_svc_m_request_facts"}
+        )
+
+
+@pytest.mark.security_regression
+def test_sec_t5_iter36_linear_time_dos_union_with_and_in_rhs() -> None:
+    """ITER36 remediation (Findings 3a & 3b): O(N^2) UNION WITH and IN-RHS AS-chain DoS fixed to linear time (< 150ms)."""
+    import time
+
+    from backend.core.sql_validator import SQLValidationError, validate_user_sql
+
+    payloads = (
+        ("union_with_bare", "SELECT 1" + " UNION WITH" * 4000),
+        ("union_with_expr", "SELECT 1" + " UNION WITH 1 AS a SELECT 1" * 2000),
+        ("in_rhs_as_chain", "SELECT 1 FROM logs WHERE 1 IN ((1)" + " AS a" * 4000 + ")"),
+        ("with_expr_as_chain", "WITH ((1)" + " AS a" * 4000 + ") AS x SELECT 1 FROM logs"),
+    )
+    for label, sql in payloads:
+        assert len(sql.encode("utf-8")) <= 64 * 1024
+        t0 = time.perf_counter()
+        try:
+            validate_user_sql(sql, allowed_tables=frozenset({"logs"}))
+        except SQLValidationError:
+            pass
+        val_ms = (time.perf_counter() - t0) * 1000.0
+        assert val_ms < 150.0, f"DoS {label} validate_user_sql took {val_ms:.1f}ms (target < 150ms)"
+
+        t1 = time.perf_counter()
+        try:
+            hs_query._rewrite_console_sql(
+                sql, svc_table="request_facts", names={"request_facts": "fla_cv_svc_m_request_facts"}
+            )
+        except (PermissionError, SQLValidationError):
+            pass
+        rw_ms = (time.perf_counter() - t1) * 1000.0
+        assert rw_ms < 750.0, f"DoS {label} _rewrite_console_sql took {rw_ms:.1f}ms"
+
+
+@pytest.mark.security_regression
+def test_sec_t5_iter36_scrub_ip_text_trailing_dot_and_dns_ipv4() -> None:
+    """ITER36 remediation (Finding 5): scrub_ip_text masks trailing-dot and DNS-embedded IPv4 while preserving OIDs."""
+    from backend.core.share_db import scrub_ip_text
+
+    res_sentence = scrub_ip_text("Request from 192.168.1.50.")
+    assert "192.168.1.50" not in res_sentence
+    assert res_sentence.endswith(".")
+
+    res_nip = scrub_ip_text("https://192.168.1.50.nip.io/login")
+    assert "192.168.1.50" not in res_nip
+    assert ".nip.io/login" in res_nip
+
+    res_sslip = scrub_ip_text("http://10.20.30.40.sslip.io:8080/api")
+    assert "10.20.30.40" not in res_sslip
+    assert ".sslip.io:8080/api" in res_sslip
+
+    # 5-part OID must remain untouched:
+    assert scrub_ip_text("OID 1.2.3.4.5 ok") == "OID 1.2.3.4.5 ok"
+
+
+@pytest.mark.security_regression
+def test_sec_t5_iter36_pii_3way_parity_and_live_chdb() -> None:
+    """ITER36 remediation (Findings 1, 2, 4a, 4b): 3-way PII parity + live chdb (analyzer=0 and 1) SQL & PII suite."""
+    import os
+    import shutil
+    import site
+    import subprocess
+    from pathlib import Path
+
+    from backend.core.share_db import SHARED_PII_KEYS
+    from backend.high_scale.postgres_control import console_access
+
+    assert len(console_access.MASKED_KEYS) == 18
+    assert len(SHARED_PII_KEYS) == 18
+    assert set(console_access.MASKED_KEYS) == set(SHARED_PII_KEYS)
+
+    keys_sql = ", ".join(f"'{k}'" for k in console_access._MAP_MASKED_KEYS)
+    map_view_expr = console_access._redaction("custom_fields", "Map(String, String)", keys_sql)
+    assert map_view_expr is not None
+    assert "toValidUTF8(" in map_view_expr and "unhex(" in map_view_expr and "splitByChar('%'" in map_view_expr
+
+    for pii_k in _ITER36_WAVE35_PII_KEYS:
+        assert console_access._is_console_pii_identifier(pii_k), f"console_access missed {pii_k!r}"
+        assert console_access._redaction(pii_k, "String", keys_sql) is not None, f"_redaction missed {pii_k!r}"
+        assert hs_query._classify_console_pii_key(pii_k) is not None, f"query.py missed {pii_k!r}"
+
+    for safe_k in _ITER36_BENIGN_KEYS:
+        assert not console_access._is_console_pii_identifier(safe_k), f"console_access FP on {safe_k!r}"
+        assert hs_query._classify_console_pii_key(safe_k) is None, f"query.py FP on {safe_k!r}"
+
+    repo_root = str(Path(hs_query.__file__).resolve().parents[2])
+    try:
+        import chdb as _chdb  # noqa: F401
+
+        exec(_REAL_CHDB_ITER36_SCRIPT, {})
+    except ImportError:
+        uv_bin = shutil.which("uv")
+        if uv_bin is not None:
+            py_paths = [repo_root, *site.getsitepackages()]
+            env = {k: v for k, v in os.environ.items() if k != "VIRTUAL_ENV"}
+            env["PYTHONPATH"] = os.pathsep.join(py_paths)
+            probe = subprocess.run(
+                [
+                    uv_bin,
+                    "run",
+                    "--offline",
+                    "--no-project",
+                    "--with",
+                    "chdb",
+                    "python",
+                    "-c",
+                    "import chdb",
+                ],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            if probe.returncode == 0:
+                run_res = subprocess.run(
+                    [
+                        uv_bin,
+                        "run",
+                        "--offline",
+                        "--no-project",
+                        "--with",
+                        "chdb",
+                        "python",
+                        "-c",
+                        _REAL_CHDB_ITER36_SCRIPT,
+                    ],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                )
+                assert run_res.returncode == 0, (
+                    f"Real chdb Iter36 suite failed:\nSTDOUT:\n{run_res.stdout}\nSTDERR:\n{run_res.stderr}"
+                )
+                assert "ITER36_CHDB_ALL_OK" in run_res.stdout

@@ -2722,6 +2722,7 @@ impl<R: Runtime> Ctx<'_, '_, R> {
                 current,
                 windows: BTreeSet::new(),
                 closed,
+                visited_blocks: BTreeSet::new(),
             });
         }
         let inventory = state

@@ -427,7 +427,7 @@ fn scan(
 /// execution lasts at most 60 s, so a key untouched for a full 120 s bucket is final, which also
 /// covers KV's cross-POP propagation delay.
 fn closed_bucket(key: &str, sid: &str, now: u64) -> Option<u64> {
-    outbox_bucket(key, sid).filter(|bucket| bucket + 1 < now / OUTBOX_BUCKET_S)
+    outbox_bucket(key, sid).filter(|bucket| *bucket < (now / OUTBOX_BUCKET_S).saturating_sub(1))
 }
 
 /// Closed outbox keys from a sorted listing, excluding `skip`.
@@ -451,17 +451,16 @@ fn check_due(
     manual: bool,
 ) -> Due {
     let rows = cursor.pending.rows + outbox.len() as u64;
-    let oldest_s = cursor
-        .pending
-        .oldest_min
-        .map(|minute| minute * 60)
-        .into_iter()
-        .chain(
-            outbox
-                .iter()
-                .filter_map(|key| outbox_bucket(key, sid).map(|b| b * OUTBOX_BUCKET_S)),
-        )
-        .min();
+    let oldest_s =
+        cursor
+            .pending
+            .oldest_min
+            .map(|minute| minute.saturating_mul(60))
+            .into_iter()
+            .chain(outbox.iter().filter_map(|key| {
+                outbox_bucket(key, sid).and_then(|b| b.checked_mul(OUTBOX_BUCKET_S))
+            }))
+            .min();
     if rows == 0 && !cursor.behind {
         return Due {
             due: false,
@@ -930,12 +929,39 @@ fn group_count(rows: &[LogRow]) -> BTreeSet<(LogKind, u64)> {
         .collect()
 }
 
+const LEASE_SAFETY_MARGIN_S: u64 = 5;
+
 struct Lease<'a, R: Runtime> {
     runtime: &'a R,
+    expires_at: u64,
+    owner: String,
 }
 
 impl<R: Runtime> Lease<'_, R> {
+    fn is_fresh(&self) -> bool {
+        self.runtime.now().saturating_add(LEASE_SAFETY_MARGIN_S) < self.expires_at
+    }
+
+    fn is_unexpired(&self) -> bool {
+        self.runtime.now() < self.expires_at
+    }
+
+    fn can_mutate(&self, started: Instant) -> bool {
+        !over_wall_time(self.runtime, started) && self.is_fresh()
+    }
+
     fn release(self) {
+        if !self.is_fresh() {
+            if !self.is_unexpired() || self.runtime.admin_remaining_calls() < 2 {
+                return;
+            }
+            let Ok(Some(record)) = self.runtime.admin_get(LEASE_KEY) else {
+                return;
+            };
+            if record.value["owner"].as_str() != Some(self.owner.as_str()) || !self.is_unexpired() {
+                return;
+            }
+        }
         let _ = self.runtime.kv_delete(LEASE_KEY);
     }
 }
@@ -945,7 +971,12 @@ fn acquire_lease<'a, R: Runtime>(
     txn_id: Option<&str>,
 ) -> Result<Option<Lease<'a, R>>, String> {
     let now = runtime.now();
-    let value = json!({"txn_id": txn_id, "expires_at": now + LEASE_SECONDS});
+    let expires_at = now.saturating_add(LEASE_SECONDS);
+    let owner = runtime
+        .random()
+        .map(hex::encode)
+        .unwrap_or_else(|_| format!("{now}-{}", txn_id.unwrap_or("")));
+    let value = json!({"txn_id": txn_id, "owner": owner, "expires_at": expires_at});
     let current = runtime.admin_get(LEASE_KEY)?;
     let generation = match &current {
         None => None,
@@ -956,7 +987,11 @@ fn acquire_lease<'a, R: Runtime>(
     };
     Ok(runtime
         .admin_cas(LEASE_KEY, generation, &value)?
-        .then_some(Lease { runtime }))
+        .then_some(Lease {
+            runtime,
+            expires_at,
+            owner,
+        }))
 }
 
 fn put_file(
@@ -1004,7 +1039,7 @@ fn build_next_cursor(cursor: &Cursor, manifest: &Manifest, now: u64) -> Cursor {
         .retain(|entry| !flushed.contains(entry));
     next.pending.recompute();
     next.cache_min = match next.pending.oldest_min {
-        Some(oldest) => (oldest - 1).max(cursor.cache_min),
+        Some(oldest) => oldest.saturating_sub(1).max(cursor.cache_min),
         None => next.scan_min.max(cursor.cache_min),
     };
     let mut due: BTreeSet<(String, u64, String)> = next.purge_due.iter().cloned().collect();
@@ -1419,6 +1454,8 @@ fn txn_id(sid: &str, manifest: &Manifest) -> String {
 struct PreparedFiles(Vec<(String, LogKind, Vec<Value>)>);
 
 /// Core of a transaction. `prepared` is `None` on resume, when durable sources are re-read.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 fn run_txn(
     runtime: &impl Runtime,
     sid: &str,
@@ -1429,21 +1466,28 @@ fn run_txn(
     report: &mut FlushReport,
 ) -> Result<bool, String> {
     run_txn_with(
-        runtime, sid, target, manifest, prepared, None, started, report,
+        runtime, sid, target, manifest, prepared, None, None, started, report,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_txn_with(
-    runtime: &impl Runtime,
+fn run_txn_with<R: Runtime>(
+    runtime: &R,
     sid: &str,
     target: &FlushTarget<'_>,
     manifest: &mut Manifest,
     prepared: Option<PreparedFiles>,
     verified_svc: Option<&Value>,
+    lease: Option<&Lease<'_, R>>,
     started: Instant,
     report: &mut FlushReport,
 ) -> Result<bool, String> {
+    let can_mutate = || {
+        lease.map_or_else(
+            || !over_wall_time(runtime, started),
+            |l| l.can_mutate(started),
+        )
+    };
     // A fresh transaction (rows in hand) has a new id no cursor can carry yet.
     let already_committed = prepared.is_none()
         && runtime.admin_get(&cursor_key(sid))?.is_some_and(|record| {
@@ -1461,7 +1505,7 @@ fn run_txn_with(
             ),
         };
         for (key, kind, file_rows) in &files {
-            if over_wall_time(runtime, started) {
+            if !can_mutate() {
                 report.status = FlushStatus::Stopped;
                 return Ok(false);
             }
@@ -1472,7 +1516,7 @@ fn run_txn_with(
             report.rows += file_rows.len() as u64;
             report.bytes_written += encoded_len;
         }
-        if over_wall_time(runtime, started) {
+        if !can_mutate() {
             report.status = FlushStatus::Stopped;
             return Ok(false);
         }
@@ -1512,42 +1556,61 @@ fn delete_file(runtime: &impl Runtime, target: &FlushTarget<'_>, key: &str) -> R
     }
 }
 
+enum AbandonOutcome {
+    NotFenced,
+    Abandoned,
+    Stopped,
+}
+
 /// An uncommitted manifest whose cursor generation moved without carrying its txn id can never
 /// commit (the CAS is fenced). Drops its orphan outputs and the manifest so the next tick re-plans
 /// from the current cursor; sources are untouched, so nothing is lost.
-fn abandon_fenced(
-    runtime: &impl Runtime,
+fn abandon_fenced<R: Runtime>(
+    runtime: &R,
     sid: &str,
     target: &FlushTarget<'_>,
     manifest: &Manifest,
     cursor_record: &Option<Record>,
-) -> Result<bool, String> {
+    lease: &Lease<'_, R>,
+    started: Instant,
+) -> Result<AbandonOutcome, String> {
     let moved = cursor_record.as_ref().map(|r| r.generation.as_str())
         != manifest.cursor_generation.as_deref();
     let carries_txn = cursor_record
         .as_ref()
         .is_some_and(|r| r.value["txn_id"].as_str() == Some(manifest.txn_id.as_str()));
     if !moved || carries_txn {
-        return Ok(false);
+        return Ok(AbandonOutcome::NotFenced);
+    }
+    if !lease.can_mutate(started) {
+        return Ok(AbandonOutcome::Stopped);
     }
     if runtime.admin_remaining_calls() < manifest.outputs.len() as u32 + 2 {
-        return Ok(false);
+        return Ok(AbandonOutcome::NotFenced);
     }
     for key in &manifest.outputs {
+        if !lease.can_mutate(started) {
+            return Ok(AbandonOutcome::Stopped);
+        }
         delete_file(runtime, target, key)?;
     }
+    if !lease.can_mutate(started) {
+        return Ok(AbandonOutcome::Stopped);
+    }
     runtime.kv_delete(&manifest_key(sid))?;
-    Ok(true)
+    Ok(AbandonOutcome::Abandoned)
 }
 
 /// Idempotent cleanup driven by a committed manifest. Returns whether everything finished.
 /// Every step keeps the purge cursor write, the lease release and the caller's `reserve`.
-fn gc(
-    runtime: &impl Runtime,
+fn gc<R: Runtime>(
+    runtime: &R,
     sid: &str,
     manifest: &mut Manifest,
     reserve: u32,
     newly_committed: bool,
+    lease: &Lease<'_, R>,
+    started: Instant,
 ) -> Result<bool, String> {
     let mut progressed = newly_committed;
     // With no svc rows archived (`svc_range.1 == 0`) the trim would remove nothing.
@@ -1559,7 +1622,7 @@ fn gc(
     // The GC manifest read and write and the lease release stay available.
     let tail = 3 + reserve;
     while manifest.gc_next < manifest.outbox_keys.len() {
-        if runtime.admin_remaining_calls() < 1 + trim + tail {
+        if !lease.can_mutate(started) || runtime.admin_remaining_calls() < 1 + trim + tail {
             break;
         }
         runtime.kv_delete(&manifest.outbox_keys[manifest.gc_next])?;
@@ -1568,16 +1631,20 @@ fn gc(
     }
     let mut done = manifest.gc_next >= manifest.outbox_keys.len();
     if done && trim > 0 {
-        done = runtime.admin_remaining_calls() >= trim + tail
+        done = lease.can_mutate(started)
+            && runtime.admin_remaining_calls() >= trim + tail
             && trim_svc_outbox(runtime, sid, manifest)?;
     }
-    if done {
+    if done && lease.can_mutate(started) {
         manifest.gc_done = true;
         runtime.kv_delete(&manifest_key(sid))?;
-    } else if progressed {
-        save_manifest(runtime, sid, manifest)?;
+        Ok(true)
+    } else {
+        if progressed && lease.can_mutate(started) {
+            save_manifest(runtime, sid, manifest)?;
+        }
+        Ok(false)
     }
-    Ok(done)
 }
 
 /// Keeps the newest `SVC_OUTBOX_KEEP` entries, never removing one that is not archived.
@@ -1659,16 +1726,32 @@ fn trim_svc_outbox(runtime: &impl Runtime, sid: &str, manifest: &Manifest) -> Re
 
 /// D10: deletes `audit:<seq>` keys that are archived and older than the retention window,
 /// always keeping the newest `AUDIT_KEEP`. Returns the number of keys deleted.
+#[cfg(test)]
 fn audit_key_gc(
     runtime: &impl Runtime,
     archived_seq: Option<u64>,
     retention_days: u32,
     reserve: u32,
 ) -> Result<u32, String> {
+    audit_key_gc_leased(runtime, archived_seq, retention_days, reserve, None, None)
+}
+
+fn audit_key_gc_leased<R: Runtime>(
+    runtime: &R,
+    archived_seq: Option<u64>,
+    retention_days: u32,
+    reserve: u32,
+    lease: Option<&Lease<'_, R>>,
+    started: Option<Instant>,
+) -> Result<u32, String> {
+    let can_mutate = || match (lease, started) {
+        (Some(l), Some(s)) => l.can_mutate(s),
+        _ => true,
+    };
     let Some(archived) = archived_seq else {
         return Ok(0);
     };
-    if runtime.admin_remaining_calls() < 9 + reserve {
+    if !can_mutate() || runtime.admin_remaining_calls() < 9 + reserve {
         return Ok(0);
     }
     let (keys, _) = list_keys(runtime, "audit:", 11)?;
@@ -1683,13 +1766,16 @@ fn audit_key_gc(
         .saturating_sub(u64::from(retention_days) * 86_400);
     let mut deleted = 0;
     for (seq, key) in seqs.into_iter().take(candidates) {
-        if seq > archived || runtime.admin_remaining_calls() < 7 + reserve {
+        if seq > archived || !can_mutate() || runtime.admin_remaining_calls() < 7 + reserve {
             break;
         }
         let Some(record) = runtime.admin_get(&key)? else {
             continue;
         };
         if record.value["time"].as_u64().unwrap_or(u64::MAX) >= cutoff {
+            break;
+        }
+        if !can_mutate() {
             break;
         }
         runtime.kv_delete(&key)?;
@@ -1770,23 +1856,43 @@ fn purge_after_commit(
     Ok(purged)
 }
 
-fn finish_committed(
-    runtime: &impl Runtime,
+#[allow(clippy::too_many_arguments)]
+fn finish_committed<R: Runtime>(
+    runtime: &R,
     sid: &str,
     manifest: &mut Manifest,
     settings: &OperationalLogSettings,
     report: &mut FlushReport,
     reserve: u32,
     newly_committed: bool,
+    lease: &Lease<'_, R>,
+    started: Instant,
 ) -> Result<(), String> {
-    if gc(runtime, sid, manifest, reserve, newly_committed)? {
+    if gc(
+        runtime,
+        sid,
+        manifest,
+        reserve,
+        newly_committed,
+        lease,
+        started,
+    )? {
         let retention = settings
             .retention_days_by_kind
             .get("admin_audit")
             .copied()
             .unwrap_or(365);
-        audit_key_gc(runtime, manifest.next_cursor.audit_seq, retention, reserve)?;
-        report.purged += purge_after_commit(runtime, sid, &manifest.next_cursor, reserve)?;
+        audit_key_gc_leased(
+            runtime,
+            manifest.next_cursor.audit_seq,
+            retention,
+            reserve,
+            Some(lease),
+            Some(started),
+        )?;
+        if lease.can_mutate(started) {
+            report.purged += purge_after_commit(runtime, sid, &manifest.next_cursor, reserve)?;
+        }
         report.status = FlushStatus::Committed;
         report.behind = manifest.next_cursor.behind;
     } else {
@@ -1920,12 +2026,25 @@ pub fn log_flush_reserving(
                     live_manifest.committed = true;
                 }
                 if !live_manifest.committed {
-                    match abandon_fenced(runtime, sid, target, &live_manifest, &cursor_record) {
-                        Ok(true) => {
+                    match abandon_fenced(
+                        runtime,
+                        sid,
+                        target,
+                        &live_manifest,
+                        &cursor_record,
+                        &lease,
+                        started,
+                    ) {
+                        Ok(AbandonOutcome::Abandoned) => {
                             lease.release();
                             return Ok(report);
                         }
-                        Ok(false) => {}
+                        Ok(AbandonOutcome::Stopped) => {
+                            report.status = FlushStatus::Stopped;
+                            lease.release();
+                            return Ok(report);
+                        }
+                        Ok(AbandonOutcome::NotFenced) => {}
                         Err(error) => {
                             lease.release();
                             return Err(error);
@@ -1951,6 +2070,11 @@ pub fn log_flush_reserving(
                         false
                     };
                     if stale_svc {
+                        if !lease.can_mutate(started) {
+                            report.status = FlushStatus::Stopped;
+                            lease.release();
+                            return Ok(report);
+                        }
                         if runtime.admin_remaining_calls() < live_manifest.outputs.len() as u32 + 2
                         {
                             report.status = FlushStatus::Deferred;
@@ -1958,10 +2082,20 @@ pub fn log_flush_reserving(
                             return Ok(report);
                         }
                         for key in &live_manifest.outputs {
+                            if !lease.can_mutate(started) {
+                                report.status = FlushStatus::Stopped;
+                                lease.release();
+                                return Ok(report);
+                            }
                             if let Err(error) = delete_file(runtime, target, key) {
                                 lease.release();
                                 return Err(error);
                             }
+                        }
+                        if !lease.can_mutate(started) {
+                            report.status = FlushStatus::Stopped;
+                            lease.release();
+                            return Ok(report);
                         }
                         if let Err(error) = runtime.kv_delete(&manifest_key(sid)) {
                             lease.release();
@@ -1982,6 +2116,7 @@ pub fn log_flush_reserving(
                             &mut live_manifest,
                             None,
                             verified_svc.as_ref(),
+                            Some(&lease),
                             started,
                             &mut report,
                         );
@@ -1994,6 +2129,8 @@ pub fn log_flush_reserving(
                                 &mut report,
                                 reserve,
                                 true,
+                                &lease,
+                                started,
                             ),
                             Ok(false) => Ok(()),
                             Err(error) => Err(error),
@@ -2012,6 +2149,8 @@ pub fn log_flush_reserving(
                         &mut report,
                         reserve,
                         false,
+                        &lease,
+                        started,
                     );
                     lease.release();
                     finished?;
@@ -2139,6 +2278,10 @@ pub fn log_flush_reserving(
         manifest.outputs = prepared.0.iter().map(|(key, _, _)| key.clone()).collect();
         manifest.next_cursor = build_next_cursor(&cursor, &manifest, now);
         manifest.next_cursor.behind = left;
+        if !lease.is_fresh() {
+            report.status = FlushStatus::Stopped;
+            return Ok(());
+        }
         // Only the lease holder writes the manifest, so the generation read above still holds.
         let ok = runtime.admin_cas(
             &manifest_key(sid),
@@ -2148,12 +2291,14 @@ pub fn log_flush_reserving(
         if !ok {
             return Err("manifest_conflict".to_string());
         }
-        if run_txn(
+        if run_txn_with(
             runtime,
             sid,
             target,
             &mut manifest,
             Some(prepared),
+            None,
+            Some(&lease),
             started,
             &mut report,
         )? {
@@ -2165,6 +2310,8 @@ pub fn log_flush_reserving(
                 &mut report,
                 reserve,
                 true,
+                &lease,
+                started,
             )?;
         }
         Ok(())
@@ -2238,7 +2385,7 @@ fn clear_cache_leased(
     cursor.scan_min = closed_end;
     cursor.pending.recompute();
     cursor.cache_min = match cursor.pending.oldest_min {
-        Some(oldest) => (oldest - 1).max(cursor.cache_min),
+        Some(oldest) => oldest.saturating_sub(1).max(cursor.cache_min),
         None => closed_end.max(cursor.cache_min),
     };
     let committed = runtime

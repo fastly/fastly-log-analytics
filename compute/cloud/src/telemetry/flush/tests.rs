@@ -3573,3 +3573,280 @@ fn iter35_m1_svc_outbox_u64_max_base_overflow_resets_cleanly() {
         assert_eq!(rt.cursor().svc_outbox_archived, u64::MAX - 1);
     }
 }
+
+#[test]
+fn iter36_f9_expired_lease_never_deletes_new_owner_lease_or_active_manifest_or_fos() {
+    // Subcase A: Worker A acquires lease; clock passes expiry; Worker B steals lease;
+    // Worker A calls `release()` -> MUST NOT delete Worker B's active lease!
+    {
+        let rt = Rt::new();
+        let lease_a = acquire_lease(&rt, Some("txn-a"))
+            .unwrap()
+            .expect("worker A lease");
+        rt.now.set(NOW_S + LEASE_SECONDS);
+        let _lease_b = acquire_lease(&rt, Some("txn-b"))
+            .unwrap()
+            .expect("worker B stole lease");
+        let b_record = rt.get_kv(LEASE_KEY).expect("worker B lease present");
+        assert_eq!(b_record["txn_id"], "txn-b");
+
+        lease_a.release();
+        assert_eq!(
+            rt.get_kv(LEASE_KEY),
+            Some(b_record),
+            "iter36 F9 (A): expired Worker A lease.release() deleted Worker B's active lease!"
+        );
+    }
+
+    // Subcase B: Mid-flight lease expiry during `abandon_fenced` / `gc` / `stale_svc`
+    // MUST abort without FOS DELETE, without deleting `manifest_key`, and without deleting Worker B's stolen lease!
+    struct ExpireUnderLeaseRt {
+        inner: Rt,
+        expired_once: Cell<bool>,
+        fos_deletes: Cell<u32>,
+    }
+    impl SetupStores for ExpireUnderLeaseRt {
+        fn config_present(&self, n: &str) -> Result<bool, String> {
+            self.inner.config_present(n)
+        }
+        fn secret_present(&self, n: &str) -> Result<bool, String> {
+            self.inner.secret_present(n)
+        }
+        fn state_linked(&self) -> Result<bool, String> {
+            self.inner.state_linked()
+        }
+    }
+    impl Runtime for ExpireUnderLeaseRt {
+        fn config(&self, k: &str) -> Result<Option<String>, String> {
+            self.inner.config(k)
+        }
+        fn secret(&self, k: &str) -> Result<Option<String>, String> {
+            self.inner.secret(k)
+        }
+        fn random(&self) -> Result<[u8; 32], String> {
+            Ok([9; 32])
+        }
+        fn now(&self) -> u64 {
+            self.inner.now()
+        }
+        fn checks(&self, l: bool) -> Result<Value, String> {
+            self.inner.checks(l)
+        }
+        fn versions(&self) -> Result<Value, String> {
+            self.inner.versions()
+        }
+        fn compute_service_id(&self) -> Option<String> {
+            self.inner.compute_service_id()
+        }
+        fn compute_service_version(&self) -> Option<String> {
+            self.inner.compute_service_version()
+        }
+        fn admin_get(&self, key: &str) -> Result<Option<Record>, String> {
+            let res = self.inner.admin_get(key);
+            // Right after Worker A re-reads `manifest_key(SID)` under its lease, simulate Worker A stalling
+            // past LEASE_SECONDS and Worker B stealing `LEASE_KEY`!
+            if key == manifest_key(SID)
+                && self.inner.get_kv(LEASE_KEY).is_some()
+                && !self.expired_once.replace(true)
+            {
+                self.inner.now.set(NOW_S + LEASE_SECONDS + 10);
+                self.inner.put_kv(
+                    LEASE_KEY,
+                    json!({
+                        "txn_id": "worker-b-active",
+                        "owner": "worker-b-owner",
+                        "expires_at": NOW_S + 2 * LEASE_SECONDS + 10,
+                    }),
+                );
+            }
+            res
+        }
+        fn admin_cas(&self, k: &str, g: Option<&str>, v: &Value) -> Result<bool, String> {
+            self.inner.admin_cas(k, g, v)
+        }
+        fn kv_list(&self, p: &str, c: Option<&str>, l: u32) -> Result<KvPage, String> {
+            self.inner.kv_list(p, c, l)
+        }
+        fn kv_delete(&self, key: &str) -> Result<(), String> {
+            self.inner.kv_delete(key)
+        }
+        fn admin_fos(&self, req: FosRequest<'_>) -> Result<FosResponse, String> {
+            if req.method == "DELETE" {
+                self.fos_deletes.set(self.fos_deletes.get() + 1);
+            }
+            self.inner.admin_fos(req)
+        }
+        fn admin_remaining_calls(&self) -> u32 {
+            self.inner.admin_remaining_calls()
+        }
+        fn core_cache_lookup(&self, key: &str) -> Result<Option<CoreCacheEntry>, CoreCacheError> {
+            self.inner.core_cache_lookup(key)
+        }
+        fn core_cache_replace(
+            &self,
+            key: &str,
+            sk: &[&str],
+            ttl: Duration,
+            u: &dyn Fn(Option<CoreCacheEntry>) -> CoreCacheEntry,
+        ) -> Result<(), CoreCacheError> {
+            self.inner.core_cache_replace(key, sk, ttl, u)
+        }
+        fn core_cache_purge(&self, surrogate: &str) -> Result<(), CoreCacheError> {
+            self.inner.core_cache_purge(surrogate)
+        }
+        fn vcpu_ms(&self) -> u64 {
+            self.inner.vcpu_ms()
+        }
+        fn admin_elapsed(&self, started: Instant) -> Duration {
+            self.inner.admin_elapsed(started)
+        }
+    }
+
+    // B1: Fenced manifest (`abandon_fenced` path)
+    {
+        let inner = Rt::new();
+        inner.set_cursor(NOW_MIN - 4);
+        inner.put_kv(&q("aa"), cron_line("r1"));
+        inner.fail_put.set(true);
+        run_err(&inner);
+        let manifest_val = inner.get_kv(&manifest_key(SID)).unwrap();
+        let orphan = manifest_val["outputs"][0].as_str().unwrap().to_owned();
+        inner
+            .objects
+            .borrow_mut()
+            .insert(orphan.clone(), vec![1, 2, 3]);
+        inner.bump(&cursor_key(SID));
+        inner.fail_put.set(false);
+        inner.budget.set(inner.calls.get() + 64);
+
+        let rt = ExpireUnderLeaseRt {
+            inner,
+            expired_once: Cell::new(false),
+            fos_deletes: Cell::new(0),
+        };
+        let rep = log_flush(
+            &rt,
+            SID,
+            Some(&target()),
+            &OperationalLogSettings::default(),
+            true,
+            Instant::now(),
+        )
+        .unwrap();
+        assert_eq!(
+            rep.status,
+            FlushStatus::Stopped,
+            "iter36 F9 (B1): must stop after lease expiry"
+        );
+        assert_eq!(
+            rt.fos_deletes.get(),
+            0,
+            "iter36 F9 (B1): must NOT call FOS DELETE after lease expiry!"
+        );
+        assert!(
+            rt.inner.get_kv(&manifest_key(SID)).is_some(),
+            "iter36 F9 (B1): must NOT delete manifest_key after lease expiry!"
+        );
+        assert_eq!(
+            rt.inner
+                .get_kv(LEASE_KEY)
+                .and_then(|v| v["owner"].as_str().map(str::to_owned))
+                .as_deref(),
+            Some("worker-b-owner"),
+            "iter36 F9 (B1): must NOT delete Worker B's stolen lease!"
+        );
+    }
+
+    // B2: Committed manifest awaiting GC (`gc` path)
+    {
+        let inner = Rt::new();
+        inner.set_cursor(NOW_MIN - 4);
+        inner.put_kv(&q("aa"), cron_line("r1"));
+        inner.fail_put.set(true);
+        run_err(&inner);
+        let manifest_val = inner.get_kv(&manifest_key(SID)).unwrap();
+        let mut cursor_val = inner.get_kv(&cursor_key(SID)).unwrap();
+        cursor_val["txn_id"] = manifest_val["txn_id"].clone();
+        inner.put_kv(&cursor_key(SID), cursor_val);
+        inner.fail_put.set(false);
+        inner.budget.set(inner.calls.get() + 64);
+
+        let rt = ExpireUnderLeaseRt {
+            inner,
+            expired_once: Cell::new(false),
+            fos_deletes: Cell::new(0),
+        };
+        let rep = log_flush(
+            &rt,
+            SID,
+            Some(&target()),
+            &OperationalLogSettings::default(),
+            true,
+            Instant::now(),
+        )
+        .unwrap();
+        assert_eq!(
+            rep.status,
+            FlushStatus::GcPending,
+            "iter36 F9 (B2): gc must defer cleanly on expired lease"
+        );
+        assert!(
+            rt.inner.get_kv(&manifest_key(SID)).is_some(),
+            "iter36 F9 (B2): gc must NOT delete manifest_key after lease expiry!"
+        );
+        assert!(
+            rt.inner.get_kv(&q("aa")).is_some(),
+            "iter36 F9 (B2): gc must NOT delete outbox key after lease expiry!"
+        );
+        assert_eq!(
+            rt.inner
+                .get_kv(LEASE_KEY)
+                .and_then(|v| v["owner"].as_str().map(str::to_owned))
+                .as_deref(),
+            Some("worker-b-owner"),
+            "iter36 F9 (B2): must NOT delete Worker B's stolen lease!"
+        );
+    }
+}
+
+#[test]
+fn iter36_f10_flush_u64_max_bucket_and_oldest_min_zero_do_not_panic_or_wrap() {
+    let max_key = outbox_key(SID, u64::MAX, Some("ovf"));
+    assert_eq!(
+        closed_bucket(&max_key, SID, NOW_S),
+        None,
+        "iter36 F10: u64::MAX outbox bucket must not overflow or wrap to closed!"
+    );
+    let zero_key = outbox_key(SID, 0, Some("z"));
+    assert_eq!(closed_bucket(&zero_key, SID, 0), None);
+    assert_eq!(closed_bucket(&zero_key, SID, OUTBOX_BUCKET_S), None);
+    assert_eq!(closed_bucket(&zero_key, SID, OUTBOX_BUCKET_S * 2), Some(0));
+    let cursor = Cursor::default();
+    let due = check_due(
+        &cursor,
+        &[max_key],
+        SID,
+        NOW_S,
+        &OperationalLogSettings::default(),
+        false,
+    );
+    assert!(due.oldest_s.is_some());
+
+    // oldest_min == Some(0) must not underflow in build_next_cursor or clear_cache!
+    let mut cur0 = Cursor {
+        scan_min: 10,
+        cache_min: 0,
+        ..Default::default()
+    };
+    cur0.pending.nonempty = vec![("api_telemetry".into(), 0, 0, 1, SID.into())];
+    cur0.pending.recompute();
+    assert_eq!(cur0.pending.oldest_min, Some(0));
+    let next = build_next_cursor(&cur0, &Manifest::default(), NOW_S);
+    assert_eq!(next.cache_min, 0);
+
+    let rt = Rt::new();
+    rt.put_kv(&cursor_key(SID), to_value(&cur0));
+    rt.now.set(180);
+    clear_cache(&rt, SID, Some(LogKind::FosUsage)).unwrap();
+    assert_eq!(rt.cursor().cache_min, 0);
+}

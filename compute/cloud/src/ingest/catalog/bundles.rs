@@ -22,6 +22,8 @@ pub struct Inventory {
     /// Snapshotted after the hour closed, so it may build the hour's final bundle.
     #[serde(default)]
     pub closed: bool,
+    #[serde(default)]
+    pub visited_blocks: BTreeSet<String>,
 }
 
 /// Catalog reads and commits made by the `summary_bundle` stage. They stop at the stage's own
@@ -43,6 +45,9 @@ pub fn collect<R: Runtime>(
         if store.runtime.admin_remaining_calls() <= reserve + 1 || !admitted(store) {
             return Ok(false);
         }
+        if inventory.visited_blocks.contains(&reference.key) {
+            return Err("catalog_parent_invalid".into());
+        }
         let block: Block = read(store, &reference.key)?;
         if block.version != VERSION
             || block.service_id != store.service.service_id
@@ -51,6 +56,17 @@ pub fn collect<R: Runtime>(
             || block.generation > inventory.generation
         {
             return Err("catalog_manifest_invalid".into());
+        }
+        inventory.visited_blocks.insert(reference.key.clone());
+        if inventory.visited_blocks.len() > MAX_SOURCES {
+            return Err("catalog_identity_admission".into());
+        }
+        if block.previous.as_ref().is_some_and(|parent| {
+            parent.generation > reference.generation
+                || parent.key == reference.key
+                || inventory.visited_blocks.contains(&parent.key)
+        }) {
+            return Err("catalog_parent_invalid".into());
         }
         inventory
             .windows
@@ -402,4 +418,230 @@ pub fn cleanup<R: Runtime>(
             .admin_event(serde_json::json!({"event":"catalog.bundle_cleanup_conflict"}));
     }
     Ok(deleted.deleted.len() as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        admin::{FosRequest, FosResponse, Record, Service},
+        setup::SetupStores,
+    };
+    use serde_json::json;
+    use std::{
+        cell::{Cell, RefCell},
+        time::Instant,
+    };
+
+    struct MockRt {
+        objects: RefCell<BTreeMap<String, Vec<u8>>>,
+        remaining: Cell<u32>,
+        gets: Cell<u32>,
+    }
+    impl SetupStores for MockRt {
+        fn config_present(&self, _: &str) -> Result<bool, String> {
+            Ok(true)
+        }
+        fn secret_present(&self, _: &str) -> Result<bool, String> {
+            Ok(true)
+        }
+        fn state_linked(&self) -> Result<bool, String> {
+            Ok(true)
+        }
+    }
+    impl Runtime for MockRt {
+        fn config(&self, _: &str) -> Result<Option<String>, String> {
+            Ok(None)
+        }
+        fn secret(&self, _: &str) -> Result<Option<String>, String> {
+            Ok(Some("tok".into()))
+        }
+        fn random(&self) -> Result<[u8; 32], String> {
+            Ok([0; 32])
+        }
+        fn now(&self) -> u64 {
+            1_800_003_600
+        }
+        fn checks(&self, _: bool) -> Result<Value, String> {
+            Ok(json!({}))
+        }
+        fn versions(&self) -> Result<Value, String> {
+            Ok(json!({}))
+        }
+        fn compute_service_id(&self) -> Option<String> {
+            None
+        }
+        fn compute_service_version(&self) -> Option<String> {
+            None
+        }
+        fn admin_get(&self, _: &str) -> Result<Option<Record>, String> {
+            Ok(None)
+        }
+        fn admin_cas(&self, _: &str, _: Option<&str>, _: &Value) -> Result<bool, String> {
+            Ok(true)
+        }
+        fn admin_fos(&self, request: FosRequest<'_>) -> Result<FosResponse, String> {
+            let rem = self.remaining.get();
+            if rem == 0 {
+                return Err("backend_budget_exhausted".into());
+            }
+            self.remaining.set(rem - 1);
+            if request.method == "GET" {
+                self.gets.set(self.gets.get() + 1);
+            }
+            let key = request.key.trim_start_matches('/');
+            match self.objects.borrow().get(key) {
+                Some(body) => Ok(FosResponse {
+                    status: 200,
+                    body: body.clone(),
+                    cdn_cache: None,
+                    retry_after: None,
+                }),
+                None => Ok(FosResponse {
+                    status: 404,
+                    body: Vec::new(),
+                    cdn_cache: None,
+                    retry_after: None,
+                }),
+            }
+        }
+        fn admin_remaining_calls(&self) -> u32 {
+            self.remaining.get()
+        }
+    }
+
+    fn test_service() -> Service {
+        serde_json::from_value(json!({
+            "service_id": "svc", "name": "n", "status": "active", "created_at": 0, "updated_at": 0,
+            "config_version": 1, "logging_enabled": true, "logging_endpoint_name": "e",
+            "log_period": 120, "sample_rate": 1, "edge_only": false, "custom_condition": "",
+            "fos_bucket": "fos-abcdefghijklmnopqrst12-logs", "fos_prefix": "", "fos_region": "us-east-1",
+            "fos_endpoint": "x", "log_fields": [], "field_limits": {}, "fastly_token_ref": "t",
+            "fos_access_key_ref": "ak", "fos_secret_key_ref": "sk", "owner": "o",
+            "bucket_adopted": false, "bucket_checked": false, "last_activated_version": null,
+            "last_reconcile": null, "pending_job_id": null
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn iter36_f7_bundles_collect_rejects_equal_gen_cycle_self_loop_and_upward_parent() {
+        let svc = test_service();
+        let hour = 1_800_000_000i64;
+        let key_a = "processed/_catalog/block-a.json".to_owned();
+        let key_b = "processed/_catalog/block-b.json".to_owned();
+
+        // 1. 2-node equal-gen cycle A (gen 5) -> B (gen 5) -> A (gen 5)
+        let blk_a = Block {
+            version: VERSION,
+            service_id: svc.service_id.clone(),
+            generation: 5,
+            hour,
+            previous: Some(Reference {
+                key: key_b.clone(),
+                generation: 5,
+            }),
+            files: vec![],
+            summaries: vec![],
+            replaces: vec![],
+            committed_at: BTreeMap::new(),
+        };
+        let blk_b = Block {
+            version: VERSION,
+            service_id: svc.service_id.clone(),
+            generation: 5,
+            hour,
+            previous: Some(Reference {
+                key: key_a.clone(),
+                generation: 5,
+            }),
+            files: vec![],
+            summaries: vec![],
+            replaces: vec![],
+            committed_at: BTreeMap::new(),
+        };
+        let rt = MockRt {
+            objects: RefCell::new(BTreeMap::from([
+                (key_a.clone(), serde_json::to_vec(&blk_a).unwrap()),
+                (key_b.clone(), serde_json::to_vec(&blk_b).unwrap()),
+            ])),
+            remaining: Cell::new(20),
+            gets: Cell::new(0),
+        };
+        let store = Store {
+            runtime: &rt,
+            service: &svc,
+            access_key: "ak".into(),
+            secret_key: "sk".into(),
+            started: Instant::now(),
+            vcpu_start: 0,
+        };
+        let mut inv: Inventory = serde_json::from_value(json!({
+            "hour": hour,
+            "generation": 5,
+            "current": { "key": key_a, "generation": 5 },
+            "windows": [],
+            "closed": false
+        }))
+        .unwrap();
+        let res = collect(&store, &mut inv, 0);
+        assert_eq!(res.err().as_deref(), Some("catalog_parent_invalid"));
+        assert!(
+            rt.gets.get() <= 2,
+            "must terminate immediately after visiting A and B"
+        );
+
+        // 2. Cross-tick budget pause (visit A -> Ok(false), resume on B -> Err("catalog_parent_invalid"))
+        rt.remaining.set(2);
+        rt.gets.set(0);
+        let mut inv_pause: Inventory = serde_json::from_value(json!({
+            "hour": hour,
+            "generation": 5,
+            "current": { "key": key_a, "generation": 5 },
+            "windows": [],
+            "closed": false
+        }))
+        .unwrap();
+        assert_eq!(collect(&store, &mut inv_pause, 0), Ok(false));
+        let roundtripped: Inventory =
+            serde_json::from_slice(&serde_json::to_vec(&inv_pause).unwrap()).unwrap();
+        let mut inv_resumed = roundtripped;
+        rt.remaining.set(10);
+        assert_eq!(
+            collect(&store, &mut inv_resumed, 0).err().as_deref(),
+            Some("catalog_parent_invalid")
+        );
+
+        // 3. Upward generation parent (parent.generation > reference.generation)
+        let blk_up = Block {
+            version: VERSION,
+            service_id: svc.service_id.clone(),
+            generation: 5,
+            hour,
+            previous: Some(Reference {
+                key: key_b.clone(),
+                generation: 6,
+            }),
+            files: vec![],
+            summaries: vec![],
+            replaces: vec![],
+            committed_at: BTreeMap::new(),
+        };
+        rt.objects
+            .borrow_mut()
+            .insert(key_a.clone(), serde_json::to_vec(&blk_up).unwrap());
+        rt.remaining.set(10);
+        let mut inv_up: Inventory = serde_json::from_value(json!({
+            "hour": hour,
+            "generation": 6,
+            "current": { "key": key_a, "generation": 5 },
+            "windows": [],
+            "closed": false
+        }))
+        .unwrap();
+        assert_eq!(
+            collect(&store, &mut inv_up, 0).err().as_deref(),
+            Some("catalog_parent_invalid")
+        );
+    }
 }

@@ -212,6 +212,7 @@ def validate_user_sql(
     session_id: str | None = None,
     service_id: str | None = None,
     allowed_tables: AbstractSet[str] | None = None,
+    case_sensitive_ctes: bool = False,
 ) -> ValidationResult:
     if not isinstance(sql, str):
         _reject(sql, "input_type", "SQL must be a string", session_id, service_id)
@@ -227,11 +228,20 @@ def validate_user_sql(
             service_id,
         )
     t0 = time.monotonic()
-    parsed, _node, err_code, err_msg = _parse_single_select_node(sql, parser_con)
+    parsed, _node, err_code, err_msg = _parse_single_select_node(
+        sql, parser_con, case_sensitive_ctes=case_sensitive_ctes
+    )
     if err_code is not None or parsed is None:
         _reject(sql, err_code or "parse_error", err_msg or "SQL parse error", session_id, service_id)
     normalized_allowed = frozenset(t.lower() for t in allowed_tables) if allowed_tables is not None else None
-    _walk_and_validate(parsed, sql, session_id, service_id, allowed_tables=normalized_allowed)
+    _walk_and_validate(
+        parsed,
+        sql,
+        session_id,
+        service_id,
+        allowed_tables=normalized_allowed,
+        case_sensitive_ctes=case_sensitive_ctes,
+    )
     elapsed_ms = (time.monotonic() - t0) * 1000
     if elapsed_ms > 50:
         logger.warning(
@@ -284,8 +294,10 @@ def _check_table_reference(
     *,
     allowed_tables: frozenset[str] | None = None,
     cte_aliases: frozenset[str] = frozenset(),
+    case_sensitive_ctes: bool = False,
 ) -> None:
-    table_name = (node.get("table_name") or "").strip()
+    raw_table_name = node.get("table_name") or ""
+    table_name = raw_table_name.strip()
     schema_name = (node.get("schema_name") or "").strip().lower()
     catalog_name = (node.get("catalog_name") or "").strip().lower()
     if "/" in table_name or "\\" in table_name or "." in table_name:
@@ -330,11 +342,12 @@ def _check_table_reference(
             session_id,
             service_id,
         )
+    cte_match_name = raw_table_name if case_sensitive_ctes else name_lower
     if (
         allowed_tables is not None
         and name_lower
         and name_lower not in allowed_tables
-        and not (name_lower in cte_aliases and not schema_name and not catalog_name)
+        and not (cte_match_name in cte_aliases and not schema_name and not catalog_name)
     ):
         _reject(
             original_sql,
@@ -353,6 +366,7 @@ def _walk_and_validate(
     *,
     allowed_tables: frozenset[str] | None = None,
     cte_aliases: frozenset[str] = frozenset(),
+    case_sensitive_ctes: bool = False,
 ) -> None:
     if isinstance(node, dict):
         if allowed_tables is not None and isinstance(cte_map := node.get("cte_map"), dict):
@@ -361,7 +375,11 @@ def _walk_and_validate(
                 if not isinstance(entry, dict):
                     continue
                 key = entry.get("key")
-                alias_fs = frozenset({key.strip().lower()}) if isinstance(key, str) and key else frozenset()
+                if isinstance(key, str) and key:
+                    cte_key = key if case_sensitive_ctes else key.strip().lower()
+                    alias_fs = frozenset({cte_key}) if cte_key else frozenset()
+                else:
+                    alias_fs = frozenset()
                 val = entry.get("value")
                 q = val.get("query") if isinstance(val, dict) else None
                 n = q.get("node") if isinstance(q, dict) else None
@@ -396,6 +414,7 @@ def _walk_and_validate(
                                 service_id,
                                 allowed_tables=allowed_tables,
                                 cte_aliases=cte_aliases,
+                                case_sensitive_ctes=case_sensitive_ctes,
                             )
                             _walk_and_validate(
                                 setop_target["right"],
@@ -404,6 +423,7 @@ def _walk_and_validate(
                                 service_id,
                                 allowed_tables=allowed_tables,
                                 cte_aliases=cte_aliases | alias_fs,
+                                case_sensitive_ctes=case_sensitive_ctes,
                             )
                             for k_rem, v_rem in n.items():
                                 if k_rem not in ("left", "right", "query"):
@@ -414,6 +434,7 @@ def _walk_and_validate(
                                         service_id,
                                         allowed_tables=allowed_tables,
                                         cte_aliases=cte_aliases,
+                                        case_sensitive_ctes=case_sensitive_ctes,
                                     )
                         else:
                             _walk_and_validate(
@@ -423,6 +444,7 @@ def _walk_and_validate(
                                 service_id,
                                 allowed_tables=allowed_tables,
                                 cte_aliases=cte_aliases,
+                                case_sensitive_ctes=case_sensitive_ctes,
                             )
                     else:
                         _walk_and_validate(
@@ -432,6 +454,7 @@ def _walk_and_validate(
                             service_id,
                             allowed_tables=allowed_tables,
                             cte_aliases=cte_aliases,
+                            case_sensitive_ctes=case_sensitive_ctes,
                         )
                 cte_aliases = cte_aliases | alias_fs
         if node.get("type") == "DISALLOWED_SUBQUERY_STATEMENT":
@@ -478,24 +501,43 @@ def _walk_and_validate(
                     service_id,
                     allowed_tables=eff_allowed,
                     cte_aliases=frozenset(),
+                    case_sensitive_ctes=case_sensitive_ctes,
                 )
             return
         if node.get("type") == "BASE_TABLE" or "table_name" in node:
             _check_table_reference(
-                node, original_sql, session_id, service_id, allowed_tables=allowed_tables, cte_aliases=cte_aliases
+                node,
+                original_sql,
+                session_id,
+                service_id,
+                allowed_tables=allowed_tables,
+                cte_aliases=cte_aliases,
+                case_sensitive_ctes=case_sensitive_ctes,
             )
         if node.get("class") == "FUNCTION":
             _check_function_node(node, original_sql, session_id, service_id)
         for key, value in node.items():
             if isinstance(value, (dict, list)) and not (key == "cte_map" and allowed_tables is not None):
                 _walk_and_validate(
-                    value, original_sql, session_id, service_id, allowed_tables=allowed_tables, cte_aliases=cte_aliases
+                    value,
+                    original_sql,
+                    session_id,
+                    service_id,
+                    allowed_tables=allowed_tables,
+                    cte_aliases=cte_aliases,
+                    case_sensitive_ctes=case_sensitive_ctes,
                 )
     elif isinstance(node, list):
         for item in node:
             if isinstance(item, (dict, list)):
                 _walk_and_validate(
-                    item, original_sql, session_id, service_id, allowed_tables=allowed_tables, cte_aliases=cte_aliases
+                    item,
+                    original_sql,
+                    session_id,
+                    service_id,
+                    allowed_tables=allowed_tables,
+                    cte_aliases=cte_aliases,
+                    case_sensitive_ctes=case_sensitive_ctes,
                 )
 
 
@@ -720,6 +762,13 @@ _AS_CLAUSE_OPENING_WORDS = frozenset(
         "USING",
     }
 )
+_BY_PRECEDING_KEYWORDS = frozenset(
+    {"GROUP", "ORDER", "PARTITION", "DISTRIBUTE", "CLUSTER", "SORT", "UNION", "INTERSECT", "EXCEPT"}
+)
+_CLAUSE_CTX_MAJOR_WORDS = frozenset(
+    {"WITH", "FROM", "JOIN", "PREWHERE", "WHERE", "HAVING", "QUALIFY", "LIMIT", "OFFSET"}
+)
+_SETOP_RIGHT_FOLLOW_WORDS = frozenset({"ALL", "DISTINCT", "BY"}) | _SUBQUERY_HEAD_KEYWORDS | _NON_SELECT_STATEMENTS
 _SQL_INTERVAL_UNITS = frozenset(
     {
         "YEAR",
@@ -1302,6 +1351,7 @@ def _get_tok_meta_entry(
             "on_op": {},
             "fact": {},
             "clause_open": {},
+            "clause_ctx": None,
             "pos_in_ready": False,
             "pos_in_idx": None,
         }
@@ -1517,16 +1567,125 @@ def _cannot_end_aliasable_tok(tokens: list[_Tok], pos: int, r: int, after_as_idx
             and not _is_non_keyword_ident_pos(tokens, pos - 1)
         )
     if wu in _AS_CLAUSE_OPENING_WORDS:
+        if (r % 2) == 0 and after_tok is not None and after_tok.kind == "WORD":
+            aw = after_tok.val.upper()
+            if aw == "IN" and after_as_idx + 1 < len(tokens) and tokens[after_as_idx + 1].kind == "LPAREN":
+                return False
+            if aw in ("UNION", "INTERSECT", "EXCEPT"):
+                nxt_after = tokens[after_as_idx + 1] if after_as_idx + 1 < len(tokens) else None
+                if nxt_after is not None and (
+                    nxt_after.kind == "LPAREN"
+                    or (nxt_after.kind == "WORD" and nxt_after.val.upper() in _SETOP_RIGHT_FOLLOW_WORDS)
+                ):
+                    return False
         return _is_clause_open_word_at(tokens, pos)
     return False
+
+
+def _get_clause_ctx_tok(tokens: list[_Tok]) -> list[tuple[bool, str]]:
+    """Build (saw_select, last_major_clause) per token in one O(N) non-reentrant pass."""
+    _, _, _, case_state = _get_tok_meta_entry(tokens)
+    if case_state is not None and case_state["clause_ctx"] is not None:
+        return case_state["clause_ctx"]
+    n = len(tokens)
+    ctx: list[tuple[bool, str]] = [(False, "")] * n
+    stack: list[list[Any]] = [[False, ""]]
+    for k, tk in enumerate(tokens):
+        top = stack[-1]
+        ctx[k] = (top[0], top[1])
+        kind = tk.kind
+        if kind in _DELIM_PAIRS:
+            stack.append([False, ""])
+            continue
+        if kind in _CLOSING_DELIMS:
+            if len(stack) > 1:
+                stack.pop()
+            else:
+                stack[0] = [False, ""]
+            continue
+        if kind == "SEMI":
+            top[0] = False
+            top[1] = ""
+            continue
+        if kind != "WORD":
+            continue
+        if k > 0:
+            prev_k = tokens[k - 1]
+            if prev_k.kind in ("DOT", "COMMA", "LPAREN", "LBRACK", "LBRACE"):
+                continue
+            if prev_k.kind == "OTHER" and not _is_num_tok_val(prev_k.val) and prev_k.val != "*":
+                continue
+            if prev_k.kind == "WORD" and len(prev_k.val) == 2 and prev_k.val.upper() == "AS":
+                continue
+        wu = tk.val.upper()
+        if wu in ("UNION", "INTERSECT", "EXCEPT") and not _is_star_except_clause(tokens, k):
+            top[0] = False
+            top[1] = ""
+        elif wu == "SELECT":
+            if not top[0]:
+                top[0] = True
+                top[1] = "SELECT"
+        elif wu in _CLAUSE_CTX_MAJOR_WORDS:
+            if k > 0 and tokens[k - 1].kind == "WORD" and tokens[k - 1].val.upper() in _AS_CLAUSE_OPENING_WORDS:
+                continue
+            top[1] = wu
+    if case_state is not None:
+        case_state["clause_ctx"] = ctx
+    return ctx
+
+
+def _is_setop_boundary_before_tok(tokens: list[_Tok], idx: int) -> bool:
+    if idx < 0:
+        return True
+    prev = tokens[idx]
+    if prev.kind == "SEMI":
+        return True
+    if prev.kind != "WORD" or _is_non_keyword_ident_pos(tokens, idx):
+        return False
+    pw = prev.val.upper()
+    if pw in ("UNION", "INTERSECT", "EXCEPT") and not _is_star_except_clause(tokens, idx):
+        return True
+    if pw in ("ALL", "DISTINCT") and idx >= 1:
+        p2 = tokens[idx - 1]
+        return (
+            p2.kind == "WORD"
+            and p2.val.upper() in ("UNION", "INTERSECT", "EXCEPT")
+            and not _is_non_keyword_ident_pos(tokens, idx - 1)
+            and not _is_star_except_clause(tokens, idx - 1)
+        )
+    if pw == "NAME" and idx >= 2:
+        p2 = tokens[idx - 1]
+        if p2.kind == "WORD" and p2.val.upper() == "BY" and not _is_non_keyword_ident_pos(tokens, idx - 1):
+            return _is_setop_boundary_before_tok(tokens, idx - 2)
+    return False
+
+
+def _can_clause_follow_in_run(prev_clause_kw: str, next_wu: str, saw_select: bool) -> bool:
+    if next_wu in ("TABLE", "WITH"):
+        return False
+    if next_wu == "BY":
+        return prev_clause_kw == "LIMIT"
+    if next_wu == "SELECT":
+        return (not saw_select) and prev_clause_kw in ("", "WITH", "FROM", "JOIN")
+    if prev_clause_kw == "OFFSET":
+        return False
+    if prev_clause_kw == "LIMIT" and next_wu not in ("OFFSET", "BY"):
+        return False
+    if prev_clause_kw == "QUALIFY" and next_wu not in ("LIMIT", "OFFSET"):
+        return False
+    if prev_clause_kw == "HAVING" and next_wu not in ("QUALIFY", "LIMIT", "OFFSET"):
+        return False
+    if prev_clause_kw == "WHERE" and next_wu == "PREWHERE":
+        return False
+    return True
 
 
 def _is_clause_open_word_at(tokens: list[_Tok], pos: int) -> bool:
     """Return True when ``tokens[pos]`` (in ``_AS_CLAUSE_OPENING_WORDS``) acts as a clause opener."""
     _, _, _, case_state = _get_tok_meta_entry(tokens)
-    co_memo: dict[int, bool] | None = case_state["clause_open"] if case_state is not None else None
+    co_memo: dict[int, tuple[bool, str]] | None = case_state["clause_open"] if case_state is not None else None
     if co_memo is not None and pos in co_memo:
-        return co_memo[pos]
+        return co_memo[pos][0]
     cur = pos
     while cur > 0:
         if co_memo is not None and (cur - 1) in co_memo:
@@ -1541,10 +1700,24 @@ def _is_clause_open_word_at(tokens: list[_Tok], pos: int) -> bool:
             cur -= 1
             continue
         break
+    saw_select_at_cur = False
     if cur > 0 and co_memo is not None and (cur - 1) in co_memo:
-        cur_val = not co_memo[cur - 1]
+        prev_val, last_clause_kw = co_memo[cur - 1]
+        cur_wu = tokens[cur].val.upper()
+        if prev_val:
+            cur_val = False
+        else:
+            if cur_wu in ("BY", "SELECT"):
+                saw_select_at_cur = _get_clause_ctx_tok(tokens)[cur][0]
+            cur_val = _can_clause_follow_in_run(last_clause_kw, cur_wu, saw_select_at_cur)
+            if cur_val:
+                last_clause_kw = cur_wu
+                if cur_wu == "SELECT":
+                    saw_select_at_cur = True
     elif cur == 0:
         cur_val = True
+        last_clause_kw = tokens[0].val.upper()
+        saw_select_at_cur = last_clause_kw == "SELECT"
     else:
         prev = tokens[cur - 1]
         cur_val = True
@@ -1560,6 +1733,7 @@ def _is_clause_open_word_at(tokens: list[_Tok], pos: int) -> bool:
                     and tokens[cur - 2].val.upper() in ("SELECT", "DISTINCT", "ALL")
                     and not _is_non_keyword_ident_pos(tokens, cur - 2)
                 )
+                or _is_select_head_modifier_end_tok(tokens, cur - 2)
             )
         )
         if (
@@ -1598,13 +1772,53 @@ def _is_clause_open_word_at(tokens: list[_Tok], pos: int) -> bool:
                 )
                 if not is_bare_table_alias:
                     cur_val = False
+        cur_wu = tokens[cur].val.upper()
+        last_clause_kw = ""
+        if cur_val:
+            if cur_wu in ("TABLE", "WITH"):
+                if not _is_setop_boundary_before_tok(tokens, cur - 1):
+                    cur_val = False
+            elif cur_wu == "BY":
+                is_by_kw = (
+                    prev.kind == "WORD"
+                    and not _is_non_keyword_ident_pos(tokens, cur - 1)
+                    and (
+                        prev.val.upper() in _BY_PRECEDING_KEYWORDS
+                        or (prev.val.upper() in ("ALL", "DISTINCT") and _is_setop_boundary_before_tok(tokens, cur - 1))
+                    )
+                )
+                if not is_by_kw:
+                    saw_sel_c, ctx_clause = _get_clause_ctx_tok(tokens)[cur]
+                    saw_select_at_cur = saw_sel_c
+                    if ctx_clause != "LIMIT":
+                        cur_val = False
+            elif cur_wu == "SELECT":
+                if not _is_setop_boundary_before_tok(tokens, cur - 1):
+                    saw_sel_c, ctx_clause = _get_clause_ctx_tok(tokens)[cur]
+                    saw_select_at_cur = saw_sel_c
+                    if saw_sel_c and ctx_clause != "WITH":
+                        cur_val = False
+        if cur_val:
+            last_clause_kw = cur_wu
+            if cur_wu == "SELECT":
+                saw_select_at_cur = True
     while True:
         if co_memo is not None:
-            co_memo[cur] = cur_val
+            co_memo[cur] = (cur_val, last_clause_kw)
         if cur >= pos:
             return cur_val
         cur += 1
-        cur_val = not cur_val
+        nxt_wu = tokens[cur].val.upper()
+        if cur_val:
+            cur_val = False
+        else:
+            if nxt_wu in ("BY", "SELECT") and not saw_select_at_cur:
+                saw_select_at_cur = _get_clause_ctx_tok(tokens)[cur][0]
+            cur_val = _can_clause_follow_in_run(last_clause_kw, nxt_wu, saw_select_at_cur)
+            if cur_val:
+                last_clause_kw = nxt_wu
+                if nxt_wu == "SELECT":
+                    saw_select_at_cur = True
 
 
 def _is_non_keyword_ident_pos(tokens: list[_Tok], idx: int) -> bool:
@@ -1784,7 +1998,10 @@ def _is_distinct_from_op(tokens: list[_Tok], idx: int) -> bool:
 
 
 def _parse_recursive_cte_tokens(
-    tokens: list[_Tok], *, expr_cte_refs: dict[str, dict[str, Any]] | None = None
+    tokens: list[_Tok],
+    *,
+    expr_cte_refs: dict[str, dict[str, Any]] | None = None,
+    case_sensitive_ctes: bool = False,
 ) -> dict[str, Any]:
     inner = _strip_outer_parens(tokens)
     k = 0
@@ -1812,7 +2029,7 @@ def _parse_recursive_cte_tokens(
         k += 1
 
     if last_union_or_except_op != "UNION" or last_idx == -1:
-        body = _parse_query_tokens(inner, expr_cte_refs=expr_cte_refs)
+        body = _parse_query_tokens(inner, expr_cte_refs=expr_cte_refs, case_sensitive_ctes=case_sensitive_ctes)
         body["type"] = "RECURSIVE_CTE_NODE"
         return body
 
@@ -1828,15 +2045,19 @@ def _parse_recursive_cte_tokens(
         or not _is_subquery_token_list(inner[:last_idx])
         or not _is_subquery_token_list(right_tokens)
     ):
-        body = _parse_query_tokens(inner, expr_cte_refs=expr_cte_refs)
+        body = _parse_query_tokens(inner, expr_cte_refs=expr_cte_refs, case_sensitive_ctes=case_sensitive_ctes)
         body["type"] = "RECURSIVE_CTE_NODE"
         return body
 
     return {
         "type": "RECURSIVE_CTE_NODE",
         "setop_type": "UNION",
-        "left": _parse_query_tokens(inner[:last_idx], expr_cte_refs=expr_cte_refs),
-        "right": _parse_query_tokens(right_tokens, expr_cte_refs=expr_cte_refs),
+        "left": _parse_query_tokens(
+            inner[:last_idx], expr_cte_refs=expr_cte_refs, case_sensitive_ctes=case_sensitive_ctes
+        ),
+        "right": _parse_query_tokens(
+            right_tokens, expr_cte_refs=expr_cte_refs, case_sensitive_ctes=case_sensitive_ctes
+        ),
     }
 
 
@@ -1881,6 +2102,14 @@ def _find_with_expr_cte_as_alias(tokens: list[_Tok], start_idx: int) -> tuple[in
                 and (k == start_idx or not _is_on_operator_tok_at(tokens, k - 1))
             ):
                 return None
+            elif (
+                wu in ("UNION", "INTERSECT", "EXCEPT")
+                and not _is_non_keyword_ident_pos(tokens, k)
+                and not _is_dot_qualifier_at(tokens, k)
+                and not _is_star_except_clause(tokens, k)
+                and (k == start_idx or not _is_on_operator_tok_at(tokens, k - 1))
+            ):
+                return None
         k += 1
     return None
 
@@ -1889,6 +2118,8 @@ def _parse_with_prefix_tokens(
     tokens: list[_Tok],
     node: dict[str, Any],
     active_expr_ctes: dict[str, dict[str, Any]],
+    *,
+    case_sensitive_ctes: bool = False,
 ) -> int:
     """Parse a leading ``WITH [RECURSIVE] ...`` clause, returning the index of the body start."""
     n = len(tokens)
@@ -1926,11 +2157,20 @@ def _parse_with_prefix_tokens(
                     rp = _find_matching_rparen(tokens, j)
                     if rp != -1 and _is_subquery_token_list(tokens[j + 1 : rp]):
                         if is_recursive:
-                            cte_body = _parse_recursive_cte_tokens(tokens[j + 1 : rp], expr_cte_refs=active_expr_ctes)
+                            cte_body = _parse_recursive_cte_tokens(
+                                tokens[j + 1 : rp],
+                                expr_cte_refs=active_expr_ctes,
+                                case_sensitive_ctes=case_sensitive_ctes,
+                            )
                         else:
-                            cte_body = _parse_query_tokens(tokens[j + 1 : rp], expr_cte_refs=active_expr_ctes)
+                            cte_body = _parse_query_tokens(
+                                tokens[j + 1 : rp],
+                                expr_cte_refs=active_expr_ctes,
+                                case_sensitive_ctes=case_sensitive_ctes,
+                            )
                         cte_entries.append({"key": cte_name, "value": {"query": {"node": cte_body}}})
-                        active_expr_ctes.pop(cte_name.strip().lower(), None)
+                        cte_expr_key = cte_name if case_sensitive_ctes else cte_name.strip().lower()
+                        active_expr_ctes.pop(cte_expr_key, None)
                         i = rp + 1
                         matched_std_cte = True
         if matched_std_cte:
@@ -1944,8 +2184,16 @@ def _parse_with_prefix_tokens(
         if expr_cte_hit is not None:
             as_idx, alias_idx = expr_cte_hit
             expr_toks = tokens[entry_start:as_idx]
-            alias_low = tokens[alias_idx].val.strip().lower()
-            _scan_expr_tokens(expr_toks, node, allow_direct_subquery=False, expr_cte_refs=active_expr_ctes)
+            alias_exact = tokens[alias_idx].val
+            alias_low = alias_exact.strip().lower()
+            alias_key = alias_exact if case_sensitive_ctes else alias_low
+            _scan_expr_tokens(
+                expr_toks,
+                node,
+                allow_direct_subquery=False,
+                expr_cte_refs=active_expr_ctes,
+                case_sensitive_ctes=case_sensitive_ctes,
+            )
             tbl_ref = _parse_in_rhs_table_ref(expr_toks)
             if tbl_ref is not None:
                 if (
@@ -1953,10 +2201,11 @@ def _parse_with_prefix_tokens(
                     and not tbl_ref.get("schema_name")
                     and not tbl_ref.get("catalog_name")
                 ):
-                    ref_low = str(tbl_ref.get("table_name") or "").strip().lower()
-                    if ref_low in active_expr_ctes:
-                        tbl_ref = active_expr_ctes[ref_low]
-                active_expr_ctes[alias_low] = tbl_ref
+                    ref_raw = str(tbl_ref.get("table_name") or "")
+                    ref_key = ref_raw if case_sensitive_ctes else ref_raw.strip().lower()
+                    if ref_key in active_expr_ctes:
+                        tbl_ref = active_expr_ctes[ref_key]
+                active_expr_ctes[alias_key] = tbl_ref
                 node["children"].append(
                     {
                         "type": "EXPR_CTE_TABLE_ALIAS",
@@ -1969,7 +2218,7 @@ def _parse_with_prefix_tokens(
                     }
                 )
             else:
-                active_expr_ctes.pop(alias_low, None)
+                active_expr_ctes.pop(alias_key, None)
             i = alias_idx + 1
             if i < n and tokens[i].kind == "COMMA":
                 i += 1
@@ -1988,20 +2237,32 @@ def _parse_with_prefix_tokens(
 
 
 def _parse_branch_with_tokens(
-    tokens: list[_Tok], *, expr_cte_refs: dict[str, dict[str, Any]] | None = None
+    tokens: list[_Tok],
+    *,
+    expr_cte_refs: dict[str, dict[str, Any]] | None = None,
+    case_sensitive_ctes: bool = False,
 ) -> tuple[dict[str, Any], int]:
     """Parse an unparenthesized set-op branch starting with ``WITH`` up to the next top-level set-op."""
     branch_node: dict[str, Any] = {"type": "SELECT_NODE", "children": []}
     active_expr_ctes: dict[str, dict[str, Any]] = dict(expr_cte_refs) if expr_cte_refs else {}
-    after_with = _parse_with_prefix_tokens(tokens, branch_node, active_expr_ctes)
+    after_with = _parse_with_prefix_tokens(
+        tokens, branch_node, active_expr_ctes, case_sensitive_ctes=case_sensitive_ctes
+    )
     body_consumed = _scan_body_tokens(
-        tokens[after_with:], branch_node, expr_cte_refs=active_expr_ctes or None, stop_at_setop=True
+        tokens[after_with:],
+        branch_node,
+        expr_cte_refs=active_expr_ctes or None,
+        stop_at_setop=True,
+        case_sensitive_ctes=case_sensitive_ctes,
     )
     return branch_node, after_with + body_consumed
 
 
 def _parse_query_tokens(
-    tokens: list[_Tok], *, expr_cte_refs: dict[str, dict[str, Any]] | None = None
+    tokens: list[_Tok],
+    *,
+    expr_cte_refs: dict[str, dict[str, Any]] | None = None,
+    case_sensitive_ctes: bool = False,
 ) -> dict[str, Any]:
     tokens = _strip_outer_parens(tokens)
     node: dict[str, Any] = {"type": "SELECT_NODE", "children": []}
@@ -2032,9 +2293,14 @@ def _parse_query_tokens(
     active_expr_ctes: dict[str, dict[str, Any]] = dict(expr_cte_refs) if expr_cte_refs else {}
     i = 0
     if tokens[0].kind == "WORD" and tokens[0].val.upper() == "WITH":
-        i = _parse_with_prefix_tokens(tokens, node, active_expr_ctes)
+        i = _parse_with_prefix_tokens(tokens, node, active_expr_ctes, case_sensitive_ctes=case_sensitive_ctes)
 
-    _scan_body_tokens(tokens if i == 0 else tokens[i:], node, expr_cte_refs=active_expr_ctes or None)
+    _scan_body_tokens(
+        tokens if i == 0 else tokens[i:],
+        node,
+        expr_cte_refs=active_expr_ctes or None,
+        case_sensitive_ctes=case_sensitive_ctes,
+    )
     return node
 
 
@@ -2576,35 +2842,44 @@ def _is_prefix_in_call(tokens: list[_Tok], in_idx: int) -> bool:
 
 def _parse_in_rhs_table_ref(rhs_tokens: list[_Tok]) -> dict[str, Any] | None:
     """Detect bare or schema/catalog-qualified table identifiers inside ``IN (...)``."""
-    unwrapped = rhs_tokens
-    while unwrapped:
-        peeled = _strip_outer_parens(unwrapped)
-        if len(peeled) != len(unwrapped):
-            unwrapped = peeled
-            continue
-        if unwrapped[0].kind == "OTHER" and bool(unwrapped[0].val) and unwrapped[0].val.strip("+") == "":
-            unwrapped = unwrapped[1:]
+    if not rhs_tokens:
+        return None
+    match_map: dict[int, int] | None = None
+    lo = 0
+    hi = len(rhs_tokens) - 1
+    while lo <= hi:
+        if lo < hi and rhs_tokens[lo].kind == "LPAREN":
+            if match_map is None:
+                match_map, _, _ = _get_tok_meta(rhs_tokens)
+            if match_map.get(lo) == hi:
+                lo += 1
+                hi -= 1
+                continue
+        if rhs_tokens[lo].kind == "OTHER" and bool(rhs_tokens[lo].val) and rhs_tokens[lo].val.strip("+") == "":
+            lo += 1
             continue
         if (
-            len(unwrapped) >= 3
-            and unwrapped[-2].kind == "WORD"
-            and unwrapped[-2].val.upper() == "AS"
-            and unwrapped[-1].kind in ("WORD", "QIDENT")
+            hi - lo >= 2
+            and rhs_tokens[hi - 1].kind == "WORD"
+            and rhs_tokens[hi - 1].val.upper() == "AS"
+            and rhs_tokens[hi].kind in ("WORD", "QIDENT")
         ):
-            unwrapped = unwrapped[:-2]
+            hi -= 2
             continue
         break
-    if not unwrapped or len(unwrapped) % 2 == 0:
+    span = hi - lo + 1
+    if span <= 0 or span % 2 == 0:
         return None
-    for idx, tk in enumerate(unwrapped):
-        if idx % 2 == 0:
+    for off in range(span):
+        tk = rhs_tokens[lo + off]
+        if off % 2 == 0:
             if tk.kind not in ("WORD", "QIDENT"):
                 return None
         elif tk.kind != "DOT":
             return None
-    if len(unwrapped) == 1 and unwrapped[0].kind == "WORD" and unwrapped[0].val.upper() in ("TRUE", "FALSE", "NULL"):
+    if span == 1 and rhs_tokens[lo].kind == "WORD" and rhs_tokens[lo].val.upper() in ("TRUE", "FALSE", "NULL"):
         return None
-    parts = [unwrapped[idx].val for idx in range(0, len(unwrapped), 2)]
+    parts = [rhs_tokens[lo + off].val for off in range(0, span, 2)]
     if len(parts) == 1:
         return {"type": "BASE_TABLE", "table_name": parts[0], "schema_name": "", "catalog_name": ""}
     if len(parts) == 2:
@@ -2615,7 +2890,10 @@ def _parse_in_rhs_table_ref(rhs_tokens: list[_Tok]) -> dict[str, Any] | None:
 
 
 def _resolve_in_rhs_table_ref(
-    rhs_tokens: list[_Tok], expr_cte_refs: dict[str, dict[str, Any]] | None
+    rhs_tokens: list[_Tok],
+    expr_cte_refs: dict[str, dict[str, Any]] | None,
+    *,
+    case_sensitive_ctes: bool = False,
 ) -> dict[str, Any] | None:
     tbl_ref = _parse_in_rhs_table_ref(rhs_tokens)
     if (
@@ -2625,7 +2903,9 @@ def _resolve_in_rhs_table_ref(
         and not tbl_ref.get("schema_name")
         and not tbl_ref.get("catalog_name")
     ):
-        resolved = expr_cte_refs.get(str(tbl_ref.get("table_name") or "").strip().lower())
+        tname_raw = str(tbl_ref.get("table_name") or "")
+        tkey = tname_raw if case_sensitive_ctes else tname_raw.strip().lower()
+        resolved = expr_cte_refs.get(tkey)
         if resolved is not None:
             return resolved
     return tbl_ref
@@ -2716,6 +2996,7 @@ def _scan_expr_tokens(
     allow_direct_subquery: bool = True,
     in_bracket: bool = False,
     expr_cte_refs: dict[str, dict[str, Any]] | None = None,
+    case_sensitive_ctes: bool = False,
 ) -> None:
     work: list[tuple[list[_Tok], str | None, bool, bool]] = [
         (tokens, enclosing_special_call, allow_direct_subquery, in_bracket)
@@ -2723,7 +3004,13 @@ def _scan_expr_tokens(
     while work:
         cur_tokens, cur_special, cur_allow_subq, cur_in_brack = work.pop()
         if cur_allow_subq and _is_subquery_token_list(cur_tokens, enclosing_special_call=cur_special):
-            node["children"].append(_parse_query_tokens(_strip_outer_parens(cur_tokens), expr_cte_refs=expr_cte_refs))
+            node["children"].append(
+                _parse_query_tokens(
+                    _strip_outer_parens(cur_tokens),
+                    expr_cte_refs=expr_cte_refs,
+                    case_sensitive_ctes=case_sensitive_ctes,
+                )
+            )
             continue
 
         cur_match_map, _, _ = _get_tok_meta(cur_tokens)
@@ -2774,7 +3061,9 @@ def _scan_expr_tokens(
                         elif rp != -1:
                             rhs = cur_tokens[i + 2 : rp]
                             if not _is_subquery_token_list(rhs):
-                                tbl_ref = _resolve_in_rhs_table_ref(rhs, expr_cte_refs)
+                                tbl_ref = _resolve_in_rhs_table_ref(
+                                    rhs, expr_cte_refs, case_sensitive_ctes=case_sensitive_ctes
+                                )
                                 if tbl_ref is not None:
                                     node["children"].append(tbl_ref)
                 elif not (is_valid_pos_in or _is_list_comp_in_at(cur_tokens, i, in_bracket=cur_in_brack)):
@@ -2879,6 +3168,7 @@ def _scan_body_tokens(
     expect_table: bool = False,
     expr_cte_refs: dict[str, dict[str, Any]] | None = None,
     stop_at_setop: bool = False,
+    case_sensitive_ctes: bool = False,
 ) -> int:
     i = 0
     n = len(tokens)
@@ -3059,7 +3349,29 @@ def _scan_body_tokens(
                         i += 1
                         at_branch_start = False
                         continue
-                    branch_node, consumed = _parse_branch_with_tokens(tokens[i:], expr_cte_refs=expr_cte_refs)
+                    branch_end = i + 1
+                    while branch_end < n:
+                        btok = tokens[branch_end]
+                        if btok.kind in _DELIM_PAIRS:
+                            brp = _find_matching_rdelim(tokens, branch_end)
+                            if brp == -1:
+                                branch_end = n
+                                break
+                            branch_end = brp + 1
+                            continue
+                        if (
+                            btok.kind == "WORD"
+                            and btok.val.upper() in ("UNION", "INTERSECT", "EXCEPT")
+                            and not _is_non_keyword_ident_pos(tokens, branch_end)
+                            and not _is_star_except_clause(tokens, branch_end)
+                        ):
+                            break
+                        branch_end += 1
+                    branch_node, consumed = _parse_branch_with_tokens(
+                        tokens[i:branch_end],
+                        expr_cte_refs=expr_cte_refs,
+                        case_sensitive_ctes=case_sensitive_ctes,
+                    )
                     node["children"].append(branch_node)
                     i += consumed
                     at_branch_start = False
@@ -3419,9 +3731,20 @@ def _scan_body_tokens(
                 if rp != -1:
                     inner = _strip_outer_parens(tokens[i + 1 : rp])
                     if _is_subquery_token_list(inner):
-                        node["children"].append(_parse_query_tokens(inner, expr_cte_refs=expr_cte_refs))
+                        node["children"].append(
+                            _parse_query_tokens(
+                                inner, expr_cte_refs=expr_cte_refs, case_sensitive_ctes=case_sensitive_ctes
+                            )
+                        )
                     else:
-                        _scan_body_tokens(inner, node, in_from=True, expect_table=True, expr_cte_refs=expr_cte_refs)
+                        _scan_body_tokens(
+                            inner,
+                            node,
+                            in_from=True,
+                            expect_table=True,
+                            expr_cte_refs=expr_cte_refs,
+                            case_sensitive_ctes=case_sensitive_ctes,
+                        )
                     expect_table = False
                     allow_table_alias = True
                     saw_final = False
@@ -3461,7 +3784,12 @@ def _scan_body_tokens(
                                 "function_name": parts[-1],
                             }
                         )
-                        _scan_expr_tokens(tokens[j + 1 : rp], node, expr_cte_refs=expr_cte_refs)
+                        _scan_expr_tokens(
+                            tokens[j + 1 : rp],
+                            node,
+                            expr_cte_refs=expr_cte_refs,
+                            case_sensitive_ctes=case_sensitive_ctes,
+                        )
                         i = rp + 1
                         # Skip optional table alias and column alias list: e.g. `range(3) t(n)` or `AS t(n)`
                         used_as_tf = False
@@ -3615,13 +3943,18 @@ def _scan_body_tokens(
                 if _is_prefix_in_call(tokens, i):
                     node["children"].append({"class": "FUNCTION", "function_name": tok.val})
                     if rp != -1:
-                        _scan_expr_tokens(tokens[i + 2 : rp], node, expr_cte_refs=expr_cte_refs)
+                        _scan_expr_tokens(
+                            tokens[i + 2 : rp],
+                            node,
+                            expr_cte_refs=expr_cte_refs,
+                            case_sensitive_ctes=case_sensitive_ctes,
+                        )
                         i = rp + 1
                         continue
                 elif rp != -1:
                     rhs = tokens[i + 2 : rp]
                     if not _is_subquery_token_list(rhs):
-                        tbl_ref = _resolve_in_rhs_table_ref(rhs, expr_cte_refs)
+                        tbl_ref = _resolve_in_rhs_table_ref(rhs, expr_cte_refs, case_sensitive_ctes=case_sensitive_ctes)
                         if tbl_ref is not None:
                             node["children"].append(tbl_ref)
             else:
@@ -3643,13 +3976,19 @@ def _scan_body_tokens(
                             node,
                             enclosing_special_call=tok.val.lower(),
                             expr_cte_refs=expr_cte_refs,
+                            case_sensitive_ctes=case_sensitive_ctes,
                         )
                         i = rp + 1
                         continue
                     i += 1
                     continue
                 node["children"].append({"class": "FUNCTION", "function_name": tok.val})
-                _scan_expr_tokens(tokens[i + 2 : rp], node, expr_cte_refs=expr_cte_refs)
+                _scan_expr_tokens(
+                    tokens[i + 2 : rp],
+                    node,
+                    expr_cte_refs=expr_cte_refs,
+                    case_sensitive_ctes=case_sensitive_ctes,
+                )
                 i = rp + 1
                 continue
         if tok.kind == "LPAREN":
@@ -3660,7 +3999,12 @@ def _scan_body_tokens(
                 while lo_p < hi_p and tokens[lo_p].kind == "LPAREN" and body_match_map.get(lo_p) == hi_p:
                     lo_p += 1
                     hi_p -= 1
-                _scan_expr_tokens(tokens[lo_p : hi_p + 1], node, expr_cte_refs=expr_cte_refs)
+                _scan_expr_tokens(
+                    tokens[lo_p : hi_p + 1],
+                    node,
+                    expr_cte_refs=expr_cte_refs,
+                    case_sensitive_ctes=case_sensitive_ctes,
+                )
                 i = rp + 1
                 continue
         if tok.kind in ("LBRACK", "LBRACE"):
@@ -3672,6 +4016,7 @@ def _scan_body_tokens(
                     allow_direct_subquery=False,
                     in_bracket=(tok.kind == "LBRACK"),
                     expr_cte_refs=expr_cte_refs,
+                    case_sensitive_ctes=case_sensitive_ctes,
                 )
                 i = rb + 1
                 continue
@@ -3684,7 +4029,11 @@ def _scan_body_tokens(
 
 
 def _parse_single_select_node(
-    sql: str, parser_con: Any | None = None, *, allow_multi: bool = False
+    sql: str,
+    parser_con: Any | None = None,
+    *,
+    allow_multi: bool = False,
+    case_sensitive_ctes: bool = False,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str | None, str | None]:
     del parser_con
     tokens, tok_err = _tokenize_sql(sql)
@@ -3759,7 +4108,7 @@ def _parse_single_select_node(
         if syntax_err is not None:
             return None, None, "parse_error:SYNTAX", f"SQL parse error: {syntax_err}"
 
-        node = _parse_query_tokens(stmt_tokens)
+        node = _parse_query_tokens(stmt_tokens, case_sensitive_ctes=case_sensitive_ctes)
         parsed = {"error": False, "statements": [{"node": node}]}
         return parsed, node, None, None
     finally:

@@ -1858,3 +1858,497 @@ it("SEC-T5-ITER35-FE-04: maintains strict O(N) performance (<10ms) across 64 KiB
     window.removeEventListener("fla:cloud-query", listener);
   }
 }, 30000);
+
+it("SEC-T5-ITER36-FE-01: preserves quoted secret key context for auth/cookie values, key= value spacing, glued compound separators, and bare AWS4-HMAC-SHA256", async () => {
+  setCloudModeRuntime(true);
+  const events: { state?: string; error?: string }[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    const cases: readonly [string, readonly string[], string][] = [
+      // Finding 1: Stage 2A quoted secret key context for multi-token auth/cookie/digest values
+      [
+        'Runtime Error: "Authorization": Bearer server rejected',
+        ["Authorization", "Bearer", "server"],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        'Runtime Error: "Authorization" = Bearer server rejected',
+        ["Authorization", "Bearer", "server", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: `Authorization` = Bearer server rejected",
+        ["Authorization", "Bearer", "server", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        'Runtime Error: "token": Bearer server rejected',
+        ["token", "Bearer", "server"],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        'Runtime Error: "Cookie": sid=tok99; mode = server rejected',
+        ["Cookie", "sid", "tok99", "mode", "server", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        'Runtime Error: "Authorization": Digest username=alice, response = cache rejected',
+        ["Authorization", "Digest", "username", "alice", "response", "cache", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        'Runtime Error: "Authorization": Digest "realm"="foo", "response" = cache rejected',
+        ["Authorization", "Digest", "realm", "foo", "response", "cache", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        'Runtime Error: "Cookie": sid="tok 99"; mode = server rejected',
+        ["Cookie", "sid", "tok", "99", "mode", "server", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        'Runtime Error: "Authorization": Bearer https://secret.example/path rejected',
+        ["Authorization", "Bearer", "secret.example"],
+        "Error: Runtime Error: [redacted] [url] rejected",
+      ],
+      // Finding 2: Stage 2B key= value (space after =, no space before =) in multi-param auth headers
+      [
+        "Runtime Error: Authorization: Digest username=alice, response= cache rejected",
+        ["Authorization", "Digest", "username", "alice", "response", "cache", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: Authorization: OAuth field= server, response= cache rejected",
+        ["Authorization", "OAuth", "field", "server", "response", "cache", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      // Finding 3: Stage 2B glued compound separators (=>, :=, ==, ::)
+      [
+        "Runtime Error: Authorization=>Bearer server rejected",
+        ["Authorization", "Bearer", "server", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: Authorization:=Bearer server rejected",
+        ["Authorization", "Bearer", "server", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: Authorization==Bearer server rejected",
+        ["Authorization", "Bearer", "server", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: Authorization::Bearer server rejected",
+        ["Authorization", "Bearer", "server"],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Error: api_key:: 100ms",
+        ["api_key", "100ms"],
+        "Error: Error: [redacted]",
+      ],
+      [
+        "Error: token:: memory",
+        ["token", "memory"],
+        "Error: Error: [redacted]",
+      ],
+      [
+        "Error: password:: 42 MB",
+        ["password", "42", "MB"],
+        "Error: Error: [redacted]",
+      ],
+      [
+        "Error: Cookie:: sid=1; a = memory",
+        ["Cookie", "sid", "memory", "="],
+        "Error: Error: [redacted]",
+      ],
+      [
+        "Error: Cookie::sid=1; a = memory",
+        ["Cookie", "sid", "memory", "="],
+        "Error: Error: [redacted]",
+      ],
+      [
+        "Error: api_key :: 100ms",
+        ["api_key", "100ms"],
+        "Error: Error: [redacted]",
+      ],
+      // Finding 4: Stage 2B bare AWS4-HMAC-SHA256 multi-param auth mode
+      [
+        "Runtime Error: AWS4-HMAC-SHA256 Credential=abc, SignedHeaders = server rejected",
+        ["AWS4", "HMAC", "Credential", "abc", "SignedHeaders", "server", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: AWS4-HMAC-SHA256 Credential=abc, response = cache rejected",
+        ["AWS4", "HMAC", "Credential", "abc", "response", "cache", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: aws4-hmac-sha256 Credential=abc, response= cache rejected",
+        ["aws4", "hmac", "Credential", "abc", "response", "cache", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+    ];
+    for (const [msg, forbidden, expectedExact] of cases) {
+      const err = new Error(msg);
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+      const got = events.at(-1)?.error ?? "";
+      for (const frag of forbidden) {
+        expect(got, `msg=${msg} got=${got}`).not.toContain(frag);
+      }
+      expect(got, `msg=${msg}`).toBe(expectedExact);
+    }
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+  }
+});
+
+it("SEC-T5-ITER36-FE-02: redacts non-ASCII/vertical inline whitespace secrets and WWW-Authenticate/Proxy-Authenticate/Negotiate headers", async () => {
+  setCloudModeRuntime(true);
+  const events: { state?: string; error?: string }[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    const cases: readonly [string, readonly string[], string][] = [
+      // Finding 5: Non-ASCII and vertical inline whitespace (\u00a0, \v, \f, \u2000, \u3000)
+      [
+        "Error: Authorization:\u00a0Bearer\u00a0memory",
+        ["Authorization", "Bearer", "memory"],
+        "Error: Error: [redacted]",
+      ],
+      [
+        "Error: Authorization: Bearer\u00a0memory",
+        ["Authorization", "Bearer", "memory"],
+        "Error: Error: [redacted]",
+      ],
+      [
+        "Error: api_key:\u00a0100ms",
+        ["api_key", "100ms"],
+        "Error: Error: [redacted]",
+      ],
+      [
+        "Error: password=\u00a042 MB",
+        ["password", "42", "MB", "="],
+        "Error: Error: [redacted]",
+      ],
+      [
+        'Error: "token":\u00a0memory',
+        ["token", "memory"],
+        "Error: Error: [redacted]",
+      ],
+      [
+        "Error: api_key:\u000bmemory",
+        ["api_key", "memory"],
+        "Error: Error: [redacted]",
+      ],
+      [
+        "Error: token:\u000c100ms",
+        ["token", "100ms"],
+        "Error: Error: [redacted]",
+      ],
+      [
+        "Error: secret:\u2000memory",
+        ["secret", "memory"],
+        "Error: Error: [redacted]",
+      ],
+      [
+        "Error: token:\u300042 MB",
+        ["token", "42", "MB"],
+        "Error: Error: [redacted]",
+      ],
+      [
+        "Error: password=\u00a042\u00a0MB",
+        ["password", "42", "MB", "="],
+        "Error: Error: [redacted]",
+      ],
+      [
+        'Error: "Authorization":\u00a0Bearer\u3000server rejected',
+        ["Authorization", "Bearer", "server"],
+        "Error: Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: Cookie:\u00a0sid=1;\u00a0mode\u00a0=\u00a0server rejected",
+        ["Cookie", "sid", "mode", "server", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      // Finding 6: WWW-Authenticate / Proxy-Authenticate + Negotiate
+      [
+        "Error: WWW-Authenticate: Negotiate memory",
+        ["WWW-Authenticate", "Negotiate", "memory"],
+        "Error: Error: [redacted]",
+      ],
+      [
+        "Error: Proxy-Authenticate: Negotiate 100ms",
+        ["Proxy-Authenticate", "Negotiate", "100ms"],
+        "Error: Error: [redacted]",
+      ],
+      [
+        "Error: Negotiate 100ms",
+        ["Negotiate", "100ms"],
+        "Error: Error: [redacted]",
+      ],
+      [
+        "Error: WWW-Authenticate: Bearer realm=a, error = memory",
+        ["WWW-Authenticate", "Bearer", "realm", "error", "memory", "="],
+        "Error: Error: [redacted]",
+      ],
+      [
+        "Error: WWW-Authenticate: Basic realm=a, charset = memory",
+        ["WWW-Authenticate", "Basic", "realm", "charset", "memory", "="],
+        "Error: Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "WWW-Authenticate": Bearer realm=a, error = memory rejected',
+        ["WWW-Authenticate", "Bearer", "realm", "error", "memory", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+    ];
+    for (const [msg, forbidden, expectedExact] of cases) {
+      const err = new Error(msg);
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+      const got = events.at(-1)?.error ?? "";
+      for (const frag of forbidden) {
+        expect(got, `msg=${msg} got=${got}`).not.toContain(frag);
+      }
+      expect(got, `msg=${msg}`).toBe(expectedExact);
+    }
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+  }
+});
+
+it("SEC-T5-ITER36-FE-03: handles empty/URL continuation segments, non-separator key prefixes, and >32-char dollar-quoted tags", async () => {
+  setCloudModeRuntime(true);
+  const events: { state?: string; error?: string }[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    const tag33 = "a".repeat(33);
+    const tag128 = "t_" + "z".repeat(126);
+    const cases: readonly [string, readonly string[], string][] = [
+      // Finding 7: Empty continuation segments and mid-header [url] / [redacted]
+      [
+        "Error: Cookie: a=1; ; b = memory",
+        ["Cookie", "memory", "="],
+        "Error: Error: [redacted]",
+      ],
+      [
+        "Error: Cookie: a=1; https://x.example/p; b = memory",
+        ["Cookie", "x.example", "memory", "="],
+        "Error: Error: [redacted]",
+      ],
+      [
+        "Error: Authorization: Digest realm=a, , response = memory",
+        ["Authorization", "Digest", "realm", "response", "memory", "="],
+        "Error: Error: [redacted]",
+      ],
+      [
+        "Error: Authorization: Digest realm=a, https://x.example/p, response = memory",
+        ["Authorization", "Digest", "realm", "x.example", "response", "memory", "="],
+        "Error: Error: [redacted]",
+      ],
+      [
+        'Runtime Error: Authorization: Digest realm=a, "opaque", response = memory rejected',
+        ["Authorization", "Digest", "realm", "opaque", "response", "memory", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        'Runtime Error: "Cookie": a=1; https://x.example/p; b = memory rejected',
+        ["Cookie", "x.example", "memory", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      // Finding 8: Non-separator prefixes (/, :, @, $) and multi-colon tokens
+      [
+        "Error: req:Authorization: 100ms",
+        ["req", "Authorization", "100ms"],
+        "Error: Error: [redacted]",
+      ],
+      [
+        "Error: /token: memory",
+        ["token", "memory"],
+        "Error: Error: [redacted]",
+      ],
+      [
+        "Error: @secret: 100ms",
+        ["secret", "100ms"],
+        "Error: Error: [redacted]",
+      ],
+      [
+        "Error: $secret: 100ms",
+        ["secret", "100ms"],
+        "Error: Error: [redacted]",
+      ],
+      [
+        "Error: headers/cookie: sid=a; max-age = 100ms",
+        ["headers", "cookie", "sid", "max-age", "100ms", "="],
+        "Error: Error: [redacted]",
+      ],
+      [
+        "Runtime Error: req:Authorization:Bearer server rejected",
+        ["req", "Authorization", "Bearer", "server"],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: req:Cookie:sid=a; max-age = 100ms rejected",
+        ["req", "Cookie", "sid", "max-age", "100ms", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      // Finding 9: Dollar-quoted tags > 32 chars (closed, unclosed, multiline)
+      [
+        `Runtime Error: $${tag33}$memory 42 MB 100ms$${tag33}$ rejected`,
+        [tag33, "memory", "42", "MB", "100ms"],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        `Runtime Error: $${tag128}$memory 42 MB\n100ms$${tag128}$ rejected`,
+        [tag128, "memory", "42", "MB", "100ms"],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        `Runtime Error: $${tag33}$memory 42 MB 100ms`,
+        [tag33, "memory", "42", "MB", "100ms"],
+        "Error: Runtime Error: [redacted]",
+      ],
+    ];
+    for (const [msg, forbidden, expectedExact] of cases) {
+      const err = new Error(msg);
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+      const got = events.at(-1)?.error ?? "";
+      for (const frag of forbidden) {
+        expect(got, `msg=${msg} got=${got}`).not.toContain(frag);
+      }
+      expect(got, `msg=${msg}`).toBe(expectedExact);
+    }
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+  }
+});
+
+it("SEC-T5-ITER36-FE-04: redacts Wave 35 bypass classes end-to-end through real @duckdb/duckdb-wasm SELECT error() probes", async () => {
+  const { createNodeBackend } = await import("./dashboard/duckdb");
+  const backend = await createNodeBackend();
+  setCloudModeRuntime(true);
+  const events: { state?: string; error?: string }[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    await backend.query("CREATE TABLE t_iter36 (secret_val VARCHAR)");
+    await backend.query("INSERT INTO t_iter36 VALUES ('memory')");
+    const tag40 = "a".repeat(40);
+
+    const realDuckWave35: readonly [string, readonly string[], string][] = [
+      [
+        `SELECT error('"Authorization" = Bearer ' || secret_val || ' rejected') FROM t_iter36`,
+        ["Authorization", "Bearer", "memory", "="],
+        "Error: Invalid Input Error: [redacted] rejected",
+      ],
+      [
+        `SELECT error('Authorization=>Bearer ' || secret_val || ' rejected') FROM t_iter36`,
+        ["Authorization", "Bearer", "memory", "="],
+        "Error: Invalid Input Error: [redacted] rejected",
+      ],
+      [
+        `SELECT error('Authorization::Bearer ' || secret_val || ' rejected') FROM t_iter36`,
+        ["Authorization", "Bearer", "memory"],
+        "Error: Invalid Input Error: [redacted] rejected",
+      ],
+      [
+        `SELECT error('AWS4-HMAC-SHA256 Credential=abc, response = ' || secret_val || ' rejected') FROM t_iter36`,
+        ["AWS4", "Credential", "abc", "response", "memory", "="],
+        "Error: Invalid Input Error: [redacted] rejected",
+      ],
+      [
+        `SELECT error('Authorization=Digest username=alice, response= ' || secret_val || ' rejected') FROM t_iter36`,
+        ["Authorization", "Digest", "alice", "response", "memory", "="],
+        "Error: Invalid Input Error: [redacted] rejected",
+      ],
+      [
+        `SELECT error('Negotiate 100ms rejected')`,
+        ["Negotiate", "100ms"],
+        "Error: Invalid Input Error: [redacted] rejected",
+      ],
+      [
+        `SELECT error('WWW-Authenticate=Bearer realm=a, error = ' || secret_val || ' rejected') FROM t_iter36`,
+        ["WWW-Authenticate", "Bearer", "realm", "error", "memory", "="],
+        "Error: Invalid Input Error: [redacted] rejected",
+      ],
+      [
+        `SELECT error('password=' || chr(160) || '42 MB rejected')`,
+        ["password", "42", "MB", "="],
+        "Error: Invalid Input Error: [redacted] rejected",
+      ],
+      [
+        `SELECT error('Cookie=a=1; ; b = ' || secret_val || ' rejected') FROM t_iter36`,
+        ["Cookie", "memory", "="],
+        "Error: Invalid Input Error: [redacted] rejected",
+      ],
+      [
+        `SELECT error('headers/cookie=sid=a; max-age = 100ms rejected')`,
+        ["headers", "cookie", "sid", "max-age", "100ms", "="],
+        "Error: Invalid Input Error: [redacted] rejected",
+      ],
+      [
+        `SELECT error('$${tag40}$' || secret_val || ' 42 MB 100ms$${tag40}$ rejected') FROM t_iter36`,
+        [tag40, "memory", "42", "MB", "100ms"],
+        "Error: Invalid Input Error: [redacted] rejected",
+      ],
+    ];
+    for (const [sql, forbidden, expectedExact] of realDuckWave35) {
+      await expect(measureCloudQuery("query.console", () => backend.query(sql))).rejects.toThrow();
+      const got = events.at(-1)?.error ?? "";
+      for (const frag of forbidden) {
+        expect(got, `sql=${sql} got=${got}`).not.toContain(frag);
+      }
+      expect(got, `sql=${sql}`).toBe(expectedExact);
+    }
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+    await backend.dispose();
+  }
+}, 45000);
+
+it("SEC-T5-ITER36-FE-05: maintains strict O(N) performance (<10ms) across 64 KiB Wave 35/36 adversarial inputs including long dollar-quote tags and Unicode whitespace", async () => {
+  setCloudModeRuntime(true);
+  const events: { state?: string; error?: string }[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    // Also assert correctness on a large >32-char dollar-quoted payload
+    const tag500 = "t" + "a".repeat(499);
+    const bigDollarErr = new Error(`Runtime Error: $${tag500}$memory 42 MB 100ms$${tag500}$ rejected`);
+    await expect(measureCloudQuery("dashboard.bundle", async () => { throw bigDollarErr; })).rejects.toBe(bigDollarErr);
+    expect(events.at(-1)?.error).toBe("Error: Runtime Error: [redacted] rejected");
+
+    const perfPayloads64k = [
+      "Runtime Error: $" + "a".repeat(64000),
+      "Runtime Error: $" + "a".repeat(30000) + "$" + "b".repeat(30000),
+      "Runtime Error: " + ("$" + "a".repeat(60) + " ").repeat(1000),
+      "Runtime Error: " + "$a$x$a$".repeat(9000),
+      "Runtime Error: " + ("$" + "k".repeat(40) + "$v$" + "k".repeat(40) + "$ ").repeat(750),
+      "Runtime Error: " + "a:".repeat(32000) + "100ms",
+      "Runtime Error: Cookie: a=1" + "; ".repeat(32000) + "b = memory",
+      "Runtime Error: Authorization: Digest a=1" + ", ".repeat(32000) + "response = cache",
+      "Runtime Error: Authorization:\u00a0" + "Bearer\u00a0".repeat(9000) + "memory",
+      "Runtime Error: WWW-Authenticate: Bearer " + "realm=a, ".repeat(7000) + "error = memory",
+    ];
+    for (const payload of perfPayloads64k) {
+      const err = new Error(payload);
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+      const trials: number[] = [];
+      for (let k = 0; k < 5; k += 1) {
+        const t0 = performance.now();
+        await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+        trials.push(performance.now() - t0);
+      }
+      const sorted = [...trials].sort((a, b) => a - b);
+      const median = sorted[Math.floor(sorted.length / 2)]!;
+      const max = sorted.at(-1)!;
+      expect(median, `len=${payload.length} trials=${trials.map((v) => v.toFixed(2)).join(",")}`).toBeLessThan(10);
+      expect(max, `len=${payload.length} trials=${trials.map((v) => v.toFixed(2)).join(",")}`).toBeLessThan(150);
+    }
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+  }
+}, 30000);

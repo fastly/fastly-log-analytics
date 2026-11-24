@@ -425,12 +425,16 @@ struct Preparing {
     offsets: BTreeMap<i64, usize>,
 }
 
+const MAX_PROOF_BLOCKS: usize = 16_384;
+
 #[derive(Serialize, Deserialize)]
 struct Proof {
     remaining: BTreeSet<String>,
     current: Option<Reference>,
     #[serde(default)]
     rows: u64,
+    #[serde(default)]
+    visited_blocks: BTreeSet<String>,
 }
 
 /// The returned watermark and ingestion watermark are committed by the same CAS.
@@ -570,6 +574,7 @@ pub fn prepare_reserving<R: Runtime>(
             remaining: wanted,
             current: work.days[&day_start(*hour)].hours.get(hour).cloned(),
             rows: 0,
+            visited_blocks: BTreeSet::new(),
         });
         while !work.proofs[hour].remaining.is_empty() {
             if runtime.admin_remaining_calls() <= reserve + 1 || !admitted(store) {
@@ -582,8 +587,30 @@ pub fn prepare_reserving<R: Runtime>(
             let current = proof
                 .current
                 .as_ref()
-                .ok_or("catalog_replacement_not_active")?;
+                .ok_or("catalog_replacement_not_active")?
+                .clone();
+            if proof.visited_blocks.contains(&current.key) {
+                return Err("catalog_parent_invalid".into());
+            }
             let parent: Block = read(store, &current.key)?;
+            if parent.version != VERSION
+                || parent.service_id != store.service.service_id
+                || parent.hour != *hour
+                || parent.generation != current.generation
+            {
+                return Err("catalog_manifest_invalid".into());
+            }
+            proof.visited_blocks.insert(current.key.clone());
+            if proof.visited_blocks.len() > MAX_PROOF_BLOCKS {
+                return Err("catalog_identity_admission".into());
+            }
+            if parent.previous.as_ref().is_some_and(|prev| {
+                prev.generation > current.generation
+                    || prev.key == current.key
+                    || proof.visited_blocks.contains(&prev.key)
+            }) {
+                return Err("catalog_parent_invalid".into());
+            }
             if parent
                 .replaces
                 .iter()
@@ -1171,4 +1198,276 @@ pub fn events<R: Runtime>(runtime: &R, service: &Service, query: &str) -> Result
         retry_ms(service.log_period),
         current.cursor
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        admin::{FosRequest, FosResponse, Record, Service},
+        setup::SetupStores,
+    };
+    use serde_json::json;
+    use std::{
+        cell::{Cell, RefCell},
+        time::Instant,
+    };
+
+    struct MockRt {
+        kv: RefCell<BTreeMap<String, Value>>,
+        objects: RefCell<BTreeMap<String, Vec<u8>>>,
+        remaining: Cell<u32>,
+        gets: Cell<u32>,
+    }
+    impl SetupStores for MockRt {
+        fn config_present(&self, _: &str) -> Result<bool, String> {
+            Ok(true)
+        }
+        fn secret_present(&self, _: &str) -> Result<bool, String> {
+            Ok(true)
+        }
+        fn state_linked(&self) -> Result<bool, String> {
+            Ok(true)
+        }
+    }
+    impl Runtime for MockRt {
+        fn config(&self, _: &str) -> Result<Option<String>, String> {
+            Ok(None)
+        }
+        fn secret(&self, _: &str) -> Result<Option<String>, String> {
+            Ok(Some("tok".into()))
+        }
+        fn random(&self) -> Result<[u8; 32], String> {
+            Ok([0; 32])
+        }
+        fn now(&self) -> u64 {
+            1_800_003_600
+        }
+        fn checks(&self, _: bool) -> Result<Value, String> {
+            Ok(json!({}))
+        }
+        fn versions(&self) -> Result<Value, String> {
+            Ok(json!({}))
+        }
+        fn compute_service_id(&self) -> Option<String> {
+            None
+        }
+        fn compute_service_version(&self) -> Option<String> {
+            None
+        }
+        fn admin_get(&self, key: &str) -> Result<Option<Record>, String> {
+            Ok(self.kv.borrow().get(key).map(|v| Record {
+                generation: "1".into(),
+                value: v.clone(),
+            }))
+        }
+        fn admin_cas(&self, key: &str, _: Option<&str>, v: &Value) -> Result<bool, String> {
+            self.kv.borrow_mut().insert(key.to_owned(), v.clone());
+            Ok(true)
+        }
+        fn admin_fos(&self, request: FosRequest<'_>) -> Result<FosResponse, String> {
+            let rem = self.remaining.get();
+            if rem == 0 {
+                return Err("backend_budget_exhausted".into());
+            }
+            self.remaining.set(rem - 1);
+            if request.method == "GET" {
+                self.gets.set(self.gets.get() + 1);
+            }
+            let key = request.key.trim_start_matches('/');
+            match self.objects.borrow().get(key) {
+                Some(body) => Ok(FosResponse {
+                    status: 200,
+                    body: body.clone(),
+                    cdn_cache: None,
+                    retry_after: None,
+                }),
+                None => Ok(FosResponse {
+                    status: 404,
+                    body: Vec::new(),
+                    cdn_cache: None,
+                    retry_after: None,
+                }),
+            }
+        }
+        fn admin_remaining_calls(&self) -> u32 {
+            self.remaining.get()
+        }
+    }
+
+    fn test_service() -> Service {
+        serde_json::from_value(json!({
+            "service_id": "svc", "name": "n", "status": "active", "created_at": 0, "updated_at": 0,
+            "config_version": 1, "logging_enabled": true, "logging_endpoint_name": "e",
+            "log_period": 120, "sample_rate": 1, "edge_only": false, "custom_condition": "",
+            "fos_bucket": "fos-abcdefghijklmnopqrst12-logs", "fos_prefix": "", "fos_region": "us-east-1",
+            "fos_endpoint": "x", "log_fields": [], "field_limits": {}, "fastly_token_ref": "t",
+            "fos_access_key_ref": "ak", "fos_secret_key_ref": "sk", "owner": "o",
+            "bucket_adopted": false, "bucket_checked": false, "last_activated_version": null,
+            "last_reconcile": null, "pending_job_id": null
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn iter36_f7_catalog_prepare_proof_rejects_cycle_and_mismatched_block_metadata() {
+        let svc = test_service();
+        let hour = 1_800_000_000i64; // 2027-01-15T08:00:00Z
+        let day = day_start(hour);
+        let day_key = "processed/_catalog/day-proof.json".to_owned();
+        let key_a = "processed/_catalog/proof-block-a.json".to_owned();
+        let key_b = "processed/_catalog/proof-block-b.json".to_owned();
+        let target_file =
+            "processed/request/year=2027/month=01/day=15/hour=08/window=1800000000-1800000120-0.parquet"
+                .to_owned();
+        let day_index = Day {
+            version: VERSION,
+            service_id: Some(svc.service_id.clone()),
+            hours: BTreeMap::from([(
+                hour,
+                Reference {
+                    key: key_a.clone(),
+                    generation: 5,
+                },
+            )]),
+            ..Default::default()
+        };
+        let head = Head {
+            version: VERSION,
+            generation: 5,
+            recent: vec![Event {
+                cursor: "5".into(),
+                generation: 5,
+                committed_at: None,
+                manifest: None,
+            }],
+            days: BTreeMap::from([(day, day_key.clone())]),
+            ..Default::default()
+        };
+        let wm = json!({ "catalog": head });
+
+        // 1. 2-node equal-gen cycle A (gen 5) -> B (gen 5) -> A (gen 5) during replacement proof
+        let blk_a = Block {
+            version: VERSION,
+            service_id: svc.service_id.clone(),
+            generation: 5,
+            hour,
+            previous: Some(Reference {
+                key: key_b.clone(),
+                generation: 5,
+            }),
+            files: vec![],
+            summaries: vec![],
+            replaces: vec![],
+            committed_at: BTreeMap::new(),
+        };
+        let blk_b = Block {
+            version: VERSION,
+            service_id: svc.service_id.clone(),
+            generation: 5,
+            hour,
+            previous: Some(Reference {
+                key: key_a.clone(),
+                generation: 5,
+            }),
+            files: vec![],
+            summaries: vec![],
+            replaces: vec![],
+            committed_at: BTreeMap::new(),
+        };
+        let rt = MockRt {
+            kv: RefCell::new(BTreeMap::new()),
+            objects: RefCell::new(BTreeMap::from([
+                (day_key.clone(), serde_json::to_vec(&day_index).unwrap()),
+                (key_a.clone(), serde_json::to_vec(&blk_a).unwrap()),
+                (key_b.clone(), serde_json::to_vec(&blk_b).unwrap()),
+            ])),
+            remaining: Cell::new(24),
+            gets: Cell::new(0),
+        };
+        let store = Store {
+            runtime: &rt,
+            service: &svc,
+            access_key: "ak".into(),
+            secret_key: "sk".into(),
+            started: Instant::now(),
+            vcpu_start: 0,
+        };
+        let res = prepare_reserving(
+            &store,
+            &wm,
+            "compaction",
+            "v2",
+            &[],
+            &[],
+            &[],
+            std::slice::from_ref(&target_file),
+            0,
+        );
+        assert_eq!(res.err().as_deref(), Some("catalog_parent_invalid"));
+        assert!(
+            rt.gets.get() <= 4,
+            "cycle in proof must terminate immediately, gets={}",
+            rt.gets.get()
+        );
+
+        // 2. Foreign service_id / wrong version / wrong hour / wrong generation on proof block -> catalog_manifest_invalid!
+        for (label, bad_blk) in [
+            (
+                "foreign_sid",
+                Block {
+                    service_id: "foreignService".into(),
+                    previous: None,
+                    ..blk_a.clone()
+                },
+            ),
+            (
+                "wrong_version",
+                Block {
+                    version: VERSION + 1,
+                    previous: None,
+                    ..blk_a.clone()
+                },
+            ),
+            (
+                "wrong_hour",
+                Block {
+                    hour: hour + 3600,
+                    previous: None,
+                    ..blk_a.clone()
+                },
+            ),
+            (
+                "wrong_gen",
+                Block {
+                    generation: 4,
+                    previous: None,
+                    ..blk_a.clone()
+                },
+            ),
+        ] {
+            rt.kv.borrow_mut().clear();
+            rt.objects
+                .borrow_mut()
+                .insert(key_a.clone(), serde_json::to_vec(&bad_blk).unwrap());
+            rt.remaining.set(24);
+            let err = prepare_reserving(
+                &store,
+                &wm,
+                "compaction",
+                "v2",
+                &[],
+                &[],
+                &[],
+                std::slice::from_ref(&target_file),
+                0,
+            )
+            .err();
+            assert_eq!(
+                err.as_deref(),
+                Some("catalog_manifest_invalid"),
+                "iter36 F7 ({label}): proof block metadata mismatch must be rejected!"
+            );
+        }
+    }
 }

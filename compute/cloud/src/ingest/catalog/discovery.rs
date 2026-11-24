@@ -190,7 +190,7 @@ fn upcoming(
         let current = index == state.hour;
         let selected = if state.summary || include_summaries {
             state.day_hours.get(hour).or_else(|| {
-                if summary_bounds.0 <= *hour && summary_bounds.1 >= hour + 3600 {
+                if summary_bounds.0 <= *hour && summary_bounds.1 >= hour.saturating_add(3600) {
                     state.hour_bundles.get(hour)
                 } else {
                     None
@@ -347,7 +347,7 @@ fn enter_day(
     state.day_hours.clear();
     state.day_bundle = if (state.summary || include_summaries)
         && summary_bounds.0 <= day
-        && summary_bounds.1 >= day + 86_400
+        && summary_bounds.1 >= day.saturating_add(86_400)
     {
         state.day_bundles.get(&day).cloned()
     } else {
@@ -442,7 +442,7 @@ fn walk<R: Runtime>(
             let day_covered = state.day_hours.contains_key(&hour);
             let mut is_open = false;
             let selected = state.day_hours.get(&hour).or_else(|| {
-                if summary_bounds.0 <= hour && summary_bounds.1 >= hour + 3600 {
+                if summary_bounds.0 <= hour && summary_bounds.1 >= hour.saturating_add(3600) {
                     state.hour_bundles.get(&hour)
                 } else {
                     None
@@ -655,7 +655,7 @@ pub fn forked_page<R: Runtime>(
     summary_bounds: (i64, i64),
 ) -> Result<Start, String> {
     let base = fresh(store, None, from, to, summary, summary_bounds)?;
-    if to - from <= FORK_MIN_SECONDS {
+    if to.saturating_sub(from) <= FORK_MIN_SECONDS {
         return walk(
             store,
             base,
@@ -670,7 +670,7 @@ pub fn forked_page<R: Runtime>(
     if base.days.len() > FORK_DAY_INDEXES {
         let size = base.days.len().div_ceil(MAX_FORKS);
         for days in base.days.chunks(size) {
-            let (first, last) = (days[0].0, days[days.len() - 1].0 + 86_400);
+            let (first, last) = (days[0].0, days[days.len() - 1].0.saturating_add(86_400));
             let mut shard = base.clone();
             shard.days = days.to_vec();
             shard
@@ -1782,5 +1782,93 @@ mod tests {
             "m2: cycle must terminate immediately after visiting A and B, not burn budget (gets={})",
             rt.gets.get()
         );
+    }
+
+    #[test]
+    fn iter36_f10_discovery_near_i64_max_hour_and_day_do_not_overflow() {
+        let svc = test_service();
+        let near_max_hour = i64::MAX - 100;
+        let near_max_day = i64::MAX - 10_000;
+
+        // 1. enter_day with day near i64::MAX must not panic on `day + 86_400`
+        let mut st = State {
+            from: 0,
+            to: i64::MAX,
+            summary: true,
+            day_bundles: BTreeMap::from([(
+                near_max_day,
+                Reference {
+                    key: "processed/_catalog/day-bundle.json".into(),
+                    generation: 1,
+                },
+            )]),
+            ..State::default()
+        };
+        let idx = Day {
+            version: VERSION,
+            service_id: Some(svc.service_id.clone()),
+            hours: BTreeMap::from([(
+                near_max_hour,
+                Reference {
+                    key: "processed/_catalog/blk-max.json".into(),
+                    generation: 1,
+                },
+            )]),
+            ..Default::default()
+        };
+        enter_day(&mut st, near_max_day, idx, true, (0, i64::MAX));
+        assert!(st.day_bundle.is_some());
+
+        // 2. upcoming with hour near i64::MAX must not panic on `hour + 3600`
+        st.day_bundle_ready = true;
+        st.hour_bundles.insert(
+            near_max_hour,
+            Reference {
+                key: "processed/_catalog/hb-max.json".into(),
+                generation: 1,
+            },
+        );
+        let keys = upcoming(&st, true, (0, i64::MAX));
+        assert!(keys
+            .iter()
+            .any(|(k, _)| k == "processed/_catalog/hb-max.json"));
+
+        // 3. walk with hour near i64::MAX and forked_page with >FORK_DAY_INDEXES days ending near i64::MAX
+        let aligned_max_day = i64::MAX - i64::MAX.rem_euclid(86_400);
+        let mut days_map = BTreeMap::new();
+        for i in 0..14i64 {
+            let d = aligned_max_day - (13 - i) * 86_400;
+            days_map.insert(d, format!("processed/_catalog/d-{i}.json"));
+        }
+        let head = Head {
+            version: VERSION,
+            generation: 1,
+            recent: vec![super::super::Event {
+                cursor: "1".into(),
+                generation: 1,
+                committed_at: None,
+                manifest: None,
+            }],
+            days: days_map,
+            ..Default::default()
+        };
+        let rt = MockRt {
+            now: (BASE + 3600) as u64,
+            kv: RefCell::new(BTreeMap::from([(
+                WATERMARK_KEY.into(),
+                json!({ "catalog": head }),
+            )])),
+            objects: RefCell::new(BTreeMap::new()),
+        };
+        let store = Store {
+            runtime: &rt,
+            service: &svc,
+            access_key: "ak".into(),
+            secret_key: "sk".into(),
+            started: Instant::now(),
+            vcpu_start: 0,
+        };
+        let start = forked_page(&store, 0, i64::MAX, true, false, (0, i64::MAX)).unwrap();
+        assert!(matches!(start, Start::Forks { .. }));
     }
 }

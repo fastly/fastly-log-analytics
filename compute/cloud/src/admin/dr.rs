@@ -246,8 +246,11 @@ pub fn sync_best_effort(runtime: &impl Runtime, service: &Service) {
     }
 }
 
-fn day_start(ts: i64) -> i64 {
-    ts - ts.rem_euclid(86_400)
+fn day_start(ts: i64) -> Option<i64> {
+    if ts < 0 {
+        return None;
+    }
+    ts.checked_sub(ts.rem_euclid(86_400))
 }
 
 fn bootstrap_service(owner_id: String, input: &RecoverInput, now: u64) -> Service {
@@ -559,22 +562,28 @@ fn manifest_unix_ts(m: &crate::ingest::catalog::Manifest) -> Option<u64> {
     .and_then(|dt| u64::try_from(dt.unix_timestamp()).ok())
 }
 
-fn ts_floor_key(service: &Service, ts: i64) -> String {
-    let minute_ts = ts - ts.rem_euclid(60);
-    format!(
+fn ts_floor_key(service: &Service, ts: i64) -> Option<String> {
+    if ts < 0 {
+        return None;
+    }
+    let minute_ts = ts.checked_sub(ts.rem_euclid(60))?;
+    Some(format!(
         "{}{}",
         crate::ingest::raw_prefix(service),
         crate::ingest::minute_dir(minute_ts)
-    )
+    ))
 }
 
-fn ts_rum_floor_key(service: &Service, ts: i64) -> String {
-    let minute_ts = ts - ts.rem_euclid(60);
-    format!(
+fn ts_rum_floor_key(service: &Service, ts: i64) -> Option<String> {
+    if ts < 0 {
+        return None;
+    }
+    let minute_ts = ts.checked_sub(ts.rem_euclid(60))?;
+    Some(format!(
         "{}raw/rum/{}",
         crate::ingest::scope(service),
         crate::ingest::minute_dir(minute_ts)
-    )
+    ))
 }
 
 fn record_scanned_reset(slot: &mut Option<ScannedReset>, generation: u64, reset_at: Option<i64>) {
@@ -670,7 +679,9 @@ fn scan_catalog_head(
                         match fos::list_objects(context, service, creds, &svc_rev_prefix, None) {
                             Ok(svc_page) => merged.extend(svc_page.objects),
                             Err(err) if err.status == 503 => return Err(err),
-                            Err(_) => {}
+                            Err(_) => {
+                                legacy_m_truncated = true;
+                            }
                         }
                     } else {
                         legacy_m_truncated = true;
@@ -738,24 +749,27 @@ fn scan_catalog_head(
                         }
                     }
                     Err(err) if err.status == 503 || must_verify_dr_state => return Err(err),
-                    Err(_) => {}
+                    Err(_) => {
+                        legacy_m_truncated = true;
+                    }
                 }
             } else {
                 budget_stopped = true;
+                legacy_m_truncated = true;
             }
         }
         // Always scan `legacy_m_prefix` even when `found_svc_rev` is true so newer legacy reset
         // manifests (e.g. `manifest-0011-reset.json`) are never hidden behind older
-        // `manifest-s-{sid}-rev-*` objects.
+        // `manifest-s-{sid}-rev-*` objects. Never reuse `next_cat_tok` (from `&prefix`) as a
+        // continuation token for `&legacy_m_prefix`.
         if !budget_stopped {
             if context.remaining_calls() > trunc_list_floor {
-                let mut m_tok: Option<String> = next_cat_tok
-                    .clone()
-                    .filter(|t| t.starts_with(&legacy_m_prefix));
-                let mut saw_any_manifest = m_tok.is_some();
+                let mut m_tok: Option<String> = None;
+                let mut saw_any_manifest = false;
                 loop {
                     if context.remaining_calls() <= trunc_list_floor {
                         budget_stopped = true;
+                        legacy_m_truncated = true;
                         break;
                     }
                     let m_page = match fos::list_objects(
@@ -769,7 +783,10 @@ fn scan_catalog_head(
                         Err(err) if err.status == 503 || must_verify_dr_state => {
                             return Err(err);
                         }
-                        Err(_) => break,
+                        Err(_) => {
+                            legacy_m_truncated = true;
+                            break;
+                        }
                     };
                     if !m_page.objects.is_empty() {
                         saw_any_manifest = true;
@@ -802,6 +819,7 @@ fn scan_catalog_head(
                 }
             } else {
                 budget_stopped = true;
+                legacy_m_truncated = true;
             }
         }
     }
@@ -871,7 +889,8 @@ fn scan_catalog_head(
     });
     let has_higher_or_unranked_manifest = objects.iter().any(|o| {
         let (t, g) = manifest_sort_rank(&o.key);
-        t > 0 && (g.is_none() || dr_head_gen.is_some_and(|dg| g.is_some_and(|mg| mg > dg)))
+        t > 0
+            && (t == 2 || g.is_none() || dr_head_gen.is_some_and(|dg| g.is_some_and(|mg| mg > dg)))
     });
 
     let mut best_manifest: Option<(String, crate::ingest::catalog::Manifest)> = None;
@@ -888,32 +907,19 @@ fn scan_catalog_head(
     let legacy_cutoff_day = (from_dr_state && service.log_retention_days > 0).then(|| {
         let cutoff =
             (now as i64 - i64::from(service.log_retention_days) * 86_400).div_euclid(3600) * 3600;
-        day_start(cutoff)
+        day_start(cutoff).unwrap_or(0)
     });
 
-    for obj in objects {
+    for (idx, obj) in objects.iter().enumerate() {
         let (m_tier, m_gen_hint) = manifest_sort_rank(&obj.key);
         if m_tier > 0 {
-            if expected_on_page
-                && !page_was_truncated
-                && !has_higher_or_unranked_manifest
-                && best_manifest.is_none()
-                && m_tier == 3
-                && expected_manifest == Some(obj.key.as_str())
-                && m_gen_hint.is_some()
-                && m_gen_hint == dr_head_gen
-            {
-                // Own service-scoped `manifest-s-{sid}-rev-*` (already ownership-validated in
-                // `validate_dr_catalog_head` and filtered before `expected_on_page`) is the
-                // highest-ranked manifest in the un-truncated listing; legacy manifests (`m_tier < 3`)
-                // never take this short-circuit and always verify JSON `service_id`.
-                break;
-            }
-            if let (Some(gh), Some((_, prev_bm))) = (m_gen_hint, best_manifest.as_ref()) {
-                if gh <= prev_bm.generation
-                    && (best_manifest_days.is_some() || prev_bm.batch == "reset")
-                {
-                    continue;
+            if m_tier == 3 {
+                if let (Some(gh), Some((_, prev_bm))) = (m_gen_hint, best_manifest.as_ref()) {
+                    if gh < prev_bm.generation
+                        && (best_manifest_days.is_some() || prev_bm.batch == "reset")
+                    {
+                        continue;
+                    }
                 }
             }
         } else if best_manifest_days.is_some()
@@ -955,7 +961,10 @@ fn scan_catalog_head(
         } else {
             0
         };
-        let dynamic_reset_hold = if effective_reset.is_some() || m_tier > 0 {
+        let is_expected = expected_manifest == Some(obj.key.as_str());
+        let dynamic_reset_hold = if must_verify_dr_state && is_expected {
+            0
+        } else if effective_reset.is_some() || m_tier > 0 {
             if use_primary_reserve {
                 extra_if_reset.0
             } else {
@@ -989,17 +998,24 @@ fn scan_catalog_head(
             {
                 budget_stopped = true;
             }
-            if m_tier == 2
-                && (m_gen_hint.is_none()
-                    || best_manifest
-                        .as_ref()
-                        .is_none_or(|(_, bm)| m_gen_hint.unwrap() > bm.generation))
-            {
+            let best_is_scoped = best_manifest
+                .as_ref()
+                .is_some_and(|(bk, _)| manifest_sort_rank(bk).0 == 3);
+            if objects[idx..].iter().any(|rem_obj| {
+                let (rt, rg) = manifest_sort_rank(&rem_obj.key);
+                (rt > 0 && rg.is_none())
+                    || rt == 2
+                    || ((rt == 3 || (!best_is_scoped && rt > 0))
+                        && rg.is_some_and(|gh| {
+                            best_manifest
+                                .as_ref()
+                                .is_none_or(|(_, bm)| gh >= bm.generation)
+                        }))
+            }) {
                 skipped_reset_manifest = true;
             }
             break;
         }
-        let is_expected = expected_manifest == Some(obj.key.as_str());
         let bytes = match fos::get_object(context, service, creds, &obj.key) {
             Ok(Some(bytes)) => bytes,
             Ok(None) => {
@@ -1022,11 +1038,15 @@ fn scan_catalog_head(
                 continue;
             }
             if manifest.service_id == service.service_id {
+                if is_expected && dr_head_gen.is_some_and(|dg| manifest.generation != dg) {
+                    return Err(Error::new(400, "invalid_dr_catalog_head"));
+                }
                 let raw_val = serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null);
                 if manifest.batch == "reset" {
                     let ts = raw_val
                         .get("reset_at")
                         .and_then(Value::as_i64)
+                        .filter(|&ts| ts >= 0)
                         .or_else(|| manifest_unix_ts(&manifest).map(|u| u as i64));
                     record_scanned_reset(&mut effective_reset, manifest.generation, ts);
                 }
@@ -1035,38 +1055,55 @@ fn scan_catalog_head(
                     .and_then(Value::as_u64)
                     .filter(|&rg| rg > 0 && rg <= manifest.generation)
                 {
-                    let ra = raw_val.get("reset_at").and_then(Value::as_i64);
+                    let ra = raw_val
+                        .get("reset_at")
+                        .and_then(Value::as_i64)
+                        .filter(|&ts| ts >= 0);
                     record_scanned_reset(&mut effective_reset, rg, ra);
                 }
+                let has_unread_candidate_manifest = objects[idx + 1..].iter().any(|rem_obj| {
+                    let (rt, rg) = manifest_sort_rank(&rem_obj.key);
+                    rt == 2
+                        || (rt > 0 && rg.is_none())
+                        || (rt > 0 && rg.is_some_and(|gh| gh >= manifest.generation))
+                });
                 let matched_expected_latest = is_expected
                     && !page_was_truncated
                     && !has_higher_or_unranked_manifest
+                    && !has_unread_candidate_manifest
                     && manifest.batch != "reset"
                     && effective_reset.is_none()
                     && dr_head_gen == Some(manifest.generation);
-                if best_manifest
-                    .as_ref()
-                    .is_none_or(|(_, prev)| manifest.generation > prev.generation)
-                {
-                    best_manifest_days = raw_val
-                        .get("head_days")
-                        .and_then(|v| {
-                            serde_json::from_value::<BTreeMap<i64, String>>(v.clone()).ok()
-                        })
-                        .filter(|m| m.values().all(|dk| safe_dr_object_key(dk, &prefix)))
-                        .map(|m| {
-                            let st = raw_val
-                                .get("head_statistics")
-                                .and_then(|sv| {
-                                    serde_json::from_value::<
-                                        BTreeMap<i64, crate::ingest::catalog::Statistics>,
-                                    >(sv.clone())
-                                    .ok()
-                                })
-                                .unwrap_or_default();
-                            (m, st)
-                        });
-                    best_manifest = Some((obj.key, manifest));
+                let replaces_best = best_manifest.as_ref().is_none_or(|(_, prev)| {
+                    manifest.generation > prev.generation
+                        || (manifest.generation == prev.generation
+                            && manifest.batch == "reset"
+                            && prev.batch != "reset")
+                });
+                if replaces_best {
+                    best_manifest_days = if manifest.batch == "reset" {
+                        None
+                    } else {
+                        raw_val
+                            .get("head_days")
+                            .and_then(|v| {
+                                serde_json::from_value::<BTreeMap<i64, String>>(v.clone()).ok()
+                            })
+                            .filter(|m| m.values().all(|dk| safe_dr_object_key(dk, &prefix)))
+                            .map(|m| {
+                                let st = raw_val
+                                    .get("head_statistics")
+                                    .and_then(|sv| {
+                                        serde_json::from_value::<
+                                            BTreeMap<i64, crate::ingest::catalog::Statistics>,
+                                        >(sv.clone())
+                                        .ok()
+                                    })
+                                    .unwrap_or_default();
+                                (m, st)
+                            })
+                    };
+                    best_manifest = Some((obj.key.clone(), manifest));
                 }
                 if matched_expected_latest {
                     // Ownership of `dr_state.catalog_head.manifest` has been verified in FOS and
@@ -1086,9 +1123,9 @@ fn scan_catalog_head(
         }
         if let Ok(block) = serde_json::from_slice::<crate::ingest::catalog::Block>(&bytes) {
             if block.service_id == service.service_id {
-                verified_own_blocks.insert(obj.key);
+                verified_own_blocks.insert(obj.key.clone());
             } else {
-                known_bad_blocks.insert(obj.key);
+                known_bad_blocks.insert(obj.key.clone());
                 saw_foreign_manifest = true;
             }
             continue;
@@ -1134,8 +1171,8 @@ fn scan_catalog_head(
                 .hours
                 .keys()
                 .next()
-                .map(|h| day_start(*h))
-                .or_else(|| day.statistics.earliest.map(day_start))
+                .and_then(|h| day_start(*h))
+                .or_else(|| day.statistics.earliest.and_then(day_start))
             {
                 if legacy_cutoff_day.is_some_and(|cd| day_ts < cd) {
                     continue;
@@ -1143,7 +1180,7 @@ fn scan_catalog_head(
                 day_candidates.entry(day_ts).or_default().push(ScannedDay {
                     min_gen,
                     max_gen,
-                    key: obj.key,
+                    key: obj.key.clone(),
                     stats: day.statistics,
                     verified_own,
                     block_keys,
@@ -1154,8 +1191,13 @@ fn scan_catalog_head(
 
     // M2 fallback: if the `!from_dr_state` `svc_rev_prefix` path only scanned manifests and the
     // selected non-reset manifest lacked `head_days`, fall back to listing `_catalog/` for days.
-    let day_list_floor = if !must_verify_dr_state && opt_cat_floor > 0 {
-        (fallback_reserve_calls + 1).max(opt_cat_floor + 1)
+    let day_opt_floor = if effective_reset.is_some() {
+        opt_floor
+    } else {
+        opt_cat_floor
+    };
+    let day_list_floor = if !must_verify_dr_state && day_opt_floor > 0 {
+        (fallback_reserve_calls + 1).max(day_opt_floor + 1)
     } else {
         trunc_list_floor
     };
@@ -1163,11 +1205,14 @@ fn scan_catalog_head(
         && !foreign_dr_state
         && !budget_stopped
         && !legacy_m_truncated
+        && !skipped_reset_manifest
         && best_manifest_days.is_none()
-        && effective_reset.is_none()
-        && best_manifest
-            .as_ref()
-            .is_some_and(|(_, m)| m.batch != "reset")
+        && best_manifest.as_ref().is_some_and(|(_, m)| {
+            m.batch != "reset"
+                && effective_reset
+                    .as_ref()
+                    .is_none_or(|r| r.generation < m.generation)
+        })
         && context.remaining_calls() > day_list_floor
     {
         if let Ok(cat_page) = fos::list_objects(context, service, creds, &prefix, None) {
@@ -1197,13 +1242,17 @@ fn scan_catalog_head(
                 } else {
                     reserve_calls
                 };
-                let day_floor = (day_reserve + extra_verify_hold + extra_if_catalog.0).max(
-                    if opt_cat_floor > 0 {
-                        opt_cat_floor + extra_verify_hold
+                let day_extra = if effective_reset.is_some() {
+                    extra_if_reset.0
+                } else {
+                    extra_if_catalog.0
+                };
+                let day_floor =
+                    (day_reserve + extra_verify_hold + day_extra).max(if day_opt_floor > 0 {
+                        day_opt_floor + extra_verify_hold
                     } else {
                         0
-                    },
-                );
+                    });
                 if context.remaining_calls() <= day_floor {
                     break;
                 }
@@ -1258,8 +1307,8 @@ fn scan_catalog_head(
                         .hours
                         .keys()
                         .next()
-                        .map(|h| day_start(*h))
-                        .or_else(|| day.statistics.earliest.map(day_start))
+                        .and_then(|h| day_start(*h))
+                        .or_else(|| day.statistics.earliest.and_then(day_start))
                     {
                         day_candidates.entry(day_ts).or_default().push(ScannedDay {
                             min_gen,
@@ -1300,8 +1349,26 @@ fn scan_catalog_head(
                         };
                         if m.committed_at.chars().any(char::is_control)
                             || m.service_id != service.service_id
+                            || dr_head_gen.is_some_and(|dg| m.generation != dg)
                         {
                             return Err(Error::new(400, "invalid_dr_catalog_head"));
+                        }
+                        if m.batch == "reset" {
+                            let raw_val =
+                                serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null);
+                            let ts = raw_val
+                                .get("reset_at")
+                                .and_then(Value::as_i64)
+                                .filter(|&ts| ts >= 0)
+                                .or_else(|| manifest_unix_ts(&m).map(|u| u as i64));
+                            record_scanned_reset(&mut effective_reset, m.generation, ts);
+                            if best_manifest.as_ref().is_none_or(|(_, prev)| {
+                                m.generation > prev.generation
+                                    || (m.generation == prev.generation && prev.batch != "reset")
+                            }) {
+                                best_manifest_days = None;
+                                best_manifest = Some((m_key.to_owned(), m));
+                            }
                         }
                         false
                     }
@@ -1329,15 +1396,11 @@ fn scan_catalog_head(
         && (legacy_m_truncated
             || skipped_reset_manifest
             || (budget_stopped && best_manifest.is_none() && day_candidates.is_empty()))
-        && effective_reset.is_none()
-        && best_manifest
-            .as_ref()
-            .is_none_or(|(_, m)| m.batch != "reset")
     {
         return Ok((None, false, true));
     }
 
-    if budget_stopped
+    if (budget_stopped || legacy_m_truncated || skipped_reset_manifest)
         && (must_verify_dr_state
             || (expected_missing
                 && (best_manifest.is_none()
@@ -1363,10 +1426,11 @@ fn scan_catalog_head(
     }
 
     let has_authoritative_days = best_manifest_days.is_some()
-        && effective_reset.as_ref().is_none_or(|r| {
-            best_manifest
-                .as_ref()
-                .is_some_and(|(_, bm)| r.generation <= bm.generation)
+        && best_manifest.as_ref().is_some_and(|(_, bm)| {
+            bm.batch != "reset"
+                && effective_reset
+                    .as_ref()
+                    .is_none_or(|r| r.generation < bm.generation)
         });
     let mut days: BTreeMap<i64, ScannedDay> = BTreeMap::new();
     if !has_authoritative_days {
@@ -1374,7 +1438,7 @@ fn scan_catalog_head(
             let cutoff = (now as i64 - i64::from(service.log_retention_days) * 86_400)
                 .div_euclid(3600)
                 * 3600;
-            let cutoff_day = day_start(cutoff);
+            let cutoff_day = day_start(cutoff).unwrap_or(0);
             day_candidates.retain(|day_ts, _| *day_ts >= cutoff_day);
         }
         if let Some((_, ref bm)) = best_manifest {
@@ -1898,10 +1962,19 @@ pub(super) fn recover(
     {
         return Err(Error::new(409, "install_already_reserved"));
     }
+    struct CursorTrimUpdate {
+        cur_key: String,
+        cur_gen: String,
+        cur_val: Value,
+        raw_base: u64,
+        base_after_rebase: u64,
+        drop_n: usize,
+        new_base: u64,
+    }
     let svc_key = format!("svc:{}", input.service_id);
     let existing_svc = context.get(&svc_key)?;
     let mut cached_existing_outbox_trim: Option<(u64, usize)> = None;
-    let mut cursor_trim_update: Option<(String, String, Value)> = None;
+    let mut cursor_trim_update: Option<CursorTrimUpdate> = None;
     if let Some(ref rec) = existing_svc {
         if rec.value.get("data_reset").is_some_and(|v| !v.is_null()) {
             return Err(Error::new(409, "data_reset_in_progress"));
@@ -1943,7 +2016,15 @@ pub(super) fn recover(
                     if let Some(obj) = updated_cursor.as_object_mut() {
                         obj.insert("svc_trimmed_base".into(), json!(new_base));
                         obj.insert("svc_trimmed_prefix_anchor".into(), json!(remaining_anchor));
-                        cursor_trim_update = Some((cur_key, c_rec.generation, updated_cursor));
+                        cursor_trim_update = Some(CursorTrimUpdate {
+                            cur_key,
+                            cur_gen: c_rec.generation,
+                            cur_val: updated_cursor,
+                            raw_base,
+                            base_after_rebase,
+                            drop_n,
+                            new_base,
+                        });
                     }
                 }
             }
@@ -1981,13 +2062,15 @@ pub(super) fn recover(
 
     let clamp_floors_to_ts =
         |svc: &Service, ts: i64, fk: &mut Option<String>, rfk: &mut Option<String>| {
-            let rf = ts_floor_key(svc, ts);
-            if fk.as_deref().is_none_or(|cur| cur < rf.as_str()) {
-                *fk = Some(rf);
+            if let Some(rf) = ts_floor_key(svc, ts) {
+                if fk.as_deref().is_none_or(|cur| cur < rf.as_str()) {
+                    *fk = Some(rf);
+                }
             }
-            let rrf = ts_rum_floor_key(svc, ts);
-            if rfk.as_deref().is_none_or(|cur| cur < rrf.as_str()) {
-                *rfk = Some(rrf);
+            if let Some(rrf) = ts_rum_floor_key(svc, ts) {
+                if rfk.as_deref().is_none_or(|cur| cur < rrf.as_str()) {
+                    *rfk = Some(rrf);
+                }
             }
         };
 
@@ -2159,7 +2242,7 @@ pub(super) fn recover(
             } else if catalog_head.is_some()
                 && !has_front_dicts
                 && cursor_hold > 0
-                && rem >= full_no_f + cursor_hold
+                && rem >= full_no_f + cursor_hold + 2
             {
                 full_no_f + cursor_hold
             } else {
@@ -2257,14 +2340,28 @@ pub(super) fn recover(
                 scanned_opt
             {
                 let reset_occurred = dr_manifest_missing
-                    || effective_reset
-                        .as_ref()
-                        .is_some_and(|r| r.generation > dr_head.generation)
-                    || scanned_manifest
-                        .as_ref()
-                        .is_some_and(|m| m.generation > dr_head.generation && m.batch == "reset");
+                    || effective_reset.as_ref().is_some_and(|r| {
+                        r.generation > dr_head.generation
+                            || (r.generation == dr_head.generation
+                                && (!dr_head.days.is_empty()
+                                    || dr_head.reset_generation != Some(r.generation)))
+                    })
+                    || scanned_manifest.as_ref().is_some_and(|m| {
+                        m.batch == "reset"
+                            && (m.generation > dr_head.generation
+                                || (m.generation == dr_head.generation
+                                    && (!dr_head.days.is_empty()
+                                        || dr_head.reset_generation != Some(m.generation))))
+                    });
                 if let Some(ts) = effective_reset.as_ref().and_then(|r| r.reset_at) {
                     clamp_floors_to_ts(&service, ts, &mut floor_key, &mut rum_floor_key);
+                    if rum_stats
+                        .as_ref()
+                        .and_then(|v| v["at"].as_i64())
+                        .is_some_and(|at| at < ts)
+                    {
+                        rum_stats = None;
+                    }
                 }
                 if reset_occurred {
                     rum_stats = None;
@@ -2290,8 +2387,18 @@ pub(super) fn recover(
                     scanned.days = dr_head.days.clone();
                     scanned.statistics = dr_head.statistics.clone();
                 }
-                if dr_manifest_missing || scanned.generation > dr_head.generation {
+                if dr_manifest_missing || reset_occurred || scanned.generation > dr_head.generation
+                {
                     catalog_head = Some(scanned);
+                } else if let (Some(ref rst), Some(ref mut ch)) =
+                    (&effective_reset, &mut catalog_head)
+                {
+                    if ch.reset_generation.is_none_or(|rg| rst.generation > rg) {
+                        ch.reset_generation = Some(rst.generation);
+                        ch.reset_at = rst.reset_at;
+                    } else if ch.reset_generation == Some(rst.generation) && ch.reset_at.is_none() {
+                        ch.reset_at = rst.reset_at;
+                    }
                 }
             } else if dr_manifest_missing {
                 rum_stats = None;
@@ -2333,6 +2440,13 @@ pub(super) fn recover(
                 });
                 if let Some(ts) = effective_reset.as_ref().and_then(|r| r.reset_at) {
                     clamp_floors_to_ts(&service, ts, &mut floor_key, &mut rum_floor_key);
+                    if rum_stats
+                        .as_ref()
+                        .and_then(|v| v["at"].as_i64())
+                        .is_some_and(|at| at < ts)
+                    {
+                        rum_stats = None;
+                    }
                 }
                 if reset_occurred {
                     rum_stats = None;
@@ -2567,10 +2681,69 @@ pub(super) fn recover(
         existing_svc.as_ref().map(|r| r.generation.as_str()),
         &svc_value,
     )?;
-    if let Some((ref cur_key, ref cur_gen, ref cur_val)) = cursor_trim_update {
-        match context.cas(cur_key, Some(cur_gen.as_str()), cur_val) {
+    if let Some(ref trim_upd) = cursor_trim_update {
+        match context.cas(
+            &trim_upd.cur_key,
+            Some(trim_upd.cur_gen.as_str()),
+            &trim_upd.cur_val,
+        ) {
             Ok(()) => {}
-            Err(err) if err.status == 409 => {}
+            Err(err) if err.status == 409 => {
+                let prev_rec = existing_svc.as_ref();
+                let prev_entries = prev_rec
+                    .and_then(|r| r.value["_audit_outbox"].as_array())
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                for _ in 0..3 {
+                    if context.remaining_calls() < 3 {
+                        break;
+                    }
+                    let Some(live_rec) = context.get(&trim_upd.cur_key)? else {
+                        break;
+                    };
+                    let live_archived = live_rec
+                        .value
+                        .get("svc_outbox_archived")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    let live_trimmed_base = live_rec
+                        .value
+                        .get("svc_trimmed_base")
+                        .and_then(Value::as_u64);
+                    if live_archived <= trim_upd.new_base
+                        || live_trimmed_base.is_some_and(|tb| tb >= trim_upd.new_base)
+                    {
+                        break;
+                    }
+                    let Some(prev) = prev_rec else {
+                        break;
+                    };
+                    let (live_eff_base, live_removable) =
+                        dr_svc_archived_removable(&prev.value, Some(&live_rec.value));
+                    if live_eff_base.max(trim_upd.raw_base) != trim_upd.base_after_rebase
+                        || live_removable <= trim_upd.drop_n
+                        || live_removable > prev_entries.len()
+                    {
+                        break;
+                    }
+                    let remaining_anchor =
+                        dr_svc_slice_anchor(&prev_entries[trim_upd.drop_n..live_removable]);
+                    let mut updated = live_rec.value.clone();
+                    if let Some(obj) = updated.as_object_mut() {
+                        obj.insert("svc_trimmed_base".into(), json!(trim_upd.new_base));
+                        obj.insert("svc_trimmed_prefix_anchor".into(), json!(remaining_anchor));
+                    }
+                    match context.cas(
+                        &trim_upd.cur_key,
+                        Some(live_rec.generation.as_str()),
+                        &updated,
+                    ) {
+                        Ok(()) => break,
+                        Err(cas_err) if cas_err.status == 409 => continue,
+                        Err(cas_err) => return Err(cas_err),
+                    }
+                }
+            }
             Err(err) => return Err(err),
         }
     }

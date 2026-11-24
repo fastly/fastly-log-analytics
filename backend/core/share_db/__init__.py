@@ -442,7 +442,7 @@ _UA_PROD_VER_RE = re.compile(
     r"/\d+(?:\.\d+){1,3}\b",
     re.IGNORECASE,
 )
-_EMBEDDED_IPV4_RE = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])")
+_EMBEDDED_IPV4_RE = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d]|\.\d)")
 _EMBEDDED_IPV6_RE = re.compile(
     r"(?<![A-Fa-f0-9:])(?:"
     r"[A-Fa-f0-9]{1,4}(?::[A-Fa-f0-9]{1,4}){2,7}"

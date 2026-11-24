@@ -15,7 +15,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, unquote_to_bytes, urlparse
 
 import orjson
 import zstandard as zstd
@@ -1016,7 +1016,7 @@ def _exempt_col_list_ident_starts(
                 ):
                     break
                 cte_tok = s_list[p]
-                cte_low = _unquote_tok(cte_tok[0], cte_tok[1]).lower()
+                cte_exact = _unquote_tok(cte_tok[0], cte_tok[1])
                 p2 = p + 1
                 has_col_list = False
                 if p2 < n and (s_list[p2][0], s_list[p2][1]) == ("OP", "("):
@@ -1037,9 +1037,9 @@ def _exempt_col_list_ident_starts(
                     break
                 if has_col_list and cte_tok[0] == "IDENT":
                     exempt.add(cte_tok[2])
-                body_ctes = frozenset(in_scope_ctes | ({cte_low} if is_recursive else set()))
+                body_ctes = frozenset(in_scope_ctes | ({cte_exact} if is_recursive else set()))
                 _walk_query(s_list[p2 + 1 : close_cte], body_ctes)
-                in_scope_ctes.add(cte_low)
+                in_scope_ctes.add(cte_exact)
                 p = close_cte + 1
                 parsed_cte = True
                 if p < n and (s_list[p][0], s_list[p][1]) == ("OP", ","):
@@ -1556,8 +1556,9 @@ def _exempt_col_list_ident_starts(
                         in_join_mod = False
                         pos = j
                         continue
-                    tbl_low = _unquote_tok(parts[-1][0], parts[-1][1]).lower()
-                    if known_relations is not None and tbl_low not in (known_relations | active_ctes):
+                    tbl_exact = _unquote_tok(parts[-1][0], parts[-1][1])
+                    tbl_low = tbl_exact.lower()
+                    if known_relations is not None and tbl_low not in known_relations and tbl_exact not in active_ctes:
                         in_from = False
                         expect_table = False
                         allow_post_table_alias = False
@@ -2026,6 +2027,67 @@ _AS_CLAUSE_OPENING_WORDS = frozenset(
         "USING",
     }
 )
+_BY_PRECEDING_KEYWORDS = frozenset(
+    {"GROUP", "ORDER", "PARTITION", "DISTRIBUTE", "CLUSTER", "SORT", "UNION", "INTERSECT", "EXCEPT"}
+)
+_CLAUSE_CTX_MAJOR_WORDS = frozenset(
+    {"WITH", "FROM", "JOIN", "PREWHERE", "WHERE", "HAVING", "QUALIFY", "LIMIT", "OFFSET"}
+)
+_SETOP_RIGHT_FOLLOW_WORDS = frozenset(
+    {
+        "ALL",
+        "DISTINCT",
+        "BY",
+        "SELECT",
+        "WITH",
+        "FROM",
+        "TABLE",
+        "VALUES",
+        "SHOW",
+        "DESCRIBE",
+        "SUMMARIZE",
+        "DESC",
+        "PIVOT",
+        "UNPIVOT",
+        "PIVOT_WIDER",
+        "PIVOT_LONGER",
+        "ATTACH",
+        "DETACH",
+        "INSTALL",
+        "UNINSTALL",
+        "LOAD",
+        "PRAGMA",
+        "SET",
+        "RESET",
+        "UPDATE",
+        "INSERT",
+        "DELETE",
+        "CREATE",
+        "DROP",
+        "ALTER",
+        "COPY",
+        "EXPORT",
+        "IMPORT",
+        "CALL",
+        "EXPLAIN",
+        "VACUUM",
+        "ANALYZE",
+        "BEGIN",
+        "COMMIT",
+        "ROLLBACK",
+        "TRANSACTION",
+        "GRANT",
+        "REVOKE",
+        "TRUNCATE",
+        "USE",
+        "CHECKPOINT",
+        "MERGE",
+        "REPLACE",
+        "PREPARE",
+        "EXECUTE",
+        "DEALLOCATE",
+    }
+)
 _SQL_INTERVAL_UNITS = frozenset(
     {
         "YEAR",
@@ -2371,6 +2433,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
             "on_op": {},
             "fact": {},
             "clause_open": {},
+            "clause_ctx": None,
         }
         _lex_meta_cache[id(tokens)] = (
             tokens,
@@ -2639,14 +2702,127 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 and not _is_non_kw_lex_pos(tokens, sig_list[s_pos - 1])
             )
         if wu in _AS_CLAUSE_OPENING_WORDS:
+            if (r % 2) == 0 and after_sig is not None and after_sig[0] == "IDENT":
+                aw = after_sig[1].upper()
+                after_s_pos = sig_pos_map.get(after_as_idx, -1)
+                nxt_after_sig = (
+                    tokens[sig_list[after_s_pos + 1]] if 0 <= after_s_pos and after_s_pos + 1 < len(sig_list) else None
+                )
+                if aw == "IN" and nxt_after_sig == ("OP", "("):
+                    return False
+                if aw in ("UNION", "INTERSECT", "EXCEPT") and nxt_after_sig is not None:
+                    if nxt_after_sig == ("OP", "(") or (
+                        nxt_after_sig[0] == "IDENT" and nxt_after_sig[1].upper() in _SETOP_RIGHT_FOLLOW_WORDS
+                    ):
+                        return False
             return _is_clause_open_word_lex(tokens, s_pos, sig_list)
         return False
 
+    def _get_clause_ctx_lex(tokens: list[tuple[str, str]], sig_list: list[int]) -> list[tuple[bool, str]]:
+        _, _, _, _, _, _, case_state = _get_lex_meta_entry(tokens)
+        if case_state["clause_ctx"] is not None:
+            return case_state["clause_ctx"]
+        n_s = len(sig_list)
+        ctx: list[tuple[bool, str]] = [(False, "")] * n_s
+        stack: list[list[Any]] = [[False, ""]]
+        for s_k, tok_idx in enumerate(sig_list):
+            top = stack[-1]
+            ctx[s_k] = (top[0], top[1])
+            tk, tt = tokens[tok_idx]
+            if tk == "OP" and tt in ("(", "[", "{"):
+                stack.append([False, ""])
+                continue
+            if tk == "OP" and tt in (")", "]", "}"):
+                if len(stack) > 1:
+                    stack.pop()
+                else:
+                    stack[0] = [False, ""]
+                continue
+            if tk == "OP" and tt == ";":
+                top[0] = False
+                top[1] = ""
+                continue
+            if tk != "IDENT":
+                continue
+            if s_k > 0:
+                prev_k, prev_t = tokens[sig_list[s_k - 1]]
+                if prev_k == "OP" and prev_t in (".", ",", "(", "[", "{"):
+                    continue
+                if prev_k == "OTHER" or (prev_k == "OP" and prev_t not in (")", "]", "}", ";", "*")):
+                    continue
+                if prev_k == "IDENT" and len(prev_t) == 2 and prev_t.upper() == "AS":
+                    continue
+            wu_c = tt.upper()
+            if wu_c in ("UNION", "INTERSECT", "EXCEPT") and not _is_lex_star_except(tokens, s_k, sig_list):
+                top[0] = False
+                top[1] = ""
+            elif wu_c == "SELECT":
+                if not top[0]:
+                    top[0] = True
+                    top[1] = "SELECT"
+            elif wu_c in _CLAUSE_CTX_MAJOR_WORDS:
+                if (
+                    s_k > 0
+                    and tokens[sig_list[s_k - 1]][0] == "IDENT"
+                    and tokens[sig_list[s_k - 1]][1].upper() in _AS_CLAUSE_OPENING_WORDS
+                ):
+                    continue
+                top[1] = wu_c
+        case_state["clause_ctx"] = ctx
+        return ctx
+
+    def _is_setop_boundary_before_lex(tokens: list[tuple[str, str]], s_idx: int, sig_list: list[int]) -> bool:
+        if s_idx < 0:
+            return True
+        tok_idx = sig_list[s_idx]
+        pk, pt = tokens[tok_idx]
+        if (pk, pt) == ("OP", ";"):
+            return True
+        if pk != "IDENT" or _is_non_kw_lex_pos(tokens, tok_idx):
+            return False
+        pw = pt.upper()
+        if pw in ("UNION", "INTERSECT", "EXCEPT") and not _is_lex_star_except(tokens, s_idx, sig_list):
+            return True
+        if pw in ("ALL", "DISTINCT") and s_idx >= 1:
+            p2_idx = sig_list[s_idx - 1]
+            p2k, p2t = tokens[p2_idx]
+            return (
+                p2k == "IDENT"
+                and p2t.upper() in ("UNION", "INTERSECT", "EXCEPT")
+                and not _is_non_kw_lex_pos(tokens, p2_idx)
+                and not _is_lex_star_except(tokens, s_idx - 1, sig_list)
+            )
+        if pw == "NAME" and s_idx >= 2:
+            p2_idx = sig_list[s_idx - 1]
+            p2k, p2t = tokens[p2_idx]
+            if p2k == "IDENT" and p2t.upper() == "BY" and not _is_non_kw_lex_pos(tokens, p2_idx):
+                return _is_setop_boundary_before_lex(tokens, s_idx - 2, sig_list)
+        return False
+
+    def _can_clause_follow_in_run_lex(prev_clause_kw: str, next_wu: str, saw_select: bool) -> bool:
+        if next_wu in ("TABLE", "WITH"):
+            return False
+        if next_wu == "BY":
+            return prev_clause_kw == "LIMIT"
+        if next_wu == "SELECT":
+            return (not saw_select) and prev_clause_kw in ("", "WITH", "FROM", "JOIN")
+        if prev_clause_kw == "OFFSET":
+            return False
+        if prev_clause_kw == "LIMIT" and next_wu not in ("OFFSET", "BY"):
+            return False
+        if prev_clause_kw == "QUALIFY" and next_wu not in ("LIMIT", "OFFSET"):
+            return False
+        if prev_clause_kw == "HAVING" and next_wu not in ("QUALIFY", "LIMIT", "OFFSET"):
+            return False
+        if prev_clause_kw == "WHERE" and next_wu == "PREWHERE":
+            return False
+        return True
+
     def _is_clause_open_word_lex(tokens: list[tuple[str, str]], s_pos: int, sig_list: list[int]) -> bool:
         _, _, _, _, _, _, case_state = _get_lex_meta_entry(tokens)
-        co_memo: dict[int, bool] = case_state["clause_open"]
+        co_memo: dict[int, tuple[bool, str]] = case_state["clause_open"]
         if s_pos in co_memo:
-            return co_memo[s_pos]
+            return co_memo[s_pos][0]
         cur_s = s_pos
         while cur_s > 0:
             if (cur_s - 1) in co_memo:
@@ -2662,10 +2838,24 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 cur_s -= 1
                 continue
             break
+        saw_select_at_cur = False
         if cur_s > 0 and (cur_s - 1) in co_memo:
-            cur_val = not co_memo[cur_s - 1]
+            prev_val, last_clause_kw = co_memo[cur_s - 1]
+            cur_wu = tokens[sig_list[cur_s]][1].upper()
+            if prev_val:
+                cur_val = False
+            else:
+                if cur_wu in ("BY", "SELECT"):
+                    saw_select_at_cur = _get_clause_ctx_lex(tokens, sig_list)[cur_s][0]
+                cur_val = _can_clause_follow_in_run_lex(last_clause_kw, cur_wu, saw_select_at_cur)
+                if cur_val:
+                    last_clause_kw = cur_wu
+                    if cur_wu == "SELECT":
+                        saw_select_at_cur = True
         elif cur_s == 0:
             cur_val = True
+            last_clause_kw = tokens[sig_list[0]][1].upper()
+            saw_select_at_cur = last_clause_kw == "SELECT"
         else:
             prev_idx = sig_list[cur_s - 1]
             prev_k, prev_t = tokens[prev_idx]
@@ -2679,6 +2869,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                     and tokens[sig_list[cur_s - 2]][1].upper() in ("SELECT", "DISTINCT", "ALL")
                     and not _is_non_kw_lex_pos(tokens, sig_list[cur_s - 2])
                 )
+                or _is_select_head_modifier_end_lex(tokens, cur_s - 2, sig_list)
             )
             if _is_select_head_modifier_end_lex(tokens, cur_s - 1, sig_list):
                 cur_val = False
@@ -2710,12 +2901,55 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                     )
                     if not is_bare_table_alias:
                         cur_val = False
+            cur_wu = tokens[sig_list[cur_s]][1].upper()
+            last_clause_kw = ""
+            if cur_val:
+                if cur_wu in ("TABLE", "WITH"):
+                    if not _is_setop_boundary_before_lex(tokens, cur_s - 1, sig_list):
+                        cur_val = False
+                elif cur_wu == "BY":
+                    is_by_kw = (
+                        prev_k == "IDENT"
+                        and not _is_non_kw_lex_pos(tokens, prev_idx)
+                        and (
+                            prev_t.upper() in _BY_PRECEDING_KEYWORDS
+                            or (
+                                prev_t.upper() in ("ALL", "DISTINCT")
+                                and _is_setop_boundary_before_lex(tokens, cur_s - 1, sig_list)
+                            )
+                        )
+                    )
+                    if not is_by_kw:
+                        saw_sel_c, ctx_clause = _get_clause_ctx_lex(tokens, sig_list)[cur_s]
+                        saw_select_at_cur = saw_sel_c
+                        if ctx_clause != "LIMIT":
+                            cur_val = False
+                elif cur_wu == "SELECT":
+                    if not _is_setop_boundary_before_lex(tokens, cur_s - 1, sig_list):
+                        saw_sel_c, ctx_clause = _get_clause_ctx_lex(tokens, sig_list)[cur_s]
+                        saw_select_at_cur = saw_sel_c
+                        if saw_sel_c and ctx_clause != "WITH":
+                            cur_val = False
+            if cur_val:
+                last_clause_kw = cur_wu
+                if cur_wu == "SELECT":
+                    saw_select_at_cur = True
         while True:
-            co_memo[cur_s] = cur_val
+            co_memo[cur_s] = (cur_val, last_clause_kw)
             if cur_s >= s_pos:
                 return cur_val
             cur_s += 1
-            cur_val = not cur_val
+            nxt_wu = tokens[sig_list[cur_s]][1].upper()
+            if cur_val:
+                cur_val = False
+            else:
+                if nxt_wu in ("BY", "SELECT") and not saw_select_at_cur:
+                    saw_select_at_cur = _get_clause_ctx_lex(tokens, sig_list)[cur_s][0]
+                cur_val = _can_clause_follow_in_run_lex(last_clause_kw, nxt_wu, saw_select_at_cur)
+                if cur_val:
+                    last_clause_kw = nxt_wu
+                    if nxt_wu == "SELECT":
+                        saw_select_at_cur = True
 
     def _is_non_kw_lex_pos(tokens: list[tuple[str, str]], idx: int) -> bool:
         if idx <= 0 or not _has_any_non_kw_sql:
@@ -4478,7 +4712,26 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 }
             )
             _blocked_expr_cte_schemas = frozenset({"system", "information_schema", "pg_catalog"})
-            _protected_tbl_names = frozenset(table_map.keys()) | frozenset(_FACT_DOMAINS.keys())
+            _protected_tbl_names = (
+                frozenset(table_map.keys())
+                | frozenset(k.lower() for k in _FACT_DOMAINS)
+                | frozenset(v.lower() for v in _FACT_DOMAINS.values())
+                | frozenset(
+                    {
+                        "logs",
+                        "client_vitals",
+                        "client_errors",
+                        "request_facts",
+                        "rum_vitals_facts",
+                        "rum_error_facts",
+                        "rum_page_load_facts",
+                        "rum_vitals",
+                        "rum_errors",
+                        "high_scale_batch_publications",
+                        svc_table.lower(),
+                    }
+                )
+            )
             expr_cte_table_refs = branch_expr_ctes
             with_sig_list, with_sig_pos, _, with_match_by_tok, _, _ = _get_lex_meta(tokens)
 
@@ -4585,6 +4838,20 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                             )
                         ):
                             return None
+                        elif (
+                            eu in ("UNION", "INTERSECT", "EXCEPT")
+                            and not _is_non_kw_lex_pos(tokens, k_e)
+                            and not _is_lex_dot_qualifier(tokens, with_sig_pos.get(k_e, -1), with_sig_list)
+                            and not _is_lex_star_except(tokens, with_sig_pos.get(k_e, -1), with_sig_list)
+                            and (
+                                k_e == start_tok_idx
+                                or (
+                                    (s_ke := with_sig_pos.get(k_e, -1)) <= 0
+                                    or not _is_lex_on_operator_tok(tokens, s_ke - 1, with_sig_list)
+                                )
+                            )
+                        ):
+                            return None
                     k_e += 1
                 return None
 
@@ -4637,6 +4904,10 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                         if p2 < len(tokens) and tokens[p2] == ("OP", "("):
                             close_idx = _find_matching_paren(tokens, p2)
                             if _is_subquery_tokens(tokens[p2 + 1 : close_idx]):
+                                if cte_name.lower() in _protected_tbl_names:
+                                    raise PermissionError(
+                                        f"CTE name {cte_name!r} cannot shadow a canonical or allowed table in console queries"
+                                    )
                                 inner_sql, inner_domains, inner_canonicals, inner_schema = _rewrite_tokens(
                                     tokens[p2 + 1 : close_idx],
                                     ctes,
@@ -4646,8 +4917,8 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                                 if explicit_cte_cols is not None:
                                     inner_domains = _demote_col_list_domains(inner_domains)
                                     inner_schema = _remap_derived_cf_schema(inner_schema, explicit_cte_cols)
-                                ctes[cte_name.lower()] = (inner_domains, inner_schema)
-                                expr_cte_table_refs.pop(cte_name.lower(), None)
+                                ctes[cte_name] = (inner_domains, inner_schema)
+                                expr_cte_table_refs.pop(cte_name, None)
                                 all_canonicals |= inner_canonicals
                                 buf.extend(tk for _, tk in tokens[i_tok : p2 + 1])
                                 buf.append(inner_sql)
@@ -4672,11 +4943,12 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 if expr_hit is not None:
                     as_idx_e, alias_idx_e = expr_hit
                     expr_slice = tokens[p:as_idx_e]
-                    alias_low_e = _unquote_sql_ident(tokens[alias_idx_e][1]).lower()
+                    alias_exact_e = _unquote_sql_ident(tokens[alias_idx_e][1])
+                    alias_low_e = alias_exact_e.lower()
                     ref_parts = _parse_lex_expr_table_ref(expr_slice)
                     if ref_parts is not None:
-                        if len(ref_parts) == 1 and ref_parts[0].lower() in expr_cte_table_refs:
-                            ref_parts = expr_cte_table_refs[ref_parts[0].lower()]
+                        if len(ref_parts) == 1 and ref_parts[0] in expr_cte_table_refs:
+                            ref_parts = expr_cte_table_refs[ref_parts[0]]
                         if len(ref_parts) > 3:
                             raise PermissionError("invalid table reference in WITH expression")
                         tbl_part_low = ref_parts[-1].strip().lower()
@@ -4700,9 +4972,13 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                             raise PermissionError(
                                 f"WITH expression alias {alias_low_e!r} cannot shadow a table in console queries"
                             )
-                        expr_cte_table_refs[alias_low_e] = ref_parts
+                        expr_cte_table_refs[alias_exact_e] = ref_parts
                     else:
-                        expr_cte_table_refs.pop(alias_low_e, None)
+                        if alias_low_e in _protected_tbl_names:
+                            raise PermissionError(
+                                f"WITH expression alias {alias_low_e!r} cannot shadow a table in console queries"
+                            )
+                        expr_cte_table_refs.pop(alias_exact_e, None)
                     if _has_enclosing_parens(expr_slice) is not None and _is_subquery_tokens(expr_slice):
                         sub_e_sql, _, sub_e_canons, _ = _rewrite_tokens(
                             expr_slice, ctes, is_subquery=True, inherited_expr_ctes=expr_cte_table_refs
@@ -5581,12 +5857,13 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                         expect_table = False
                         s_pos += 1
                         continue
-                    low_tbl = _unquote_sql_ident(t).lower()
+                    exact_tbl = _unquote_sql_ident(t)
+                    low_tbl = exact_tbl.lower()
                     item_doms: set[str] = set()
                     item_sch = _DerivedCfSchema()
                     is_cte_ref = False
-                    if low_tbl in ctes:
-                        cte_doms, item_sch = ctes[low_tbl]
+                    if exact_tbl in ctes:
+                        cte_doms, item_sch = ctes[exact_tbl]
                         item_doms = set(cte_doms)
                         is_cte_ref = True
                     elif k == "IDENT" and low_tbl in table_map:
@@ -5992,8 +6269,9 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 append_rw(tok_pair)
                 continue
             if next_tok == ("OP", "."):
-                low_q = t.lower()
-                if low_q in table_map and low_q not in ctes:
+                exact_q = _unquote_sql_ident(t)
+                low_q = exact_q.lower()
+                if low_q in table_map and exact_q not in ctes:
                     append_rw(("IDENT", table_map[low_q][0]))
                 else:
                     append_rw(tok_pair)
@@ -6197,7 +6475,9 @@ def _classify_console_pii_key(raw_key: Any) -> Literal["session", "ip"] | None:
         low_seed = _normalize_console_pii_unicode(seed).strip(_CONSOLE_PII_WS_STRIP_CHARS).lower()
         if low_seed:
             candidates.append(low_seed)
-        decoded = _normalize_console_pii_unicode(unquote(unquote(seed)))
+        decoded = _normalize_console_pii_unicode(
+            unquote_to_bytes(unquote_to_bytes(seed)).decode("utf-8", errors="replace")
+        )
         raw_lower = decoded.strip(_CONSOLE_PII_WS_STRIP_CHARS).lower()
         camel_src = _CONSOLE_PII_CAMEL_IPV_RE.sub(r"Ipv\1", decoded)
         camel = (
@@ -6338,6 +6618,7 @@ def query_endpoint(
             session_id=session_id,
             service_id=service.service_id,
             allowed_tables=allowed_tables,
+            case_sensitive_ctes=True,
         )
     except SQLValidationError as exc:
         raise PermissionError(exc.message) from exc
@@ -6355,6 +6636,7 @@ def query_endpoint(
             session_id=session_id,
             service_id=service.service_id,
             allowed_tables=post_allowed_tables,
+            case_sensitive_ctes=True,
         )
     except SQLValidationError as exc:
         raise PermissionError(exc.message) from exc
@@ -6366,15 +6648,16 @@ def query_endpoint(
                 for entry in entries:
                     if isinstance(entry, dict):
                         key = entry.get("key")
-                        alias_fs = frozenset({key.strip().lower()}) if isinstance(key, str) and key else frozenset()
+                        alias_fs = frozenset({key}) if isinstance(key, str) and key else frozenset()
                         if (val := entry.get("value")) is not None:
                             found |= _collect_non_cte_base_tables(val, active_ctes)
                         active_ctes = active_ctes | alias_fs
             if node_obj.get("type") == "BASE_TABLE" or "table_name" in node_obj:
-                tname = str(node_obj.get("table_name") or "").strip().lower()
+                tname_exact = str(node_obj.get("table_name") or "")
+                tname = tname_exact.strip().lower()
                 sname = str(node_obj.get("schema_name") or "").strip().lower()
                 cname = str(node_obj.get("catalog_name") or "").strip().lower()
-                if tname and not (tname in active_ctes and not sname and not cname):
+                if tname and not (tname_exact in active_ctes and not sname and not cname):
                     found.add(tname)
             for k_child, v_child in node_obj.items():
                 if k_child != "cte_map":

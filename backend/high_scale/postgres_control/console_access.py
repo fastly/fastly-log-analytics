@@ -122,13 +122,17 @@ def _strip_pii_brackets(value: str) -> str:
         cur = nxt
 
 
+def _decode_pii_url_twice(value: str) -> str:
+    return urllib.parse.unquote_to_bytes(urllib.parse.unquote_to_bytes(value)).decode("utf-8", errors="replace")
+
+
 def _is_console_pii_identifier(name: str) -> bool:
     raw = _normalize_pii_unicode(name).strip(_PII_WS_STRIP_CHARS).lower()
     if not raw:
         return False
     if raw in MASKED_KEYS or raw in _MAP_MASKED_KEY_SET or is_saved_view_pii_key(name):
         return True
-    decoded = _normalize_pii_unicode(urllib.parse.unquote(urllib.parse.unquote(name)))
+    decoded = _normalize_pii_unicode(_decode_pii_url_twice(name))
     raw_lower = decoded.strip(_PII_WS_STRIP_CHARS).lower()
     camel_src = _PII_CAMEL_IPV_RE.sub(r"Ipv\1", decoded)
     camel = _PII_CAMEL_RE_2.sub(r"\1_\2", _PII_CAMEL_RE_1.sub(r"\1_\2", camel_src)).strip(_PII_WS_STRIP_CHARS).lower()
@@ -224,8 +228,16 @@ def _redaction(name: str, type_: str, keys: str) -> str | None:
                 f"{u_idot_pat}, 'I'), {u_comb_dot_pat}, ''), {u_kelvin_pat}, 'K')"
             )
 
+        def _ch_url_decode_pass(expr: str) -> str:
+            return (
+                "arrayMap(parts -> arrayStringConcat(arrayMap((p, idx) -> "
+                "if(idx = 1, p, if(match(p, '^[0-9A-Fa-f]{2}'), "
+                "concat(unhex(substring(p, 1, 2)), substring(p, 3)), concat('%', p))), "
+                f"parts, arrayEnumerate(parts))), [splitByChar('%', {expr})])[1]"
+            )
+
         k_raw_pre = f"lower(replaceRegexpAll({_ch_norm_u('toValidUTF8(k)')}, {ws_trim_pat}, ''))"
-        k_decoded = "toValidUTF8(decodeURLComponent(decodeURLComponent(k)))"
+        k_decoded = f"toValidUTF8({_ch_url_decode_pass(_ch_url_decode_pass('k'))})"
         k_norm = _ch_norm_u(k_decoded)
         k_raw_lower = f"lower(replaceRegexpAll({k_norm}, {ws_trim_pat}, ''))"
         camel_ipv_pat = _literal(_PII_CAMEL_IPV_RE.pattern)
@@ -239,12 +251,16 @@ def _redaction(name: str, type_: str, keys: str) -> str | None:
             f"{camel1_pat}, {camel_repl}), {camel2_pat}, {camel_repl}), {ws_trim_pat}, ''))"
         )
         bracket_strip_pat = _literal(_PII_BRACKET_STRIP_RE.pattern)
+        bracket_greedy_pat = _literal(r"\[.*\]")
 
         def _ch_strip_brackets(expr: str) -> str:
             cur_e = expr
-            for _ in range(3):
+            for _ in range(5):
                 cur_e = f"replaceRegexpAll({cur_e}, {bracket_strip_pat}, '')"
-            return cur_e
+            return (
+                f"arrayStringConcat(arrayMap(bseg -> replaceRegexpAll(bseg, {bracket_greedy_pat}, ''), "
+                f"splitByChar('.', {cur_e})), '.')"
+            )
 
         k_raw_unbrack = f"replaceRegexpAll({_ch_strip_brackets(k_raw_lower)}, {ws_trim_pat}, '')"
         k_camel_unbrack = f"replaceRegexpAll({_ch_strip_brackets(k_camel)}, {ws_trim_pat}, '')"
