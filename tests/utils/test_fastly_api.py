@@ -531,7 +531,13 @@ def test_ensure_cdn_service_success():
         patch("backend.provision.fastly_api.account_has_rate_limiting", return_value=True) as mock_detect,
     ):
         result = fastly_api.ensure_cdn_service(input_cfg, "AK", "SK", "tok", status_cb=statuses.append)
-        assert result == {"id": "cdn-new-123", "name": "MyCDN", "rate_limiting": True, "created": True}
+        assert result == {
+            "id": "cdn-new-123",
+            "name": "MyCDN",
+            "cdn_url": "https://mycdn.example.com",
+            "rate_limiting": True,
+            "created": True,
+        }
         written_json = svcconfig.load_config("log-svc-123")
         assert written_json["fos_access_key_id"] == "AK" and written_json["fos_secret_access_key"] == "SK"
         assert written_json["cdn_service_name"] == "MyCDN"

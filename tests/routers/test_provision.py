@@ -500,10 +500,22 @@ def _fake_ensure_fos_access_key(
 
 
 def _fake_ensure_fos_bucket(
-    bucket, region, access_key, secret_key, *, service_id=None, status_cb=None, on_created=None
+    bucket,
+    region,
+    access_key,
+    secret_key,
+    *,
+    service_id=None,
+    status_cb=None,
+    on_created=None,
+    system_generated=False,
+    on_name_selected=None,
+    max_attempts=None,
 ):
     if status_cb:
         status_cb(f"🪣 Bucket {bucket} in {region} (mock)…")
+    if on_name_selected:
+        on_name_selected(bucket)
     if on_created:
         on_created()
     return True

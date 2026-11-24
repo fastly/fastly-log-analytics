@@ -1208,18 +1208,18 @@ def test_ensure_creates_full_stack_and_emits_status_callbacks():
     assert (
         result["scoring_service_id"],
         result["scoring_service_name"],
-        result["scoring_domain"],
         result["scoring_keys_store_id"],
         result["scoring_config_store_id"],
         result["scoring_matrix_store_id"],
     ) == (
         "SCORING_SVC_ID",
         f"Session Scoring Service for {LOG_SVC}",
-        f"fos-{LOG_SVC.lower()}-session-scorer.edgecompute.app",
         "KEYS_STORE_ID",
         "CFG_STORE_ID",
         "MATRIX_STORE_ID",
     )
+    assert re.fullmatch(r"fla-[0-9a-f]{24}\.edgecompute\.app", result["scoring_domain"])
+    assert LOG_SVC.lower() not in result["scoring_domain"]
     assert len(result["aes_key_hex"]) == 64 and int(result["aes_key_hex"], 16) >= 0
 
     calls = fastly_mock.call_args_list
@@ -1229,9 +1229,8 @@ def test_ensure_creates_full_stack_and_emits_status_callbacks():
         "type": "wasm",
     }
     assert (
-        next(c for c in calls if c.args[1] == "/service/SCORING_SVC_ID/version/1/domain")
-        .args[2]["name"]
-        .endswith("session-scorer.edgecompute.app")
+        next(c for c in calls if c.args[1] == "/service/SCORING_SVC_ID/version/1/domain").args[2]["name"]
+        == result["scoring_domain"]
     )
     assert (
         next(c for c in calls if c.args[1] == "/service/SCORING_SVC_ID/version/1/backend").args[2]["name"]

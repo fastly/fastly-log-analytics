@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -2366,7 +2367,10 @@ def test_scoring_matrix_store_names_and_write_only_parity():
     assert wasm_deploy.SCORING_SERVICE_NAME_PREFIX == "Session Scoring Service for "
     assert 'format!("Session Scoring Service for {sid}")' in scoring_rs
     assert wasm_deploy.SCORING_DOMAIN_TEMPLATE == "fos-{sid_lower}-session-scorer.edgecompute.app"
-    assert '"fos-{}-session-scorer.edgecompute.app"' in scoring_rs
+    assert re.fullmatch(r"fla-[0-9a-f]{24}\.edgecompute\.app", wasm_deploy.generate_opaque_scorer_domain())
+    assert wasm_deploy.MAX_COLLISION_ATTEMPTS == 5
+    assert "const MAX_SCORING_DOMAIN_COLLISION_ATTEMPTS: usize = 5;" in scoring_rs
+    assert 'format!("fla-{}.edgecompute.app", hex::encode(&bytes[..12]))' in scoring_rs
 
     # Existing scoring service reuse must not read back aes_key_hex (write-only policy).
     def _reuse_fastly(method, path, *_a, **_kw):
