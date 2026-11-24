@@ -201,19 +201,82 @@ export function deduplicateMetroLeaderboard(
 
 export function normalizeProtocolBucket(raw: unknown): string {
   const val = String(raw ?? "").trim().toUpperCase();
-  if (val === "HTTP/3" || val === "H3" || val.startsWith("HTTP/3")) {
+  if (val === "HTTP/3" || val === "H3" || val === "3" || val === "3.0" || val.startsWith("HTTP/3")) {
     return "HTTP/3";
   }
-  if (val === "HTTP/2" || val === "H2" || val === "HTTP/2.0") {
+  if (val === "HTTP/2" || val === "H2" || val === "2" || val === "2.0" || val === "HTTP/2.0") {
     return "HTTP/2";
   }
-  if (val === "HTTP/1.1") {
+  if (val === "HTTP/1.1" || val === "1.1") {
     return "HTTP/1.1";
   }
-  if (val === "HTTP/1.0") {
+  if (val === "HTTP/1.0" || val === "1.0") {
     return "HTTP/1.0";
   }
   return "Other";
+}
+
+export function normalizeProtocolDistribution(
+  entries: readonly { protocol: unknown; requests: unknown }[],
+  total: number,
+): { protocol: string; requests: number; share_pct: number }[] {
+  const counts = new Map<string, number>();
+  for (const entry of entries) {
+    const reqs = Number(entry.requests ?? 0);
+    if (reqs <= 0) continue;
+    const norm = normalizeProtocolBucket(entry.protocol);
+    counts.set(norm, (counts.get(norm) ?? 0) + reqs);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    .map(([protocol, requests]) => ({
+      protocol,
+      requests,
+      share_pct: total > 0 ? (requests * 100) / total : 0,
+    }));
+}
+
+export function pickWorstSignificant<T extends { health_score: number | null; reqs: number }>(
+  rows: readonly T[],
+  totalReqs: number,
+): T | undefined {
+  const scored = rows.filter((row) => row.health_score != null);
+  const sig = scored.filter((row) => row.reqs > totalReqs * 0.01);
+  const pool = sig.length > 0 ? sig : scored;
+  return [...pool].sort((a, b) => a.health_score! - b.health_score!)[0];
+}
+
+export function asnTrendFromBuckets(
+  asnBuckets: readonly Record<string, unknown>[] | undefined,
+  totalBucketCount: number,
+  bucketSeconds: number,
+  fallbackScore: number | null,
+): { health_score_1h_ago: number | null; health_score_1w_ago: number | null; trend: "improving" | "degrading" | "stable" } {
+  const sorted = [...(asnBuckets ?? [])].sort((a, b) =>
+    String(a.bucket ?? "").localeCompare(String(b.bucket ?? "")),
+  );
+  const avg = (items: typeof sorted): number | null => {
+    const scores = items
+      .map((b) => b.health_score)
+      .filter((s): s is number => typeof s === "number" && Number.isFinite(s));
+    return scores.length ? roundTo(scores.reduce((sum, s) => sum + s, 0) / scores.length, 1) : null;
+  };
+  const lastScore = sorted.length ? sorted[sorted.length - 1].health_score : null;
+  const latest = typeof lastScore === "number" && Number.isFinite(lastScore) ? lastScore : fallbackScore;
+  let hs1h = latest;
+  let hs1w = latest;
+  if (totalBucketCount > 1 && sorted.length > 0) {
+    const n1h = Math.max(1, Math.floor(3600 / Math.max(1, bucketSeconds)));
+    hs1w = avg(sorted.slice(0, Math.max(1, Math.floor(sorted.length / 4))));
+    hs1h = avg(sorted.slice(Math.max(0, sorted.length - n1h)));
+  }
+  let trend: "improving" | "degrading" | "stable" = "stable";
+  if (latest != null && hs1h != null) {
+    const delta = latest - hs1h;
+    if (delta < -5) trend = "degrading";
+    else if (delta > 5) trend = "improving";
+  }
+  return { health_score_1h_ago: hs1h, health_score_1w_ago: hs1w, trend };
 }
 
 export function emptyNetworkHealth(missingTcpFields: string[] = []) {
@@ -324,7 +387,7 @@ const SCAN_COLUMNS = {
   pop_health: [...POP_COLUMNS, "status", "cache", "cache_status", ...BYTES_COLUMNS, "ttfb", "ttfb_ms", ...RTT_COLUMNS,
     "client_ploss"],
   transport: ["proto", "protocol", ...BYTES_COLUMNS, ...RTT_COLUMNS, "ploss", "client_ploss", "delivery_rate",
-    "tcpi_delivery_rate"],
+    "tcpi_delivery_rate", "retrans", "client_tcpi_delta_retrans"],
 } as const;
 
 export type NetworkScan = keyof typeof SCAN_COLUMNS;
@@ -754,10 +817,12 @@ export async function queryNetworkHealth(params: NetworkQueryParams = {}) {
   const bucketData = await queryNetworkBuckets(params, where, engine);
   const shielding = wantShielding(params.sections)
     ? await queryNetworkShielding(params, where, engine) : undefined;
-  const worstAsn = by_asn.filter((row) => row.health_score != null)
-    .sort((a, b) => a.health_score! - b.health_score!)[0];
-  const worstCountry = by_country.filter((row) => row.health_score != null)
-    .sort((a, b) => a.health_score! - b.health_score!)[0];
+  const bucketSeconds = Math.max(1, Math.min(14400, Math.floor(params.bucket_seconds ?? 300)));
+  const heatmapByAsn = new Map<number, readonly Record<string, unknown>[]>(
+    bucketData.heatmap.map((entry) => [entry.asn, entry.buckets]),
+  );
+  const worstAsn = pickWorstSignificant(by_asn, totalRequests);
+  const worstCountry = pickWorstSignificant(by_country, totalRequests);
 
   return {
     available: true,
@@ -768,8 +833,7 @@ export async function queryNetworkHealth(params: NetworkQueryParams = {}) {
     leaderboard: by_asn.slice(0, Math.max(1, Math.min(100, params.top_n ?? 30))).map((row) => ({
       ...row, label: row.as_name, total_reqs: row.reqs,
       health_score_now: row.health_score,
-      health_score_1h_ago: null,
-      health_score_1w_ago: null,
+      ...asnTrendFromBuckets(heatmapByAsn.get(row.asn), bucketData.buckets.length, bucketSeconds, row.health_score),
     })),
     summary: {
       total_requests: totalRequests,
@@ -1082,6 +1146,7 @@ async function queryNetworkTransport(params: NetworkQueryParams) {
         COALESCE(resp_body_size, resp_bytes, 0) AS bytes,
         COALESCE(tcp_rtt, client_rtt_us, client_tcpi_rtt, tcpi_rtt) AS rtt_us,
         COALESCE(client_ploss, ploss) AS ploss_value,
+        COALESCE(retrans, client_tcpi_delta_retrans) AS retrans_value,
         COALESCE(delivery_rate, tcpi_delivery_rate) AS delivery_rate_value
       FROM requests WHERE ${where}
     ), grouped AS (
@@ -1089,6 +1154,7 @@ async function queryNetworkTransport(params: NetworkQueryParams) {
         COUNT(*) AS total_requests,
         SUM(bytes) AS bandwidth_bytes,
         QUANTILE_CONT(rtt_us, [0.5, 0.9, 0.95, 0.99]) AS rtt_quantiles,
+        COUNT(*) FILTER (WHERE retrans_value > 0) * 100.0 / NULLIF(COUNT(*), 0) AS retrans_rate_pct,
         AVG(ploss_value) * 100.0 AS packet_loss_pct,
         AVG(delivery_rate_value) * 8.0 / 1000000.0 AS delivery_rate_mbps
       FROM scoped GROUP BY GROUPING SETS ((), (protocol_key))
@@ -1098,16 +1164,17 @@ async function queryNetworkTransport(params: NetworkQueryParams) {
       rtt_quantiles[2] / 1000.0 AS tcp_rtt_p90_ms,
       rtt_quantiles[3] / 1000.0 AS tcp_rtt_p95_ms,
       rtt_quantiles[4] / 1000.0 AS tcp_rtt_p99_ms,
-      packet_loss_pct, delivery_rate_mbps
+      retrans_rate_pct, packet_loss_pct, delivery_rate_mbps
     FROM grouped ORDER BY is_protocol, total_requests DESC`, [], params.signal);
   const summary = rows.find((entry) => !entry.is_protocol);
   const row: Record<string, unknown> = summary ? {
-    total_requests: summary.total_requests,
-    bandwidth_bytes: summary.bandwidth_bytes,
+    total_requests: Number(summary.total_requests ?? 0),
+    bandwidth_bytes: summary.bandwidth_bytes == null ? null : Number(summary.bandwidth_bytes),
     tcp_rtt_p50_ms: summary.tcp_rtt_p50_ms,
     tcp_rtt_p90_ms: summary.tcp_rtt_p90_ms,
     tcp_rtt_p95_ms: summary.tcp_rtt_p95_ms,
     tcp_rtt_p99_ms: summary.tcp_rtt_p99_ms,
+    retrans_rate_pct: summary.retrans_rate_pct == null ? null : roundTo(Number(summary.retrans_rate_pct), 2),
     packet_loss_pct: summary.packet_loss_pct,
     delivery_rate_mbps: summary.delivery_rate_mbps,
   } : {};
@@ -1118,10 +1185,7 @@ async function queryNetworkTransport(params: NetworkQueryParams) {
     ...row,
     has_transport_data: total > 0,
     missing_fields: row.tcp_rtt_p50_ms == null ? ["tcp_rtt"] : [],
-    protocol_distribution: protocols.map((entry) => ({
-      protocol: String(entry.protocol), requests: Number(entry.requests),
-      share_pct: total ? Number(entry.requests) * 100 / total : 0,
-    })),
+    protocol_distribution: normalizeProtocolDistribution(protocols, total),
   };
 }
 

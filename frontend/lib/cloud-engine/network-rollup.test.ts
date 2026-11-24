@@ -738,4 +738,37 @@ describe("networkFromRollup", () => {
       filters: { url: { mode: "include" as const, values: ["/foo"] } },
     })).toBe(false);
   });
+
+  it("populates retrans_rate_pct and normalizes protocol_distribution in transportFromRollup plus leaderboard trend", async () => {
+    const rttHist = new Histogram();
+    rttHist.min = 20_000;
+    rttHist.max = 20_000;
+    rttHist.buckets[50] = 100;
+    const rttBytes = rttHist.toBytes()!;
+    const t = new Date(T0);
+    const summaryBuf = parquetWriteBuffer({
+      kvMetadata: [{ key: "flp_summary", value: "3" }],
+      columnData: [
+        { name: "bundle", data: ["dim_totals", "dim_totals", "dim_totals", "dim_totals", "transport", "transport", "transport", "dims", "dims", "series5", "series5"], type: "STRING" },
+        { name: "bucket", data: [t, t, t, t, t, t, t, t, t, t, t], type: "TIMESTAMP" },
+        { name: "field", data: ["overall", "proto", "country", "asn", "overall", "proto", "proto", "country", "asn", "overall", "asn"], type: "STRING" },
+        { name: "value", data: ["transport", "transport", "dims", "dims", "", "1.1", "HTTP/1.1", "US", "64500", "", "64500"], type: "STRING" },
+        { name: "requests", data: [BigInt(100), BigInt(100), BigInt(100), BigInt(100), BigInt(100), BigInt(60), BigInt(40), BigInt(100), BigInt(100), BigInt(100), BigInt(100)], type: "INT64" },
+        { name: "resp_bytes_sum", data: [null, null, null, null, BigInt(50000), null, null, BigInt(50000), BigInt(50000), BigInt(50000), BigInt(50000)], type: "INT64" },
+        { name: "rtt_sum", data: [null, null, null, null, null, null, null, BigInt(2_000_000), BigInt(2_000_000), BigInt(2_000_000), BigInt(2_000_000)], type: "INT64" },
+        { name: "rtt_count", data: [null, null, null, null, null, null, null, BigInt(100), BigInt(100), BigInt(100), BigInt(100)], type: "INT64" },
+        { name: "retrans_count", data: [null, null, null, null, null, null, null, BigInt(2), BigInt(2), null, null], type: "INT64" },
+        { name: "truncated", data: [false, false, false, false, null, false, null, false, false, null, false], type: "BOOLEAN" },
+        { name: "rtt_hist", data: [null, null, null, null, rttBytes, null, null, rttBytes, rttBytes, rttBytes, rttBytes], type: "BYTE_ARRAY" },
+      ],
+    });
+    const decoded = await decodeRollup(summaryBuf, 300_000);
+    const rollupRes: RollupResult = { rollup: decoded!, dataFromMs: T0, dataThroughMs: T0 + 300_000 };
+    const tr = transportFromRollup(rollupRes)! as { retrans_rate_pct?: number; protocol_distribution: { protocol: string; requests: number; share_pct: number }[] };
+    expect(tr.retrans_rate_pct).toBe(2);
+    expect(tr.protocol_distribution).toEqual([{ protocol: "HTTP/1.1", requests: 100, share_pct: 100 }]);
+    const nh = networkHealthFromRollup(rollupRes, { bucket_seconds: 300 })! as { leaderboard: { health_score_1h_ago: unknown; trend?: string }[] };
+    expect(nh.leaderboard[0].health_score_1h_ago).toEqual(expect.any(Number));
+    expect(nh.leaderboard[0].trend).toBe("stable");
+  });
 });

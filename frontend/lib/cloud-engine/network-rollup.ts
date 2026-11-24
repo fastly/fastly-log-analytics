@@ -1,6 +1,7 @@
 import type { RollupAgg, RollupResult } from "./dashboard/rollup-query";
 import { emptyAgg, queryRollup, rebucketSeries, rollupGroup, sumAggs } from "./dashboard/rollup-query";
 import {
+  asnTrendFromBuckets,
   computeNetworkHealthScore,
   deduplicateMetroLeaderboard,
   emptyNetworkHealth,
@@ -9,8 +10,10 @@ import {
   isUnknownCity,
   networkBundle,
   normalizeProtocolBucket,
+  normalizeProtocolDistribution,
   parseEpochMs,
   parseMetroCode,
+  pickWorstSignificant,
   PROTOCOL_BUCKETS,
   roundTo,
   TCP_FIELDS,
@@ -215,10 +218,9 @@ export function networkHealthFromRollup(
   const healthScore = total.medRttUs == null ? null : computeNetworkHealthScore(
     medRttUs, Math.max(1, total.p10RttUs ?? medRttUs), avgPloss, total.errorPct,
   );
-  const worst = <T extends { health_score: number | null }>(rows: T[]) =>
-    rows.filter((row) => row.health_score != null).sort((a, b) => a.health_score! - b.health_score!)[0];
-  const worstAsn = worst(by_asn);
-  const worstCountry = worst(by_country);
+  const heatmapByAsn = new Map(heatmap.map((entry) => [entry.asn, entry.buckets]));
+  const worstAsn = pickWorstSignificant(by_asn, total.reqs);
+  const worstCountry = pickWorstSignificant(by_country, total.reqs);
 
   return {
     available: true,
@@ -232,8 +234,7 @@ export function networkHealthFromRollup(
     leaderboard: by_asn.slice(0, topN).map((row) => ({
       ...row, label: row.as_name, total_reqs: row.reqs,
       health_score_now: row.health_score,
-      health_score_1h_ago: null,
-      health_score_1w_ago: null,
+      ...asnTrendFromBuckets(heatmapByAsn.get(row.asn), buckets.length, bucketMs / 1000, row.health_score),
     })),
     summary: {
       total_requests: total.reqs,
@@ -622,6 +623,8 @@ export function transportFromRollup(result: RollupResult) {
   };
   const p50 = rtt(0.5);
   const lowerBound = result.rollup.truncated.has("transport/proto") ? ["protocol_distribution"] : [];
+  const dimsCountry = result.rollup.dims.get("country") ?? result.rollup.dims.get("asn");
+  const retransCount = dimsCountry ? sumAggs(dimsCountry.values()).retrans : (agg?.retrans ?? 0);
   return {
     total_requests: total,
     bandwidth_bytes: total ? agg!.respBytes : null,
@@ -629,14 +632,15 @@ export function transportFromRollup(result: RollupResult) {
     tcp_rtt_p90_ms: rtt(0.9),
     tcp_rtt_p95_ms: rtt(0.95),
     tcp_rtt_p99_ms: rtt(0.99),
+    retrans_rate_pct: total > 0 ? roundTo((retransCount * 100) / total, 2) : null,
     packet_loss_pct: agg?.plossCount ? (agg.plossSum / agg.plossCount) * 100 : null,
     delivery_rate_mbps: agg?.deliveryCount ? ((agg.deliverySum / agg.deliveryCount) * 8) / 1_000_000 : null,
     has_transport_data: total > 0,
     missing_fields: p50 == null ? ["tcp_rtt"] : [],
-    protocol_distribution: [...protos]
-      .filter(([, p]) => p.requests > 0)
-      .sort((a, b) => b[1].requests - a[1].requests || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
-      .map(([protocol, p]) => ({ protocol, requests: p.requests, share_pct: (p.requests * 100) / total })),
+    protocol_distribution: normalizeProtocolDistribution(
+      [...protos].map(([protocol, p]) => ({ protocol, requests: p.requests })),
+      total,
+    ),
     _approx: true,
     _approx_note: lowerBound.length
       ? "TCP RTT percentiles are estimated from summary histograms (≈); protocol counts are lower bounds (≥)."

@@ -16,6 +16,7 @@ import {
   handleNetworkRequest,
   NETWORK_SCAN_COLUMNS,
   networkScanColumns,
+  normalizeProtocolBucket,
   queryNetworkBundle,
   queryNetworkHealth,
 } from "./network";
@@ -429,6 +430,65 @@ describe("Feature F21 — Network cloud-engine", () => {
       });
     } finally {
       resetAsnNamesForTest();
+      await engine.reset();
+    }
+  });
+
+  it("normalizes short protocol strings, populates retrans_rate_pct, numeric bandwidth_bytes, 1% worst floor, and leaderboard trend", async () => {
+    expect([
+      normalizeProtocolBucket("1.1"),
+      normalizeProtocolBucket("1.0"),
+      normalizeProtocolBucket("2"),
+      normalizeProtocolBucket("2.0"),
+      normalizeProtocolBucket("3"),
+      normalizeProtocolBucket("3.0"),
+    ]).toEqual(["HTTP/1.1", "HTTP/1.0", "HTTP/2", "HTTP/2", "HTTP/3", "HTTP/3"]);
+
+    const engine = new DuckDBAnalyticalEngine();
+    try {
+      // 105 rows total over 2 hourly buckets:
+      // - 102 in US / AS64500 (fast/healthy, 2 with retrans > 0, HTTP/1.1 + "1.1")
+      // - 1 noisy outlier in KR / AS64599 (< 1% of 105 = 1.05, terrible RTT/loss)
+      // - 2 in GB / AS64501 (> 1% of 105, moderately worse RTT)
+      const inserts: string[] = [];
+      for (let i = 0; i < 52; i++) {
+        const retrans = i === 0 ? 1 : 0;
+        const proto = i % 2 === 0 ? "1.1" : "HTTP/1.1";
+        inserts.push(`('native', 1700000100000, 'US', 'Chicago', 41.88, -87.63, 64500, 'ORD', 200, 1000, 'HIT', 0.02, 20000, 0.0, ${retrans}, '${proto}')`);
+      }
+      for (let i = 0; i < 50; i++) {
+        const retrans = i === 0 ? 2 : 0;
+        inserts.push(`('native', 1700003700000, 'US', 'Chicago', 41.88, -87.63, 64500, 'ORD', 200, 1000, 'HIT', 0.02, 20000, 0.0, ${retrans}, '2')`);
+      }
+      for (let i = 0; i < 2; i++) {
+        inserts.push(`('native', 1700003700000, 'GB', 'London', 51.5, -0.1, 64501, 'LHR', 200, 500, 'MISS', 0.08, 60000, 0.02, 0, '3.0')`);
+      }
+      inserts.push(`('native', 1700003700000, 'KR', 'Seoul', 37.5, 126.9, 64599, 'ICN', 503, 500, 'MISS', 0.5, 300000, 0.2, 0, '1.0')`);
+      await engine.executeSql(`INSERT INTO requests
+        (scoped_key, ts_ms, country, city, lat, lon, asn, pop, status, resp_bytes, cache, ttfb, tcp_rtt, ploss, retrans, proto)
+        VALUES ${inserts.join(", ")}`);
+
+      const bundle = await queryNetworkBundle({ engine, bucket_seconds: 3600 });
+      const tr = bundle.transport as Record<string, unknown>;
+      expect(typeof tr.bandwidth_bytes).toBe("number");
+      expect(tr.retrans_rate_pct).toBeCloseTo((2 * 100) / 105, 1);
+      const protoMap = Object.fromEntries(
+        bundle.transport.protocol_distribution.map((p: { protocol: string; requests: number }) => [p.protocol, p.requests]),
+      );
+      expect(protoMap["HTTP/1.1"]).toBe(52);
+      expect(protoMap["HTTP/2"]).toBe(50);
+      expect(protoMap["HTTP/3"]).toBe(2);
+      expect(protoMap["HTTP/1.0"]).toBe(1);
+
+      expect(bundle.health.summary).toMatchObject({
+        worst_asn: { label: "AS64501" },
+        worst_country: { label: "United Kingdom" },
+      });
+      const topLead = bundle.health.leaderboard.find((r) => r.asn === 64500) as Record<string, unknown>;
+      expect(topLead.health_score_1h_ago).toEqual(expect.any(Number));
+      expect(topLead.health_score_1w_ago).toEqual(expect.any(Number));
+      expect(topLead.trend).toBe("stable");
+    } finally {
       await engine.reset();
     }
   });
