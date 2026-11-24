@@ -402,7 +402,7 @@ function qualityAnswer(result: RollupResult, regionCountry: string, rollupMeta: 
       requests: agg.requests,
       avg_rtt_ms: rttMs(agg),
       avg_rttvar_ms: roundTo((avg(client?.rttvarSum ?? 0, client?.rttvarCount ?? 0) ?? 0) / 1000, 2),
-      avg_ploss_pct: roundTo((avg(client?.plossSum ?? 0, client?.plossCount ?? 0) ?? 0) * 100, 2),
+      avg_ploss_pct: roundTo((avg(agg.plossSum, agg.plossCount) ?? 0) * 100, 2),
       avg_cwnd: roundTo(avg(agg.cwndSum, agg.cwndCount) ?? 0, 1),
     };
     return { ...row, value: asn, label: row.as_name, rtt_ms: row.avg_rtt_ms, reqs: row.requests };

@@ -309,8 +309,8 @@ const SCAN_COLUMNS = {
   map: ["city", "geo_city", ...COUNTRY_COLUMNS, "lat", "lon", ...RTT_COLUMNS, "ploss", "client_ploss", "status"],
   shielding: ["edge", "rid", "prid", "pop", "ttfb", "ottfb"],
   quality: [...COUNTRY_COLUMNS, ...ASN_COLUMNS, "as_name", "proto", "protocol", ...POP_COLUMNS, "region", "geo_region",
-    ...RTT_COLUMNS, "client_cwnd", "client_tcpi_rttvar", "client_ploss", "rtt_var", "tcpi_rtt_var",
-    "client_tcpi_delta_retrans", "elapsed", "time_elapsed_usec", ...BYTES_COLUMNS, "ttfb", "ttfb_ms", "cache", "cache_status"],
+    ...RTT_COLUMNS, "client_cwnd", "client_tcpi_rttvar", "ploss", "client_ploss", "rtt_var", "tcpi_rtt_var",
+    "retrans", "client_tcpi_delta_retrans", "elapsed", "time_elapsed_usec", ...BYTES_COLUMNS, "ttfb", "ttfb_ms", "cache", "cache_status"],
   pop_health: [...POP_COLUMNS, "status", "cache", "cache_status", ...BYTES_COLUMNS, "ttfb", "ttfb_ms", ...RTT_COLUMNS,
     "client_ploss"],
   transport: ["proto", "protocol", ...BYTES_COLUMNS, ...RTT_COLUMNS, "ploss", "client_ploss", "delivery_rate",
@@ -330,7 +330,7 @@ export type QualityPart = typeof QUALITY_PARTS[number];
 const QUALITY_PART_COLUMNS: Record<QualityPart, readonly string[]> = {
   throughput: ["elapsed", "time_elapsed_usec", ...BYTES_COLUMNS],
   region: [...COUNTRY_COLUMNS, "region", "geo_region", ...RTT_COLUMNS],
-  asn_client: [...ASN_COLUMNS, "client_tcpi_rttvar", "client_ploss"],
+  asn_client: [...ASN_COLUMNS, "client_tcpi_rttvar", "ploss", "client_ploss"],
 };
 
 function qualityParts(value: unknown): QualityPart[] | null {
@@ -804,9 +804,9 @@ async function queryNetworkQualityParts(
     const rows = asns.length ? await engine.executeSql<Record<string, unknown>>(`SELECT
         COALESCE(client_asn, asn, 0)::BIGINT AS asn,
         AVG(client_tcpi_rttvar)::DOUBLE AS avg_rttvar_us,
-        AVG(client_ploss)::DOUBLE AS avg_ploss
+        AVG(COALESCE(client_ploss, ploss))::DOUBLE AS avg_ploss
       FROM requests WHERE ${where} AND COALESCE(client_asn, asn, 0) IN (${asns.join(", ")})
-        AND (client_tcpi_rttvar IS NOT NULL OR client_ploss IS NOT NULL)
+        AND (client_tcpi_rttvar IS NOT NULL OR client_ploss IS NOT NULL OR ploss IS NOT NULL)
       GROUP BY 1`, [], params.signal) : [];
     out.asn_client = rows.map((row) => ({
       asn: Number(row.asn),
