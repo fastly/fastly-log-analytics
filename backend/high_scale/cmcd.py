@@ -42,6 +42,8 @@ def project_cmcd(request_event: Mapping[str, Any]) -> dict[str, Any] | None:
         return None
     if not isinstance(raw_fields, Mapping):
         raise ValueError("CMCD fields must be a mapping")
+    if not any(v not in (None, "") for v in raw_fields.values()):
+        return None
     request_event_id = request_event.get("event_id")
     if not isinstance(request_event_id, str) or not request_event_id:
         raise ValueError("CMCD projection requires request_event_id")
@@ -288,6 +290,9 @@ def _cmcd_aggregates_compute(
     if not int(probe["events"] or 0):
         return empty_cmcd_aggregates(available=True, section_timings=trace.timings())
     has = {key: bool(int(probe[f"has_{key}"] or 0)) for key in ("bl", "br", "bs", "mtp", "ot", "sf", "su", "tb", "cid")}
+    # cmcd_bs is a sparse flag (1/true only on starvation, empty/NULL otherwise), so buffer-length
+    # telemetry proves starvation tracking is active even in healthy windows with zero starvations.
+    has_bs_effective = has["bs"] or has["bl"]
     has_country = bool(int(probe["has_country"] or 0))
     has_asn = bool(int(probe["has_asn"] or 0))
     has_video_filter = has["ot"]
@@ -299,8 +304,7 @@ def _cmcd_aggregates_compute(
         def _run_overview() -> dict[str, Any]:
             row = execute(
                 "/* cmcd:overview */ SELECT uniqExact(sid) AS active_sessions, "
-                "if(countIf(bs IS NOT NULL) = 0, NULL, "
-                "uniqExactIf(sid, bs = 1) * 100.0 / nullIf(uniqExact(sid), 0)) AS rebuffer_rate, "
+                "uniqExactIf(sid, bs = 1) * 100.0 / nullIf(uniqExact(sid), 0) AS rebuffer_rate, "
                 f"avgIf(br, {video}) AS avg_bitrate, avgIf(bl, {video}) AS avg_buffer_length, "
                 f"quantileTDigestIf(0.5)(mtp, {video}) AS median_throughput FROM ({events})",
                 params,
@@ -321,7 +325,7 @@ def _cmcd_aggregates_compute(
             return {
                 "overview": {
                     "active_sessions": int(row["active_sessions"] or 0),
-                    "rebuffer_rate": _round(row.get("rebuffer_rate")) if has["bs"] else None,
+                    "rebuffer_rate": _round(row.get("rebuffer_rate")) if has_bs_effective else None,
                     "avg_bitrate": _round(row.get("avg_bitrate")) if has["br"] else None,
                     "avg_buffer_length": _round(row.get("avg_buffer_length")) if has["bl"] else None,
                     "median_throughput": _round(row.get("median_throughput")) if has["mtp"] else None,
@@ -344,17 +348,25 @@ def _cmcd_aggregates_compute(
             ts_out: dict[str, Any] = {}
             select = [f"{_BUCKET.format(column='ts')} AS bucket"]
             if want_ts["sessions_ts"]:
+                rebuffer_session_expr = (
+                    "uniqExactIf(sid, bs = 1) * 100.0 / nullIf(uniqExact(sid), 0) AS rebuffer_session_pct"
+                    if has_bs_effective
+                    else "CAST(NULL AS Nullable(Float64)) AS rebuffer_session_pct"
+                )
                 select += [
                     "uniqExact(sid) AS concurrent_sessions",
-                    "if(countIf(bs IS NOT NULL) = 0, NULL, "
-                    "uniqExactIf(sid, bs = 1) * 100.0 / nullIf(uniqExact(sid), 0)) AS rebuffer_session_pct",
+                    rebuffer_session_expr,
                 ]
             if want_ts["buffer_health_ts"]:
+                starvation_expr = (
+                    "countIf(bs = 1) * 100.0 / nullIf(count(), 0) AS starvation_rate"
+                    if has_bs_effective
+                    else "CAST(NULL AS Nullable(Float64)) AS starvation_rate"
+                )
                 select += [
                     f"quantileTDigestIf(0.5)(bl, {video}) AS p50_buffer",
                     f"quantileTDigestIf(0.95)(bl, {video}) AS p95_buffer",
-                    "if(countIf(bs IS NOT NULL) = 0, NULL, countIf(bs = 1) * 100.0 / nullIf(count(), 0)) "
-                    "AS starvation_rate",
+                    starvation_expr,
                 ]
             if want_ts["bitrate_ts"]:
                 select += [
@@ -368,9 +380,7 @@ def _cmcd_aggregates_compute(
                     f"quantileTDigestIf(0.99)(mtp, {video}) AS p99_throughput",
                 ]
             if want_ts["startup_ts"]:
-                select.append(
-                    "if(countIf(su IS NOT NULL) = 0, NULL, countIf(su = 1) * 100.0 / nullIf(count(), 0)) AS startup_ratio"
-                )
+                select.append("countIf(su = 1) * 100.0 / nullIf(count(), 0) AS startup_ratio")
             rows = execute(
                 f"/* cmcd:timeseries */ SELECT {', '.join(select)} FROM ({events}) GROUP BY bucket ORDER BY bucket",
                 params,
@@ -462,7 +472,7 @@ def _cmcd_aggregates_compute(
             }
 
         tasks.append(("top_content", _run_top_content))
-    if wanted("rebuffer_by_country") and has_country and has["bs"]:
+    if wanted("rebuffer_by_country") and has_country and has_bs_effective:
 
         def _run_rebuffer_country() -> dict[str, Any]:
             rows = execute(
@@ -488,7 +498,7 @@ def _cmcd_aggregates_compute(
             }
 
         tasks.append(("rebuffer_country", _run_rebuffer_country))
-    if wanted("rebuffer_by_asn") and has_asn and has["bs"]:
+    if wanted("rebuffer_by_asn") and has_asn and has_bs_effective:
 
         def _run_rebuffer_asn() -> dict[str, Any]:
             rows = execute(

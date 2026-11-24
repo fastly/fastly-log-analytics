@@ -1955,6 +1955,34 @@ def test_cmcd_projection_is_absent_when_request_has_no_cmcd() -> None:
     assert project_cmcd({"event_id": "request-event-1", "service_id": "svc"}) is None
 
 
+@pytest.mark.no_postgres
+def test_cmcd_projection_skips_empty_only_cmcd_fields_and_normalization_drops_blanks() -> None:
+    from backend.high_scale.query import _normalize_serving_fields
+
+    assert (
+        project_cmcd(
+            {
+                "event_id": "request-event-empty",
+                "service_id": "svc",
+                "timestamp": "2026-09-01T00:00:00Z",
+                "cmcd": {"sid": "", "cmcd_sid": "", "bl": "", "cmcd_bl": None},
+            }
+        )
+        is None
+    )
+    raw_event: dict[str, Any] = {
+        "event_id": "request-event-blank",
+        "service_id": "svc",
+        "timestamp": "2026-09-01T00:00:00Z",
+        "cmcd_sid": "",
+        "cmcd_bl": "",
+        "cmcd_bs": None,
+    }
+    _normalize_serving_fields(raw_event, "request")
+    assert raw_event["cmcd"] == {}
+    assert project_cmcd(raw_event) is None
+
+
 def test_cmcd_projection_requires_request_event_identity() -> None:
     with pytest.raises(ValueError, match="request_event_id"):
         project_cmcd({"service_id": "svc", "cmcd": {"br": 1200}})
@@ -3147,16 +3175,45 @@ def test_only_requested_sections_are_queried() -> None:
     assert "overview" not in result and "top_content" not in result
 
 
+@pytest.mark.no_postgres
 @pytest.mark.usefixtures("_asn_names")
 def test_sections_that_need_an_absent_cmcd_key_are_omitted_like_the_standard_path() -> None:
-    client = _Client_cmcd(probe={**_PRESENT, "has_bs": 0, "has_br": 0, "has_cid": 0, "has_country": 0, "has_asn": 0})
+    client = _Client_cmcd(
+        probe={**_PRESENT, "has_bs": 0, "has_bl": 0, "has_br": 0, "has_cid": 0, "has_country": 0, "has_asn": 0}
+    )
     result = _run(client)
-    for key in ("top_content", "rebuffer_by_country", "rebuffer_by_asn", "bitrate_ts"):
+    for key in ("top_content", "rebuffer_by_country", "rebuffer_by_asn", "bitrate_ts", "buffer_health_ts"):
         assert key not in result
     assert result["overview"]["rebuffer_rate"] is None and result["overview"]["avg_bitrate"] is None
-    assert result["overview"]["avg_buffer_length"] == 12.0
+    assert result["overview"]["avg_buffer_length"] is None and result["overview"]["median_throughput"] == 8000.0
     markers = " ".join(sql for sql, _ in client.calls)
     assert "cmcd:top_content" not in markers and "cmcd:rebuffer_by_country" not in markers
+
+
+@pytest.mark.no_postgres
+@pytest.mark.usefixtures("_asn_names")
+def test_healthy_window_with_sparse_bs_and_buffer_length_still_serves_rebuffer_sections() -> None:
+    client = _Client_cmcd(probe={**_PRESENT, "has_bs": 0, "has_bl": 1})
+    result = _run(client)
+    assert result["overview"]["rebuffer_rate"] == 25.0
+    assert result["rebuffer_by_country"] == [
+        {"country": "US", "rebuffer_rate": 10.0, "session_count": 3, "median_throughput": 7500.0}
+    ]
+    assert result["rebuffer_by_asn"] == [
+        {
+            "asn": 7922,
+            "label": "Comcast Cable Communications (7922)",
+            "rebuffer_rate": 50.0,
+            "session_count": 2,
+            "avg_bitrate": 2000.0,
+            "avg_buffer_length": 8.0,
+        }
+    ]
+    overview_sql = next(sql for sql, _ in client.calls if "cmcd:overview */" in sql)
+    ts_sql = next(sql for sql, _ in client.calls if "cmcd:timeseries */" in sql)
+    assert "countIf(bs IS NOT NULL) = 0" not in overview_sql
+    assert "countIf(bs IS NOT NULL) = 0" not in ts_sql
+    assert "countIf(su IS NOT NULL) = 0" not in ts_sql
 
 
 @pytest.mark.usefixtures("_asn_names")

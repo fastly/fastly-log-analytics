@@ -267,7 +267,9 @@ def _normalize_serving_fields(event: dict[str, Any], domain: str) -> None:
                     elif val is not None:
                         event[k] = bool(val)
             elif action == 5:
-                s_val = str(val) if val is not None else ""
+                if val in (None, ""):
+                    continue
+                s_val = str(val)
                 cmcd[k] = s_val
                 short_k = k[5:]
                 if short_k:

@@ -36,24 +36,27 @@ export async function ServerFooter() {
   let envName = 'local'
   let machineName = process.env.POD_NAME || os.hostname()
 
-  // Dynamic Google Compute Engine Metadata Detection
-  const gceHostname = await fetchGceMetadata('instance/name')
-  const gceProject = await fetchGceMetadata('project/project-id')
-
-  if (gceHostname) {
-    envName = 'gce'
-    if (gceProject) {
-      envName = `gce (${gceProject})`
-    }
-    machineName = gceHostname
-  } else if (process.env.K8S_CLUSTER_NAME) {
+  if (process.env.K8S_CLUSTER_NAME) {
     envName = `k8s-${process.env.K8S_CLUSTER_NAME}`
   } else if (process.env.KUBERNETES_SERVICE_HOST) {
     envName = 'k8s'
-  } else if (process.env.ENV_NAME) {
-    envName = process.env.ENV_NAME
-  } else if (process.env.NODE_ENV === 'production') {
-    envName = 'production'
+  } else {
+    // Dynamic Google Compute Engine Metadata Detection (only outside Kubernetes,
+    // since GKE/Elevation pods also respond on 169.254.169.254).
+    const gceHostname = await fetchGceMetadata('instance/name')
+    const gceProject = await fetchGceMetadata('project/project-id')
+
+    if (gceHostname) {
+      envName = 'gce'
+      if (gceProject) {
+        envName = `gce (${gceProject})`
+      }
+      machineName = gceHostname
+    } else if (process.env.ENV_NAME) {
+      envName = process.env.ENV_NAME
+    } else if (process.env.NODE_ENV === 'production') {
+      envName = 'production'
+    }
   }
 
   const architecture = 'clickhouse'

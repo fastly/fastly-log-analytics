@@ -363,12 +363,27 @@ describe('LazyMount', () => {
 })
 
 describe('ServerFooter', () => {
+  const savedEnv = {
+    COMMIT_HASH: process.env.COMMIT_HASH,
+    K8S_CLUSTER_NAME: process.env.K8S_CLUSTER_NAME,
+    KUBERNETES_SERVICE_HOST: process.env.KUBERNETES_SERVICE_HOST,
+    POD_NAME: process.env.POD_NAME,
+  }
   beforeEach(() => {
     setHeaders({})
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, text: async () => 'secret-instance' }))
     process.env.COMMIT_HASH = 'abc1234'
+    delete process.env.K8S_CLUSTER_NAME
+    delete process.env.KUBERNETES_SERVICE_HOST
+    delete process.env.POD_NAME
   })
-  afterEach(() => { vi.unstubAllGlobals() })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    for (const [k, v] of Object.entries(savedEnv)) {
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+    }
+  })
   it('renders infrastructure details for admin requests and nothing for Caddy-proxied requests', async () => {
     const el = await ServerFooter()
     expect(el).not.toBeNull()
@@ -377,6 +392,18 @@ describe('ServerFooter', () => {
     vi.stubGlobal('fetch', fetchSpy)
     setHeaders({ 'x-proxied-by-caddy': 'true' })
     expect(await ServerFooter()).toBeNull()
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+  it('prefers Kubernetes over GCE metadata so GKE/Elevation pods are not labeled as gce', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: true, text: async () => 'gke-node-1' })
+    vi.stubGlobal('fetch', fetchSpy)
+    process.env.KUBERNETES_SERVICE_HOST = '10.0.0.1'
+    process.env.POD_NAME = 'fla-se-demo-frontend-abc'
+    const el = await ServerFooter()
+    const serialized = JSON.stringify(el)
+    expect(serialized).toContain('k8s')
+    expect(serialized).toContain('fla-se-demo-frontend-abc')
+    expect(serialized).not.toContain('gce')
     expect(fetchSpy).not.toHaveBeenCalled()
   })
 })
