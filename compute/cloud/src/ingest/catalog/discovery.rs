@@ -467,8 +467,15 @@ fn walk<R: Runtime>(
                 )?;
                 let coverage = bundles::parse(&bytes)?;
                 let open_fits = !is_open
-                    || file_bounds(&coverage.file.key)
-                        .is_some_and(|(_, end)| summary_bounds.1 >= end);
+                    || if coverage.windows.is_empty() {
+                        file_bounds(&coverage.file.key)
+                            .is_some_and(|(_, end)| summary_bounds.1 >= end)
+                    } else {
+                        coverage
+                            .windows
+                            .iter()
+                            .all(|k| file_bounds(k).is_some_and(|(start, _)| start < to))
+                    };
                 if open_fits {
                     state.covered_windows = coverage.windows;
                     if !day_covered {
@@ -774,3 +781,352 @@ fn initial(root: Head, service: String, from: i64, to: i64, summary: bool, now: 
 }
 
 use sha2::Digest;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        admin::{FosRequest, FosResponse, Record, Service},
+        ingest::bundle::open_bundle_key,
+        setup::SetupStores,
+    };
+    use std::{cell::RefCell, time::Instant};
+
+    const BASE: i64 = 1_800_000_000; // 2027-01-15T08:00:00Z
+
+    struct MockRt {
+        now: u64,
+        kv: RefCell<BTreeMap<String, Value>>,
+        objects: RefCell<BTreeMap<String, Vec<u8>>>,
+    }
+
+    impl SetupStores for MockRt {
+        fn config_present(&self, _: &str) -> Result<bool, String> {
+            Ok(true)
+        }
+        fn secret_present(&self, _: &str) -> Result<bool, String> {
+            Ok(true)
+        }
+        fn state_linked(&self) -> Result<bool, String> {
+            Ok(true)
+        }
+    }
+
+    impl Runtime for MockRt {
+        fn config(&self, _: &str) -> Result<Option<String>, String> {
+            Ok(None)
+        }
+        fn secret(&self, _: &str) -> Result<Option<String>, String> {
+            Ok(Some("tok".into()))
+        }
+        fn random(&self) -> Result<[u8; 32], String> {
+            Ok([0; 32])
+        }
+        fn now(&self) -> u64 {
+            self.now
+        }
+        fn checks(&self, _: bool) -> Result<Value, String> {
+            Ok(json!({}))
+        }
+        fn versions(&self) -> Result<Value, String> {
+            Ok(json!({}))
+        }
+        fn compute_service_id(&self) -> Option<String> {
+            None
+        }
+        fn compute_service_version(&self) -> Option<String> {
+            None
+        }
+        fn admin_get(&self, key: &str) -> Result<Option<Record>, String> {
+            Ok(self.kv.borrow().get(key).map(|v| Record {
+                generation: "1".into(),
+                value: v.clone(),
+            }))
+        }
+        fn admin_get_fresh(&self, key: &str, _: &str) -> Result<Option<Record>, String> {
+            self.admin_get(key)
+        }
+        fn admin_cas(&self, _: &str, _: Option<&str>, _: &Value) -> Result<bool, String> {
+            Ok(true)
+        }
+        fn admin_fos(&self, request: FosRequest<'_>) -> Result<FosResponse, String> {
+            let key = request.key.trim_start_matches('/');
+            match request.method {
+                "GET" => match self.objects.borrow().get(key) {
+                    Some(body) => Ok(FosResponse {
+                        status: 200,
+                        body: body.clone(),
+                        cdn_cache: None,
+                        retry_after: None,
+                    }),
+                    None => Ok(FosResponse {
+                        status: 404,
+                        body: Vec::new(),
+                        cdn_cache: None,
+                        retry_after: None,
+                    }),
+                },
+                "PUT" => {
+                    self.objects
+                        .borrow_mut()
+                        .insert(key.to_owned(), request.body.to_vec());
+                    Ok(FosResponse {
+                        status: 200,
+                        body: Vec::new(),
+                        cdn_cache: None,
+                        retry_after: None,
+                    })
+                }
+                other => Err(format!("unexpected fos method: {other}")),
+            }
+        }
+    }
+
+    fn test_service() -> Service {
+        serde_json::from_value(json!({
+            "service_id": "svc", "name": "n", "status": "active", "created_at": 0, "updated_at": 0,
+            "config_version": 1, "logging_enabled": true, "logging_endpoint_name": "e",
+            "log_period": 120, "sample_rate": 1, "edge_only": false, "custom_condition": "",
+            "fos_bucket": "fos-abcdefghijklmnopqrst12-logs", "fos_prefix": "", "fos_region": "us-east-1",
+            "fos_endpoint": "x", "log_fields": [], "field_limits": {}, "fastly_token_ref": "t",
+            "fos_access_key_ref": "ak", "fos_secret_key_ref": "sk", "owner": "o",
+            "bucket_adopted": false, "bucket_checked": false, "last_activated_version": null,
+            "last_reconcile": null, "pending_job_id": null
+        }))
+        .unwrap()
+    }
+
+    /// Seeds one open hour (BASE..BASE+3600) with 28 two-minute summary windows (08:00..08:56)
+    /// and a matching `open_bundle=` covering all 28 windows.
+    fn seed_open_hour() -> (MockRt, Service, String, Vec<String>) {
+        let rt = MockRt {
+            now: (BASE + 55 * 60 + 6) as u64,
+            kv: RefCell::new(BTreeMap::new()),
+            objects: RefCell::new(BTreeMap::new()),
+        };
+        let svc = test_service();
+        let mut windows = Vec::new();
+        let mut summaries = Vec::new();
+        for i in 0..28 {
+            let start = BASE + i * 120;
+            let end = start + 120;
+            let key = format!(
+                "processed/summary/request/year=2027/month=01/day=15/hour=08/summary={start}-{end}-0.parquet"
+            );
+            summaries.push(Output {
+                key: key.clone(),
+                bytes: 100,
+                rows: 10,
+                md5: format!("m{i}"),
+                metadata: None,
+            });
+            windows.push(key);
+        }
+        let end_ms = (BASE + 28 * 120) * 1000;
+        let open_key = open_bundle_key("processed/summary_bundle/request/", BASE, end_ms, &windows);
+        let coverage_key = "processed/_catalog/open-coverage.json".to_owned();
+        let coverage = bundles::Coverage {
+            file: Output {
+                key: open_key.clone(),
+                bytes: 2800,
+                rows: 280,
+                md5: "openmd5".into(),
+                metadata: None,
+            },
+            start: BASE,
+            end: BASE + 28 * 120,
+            windows: windows.iter().cloned().collect(),
+            hours: BTreeMap::new(),
+            built_generation: 1,
+        };
+        let block_key = "processed/_catalog/block-1.json".to_owned();
+        let block = Block {
+            version: VERSION,
+            service_id: svc.service_id.clone(),
+            generation: 1,
+            hour: BASE,
+            previous: None,
+            files: Vec::new(),
+            summaries,
+            replaces: Vec::new(),
+            committed_at: BTreeMap::new(),
+        };
+        let day = day_start(BASE);
+        let day_key = "processed/_catalog/day-1.json".to_owned();
+        let day_index = Day {
+            version: VERSION,
+            service_id: Some(svc.service_id.clone()),
+            hours: BTreeMap::from([(
+                BASE,
+                Reference {
+                    key: block_key.clone(),
+                    generation: 1,
+                },
+            )]),
+            summary_counts: BTreeMap::from([(BASE, windows.len() as u64)]),
+            ..Default::default()
+        };
+        let head = Head {
+            version: VERSION,
+            generation: 1,
+            recent: vec![super::super::Event {
+                cursor: "1".into(),
+                generation: 1,
+                committed_at: None,
+                manifest: None,
+            }],
+            days: BTreeMap::from([(day, day_key.clone())]),
+            open_bundles: BTreeMap::from([(
+                BASE,
+                Reference {
+                    key: coverage_key.clone(),
+                    generation: 1,
+                },
+            )]),
+            ..Default::default()
+        };
+        rt.objects
+            .borrow_mut()
+            .insert(coverage_key, serde_json::to_vec(&coverage).unwrap());
+        rt.objects
+            .borrow_mut()
+            .insert(block_key, serde_json::to_vec(&block).unwrap());
+        rt.objects
+            .borrow_mut()
+            .insert(day_key, serde_json::to_vec(&day_index).unwrap());
+        rt.kv
+            .borrow_mut()
+            .insert(WATERMARK_KEY.into(), json!({ "catalog": head }));
+        (rt, svc, open_key, windows)
+    }
+
+    #[test]
+    fn open_bundle_fits_when_to_is_inside_latest_window() {
+        let (rt, svc, open_key, _) = seed_open_hour();
+        let store = Store {
+            runtime: &rt,
+            service: &svc,
+            access_key: "ak".into(),
+            secret_key: "sk".into(),
+            started: Instant::now(),
+            vcpu_start: 0,
+        };
+        // Live query at 08:55:06Z, inside the last 2-minute window [08:54:00, 08:56:00).
+        let from = BASE;
+        let to = BASE + 55 * 60 + 6;
+        let page =
+            pinned_page_precise(&store, from, to, true, false, None, None, (from, to)).unwrap();
+        let keys: Vec<&str> = page
+            .files
+            .iter()
+            .map(|f| f["key"].as_str().unwrap())
+            .collect();
+        assert_eq!(keys, vec![open_key.as_str()]);
+        assert!(page.next.is_none());
+    }
+
+    #[test]
+    fn open_bundle_matches_included_for_fractional_to() {
+        let (rt, svc, open_key, windows) = seed_open_hour();
+        let store = Store {
+            runtime: &rt,
+            service: &svc,
+            access_key: "ak".into(),
+            secret_key: "sk".into(),
+            started: Instant::now(),
+            vcpu_start: 0,
+        };
+        // Fractional `to` = 08:54:00.500Z: api.rs sets summary_bounds.1 = 08:54:00, to = 08:54:01.
+        // `included()` includes [08:54:00, 08:56:00), so open_bundle fits.
+        let last_start = BASE + 54 * 60;
+        let page = pinned_page_precise(
+            &store,
+            BASE,
+            last_start + 1,
+            true,
+            false,
+            None,
+            None,
+            (BASE, last_start),
+        )
+        .unwrap();
+        let keys: Vec<&str> = page
+            .files
+            .iter()
+            .map(|f| f["key"].as_str().unwrap())
+            .collect();
+        assert_eq!(keys, vec![open_key.as_str()]);
+
+        // Fractional `to` = 08:53:59.500Z: api.rs sets summary_bounds.1 = 08:53:59, to = 08:54:00.
+        // `included()` excludes [08:54:00, 08:56:00), so open_bundle must be rejected.
+        let page = pinned_page_precise(
+            &store,
+            BASE,
+            last_start,
+            true,
+            false,
+            None,
+            None,
+            (BASE, last_start - 1),
+        )
+        .unwrap();
+        let keys: Vec<&str> = page
+            .files
+            .iter()
+            .map(|f| f["key"].as_str().unwrap())
+            .collect();
+        assert_eq!(keys.len(), 27);
+        assert!(keys.iter().all(|k| !k.contains("open_bundle=")));
+        assert!(!keys.contains(&windows[27].as_str()));
+    }
+
+    #[test]
+    fn open_bundle_rejected_for_historical_sub_hour_range() {
+        let (rt, svc, _, windows) = seed_open_hour();
+        let store = Store {
+            runtime: &rt,
+            service: &svc,
+            access_key: "ak".into(),
+            secret_key: "sk".into(),
+            started: Instant::now(),
+            vcpu_start: 0,
+        };
+        // Sub-hour historical query ending at 08:30:00Z (15 windows before 08:30).
+        let from = BASE;
+        let to = BASE + 30 * 60;
+        let page =
+            pinned_page_precise(&store, from, to, true, false, None, None, (from, to)).unwrap();
+        let keys: Vec<&str> = page
+            .files
+            .iter()
+            .map(|f| f["key"].as_str().unwrap())
+            .collect();
+        assert_eq!(keys.len(), 15);
+        assert!(keys.iter().all(|k| !k.contains("open_bundle=")));
+        assert!(keys
+            .iter()
+            .all(|k| file_bounds(k).is_some_and(|(s, _)| s < to)));
+
+        // Exact boundary at last_window.start (08:54:00Z): excludes window 27.
+        let to_boundary = BASE + 54 * 60;
+        let page = pinned_page_precise(
+            &store,
+            from,
+            to_boundary,
+            true,
+            false,
+            None,
+            None,
+            (from, to_boundary),
+        )
+        .unwrap();
+        let keys: Vec<&str> = page
+            .files
+            .iter()
+            .map(|f| f["key"].as_str().unwrap())
+            .collect();
+        assert_eq!(keys.len(), 27);
+        assert!(keys.iter().all(|k| !k.contains("open_bundle=")));
+        assert!(!keys.contains(&windows[27].as_str()));
+    }
+}
