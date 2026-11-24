@@ -6,12 +6,6 @@ const mockInspect = vi.fn()
 const mockClear = vi.fn()
 const mockShowToast = vi.fn()
 
-vi.mock('@/components/AppLayout', () => ({
-  AppLayout: ({ children }: { children: React.ReactNode }) => (
-    <div data-testid="app-layout">{children}</div>
-  ),
-}))
-
 vi.mock('@/lib/cloud-engine/mode', () => ({
   IS_CLOUD_MODE: true,
 }))
@@ -126,5 +120,31 @@ describe('CacheClient', () => {
       )
     })
     expect(mockShowToast).toHaveBeenCalledWith('Browser cache cleared', 'success')
+  })
+
+  it('does not render an AppLayout wrapper around the page content', async () => {
+    mockInspect.mockResolvedValue({
+      usage: 0,
+      quota: 100 * 1024 * 1024,
+      persisted: false,
+      indexedFiles: 0,
+      indexedBytes: 0,
+      lastError: null,
+      opfs: { available: true, files: 0, bytes: 0 },
+      caches: [],
+      totalCachedEntries: 0,
+      totalCachedBytes: 0,
+      measuredAt: 1700000000000,
+    })
+
+    const { container } = render(<CacheClient />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId('browser-cache-page')).toBeInTheDocument()
+    })
+    expect(container.firstElementChild).toBe(
+      screen.getByTestId('browser-cache-page'),
+    )
+    expect(container.querySelector('main, aside, nav')).toBeNull()
   })
 })
