@@ -851,6 +851,103 @@ def test_decode_expands_batched_querystring_matching_canonical_parity() -> None:
     )
 
 
+@pytest.mark.no_postgres
+def test_decode_skips_truncated_trailing_querystring_metric_and_preserves_top_level_error() -> None:
+    truncated_url_no_val = (
+        "/rum-beacon?service_id=svc"
+        "&rum_metric_name=event_faro_rum_demo_view&rum_metric_value=1&rum_metric_rating="
+        "&rum_metric_name=ttfb&rum_metric_value=126.3&rum_metric_rating=good"
+        "&rum_metric_name=connection_duration&rum_metric_value=25.7&rum_metric_rating=good"
+        "&rum_metric_name=request_duration&"
+    )
+    truncated_url_mid_key_with_err = (
+        "/rum-beacon?service_id=svc"
+        "&rum_metric_name=inp&rum_metric_value=16&rum_metric_rating=good"
+        "&rum_metric_name=interaction_time&rum_metric_value=1268.4&rum_metric_rating=good"
+        "&rum_metric_name=presentation_delay&rum_metric_value=14.7&rum_metric_rating=good"
+        "&rum_metric_name=input_delay&rum_metric"
+    )
+    truncated_url_empty_val = (
+        "/rum-beacon?service_id=svc"
+        "&rum_metric_name=lcp&rum_metric_value=208&rum_metric_rating=good"
+        "&rum_metric_name=cls&rum_metric_value="
+    )
+
+    rec1 = {
+        "timestamp": "2026-11-24T15:38:10+0000",
+        "url": truncated_url_no_val,
+        "rum_cid": "194f5955",
+        "rum_pathname": "/rum-demo/page3",
+        "rum_error_message": "",
+    }
+    res1 = decode_source_object(
+        _source("rum_vitals", "raw/rum/trunc1.zst"),
+        (json.dumps(rec1) + "\n").encode(),
+        transform_version="normalize.v1",
+    )
+    assert (res1.decoded_rows, res1.accepted_rows, res1.quarantined_rows) == (1, 3, 0)
+    assert [(e["metric_name"], e["metric_value"]) for e in res1.events] == [
+        ("event_faro_rum_demo_view", 1.0),
+        ("ttfb", 126.3),
+        ("connection_duration", 25.7),
+    ]
+
+    rec2 = {
+        "timestamp": "2026-11-24T15:36:52+0000",
+        "url": truncated_url_mid_key_with_err,
+        "rum_cid": "06d97818",
+        "rum_pathname": "/rum-demo/",
+        "rum_error_message": "Uncaught RangeError: Maximum call stack size exceeded",
+        "rum_error_file": "app.js",
+        "rum_error_line": "12",
+        "rum_error_col": "4",
+    }
+    res2_vitals = decode_source_object(
+        _source("rum_vitals", "raw/rum/trunc2.zst"),
+        (json.dumps(rec2) + "\n").encode(),
+        transform_version="normalize.v1",
+    )
+    assert (res2_vitals.decoded_rows, res2_vitals.accepted_rows, res2_vitals.quarantined_rows) == (1, 3, 0)
+    assert [(e["metric_name"], e["metric_value"]) for e in res2_vitals.events] == [
+        ("inp", 16.0),
+        ("interaction_time", 1268.4),
+        ("presentation_delay", 14.7),
+    ]
+    res2_errors = decode_source_object(
+        _source("rum_errors", "raw/rum/trunc2.zst"),
+        (json.dumps(rec2) + "\n").encode(),
+        transform_version="normalize.v1",
+    )
+    assert (res2_errors.decoded_rows, res2_errors.accepted_rows, res2_errors.quarantined_rows) == (1, 1, 0)
+    assert res2_errors.events[0]["error_message"] == "Uncaught RangeError: Maximum call stack size exceeded"
+
+    rec3 = {
+        "timestamp": "2026-11-24T15:37:00+0000",
+        "url": truncated_url_empty_val,
+        "rum_cid": "cid-3",
+    }
+    res3 = decode_source_object(
+        _source("rum_vitals", "raw/rum/trunc3.zst"),
+        (json.dumps(rec3) + "\n").encode(),
+        transform_version="normalize.v1",
+    )
+    assert (res3.decoded_rows, res3.accepted_rows, res3.quarantined_rows) == (1, 1, 0)
+    assert [(e["metric_name"], e["metric_value"]) for e in res3.events] == [("lcp", 208.0)]
+
+    # Non-trailing corrupted metric value must still be quarantined (fail-closed)
+    rec_bad = {
+        "timestamp": "2026-11-24T15:37:00+0000",
+        "url": "/rum-beacon?service_id=svc&rum_metric_name=lcp&rum_metric_value=broken&rum_metric_name=cls&rum_metric_value=0.05",
+        "rum_cid": "cid-bad",
+    }
+    res_bad = decode_source_object(
+        _source("rum_vitals", "raw/rum/bad.zst"),
+        (json.dumps(rec_bad) + "\n").encode(),
+        transform_version="normalize.v1",
+    )
+    assert (res_bad.accepted_rows, res_bad.quarantined_rows) == (0, 1)
+
+
 def test_decode_source_object_supports_zstd_frames_and_rejects_corrupt_zstd() -> None:
     import zstandard as zstd
 
@@ -1620,6 +1717,129 @@ def test_publication_attempt_with_mismatched_row_count_rejected() -> None:
     assert exc_info.value.rows_inserted == 95
     manifest = store.get("batch-mismatch")
     assert manifest is not None and manifest.status is PublicationStatus.PENDING and manifest.visible_rows == 0
+
+
+@pytest.mark.no_postgres
+def test_clickhouse_batch_accepts_ttl_evicted_expired_rows_and_still_rejects_fresh_partial_insert() -> None:
+    from backend.high_scale.archive.clickhouse_batch import ClickHouseBatchAdapter
+
+    now = datetime.now(UTC)
+    ttl_cutoff = now - timedelta(days=30)
+
+    class TtlEnforcingFakeHttpClient:
+        def __init__(self, *, drop_extra_fresh: int = 0) -> None:
+            self.drop_extra_fresh = drop_extra_fresh
+            self.publications: dict[str, dict[str, Any]] = {}
+            self.rows_by_batch: dict[str, list[tuple[Any, ...]]] = {}
+            self.deleted_batches: list[str] = []
+
+        def insert_rows(self, table: str, columns: list[str], rows: list[tuple[Any, ...]]) -> None:
+            if table == "high_scale_batch_publications":
+                for r in rows:
+                    rec = dict(zip(columns, r, strict=True))
+                    self.publications[str(rec["batch_id"])] = rec
+                return
+            ts_idx = columns.index("event_timestamp")
+            bid_idx = columns.index("batch_id")
+            kept: list[tuple[Any, ...]] = []
+            for r in rows:
+                ts = r[ts_idx]
+                if isinstance(ts, datetime) and ts <= ttl_cutoff:
+                    continue
+                kept.append(r)
+            if self.drop_extra_fresh > 0:
+                kept = kept[: max(0, len(kept) - self.drop_extra_fresh)]
+            for r in kept:
+                self.rows_by_batch.setdefault(str(r[bid_idx]), []).append(r)
+
+        def execute(self, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+            params = params or {}
+            if "FROM high_scale_batch_publications" in sql:
+                rec = self.publications.get(str(params.get("batch_id")))
+                return [rec] if rec is not None else []
+            if "SELECT count() AS row_count" in sql:
+                bid = str(params.get("batch_id"))
+                return [{"row_count": len(self.rows_by_batch.get(bid, []))}]
+            return []
+
+        def delete_batch_rows(self, table: str, batch_id: str) -> None:
+            self.deleted_batches.append(batch_id)
+            self.rows_by_batch.pop(batch_id, None)
+
+    def _vital_row(idx: int, ts: datetime) -> dict[str, Any]:
+        return {
+            "event_id": f"00000000-0000-4000-8000-{idx:012d}",
+            "timestamp": ts.isoformat(),
+            "source_object_key": f"raw/rum/old-{idx}.log.gz",
+            "source_object_version": "v1",
+            "line_ordinal": idx,
+            "transform_version": "normalize.v1",
+            "client_id": "cid-1",
+            "metric_name": "lcp",
+            "metric_value": 100.0 + idx,
+            "metric_rating": "good",
+            "pathname": "/",
+        }
+
+    # Case A: All rows older than 30d TTL -> ClickHouse evicts all rows -> marks VISIBLE with 0 visible_rows
+    fake_a = TtlEnforcingFakeHttpClient()
+    pub_a = ClickHousePublication(InMemoryBatchManifestStore(), ClickHouseBatchAdapter(fake_a))  # type: ignore[arg-type]
+    expired_batch = HighScaleBatch(
+        batch_id="batch-all-expired",
+        service_id="svc-ttl",
+        domain="rum_vitals",
+        generation="1",
+        rows=tuple(_vital_row(i, now - timedelta(days=60)) for i in range(3)),
+    )
+    res_a = pub_a.publish(expired_batch)
+    assert res_a.status is PublicationStatus.VISIBLE and res_a.rows_visible == 0 and res_a.duplicate is False
+    assert fake_a.deleted_batches == []
+    # Replay must remain idempotent
+    res_a2 = pub_a.publish(expired_batch)
+    assert res_a2.status is PublicationStatus.VISIBLE and res_a2.rows_visible == 0 and res_a2.duplicate is True
+
+    # Case B: Mixed 30d boundary batch (2 expired + 3 fresh) -> 3 survive -> VISIBLE with 3 rows_visible
+    fake_b = TtlEnforcingFakeHttpClient()
+    pub_b = ClickHousePublication(InMemoryBatchManifestStore(), ClickHouseBatchAdapter(fake_b))  # type: ignore[arg-type]
+    mixed_batch = HighScaleBatch(
+        batch_id="batch-mixed-ttl",
+        service_id="svc-ttl",
+        domain="rum_vitals",
+        generation="1",
+        rows=(
+            _vital_row(1, now - timedelta(days=35)),
+            _vital_row(2, now - timedelta(days=35)),
+            _vital_row(3, now - timedelta(hours=1)),
+            _vital_row(4, now - timedelta(hours=1)),
+            _vital_row(5, now - timedelta(hours=1)),
+        ),
+    )
+    res_b = pub_b.publish(mixed_batch)
+    assert res_b.status is PublicationStatus.VISIBLE and res_b.rows_visible == 3
+    assert fake_b.deleted_batches == []
+
+    # Case C: Mixed batch where a fresh row ALSO goes missing -> fail-closed PartialInsert!
+    fake_c = TtlEnforcingFakeHttpClient(drop_extra_fresh=1)
+    pub_c = ClickHousePublication(InMemoryBatchManifestStore(), ClickHouseBatchAdapter(fake_c))  # type: ignore[arg-type]
+    with pytest.raises(PartialInsert) as exc_c:
+        pub_c.publish(mixed_batch)
+    assert exc_c.value.rows_inserted == 2
+    assert len(fake_c.deleted_batches) == 1
+
+    # Case D: All fresh rows where ClickHouse drops everything -> fail-closed PartialInsert(0)!
+    fake_d = TtlEnforcingFakeHttpClient(drop_extra_fresh=3)
+    pub_d = ClickHousePublication(InMemoryBatchManifestStore(), ClickHouseBatchAdapter(fake_d))  # type: ignore[arg-type]
+    fresh_batch = HighScaleBatch(
+        batch_id="batch-fresh-dropped",
+        service_id="svc-ttl",
+        domain="rum_vitals",
+        generation="1",
+        rows=tuple(_vital_row(i, now - timedelta(hours=1)) for i in range(3)),
+    )
+    with pytest.raises(PartialInsert) as exc_d:
+        pub_d.publish(fresh_batch)
+    assert exc_d.value.rows_inserted == 0
+    assert len(fake_d.deleted_batches) == 1
 
 
 def test_query_filters_visible_state_and_ignores_pending_rows() -> None:

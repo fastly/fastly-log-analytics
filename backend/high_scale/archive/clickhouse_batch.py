@@ -12,7 +12,7 @@ import re
 import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from functools import cached_property
 from pathlib import Path
@@ -103,6 +103,40 @@ _PUBLICATION_COLUMNS = (
 )
 
 
+_DEFAULT_TABLE_TTL_DAYS = 30
+_TABLE_TTL_DAYS: dict[str, int] = {"request_aggregates_1h": 90}
+_TTL_BOUNDARY_GRACE = timedelta(minutes=10)
+
+
+def _count_ttl_expired_rows(
+    table: str,
+    columns: Sequence[str],
+    mapped_rows: Sequence[tuple[Any, ...]],
+    *,
+    now: datetime | None = None,
+) -> int:
+    """Count rows whose ClickHouse TTL column is at or past the table's retention horizon."""
+    if not mapped_rows:
+        return 0
+    ts_idx: int | None = None
+    for ts_col in ("event_timestamp", "bucket_start"):
+        if ts_col in columns:
+            ts_idx = columns.index(ts_col)
+            break
+    if ts_idx is None:
+        return 0
+    ttl_days = _TABLE_TTL_DAYS.get(table, _DEFAULT_TABLE_TTL_DAYS)
+    cutoff = (now or datetime.now(UTC)) - timedelta(days=ttl_days) + _TTL_BOUNDARY_GRACE
+    expired = 0
+    for row in mapped_rows:
+        ts = row[ts_idx]
+        if isinstance(ts, datetime):
+            ts_utc = ts.replace(tzinfo=UTC) if ts.tzinfo is None else ts.astimezone(UTC)
+            if ts_utc <= cutoff:
+                expired += 1
+    return expired
+
+
 class BaseClickHouseBatchAdapter:
     """Shared idempotent insert-behind-a-publication-row mechanics."""
 
@@ -135,7 +169,8 @@ class BaseClickHouseBatchAdapter:
         if existing is not None:
             self._validate_publication(existing, batch)
             if existing["publication_state"] == "visible":
-                return InsertReceipt(batch.batch_id, len(batch.rows), batch.digest)
+                vis = int(existing.get("visible_rows", len(batch.rows)))
+                return InsertReceipt(batch.batch_id, vis, batch.digest, ttl_expired_rows=max(0, len(batch.rows) - vis))
             version = int(existing["manifest_version"])
         else:
             self._insert_publication(batch, batch_uuid, version=1, state="pending", visible_rows=0)
@@ -144,6 +179,21 @@ class BaseClickHouseBatchAdapter:
         expected = len(batch.rows)
         existing_rows = self._count_rows(table, batch, batch_uuid, columns=columns, mapped_rows=mapped_rows)
         if existing_rows not in (0, expected):
+            expired_candidates = _count_ttl_expired_rows(table, columns, mapped_rows)
+            if expired_candidates > 0 and (expected - expired_candidates) <= existing_rows < expected:
+                ttl_expired = expected - existing_rows
+                logger.warning(
+                    "clickhouse.ttl_evicted_rows",
+                    table=table,
+                    batch_id=batch.batch_id,
+                    expected_rows=expected,
+                    visible_rows=existing_rows,
+                    ttl_expired_rows=ttl_expired,
+                )
+                self._insert_publication(
+                    batch, batch_uuid, version=version + 1, state="visible", visible_rows=existing_rows
+                )
+                return InsertReceipt(batch.batch_id, existing_rows, batch.digest, ttl_expired_rows=ttl_expired)
             self._client.delete_batch_rows(table, batch_uuid)
             raise PartialInsert(existing_rows)
         if existing_rows == 0:
@@ -162,6 +212,21 @@ class BaseClickHouseBatchAdapter:
                 raise
             existing_rows = self._count_rows(table, batch, batch_uuid, columns=columns, mapped_rows=mapped_rows)
         if existing_rows != expected:
+            expired_candidates = _count_ttl_expired_rows(table, columns, mapped_rows)
+            if expired_candidates > 0 and (expected - expired_candidates) <= existing_rows < expected:
+                ttl_expired = expected - existing_rows
+                logger.warning(
+                    "clickhouse.ttl_evicted_rows",
+                    table=table,
+                    batch_id=batch.batch_id,
+                    expected_rows=expected,
+                    visible_rows=existing_rows,
+                    ttl_expired_rows=ttl_expired,
+                )
+                self._insert_publication(
+                    batch, batch_uuid, version=version + 1, state="visible", visible_rows=existing_rows
+                )
+                return InsertReceipt(batch.batch_id, existing_rows, batch.digest, ttl_expired_rows=ttl_expired)
             self._client.delete_batch_rows(table, batch_uuid)
             raise PartialInsert(existing_rows)
 
@@ -421,6 +486,7 @@ class InsertReceipt:
     batch_id: str
     rows_inserted: int
     digest: str
+    ttl_expired_rows: int = 0
 
 
 class BatchManifestStore(Protocol):
@@ -724,7 +790,7 @@ class ClickHousePublication:
             raise ValueError("ClickHouse receipt batch id mismatch")
         if receipt.digest != batch.digest:
             raise ValueError("ClickHouse receipt digest mismatch")
-        if receipt.rows_inserted != len(batch.rows):
+        if receipt.ttl_expired_rows < 0 or (receipt.rows_inserted + receipt.ttl_expired_rows) != len(batch.rows):
             raise PartialInsert(receipt.rows_inserted)
 
         self._manifests.put(

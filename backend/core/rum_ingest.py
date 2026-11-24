@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import sys as _sys
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -180,10 +181,19 @@ def extract_metrics_from_query_params(qparams: dict[str, list[str]], log_data: d
     pathname = next((p for p in (qparams.get("rum_pathname") or []) if p), None) or log_data.get("rum_pathname") or "/"
 
     extracted: list[dict] = []
+    last_name_idx = len(raw_names) - 1
     for idx, name in enumerate(raw_names):
         if not name:
             continue
-        val = raw_values[idx] if idx < len(raw_values) else None
+        if idx >= len(raw_values):
+            # Batched /rum-beacon URL truncated before this metric's value parameter.
+            continue
+        val = raw_values[idx]
+        if idx == last_name_idx:
+            parsed_val = safe_float(val)
+            if parsed_val is None or not math.isfinite(parsed_val):
+                # Trailing metric truncated mid-value in a batched /rum-beacon URL.
+                continue
         rating = raw_ratings[idx] if idx < len(raw_ratings) else ""
         extracted.append(
             {
@@ -198,12 +208,31 @@ def extract_metrics_from_query_params(qparams: dict[str, list[str]], log_data: d
             }
         )
 
-    for idx, err_msg in enumerate(raw_err_msgs):
-        if not err_msg:
-            continue
-        err_file = (raw_err_files[idx] if idx < len(raw_err_files) else "") or "unknown.js"
-        err_line = safe_int(raw_err_lines[idx]) if idx < len(raw_err_lines) else 0
-        err_col = safe_int(raw_err_cols[idx]) if idx < len(raw_err_cols) else 0
+    if raw_err_msgs:
+        for idx, err_msg in enumerate(raw_err_msgs):
+            if not err_msg:
+                continue
+            err_file = (raw_err_files[idx] if idx < len(raw_err_files) else "") or "unknown.js"
+            err_line = safe_int(raw_err_lines[idx]) if idx < len(raw_err_lines) else 0
+            err_col = safe_int(raw_err_cols[idx]) if idx < len(raw_err_cols) else 0
+            extracted.append(
+                {
+                    "metric_name": "exception",
+                    "metric_value": None,
+                    "metric_rating": "",
+                    "pathname": pathname,
+                    "cid": cid,
+                    "browser": browser_name,
+                    "os": os_name,
+                    "device": device_type,
+                    "error_message": err_msg,
+                    "error_file": err_file,
+                    "error_line": err_line,
+                    "error_col": err_col,
+                }
+            )
+    elif log_data.get("rum_error_message"):
+        # URL truncated before rum_error_message, while VCL captured top-level rum_error_* fields.
         extracted.append(
             {
                 "metric_name": "exception",
@@ -214,10 +243,10 @@ def extract_metrics_from_query_params(qparams: dict[str, list[str]], log_data: d
                 "browser": browser_name,
                 "os": os_name,
                 "device": device_type,
-                "error_message": err_msg,
-                "error_file": err_file,
-                "error_line": err_line,
-                "error_col": err_col,
+                "error_message": str(log_data.get("rum_error_message")),
+                "error_file": str(log_data.get("rum_error_file") or "unknown.js"),
+                "error_line": safe_int(log_data.get("rum_error_line")),
+                "error_col": safe_int(log_data.get("rum_error_col")),
             }
         )
 
