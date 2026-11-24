@@ -296,7 +296,7 @@ function InsightsBody({
               <Loader2 className="h-4 w-4 animate-spin text-primary" aria-hidden="true" />
               {data.pending || !data.computed_at
                 ? <span>Evaluating detectors in the background…</span>
-                : <span>Refreshing (computed {relative(data.computed_at)})</span>}
+                : <span suppressHydrationWarning>Refreshing (computed {relative(data.computed_at)})</span>}
             </span>
           )}
           {refreshError && (
@@ -387,10 +387,10 @@ function InsightsBody({
         {data && data.computed_at && (
           <TooltipProvider>
             <Tooltip>
-              <TooltipTrigger render={<span className="" />}>
+              <TooltipTrigger render={<span suppressHydrationWarning className="" />}>
                 Computed {relative(data.computed_at)}
               </TooltipTrigger>
-              <TooltipContent className="text-xs">
+              <TooltipContent className="text-xs" suppressHydrationWarning>
                 {full(data.computed_at)} {abbr()}
               </TooltipContent>
             </Tooltip>
@@ -402,7 +402,7 @@ function InsightsBody({
         {rollupMeta && (
           <div role="note" className="mb-2 flex items-center gap-2 rounded-md border bg-muted/30 px-3 py-1.5 text-xs text-muted-foreground">
             <Info className="h-3.5 w-3.5 shrink-0" />
-            <span title={formatDate(rollupMeta.data_through, timezone, 'yyyy-MM-dd HH:mm:ss')}>
+            <span suppressHydrationWarning title={formatDate(rollupMeta.data_through, timezone, 'yyyy-MM-dd HH:mm:ss')}>
               Baseline from log summaries through {formatDate(rollupMeta.data_through, timezone, 'HH:mm')}; the {windowHours}h window is read from raw logs.
               Baseline values marked ≈ are estimated and ≥ are lower bounds; detectors the summaries can&apos;t compare read their baseline from raw logs.
             </span>
