@@ -27,8 +27,9 @@ const RUM_ARCHIVE_FIXED_BYTES = 22_500
 const RUM_ARCHIVE_BYTES_PER_ROW = 350
 const ARCHIVE_RETENTION_MARGIN_DAYS = 1
 const ARCHIVE_DELETION_GRACE_MINUTES = 15
-// ZSTD compresses structured, repetitive NDJSON edge logs by ~15× (~33% smaller than gzip's ~10×).
-export const RAW_LOG_COMPRESSION_RATIO = 15
+// Measured live on Fastly NDJSON edge log batches (`ops:ingest_files` raw_bytes / raw_size = 5.42×
+// on request logs, 2.68–2.73× on smaller/RUM batches); 5× avoids under-predicting raw log volume.
+export const RAW_LOG_COMPRESSION_RATIO = 5
 // Batched RUM beacons share page/session metadata and compress to ~128 B per metric row in ZSTD Parquet (~512 B raw / 4).
 export const RUM_COMPRESSED_BYTES_PER_BEACON = 128
 // RUM beacons are batched client-side (~4 metrics per /rum-beacon flush) and written as ZSTD-compressed

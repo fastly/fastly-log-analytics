@@ -755,7 +755,7 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     })
 
     test('models ZSTD raw log compression (15x) for smaller compressed volume, raw storage, and CDN egress', () => {
-      expect(RAW_LOG_COMPRESSION_RATIO).toBe(15)
+      expect(RAW_LOG_COMPRESSION_RATIO).toBe(5)
       const results = calculate(DEFAULTS)
       expect(results.totalGzBytesPerMonth).toBeCloseTo(results.totalBytesPerMonth / RAW_LOG_COMPRESSION_RATIO, 2)
       expect(results.cdnEgressGB).toBeCloseTo(results.totalGzBytesPerMonth / (1024 * 1024 * 1024), 6)
