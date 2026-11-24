@@ -188,11 +188,12 @@ function findScrollContainer(node: Element): Element | null {
 interface UseInViewOnceOptions<T extends Element> {
   rootMargin?: string
   findRoot?: (node: T) => Element | null
+  enabled?: boolean
 }
 
 export function useInViewOnce<T extends Element>(
   ref: RefObject<T | null>,
-  { rootMargin = '0px', findRoot }: UseInViewOnceOptions<T> = {},
+  { rootMargin = '0px', findRoot, enabled = true }: UseInViewOnceOptions<T> = {},
 ): boolean {
   const [seen, setSeen] = useState(false)
   const supported = useSyncExternalStore(
@@ -203,7 +204,7 @@ export function useInViewOnce<T extends Element>(
 
   useEffect(() => {
     const node = ref.current
-    if (seen || !supported || !node) return
+    if (!enabled || seen || !supported || !node) return
     const observer = new IntersectionObserver(
       ([entry]) => {
         if (entry.isIntersecting) {
@@ -215,9 +216,9 @@ export function useInViewOnce<T extends Element>(
     )
     observer.observe(node)
     return () => observer.disconnect()
-  }, [ref, seen, supported, rootMargin, findRoot])
+  }, [ref, enabled, seen, supported, rootMargin, findRoot])
 
-  return seen || !supported
+  return enabled && (seen || !supported)
 }
 
 interface LazyMountProps {

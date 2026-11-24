@@ -109,7 +109,7 @@ export function AssetsReportContent({
 
   // The URL tables always read raw rows, so in Cloud they wait until summaries paint and their panel enters the viewport.
   const hotspotsRef = React.useRef<HTMLDivElement>(null)
-  const hotspotsNear = useInViewOnce(hotspotsRef, { rootMargin: '0px' })
+  const hotspotsNear = useInViewOnce(hotspotsRef, { rootMargin: '0px', enabled: !rollupFirst || rollupQuery.isSuccess })
   const bundle = useAnalyticsReportQuery<AssetsAggregates | undefined>({
     namespace: ['assets', 'aggregates'],
     serviceId: activeServiceId,
@@ -164,7 +164,7 @@ export function AssetsReportContent({
   return (
     <div className={cn('space-y-8 py-6 transition-opacity duration-150', isFetching && !isLoading && 'opacity-60 pointer-events-none')}>
       <RollupDataThroughSlot reserve={rollupFirst} meta={rollup} />
-      <RawWindowNote window={readRawWindow(bundle.data)} />
+      <RawWindowNote window={readRawWindow(bundle.data) ?? readRawWindow(rollupQuery.data)} />
 
       <AssetsOverviewGrid
         breakdown={breakdown}

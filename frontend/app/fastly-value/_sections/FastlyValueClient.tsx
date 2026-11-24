@@ -11,7 +11,7 @@ import { RawWindowNote, readRawWindow, readRollupMeta, RollupDataThroughSlot } f
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { Skeleton } from '@/components/ui/skeleton'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
-import { hasFilterValues, VALUE_ROLLUP_SECTIONS } from '@/lib/cloud-engine/rollup-sections'
+import { hasFilterValues, singleLowCardFilter, VALUE_ROLLUP_SECTIONS } from '@/lib/cloud-engine/rollup-sections'
 import type { FiltersPayload } from '@/types/api'
 import { AssetsReportContent } from '@/app/assets-shield/_sections/AssetsClient'
 import {
@@ -48,14 +48,23 @@ function FastlyValueBody({ startTime, endTime, activeServiceId, filterPayload }:
     if (activeTab === 'assets') return ['overview'] // dummy section, query disabled
     return [activeTab]
   }, [activeTab]) as ValueSection[]
-  // Cloud answers the VALUE_ROLLUP_SECTIONS from summaries when unfiltered; read them apart from any
-  // others so they paint without waiting on a raw scan.
+  // Cloud answers VALUE_ROLLUP_SECTIONS from summaries when unfiltered, and overview from
+  // filtered_rollups for a single low-cardinality include filter; split them so they paint
+  // without waiting on a raw scan.
   const rollupFirst = isCloudMode() && !hasFilterValues(filterPayload)
+  const filteredRollup = isCloudMode() && singleLowCardFilter(filterPayload) !== null
   const [rollupSections, rawSections] = React.useMemo(() => {
-    const servable = new Set<string>(VALUE_ROLLUP_SECTIONS)
-    const fromRollup = rollupFirst && activeTab !== 'assets' ? sections.filter((section) => servable.has(section)) : []
-    return [fromRollup, sections.filter((section) => !fromRollup.includes(section))]
-  }, [rollupFirst, activeTab, sections])
+    if (activeTab === 'assets') return [[], sections]
+    if (rollupFirst) {
+      const servable = new Set<string>(VALUE_ROLLUP_SECTIONS)
+      const fromRollup = sections.filter((section) => servable.has(section))
+      return [fromRollup, sections.filter((section) => !fromRollup.includes(section))]
+    }
+    if (filteredRollup && sections.includes('overview')) {
+      return [['overview'] as ValueSection[], sections.filter((section) => section !== 'overview')]
+    }
+    return [[], sections]
+  }, [rollupFirst, filteredRollup, activeTab, sections])
   const split = rollupSections.length > 0
   const range = { relativeRange, isAutoRange, startTime, endTime, anchor }
   const postValue = (requested: ValueSection[], rangeBody: RangeWire['rangeBody'], signal: AbortSignal | undefined) =>
@@ -123,7 +132,7 @@ function FastlyValueBody({ startTime, endTime, activeServiceId, filterPayload }:
   return (
     <div className="space-y-6">
       <RollupDataThroughSlot reserve={split} meta={rollup} />
-      <RawWindowNote window={readRawWindow(valueQuery.data)} />
+      <RawWindowNote window={readRawWindow(valueQuery.data) ?? readRawWindow(rollupQuery.data)} />
       <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as TabId)}>
         <TabsList className="flex flex-wrap h-auto gap-1">
           {TABS.map((tab) => (

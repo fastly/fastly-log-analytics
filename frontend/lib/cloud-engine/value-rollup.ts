@@ -1,8 +1,10 @@
 import type { Rollup, RollupResult, RollupValue } from "./dashboard/rollup-query";
-import { queryRollup, rebucketSeries, sumAggs } from "./dashboard/rollup-query";
+import { emptyAgg, queryRollup, rebucketSeries, rollupGroup, sumAggs } from "./dashboard/rollup-query";
 import { parseEpochMs, roundTo } from "./network";
 import type { NetworkRollupMeta } from "./network-rollup";
-import { hasFilterValues, VALUE_ROLLUP_SECTIONS } from "./rollup-sections";
+import {
+  hasFilterValues, singleLowCardFilter, VALUE_ROLLUP_SECTIONS, type FilteredRollupFilter,
+} from "./rollup-sections";
 import { emptyValueSummary, type ValueQueryParams } from "./value";
 import { defineSummarySpec, type SummarySpec } from "./dashboard/summary-projection";
 import type { LoggedHour } from "./value-stats";
@@ -53,7 +55,12 @@ const HIT_STATES = new Set(["HIT", "HIT-STALE", "HIT-CLUSTER"]);
 
 /** Whether summaries may answer this /fastly-value read at all, before any range or listing is resolved. */
 export function valueRollupEligible(path: string, body: ValueRollupBody): boolean {
-  if (!/^\/api\/value\/summary\/*$/.test(path) || hasFilterValues(body.filters, body.custom_filters)) return false;
+  if (!/^\/api\/value\/summary\/*$/.test(path)) return false;
+  if (hasFilterValues(body.filters, body.custom_filters)) {
+    if (!Array.isArray(body.sections) || body.sections.length === 0) return false;
+    if (!body.sections.every((section) => section === "overview")) return false;
+    return singleLowCardFilter(body.filters, body.custom_filters, body) !== null;
+  }
   const servable = new Set<string>(VALUE_ROLLUP_SECTIONS);
   return Array.isArray(body.sections) && body.sections.length > 0 &&
     body.sections.every((section) => servable.has(section));
@@ -399,7 +406,40 @@ export function valueSummaryFromRollup(
   return pick();
 }
 
-/** The summary groups and columns /fastly-value reads. */
+function filteredValueOverview(
+  result: RollupResult,
+  filter: FilteredRollupFilter,
+): (Partial<ValueSummary> & { rollup: NetworkRollupMeta & { logged_hours?: LoggedHour[] } }) | null {
+  const group = rollupGroup(result.rollup, "filtered_rollups", filter.field);
+  if (!group) return null;
+  const isTruncated = result.rollup.truncated.has(`filtered_rollups/${filter.field}`);
+  const found = group.get(filter.value);
+  if (!found && isTruncated) return null;
+  const agg = found ?? emptyAgg();
+  const total = agg.requests;
+  const hits = agg.hitRequests;
+  const originReqs = agg.missRequests + agg.passRequests;
+  const hasCache = hits + originReqs > 0;
+  return {
+    overview: {
+      total_requests: total,
+      total_bandwidth_bytes: agg.respBytes || null,
+      origin_offload_pct: total > 0 && hasCache ? roundTo((hits * 100) / total, 2) : null,
+      threats_blocked: null,
+      cache_acceleration_factor: null,
+      edge_hit_requests: hasCache ? hits : null,
+      origin_requests: hasCache ? originReqs : null,
+    },
+    rollup: {
+      data_from: new Date(result.dataFromMs).toISOString(),
+      data_through: new Date(result.dataThroughMs).toISOString(),
+      approximate: [],
+      lower_bound: isTruncated ? ["overview"] : [],
+    },
+  };
+}
+
+/** The summary groups and columns /fastly-value reads unfiltered. */
 export const VALUE_SUMMARY_SPEC = defineSummarySpec({
   groups: ["overview", "series5", "all_fields", "field_totals", "dim_totals", "value"],
   columns: [
@@ -409,11 +449,18 @@ export const VALUE_SUMMARY_SPEC = defineSummarySpec({
   ],
 });
 
+/** The summary groups and columns /fastly-value reads for a filtered overview. */
+export const VALUE_FILTERED_SUMMARY_SPEC = defineSummarySpec({
+  groups: ["filtered_rollups", "dim_totals"],
+  columns: ["requests", "hit_requests", "miss_requests", "pass_requests", "resp_bytes_sum"],
+});
+
 /**
- * Answers an unfiltered Cloud /fastly-value read from v3 summaries, or returns
- * null when the raw scan must: a filter, summaries written before the `value`
- * rows a section reads, a chart interval other than a day for a section with a
- * series, or a range the summaries don't cover (see `queryRollup`).
+ * Answers an unfiltered Cloud /fastly-value read (or an hour-aligned single
+ * low-cardinality filtered overview read) from v3 summaries, or returns null
+ * when the raw scan must: unsupported filters, summaries written before the
+ * `value` rows a section reads, a chart interval other than a day for a
+ * section with a series, or a range the summaries don't cover (see `queryRollup`).
  */
 export async function valueFromRollup(
   path: string,
@@ -427,6 +474,13 @@ export async function valueFromRollup(
   const fromMs = parseEpochMs(body.start_time ?? undefined);
   const toMs = parseEpochMs(body.end_time ?? undefined);
   if (fromMs === null || toMs === null || fromMs >= toMs) return null;
+  if (hasFilterValues(body.filters, body.custom_filters)) {
+    const filter = singleLowCardFilter(body.filters, body.custom_filters, body);
+    if (!filter) return null;
+    const filteredSpec = spec === VALUE_SUMMARY_SPEC ? VALUE_FILTERED_SUMMARY_SPEC : spec;
+    const result = await queryRollup(source, { fromMs, toMs, signal, spec: filteredSpec ?? undefined });
+    return result ? filteredValueOverview(result, filter) : null;
+  }
   const result = await queryRollup(source, { fromMs, toMs, signal, spec: spec ?? undefined });
   return result ? valueSummaryFromRollup(result, body) : null;
 }

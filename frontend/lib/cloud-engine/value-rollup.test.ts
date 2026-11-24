@@ -1,5 +1,6 @@
 // @vitest-environment node
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { parquetWriteBuffer } from "hyparquet-writer";
 import { DuckDBAnalyticalEngine as ParquetEngine } from "./dashboard/duckdb";
 import type { ManifestFile } from "./dashboard/manifest";
 import { decodeRollup, mergeRollups, type RollupResult } from "./dashboard/rollup-query";
@@ -319,5 +320,56 @@ describe("valueFromRollup", () => {
     }
     expect(valueRollupEligible("/api/value/summary", body({ filters: { pop: { values: [], mode: "include" } } }))).toBe(true);
     expect(valueRollupEligible("/api/value/other", body())).toBe(false);
+  });
+
+  it("serves filtered /api/value/summary overview from filtered_rollups for hour-aligned single low-card filters", async () => {
+    const hour = FIXTURES.origin.files("hour")[0];
+    const hourStart = Date.parse(hour.start);
+    const t = new Date(hourStart);
+    const summaryBuf = parquetWriteBuffer({
+      kvMetadata: [{ key: "flp_summary", value: "3" }],
+      columnData: [
+        { name: "bundle", data: ["overview", "dim_totals", "filtered_rollups"], type: "STRING" },
+        { name: "bucket", data: [t, t, t], type: "TIMESTAMP" },
+        { name: "field", data: ["", "status", "status"], type: "STRING" },
+        { name: "value", data: ["", "filtered_rollups", "200"], type: "STRING" },
+        { name: "requests", data: [BigInt(100), BigInt(100), BigInt(80)], type: "INT64" },
+        { name: "hit_requests", data: [null, null, BigInt(60)], type: "INT64" },
+        { name: "miss_requests", data: [null, null, BigInt(15)], type: "INT64" },
+        { name: "pass_requests", data: [null, null, BigInt(5)], type: "INT64" },
+        { name: "resp_bytes_sum", data: [BigInt(10000), null, BigInt(8000)], type: "INT64" },
+        { name: "truncated", data: [null, false, null], type: "BOOLEAN" },
+      ],
+    });
+    const filteredSource = fixtureSource(
+      [fixturePage(FIXTURES.origin.files("raw"))],
+      { [hour.key]: summaryBuf },
+      { json: [], files: [] },
+      [fixturePage([hour])],
+    );
+    const reqBody = {
+      start_time: hour.start,
+      end_time: hour.end,
+      sections: ["overview"] as ("overview" | "caching")[],
+      filters: { status: { mode: "include", values: ["200"] } },
+    };
+    expect(valueRollupEligible("/api/value/summary", reqBody)).toBe(true);
+    const served = await valueFromRollup("/api/value/summary", reqBody, filteredSource);
+    expect(served).not.toBeNull();
+    expect(served!.overview).toEqual({
+      total_requests: 80,
+      total_bandwidth_bytes: 8000,
+      origin_offload_pct: 75,
+      threats_blocked: null,
+      cache_acceleration_factor: null,
+      edge_hit_requests: 60,
+      origin_requests: 20,
+    });
+    expect(served!.rollup.lower_bound).toEqual([]);
+
+    // Non-hour-aligned, multi-field, custom_filters, or non-overview sections must fall back.
+    expect(valueRollupEligible("/api/value/summary", { ...reqBody, start_time: new Date(hourStart + 60_000).toISOString() })).toBe(false);
+    expect(valueRollupEligible("/api/value/summary", { ...reqBody, sections: ["overview", "caching"] })).toBe(false);
+    expect(valueRollupEligible("/api/value/summary", { ...reqBody, custom_filters: { tenant: { mode: "include", values: ["a"] } } })).toBe(false);
   });
 });

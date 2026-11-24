@@ -268,6 +268,19 @@ export async function ensureCloudRange(
         const needed = files.reduce((total, file) => total + (plans.get(file.scopedKey)?.projectedBytes
           ?? persisted.get(file.scopedKey)?.byteLength ?? engine.getFileMeta(file.scopedKey)?.byteLength ?? 0), 0);
         if (needed > byteLimit) throw overBudget({ unit: "bytes", needed, limit: byteLimit });
+        const wireNeeded = files.reduce((total, file) => {
+          const plan = plans.get(file.scopedKey);
+          if (!plan) return total;
+          const held = wholes.get(file.scopedKey);
+          if (held?.cached) return total;
+          const plannedRangeBytes = plan.ranges.reduce((sum, r) => sum + (r.end - r.start), 0);
+          const willFetchWhole = Boolean(held) || (
+            plan.ranges.length > 0 && file.size > 0 && file.size <= MAX_RANGE_BYTES
+            && plannedRangeBytes >= file.size * 0.65
+          );
+          return total + (willFetchWhole ? file.size : plannedRangeBytes);
+        }, 0);
+        if (wireNeeded > byteLimit) throw overBudget({ unit: "bytes", needed: wireNeeded, limit: byteLimit });
       }
       const progress = { phase: "files" as const, cached: 0, toFetch: files.length,
         toDecode: 0, done: 0, downloadedBytes: 0, cachedBytes: 0 };

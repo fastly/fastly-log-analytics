@@ -252,6 +252,31 @@ describe("Cloud first-page analytical range loading", () => {
     }
   });
 
+  it("rejects a projection whose >=65% whole-file wire download exceeds the byte budget even when projectedBytes fits", async () => {
+    // Reproduces /assets-shield and /fastly-value (filtered) downloading ~240 MB across 30+ compacted
+    // files: projectedBytes fits under the 64 MiB DuckDB budget, but coalesced ranges cover >=65% of
+    // each file so fetchProjected would fall back to fetchWhole and pull the entire files over HTTP.
+    const { entries } = projectedFiles(3);
+    const totalWire = entries.reduce((sum, entry) => sum + entry.size, 0);
+    const budget = Math.floor(totalWire * 0.5);
+    planned.projectedBytes = Math.floor(budget * 0.25);
+    try {
+      const error = await ensureCloudRange(from, to, signal, ["request"], {
+        projection: { columns: ["timestamp", "ua", "status", "cache", "referer"], maxBytes: budget },
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(CloudBudgetError);
+      expect((error as CloudBudgetError).detail).toEqual({
+        unit: "bytes",
+        needed: expect.any(Number),
+        limit: budget,
+      });
+      expect((error as CloudBudgetError).detail!.needed).toBeGreaterThan(budget);
+      expect(source.fetchFile).not.toHaveBeenCalled();
+    } finally {
+      planned.projectedBytes = null;
+    }
+  });
+
   it("names the needed and allowed size when a projection is over budget", async () => {
     const { fullBytes } = projectedFiles(3);
     const error = await ensureCloudRange(from, to, signal, ["request"], projection(4096)).catch((e: unknown) => e);
