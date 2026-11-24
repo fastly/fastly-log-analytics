@@ -140,6 +140,17 @@ export const INSIGHTS_SUMMARY_SPEC = defineSummarySpec({
     "status_5xx", "hit_requests", "miss_requests", "pass_requests",
     "elapsed_count", "elapsed_hist",
   ],
+  only: {
+    count: ["all_fields", "ins_ip", "ins_asn"],
+    requests: ["dims", "series5", "ins_url", "ins_ip", "ins_asn"],
+    errors: ["dims", "series5", "ins_ip"],
+    status_5xx: ["ins_url"],
+    hit_requests: ["ins_url"],
+    miss_requests: ["ins_url"],
+    pass_requests: ["ins_url"],
+    elapsed_count: ["urls", "ins_lat"],
+    elapsed_hist: ["urls", "ins_lat"],
+  },
 });
 
 /**
@@ -419,6 +430,9 @@ const ROLLUP_INSIGHT_COLUMNS = new Set(
  * is absent from either rollup. Returns null when summaries cannot cover both
  * ranges so the caller falls back to the raw scan.
  */
+const HOUR_MS = 3_600_000;
+const ALIGN_MIN_WINDOW_HOURS = 6;
+
 export async function insightsFromRollup(
   body: InsightsRollupRequest,
   filters: readonly DashboardFilter[],
@@ -428,24 +442,53 @@ export async function insightsFromRollup(
 ) {
   if (filters.length || Array.isArray(body.detectors)) return null;
   const { end, windowStart, start, windowHours, baselineHours } = resolveInsightWindow(body);
-  const [windowResult, baselineResult] = await Promise.all([
-    queryRollup(source, {
-      fromMs: windowStart, toMs: end, signal, spec: spec ?? undefined, residual: INSIGHTS_RESIDUAL,
-    }),
-    queryRollup(source, {
-      fromMs: start, toMs: windowStart, signal, spec: spec ?? undefined, residual: INSIGHTS_RESIDUAL,
-    }),
-    loadAsnNames(),
-  ]);
-  if (!windowResult || !baselineResult) return null;
-
-  const wRollup = windowResult.rollup;
-  const bRollup = baselineResult.rollup;
   const sumOverall = (rollup: Rollup) => {
     let total = 0;
     for (const agg of rollup.series.get("overall")?.get("")?.values() ?? []) total += agg.requests;
     return total;
   };
+  const fetchPair = (fromStart: number, fromWindow: number, toEnd: number) =>
+    Promise.all([
+      queryRollup(source, {
+        fromMs: fromWindow, toMs: toEnd, signal, spec: spec ?? undefined, residual: INSIGHTS_RESIDUAL,
+      }),
+      queryRollup(source, {
+        fromMs: fromStart, toMs: fromWindow, signal, spec: spec ?? undefined, residual: INSIGHTS_RESIDUAL,
+      }),
+      loadAsnNames(),
+    ]);
+
+  const earliestLogMs = body.earliest_log_at ? Date.parse(body.earliest_log_at) : Number.NaN;
+  const alignedEnd = Math.floor(end / HOUR_MS) * HOUR_MS;
+  const canAlignToCompletedHour =
+    windowHours >= ALIGN_MIN_WINDOW_HOURS
+    && !body.clamp_end
+    && end !== alignedEnd
+    && (!Number.isFinite(earliestLogMs) || earliestLogMs <= alignedEnd - HOUR_MS);
+
+  let effectiveEnd = end;
+  let windowResult: RollupResult | null = null;
+  let baselineResult: RollupResult | null = null;
+  if (canAlignToCompletedHour) {
+    const alignedWindowStart = alignedEnd - windowHours * HOUR_MS;
+    const alignedStart = alignedWindowStart - baselineHours * HOUR_MS;
+    const [wRes, bRes] = await fetchPair(alignedStart, alignedWindowStart, alignedEnd);
+    if (wRes && bRes && sumOverall(wRes.rollup) > 0) {
+      windowResult = wRes;
+      baselineResult = bRes;
+      effectiveEnd = alignedEnd;
+    }
+  }
+  if (!windowResult || !baselineResult) {
+    const [wRes, bRes] = await fetchPair(start, windowStart, end);
+    windowResult = wRes;
+    baselineResult = bRes;
+    effectiveEnd = end;
+  }
+  if (!windowResult || !baselineResult) return null;
+
+  const wRollup = windowResult.rollup;
+  const bRollup = baselineResult.rollup;
   const windowRequests = sumOverall(wRollup);
   const baselineRequests = sumOverall(bRollup);
 
@@ -635,13 +678,12 @@ export async function insightsFromRollup(
   const enabled = new Set(body.enabled_log_fields ?? []);
   const availableColumns = new Set([...ROLLUP_INSIGHT_COLUMNS].filter((field) => enabled.has(field)));
   const availability = handleInsightAvailability(body.service_id, availableColumns);
-  const earliestLogMs = body.earliest_log_at ? Date.parse(body.earliest_log_at) : Number.NaN;
   const effectiveFirstMs = baselineRequests > 0 && Number.isFinite(earliestLogMs)
     ? Math.min(baselineResult.dataFromMs, earliestLogMs)
     : baselineRequests > 0 ? baselineResult.dataFromMs : null;
-  const historyHours = effectiveFirstMs == null ? 0 : Math.max(0, (end - effectiveFirstMs) / 3_600_000);
+  const historyHours = effectiveFirstMs == null ? 0 : Math.max(0, (effectiveEnd - effectiveFirstMs) / HOUR_MS);
   const envelope = await handleInsights(body, {
-    now: new Date(end),
+    now: new Date(effectiveEnd),
     maskIps: Boolean(body.mask_ips),
     availableColumns,
     availableHistoryHours: historyHours,

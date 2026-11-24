@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import contextvars
+import json
 import logging
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -11,6 +13,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import wait as _wait_futures
 from dataclasses import dataclass, field
 from datetime import datetime
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
@@ -78,6 +81,22 @@ from .sql_queries import Detection, _base_sql, _detection_for
 logger = logging.getLogger(__name__)
 
 _MAX_WORKERS = 8
+_INSIGHT_MARKER_RE = re.compile(r"^\s*/\*\s*insight:\w+\s*\*/\s*")
+_MULTIPLEX_GROUPS: tuple[tuple[str, frozenset[str]], ...] = (
+    ("group_rollup_batches", frozenset({"batch_misc", "batch_geo", "batch_asn", "batch_url_cache"})),
+    (
+        "group_rollup_standalone",
+        frozenset({"error_spikes", "new_probe_urls", "ua_monoculture", "referer_monoculture", "waf_signal_spikes"}),
+    ),
+    (
+        "group_window_perf",
+        frozenset({"batch_window_url", "batch_beaconing", "batch_latency_dim", "batch_url_perf", "batch_origin_perf"}),
+    ),
+    (
+        "group_ip_network",
+        frozenset({"batch_ip_outlier", "batch_ip_abuse", "batch_network_asn", "batch_fingerprint_spread"}),
+    ),
+)
 _FIELD_SAMPLE_ROWS = 1000
 _BASE_FIELDS = frozenset({"timestamp", "url", "country", "ip"})
 _ASN_INSIGHT_MARKERS = ("asn", "metro")
@@ -261,90 +280,140 @@ def _evaluate(
             investigate_url_builder=make_investigate_url,
         )
 
-    def run_standalone(definition: InsightDefinition, detection: Detection) -> list[tuple[str, dict[str, Any]]]:
-        try:
-            shape = ROLLUP_DETECTIONS.get(definition.id)
-            span = rollup_spans.get(shape) if shape else None
-            query_params = params
-            source: Literal["fact", "mixed"] = "fact"
-            if shape and span:
-                sql = rollup_base_sql(detection, definition.id, shape)
-                query_params = {**params, "rollup_start": span[0], "rollup_end": span[1]}
-                source = "mixed"
-            else:
-                sql = _base_sql(detection, definition.id)
-            if filter_clause:
-                sql = sql.replace(
-                    "AND event_timestamp <= {window_end:DateTime64(3)}",
-                    f"AND event_timestamp <= {{window_end:DateTime64(3)}} AND ({filter_clause})",
-                )
-            rows = [
-                tuple(row.values())
-                for row in trace.run(definition.id, lambda: service.client.execute(sql, query_params), source=source)
-            ]
-            return [(definition.id, _shape(definition, rows))]
-        except Exception as exc:
-            return [
-                (
-                    definition.id,
-                    build_error_insight_card(
-                        definition.id,
-                        definition.title,
-                        str(definition.category),
-                        _failure_message(exc),
-                        description=definition.description,
-                    ),
-                )
-            ]
+    @dataclass
+    class _QueryUnit:
+        key: str
+        sql: str
+        query_params: dict[str, Any]
+        source: Literal["fact", "mixed"]
+        finish: Callable[[list[dict[str, Any]]], list[tuple[str, dict[str, Any]]]]
+        on_error: Callable[[Exception], list[tuple[str, dict[str, Any]]]]
 
-    def run_batch(
-        batch: DetectionBatch, members: list[tuple[InsightDefinition, Detection]]
-    ) -> list[tuple[str, dict[str, Any]]]:
+    def _error_card(definition: InsightDefinition, msg: str) -> tuple[str, dict[str, Any]]:
+        return (
+            definition.id,
+            build_error_insight_card(
+                definition.id,
+                definition.title,
+                str(definition.category),
+                msg,
+                description=definition.description,
+            ),
+        )
+
+    def _prepare_standalone(definition: InsightDefinition, detection: Detection) -> _QueryUnit:
+        shape = ROLLUP_DETECTIONS.get(definition.id)
+        span = rollup_spans.get(shape) if shape else None
+        query_params = params
+        source: Literal["fact", "mixed"] = "fact"
+        if shape and span:
+            sql = rollup_base_sql(detection, definition.id, shape)
+            query_params = {**params, "rollup_start": span[0], "rollup_end": span[1]}
+            source = "mixed"
+        else:
+            sql = _base_sql(detection, definition.id)
+        if filter_clause:
+            sql = sql.replace(
+                "AND event_timestamp <= {window_end:DateTime64(3)}",
+                f"AND event_timestamp <= {{window_end:DateTime64(3)}} AND ({filter_clause})",
+            )
+
+        def _finish(raw_rows: list[dict[str, Any]]) -> list[tuple[str, dict[str, Any]]]:
+            try:
+                return [(definition.id, _shape(definition, [tuple(row.values()) for row in raw_rows]))]
+            except Exception as exc:
+                return [_error_card(definition, _failure_message(exc))]
+
+        return _QueryUnit(
+            key=definition.id,
+            sql=sql,
+            query_params=query_params,
+            source=source,
+            finish=_finish,
+            on_error=lambda exc: [_error_card(definition, _failure_message(exc))],
+        )
+
+    def _prepare_batch(batch: DetectionBatch, members: list[tuple[InsightDefinition, Detection]]) -> _QueryUnit:
         active_ids = {definition.id for definition, _ in members}
+        span = rollup_spans.get(batch.rollup_shape) if batch.rollup_shape else None
+        sql, source = batch.build_sql(active_ids, present=present, rollup_span=span, filter_clause=filter_clause)
+        query_params = (
+            {**params, "rollup_start": span[0], "rollup_end": span[1]} if (batch.rollup_shape and span) else params
+        )
+
+        def _on_error(exc: Exception) -> list[tuple[str, dict[str, Any]]]:
+            msg = _failure_message(exc)
+            return [_error_card(definition, msg) for definition, _ in members]
+
+        def _finish(raw_rows: list[dict[str, Any]]) -> list[tuple[str, dict[str, Any]]]:
+            try:
+                per_detector = batch.extract_rows(
+                    raw_rows, active_ids, window_hours=window_hours, baseline_hours=baseline_hours
+                )
+            except Exception as exc:
+                return _on_error(exc)
+            out: list[tuple[str, dict[str, Any]]] = []
+            for definition, _ in members:
+                try:
+                    out.append((definition.id, _shape(definition, per_detector.get(definition.id, []))))
+                except Exception as exc:
+                    out.append(_error_card(definition, _failure_message(exc)))
+            return out
+
+        return _QueryUnit(
+            key=f"batch_{batch.name}",
+            sql=sql,
+            query_params=query_params,
+            source=source,
+            finish=_finish,
+            on_error=_on_error,
+        )
+
+    def _run_unit(unit: _QueryUnit) -> list[tuple[str, dict[str, Any]]]:
         try:
-            span = rollup_spans.get(batch.rollup_shape) if batch.rollup_shape else None
-            sql, source = batch.build_sql(active_ids, present=present, rollup_span=span, filter_clause=filter_clause)
-            query_params = (
-                {**params, "rollup_start": span[0], "rollup_end": span[1]} if (batch.rollup_shape and span) else params
-            )
             raw_rows = trace.run(
-                f"batch_{batch.name}", lambda: service.client.execute(sql, query_params), source=source
-            )
-            per_detector = batch.extract_rows(
-                raw_rows, active_ids, window_hours=window_hours, baseline_hours=baseline_hours
+                unit.key, lambda: service.client.execute(unit.sql, unit.query_params), source=unit.source
             )
         except Exception as exc:
-            msg = _failure_message(exc)
-            return [
-                (
-                    definition.id,
-                    build_error_insight_card(
-                        definition.id,
-                        definition.title,
-                        str(definition.category),
-                        msg,
-                        description=definition.description,
-                    ),
-                )
-                for definition, _ in members
-            ]
-        out: list[tuple[str, dict[str, Any]]] = []
-        for definition, _ in members:
-            try:
-                out.append((definition.id, _shape(definition, per_detector.get(definition.id, []))))
-            except Exception as exc:
-                out.append(
-                    (
-                        definition.id,
-                        build_error_insight_card(
-                            definition.id,
-                            definition.title,
-                            str(definition.category),
-                            _failure_message(exc),
-                            description=definition.description,
-                        ),
-                    )
-                )
+            return unit.on_error(exc)
+        return unit.finish(raw_rows)
+
+    def _run_group(group_name: str, group_units: list[_QueryUnit]) -> list[tuple[str, dict[str, Any]]]:
+        if len(group_units) == 1:
+            return _run_unit(group_units[0])
+        combined_params = dict(params)
+        branches: list[str] = []
+        for idx, unit in enumerate(group_units):
+            branch_sql = _INSIGHT_MARKER_RE.sub("", unit.sql, count=1).strip()
+            for pname in ("rollup_start", "rollup_end"):
+                if pname in unit.query_params:
+                    aliased = f"{pname}_{idx}"
+                    branch_sql = branch_sql.replace(f"{{{pname}:", f"{{{aliased}:")
+                    combined_params[aliased] = unit.query_params[pname]
+            branches.append(f"SELECT '{unit.key}' AS _q, formatRow('JSONEachRow', *) AS _r FROM ({branch_sql})")
+        combined_sql = f"/* insight:{group_name} */ " + " UNION ALL ".join(branches)
+        group_source: Literal["fact", "mixed"] = (
+            "mixed" if any(unit.source == "mixed" for unit in group_units) else "fact"
+        )
+        try:
+            raw_rows = trace.run(
+                group_name, lambda: service.client.execute(combined_sql, combined_params), source=group_source
+            )
+            by_key: dict[str, list[dict[str, Any]]] = {}
+            for row in raw_rows:
+                tag = str(row.get("_q") or "")
+                raw_json = row.get("_r")
+                decoded = json.loads(raw_json) if isinstance(raw_json, str) else raw_json
+                if isinstance(decoded, dict):
+                    by_key.setdefault(tag, []).append(decoded)
+        except Exception:
+            out: list[tuple[str, dict[str, Any]]] = []
+            for unit in group_units:
+                out.extend(_run_unit(unit))
+            return out
+        out = []
+        for unit in group_units:
+            out.extend(unit.finish(by_key.get(unit.key, [])))
         return out
 
     candidates: list[tuple[InsightDefinition, Detection]] = []
@@ -406,9 +475,16 @@ def _evaluate(
         else:
             eligible.append((definition, detection))
     batches, standalone = plan_execution(eligible, present)
+    units: list[_QueryUnit] = [
+        *(_prepare_batch(b, m) for b, m in batches),
+        *(_prepare_standalone(d, det) for d, det in standalone),
+    ]
+    grouped: dict[str, list[_QueryUnit]] = {}
+    for unit in units:
+        group_name = next((name for name, members in _MULTIPLEX_GROUPS if unit.key in members), "group_raw_standalone")
+        grouped.setdefault(group_name, []).append(unit)
     tasks: list[Callable[[], list[tuple[str, dict[str, Any]]]]] = [
-        *(lambda b=b, m=m: run_batch(b, m) for b, m in batches),
-        *(lambda d=d, det=det: run_standalone(d, det) for d, det in standalone),
+        partial(_run_group, g, u) for g, u in grouped.items()
     ]
     with ThreadPoolExecutor(max_workers=_MAX_WORKERS, thread_name_prefix="hs-insights") as pool:
         futures = [pool.submit(contextvars.copy_context().run, task) for task in tasks]

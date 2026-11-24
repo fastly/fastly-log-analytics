@@ -1001,7 +1001,7 @@ describe("Cloud first-page analytical range loading", () => {
     vi.mocked(fetchManifest).mockResolvedValue({ files: [entryV1], complete: true });
 
     // 1. Different column subsets (>=65% of file) under the SAME (scope, serviceId, dataset, key, etag, size) share 1 fetchFile call!
-    const expectedWholeKeyA = JSON.stringify(["fixture-session", "svc-a", "request", entryV1.key, "\"etag-v1\"", bytesV1.byteLength, ""]);
+    const expectedWholeKeyA = JSON.stringify(["fixture-session:svc-a", "request", entryV1.key, "\"etag-v1\"", bytesV1.byteLength, ""]);
     const read1 = await ensureCloudRange(from, to, signal, ["request"], {
       serviceId: "svc-a",
       projection: { columns: ["timestamp", "url", "ua"] },

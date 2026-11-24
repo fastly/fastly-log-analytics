@@ -32,7 +32,7 @@ import {
   handleInsights,
 } from "./insights";
 import { INSIGHTS_RESIDUAL_FIELDS } from "./insights-residual";
-import { insightsBaselineFromRollup, insightsBaselineRollup, insightsDeferredDetectors, insightsFromRollup, ipDetectorsRuledOut, rollupInsightsBaseline } from "./insights-rollup";
+import { INSIGHTS_SUMMARY_SPEC, insightsBaselineFromRollup, insightsBaselineRollup, insightsDeferredDetectors, insightsFromRollup, ipDetectorsRuledOut, rollupInsightsBaseline } from "./insights-rollup";
 import { parquetWriteBuffer } from "hyparquet-writer";
 import { _coalesced_ip_security_aggregates, INSIGHT_DEFINITIONS } from "./insights";
 import type { Rollup } from "./dashboard/rollup-query";
@@ -761,5 +761,72 @@ describe("IP detectors from the window's ins_ip", () => {
     const result = await answer(20, 9);
     expect(result.deferred_detectors).toEqual([]);
     expect(result.insights.find((c) => c.id === "content_discovery")!.placeholder).toBeFalsy();
+  });
+});
+
+describe("INSIGHTS_SUMMARY_SPEC column scoping and multi-hour window alignment", () => {
+  it("scopes expensive columns in INSIGHTS_SUMMARY_SPEC to their owning groups", () => {
+    expect([...(INSIGHTS_SUMMARY_SPEC.only.get("elapsed_hist") ?? [])].sort()).toEqual(["ins_lat", "urls"]);
+    expect([...(INSIGHTS_SUMMARY_SPEC.only.get("elapsed_count") ?? [])].sort()).toEqual(["ins_lat", "urls"]);
+    expect([...(INSIGHTS_SUMMARY_SPEC.only.get("status_5xx") ?? [])]).toEqual(["ins_url"]);
+    expect([...(INSIGHTS_SUMMARY_SPEC.only.get("hit_requests") ?? [])]).toEqual(["ins_url"]);
+    expect([...(INSIGHTS_SUMMARY_SPEC.only.get("miss_requests") ?? [])]).toEqual(["ins_url"]);
+    expect([...(INSIGHTS_SUMMARY_SPEC.only.get("pass_requests") ?? [])]).toEqual(["ins_url"]);
+    expect([...(INSIGHTS_SUMMARY_SPEC.only.get("count") ?? [])].sort()).toEqual(["all_fields", "ins_asn", "ins_ip"]);
+  });
+
+  it("aligns multi-hour (>=6h) windows to completed UTC hours to avoid open-hour and mid-hour raw scans", async () => {
+    // 12 hours of 1-hour summaries ending at 2030-01-02T17:00:00Z; now is 17:32:00Z (32m into open hour).
+    const ALIGNED_END = Date.UTC(2030, 0, 2, 17, 0, 0);
+    const MID_HOUR_NOW = ALIGNED_END + 32 * 60_000;
+    const summaryFiles: { key: string; start: string; end: string; size: number; rows: number }[] = [];
+    const bufs: Record<string, ArrayBuffer> = {};
+    for (let h = 12; h >= 1; h--) {
+      const fromMs = ALIGNED_END - h * HOUR;
+      const toMs = fromMs + HOUR;
+      const key = `raw-h${h}`;
+      const raw = parquetWriteBuffer({
+        columnData: [
+          { name: "timestamp", type: "TIMESTAMP", data: [new Date(fromMs + 60_000), new Date(fromMs + 120_000)] },
+          { name: "status", type: "INT64", data: [BigInt(200), BigInt(200)] },
+          { name: "url", type: "STRING", data: ["/ok", "/ok"] },
+          { name: "ip", type: "STRING", data: ["1.1.1.1", "1.1.1.1"] },
+        ],
+      });
+      bufs[key] = raw;
+      summaryFiles.push({
+        key,
+        start: new Date(fromMs).toISOString(),
+        end: new Date(toMs).toISOString(),
+        size: raw.byteLength,
+        rows: 2,
+      });
+    }
+    const calls = { json: [] as string[], files: [] as string[] };
+    const src = fixtureSource([fixturePage(summaryFiles)], bufs, calls, []);
+    vi.useFakeTimers({ toFake: ["Date"], now: MID_HOUR_NOW });
+    try {
+      const result = await insightsFromRollup(
+        withSettings({
+          ...body,
+          clamp_end: undefined,
+          window_size_hrs: 6,
+          baseline_hrs: 6,
+          earliest_log_at: new Date(ALIGNED_END - 24 * HOUR).toISOString(),
+        }),
+        [],
+        src,
+        signal,
+      );
+      expect(result).not.toBeNull();
+      // Window end must be aligned to 17:00:00Z, NOT 17:32:00Z.
+      expect(result!.window_end).toBe(new Date(ALIGNED_END).toISOString());
+      expect(result!.window_start).toBe(new Date(ALIGNED_END - 6 * HOUR).toISOString());
+      expect(result!.window_total_requests).toBe(12);
+      // No manifest query should have asked for the open hour (17:32:00Z).
+      expect(calls.json.some((u) => u.includes("17%3A32") || u.includes("17:32"))).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

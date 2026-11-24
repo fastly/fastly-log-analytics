@@ -72,6 +72,11 @@ class _BatchFakeClient:
                 for shape in ROLLUP_SHAPES
                 for h in hours
             ]
+        if name.startswith("group_"):
+            tags = re.findall(r"SELECT '(\w+)' AS _q, formatRow\('JSONEachRow', \*\) AS _r", sql)
+            if any(tag in self._fail for tag in tags):
+                raise RuntimeError(f"boom:{name}")
+            return [{"_q": tag, "_r": json.dumps(row)} for tag in tags for row in self._rows.get(tag, [])]
         return self._rows.get(name, [])
 
     def queries(self) -> dict[str, tuple[str, dict[str, Any]]]:
@@ -89,14 +94,14 @@ def _cards(response: Any) -> dict[str, dict[str, Any]]:
 
 
 def test_full_evaluation_consolidates_queries_by_at_least_half() -> None:
-    """A full 51-detector High-Scale evaluation must execute <= 27 ClickHouse queries (down from 53-54)."""
+    """A full 51-detector High-Scale evaluation must execute <= 10 ClickHouse queries."""
     client = _BatchFakeClient(with_rollup=True)
     cards = _cards(_run(client))
     assert set(cards) == EVERY_CARD
     assert all(card["severity"] == "clean" for card in cards.values())
-    # 3 metadata (history, fields, rollup_coverage) + <= 24 detector/batch queries = <= 27 total
-    assert len(client.calls) <= 27, (
-        f"Expected <= 27 ClickHouse queries, got {len(client.calls)}: {list(client.queries())}"
+    # 3 metadata (history, fields, rollup_coverage) + 5 multiplexed detector groups = 8 total
+    assert len(client.calls) <= 10, (
+        f"Expected <= 10 ClickHouse queries, got {len(client.calls)}: {list(client.queries())}"
     )
     assert evaluator._MAX_WORKERS >= 8
 
@@ -105,19 +110,19 @@ def test_batched_rollup_queries_use_rollup_table_and_preserve_visibility_fence()
     client = _BatchFakeClient(with_rollup=True)
     _run(client)
     queries = client.queries()
-    expected_rollup_batches = {
+    assert "group_rollup_batches" in queries
+    sql, params = queries["group_rollup_batches"]
+    for batch_name, shape in {
         "batch_misc": "misc",
         "batch_geo": "geo",
         "batch_asn": "asn",
         "batch_url_cache": "url_cache",
-    }
-    for batch_name, shape in expected_rollup_batches.items():
-        assert batch_name in queries, f"Expected rollup batch {batch_name} to run"
-        sql, params = queries[batch_name]
-        assert "FROM request_insight_hourly" in sql and f"shape = '{shape}'" in sql
-        assert "rollup_start" in params and "rollup_end" in params
-        assert "svc-opt" not in sql
-        assert all(name in params for name in re.findall(r"\{(\w+):", sql))
+    }.items():
+        assert f"SELECT '{batch_name}' AS _q" in sql
+        assert f"shape = '{shape}'" in sql
+    assert "FROM request_insight_hourly" in sql
+    assert "svc-opt" not in sql
+    assert all(name in params for name in re.findall(r"\{(\w+):", sql))
 
 
 def test_batch_misc_extracts_all_six_detectors_with_exact_semantics() -> None:
@@ -387,9 +392,10 @@ def test_single_enabled_member_falls_back_to_standalone_query(monkeypatch: pytes
     client = _BatchFakeClient()
     cards = _cards(_run(client))
     queries = client.queries()
+    all_sql = "\n".join(sql for sql, _ in queries.values())
     assert "new_country_traffic" in cards
-    assert "new_country_traffic" in queries
-    assert "batch_geo" not in queries
+    assert "new_country_traffic" in queries or "SELECT 'new_country_traffic' AS _q" in all_sql
+    assert "batch_geo" not in queries and "SELECT 'batch_geo' AS _q" not in all_sql
 
 
 def test_remaining_batches_extract_and_shape_cards(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -672,6 +672,10 @@ export function browserSource(
   const memoryFiles = new Map<string, ArrayBuffer>();
   const memoryFileIdentities = new Map<string, string | undefined>();
   let memoryFileBytes = 0;
+  const MAX_MEMORY_RANGE_BYTES = 8 * 1024 * 1024;
+  const MAX_MEMORY_RANGE_ENTRY_BYTES = 2 * 1024 * 1024;
+  const memoryRanges = new Map<string, ArrayBuffer>();
+  let memoryRangeBytes = 0;
   type InFlightFile = {
     controller: AbortController;
     promise: Promise<{ bytes: ArrayBuffer; cached: boolean; cdn: string | null }>;
@@ -810,6 +814,8 @@ export function browserSource(
     memoryFiles.clear();
     memoryFileIdentities.clear();
     memoryFileBytes = 0;
+    memoryRanges.clear();
+    memoryRangeBytes = 0;
     fileCachePromise = null;
     rollupCachePromise = null;
     opfsStores.clear();
@@ -1601,6 +1607,12 @@ export function browserSource(
         start,
         end,
       ]);
+      const cachedRange = memoryRanges.get(rangeKey);
+      if (cachedRange) {
+        memoryRanges.delete(rangeKey);
+        memoryRanges.set(rangeKey, cachedRange);
+        return cachedRange.slice(0);
+      }
       const existing = inFlightRanges.get(rangeKey);
       if (existing && !existing.controller.signal.aborted) {
         const bytes = await waitSharedRange(existing, signal);
@@ -1649,6 +1661,22 @@ export function browserSource(
             if (bytes.byteLength !== end - start)
               throw new Error(`Range read of ${file.key} returned ${bytes.byteLength} bytes, not ${end - start}`);
             if (callEpoch !== cacheEpoch) throw new Error("Cache cleared");
+            if (bytes.byteLength > 0 && bytes.byteLength <= MAX_MEMORY_RANGE_ENTRY_BYTES) {
+              const prev = memoryRanges.get(rangeKey);
+              if (prev) {
+                memoryRangeBytes -= prev.byteLength;
+                memoryRanges.delete(rangeKey);
+              }
+              while (memoryRanges.size > 0 && memoryRangeBytes + bytes.byteLength > MAX_MEMORY_RANGE_BYTES) {
+                const oldestKey = memoryRanges.keys().next().value;
+                if (oldestKey === undefined) break;
+                const oldest = memoryRanges.get(oldestKey);
+                memoryRanges.delete(oldestKey);
+                if (oldest) memoryRangeBytes -= oldest.byteLength;
+              }
+              memoryRanges.set(rangeKey, bytes.slice(0));
+              memoryRangeBytes += bytes.byteLength;
+            }
             const cdn = response.headers.get("x-flp-cdn-cache");
             const cdnHit = isCdnHit(cdn);
             const vcpuMs = parseVcpuMsHeader(response.headers);

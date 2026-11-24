@@ -370,4 +370,29 @@ describe("query schemas from footers", () => {
       expect(projected.schema?.timestampType).toBe("TIMESTAMP WITH TIME ZONE");
     }
   });
+
+  it("passes canonical wholeFileIdentity to fetchFile on whole-first reads so range-loader shares the cache entry", async () => {
+    const bytes = typed({ type: "INT64", logical_type: { type: "TIMESTAMP", isAdjustedToUTC: true, unit: "MILLIS" } }, 200);
+    const seenModes: Array<{ identity?: string } | undefined> = [];
+    const read = projectedReader({
+      cacheScope: "fixture-session:svc-a",
+      fetchRange: async (_file, start, end) => bytes.slice(start, end),
+      fetchFile: async (_key, _sig, mode) => {
+        seenModes.push(mode);
+        return { bytes: bytes.slice(0), cached: false };
+      },
+    }, ["timestamp", "status"]);
+    const entry = {
+      key: "processed/request/f.parquet",
+      start: new Date(Date.now() - 600_000).toISOString(),
+      end: new Date(Date.now() - 60_000).toISOString(),
+      size: bytes.byteLength,
+      rows: 200,
+      etag: "\"etag-shared\"",
+    };
+    await (await read(entry)).read();
+    expect(seenModes).toEqual([
+      { identity: JSON.stringify(["fixture-session:svc-a", "request", entry.key, "\"etag-shared\"", bytes.byteLength, ""]) },
+    ]);
+  });
 });

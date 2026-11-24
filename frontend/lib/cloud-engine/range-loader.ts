@@ -11,6 +11,7 @@ import {
   assembleProjectedParquet, fetchProjectedRanges, planParquetProjection, readParquetFooter, readsWholeFirst,
   readWholeParquetFooter, type ParquetProjection,
 } from "./dashboard/parquet-projection";
+import { wholeFileIdentity } from "./dashboard/projected-read";
 import { beginCloudLoading } from "./loading-progress";
 import { fetchLanes } from "./fetch-lanes";
 import { CloudBudgetError, MAX_REGISTERED_BYTES, type CloudBudgetDetail } from "./dashboard/budget";
@@ -170,12 +171,13 @@ export async function ensureCloudRange(
     }
     const fileSource = options.serviceId ? source.withOptions({ serviceId: options.serviceId }) : source;
     const scope = dashboardCacheScope();
+    const wholeScope = options.serviceId ? `${scope}:${options.serviceId}` : scope;
     const files = manifests.flatMap((manifest, index) =>
       manifest.files.map((file) => {
         const identity = fileIdentity(scope, options.serviceId, datasets[index], file);
         const columns = widerColumns && Date.parse(file.end) > widerFromMs ? widerColumns : projectedColumns;
         return { ...file, dataset: datasets[index], columns,
-          wholeKey: JSON.stringify(identity),
+          wholeKey: wholeFileIdentity(wholeScope, file, datasets[index]),
           footerKey: JSON.stringify([...identity, "footer"]),
           scopedKey: JSON.stringify([...identity,
             ...columns ? ["projection", ...[...columns].sort()] : []]),

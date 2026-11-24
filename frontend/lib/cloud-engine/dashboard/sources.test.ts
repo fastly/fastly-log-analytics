@@ -114,9 +114,11 @@ describe("browserSource", () => {
     expect(new Headers(init!.headers).get("x-service-id")).toBe("svc");
     expect(calls).toEqual([expect.objectContaining({ status: 206, bytes: 3, cache: "cdn" })]);
     expect(init!.priority).toBeUndefined();
+    clearBrowserSourceMemoryCaches();
     await source.fetchRange(file, 10, 13, undefined, "high");
     expect(fetcher.mock.calls[1][1]!.priority).toBe("high");
 
+    clearBrowserSourceMemoryCaches();
     for (const [status, range, etag, bytes] of [
       [200, "bytes 10-12/100", "\"e1\"", 3],
       [206, "bytes 10-12/101", "\"e1\"", 3],
@@ -1924,6 +1926,24 @@ describe("persistent Parquet store", () => {
     expect(new Uint8Array(b2)).toEqual(new Uint8Array(16).fill(42));
     // Distinct buffers so transferring one to a Worker cannot detach the other.
     expect(b1).not.toBe(b2);
+
+    // Sequential repeat read of the same (scope, key, etag, start, end) hits the in-memory range LRU cache.
+    const b3 = await source.fetchRange!(file, 0, 16);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(new Uint8Array(b3)).toEqual(new Uint8Array(16).fill(42));
+    expect(b3).not.toBe(b1);
+
+    // Clearing memory caches evicts cached ranges so the next read hits the network again.
+    clearBrowserSourceMemoryCaches();
+    const p4 = source.fetchRange!(file, 0, 16);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    resolveFetch(
+      new Response(new Uint8Array(16).fill(99), {
+        status: 206,
+        headers: { "content-range": "bytes 0-15/100", etag: '"e1"' },
+      }),
+    );
+    expect(new Uint8Array(await p4)).toEqual(new Uint8Array(16).fill(99));
   });
 
   it("blocks post-logout OPFS persistFile raw-PII writes and StoreIndex/writeRollup/readDerivedFile CacheStorage re-creation across clearDashboardData and setDashboardCacheIdentity", async () => {

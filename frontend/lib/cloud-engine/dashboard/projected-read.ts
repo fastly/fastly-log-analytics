@@ -15,6 +15,15 @@ const QUERY_COLUMNS = ["timestamp", "status", "cache", "resp_bytes", "edge"];
 // Projected ranges are mostly a few KiB, so their round trips, not bandwidth, bound a cold load.
 const RANGE_CONCURRENCY = 16;
 
+/** Canonical whole-file cache identity shared between projectedReader and range-loader. */
+export function wholeFileIdentity(
+  cacheScope: string | undefined,
+  file: Pick<ManifestFile, "key" | "etag" | "size" | "schema_version">,
+  dataset = "request",
+): string {
+  return JSON.stringify([cacheScope ?? "", dataset, file.key, file.etag ?? "", file.size, file.schema_version ?? ""]);
+}
+
 /**
  * The raw columns a selective dashboard query reads for these cards and
  * filters, or null when one names a column it can't type, so the caller reads
@@ -101,7 +110,7 @@ export function projectedReader(
         bytes: file.size,
         read: async () => {
           signal?.throwIfAborted();
-          const whole = await fetchFile(file.key, signal);
+          const whole = await fetchFile(file.key, signal, { identity: wholeFileIdentity(source.cacheScope, file) });
           if (whole.bytes.byteLength !== file.size) {
             throw new Error(`Whole-file read of ${file.key} returned ${whole.bytes.byteLength} bytes, not ${file.size}`);
           }
