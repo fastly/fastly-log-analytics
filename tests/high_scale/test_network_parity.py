@@ -463,7 +463,7 @@ def test_network_page_query_consolidation_counts(monkeypatch: pytest.MonkeyPatch
                 {
                     "kind": "rollup",
                     "pop": "SJC",
-                    "requests": 5000,
+                    "req_count": 5000,
                     "errors": 0,
                     "p50_rtt_us": 21_000.0,
                     "p95_ttfb_ms": 0.0,
@@ -473,7 +473,7 @@ def test_network_page_query_consolidation_counts(monkeypatch: pytest.MonkeyPatch
                 {
                     "kind": "fact",
                     "pop": "SJC",
-                    "requests": 500,
+                    "req_count": 500,
                     "errors": 10,
                     "p50_rtt_us": 25_000.0,
                     "p95_ttfb_ms": 80.0,
@@ -489,6 +489,9 @@ def test_network_page_query_consolidation_counts(monkeypatch: pytest.MonkeyPatch
     )
     pop_resp = get_pop_health(pop_svc, datetime(2026, 9, 8, 0, 0, tzinfo=UTC), datetime(2026, 9, 15, 0, 0, tzinfo=UTC))
     assert len(pop_client.calls) == 1
+    pop_sql = pop_client.calls[0][0]
+    assert "toUInt64(sum(requests)) AS req_count" in pop_sql
+    assert "sum(requests)) AS requests" not in pop_sql
     assert pop_resp.data[0].requests == 5000
     assert pop_resp.data[0].errors == 100
     assert pop_resp.data[0].p50_rtt_us == 25000.0

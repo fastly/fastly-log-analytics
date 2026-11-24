@@ -1286,7 +1286,7 @@ def get_pop_health(
                     "network_dimensions", client=service.client, service_id=service.service_id
                 )
                 combined_sql = (
-                    "SELECT 'rollup' AS kind, value AS pop, toUInt64(sum(requests)) AS requests, "
+                    "SELECT 'rollup' AS kind, value AS pop, toUInt64(sum(requests)) AS req_count, "
                     "toUInt64(0) AS errors, "
                     "sum(tcp_rtt_p50_us * tcp_rtt_count) / nullIf(sum(tcp_rtt_count), 0) AS p50_rtt_us, "
                     "sum(ttfb_p95_us * requests) / nullIf(sumIf(requests, ttfb_p95_us IS NOT NULL), 0) * 1000.0 AS p95_ttfb_ms, "
@@ -1296,7 +1296,7 @@ def get_pop_health(
                     f"AND bucket_start >= {{start:DateTime64(3)}} AND bucket_start < {{end:DateTime64(3)}} AND {fence} "
                     "GROUP BY pop "
                     "UNION ALL "
-                    f"SELECT 'fact' AS kind, custom_fields['pop'] AS pop, toUInt64(count()) AS requests, "
+                    f"SELECT 'fact' AS kind, custom_fields['pop'] AS pop, toUInt64(count()) AS req_count, "
                     f"toUInt64(countIf({_STATUS} >= 500)) AS errors, "
                     f"quantileTDigest(0.5)({_RTT}) AS p50_rtt_us, quantileTDigest(0.95)({_TTFB}) * 1000.0 AS p95_ttfb_ms, "
                     "toUInt64(countIf(startsWith(upper(custom_fields['cache']), 'HIT'))) AS cache_hits, "
@@ -1314,12 +1314,12 @@ def get_pop_health(
                     if cr.get("kind") == "rollup":
                         if cr.get("pop"):
                             rollup_by_pop[str(cr["pop"])] = (
-                                int(cr.get("requests") or 0),
+                                int(cr.get("req_count") or 0),
                                 cr.get("p50_rtt_us"),
                                 cr.get("p95_ttfb_ms"),
                             )
                     else:
-                        fact_rows.append(cr)
+                        fact_rows.append({**cr, "requests": cr.get("req_count", cr.get("requests"))})
                 if not fact_rows:
                     pop_stride = 1
                     fact_rows = trace.run(
