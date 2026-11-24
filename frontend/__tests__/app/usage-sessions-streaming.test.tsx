@@ -394,8 +394,9 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     renderWithQuery(<UsagePage />, { queryClient })
     expect(await screen.findByText('Compute (app + worker)')).toBeInTheDocument()
     expect(screen.getByText('KV Store')).toBeInTheDocument()
-    expect(screen.getByText('3 secrets')).toBeInTheDocument()
-    expect(screen.getByText('$21.00')).toBeInTheDocument()
+    expect(screen.getByText('Secret Store')).toBeInTheDocument()
+    expect(screen.getByText('1 secrets')).toBeInTheDocument()
+    expect(screen.getByText('$7.00')).toBeInTheDocument()
     expect(screen.getByText(/front reqs/)).toBeInTheDocument()
     expect(screen.getByRole('spinbutton', { name: 'Total requests per day' })).toHaveValue(12345)
     expect(screen.queryByTestId('cost-calculator')).not.toBeInTheDocument()
@@ -754,19 +755,22 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
         .toBeCloseTo(results.storageTiers.find(t => t.label === 'Archive Parquet')?.gbMonths ?? 0, 6)
     })
 
-    test('models ZSTD raw log compression (15x) for smaller compressed volume, raw storage, and CDN egress', () => {
+    test('models ZSTD raw log compression (5x) for smaller compressed volume, raw storage, and CDN egress', () => {
       expect(RAW_LOG_COMPRESSION_RATIO).toBe(5)
       const results = calculate(DEFAULTS)
       expect(results.totalGzBytesPerMonth).toBeCloseTo(results.totalBytesPerMonth / RAW_LOG_COMPRESSION_RATIO, 2)
       expect(results.cdnEgressGB).toBeCloseTo(results.totalGzBytesPerMonth / (1024 * 1024 * 1024), 6)
-      // PREFILL reverse-estimates uncompressed bytes/line from compressed file size using RAW_LOG_COMPRESSION_RATIO
-      const prefilled = reducer(DEFAULTS, {
+      // PREFILL keeps canonical DEFAULTS.bytesPerLine (1320) unless estimated_bytes_per_line is provided
+      const prefilledDefault = reducer(DEFAULTS, {
         type: 'PREFILL',
         prefill: makePrefill({ avg_log_file_size_kb: 50, requests_per_day: 1_000_000, log_period_seconds: 60 }),
       })
-      const expectedFilesPerDay = (86400 / 60) * 120
-      const expectedBpl = Math.round((50 * 1024 * RAW_LOG_COMPRESSION_RATIO * expectedFilesPerDay) / 1_000_000)
-      expect(prefilled.bytesPerLine).toBe(expectedBpl)
+      expect(prefilledDefault.bytesPerLine).toBe(1320)
+      const prefilledMeasured = reducer(DEFAULTS, {
+        type: 'PREFILL',
+        prefill: makePrefill({ estimated_bytes_per_line: 2450, avg_log_file_size_kb: 50 }),
+      })
+      expect(prefilledMeasured.bytesPerLine).toBe(2450)
     })
 
     test('sizes the Archive Parquet tier from snapshot_interval_minutes and batches busy services', () => {

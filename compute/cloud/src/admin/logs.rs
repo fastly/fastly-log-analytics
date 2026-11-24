@@ -456,6 +456,17 @@ fn sweep(runtime: &impl Runtime) -> Outcome {
             Ok(report) => report,
             Err(error) => return fail(502, &error),
         };
+    if !report.deleted_keys.is_empty() && runtime.admin_remaining_calls() >= AUDIT_TAIL + 4 {
+        let buffer = LogBuffer::new(&installed.service.service_id, "manual-retention");
+        write_parquet_deleted_logs(
+            runtime,
+            &buffer,
+            "manual-retention",
+            "retention",
+            &report.deleted_keys,
+        );
+        telemetry::flush_request_buffer(runtime, &buffer);
+    }
     note_sweep(
         runtime,
         last.as_ref().map(|r| r.generation.as_str()),
@@ -940,7 +951,7 @@ pub(super) fn maintenance_stage(
             continue;
         }
         let row = match index {
-            0 => sweep_stage(&store, settings),
+            0 => sweep_stage(&store, &buffer, tick.run_id, settings),
             1 => compact_stage(&store, settings),
             2 => history_stage(&store, settings),
             3 => reconcile_stage(&store, &buffer),
@@ -1071,9 +1082,59 @@ fn caller(runtime: &impl Runtime, name: &'static str) {
     }
 }
 
+/// Records deleted Parquet keys in `ingest_files` in bounded batches so each row stays well
+/// below `telemetry::MAX_ROW_BYTES`.
+fn write_parquet_deleted_logs(
+    runtime: &impl Runtime,
+    buffer: &LogBuffer,
+    run_id: &str,
+    dataset: &str,
+    keys: &[String],
+) {
+    const MAX_JSON_BYTES: usize = 2400;
+    let mut batch: Vec<&str> = Vec::new();
+    let mut batch_bytes = 2; // "[]"
+    for key in keys {
+        let encoded_len = serde_json::to_string(key).map_or(key.len() + 2, |s| s.len());
+        let sep = usize::from(!batch.is_empty());
+        if !batch.is_empty() && batch_bytes + sep + encoded_len > MAX_JSON_BYTES {
+            write_log(
+                runtime,
+                buffer,
+                WritableLogKind::IngestFiles,
+                json!({
+                    "run_id": run_id,
+                    "dataset": dataset,
+                    "status": "parquet_deleted",
+                    "output_keys_json": json!(batch).to_string(),
+                }),
+            );
+            batch.clear();
+            batch_bytes = 2;
+        }
+        batch_bytes += usize::from(!batch.is_empty()) + encoded_len;
+        batch.push(key.as_str());
+    }
+    if !batch.is_empty() {
+        write_log(
+            runtime,
+            buffer,
+            WritableLogKind::IngestFiles,
+            json!({
+                "run_id": run_id,
+                "dataset": dataset,
+                "status": "parquet_deleted",
+                "output_keys_json": json!(batch).to_string(),
+            }),
+        );
+    }
+}
+
 /// The retention sweep, every `SWEEP_INTERVAL_S` or until a started sweep completes.
 fn sweep_stage<R: Runtime>(
     store: &Store<'_, R>,
+    buffer: &LogBuffer,
+    run_id: &str,
     settings: &OperationalLogSettings,
 ) -> Option<StageRow> {
     let runtime = store.runtime;
@@ -1104,6 +1165,15 @@ fn sweep_stage<R: Runtime>(
     let before = runtime.admin_remaining_calls();
     match retention::retention_sweep_from(store, settings, TAIL + 1, None, resume_from) {
         Ok(report) => {
+            if !report.deleted_keys.is_empty() {
+                write_parquet_deleted_logs(
+                    runtime,
+                    buffer,
+                    run_id,
+                    "retention",
+                    &report.deleted_keys,
+                );
+            }
             row.deleted = report.deleted;
             row.bytes = report.bytes;
             row.more_pending = report.more_pending;
@@ -1407,6 +1477,24 @@ impl PassChain {
                     break;
                 }
             };
+            let dataset = if table.is_some() { "rum" } else { "request" };
+            for file in &report.created_files {
+                write_log(
+                    runtime,
+                    buffer,
+                    WritableLogKind::IngestFiles,
+                    json!({
+                        "run_id": turn,
+                        "dataset": dataset,
+                        "status": "compacted",
+                        "output_keys_json": json!([{"key": file.key, "bytes": file.bytes}]).to_string(),
+                        "timestamp": file.at.saturating_mul(1000),
+                    }),
+                );
+            }
+            if !report.deleted_keys.is_empty() {
+                write_parquet_deleted_logs(runtime, buffer, turn, dataset, &report.deleted_keys);
+            }
             let row = &mut self.row;
             row.listed += report.sources;
             row.files += u64::from(report.compacts);
@@ -1663,4 +1751,140 @@ fn finish_row(
     row.calls = calls_before.saturating_sub(runtime.admin_remaining_calls());
     row.duration_ms = began.elapsed().as_millis() as u64;
     row.apply_span(runtime, span);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::admin::Record;
+    use crate::shell::KvPage;
+    use std::cell::RefCell;
+    use std::collections::BTreeMap;
+
+    #[derive(Default)]
+    struct TestRt {
+        kv: RefCell<BTreeMap<String, Value>>,
+        seq: std::cell::Cell<u8>,
+    }
+
+    impl crate::setup::SetupStores for TestRt {
+        fn config_present(&self, _: &str) -> Result<bool, String> {
+            Ok(true)
+        }
+        fn secret_present(&self, _: &str) -> Result<bool, String> {
+            Ok(true)
+        }
+        fn state_linked(&self) -> Result<bool, String> {
+            Ok(true)
+        }
+    }
+
+    impl Runtime for TestRt {
+        fn config(&self, _: &str) -> Result<Option<String>, String> {
+            Ok(None)
+        }
+        fn secret(&self, _: &str) -> Result<Option<String>, String> {
+            Ok(None)
+        }
+        fn random(&self) -> Result<[u8; 32], String> {
+            let next = self.seq.get().wrapping_add(1);
+            self.seq.set(next);
+            Ok([next; 32])
+        }
+        fn now(&self) -> u64 {
+            1_700_000_000
+        }
+        fn checks(&self, _: bool) -> Result<Value, String> {
+            Ok(json!({}))
+        }
+        fn versions(&self) -> Result<Value, String> {
+            Ok(json!({}))
+        }
+        fn compute_service_id(&self) -> Option<String> {
+            None
+        }
+        fn compute_service_version(&self) -> Option<String> {
+            None
+        }
+        fn admin_get(&self, key: &str) -> Result<Option<Record>, String> {
+            Ok(self.kv.borrow().get(key).map(|value| Record {
+                value: value.clone(),
+                generation: "1".into(),
+            }))
+        }
+        fn admin_cas(
+            &self,
+            key: &str,
+            _: Option<&str>,
+            value: &Value,
+        ) -> Result<bool, String> {
+            self.kv.borrow_mut().insert(key.into(), value.clone());
+            Ok(true)
+        }
+        fn kv_delete(&self, key: &str) -> Result<(), String> {
+            self.kv.borrow_mut().remove(key);
+            Ok(())
+        }
+        fn kv_list(
+            &self,
+            prefix: &str,
+            _: Option<&str>,
+            _: u32,
+        ) -> Result<KvPage, String> {
+            let keys = self
+                .kv
+                .borrow()
+                .keys()
+                .filter(|k| k.starts_with(prefix))
+                .cloned()
+                .collect();
+            Ok(KvPage {
+                keys,
+                next_cursor: None,
+            })
+        }
+        fn admin_fos(
+            &self,
+            _: crate::admin::FosRequest<'_>,
+        ) -> Result<crate::admin::FosResponse, String> {
+            Err("unused".into())
+        }
+        fn worker_dispatch(&self, _: &[(String, Value)], _: Duration) -> Vec<Result<Value, String>> {
+            Vec::new()
+        }
+        fn admin_event(&self, _: Value) {}
+    }
+
+    #[test]
+    fn write_parquet_deleted_logs_splits_large_batches_under_row_cap() {
+        let rt = TestRt::default();
+        let buffer = LogBuffer::new("svc1", "run-1");
+        let keys: Vec<String> = (0..60)
+            .map(|i| format!("processed/request/2026/11/23/00/window=file-{i:04}-abcdef.parquet"))
+            .collect();
+        write_parquet_deleted_logs(&rt, &buffer, "run-1", "request", &keys);
+        let outbox = telemetry::flush_request_buffer(&rt, &buffer);
+        assert!(outbox.outbox_error.is_none());
+        let rows = telemetry::read_live(
+            &rt,
+            "svc1",
+            telemetry::LogKind::IngestFiles,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .rows;
+        assert!(rows.len() > 1);
+        let mut recorded = Vec::new();
+        for row in rows {
+            assert_eq!(row["status"], "parquet_deleted");
+            assert_eq!(row["dataset"], "request");
+            let parsed: Vec<String> =
+                serde_json::from_str(row["output_keys_json"].as_str().unwrap()).unwrap();
+            recorded.extend(parsed);
+        }
+        recorded.sort();
+        assert_eq!(recorded, keys);
+    }
 }

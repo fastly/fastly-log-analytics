@@ -231,8 +231,10 @@ export interface IngestOutput {
 
 export interface IngestDeletedIntervalsResult {
   intervals: StorageBillingInterval[];
-  /** Parquet files converted raw files produced (`output_keys_json`), first write per key. */
+  /** Parquet files converted raw files or compaction produced (`output_keys_json`), first write per key. */
   outputs: IngestOutput[];
+  /** Parquet keys deleted by compaction or retention (`status = "parquet_deleted"`). */
+  deletedParquetKeys?: Set<string>;
   bytes: number;
   complete: boolean;
   provenance: "cloud:ingest_files" | "cloud:ingest_files_incomplete";
@@ -272,8 +274,12 @@ export async function fetchIngestDeletedIntervals(
 
   const lifecycles = new Map<string, RawLifecycle>();
   const outputs = new Map<string, IngestOutput>();
+  const deletedParquetKeys = new Set<string>();
   for (const row of result.rows) {
-    if (row.status === "converted" && typeof row.output_keys_json === "string") {
+    if (
+      (row.status === "converted" || row.status === "compacted") &&
+      typeof row.output_keys_json === "string"
+    ) {
       const at = parseTimestampMs(row.timestamp);
       let written: unknown = [];
       try {
@@ -286,6 +292,26 @@ export async function fetchIngestDeletedIntervals(
         const bytes = Number(output?.bytes);
         if (!key || !Number.isFinite(bytes) || at === null || outputs.has(key)) continue;
         outputs.set(key, { key, bytes, createdAt: at });
+      }
+    }
+    if (
+      row.status === "parquet_deleted" &&
+      typeof row.output_keys_json === "string"
+    ) {
+      let deleted: unknown = [];
+      try {
+        deleted = JSON.parse(row.output_keys_json);
+      } catch {
+        deleted = [];
+      }
+      for (const entry of Array.isArray(deleted) ? deleted : []) {
+        const key =
+          typeof entry === "string"
+            ? entry
+            : typeof entry?.key === "string"
+              ? entry.key
+              : "";
+        if (key) deletedParquetKeys.add(key);
       }
     }
     const rawKey = typeof row.raw_key === "string" ? row.raw_key : "";
@@ -380,6 +406,7 @@ export async function fetchIngestDeletedIntervals(
   return {
     intervals,
     outputs: [...outputs.values()],
+    deletedParquetKeys,
     bytes,
     complete,
     provenance: complete

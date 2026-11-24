@@ -232,6 +232,13 @@ pub(super) fn handle_authorized_worker<R: Runtime>(
     }
 }
 
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompactedFile {
+    pub key: String,
+    pub bytes: u64,
+    pub at: u64,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Report {
     pub compacts: u32,
@@ -246,6 +253,10 @@ pub struct Report {
     pub stopped: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lease_generation: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub created_files: Vec<CompactedFile>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deleted_keys: Vec<String>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -579,13 +590,28 @@ pub fn compact_pass<R: Runtime>(
     }
     if run.bump && rum {
         // RUM readers list the folder itself, so the compact is published once it exists.
+        run.report
+            .created_files
+            .extend(pending.iter().map(|q| CompactedFile {
+                key: q.compact.clone(),
+                bytes: q.output_bytes(),
+                at: q.at,
+            }));
         run.state.queue.extend(pending);
         run.finish_job();
         run.changed = true;
     } else if run.bump {
         let committed = match commit_watermark(store, watermark, &mut pending, tail + 2) {
             Ok(new) => {
-                if !new {
+                if new {
+                    run.report
+                        .created_files
+                        .extend(pending.iter().map(|q| CompactedFile {
+                            key: q.compact.clone(),
+                            bytes: q.output_bytes(),
+                            at: q.at,
+                        }));
+                } else {
                     run.report.compacts = 0;
                     run.report.sources = 0;
                     run.report.rows = 0;
@@ -1135,6 +1161,7 @@ impl<R: Runtime> Run<'_, '_, R> {
         };
         self.report.deleted += result.deleted.len() as u64;
         self.report.failed += result.failed.len() as u64;
+        self.report.deleted_keys.extend(result.deleted.iter().cloned());
         if let (Some(usage), Some(first)) = (self.store.runtime.usage_agg(), result.deleted.first())
         {
             if result.failed.is_empty()

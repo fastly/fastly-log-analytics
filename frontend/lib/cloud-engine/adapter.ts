@@ -236,13 +236,26 @@ async function storageBillingIntervals(
   checkUsageEpoch();
 
   const deletedIds = new Set(ingest.intervals.map((interval) => interval.id));
-  const snapshotLive = inventory.intervals.filter(
-    (interval) => !deletedIds.has(interval.id),
-  );
-  // Between 6-hourly snapshots, Parquet that ingest wrote since the last one is live too.
+  const deletedParquetKeys = ingest.deletedParquetKeys ?? new Set<string>();
+  const snapshotLive = inventory.intervals.filter((interval) => {
+    if (deletedIds.has(interval.id)) return false;
+    if (deletedParquetKeys.size === 0) return true;
+    const prefix = `${interval.dataset}:`;
+    const key = interval.id.startsWith(prefix)
+      ? interval.id.slice(prefix.length)
+      : interval.id;
+    return !deletedParquetKeys.has(key);
+  });
+  // Between 6-hourly snapshots, Parquet that ingest or compaction wrote since the last one is live too.
   const liveIntervals = [
     ...snapshotLive,
-    ...liveSinceSnapshot(ingest.outputs, snapshotLive, inventory.observedAt, toMs),
+    ...liveSinceSnapshot(
+      ingest.outputs,
+      snapshotLive,
+      inventory.observedAt,
+      toMs,
+      deletedParquetKeys,
+    ),
   ];
 
   const fosAccounting = deletedBytesAccountingSince(

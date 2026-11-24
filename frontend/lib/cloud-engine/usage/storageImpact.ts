@@ -72,17 +72,20 @@ export function storageImpactBreakdown(input: {
 }
 
 /**
- * Live intervals for Parquet files ingest wrote after the inventory snapshot completed and that the
- * snapshot doesn't already hold, so live storage stays current between the 6-hourly snapshots.
+ * Live intervals for Parquet files ingest or compaction wrote after the inventory snapshot
+ * completed and that the snapshot doesn't already hold (nor were subsequently deleted), so live
+ * storage stays current between the 6-hourly snapshots.
  */
 export function liveSinceSnapshot(
   outputs: IngestOutput[],
   snapshot: StorageBillingInterval[],
   observedAt: number | null,
   now: number,
+  deletedKeys?: ReadonlySet<string>,
 ): StorageBillingInterval[] {
   const held = new Set(snapshot.map((interval) => interval.id));
   return outputs.flatMap((output) => {
+    if (deletedKeys?.has(output.key)) return [];
     const dataset = output.key.includes("processed/rum/") ? "pq_rum" : "pq_request";
     const id = `${dataset}:${output.key}`;
     if (held.has(id) || (observedAt !== null && output.createdAt <= observedAt)) return [];

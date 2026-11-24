@@ -450,6 +450,52 @@ describe("fetchIngestDeletedIntervals", () => {
       complete: false,
     });
   });
+
+  it("collects compacted outputs and deleted Parquet keys without treating them as raw_request deletions", async () => {
+    const read = vi.fn(async () => ({
+      rows: [
+        {
+          timestamp: 500,
+          dataset: "request",
+          status: "compacted",
+          output_keys_json: JSON.stringify([
+            { key: "processed/request/compact=1.parquet", bytes: 1200 },
+          ]),
+        },
+        {
+          timestamp: 600,
+          dataset: "request",
+          status: "parquet_deleted",
+          output_keys_json: JSON.stringify([
+            "processed/request/window=a.parquet",
+            "processed/request/window=b.parquet",
+          ]),
+        },
+      ],
+      liveTruncated: false,
+    }));
+
+    const result = await fetchIngestDeletedIntervals(
+      { from: 0, to: 1000 },
+      identity,
+      read,
+      { minimumBilledDays: 30 },
+    );
+
+    expect(result.complete).toBe(true);
+    expect(result.intervals).toHaveLength(0);
+    expect(result.outputs).toEqual([
+      {
+        key: "processed/request/compact=1.parquet",
+        bytes: 1200,
+        createdAt: 500,
+      },
+    ]);
+    expect([...(result.deletedParquetKeys ?? [])]).toEqual([
+      "processed/request/window=a.parquet",
+      "processed/request/window=b.parquet",
+    ]);
+  });
 });
 
 describe("summarizeUsage", () => {

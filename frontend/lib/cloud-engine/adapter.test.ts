@@ -727,6 +727,98 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     expect(body.storage_intervals).toHaveLength(1);
   });
 
+  it("subtracts deleted Parquet keys from snapshotLive and includes compaction outputs in liveSinceSnapshot", async () => {
+    const now = fixtureUsageInput.now;
+    const observedAt = now - 3_600_000;
+    vi.spyOn(Date, "now").mockReturnValue(now);
+    vi.spyOn(usage, "fetchUsageSettings").mockResolvedValue(fixtureUsageInput.settings);
+    const summary = usage.summarizeUsage(fixtureUsageInput);
+    vi.spyOn(usage, "fetchUsageSummary").mockResolvedValue({
+      ...summary, input: fixtureUsageInput, summary, lines: [], totalUsd: 0,
+    });
+    vi.spyOn(usage, "fetchCloudStorageInventory").mockResolvedValue({
+      intervals: [
+        {
+          id: "pq_request:processed/request/window=1.parquet",
+          dataset: "pq_request",
+          kind: "live",
+          bytes: 400,
+          createdAt: observedAt - 3_600_000,
+          deletedAt: null,
+          billedFrom: observedAt - 3_600_000,
+          billedUntil: now,
+          complete: true,
+          provenance: "cloud:inventory",
+        },
+        {
+          id: "pq_request:processed/request/kept.parquet",
+          dataset: "pq_request",
+          kind: "live",
+          bytes: 500,
+          createdAt: observedAt - 3_600_000,
+          deletedAt: null,
+          billedFrom: observedAt - 3_600_000,
+          billedUntil: now,
+          complete: true,
+          provenance: "cloud:inventory",
+        },
+      ],
+      complete: true,
+      snapshotId: "snap-1",
+      observedAt,
+      provenance: "cloud:inventory",
+    });
+    vi.spyOn(usage, "fetchUsageKindWithCoverage").mockResolvedValue({
+      rows: [{
+        ...fixtureUsageInput.rows.fos_usage[0],
+        op: "DELETE_OBJECTS",
+        dataset: "pq_request",
+        caller: "worker:request_compact",
+        timestamp: now - 1_800_000,
+        bytes_in: 0,
+        bytes_deleted: 400,
+        bytes_deleted_complete: true,
+      }],
+      complete: true,
+    });
+    vi.spyOn(usage, "fetchIngestDeletedIntervals").mockResolvedValue({
+      outputs: [
+        {
+          key: "processed/request/compact=1.parquet",
+          bytes: 350,
+          createdAt: now - 1_800_000,
+        },
+      ],
+      deletedParquetKeys: new Set(["processed/request/window=1.parquet"]),
+      intervals: [],
+      bytes: 0,
+      complete: true,
+      provenance: "cloud:ingest_files",
+    });
+    const params = new URLSearchParams({
+      start: new Date(now - 3_600_000).toISOString(),
+      end: new Date(now).toISOString(),
+    });
+
+    const response = await handleCloudAnalyticalRequest(
+      new Request(`http://localhost/api/usage/current-storage?${params}`),
+    );
+    const body = await response!.json();
+
+    const liveIds = body.storage_intervals
+      .filter((i: { kind: string }) => i.kind === "live")
+      .map((i: { id: string }) => i.id);
+    expect(liveIds).toEqual([
+      "pq_request:processed/request/kept.parquet",
+      "pq_request:processed/request/compact=1.parquet",
+    ]);
+    expect(body).toMatchObject({
+      processed_request_bytes: 850,
+      processed_objects: 2,
+      cloud_copy_deleted_bytes: 400,
+    });
+  });
+
   it("uses exact ingest_files deletion intervals even when fos_usage coverage is incomplete", async () => {
     const now = fixtureUsageInput.now;
     vi.spyOn(Date, "now").mockReturnValue(now);

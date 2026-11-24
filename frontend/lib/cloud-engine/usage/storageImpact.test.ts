@@ -101,4 +101,20 @@ describe("liveSinceSnapshot", () => {
     ]);
     expect(out.every((i) => i.kind === "live" && i.provenance === "cloud:ingest_outputs")).toBe(true);
   });
+
+  it("excludes outputs that were deleted after creation (e.g. compacted before the next snapshot)", () => {
+    const out = liveSinceSnapshot(
+      [
+        { key: "processed/request/window=1.parquet", bytes: 5, createdAt: now - 3_600_000 },
+        { key: "processed/request/compact=1.parquet", bytes: 9, createdAt: now - 1_800_000 },
+      ],
+      [],
+      now - 2 * 3_600_000,
+      now,
+      new Set(["processed/request/window=1.parquet"]),
+    );
+    expect(out.map((i) => [i.id, i.bytes])).toEqual([
+      ["pq_request:processed/request/compact=1.parquet", 9],
+    ]);
+  });
 });

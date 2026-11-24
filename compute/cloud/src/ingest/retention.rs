@@ -495,6 +495,7 @@ pub struct SweepReport {
     pub more_pending: bool,
     pub backend_calls: u32,
     pub logs: Vec<Value>,
+    pub deleted_keys: Vec<String>,
     /// Index of the first dataset left unfinished, so the next sweep can skip the finished ones.
     pub resume_from: usize,
 }
@@ -868,6 +869,7 @@ fn sweep_dataset<R: Runtime>(
             };
             report.deleted += outcome.deleted.len() as u64;
             report.failed += outcome.failed.len() as u64;
+            report.deleted_keys.extend(outcome.deleted.iter().cloned());
             state.pending = outcome.failed;
             if !persist(&mut state)? {
                 return Ok(false);
