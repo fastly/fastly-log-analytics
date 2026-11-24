@@ -210,15 +210,17 @@ def compute_network_health_score(
 ) -> float:
     """Compute the composite 0–100 network health score (supports both 5-arg and 4-arg signatures)."""
     if error_pct is _UNSET:
-        rtt_med_us = float(throughput_bps or 0.0)
-        rtt_base_us = float(rtt_congestion_us or 0.0)
-        congestion_us = max(0.0, rtt_med_us - rtt_base_us)
-        loss_pct = max(0.0, float(avg_ploss or 0.0))
+        rtt_med_us = max(0.0, float(throughput_bps or 0.0))
+        rtt_base_us = max(1.0, float(rtt_congestion_us or 1.0))
+        ploss = max(0.0, float(avg_ploss or 0.0))
         err_pct = max(0.0, float(rtt_jitter_us or 0.0))
-        c_pen = min(40.0, (congestion_us / 1000.0) * 0.25)
-        l_pen = min(35.0, loss_pct * 3.5)
-        e_pen = min(25.0, err_pct * 2.5)
-        return round(max(0.0, min(100.0, 100.0 - (c_pen + l_pen + e_pen))), 1)
+        rtt_ratio = rtt_med_us / rtt_base_us
+        rtt_score = max(0.0, min(100.0, 100.0 - max(0.0, rtt_ratio - 1.0) * 50.0))
+        ploss_pct = ploss * 100.0 if ploss <= 1.0 else ploss
+        ploss_score = max(0.0, min(100.0, 100.0 - ploss_pct * 20.0))
+        error_score = max(0.0, min(100.0, 100.0 - err_pct * 10.0))
+        composite = 0.4 * rtt_score + 0.35 * ploss_score + 0.25 * error_score
+        return round(max(0.0, min(100.0, composite)), 1)
     _ = throughput_bps
     pkt = min(max(float(avg_ploss or 0.0), 0.0) / 0.05, 1.0) if avg_ploss is not None else 0.0
     cong = min(max(float(rtt_congestion_us or 0.0), 0.0) / 200_000.0, 1.0) if rtt_congestion_us is not None else 0.0
@@ -756,6 +758,7 @@ def compute_network_global_summary(
     cities_list: Sequence[Mapping[str, Any]] = (),
     *,
     rtt_values: Sequence[float] | None = None,
+    rtt_weights: Sequence[float | int] | None = None,
     has_country: bool = True,
     zero_as_int: bool = True,
 ) -> dict[str, Any]:
@@ -768,7 +771,18 @@ def compute_network_global_summary(
     all_hs = [le["health_score_now"] for le in leaderboard if le.get("health_score_now") is not None]
     global_hs = round(sum(all_hs) / len(all_hs), 1) if all_hs else zero_default
 
-    avg_rtt_ms = round(sum(rtts) / len(rtts) / 1000.0, 1) if rtts else zero_default
+    if rtts:
+        if rtt_weights is not None and len(rtt_weights) == len(rtts):
+            weighted_pairs = [(v, w) for v, w in zip(rtts, rtt_weights, strict=False) if w > 0]
+            total_w = sum(w for _, w in weighted_pairs)
+            if total_w > 0:
+                avg_rtt_ms = round(sum(v * w for v, w in weighted_pairs) / total_w / 1000.0, 1)
+            else:
+                avg_rtt_ms = round(sum(rtts) / len(rtts) / 1000.0, 1)
+        else:
+            avg_rtt_ms = round(sum(rtts) / len(rtts) / 1000.0, 1)
+    else:
+        avg_rtt_ms = zero_default
 
     worst_asn: dict[str, Any] | None = None
     if leaderboard:

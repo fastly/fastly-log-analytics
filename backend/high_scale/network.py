@@ -582,13 +582,15 @@ def network_health(
                 ),
                 (
                     "map",
+                    f"WITH {_RTT} AS _rtt "
                     f"SELECT country AS country, custom_fields['city'] AS city, custom_fields['region'] AS region, "
                     f"custom_fields['metro'] AS metro, {bucket_expr} AS bucket_ts, "
                     "anyIf(custom_fields['lat'], custom_fields['lat'] != '') AS lat, "
                     "anyIf(custom_fields['lon'], custom_fields['lon'] != '') AS lon, "
-                    f"avg({_RTT}) AS rtt_med_us, avg({_PLOSS}) AS avg_ploss, {err_pct_expr}, count() AS reqs "
+                    f"quantileTDigest(0.5)(_rtt) AS rtt_med_us, quantileTDigest(0.1)(_rtt) AS rtt_p10_us, "
+                    f"avg({_PLOSS}) AS avg_ploss, {err_pct_expr}, count() AS reqs "
                     f"FROM request_facts PREWHERE {rtt_prewhere} AND country != ''{map_asn_sql} "
-                    f"WHERE {_RTT} > 0 "
+                    "WHERE _rtt > 0 "
                     "GROUP BY country, city, region, metro, bucket_ts ORDER BY bucket_ts ASC, reqs DESC LIMIT 100 BY bucket_ts LIMIT 20000",
                 ),
             ]
@@ -616,10 +618,13 @@ def network_health(
                 fast_queries_list.append(
                     (
                         "metro",
+                        f"WITH {_RTT} AS _rtt "
                         f"SELECT country AS country, custom_fields['city'] AS city, custom_fields['region'] AS region, "
-                        f"custom_fields['metro'] AS metro, avg({_PLOSS}) AS avg_ploss, {err_pct_expr}, count() AS total_reqs "
+                        f"custom_fields['metro'] AS metro, "
+                        f"quantileTDigest(0.5)(_rtt) AS rtt_med_us, quantileTDigest(0.1)(_rtt) AS rtt_p10_us, "
+                        f"avg({_PLOSS}) AS avg_ploss, {err_pct_expr}, count() AS total_reqs "
                         f"FROM request_facts PREWHERE {rtt_prewhere} AND country != '' "
-                        f"WHERE {_RTT} > 0 "
+                        "WHERE _rtt > 0 "
                         "GROUP BY country, city, region, metro ORDER BY total_reqs DESC LIMIT 200",
                     )
                 )
@@ -724,7 +729,7 @@ def network_health(
                         str(mr.get("region") or ""),
                         str(mr.get("metro") or ""),
                     )
-                    acc = metro_acc.setdefault(key, [0.0, 0.0, 0.0, 0.0])
+                    acc = metro_acc.setdefault(key, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
                     rq = float(mr.get("reqs") or 0)
                     acc[0] += rq
                     if mr.get("avg_ploss") is not None:
@@ -732,6 +737,12 @@ def network_health(
                         acc[2] += rq
                     if mr.get("error_pct") is not None:
                         acc[3] += float(mr["error_pct"]) * rq
+                    if mr.get("rtt_med_us") is not None:
+                        acc[4] += float(mr["rtt_med_us"]) * rq
+                        acc[5] += rq
+                    if mr.get("rtt_p10_us") is not None:
+                        acc[6] += float(mr["rtt_p10_us"]) * rq
+                        acc[7] += rq
                 metro_rows = [
                     {
                         "country": k[0],
@@ -741,6 +752,8 @@ def network_health(
                         "total_reqs": int(v[0]),
                         "avg_ploss": (v[1] / v[2]) if v[2] > 0 else None,
                         "error_pct": (v[3] / v[0]) if v[0] > 0 else 0.0,
+                        "rtt_med_us": (v[4] / v[5]) if v[5] > 0 else None,
+                        "rtt_p10_us": (v[6] / v[7]) if v[7] > 0 else None,
                     }
                     for k, v in sorted(metro_acc.items(), key=lambda kv: kv[1][0], reverse=True)[:200]
                 ]
@@ -776,7 +789,8 @@ def network_health(
                         "country AS country, custom_fields['city'] AS city, "
                         "any(toFloat64OrNull(custom_fields['lat'])) AS lat, any(toFloat64OrNull(custom_fields['lon'])) AS lon, "
                         f"custom_fields['metro'] AS metro, {bucket_expr} AS bucket_ts, "
-                        f"median({_RTT}) AS rtt_med_us, avg({_PLOSS}) AS avg_ploss, {err_pct_expr}, count() AS reqs",
+                        f"median({_RTT}) AS rtt_med_us, quantile(0.1)({_RTT}) AS rtt_p10_us, "
+                        f"avg({_PLOSS}) AS avg_ploss, {err_pct_expr}, count() AS reqs",
                         f"{rtt_where} AND country != ''{map_asn_sql}",
                         group_by="country, city, metro, bucket_ts",
                         order_by="bucket_ts ASC, reqs DESC LIMIT 50 BY bucket_ts",
@@ -787,7 +801,8 @@ def network_health(
                     "metro",
                     _ch_fact_query(
                         "country AS country, custom_fields['city'] AS city, custom_fields['region'] AS region, "
-                        f"custom_fields['metro'] AS metro, avg({_PLOSS}) AS avg_ploss, {err_pct_expr}, count() AS total_reqs",
+                        f"custom_fields['metro'] AS metro, median({_RTT}) AS rtt_med_us, quantile(0.1)({_RTT}) AS rtt_p10_us, "
+                        f"avg({_PLOSS}) AS avg_ploss, {err_pct_expr}, count() AS total_reqs",
                         f"{rtt_where} AND country != ''",
                         group_by="country, city, region, metro",
                         order_by="total_reqs DESC",
@@ -912,6 +927,15 @@ def network_health(
                 cities_list.append({"name": name, "lat": lat, "lon": lon})
             return idx
 
+        def _geo_health_score(row: Mapping[str, Any], pkt: float | None, err: float | None) -> float:
+            rtt_med = _flt(row.get("rtt_med_us"))
+            if rtt_med is None:
+                return _health_score(None, None, pkt, None, err)
+            rtt_base = _flt(row.get("rtt_p10_us"))
+            if rtt_base is None:
+                rtt_base = _flt(row.get("rtt_baseline_us"))
+            return _health_score(rtt_med, max(1.0, rtt_base if rtt_base is not None else rtt_med), pkt, err)
+
         map_by_bucket: dict[str, list[dict]] = {}
         countries_set: set[str] = set()
         for r in map_rows:
@@ -940,7 +964,7 @@ def network_health(
                         "rtt_med_us": _flt(r["rtt_med_us"]),
                         "avg_ploss": pkt,
                         "error_pct": _flt(err, 2),
-                        "health_score": _health_score(None, None, pkt, None, err),
+                        "health_score": _geo_health_score(r, pkt, err),
                         "reqs": int(r["reqs"]),
                     }
                 )
@@ -956,7 +980,7 @@ def network_health(
             ctry, city, region = r["country"] or "", r["city"] or "", r["region"] or ""
             pkt, err = _flt(r["avg_ploss"]), _flt(r["error_pct"])
             hs, metro_code, reqs = (
-                _health_score(None, None, pkt, None, err),
+                _geo_health_score(r, pkt, err),
                 _parse_metro_code(r.get("metro")),
                 int(r["total_reqs"]),
             )
@@ -985,9 +1009,15 @@ def network_health(
             asn_labels=asn_labels,
         )
 
+        rtt_pairs = [
+            (float(r["rtt_med_us"]), max(0, int(r.get("reqs") or 0)))
+            for r in heatmap_rows
+            if r.get("rtt_med_us") is not None
+        ]
         raw_summary = compute_network_global_summary(
             leaderboard=leaderboard,
-            rtt_values=[float(r["rtt_med_us"]) for r in heatmap_rows if r["rtt_med_us"] is not None],
+            rtt_values=[v for v, _ in rtt_pairs],
+            rtt_weights=[w for _, w in rtt_pairs],
             total_reqs=sum(int(r["reqs"]) for r in heatmap_rows),
             map_buckets=map_buckets,
             cities_list=cities_list,
