@@ -63,19 +63,11 @@ describe("front clock probes", () => {
     const delivery = (logPeriodS: number) =>
       line(estimateMonthly({ ...quiet, logPeriodS }, units, rates), "delivery").usd;
     // 2 checks × 53 POPs × 86,400 s ÷ 30 s = 305,280 probes a day, 30 days a month, ~2 KB each.
-    // Fastly Full Site Delivery includes 100 GB free bandwidth and 1M free requests per month.
+    // 100 GB egress is free (18.3 GB < 100 GB); 1,000,000 front requests are free (+ 720 summary reads).
     const probes = (2 * 53 * 86_400) / 30 * 30;
-    const probeGb = (probes * 2_000) / 1e9;
-    expect(delivery(60)).toBeCloseTo(
-      (Math.max(0, probes - 1_000_000) / 10_000) * 0.01 +
-        Math.max(0, probeGb - 100) * 0.12,
-    );
-    const probes20 = probes * 3;
-    const probeGb20 = probeGb * 3;
-    expect(delivery(20)).toBeCloseTo(
-      (Math.max(0, probes20 - 1_000_000) / 10_000) * 0.01 +
-        Math.max(0, probeGb20 - 100) * 0.12,
-    );
+    const summaryReads = 24 * 30;
+    expect(delivery(60)).toBeCloseTo(((probes + summaryReads - 1_000_000) / 10_000) * 0.01);
+    expect(delivery(20)).toBeCloseTo(((probes * 3 + summaryReads - 1_000_000) / 10_000) * 0.01);
     expect(delivery(300)).toBeCloseTo(delivery(60));
     expect(line(estimateMonthly({ ...quiet, logPeriodS: 60 }, units, rates), "delivery").detail)
       .toContain("305,280 clock probes/day every 30 s");
@@ -154,16 +146,16 @@ describe("estimateMonthly", () => {
     const stored = (deleteAfter: boolean) =>
       line(estimateMonthly({ ...inputs, deleteAfter }, zeroUnits, rates), "storage")
         .parts!.find((p) => p.label === "Storage")!.usd;
-    // 1 GB of raw a day: 30 days billed when deleted, 90 when kept; summary files ride on top.
-    expect(stored(true)).toBeGreaterThanOrEqual(30);
-    expect(stored(true)).toBeLessThan(30.1);
+    // 1 GB of raw a day: 30 days billed when deleted (minus 5 GB free tier = 25), 90 when kept; summary files ride on top.
+    expect(stored(true)).toBeGreaterThanOrEqual(25);
+    expect(stored(true)).toBeLessThan(25.1);
     expect(stored(false) - stored(true)).toBeCloseTo(60);
   });
 
   it("adds fixed daily cost to per-file and per-line work over 30 days", () => {
     const units = {
       ...zeroUnits,
-      appRequestsPerDay: 1_000,
+      appRequestsPerDay: 1_000_000,
       workerRequestsPerFile: 0.5,
       vcpuMsPer1kLines: 10,
       fosClassAPerFile: 3,
@@ -182,13 +174,13 @@ describe("estimateMonthly", () => {
       enabled: false,
     });
     expect(estimate.filesPerDay).toBe(1_440);
-    // (1,000 + 0.5 × 1,440) × 30 requests; 10 × 1,000 = 10,000 vCPU ms/day across 720 worker executions (~13.89 ms/exec, within 20 ms free tier => $0 excess CPU).
+    // (1,000,000 + 0.5 × 1,440) × 30 = 30,021,600 requests (minus 10M free tier); 10 × 1,000 = 10,000 vCPU ms/day across 720 worker executions (~13.89 ms/exec, within 20 ms free tier => $0 excess CPU).
     expect(line(estimate, "compute").usd).toBeCloseTo(
-      (51_600 / 1e6) * 0.5,
+      ((30_021_600 - 10_000_000) / 1e6) * 0.5,
     );
-    // Per-file Class A plus the summary bundles' 24 hourly and 1 daily PUT a day.
+    // Per-file Class A plus the summary bundles' 24 hourly and 1 daily PUT a day (minus 1,000 free tier).
     expect(line(estimate, "storage").parts!.find((p) => p.label === "Class A")!.usd).toBeCloseTo(
-      (((3 * 1_440 + 25) * 30) / 1000) * 0.0025,
+      (((3 * 1_440 + 25) * 30 - 1_000) / 1000) * 0.0025,
     );
     expect(line(estimate, "secrets").usd).toBe(10);
     expect(estimate.total).toBeCloseTo(
@@ -401,8 +393,9 @@ describe("compaction", () => {
   });
 
   it("counts compaction's usage in the storage, operations, delivery, Compute and KV lines instead of its own", () => {
-    const withIt = estimateMonthly(inputs, units, LIST_PRICE_RATES, on);
-    const off = estimateMonthly(inputs, units, LIST_PRICE_RATES, { ...on, enabled: false });
+    const baseUnits = { ...units, kvClassBPerDay: 50_000, appRequestsPerDay: 400_000 };
+    const withIt = estimateMonthly(inputs, baseUnits, LIST_PRICE_RATES, on);
+    const off = estimateMonthly(inputs, baseUnits, LIST_PRICE_RATES, { ...on, enabled: false });
     const c = withIt.compaction!;
     expect(withIt.lines.map((l) => l.id)).not.toContain("compaction");
     const part = (e: typeof withIt, id: string, label: string) =>
@@ -514,9 +507,10 @@ describe("compaction", () => {
       48 * 20 * 24 + (86_400 / 30) * COMPACT_DISPATCH_VCPU_MS,
     );
     // With nothing to merge the job still probes: its requests remain in the line.
+    const idleUnits = { ...units, appRequestsPerDay: 400_000, kvClassBPerDay: 50_000 };
     const idle = estimateMonthly(
       { ...inputs, edgeRequestsPerDay: 0 },
-      units,
+      idleUnits,
       LIST_PRICE_RATES,
       on,
     );
@@ -524,7 +518,7 @@ describe("compaction", () => {
     expect(idle.compaction!.dispatchesPerDay).toBe(86_400 / 30);
     const idleOff = estimateMonthly(
       { ...inputs, edgeRequestsPerDay: 0 },
-      units,
+      idleUnits,
       LIST_PRICE_RATES,
       { ...on, enabled: false },
     );
@@ -536,13 +530,14 @@ describe("compaction", () => {
   });
 
   it("offsets the cost with fewer dashboard file reads", () => {
-    const estimate = estimateMonthly(inputs, units, LIST_PRICE_RATES, {
+    const readUnits = { ...units, frontRequestsPerDay: 50_000 };
+    const estimate = estimateMonthly(inputs, readUnits, LIST_PRICE_RATES, {
       ...on,
       hoursReadPerDay: 10,
     });
     // 24 files an hour become 1, for each of 10 hours read a day.
     expect(estimate.compaction!.fileReadsSavedPerDay).toBe(230);
-    const without = estimateMonthly(inputs, units, LIST_PRICE_RATES, {
+    const without = estimateMonthly(inputs, readUnits, LIST_PRICE_RATES, {
       ...on,
       hoursReadPerDay: 0,
     });
@@ -550,7 +545,7 @@ describe("compaction", () => {
     // Delivery requests are under the 20,000 req/GB included allowance, so saving reads saves FOS Class B ops.
     expect(
       without.total - estimate.total,
-    ).toBeCloseTo((saved / 10_000) * 0.004);
+    ).toBeCloseTo((saved / 10_000) * 0.01 + (saved / 10_000) * 0.004);
   });
 
   it("applies Fastly Full Site Delivery monthly free tiers (100 GB bandwidth and 1M requests)", () => {
@@ -707,23 +702,25 @@ describe("usage audit fixes", () => {
       line(est, "kv").parts!.find((p) => p.label === "Class A")!.usd;
     const quiet = { ...DEFAULT_INPUTS, edgeRequestsPerDay: 0, rumPageviewsPerDay: 0 };
     // The calculator passes DEFAULT_UNITS; idle KV follows the chosen period.
-    expect(
-      kvClassAUsd(estimateMonthly({ ...quiet, logPeriodS: 300 }, DEFAULT_UNITS, rates, off)),
-    ).toBeCloseTo((96 * 30) / 1e6);
-    expect(
-      kvClassAUsd(estimateMonthly({ ...quiet, logPeriodS: 60 }, DEFAULT_UNITS, rates, off)),
-    ).toBeCloseTo((480 * 30) / 1e6);
+    const est300 = estimateMonthly({ ...quiet, logPeriodS: 300 }, DEFAULT_UNITS, rates, off);
+    const est60 = estimateMonthly({ ...quiet, logPeriodS: 60 }, DEFAULT_UNITS, rates, off);
+    const est5 = estimateMonthly({ ...quiet, logPeriodS: 5 }, DEFAULT_UNITS, rates, off);
+    expect(est300.totals.kvA).toBeCloseTo(96 * 30);
+    expect(est60.totals.kvA).toBeCloseTo(480 * 30);
+    expect(kvClassAUsd(est300)).toBe(0);
+    expect(kvClassAUsd(est60)).toBe(0);
+    expect(kvClassAUsd(est5)).toBeCloseTo((5_760 * 30 - 100_000) / 1e6);
     // A measured (non-default) base passes through unchanged regardless of the period.
     expect(
       kvClassAUsd(
         estimateMonthly(
           { ...quiet, logPeriodS: 60 },
-          { ...DEFAULT_UNITS, kvClassAPerDay: 1_000 },
+          { ...DEFAULT_UNITS, kvClassAPerDay: 5_000 },
           rates,
           off,
         ),
       ),
-    ).toBeCloseTo((1_000 * 30) / 1e6);
+    ).toBeCloseTo((5_000 * 30 - 100_000) / 1e6);
   });
 
   it("does not double-count per-window summary Class A PUTs in the measured per-file ops", () => {
@@ -892,7 +889,7 @@ describe("measureEstimate", () => {
       billing: {
         ...billing,
         byRole: {
-          app: { requests: 700_000, vcpuMs: 2_100_000 },
+          app: { requests: 700_000, vcpuMs: 70_000_000 },
           worker: { requests: 50, vcpuMs: 400 },
         },
       },
@@ -903,7 +900,7 @@ describe("measureEstimate", () => {
       { ...zeroRates, compute_vcpu_rate_per_million_ms: 1e6 },
       { ...DEFAULT_COMPACTION, enabled: false },
     );
-    expect(line(estimate, "compute").usd).toBeCloseTo((300_000 + 400) * 30, 6);
+    expect(line(estimate, "compute").usd).toBeCloseTo((10_000_000 + 400) * 30 - 100_000_000, 6);
   });
 
   it("caps the estimated summary share at the measured worker CPU", () => {
@@ -920,11 +917,11 @@ describe("measureEstimate", () => {
     expect(measuredUnits.summaryVcpuMsPer1kLines).toBeUndefined();
     const estimate = estimateMonthly(
       { ...DEFAULT_INPUTS, edgeRequestsPerDay: 1_000 },
-      { ...units, appVcpuMsPerDay: 0 },
+      { ...units, appVcpuMsPerDay: 10_000_000 },
       { ...zeroRates, compute_vcpu_rate_per_million_ms: 1e6 },
       { ...DEFAULT_COMPACTION, enabled: false },
     );
-    expect(line(estimate, "compute").usd).toBeCloseTo(10 * 30, 6);
+    expect(line(estimate, "compute").usd).toBeCloseTo((10_000_000 + 10) * 30 - 100_000_000, 6);
   });
 
   it("attributes a bill smaller than the per-file default entirely to files", () => {
@@ -1109,28 +1106,29 @@ describe("measureEstimate", () => {
 describe("contract CPU terms parity across /calculator and /usage", () => {
   const cpuOnlyRates = {
     ...zeroRates,
+    compute_vcpu_rate_per_million_ms: LIST_PRICE_RATES.compute_vcpu_rate_per_million_ms,
     compute_vcpu_free_ms_per_request: 20,
     compute_vcpu_excess_rate_per_second: 0.00005,
     compute_vcpu_rounding_ms: 10,
   };
 
   it("applies the 20 ms free allowance and nearest-10ms rounding per execution in the calculator", () => {
-    // 1,000 app requests/day:
+    // 1,000,000 app requests/day:
     // At 24 ms/request (4 ms excess => rounds to 0 ms): $0
     const at24 = estimateMonthly(
       { ...DEFAULT_INPUTS, edgeRequestsPerDay: 0, requestsPerDay: 0 },
-      { ...zeroUnits, appRequestsPerDay: 1_000, appVcpuMsPerDay: 24_000 },
+      { ...zeroUnits, appRequestsPerDay: 1_000_000, appVcpuMsPerDay: 24_000_000 },
       cpuOnlyRates,
     );
     expect(line(at24, "compute").usd).toBe(0);
 
-    // At 26 ms/request (6 ms excess => rounds to 10 ms): 10 ms * 1,000/day * 30 days = 300,000 ms => $0.015
+    // At 26 ms/request (6 ms excess => rounds to 10 ms): 10 ms * 1,000,000/day * 30 days = 300,000,000 ms (minus 100M free tier = 200,000,000 ms) => $10
     const at26 = estimateMonthly(
       { ...DEFAULT_INPUTS, edgeRequestsPerDay: 0, requestsPerDay: 0 },
-      { ...zeroUnits, appRequestsPerDay: 1_000, appVcpuMsPerDay: 26_000 },
+      { ...zeroUnits, appRequestsPerDay: 1_000_000, appVcpuMsPerDay: 26_000_000 },
       cpuOnlyRates,
     );
-    expect(line(at26, "compute").usd).toBeCloseTo((300_000 / 1000) * 0.00005);
+    expect(line(at26, "compute").usd).toBeCloseTo(((300_000_000 - 100_000_000) / 1000) * 0.00005);
   });
 
   it("produces the exact same CPU cost in /calculator and /usage for the same per-execution input", () => {

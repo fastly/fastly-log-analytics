@@ -866,21 +866,23 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     })
 
     test('Billing Zones (MBZ100, MBZ200, Global) configure correct rates and calculate egress costs', () => {
-      expect(DEFAULTS.billingZone).toBe('MBZ200')
-      expect(DEFAULTS.rateEgress).toBe(0.12)
-      const mbz100State = reducer(DEFAULTS, { type: 'SET_ZONE', zone: 'MBZ100' })
+      const highTraffic = { ...DEFAULTS, reqDay: 20_000_000, edgeReqDay: 20_000_000 }
+      expect(highTraffic.billingZone).toBe('MBZ200')
+      expect(highTraffic.rateEgress).toBe(0.12)
+      const mbz100State = reducer(highTraffic, { type: 'SET_ZONE', zone: 'MBZ100' })
       expect(mbz100State.billingZone).toBe('MBZ100')
       expect(mbz100State.rateEgress).toBe(0.08)
-      const globalState = reducer(DEFAULTS, { type: 'SET_ZONE', zone: 'Global' })
+      const globalState = reducer(highTraffic, { type: 'SET_ZONE', zone: 'Global' })
       expect(globalState.billingZone).toBe('Global')
       expect(globalState.rateEgress).toBe(0.18)
 
-      const [resMBZ100, resMBZ200, resGlobal] = [calculate(mbz100State), calculate(DEFAULTS), calculate(globalState)]
+      const [resMBZ100, resMBZ200, resGlobal] = [calculate(mbz100State), calculate(highTraffic), calculate(globalState)]
+      expect(resMBZ200.cdnEgressGB).toBeGreaterThan(100)
       expect(resMBZ100.cdnEgressGB).toBe(resMBZ200.cdnEgressGB)
       expect(resGlobal.cdnEgressGB).toBe(resMBZ200.cdnEgressGB)
-      expect(resMBZ100.costEgress).toBeCloseTo(resMBZ100.cdnEgressGB * 0.08, 4)
-      expect(resMBZ200.costEgress).toBeCloseTo(resMBZ200.cdnEgressGB * 0.12, 4)
-      expect(resGlobal.costEgress).toBeCloseTo(resGlobal.cdnEgressGB * 0.18, 4)
+      expect(resMBZ100.costEgress).toBeCloseTo((resMBZ100.cdnEgressGB - 100) * 0.08, 4)
+      expect(resMBZ200.costEgress).toBeCloseTo((resMBZ200.cdnEgressGB - 100) * 0.12, 4)
+      expect(resGlobal.costEgress).toBeCloseTo((resGlobal.cdnEgressGB - 100) * 0.18, 4)
       expect(resMBZ100.costEgress).toBeLessThan(resMBZ200.costEgress)
       expect(resMBZ200.costEgress).toBeLessThan(resGlobal.costEgress)
     })

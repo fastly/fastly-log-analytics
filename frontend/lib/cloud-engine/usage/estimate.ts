@@ -10,13 +10,19 @@ import {
   ingestShape,
   ingestTick,
 } from "./ingestShape";
+import { DAY_MS, LIST_RATES } from "./rates";
 import {
-  DAY_MS,
-  FREE_SECRETS,
-  LIST_RATES,
-  billableCdnEgressGb,
-  billableCdnRequests,
-} from "./rates";
+  priceCdnEgress,
+  priceCdnRequests,
+  priceComputeRequests,
+  priceComputeVcpuMs,
+  priceFosClassA,
+  priceFosClassB,
+  priceKvClassA,
+  priceKvClassB,
+  priceSecrets,
+  priceStorageGb,
+} from "./pricing";
 
 export const MONTH_DAYS = 30;
 export const DEFAULT_MIN_BILLED_DAYS = LIST_RATES.min_billed_days;
@@ -542,9 +548,9 @@ export function estimateMonthly(
   const classAUsd = (n: number) => (n / 1000) * rates.class_a_rate_per_1k;
   const classBUsd = (n: number) => (n / 10_000) * rates.class_b_rate_per_10k;
   const egressUsd = (egressGb: number) =>
-    billableCdnEgressGb(egressGb) * rates.cdn_egress_rate_per_gb;
+    priceCdnEgress(egressGb, rates.cdn_egress_rate_per_gb);
   const frontUsd = (n: number) =>
-    (billableCdnRequests(n) / 10_000) * rates.cdn_request_rate_per_10k;
+    priceCdnRequests(n, rates.cdn_request_rate_per_10k);
   const requestUsd = (n: number) =>
     (n / 1e6) * rates.compute_request_rate_per_million;
   const vcpuExecUsd = (dailyVcpuMs: number, dailyExecutions: number) =>
@@ -799,6 +805,10 @@ export function estimateMonthly(
     },
     { ...NO_USAGE },
   );
+  const billedVcpuMs =
+    rates.compute_vcpu_rate_per_million_ms > 0
+      ? (all.vcpuUsd / rates.compute_vcpu_rate_per_million_ms) * 1e6
+      : 0;
   const lines: EstimateLine[] = [
     {
       id: "storage",
@@ -806,9 +816,9 @@ export function estimateMonthly(
       detail: `${gb(all.storageGb)} GB-months · A ${count(all.fosA)} · B ${count(all.fosB)}`,
       help: "Raw logs, Parquet, summary bundles, RUM and fixed pq_ops storage (telemetry plus event-driven meta/cloud_dr_state.json DR snapshots), merged-away compaction sources billed their minimum days, and every feature's Class A and Class B operations.",
       ...priced([
-        { label: "Storage", usd: all.storageGb * rates.storage_rate_per_gb_month },
-        { label: "Class A", usd: classAUsd(all.fosA) },
-        { label: "Class B", usd: classBUsd(all.fosB) },
+        { label: "Storage", usd: priceStorageGb(all.storageGb, rates.storage_rate_per_gb_month) },
+        { label: "Class A", usd: priceFosClassA(all.fosA, rates.class_a_rate_per_1k) },
+        { label: "Class B", usd: priceFosClassB(all.fosB, rates.class_b_rate_per_10k) },
       ]),
     },
     {
@@ -816,8 +826,8 @@ export function estimateMonthly(
       label: "CDN delivery",
       detail: `${gb(all.egressGb)} GB (100 GB free) · ${count(all.frontRequests)} front reqs (1M free), incl. ${count(probesPerDay)} clock probes/day every ${probeIntervalS} s`,
       ...priced([
-        { label: "Egress", usd: egressUsd(all.egressGb) },
-        { label: "Requests", usd: frontUsd(all.frontRequests) },
+        { label: "Egress", usd: priceCdnEgress(all.egressGb, rates.cdn_egress_rate_per_gb) },
+        { label: "Requests", usd: priceCdnRequests(all.frontRequests, rates.cdn_request_rate_per_10k) },
       ]),
     },
     {
@@ -825,8 +835,8 @@ export function estimateMonthly(
       label: "Compute (app + worker)",
       detail: `${count(all.computeRequests)} reqs · ${count(all.vcpuMs)} vCPU ms`,
       ...priced([
-        { label: "Requests", usd: requestUsd(all.computeRequests) },
-        { label: "vCPU", usd: all.vcpuUsd },
+        { label: "Requests", usd: priceComputeRequests(all.computeRequests, rates.compute_request_rate_per_million) },
+        { label: "vCPU", usd: priceComputeVcpuMs(billedVcpuMs, rates.compute_vcpu_rate_per_million_ms) },
       ]),
     },
     {
@@ -834,15 +844,15 @@ export function estimateMonthly(
       label: "KV Store",
       detail: `A ${count(all.kvA)} · B ${count(all.kvB)}`,
       ...priced([
-        { label: "Class A", usd: (all.kvA / 1e6) * rates.kv_class_a_rate_per_million },
-        { label: "Class B", usd: (all.kvB / 1e6) * rates.kv_class_b_rate_per_million },
+        { label: "Class A", usd: priceKvClassA(all.kvA, rates.kv_class_a_rate_per_million) },
+        { label: "Class B", usd: priceKvClassB(all.kvB, rates.kv_class_b_rate_per_million) },
       ]),
     },
     {
       id: "secrets",
       label: "Secret Store",
       detail: `${count(units.secrets)} secrets`,
-      usd: Math.max(0, units.secrets - FREE_SECRETS) * rates.secret_rate_per_month,
+      usd: priceSecrets(units.secrets, rates.secret_rate_per_month),
     },
     {
       id: "config",

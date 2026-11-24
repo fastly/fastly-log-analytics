@@ -40,12 +40,22 @@ describe('Cloud cost calculator', () => {
   })
 
   it('falls back for a null rate without replacing an explicit zero rate', () => {
-    const { rerender } = render(<CloudCostCalculator />)
+    const prefillData = {
+      inputs: {
+        ...DEFAULT_INPUTS,
+        logPeriodS: 1,
+        filesPerPeriod: 109,
+        requestsPerDay: 500_000_000,
+        edgeRequestsPerDay: 500_000_000,
+      },
+      measuredInputs: { filesPerPeriod: true as const },
+    }
+    const { rerender } = render(<CloudCostCalculator prefillData={prefillData} />)
     const total = screen.getByText('Total Estimated Monthly Cost').parentElement?.nextElementSibling
     const reference = total?.textContent
-    rerender(<CloudCostCalculator rates={{ compute_request_rate_per_million: null }} />)
+    rerender(<CloudCostCalculator prefillData={prefillData} rates={{ compute_request_rate_per_million: null }} />)
     expect(total?.textContent).toBe(reference)
-    rerender(<CloudCostCalculator rates={{ compute_request_rate_per_million: 0 }} />)
+    rerender(<CloudCostCalculator prefillData={prefillData} rates={{ compute_request_rate_per_million: 0 }} />)
     expect(total?.textContent).not.toBe(reference)
   })
 

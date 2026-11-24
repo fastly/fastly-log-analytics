@@ -1,5 +1,11 @@
 import { formatAbbreviatedCount } from '@/lib/utils'
 import { SERVICE_DEFAULTS } from '@/lib/serviceDefaults'
+import {
+  priceCdnEgress,
+  priceFosClassA,
+  priceFosClassB,
+  priceStorageGb,
+} from '@/lib/cloud-engine/usage/pricing'
 import type { components } from '@/types/api.generated'
 
 export type PrefillResponse = components['schemas']['PrefillResponse']
@@ -205,10 +211,10 @@ export const CDN_FREE_EGRESS_GB_PER_MONTH = 100
 
 // Single pricing step shared by calculate() and the shared load-testing tool (the load-test config's `estimator`).
 export function priceQuantities(s: CalcState, q: MonthlyQuantities): PricedQuantities {
-  const costA = (q.classAPerMonth / 1000) * s.rateA
-  const costB = (q.classBPerMonth / 1000) * s.rateB
-  const costStorage = q.gbMonthsStored * s.rateStorage
-  const costEgress = Math.max(0, q.cdnEgressGB - CDN_FREE_EGRESS_GB_PER_MONTH) * s.rateEgress
+  const costA = priceFosClassA(q.classAPerMonth, s.rateA)
+  const costB = priceFosClassB(q.classBPerMonth, s.rateB * 10)
+  const costStorage = priceStorageGb(q.gbMonthsStored, s.rateStorage)
+  const costEgress = s.cdnEnabled ? priceCdnEgress(q.cdnEgressGB, s.rateEgress) : 0
   return { costA, costB, costStorage, costEgress, totalCost: costA + costB + costStorage + costEgress }
 }
 
