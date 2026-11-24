@@ -319,6 +319,11 @@ fn route(
                     return Err(Error::new(400, "invalid_prefix"));
                 }
             }
+            let default_bucket = context
+                .get(&format!("svc:{sid}"))?
+                .and_then(|record| record.value["fos_bucket"].as_str().map(str::to_owned))
+                .filter(|bucket| valid_bucket(bucket))
+                .map_or_else(|| opaque_bucket_name(context.runtime), Ok)?;
             let mut result = json!({
                 "valid": true,
                 "service": {"id": sid, "name": service["name"]},
@@ -328,11 +333,7 @@ fn route(
                 "defaults": {
                     "endpoint_name": "Fastly Object Storage Logs",
                     "fos_region": "us-east-1",
-                    "fos_bucket_name": if capture == Capture::Attached {
-                        format!("fos-{}-cloud-logs", safe_service_id(sid))
-                    } else {
-                        format!("fos-{}-logs", safe_service_id(sid))
-                    },
+                    "fos_bucket_name": default_bucket,
                     "fos_prefix": "",
                     "sample_rate": 100,
                     "edge_only": true,
@@ -513,22 +514,11 @@ fn own_services(runtime: &impl Runtime) -> Result<Vec<String>, Error> {
         .collect()
 }
 
-fn safe_service_id(sid: &str) -> String {
-    let mut out = String::new();
-    let mut prev_dash = true;
-    for ch in sid.chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch.to_ascii_lowercase());
-            prev_dash = false;
-        } else if !prev_dash {
-            out.push('-');
-            prev_dash = true;
-        }
-    }
-    if out.ends_with('-') {
-        out.pop();
-    }
-    out
+pub fn opaque_bucket_name(runtime: &impl Runtime) -> Result<String, Error> {
+    let bytes = runtime
+        .random()
+        .map_err(|_| Error::new(503, "random_unavailable"))?;
+    Ok(format!("fla-{}", hex::encode(&bytes[..12])))
 }
 
 fn validate_token(
@@ -1353,6 +1343,25 @@ fn provision(
     if rum.enabled && !owned_endpoint_names.contains(&rum.endpoint_name) {
         owned_endpoint_names.push(rum.endpoint_name.clone());
     }
+    let previous: Option<Service> = context
+        .get(&format!("svc:{}", input.service_id))?
+        .map(|record| decode(record.value))
+        .transpose()?;
+    let explicit_bucket = input.fos_bucket.trim();
+    let (fos_bucket, bucket_generated) = if !explicit_bucket.is_empty() {
+        (explicit_bucket.to_owned(), false)
+    } else if let Some(existing_bucket) = previous
+        .as_ref()
+        .map(|svc| svc.fos_bucket.trim())
+        .filter(|b| !b.is_empty())
+    {
+        (
+            existing_bucket.to_owned(),
+            previous.as_ref().is_some_and(|svc| svc.bucket_generated),
+        )
+    } else {
+        (opaque_bucket_name(context.runtime)?, true)
+    };
     let mut service = Service {
         service_id: input.service_id.clone(),
         name: target["name"]
@@ -1369,7 +1378,7 @@ fn provision(
         sample_rate: input.sample_rate,
         edge_only: input.edge_only,
         custom_condition: input.custom_condition,
-        fos_bucket: input.fos_bucket,
+        fos_bucket,
         fos_prefix: input.fos_prefix,
         fos_region: input.fos_region.clone(),
         fos_endpoint: format!("{}.object.fastlystorage.app", input.fos_region),
@@ -1387,6 +1396,7 @@ fn provision(
         owner: owner(context.runtime)?,
         bucket_adopted: false,
         bucket_checked: false,
+        bucket_generated,
         last_activated_version: None,
         last_reconcile: None,
         pending_job_id: None,
@@ -1411,10 +1421,6 @@ fn provision(
         cdn_shield: input.cdn_shield.trim().to_owned(),
         stored_log_field_ids: None,
     };
-    let previous: Option<Service> = context
-        .get(&format!("svc:{}", input.service_id))?
-        .map(|record| decode(record.value))
-        .transpose()?;
     reconcile_system_fields(&mut service, previous.as_ref())?;
     validate_service(
         &service,

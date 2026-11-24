@@ -278,6 +278,7 @@ fn bootstrap_service(owner_id: String, input: &RecoverInput, now: u64) -> Servic
         owner: owner_id,
         bucket_adopted: true,
         bucket_checked: true,
+        bucket_generated: false,
         last_activated_version: None,
         last_reconcile: None,
         pending_job_id: None,
@@ -2668,6 +2669,7 @@ mod tests {
             owner: "flpApp".into(),
             bucket_adopted: true,
             bucket_checked: true,
+            bucket_generated: false,
             last_activated_version: Some(4),
             last_reconcile: Some(json!({
                 "outcome": "complete",

@@ -1080,3 +1080,31 @@ sub sec_coex_vcl_31a_shield_hop_strips_unauth_continue_and_preserves_auth_contin
   assert.equal(req.http.x-flp-tick-pass, "1");
   assert.state(pass);
 }
+
+
+// @scope: deliver
+sub sec22_edge_deliver_strips_internal_headers_and_surrogate_key {
+  testing.inject_variable("fastly.ff.visits_this_service", 0);
+  set resp.status = 200;
+  set resp.http.Surrogate-Key = "flp-html svc-123";
+  set resp.http.x-flp-auth-fail = "1";
+  set resp.http.x-flp-fos-bucket = "fla-0123456789abcdef01234567";
+  set resp.http.x-flp-fos-region = "us-east-1";
+  set resp.http.x-flp-fos-service = "svc123";
+  set resp.http.x-flp-tick-ttl = "10";
+  set resp.http.x-flp-worker-key = "internal-key";
+  set resp.http.x-flp-clock-secret = "internal-clock";
+  set resp.http.x-flp-shell = "admin";
+  set resp.http.x-compress-hint = "on";
+  testing.call_subroutine("vcl_deliver");
+  assert.is_notset(resp.http.Surrogate-Key);
+  assert.is_notset(resp.http.x-flp-auth-fail);
+  assert.is_notset(resp.http.x-flp-fos-bucket);
+  assert.is_notset(resp.http.x-flp-fos-region);
+  assert.is_notset(resp.http.x-flp-fos-service);
+  assert.is_notset(resp.http.x-flp-tick-ttl);
+  assert.is_notset(resp.http.x-flp-worker-key);
+  assert.is_notset(resp.http.x-flp-clock-secret);
+  assert.is_notset(resp.http.x-flp-shell);
+  assert.is_notset(resp.http.x-compress-hint);
+}

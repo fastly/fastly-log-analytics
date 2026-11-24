@@ -20,7 +20,7 @@ import tarfile
 import time
 import urllib.parse
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -78,6 +78,10 @@ def _http_client(*, timeout: float, transport: httpx.BaseTransport | None = None
 
 class APIError(RuntimeError):
     """An API failure with no server body or credential material."""
+
+    def __init__(self, message: str, *, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 class FastlyAPI:
@@ -194,7 +198,7 @@ class FastlyAPI:
             body = response.content
             received = len(body)
             if status >= 400:
-                raise APIError(f"Fastly {method} {path.split('?')[0]} returned {status}")
+                raise APIError(f"Fastly {method} {path.split('?')[0]} returned {status}", status=status)
             return json.loads(body) if body else None
         except APIError as exc:
             error_type = type(exc).__name__
@@ -312,20 +316,129 @@ def ensure_flush_clock(api: Any, base: str) -> None:
         api.request("POST", base + "/backend", flush_clock_backend(host), form=True)
 
 
+MAX_DOMAIN_COLLISION_ATTEMPTS = 5
+
+
+def opaque_subdomain(suffix: str) -> str:
+    """Generate a CSPRNG opaque subdomain with >= 96 bits entropy and zero install-name correlation."""
+    return domain(f"fla-{secrets.token_hex(12)}.{suffix}")
+
+
+def _domain_suffix_for_role(role: str) -> str:
+    return "global.ssl.fastly.net" if role == "front" else "edgecompute.app"
+
+
+def _is_domain_conflict(err: APIError) -> bool:
+    return err.status == 409 or "returned 409" in str(err)
+
+
+def load_inventory_domains(inventory_path: Path | None) -> dict[str, str]:
+    """Read persisted service domains from a local inventory file when present."""
+    if inventory_path is None or not inventory_path.exists():
+        return {}
+    try:
+        data = json.loads(inventory_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    services = data.get("services")
+    if not isinstance(services, dict):
+        return {}
+    out: dict[str, str] = {}
+    for role in ("front", "compute", "worker"):
+        entry = services.get(role)
+        if isinstance(entry, dict) and isinstance(entry.get("domain"), str) and entry["domain"].strip():
+            out[role] = domain(entry["domain"].strip())
+    return out
+
+
+def _rebuild_plan_with_domains(
+    plan: dict[str, Any],
+    hosts: Mapping[str, str],
+    generated_domains: Mapping[str, bool] | None = None,
+) -> dict[str, Any]:
+    rebuilt = resource_plan(
+        plan["install_name"],
+        public_host=hosts["front"],
+        compute_host=hosts["compute"],
+        worker_host=hosts["worker"],
+    )
+    if generated_domains is not None:
+        rebuilt["generated_domains"] = {
+            role: bool(generated_domains.get(role, False)) for role in ("front", "compute", "worker")
+        }
+    return rebuilt
+
+
+def _attach_domain_with_retry(
+    api: Any,
+    *,
+    role: str,
+    service_id: str,
+    version: int,
+    plan: dict[str, Any],
+    inventory: dict[str, Any],
+    inventory_path: Path,
+) -> dict[str, Any]:
+    """Persist domain in inventory before Fastly POST, retrying CSPRNG domains on 409 collision."""
+    is_generated = bool(plan.get("generated_domains", {}).get(role, False))
+    current_domain = plan["domains"][role]
+    attempts = MAX_DOMAIN_COLLISION_ATTEMPTS if is_generated else 1
+    for attempt in range(attempts):
+        inventory["services"][role]["domain"] = current_domain
+        _save(inventory_path, inventory)
+        try:
+            api.request(
+                "POST",
+                f"/service/{service_id}/version/{version}/domain",
+                {"name": current_domain},
+                form=True,
+            )
+            if current_domain != plan["domains"][role]:
+                updated_hosts = {**plan["domains"], role: current_domain}
+                plan = _rebuild_plan_with_domains(plan, updated_hosts, plan.get("generated_domains"))
+            return plan
+        except APIError as err:
+            if not is_generated or not _is_domain_conflict(err) or attempt + 1 >= attempts:
+                raise
+            current_domain = opaque_subdomain(_domain_suffix_for_role(role))
+    raise APIError(f"Domain collision exhausted for {role}", status=409)
+
+
 def resource_plan(
     name: str = "flp",
     *,
     public_host: str | None = None,
     compute_host: str | None = None,
     worker_host: str | None = None,
+    existing_domains: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     if not re.fullmatch(r"[a-z][a-z0-9-]{0,39}", name) or name.endswith("-"):
         raise ValueError("Install name must be 1–40 lowercase letters, digits or hyphens")
-    hosts = {
-        "front": domain(public_host or f"{name}.global.ssl.fastly.net"),
-        "compute": domain(compute_host or f"{name}.edgecompute.app"),
-        "worker": domain(worker_host or f"{name}-worker.edgecompute.app"),
+    persisted = existing_domains or {}
+    explicit = {
+        "front": public_host,
+        "compute": compute_host,
+        "worker": worker_host,
     }
+    hosts: dict[str, str] = {}
+    generated_domains: dict[str, bool] = {}
+    if public_host:
+        hosts["front"] = domain(public_host)
+    elif persisted.get("front"):
+        hosts["front"] = domain(persisted["front"])
+    else:
+        hosts["front"] = domain(f"{name}.global.ssl.fastly.net")
+    generated_domains["front"] = False
+    for role in ("compute", "worker"):
+        if explicit[role]:
+            hosts[role] = domain(explicit[role])  # type: ignore[arg-type]
+            generated_domains[role] = False
+        elif persisted.get(role):
+            hosts[role] = domain(persisted[role])
+            generated_domains[role] = False
+        else:
+            hosts[role] = opaque_subdomain(_domain_suffix_for_role(role))
+            generated_domains[role] = True
     raw_prefix = _cli.ANALYTICS_LOG_LAYOUT.split("year=")[0]
     return {
         "install_name": name,
@@ -341,6 +454,7 @@ def resource_plan(
         },
         "links": LINKS.copy(),
         "domains": hosts,
+        "generated_domains": generated_domains,
         "public_base_url": "https://" + hosts["front"],
         "managed_prefix": f"{name}-",
         "backends": {
@@ -1118,6 +1232,45 @@ def _config_items_map(raw: Any) -> dict[str, str]:
     return out
 
 
+def _discover_existing_domains(
+    api: Any,
+    plan: dict[str, Any],
+    existing_services: Mapping[str, dict[str, Any]],
+    config_store_id: str,
+    inventory_path: Path | None,
+) -> dict[str, str]:
+    discovered: dict[str, str] = {}
+    for role, host in load_inventory_domains(inventory_path).items():
+        discovered[role] = host
+    try:
+        items = _config_items_map(api.request("GET", f"{_stores.STORE_ENDPOINTS['config']}/{config_store_id}/items"))
+    except APIError:
+        items = {}
+    if "front" not in discovered and items.get("public_base_url"):
+        parsed = urllib.parse.urlsplit(items["public_base_url"])
+        if parsed.hostname:
+            discovered["front"] = domain(parsed.hostname)
+    if "compute" not in discovered and items.get("compute_host"):
+        discovered["compute"] = domain(items["compute_host"])
+    if "worker" not in discovered and items.get("worker_host"):
+        discovered["worker"] = domain(items["worker_host"])
+    for role in ("front", "compute", "worker"):
+        remote = existing_services.get(plan["services"][role])
+        if remote is None:
+            continue
+        try:
+            ver, _ = _latest_version(api, remote["id"])
+            domains_resp = api.request("GET", f"/service/{remote['id']}/version/{ver}/domain")
+        except APIError:
+            continue
+        if isinstance(domains_resp, list):
+            for entry in domains_resp:
+                if isinstance(entry, dict) and isinstance(entry.get("name"), str) and entry["name"].strip():
+                    discovered[role] = domain(entry["name"].strip())
+                    break
+    return discovered
+
+
 def recover_relink(
     api: Any,
     plan: dict[str, Any],
@@ -1145,6 +1298,20 @@ def recover_relink(
     }
 
     existing_services = {svc["name"]: svc for svc in _list_services(api) if not svc.get("deleted_at")}
+
+    # Reuse persisted/surviving/legacy domains unless explicitly overridden on the CLI.
+    generated_flags = dict(plan.get("generated_domains", {}))
+    if any(generated_flags.get(role, False) for role in ("front", "compute", "worker")):
+        discovered = _discover_existing_domains(api, plan, existing_services, stores["config"]["id"], inventory_path)
+        merged_hosts = dict(plan["domains"])
+        changed = False
+        for role in ("front", "compute", "worker"):
+            if generated_flags.get(role, False) and role in discovered:
+                merged_hosts[role] = discovered[role]
+                generated_flags[role] = False
+                changed = True
+        if changed:
+            plan = _rebuild_plan_with_domains(plan, merged_hosts, generated_flags)
 
     # Pre-flight validate all surviving services and required front dictionaries before any writes.
     for role in ("compute", "worker"):
@@ -1212,12 +1379,14 @@ def recover_relink(
                 "version": 1,
                 "domain": plan["domains"][role],
             }
-            _save(inventory_path, inventory)
-            api.request(
-                "POST",
-                f"/service/{sid}/version/1/domain",
-                {"name": plan["domains"][role]},
-                form=True,
+            plan = _attach_domain_with_retry(
+                api,
+                role=role,
+                service_id=sid,
+                version=1,
+                plan=plan,
+                inventory=inventory,
+                inventory_path=inventory_path,
             )
             for kind, link_name in LINKS.items():
                 api.request(
@@ -1294,13 +1463,15 @@ def recover_relink(
             "version": 1,
             "domain": plan["domains"]["front"],
         }
-        _save(inventory_path, inventory)
         front_prefix = f"/service/{front_id}/version/1"
-        api.request(
-            "POST",
-            front_prefix + "/domain",
-            {"name": plan["domains"]["front"]},
-            form=True,
+        plan = _attach_domain_with_retry(
+            api,
+            role="front",
+            service_id=front_id,
+            version=1,
+            plan=plan,
+            inventory=inventory,
+            inventory_path=inventory_path,
         )
         for dict_role, (dict_name, private) in DICTIONARIES.items():
             created_dict = api.request(
@@ -1556,12 +1727,14 @@ def bootstrap(
             "domain": plan["domains"][role],
         }
         inventory["services"][role] = service
-        _save(inventory_path, inventory)
-        api.request(
-            "POST",
-            f"/service/{service['id']}/version/1/domain",
-            {"name": service["domain"]},
-            form=True,
+        plan = _attach_domain_with_retry(
+            api,
+            role=role,
+            service_id=service["id"],
+            version=1,
+            plan=plan,
+            inventory=inventory,
+            inventory_path=inventory_path,
         )
 
     for kind, name in plan["stores"].items():
@@ -1772,6 +1945,7 @@ def main(argv: list[str] | None = None) -> int:
                 public_host=args.public_host,
                 compute_host=args.compute_host,
                 worker_host=args.worker_host,
+                existing_domains=load_inventory_domains(args.inventory),
             )
             if args.dry_run and args.apply:
                 raise ValueError("--dry-run and --apply are mutually exclusive")
@@ -1859,6 +2033,7 @@ def main(argv: list[str] | None = None) -> int:
                     public_host=args.public_host,
                     compute_host=args.compute_host,
                     worker_host=args.worker_host,
+                    existing_domains=load_inventory_domains(args.inventory),
                 )
                 if not args.apply:
                     print(

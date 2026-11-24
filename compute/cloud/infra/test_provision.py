@@ -21,23 +21,38 @@ import pytest
 
 def test_plan_is_deterministic_isolated_and_contains_no_credentials() -> None:
     first = provision.resource_plan("team-a")
-    assert first == provision.resource_plan("team-a")
-    assert first["services"] == {
-        "compute": "team-a",
-        "worker": "team-a-worker",
-        "front": "team-a-front",
-    }
-    assert first["stores"] == {
-        "secret": "team-a_secrets",
-        "config": "team-a_config",
-        "kv": "team-a_state",
-    }
-    assert first["links"] == {
-        "secret": "flp_secrets",
-        "config": "flp_config",
-        "kv": "flp_state",
-    }
+    second = provision.resource_plan("team-a")
+    assert (
+        first["services"]
+        == second["services"]
+        == {
+            "compute": "team-a",
+            "worker": "team-a-worker",
+            "front": "team-a-front",
+        }
+    )
+    assert (
+        first["stores"]
+        == second["stores"]
+        == {
+            "secret": "team-a_secrets",
+            "config": "team-a_config",
+            "kv": "team-a_state",
+        }
+    )
+    assert (
+        first["links"]
+        == second["links"]
+        == {
+            "secret": "flp_secrets",
+            "config": "flp_config",
+            "kv": "flp_state",
+        }
+    )
     assert first["public_base_url"] == "https://team-a.global.ssl.fastly.net"
+    assert first["domains"]["compute"] != second["domains"]["compute"]
+    assert first["domains"]["worker"] != second["domains"]["worker"]
+    assert first["domains"]["compute"] != first["domains"]["worker"]
     assert set(first["secret_keys"]) == {
         "session_key",
         "front_key",
@@ -2166,3 +2181,151 @@ def test_recover_latest_version_and_normalize_origin_edge_cases() -> None:
     ):
         with pytest.raises(ValueError, match="without credentials, query, or fragment"):
             provision._normalize_origin(bad_url)
+
+
+def test_sec22_default_compute_and_worker_domains_are_independent_csprng_opaque() -> None:
+    plan_a = provision.resource_plan("acme-prod")
+    plan_b = provision.resource_plan("acme-prod")
+
+    assert plan_a["domains"]["front"] == "acme-prod.global.ssl.fastly.net"
+    assert plan_a["generated_domains"] == {"front": False, "compute": True, "worker": True}
+
+    opaque_re = re.compile(r"^fla-[0-9a-f]{24}\.edgecompute\.app$")
+    for role in ("compute", "worker"):
+        host_a = plan_a["domains"][role]
+        host_b = plan_b["domains"][role]
+        assert opaque_re.fullmatch(host_a), f"unexpected {role} host: {host_a}"
+        assert opaque_re.fullmatch(host_b), f"unexpected {role} host: {host_b}"
+        assert "acme" not in host_a
+        assert "prod" not in host_a
+        assert host_a != host_b
+    assert plan_a["domains"]["compute"] != plan_a["domains"]["worker"]
+
+
+def test_sec22_explicit_host_overrides_are_preserved() -> None:
+    plan = provision.resource_plan(
+        "team-a",
+        public_host="analytics.example.com",
+        compute_host="custom-compute.edgecompute.app",
+        worker_host="custom-worker.edgecompute.app",
+    )
+    assert plan["domains"] == {
+        "front": "analytics.example.com",
+        "compute": "custom-compute.edgecompute.app",
+        "worker": "custom-worker.edgecompute.app",
+    }
+    assert plan["public_base_url"] == "https://analytics.example.com"
+    assert plan["generated_domains"] == {"front": False, "compute": False, "worker": False}
+
+
+def test_sec22_idempotent_reuse_of_persisted_and_legacy_inventory_domains(tmp_path: Path) -> None:
+    inv_path = tmp_path / "team-a-resources.local.json"
+    inv_path.write_text(
+        json.dumps(
+            {
+                "install_name": "team-a",
+                "services": {
+                    "front": {"id": "f1", "domain": "team-a.global.ssl.fastly.net"},
+                    "compute": {"id": "c1", "domain": "team-a.edgecompute.app"},
+                    "worker": {"id": "w1", "domain": "team-a-worker.edgecompute.app"},
+                },
+            }
+        )
+    )
+    persisted = provision.load_inventory_domains(inv_path)
+    plan = provision.resource_plan("team-a", existing_domains=persisted)
+    assert plan["domains"] == {
+        "front": "team-a.global.ssl.fastly.net",
+        "compute": "team-a.edgecompute.app",
+        "worker": "team-a-worker.edgecompute.app",
+    }
+    assert plan["generated_domains"] == {"front": False, "compute": False, "worker": False}
+
+
+def test_sec22_bootstrap_retries_409_domain_collision_and_persists_winner(
+    inventory_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(provision, "lint_front", lambda _rl: None)
+    api = SyntheticBootstrapAPI()
+    plan = provision.resource_plan("team-a")
+    initial_compute_domain = plan["domains"]["compute"]
+    domain_attempts: list[str] = []
+    saved_before_post: list[str] = []
+
+    orig_request = api.request
+
+    def colliding_request(method: str, path: str, payload: object = None, *, form: bool = False) -> object:
+        if method == "POST" and path.endswith("/version/1/domain"):
+            name = payload["name"]
+            if name.endswith(".edgecompute.app") and len(domain_attempts) < 2:
+                domain_attempts.append(name)
+                # Verify inventory was already persisted with the candidate domain BEFORE the POST.
+                persisted = json.loads(inventory_path.read_text())
+                saved_before_post.append(persisted["services"]["compute"]["domain"])
+                raise provision.APIError(f"Fastly POST {path} returned 409", status=409)
+        return orig_request(method, path, payload, form=form)
+
+    api.request = colliding_request  # type: ignore[method-assign]
+    inv = provision.bootstrap(
+        api,
+        plan,
+        inventory_path,
+        rate_limiting=False,
+        api_token="api-token",
+    )
+    assert len(domain_attempts) == 2
+    assert saved_before_post == domain_attempts
+    winning_compute = inv["services"]["compute"]["domain"]
+    assert winning_compute != initial_compute_domain
+    assert winning_compute not in domain_attempts
+    assert re.fullmatch(r"^fla-[0-9a-f]{24}\.edgecompute\.app$", winning_compute)
+    # Front backend & Config Store must reflect the winning domain after 409 rotation.
+    front_backend_puts = [
+        payload
+        for method, path, payload, _form in api.calls
+        if method == "POST" and path.endswith("/version/1/backend") and payload.get("name") == "flp"
+    ]
+    assert front_backend_puts[-1]["address"] == winning_compute
+    config_puts = {
+        path.rsplit("/", 1)[-1]: payload["item_value"]
+        for method, path, payload, _form in api.calls
+        if method == "PUT" and "/resources/stores/config/" in path and "/item/" in path
+    }
+    assert config_puts["compute_host"] == winning_compute
+
+
+def test_sec22_recover_relink_reuses_surviving_legacy_fastly_and_config_domains(
+    inventory_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(provision, "lint_front", lambda _rl: None)
+    stores = _surviving_stores("team-a")
+    api = SyntheticRecoverAPI(
+        stores=stores,
+        services=[{"id": "front-surviving", "name": "team-a-front", "type": "vcl"}],
+        versions={"front-surviving": [{"number": 3, "active": True, "locked": True}]},
+        dictionaries={
+            ("front-surviving", 3): [
+                {"id": "d-auth", "name": "flp_front_auth"},
+                {"id": "d-buckets", "name": "flp_fos_buckets"},
+                {"id": "d-creds", "name": "flp_fos_credentials"},
+            ]
+        },
+        config_items=[
+            {"item_key": "public_base_url", "item_value": "https://team-a.global.ssl.fastly.net"},
+            {"item_key": "compute_host", "item_value": "team-a.edgecompute.app"},
+            {"item_key": "worker_host", "item_value": "team-a-worker.edgecompute.app"},
+        ],
+    )
+    provision.recover_relink(
+        api,
+        provision.resource_plan("team-a"),
+        inventory_path,
+        api_token="api-token",
+        rate_limiting=False,
+    )
+    inv = json.loads(inventory_path.read_text())
+    assert inv["services"]["compute"]["domain"] == "team-a.edgecompute.app"
+    assert inv["services"]["worker"]["domain"] == "team-a-worker.edgecompute.app"
+    assert inv["services"]["front"]["domain"] == "team-a.global.ssl.fastly.net"

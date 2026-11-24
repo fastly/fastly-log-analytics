@@ -435,6 +435,8 @@ pub fn delete_object(
         Err(Error::new(502, "object_delete_failed"))
     }
 }
+const MAX_BUCKET_COLLISION_ATTEMPTS: usize = 5;
+
 pub fn bucket(
     context: &Context<'_, impl Runtime>,
     job: &mut Job,
@@ -449,16 +451,53 @@ pub fn bucket(
             }
         }
         "bucket_probe" => {
-            let result = request(context, service, "HEAD", "", "", true)?;
-            match result.status {
-                200 => service.bucket_adopted = true,
-                404 => service.bucket_adopted = false,
-                _ => return Err(Error::new(502, "bucket_head_failed")),
+            let mut current_record = record.clone();
+            if service.bucket_generated {
+                let mut available = false;
+                for attempt in 0..MAX_BUCKET_COLLISION_ATTEMPTS {
+                    let result = request(context, service, "HEAD", "", "", true)?;
+                    match result.status {
+                        404 => {
+                            service.bucket_adopted = false;
+                            available = true;
+                            break;
+                        }
+                        200 | 403 | 409 => {
+                            if attempt + 1 == MAX_BUCKET_COLLISION_ATTEMPTS {
+                                return Err(Error::new(409, "bucket_name_collision"));
+                            }
+                            service.fos_bucket = crate::admin::opaque_bucket_name(context.runtime)?;
+                            save_job_service(
+                                context,
+                                &current_record,
+                                service,
+                                job,
+                                "bucket.rotated",
+                                "bucket_probe",
+                            )?;
+                            current_record = context
+                                .get(&format!("svc:{}", service.service_id))?
+                                .ok_or_else(|| Error::new(503, "state_unavailable"))?;
+                            job.expected_generation = current_record.generation.clone();
+                        }
+                        _ => return Err(Error::new(502, "bucket_head_failed")),
+                    }
+                }
+                if !available {
+                    return Err(Error::new(409, "bucket_name_collision"));
+                }
+            } else {
+                let result = request(context, service, "HEAD", "", "", true)?;
+                match result.status {
+                    200 => service.bucket_adopted = true,
+                    404 => service.bucket_adopted = false,
+                    _ => return Err(Error::new(502, "bucket_head_failed")),
+                }
             }
             service.bucket_checked = true;
             save_job_service(
                 context,
-                record,
+                &current_record,
                 service,
                 job,
                 "bucket.checked",
@@ -475,17 +514,59 @@ pub fn bucket(
                 return Err(Error::new(409, "bucket_not_checked"));
             }
             if !service.bucket_adopted {
-                let result = request(context, service, "PUT", "", "", true)?;
-                if !(200..300).contains(&result.status) {
-                    if result.status == 409 {
-                        service.bucket_adopted = true;
-                        save_job_service(context, record, service, job, "bucket.adopted", "key")?;
-                        job.expected_generation = context
-                            .get(&format!("svc:{}", service.service_id))?
-                            .ok_or_else(|| Error::new(503, "state_unavailable"))?
-                            .generation;
-                    } else {
-                        return Err(Error::new(502, "bucket_create_failed"));
+                if service.bucket_generated {
+                    let mut current_record = record.clone();
+                    let mut created = false;
+                    for attempt in 0..MAX_BUCKET_COLLISION_ATTEMPTS {
+                        let result = request(context, service, "PUT", "", "", true)?;
+                        if (200..300).contains(&result.status) {
+                            created = true;
+                            break;
+                        }
+                        if result.status == 409 {
+                            if attempt + 1 == MAX_BUCKET_COLLISION_ATTEMPTS {
+                                return Err(Error::new(409, "bucket_name_collision"));
+                            }
+                            service.fos_bucket = crate::admin::opaque_bucket_name(context.runtime)?;
+                            save_job_service(
+                                context,
+                                &current_record,
+                                service,
+                                job,
+                                "bucket.rotated",
+                                "bucket_create",
+                            )?;
+                            current_record = context
+                                .get(&format!("svc:{}", service.service_id))?
+                                .ok_or_else(|| Error::new(503, "state_unavailable"))?;
+                            job.expected_generation = current_record.generation.clone();
+                        } else {
+                            return Err(Error::new(502, "bucket_create_failed"));
+                        }
+                    }
+                    if !created {
+                        return Err(Error::new(409, "bucket_name_collision"));
+                    }
+                } else {
+                    let result = request(context, service, "PUT", "", "", true)?;
+                    if !(200..300).contains(&result.status) {
+                        if result.status == 409 {
+                            service.bucket_adopted = true;
+                            save_job_service(
+                                context,
+                                record,
+                                service,
+                                job,
+                                "bucket.adopted",
+                                "key",
+                            )?;
+                            job.expected_generation = context
+                                .get(&format!("svc:{}", service.service_id))?
+                                .ok_or_else(|| Error::new(503, "state_unavailable"))?
+                                .generation;
+                        } else {
+                            return Err(Error::new(502, "bucket_create_failed"));
+                        }
                     }
                 }
             }

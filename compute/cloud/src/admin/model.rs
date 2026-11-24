@@ -50,6 +50,8 @@ pub struct Service {
     pub owner: String,
     pub bucket_adopted: bool,
     pub bucket_checked: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub bucket_generated: bool,
     pub last_activated_version: Option<u64>,
     pub last_reconcile: Option<Value>,
     pub pending_job_id: Option<String>,
@@ -377,7 +379,7 @@ pub struct Lease {
 pub struct Provision {
     pub token: String,
     pub service_id: String,
-    #[serde(alias = "fos_bucket_name")]
+    #[serde(default, alias = "fos_bucket_name")]
     pub fos_bucket: String,
     pub fos_region: String,
     #[serde(default)]
@@ -758,6 +760,7 @@ mod tests {
                     owner: "fixture-owner".into(),
                     bucket_adopted: true,
                     bucket_checked: true,
+                    bucket_generated: false,
                     last_activated_version: Some(1),
                     last_reconcile: None,
                     pending_job_id: None,

@@ -589,6 +589,15 @@ sub vcl_deliver {
   #RATELIMIT_END
   if (fastly.ff.visits_this_service == 0) {
     unset resp.http.x-flp-auth-fail;
+    unset resp.http.Surrogate-Key;
+    unset resp.http.x-flp-fos-bucket;
+    unset resp.http.x-flp-fos-region;
+    unset resp.http.x-flp-fos-service;
+    unset resp.http.x-flp-tick-ttl;
+    unset resp.http.x-flp-worker-key;
+    unset resp.http.x-flp-clock-secret;
+    unset resp.http.x-flp-shell;
+    unset resp.http.x-compress-hint;
     if (req.http.x-flp-shell == "admin" && resp.status == 200 && resp.http.Content-Type ~ "^text/(html|plain)") {
       set resp.http.Vary = "Cookie";
     }

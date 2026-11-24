@@ -114,9 +114,17 @@ fn attach_alongside(other_has_rum: bool) {
         validated["capture"],
         json!({"mode":"attached","missing_fields":[],"rum_present":other_has_rum,"cmcd_present":false})
     );
-    assert_eq!(
-        validated["defaults"]["fos_bucket_name"],
-        "fos-fixtureservice-cloud-logs"
+    let default_bucket = validated["defaults"]["fos_bucket_name"]
+        .as_str()
+        .expect("default fos_bucket_name should be a string");
+    assert!(
+        default_bucket.starts_with("fla-")
+            && default_bucket.len() == 28
+            && default_bucket[4..]
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            && !default_bucket.contains("fixtureservice"),
+        "expected opaque CSPRNG bucket name without service_id, got {default_bucket}"
     );
     assert_eq!(validated["defaults"]["fos_region"], "us-east-1");
 

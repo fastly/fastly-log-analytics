@@ -752,11 +752,13 @@ fn scoring_service_name(sid: &str) -> String {
     format!("Session Scoring Service for {sid}")
 }
 
-fn scoring_domain(sid: &str) -> String {
-    format!(
-        "fos-{}-session-scorer.edgecompute.app",
-        sid.to_ascii_lowercase()
-    )
+const MAX_SCORING_DOMAIN_COLLISION_ATTEMPTS: usize = 5;
+
+pub fn opaque_scoring_domain(runtime: &impl Runtime) -> Result<String, Error> {
+    let bytes = runtime
+        .random()
+        .map_err(|_| Error::new(503, "random_unavailable"))?;
+    Ok(format!("fla-{}.edgecompute.app", hex::encode(&bytes[..12])))
 }
 
 fn keys_store_name(scorer_sid: &str) -> String {
@@ -1326,10 +1328,56 @@ fn ensure_scorer_service_step(
         }
     }
     check_entitlement(context, token, "kv_store", "kv_store_not_enabled")?;
+    let mut current_record = record.clone();
     let name = scoring_service_name(&service.service_id);
-    let domain = scoring_domain(&service.service_id);
+    let mut domain = service
+        .scoring
+        .as_ref()
+        .map(|s| s.scoring_domain.trim())
+        .filter(|d| !d.is_empty())
+        .map(str::to_owned);
+    if domain.is_none() {
+        let minted = opaque_scoring_domain(context.runtime)?;
+        let mut sc = service.scoring.clone().unwrap_or_default();
+        sc.scoring_domain = minted.clone();
+        service.scoring = Some(sc);
+        checkpoint_scoring_job_service(
+            context,
+            &current_record,
+            service,
+            job,
+            "scoring.domain_assigned",
+            "scorer_service",
+        )?;
+        current_record = context
+            .get(&format!("svc:{}", service.service_id))?
+            .ok_or_else(|| Error::new(503, "state_unavailable"))?;
+        domain = Some(minted);
+    }
+    let mut domain = domain.unwrap_or_default();
+    let existing_scorer_sid = service
+        .scoring
+        .as_ref()
+        .map(|s| s.scoring_service_id.trim())
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
     let services = context.api("GET", "/service", token, None)?;
-    let existing = list(&services)?.iter().find(|s| s["name"] == name).cloned();
+    let existing = existing_scorer_sid
+        .as_deref()
+        .and_then(|sid| {
+            list(&services)
+                .ok()?
+                .iter()
+                .find(|s| s["id"].as_str() == Some(sid))
+                .cloned()
+        })
+        .or_else(|| {
+            list(&services)
+                .ok()?
+                .iter()
+                .find(|s| s["name"] == name)
+                .cloned()
+        });
     let (scorer_sid, v1_unlocked) = if let Some(svc) = existing {
         let sid = required(&svc, "id")?.to_owned();
         let encoded_sid = encode(&sid);
@@ -1378,20 +1426,52 @@ fn ensure_scorer_service_step(
             token,
             None,
         )?;
-        let has_domain = list(&domains)?
+        let existing_domain = list(&domains)?
             .iter()
-            .any(|d| d["name"].as_str() == Some(domain.as_str()));
-        if !has_domain {
-            if context.remaining_calls() < 8 {
-                return budget_yield(progressed);
-            }
-            let (status, _) = context.api_status(
-                "POST",
-                &format!("/service/{encoded_sid}/version/1/domain"),
-                token,
-                Some(json!({"name": domain})),
-            )?;
-            if !(200..300).contains(&status) && status != 409 {
+            .filter_map(|d| d["name"].as_str())
+            .find(|d| valid_scoring_domain(d))
+            .map(str::to_owned);
+        if let Some(existing_domain) = existing_domain {
+            domain = existing_domain;
+        } else {
+            let mut attached = false;
+            for attempt in 0..MAX_SCORING_DOMAIN_COLLISION_ATTEMPTS {
+                if context.remaining_calls() < 8 {
+                    return budget_yield(progressed);
+                }
+                let (status, _) = context.api_status(
+                    "POST",
+                    &format!("/service/{encoded_sid}/version/1/domain"),
+                    token,
+                    Some(json!({"name": domain})),
+                )?;
+                if (200..300).contains(&status) {
+                    progressed = true;
+                    attached = true;
+                    break;
+                }
+                if status == 409 {
+                    if attempt + 1 == MAX_SCORING_DOMAIN_COLLISION_ATTEMPTS {
+                        return Err(Error::new(409, "scoring_domain_collision"));
+                    }
+                    domain = opaque_scoring_domain(context.runtime)?;
+                    let mut sc = service.scoring.clone().unwrap_or_default();
+                    sc.scoring_domain = domain.clone();
+                    service.scoring = Some(sc);
+                    checkpoint_scoring_job_service(
+                        context,
+                        &current_record,
+                        service,
+                        job,
+                        "scoring.domain_rotated",
+                        "scorer_service",
+                    )?;
+                    current_record = context
+                        .get(&format!("svc:{}", service.service_id))?
+                        .ok_or_else(|| Error::new(503, "state_unavailable"))?;
+                    progressed = true;
+                    continue;
+                }
                 return Err(Error::new(
                     if status == 401 || status == 403 {
                         403
@@ -1401,7 +1481,9 @@ fn ensure_scorer_service_step(
                     "fastly_api_rejected",
                 ));
             }
-            progressed = true;
+            if !attached {
+                return Err(Error::new(409, "scoring_domain_collision"));
+            }
         }
         let backends = context.api(
             "GET",
@@ -1454,7 +1536,7 @@ fn ensure_scorer_service_step(
     service.scoring = Some(sc);
     checkpoint_scoring_job_service(
         context,
-        record,
+        &current_record,
         service,
         job,
         "scoring.scorer_service",
@@ -3147,6 +3229,15 @@ pub fn route(
                 reconcile::verify_managed_customer_vcl_ownership(context, &service, &token)?;
             if service_has_scoring_pragmas_at_version(context, sid, active, &token) == Some(false) {
                 return Err(Error::new(409, "missing_scoring_pragmas"));
+            }
+            let has_persisted_domain = service
+                .scoring
+                .as_ref()
+                .is_some_and(|sc| !sc.scoring_domain.trim().is_empty());
+            if !has_persisted_domain {
+                let mut sc = service.scoring.clone().unwrap_or_default();
+                sc.scoring_domain = opaque_scoring_domain(context.runtime)?;
+                service.scoring = Some(sc);
             }
             let mut job = new_job(context, actor, &service, "scoring_enable", false, true)?;
             job.step = "scorer_service".into();
