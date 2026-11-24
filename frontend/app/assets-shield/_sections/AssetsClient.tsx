@@ -98,19 +98,6 @@ export function AssetsReportContent({
     return unwrapClient(client.POST('/api/assets/aggregates', { signal, body }))
   }
 
-  // The URL tables always read raw rows, so in Cloud they wait until their panel nears the viewport.
-  const hotspotsRef = React.useRef<HTMLDivElement>(null)
-  const hotspotsNear = useInViewOnce(hotspotsRef, { rootMargin: '600px' })
-  const bundle = useAnalyticsReportQuery<AssetsAggregates | undefined>({
-    namespace: ['assets', 'aggregates'],
-    serviceId: activeServiceId,
-    filterPayload,
-    range,
-    keyParts: rollupFirst ? [ASSETS_RAW_SECTIONS] : [],
-    queryOptions: { enabled: !rollupFirst || hotspotsNear },
-    queryFn: ({ rangeBody, signal }) => postAssets(rollupFirst ? ASSETS_RAW_SECTIONS : undefined, rangeBody, signal),
-  })
-
   const rollupQuery = useAnalyticsReportQuery<AssetsAggregates | undefined>({
     namespace: ['assets', 'aggregates', 'rollup'],
     serviceId: activeServiceId,
@@ -118,6 +105,19 @@ export function AssetsReportContent({
     range,
     queryOptions: { enabled: rollupFirst },
     queryFn: ({ rangeBody, signal }) => postAssets(ASSETS_ROLLUP_SECTIONS, rangeBody, signal),
+  })
+
+  // The URL tables always read raw rows, so in Cloud they wait until summaries paint and their panel enters the viewport.
+  const hotspotsRef = React.useRef<HTMLDivElement>(null)
+  const hotspotsNear = useInViewOnce(hotspotsRef, { rootMargin: '0px' })
+  const bundle = useAnalyticsReportQuery<AssetsAggregates | undefined>({
+    namespace: ['assets', 'aggregates'],
+    serviceId: activeServiceId,
+    filterPayload,
+    range,
+    keyParts: rollupFirst ? [ASSETS_RAW_SECTIONS] : [],
+    queryOptions: { enabled: !rollupFirst || (rollupQuery.isSuccess && hotspotsNear) },
+    queryFn: ({ rangeBody, signal }) => postAssets(rollupFirst ? ASSETS_RAW_SECTIONS : undefined, rangeBody, signal),
   })
 
   const summaryQuery = rollupFirst ? rollupQuery : bundle

@@ -118,12 +118,12 @@ describe('AssetsClient on Cloud', () => {
     expect(await screen.findByText('No uncompressed static assets detected! Nice work.')).toBeInTheDocument()
   })
 
-  it('observes hotspots against the nearest overflow-auto scroll container so rootMargin works inside AppLayout main', async () => {
+  it('observes hotspots against the nearest overflow-auto scroll container with 0px rootMargin', async () => {
     setCloudModeRuntime(true)
-    const observedRoots: Array<Element | Document | null | undefined> = []
+    const observed: Array<IntersectionObserverInit | undefined> = []
     class RecordingObserver {
       constructor(_cb: IntersectionObserverCallback, options?: IntersectionObserverInit) {
-        observedRoots.push(options?.root)
+        observed.push(options)
       }
       observe() {}
       disconnect() {}
@@ -141,7 +141,25 @@ describe('AssetsClient on Cloud', () => {
     expect(await screen.findByText('4,321 reqs')).toBeInTheDocument()
     const mainEl = container.querySelector('main#main')
     expect(mainEl).not.toBeNull()
-    expect(observedRoots).toContain(mainEl)
+    expect(observed).toContainEqual(expect.objectContaining({ root: mainEl, rootMargin: '0px' }))
+  })
+
+  it('waits for the rollup summary to succeed before reading raw URL hotspots even if already in view', async () => {
+    setCloudModeRuntime(true)
+    const observer = stubIntersectionObserver()
+    let answerSummary: (body: unknown) => void = () => {}
+    const summary = new Promise((resolve) => { answerSummary = resolve })
+    const sections = recordPosts('/api/assets/aggregates', (asked) => asked?.includes('summary') ? summary : never())
+    renderBootstrapped(<AssetsClient />, { withNuqs: true })
+
+    await waitFor(() => expect(sections).toEqual([['summary']]))
+    act(() => observer.fire(true))
+    await Promise.resolve()
+    expect(sections).toEqual([['summary']])
+
+    answerSummary({ ...assetsSummary, rollup: meta })
+    expect(await screen.findByText('4,321 reqs')).toBeInTheDocument()
+    await waitFor(() => expect(sections).toEqual([['summary'], ['large_uncompressed_assets', 'low_ttl_assets']]))
   })
 
   it('names the asset fields the service log settings leave off, whatever the response says', async () => {
