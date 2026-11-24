@@ -16,6 +16,9 @@ import { SkeletonGrid } from '@/components/ui/skeleton'
 import { useIsDataReady } from '@/hooks/useBootstrap'
 import type { ReportConfiguration } from '@/hooks/useDashboardCards'
 import { adminFetch, client, unwrapClient } from '@/lib/api'
+import { estimateLogLineBytes, type LogFieldsCatalogLike } from '@/lib/apiLogFields'
+import type { LogFieldsConfig } from '@/types/api'
+import { queryKeys } from '@/lib/apiQueryKeys'
 import type { ChartInterval } from '@/lib/utils'
 import { useServiceStore } from '@/stores/filterStore'
 import {
@@ -223,6 +226,34 @@ export function UsagePageContent({
 
   const cloudMode = isCloudMode()
 
+  const { data: cloudLogFields } = useQuery({
+    queryKey: ['usage', 'cloud-log-fields', activeServiceId],
+    queryFn: async ({ signal }) => {
+      return unwrapClient(client.GET('/api/services/{service_id}/log-fields', {
+        params: { path: { service_id: activeServiceId! } },
+        signal,
+      }))
+    },
+    enabled: isReady && cloudMode && estimatorVisible && Boolean(activeServiceId),
+    staleTime: 5 * 60_000,
+  })
+
+  const { data: cloudLogFieldsCatalog } = useQuery({
+    queryKey: queryKeys.logFieldsCatalog(activeServiceId ?? undefined),
+    queryFn: async ({ signal }) => {
+      return unwrapClient(client.GET('/api/log-fields/catalog', { signal }))
+    },
+    enabled: isReady && cloudMode && estimatorVisible && Boolean(activeServiceId),
+    staleTime: 5 * 60_000,
+  })
+
+  const cloudEstimatedBytesPerLine = cloudMode
+    ? estimateLogLineBytes(
+        cloudLogFields?.log_fields as LogFieldsConfig | undefined,
+        cloudLogFieldsCatalog as LogFieldsCatalogLike,
+      )
+    : null
+
   const storageWithMeta = storage as StorageUsageData | undefined
   const opsWithMeta = ops as (typeof ops & {
     source?: string
@@ -367,6 +398,7 @@ export function UsagePageContent({
               key={activeServiceId}
               prefillData={cloudPrefill}
               rates={prefillRates}
+              estimatedBytesPerLine={cloudEstimatedBytesPerLine}
               localStorageGbHours={localStorageGbHours}
               localStoragePeriodHours={localStoragePeriodHours}
             />

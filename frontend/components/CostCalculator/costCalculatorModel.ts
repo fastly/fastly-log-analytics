@@ -70,7 +70,7 @@ export type CalcAction =
 
 export const DEFAULTS: CalcState = {
   reqDay: 1_000_000, sampleRate: SERVICE_DEFAULTS.sampleRatePercent, edgeOnly: true, edgeReqDay: 800_000, rumBeaconsDay: 0,
-  logPeriod: SERVICE_DEFAULTS.logPeriodSeconds, bytesPerLine: 500,
+  logPeriod: SERVICE_DEFAULTS.logPeriodSeconds, bytesPerLine: 1320,
   logNodes: 1, userEditedNodes: false,
   logsChecksPerDay: 2,
   cdnEnabled: true, retentionDays: SERVICE_DEFAULTS.logRetentionDays, rumRetentionDays: SERVICE_DEFAULTS.rumRetentionDays,
@@ -119,7 +119,7 @@ export function reducer(state: CalcState, action: CalcAction): CalcState {
         reqDay: req,
         edgeReqDay: edgeReq,
         logPeriod: lp,
-        bytesPerLine: DEFAULTS.bytesPerLine,
+        bytesPerLine: p.estimated_bytes_per_line != null ? Math.max(10, Math.round(p.estimated_bytes_per_line)) : DEFAULTS.bytesPerLine,
         rumBeaconsDay: p.rum_beacons_per_day ?? state.rumBeaconsDay,
         ...(p.edge_only != null && { edgeOnly: p.edge_only }),
         ...(p.delete_after != null && { deleteLogs: p.delete_after }),

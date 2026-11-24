@@ -93,6 +93,17 @@ describe('Cloud cost calculator', () => {
     expect(storage()).not.toBe(before)
   })
 
+  it('uses configured-fields estimatedBytesPerLine and scales storage accordingly', () => {
+    const { rerender } = render(<CloudCostCalculator />)
+    const defaultField = screen.getByRole('spinbutton', { name: 'Average bytes per log line' })
+    expect(defaultField).toHaveValue(1320)
+    const defaultStorage = screen.getByText('Object Storage').closest('[data-estimate-line]')!.textContent
+
+    rerender(<CloudCostCalculator estimatedBytesPerLine={2640} />)
+    expect(screen.getByRole('spinbutton', { name: 'Average bytes per log line' })).toHaveValue(2640)
+    expect(screen.getByText('Object Storage').closest('[data-estimate-line]')!.textContent).not.toBe(defaultStorage)
+  })
+
   it('scales edge requests with total requests for edge-only logging', () => {
     render(<CloudCostCalculator prefillData={{ inputs: { ...DEFAULT_INPUTS, edgeOnly: true } }} />)
     const total = screen.getByText('Total Estimated Monthly Cost').parentElement?.nextElementSibling

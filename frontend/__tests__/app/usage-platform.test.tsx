@@ -215,6 +215,14 @@ describe('observed Platform usage', () => {
       .toBe(reference)
   })
 
+  it('prefills High-Scale line size from configured log fields and defaults to 1320 B matching Cloud', () => {
+    const { rerender } = render(<CostCalculator />)
+    expect(screen.getByRole('spinbutton', { name: 'Average bytes per log line' })).toHaveValue(1320)
+
+    rerender(<CostCalculator prefillData={{ estimated_bytes_per_line: 2450, avg_log_file_size_kb: 999 } as never} />)
+    expect(screen.getByRole('spinbutton', { name: 'Average bytes per log line' })).toHaveValue(2450)
+  })
+
   it('lets users switch the High-Scale Cloud snapshot interval and updates DR state snapshots and total cost', () => {
     render(<CostCalculator />)
     const group = screen.getByRole('group', { name: 'Cloud snapshot interval' })

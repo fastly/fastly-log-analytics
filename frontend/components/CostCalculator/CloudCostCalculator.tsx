@@ -161,10 +161,11 @@ function zoneForRate(rate: number): BillingZone {
   return 'MBZ200'
 }
 
-export function CloudCostCalculator({ prefillData, prefillNote, rates: configuredRates }: {
+export function CloudCostCalculator({ prefillData, prefillNote, rates: configuredRates, estimatedBytesPerLine }: {
   prefillData?: Partial<MeasuredEstimate>
   prefillNote?: string
   rates?: Partial<Record<keyof EstimateRates, number | null>>
+  estimatedBytesPerLine?: number | null
   localStorageGbHours?: number | null
   localStoragePeriodHours?: number | null
 }) {
@@ -175,6 +176,14 @@ export function CloudCostCalculator({ prefillData, prefillNote, rates: configure
   const [selectedZone, setSelectedZone] = useState<BillingZone | null>(null)
 
   const base: EstimateInputs = { ...DEFAULT_INPUTS }
+  if (estimatedBytesPerLine != null && estimatedBytesPerLine > 0) {
+    const defaultLineBytes = DEFAULT_INPUTS.gzBytesPerLine * DEFAULT_INPUTS.rawBytesPerGzByte
+    if (defaultLineBytes > 0) {
+      const scale = estimatedBytesPerLine / defaultLineBytes
+      base.gzBytesPerLine = DEFAULT_INPUTS.gzBytesPerLine * scale
+      base.parquetBytesPerRow = DEFAULT_INPUTS.parquetBytesPerRow * scale
+    }
+  }
   const prefillInputs = prefillData?.inputs
   if (prefillInputs) {
     if (prefillInputs.requestsPerDay !== undefined) base.requestsPerDay = prefillInputs.requestsPerDay

@@ -163,6 +163,31 @@ export function estimateLogFieldBytesPerLine(
   return total;
 }
 
+/** Matches backend `estimate_log_line_bytes` (field bytes + JSON framing + enabled custom fields). */
+export function estimateLogLineBytes(
+  config: LogFieldsConfig | undefined,
+  catalog: LogFieldsCatalogLike,
+): number | null {
+  if (!catalog?.fields || catalog.fields.length === 0) return null;
+  const enabledGroups = new Set(config?.groups || []);
+  const overrides = config?.field_overrides || {};
+  let fieldBytes = 0;
+  let enabledCount = 0;
+  for (const field of catalog.fields) {
+    const inGroup = field.group === null || enabledGroups.has(field.group);
+    const override = overrides[field.id];
+    const isEnabled = override === true || (override !== false && inGroup);
+    if (!isEnabled) continue;
+    enabledCount += 1;
+    fieldBytes += field.typical_bytes || 0;
+  }
+  const customEnabled = (config?.custom_fields ?? []).filter((cf) => cf.enabled !== false);
+  for (const cf of customEnabled) {
+    fieldBytes += Math.max(0, Number(cf.bytes_estimate) || 0);
+  }
+  return 2 + (enabledCount + customEnabled.length) * 5 + fieldBytes;
+}
+
 export function evaluateLogFieldPresetSummary(
   config: LogFieldsConfig | undefined,
   catalog: LogFieldsCatalogLike,
