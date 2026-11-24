@@ -10,6 +10,7 @@ export type LoadingState = {
 
 const stages: LoadingStage[] = ["session", "range", "listing", "files"];
 const jobs = new Map<symbol, LoadingState>();
+const completedBatchProgress: RunProgress[] = [];
 const listeners = new Set<() => void>();
 let snapshot: LoadingState | null = null;
 let hasResults = false;
@@ -17,10 +18,16 @@ let hasResults = false;
 function publish(): void {
   const active = [...jobs.values()];
   if (!active.length) {
+    completedBatchProgress.length = 0;
     snapshot = null;
   } else {
-    const stage = stages.find((stage) => active.some((job) => job.stage === stage))!;
-    const progress = active.flatMap((job) => job.progress ? [job.progress] : []);
+    const activeProgress = active.flatMap((job) => job.progress ? [job.progress] : []);
+    const progress = [...activeProgress, ...completedBatchProgress];
+    // Once any job in the active batch is reading files, keep the popup on "files"
+    // so late-arriving "listing" jobs don't flicker the card back to stage 3/4.
+    const stage = progress.length > 0
+      ? "files"
+      : stages.find((stage) => active.some((job) => job.stage === stage))!;
     snapshot = {
       stage,
       refreshing: active.some((job) => job.refreshing),
@@ -51,6 +58,7 @@ export const cloudLoadingStore = {
   getServerSnapshot: (): null => null,
   reset(): void {
     jobs.clear();
+    completedBatchProgress.length = 0;
     hasResults = false;
     publish();
   },
@@ -75,11 +83,10 @@ export function beginCloudLoading(
       if (!current) return;
       if (success && current.stage === "files") hasResults = true;
       jobs.delete(id);
-      // Analyses wait on their file read; once it lands they are aggregating, not starting over.
-      if (success && current.stage === "files" && current.progress) {
-        for (const [other, job] of jobs) {
-          if (job.stage === "files" && !job.progress) jobs.set(other, { ...job, progress: { ...current.progress, phase: "aggregate" } });
-        }
+      // Retain completed file totals while sibling jobs remain active so counts never drop backwards
+      // and waiting analyses transition smoothly to aggregation.
+      if (success && current.stage === "files" && current.progress && jobs.size > 0) {
+        completedBatchProgress.push({ ...current.progress, phase: "aggregate" });
       }
       publish();
     },

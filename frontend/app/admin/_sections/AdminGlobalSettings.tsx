@@ -320,9 +320,9 @@ export const PricingSettings = () => {
                   />
                 )} />
               ) : (
-                <div aria-label={f.label} className={cn('h-8 flex items-center font-mono text-xs px-3 rounded-md bg-muted/40 border border-transparent', !currentVal && 'text-muted-foreground/60')}>
+                <output id={inputId} className={cn('h-8 flex items-center font-mono text-xs px-3 rounded-md bg-muted/40 border border-transparent', !currentVal && 'text-muted-foreground/60')}>
                   {currentVal}
-                </div>
+                </output>
               )}
             </div>
           )

@@ -568,7 +568,7 @@ describe("usage audit fixes", () => {
     expect(DEFAULT_UNITS.fosClassAPerFile).not.toBe(3);
   });
 
-  it("keeps SE-demo Class A spend realistic (~$3-4/mo, not $25-70)", () => {
+  it("keeps low-volume Class A spend realistic (~$3-4/mo, not $25-70)", () => {
     // SE demo: 200k req/day, 60 s log period, 25 writing POPs.
     const seDemo = {
       ...DEFAULT_INPUTS,

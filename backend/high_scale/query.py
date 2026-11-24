@@ -4932,7 +4932,7 @@ _CONSOLE_PII_CAMEL_RE_2 = re.compile(r"([A-Z]+)([A-Z][a-z])")
 _CONSOLE_PII_SPLIT_OUTER_RE = re.compile(r"[\[\]/:]+")
 _CONSOLE_PII_SPLIT_ALL_RE = re.compile(r"[.\[\]/:]+")
 _CONSOLE_ARRAY_ELEM_PII_RE = re.compile(
-    r"arrayelement\(\s*(?:(?:[A-Za-z_][A-Za-z0-9_]*|\"(?:[^\"]|\"\")*\"|`(?:[^`]|``)*`)\s*\.\s*)*(?:custom_fields|cmcd)\s*,\s*'([^']+)'\s*\)",
+    rf"arrayelement\(\s*(?:(?:{SAFE_IDENT_RE.pattern}|\"(?:[^\"]|\"\")*\"|`(?:[^`]|``)*`)\s*\.\s*)*(?:custom_fields|cmcd)\s*,\s*'([^']+)'\s*\)",
     re.IGNORECASE,
 )
 _CONSOLE_AFFIX_PREFIX_RE = re.compile(

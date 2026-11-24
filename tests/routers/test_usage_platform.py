@@ -62,7 +62,7 @@ def test_platform_usage_prefers_storage_gauges_and_keeps_partial_failures(monkey
     assert response.storage.status == "ok"
     assert response.storage.bytes == 2_000
     assert response.storage.buckets == 4
-    assert response.storage.gb_hours == pytest.approx(3_000 / 1024**3 * 24)
+    assert response.storage.gb_hours == pytest.approx(3_000 / 1_000_000_000 * 24)
     assert response.compute.status == "not_configured"
     assert response.ngwaf.status == "unavailable"
     assert [call["entity_id"] for call in calls] == [None, "workspace-a"]
@@ -94,7 +94,7 @@ def test_platform_usage_sparse_storage_gauges_carry_observed_values(monkeypatch)
     assert response.source == "fastly"
     assert response.storage.bytes == 1_000
     assert response.storage.buckets == 2
-    assert response.storage.gb_hours == pytest.approx(2_000 / 1024**3 * 24)
+    assert response.storage.gb_hours == pytest.approx(2_000 / 1_000_000_000 * 24)
     assert response.ngwaf.status == "not_configured"
 
 

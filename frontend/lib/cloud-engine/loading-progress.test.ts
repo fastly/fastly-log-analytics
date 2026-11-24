@@ -82,6 +82,22 @@ describe("cloud loading progress", () => {
     nextSession.finish(false);
   });
 
+  it("retains completed job totals while sibling jobs run and never regresses from files to listing", () => {
+    const first = beginCloudLoading("listing");
+    const second = beginCloudLoading("listing");
+    first.update({ stage: "files", progress: { ...progress, toFetch: 10, toDecode: 0, done: 10 } });
+    // Even while `second` is still in "listing", stage stays on "files" so the card does not jump.
+    expect(cloudLoadingStore.getSnapshot()?.stage).toBe("files");
+    second.update({ stage: "files", progress: { ...progress, toFetch: 20, toDecode: 0, done: 5 } });
+    first.finish(true);
+    expect(cloudLoadingStore.getSnapshot()).toMatchObject({
+      stage: "files",
+      progress: { phase: "files", toFetch: 30, done: 15 },
+    });
+    second.finish(true);
+    expect(cloudLoadingStore.getSnapshot()).toBeNull();
+  });
+
   it("publishes each loading change for readiness diagnostics in Cloud mode", () => {
     setCloudModeRuntime(true);
     const events: unknown[] = [];

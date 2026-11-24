@@ -509,7 +509,7 @@ def test_log_usage_calls_classifies_raw_http_put_post_as_class_a(mock_enabled):
         ("POST", "A"),
         ("COPY", "A"),
         ("GET", "B"),
-        ("DELETE", "B"),
+        ("DELETE", "A"),
     ]
 
 

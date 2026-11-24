@@ -72,17 +72,19 @@ export async function fetchEstimatePrefill(
       }
       return null;
     });
-  const settings = await fetchUsageSettings(signal);
-  assertOpsEpoch(startOpsEpoch, signal);
-  const [traffic, billing, runs, fos, files] = await Promise.all([
+  const settingsPromise = fetchUsageSettings(signal);
+  const [settings, traffic, billing, runs, fos, files] = await Promise.all([
+    settingsPromise,
     optional(getLoggedTraffic(signal)),
     optional(fetchComputeBilling(range, signal)),
     optional(fetchUsageKind("cron_runs", range, resolvedIdentity, read, signal)),
-    settings.enabled
-      ? optional(
-          fetchUsageKind("fos_usage", range, resolvedIdentity, read, signal),
-        )
-      : Promise.resolve(null),
+    settingsPromise.then((s) =>
+      s.enabled
+        ? optional(
+            fetchUsageKind("fos_usage", range, resolvedIdentity, read, signal),
+          )
+        : null,
+    ),
     optional(read("ingest_files", iso, { ...resolvedIdentity, signal })),
   ]);
   assertOpsEpoch(startOpsEpoch, signal);
