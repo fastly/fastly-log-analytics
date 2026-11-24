@@ -1633,6 +1633,10 @@ _IN_PREFIX_PREV_KEYWORDS = frozenset(
         "LIMIT",
         "OFFSET",
         "FETCH",
+        "FIRST",
+        "NEXT",
+        "STEP",
+        "STALENESS",
         "RETURN",
         "SET",
         "VALUES",
@@ -2364,6 +2368,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
             "map": {},
             "on_op": {},
             "fact": {},
+            "clause_open": {},
         }
         _lex_meta_cache[id(tokens)] = (
             tokens,
@@ -2632,42 +2637,83 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 and not _is_non_kw_lex_pos(tokens, sig_list[s_pos - 1])
             )
         if wu in _AS_CLAUSE_OPENING_WORDS:
-            if s_pos == 0:
-                return True
-            if _is_select_head_modifier_end_lex(tokens, s_pos - 1, sig_list):
-                return False
-            prev_idx = sig_list[s_pos - 1]
-            prev_k, prev_t = tokens[prev_idx]
-            if (prev_k == "OTHER" and not _is_postfix_factorial_lex(tokens, s_pos - 1, sig_list)) or (
-                prev_k == "OP" and prev_t not in (")", "]", "}", ";")
+            return _is_clause_open_word_lex(tokens, s_pos, sig_list)
+        return False
+
+    def _is_clause_open_word_lex(tokens: list[tuple[str, str]], s_pos: int, sig_list: list[int]) -> bool:
+        _, _, _, _, _, _, case_state = _get_lex_meta_entry(tokens)
+        co_memo: dict[int, bool] = case_state["clause_open"]
+        if s_pos in co_memo:
+            return co_memo[s_pos]
+        cur_s = s_pos
+        while cur_s > 0:
+            if (cur_s - 1) in co_memo:
+                break
+            prev_i = sig_list[cur_s - 1]
+            prev_k, prev_t = tokens[prev_i]
+            if (
+                prev_k == "IDENT"
+                and prev_t.upper() in _AS_CLAUSE_OPENING_WORDS
+                and not _is_non_kw_lex_pos(tokens, prev_i)
+                and not (prev_t.upper() == "FROM" and _is_lex_distinct_from(tokens, cur_s - 1, sig_list))
             ):
-                return False
-            if prev_k == "IDENT" and not _is_non_kw_lex_pos(tokens, prev_idx):
+                cur_s -= 1
+                continue
+            break
+        if cur_s > 0 and (cur_s - 1) in co_memo:
+            cur_val = not co_memo[cur_s - 1]
+        elif cur_s == 0:
+            cur_val = True
+        else:
+            prev_idx = sig_list[cur_s - 1]
+            prev_k, prev_t = tokens[prev_idx]
+            cur_val = True
+            is_star_wildcard = (prev_k, prev_t) == ("OP", "*") and (
+                cur_s == 1
+                or tokens[sig_list[cur_s - 2]] == ("OP", ".")
+                or tokens[sig_list[cur_s - 2]] == ("OP", ",")
+                or (
+                    tokens[sig_list[cur_s - 2]][0] == "IDENT"
+                    and tokens[sig_list[cur_s - 2]][1].upper() in ("SELECT", "DISTINCT", "ALL")
+                    and not _is_non_kw_lex_pos(tokens, sig_list[cur_s - 2])
+                )
+            )
+            if _is_select_head_modifier_end_lex(tokens, cur_s - 1, sig_list):
+                cur_val = False
+            elif (prev_k == "OTHER" and not _is_postfix_factorial_lex(tokens, cur_s - 1, sig_list)) or (
+                prev_k == "OP" and prev_t not in (")", "]", "}", ";") and not is_star_wildcard
+            ):
+                cur_val = False
+            elif prev_k == "IDENT" and not _is_non_kw_lex_pos(tokens, prev_idx):
                 pw = prev_t.upper()
-                if pw in ("SELECT", "FROM", "JOIN", "TABLE", "IN", "GLOBAL"):
-                    return False
-                if pw in ("DISTINCT", "ALL"):
+                if pw in ("IN", "GLOBAL"):
+                    cur_val = False
+                elif pw in ("DISTINCT", "ALL"):
                     is_setop_mod = (
-                        s_pos >= 2
-                        and tokens[sig_list[s_pos - 2]][0] == "IDENT"
-                        and tokens[sig_list[s_pos - 2]][1].upper() in ("UNION", "INTERSECT", "EXCEPT")
-                        and not _is_non_kw_lex_pos(tokens, sig_list[s_pos - 2])
+                        cur_s >= 2
+                        and tokens[sig_list[cur_s - 2]][0] == "IDENT"
+                        and tokens[sig_list[cur_s - 2]][1].upper() in ("UNION", "INTERSECT", "EXCEPT")
+                        and not _is_non_kw_lex_pos(tokens, sig_list[cur_s - 2])
                     )
                     if not is_setop_mod:
-                        return False
-                if _is_lex_prev_word_operator(tokens, s_pos - 1, sig_list, tokens[pos]):
+                        cur_val = False
+                elif _is_lex_prev_word_operator(tokens, cur_s - 1, sig_list, tokens[sig_list[cur_s]]):
                     is_bare_table_alias = (
-                        s_pos >= 3
-                        and tokens[sig_list[s_pos - 2]][0] in ("IDENT", "DQUOTE")
-                        and tokens[sig_list[s_pos - 3]][0] == "IDENT"
-                        and tokens[sig_list[s_pos - 3]][1].upper() in ("FROM", "JOIN")
-                        and not _is_non_kw_lex_pos(tokens, sig_list[s_pos - 3])
-                        and not _is_lex_distinct_from(tokens, s_pos - 3, sig_list)
+                        cur_s >= 3
+                        and tokens[sig_list[cur_s - 2]][0] in ("IDENT", "DQUOTE")
+                        and tokens[sig_list[cur_s - 3]][0] == "IDENT"
+                        and tokens[sig_list[cur_s - 3]][1].upper() in ("FROM", "JOIN")
+                        and not _is_non_kw_lex_pos(tokens, sig_list[cur_s - 3])
+                        and not _is_lex_distinct_from(tokens, cur_s - 3, sig_list)
                     )
                     if not is_bare_table_alias:
-                        return False
-            return True
-        return False
+                        cur_val = False
+        while True:
+            co_memo[cur_s] = cur_val
+            if cur_s >= s_pos:
+                return cur_val
+            cur_s += 1
+            cur_val = not cur_val
 
     def _is_non_kw_lex_pos(tokens: list[tuple[str, str]], idx: int) -> bool:
         if idx <= 0 or not _has_any_non_kw_sql:
@@ -4383,6 +4429,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
         inherited_ctes: dict[str, tuple[set[str], _DerivedCfSchema]],
         *,
         is_subquery: bool = False,
+        inherited_expr_ctes: dict[str, list[str]] | None = None,
     ) -> tuple[str, set[str], set[str], _DerivedCfSchema]:
         tokens, prefix_wrap_s, suffix_wrap_s = _peel_enclosing_parens(tokens)
 
@@ -4392,6 +4439,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
             return prefix_wrap_s + s + suffix_wrap_s
 
         ctes = dict(inherited_ctes)
+        branch_expr_ctes: dict[str, list[str]] = dict(inherited_expr_ctes) if inherited_expr_ctes else {}
         all_canonicals: set[str] = set()
         sig = _sig_indices(tokens)
         if not sig:
@@ -4429,8 +4477,8 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
             )
             _blocked_expr_cte_schemas = frozenset({"system", "information_schema", "pg_catalog"})
             _protected_tbl_names = frozenset(table_map.keys()) | frozenset(_FACT_DOMAINS.keys())
-            expr_cte_table_refs: dict[str, list[str]] = {}
-            _, _, _, with_match_by_tok, _, _ = _get_lex_meta(tokens)
+            expr_cte_table_refs = branch_expr_ctes
+            with_sig_list, with_sig_pos, _, with_match_by_tok, _, _ = _get_lex_meta(tokens)
 
             def _parse_lex_expr_table_ref(expr_slice: list[tuple[str, str]]) -> list[str] | None:
                 esig, _, _, _, ematch_s, _ = _get_lex_meta(expr_slice)
@@ -4441,6 +4489,12 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                     if lo_e < hi_e and expr_slice[esig[lo_e]] == ("OP", "(") and ematch_s.get(lo_e) == hi_e:
                         lo_e += 1
                         hi_e -= 1
+                        continue
+                    cur_lo = expr_slice[esig[lo_e]]
+                    if cur_lo == ("OP", "+") or (
+                        cur_lo[0] == "OTHER" and bool(cur_lo[1]) and cur_lo[1].strip("+") == ""
+                    ):
+                        lo_e += 1
                         continue
                     if (
                         hi_e - lo_e >= 2
@@ -4516,12 +4570,24 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                                             cl_sub = with_match_by_tok.get(aft_e, -1)
                                             if cl_sub > aft_e and _is_subquery_tokens(tokens[aft_e : cl_sub + 1]):
                                                 return k_e, al_e
-                        elif eu in _with_subq_heads and not _is_non_kw_lex_pos(tokens, k_e):
+                        elif (
+                            eu == "SELECT"
+                            and not _is_non_kw_lex_pos(tokens, k_e)
+                            and not _is_lex_dot_qualifier(tokens, with_sig_pos.get(k_e, -1), with_sig_list)
+                            and (
+                                k_e == start_tok_idx
+                                or (
+                                    (s_ke := with_sig_pos.get(k_e, -1)) <= 0
+                                    or not _is_lex_on_operator_tok(tokens, s_ke - 1, with_sig_list)
+                                )
+                            )
+                        ):
                             return None
                     k_e += 1
                 return None
 
             parsed_any_cte = False
+            expecting_cte_item = True
             while i_tok < len(tokens):
                 p = i_tok
                 while p < len(tokens) and tokens[p][0] in ("WS", "COMMENT"):
@@ -4570,7 +4636,10 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                             close_idx = _find_matching_paren(tokens, p2)
                             if _is_subquery_tokens(tokens[p2 + 1 : close_idx]):
                                 inner_sql, inner_domains, inner_canonicals, inner_schema = _rewrite_tokens(
-                                    tokens[p2 + 1 : close_idx], ctes, is_subquery=True
+                                    tokens[p2 + 1 : close_idx],
+                                    ctes,
+                                    is_subquery=True,
+                                    inherited_expr_ctes=expr_cte_table_refs,
                                 )
                                 if explicit_cte_cols is not None:
                                     inner_domains = _demote_col_list_domains(inner_domains)
@@ -4592,7 +4661,9 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                     if next_sig < len(tokens) and tokens[next_sig] == ("OP", ","):
                         buf.extend(tk for _, tk in tokens[i_tok : next_sig + 1])
                         i_tok = next_sig + 1
+                        expecting_cte_item = True
                         continue
+                    expecting_cte_item = False
                     break
 
                 expr_hit = _find_lex_expr_cte_as(p)
@@ -4606,9 +4677,22 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                             ref_parts = expr_cte_table_refs[ref_parts[0].lower()]
                         if len(ref_parts) > 3:
                             raise PermissionError("invalid table reference in WITH expression")
-                        if len(ref_parts) >= 2 and ref_parts[-2].lower() in _blocked_expr_cte_schemas:
+                        tbl_part_low = ref_parts[-1].strip().lower()
+                        if "/" in tbl_part_low or "\\" in tbl_part_low or "." in tbl_part_low:
+                            raise PermissionError(
+                                f"table name {ref_parts[-1]!r} contains path-like characters in console queries"
+                            )
+                        if tbl_part_low.startswith("pg_"):
+                            raise PermissionError(
+                                f"table {ref_parts[-1]!r} uses restricted prefix 'pg_' in console queries"
+                            )
+                        if len(ref_parts) >= 2 and ref_parts[-2].strip().lower() in _blocked_expr_cte_schemas:
                             raise PermissionError(
                                 f"restricted schema {ref_parts[-2]!r} is not allowed in console queries"
+                            )
+                        if len(ref_parts) == 3 and ref_parts[0].strip().lower() != "main":
+                            raise PermissionError(
+                                f"restricted catalog {ref_parts[0]!r} is not allowed in console queries"
                             )
                         if alias_low_e in _protected_tbl_names:
                             raise PermissionError(
@@ -4617,8 +4701,10 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                         expr_cte_table_refs[alias_low_e] = ref_parts
                     else:
                         expr_cte_table_refs.pop(alias_low_e, None)
-                    if _is_subquery_tokens(expr_slice):
-                        sub_e_sql, _, sub_e_canons, _ = _rewrite_tokens(expr_slice, ctes, is_subquery=True)
+                    if _has_enclosing_parens(expr_slice) is not None and _is_subquery_tokens(expr_slice):
+                        sub_e_sql, _, sub_e_canons, _ = _rewrite_tokens(
+                            expr_slice, ctes, is_subquery=True, inherited_expr_ctes=expr_cte_table_refs
+                        )
                     else:
                         sub_e_sql, _, sub_e_canons, _ = _rewrite_single_branch(expr_slice, ctes, is_subquery=True)
                     all_canonicals |= sub_e_canons
@@ -4626,15 +4712,21 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                     buf.append(sub_e_sql)
                     buf.extend(tk for _, tk in tokens[as_idx_e : alias_idx_e + 1])
                     i_tok = alias_idx_e + 1
+                    parsed_any_cte = True
                     next_sig = i_tok
                     while next_sig < len(tokens) and tokens[next_sig][0] in ("WS", "COMMENT"):
                         next_sig += 1
                     if next_sig < len(tokens) and tokens[next_sig] == ("OP", ","):
                         buf.extend(tk for _, tk in tokens[i_tok : next_sig + 1])
                         i_tok = next_sig + 1
+                        expecting_cte_item = True
                         continue
+                    expecting_cte_item = False
                     break
-                break
+                raise PermissionError("SQL parse error: invalid WITH clause item")
+
+            if expecting_cte_item:
+                raise PermissionError("SQL parse error: incomplete WITH clause")
 
             if parsed_any_cte:
                 out_prefix = "".join(buf)
@@ -4685,12 +4777,24 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                     ):
                         sep: list[tuple[str, str]] = [tokens[i_tok]]
                         j = i_tok + 1
-                        while j < len(tokens) and tokens[j][0] in ("WS", "COMMENT"):
-                            sep.append(tokens[j])
-                            j += 1
-                        if j < len(tokens) and tokens[j][0] == "IDENT" and tokens[j][1].upper() in ("ALL", "DISTINCT"):
-                            sep.append(tokens[j])
-                            j += 1
+                        while j < len(tokens):
+                            if tokens[j][0] in ("WS", "COMMENT"):
+                                sep.append(tokens[j])
+                                j += 1
+                            elif tokens[j][0] == "IDENT" and tokens[j][1].upper() in ("ALL", "DISTINCT"):
+                                sep.append(tokens[j])
+                                j += 1
+                            elif tokens[j][0] == "IDENT" and tokens[j][1].upper() == "BY":
+                                j_n = j + 1
+                                while j_n < len(tokens) and tokens[j_n][0] in ("WS", "COMMENT"):
+                                    j_n += 1
+                                if j_n < len(tokens) and tokens[j_n][0] == "IDENT" and tokens[j_n][1].upper() == "NAME":
+                                    sep.extend(tokens[j : j_n + 1])
+                                    j = j_n + 1
+                                else:
+                                    break
+                            else:
+                                break
                         branches.append((cur_branch, sep))
                         cur_branch = []
                         split_in_from = False
@@ -4817,8 +4921,17 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
         first_branch = True
         rendered_parts: list[str] = [out_prefix]
         for b_tokens, sep_tokens in branches:
-            if _has_enclosing_parens(b_tokens) is not None:
-                b_sql, b_domains, b_canonicals, b_schema = _rewrite_tokens(b_tokens, ctes, is_subquery=is_subquery)
+            b_sig = _sig_indices(b_tokens)
+            starts_with_cte = bool(
+                len(branches) > 1
+                and b_sig
+                and b_tokens[b_sig[0]][0] == "IDENT"
+                and b_tokens[b_sig[0]][1].upper() == "WITH"
+            )
+            if _has_enclosing_parens(b_tokens) is not None or starts_with_cte:
+                b_sql, b_domains, b_canonicals, b_schema = _rewrite_tokens(
+                    b_tokens, ctes, is_subquery=is_subquery, inherited_expr_ctes=branch_expr_ctes
+                )
             else:
                 b_sql, b_domains, b_canonicals, b_schema = _rewrite_single_branch(
                     b_tokens, ctes, is_subquery=is_subquery
@@ -5148,6 +5261,12 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 if lo < hi and processed[sig_idxs[lo]] == ("OP", "(") and proc_match_by_s.get(lo) == hi:
                     lo += 1
                     hi -= 1
+                    continue
+                cur_in_lo = processed[sig_idxs[lo]]
+                if cur_in_lo == ("OP", "+") or (
+                    cur_in_lo[0] == "OTHER" and bool(cur_in_lo[1]) and cur_in_lo[1].strip("+") == ""
+                ):
+                    lo += 1
                     continue
                 if (
                     hi - lo >= 2
@@ -6027,18 +6146,19 @@ _CONSOLE_EXTRA_IP_PII_KEYS = PII_IP_KEYS | frozenset(
     }
 )
 _CONSOLE_EXTRA_IP_NONWORD = frozenset(re.sub(r"[^a-z0-9]+", "", k.lower()) for k in _CONSOLE_EXTRA_IP_PII_KEYS)
-_CONSOLE_PII_WS_PY_CHARS = " \t\n\r\f\x0b\x85\u00a0\u1680\u2000-\u200b\u2028\u2029\u202f\u205f\u3000\ufeff"
+_CONSOLE_PII_WS_PY_CHARS = "\x00-\x1f \x7f\x85\u00a0\u1680\u180e\u2000-\u200d\u2028\u2029\u202f\u205f\u2060\u3000\ufeff"
 _CONSOLE_PII_WS_STRIP_CHARS = (
-    " \t\n\r\f\x0b\x85\u00a0\u1680"
-    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u200b"
-    "\u2028\u2029\u202f\u205f\u3000\ufeff"
+    "".join(chr(c) for c in range(0x20))
+    + " \x7f\x85\u00a0\u1680\u180e"
+    + "".join(chr(c) for c in range(0x2000, 0x200E))
+    + "\u2028\u2029\u202f\u205f\u2060\u3000\ufeff"
 )
-_CONSOLE_PII_CAMEL_IPV_RE = re.compile(r"IPv([46])")
+_CONSOLE_PII_CAMEL_IPV_RE = re.compile(r"IP[vV]([46])")
 _CONSOLE_PII_CAMEL_RE_1 = re.compile(r"([a-z0-9])([A-Z])")
 _CONSOLE_PII_CAMEL_RE_2 = re.compile(r"([A-Z]+)([A-Z][a-z])")
 _CONSOLE_PII_SPLIT_OUTER_RE = re.compile(f"[\\[\\]/:;|,&=?{_CONSOLE_PII_WS_PY_CHARS}]+")
 _CONSOLE_PII_SPLIT_ALL_RE = re.compile(f"[.\\[\\]/:;|,&=?{_CONSOLE_PII_WS_PY_CHARS}]+")
-_CONSOLE_PII_BRACKET_STRIP_RE = re.compile(r"\[['\"`]?[^'\"`\]]+['\"`]?\]")
+_CONSOLE_PII_BRACKET_STRIP_RE = re.compile(r"\[[^\[\]]*\]")
 _CONSOLE_PII_IPV_RE = re.compile(r"([a-z_])ipv[46](?:_|$)")
 _CONSOLE_ARRAY_ELEM_PII_RE = re.compile(
     rf"arrayelement\(\s*(?:(?:{SAFE_IDENT_RE.pattern}|\"(?:[^\"]|\"\")*\"|`(?:[^`]|``)*`)\s*\.\s*){{0,3}}(?:custom_fields|cmcd)\s*,\s*'([^']+)'\s*\)",
@@ -6051,7 +6171,16 @@ _CONSOLE_SUFFIX_RE = re.compile(r"(?:_v[0-9]+|_hash|_addr|_?[0-9]+)+$")
 
 
 def _normalize_console_pii_unicode(value: str) -> str:
-    return value.replace("\u0130", "i").replace("\u0307", "").replace("\u212a", "k")
+    return value.replace("\u0130", "I").replace("\u0307", "").replace("\u212a", "K")
+
+
+def _strip_console_pii_brackets(value: str) -> str:
+    cur = value
+    while True:
+        nxt = _CONSOLE_PII_BRACKET_STRIP_RE.sub("", cur)
+        if nxt == cur:
+            return cur
+        cur = nxt
 
 
 def _classify_console_pii_key(raw_key: Any) -> Literal["session", "ip"] | None:
@@ -6074,8 +6203,8 @@ def _classify_console_pii_key(raw_key: Any) -> Literal["session", "ip"] | None:
             .strip(_CONSOLE_PII_WS_STRIP_CHARS)
             .lower()
         )
-        raw_unbrack = _CONSOLE_PII_BRACKET_STRIP_RE.sub("", raw_lower).strip(_CONSOLE_PII_WS_STRIP_CHARS)
-        camel_unbrack = _CONSOLE_PII_BRACKET_STRIP_RE.sub("", camel).strip(_CONSOLE_PII_WS_STRIP_CHARS)
+        raw_unbrack = _strip_console_pii_brackets(raw_lower).strip(_CONSOLE_PII_WS_STRIP_CHARS)
+        camel_unbrack = _strip_console_pii_brackets(camel).strip(_CONSOLE_PII_WS_STRIP_CHARS)
         for base in (raw_lower, camel, raw_unbrack, camel_unbrack):
             if base:
                 candidates.append(base)
@@ -6090,13 +6219,17 @@ def _classify_console_pii_key(raw_key: Any) -> Literal["session", "ip"] | None:
         if seg in _CONSOLE_EXTRA_IP_PII_KEYS:
             matched_ip = True
         canon = re.sub(r"[^a-z0-9]+", "_", seg).strip("_")
-        if not canon:
+        nw_under = re.sub(r"[^a-z0-9_]+", "", seg)
+        if not canon and not nw_under:
             continue
-        ipv_norm = _CONSOLE_PII_IPV_RE.sub(r"\1ip_", canon).strip("_")
-        affix_stripped = _CONSOLE_AFFIX_PREFIX_RE.sub("", ipv_norm).strip("_")
-        no_suffix = _CONSOLE_SUFFIX_RE.sub("", ipv_norm).strip("_")
-        stripped = _CONSOLE_SUFFIX_RE.sub("", affix_stripped).strip("_")
-        for cand in (canon, ipv_norm, affix_stripped, no_suffix, stripped):
+        ipv_norm = _CONSOLE_PII_IPV_RE.sub(r"\1ip_", canon).strip("_") if canon else ""
+        affix_stripped = _CONSOLE_AFFIX_PREFIX_RE.sub("", ipv_norm).strip("_") if ipv_norm else ""
+        no_suffix = _CONSOLE_SUFFIX_RE.sub("", ipv_norm).strip("_") if ipv_norm else ""
+        stripped = _CONSOLE_SUFFIX_RE.sub("", affix_stripped).strip("_") if affix_stripped else ""
+        nw_ipv = _CONSOLE_PII_IPV_RE.sub(r"\1ip_", nw_under) if nw_under else ""
+        nw_affix = _CONSOLE_AFFIX_PREFIX_RE.sub("", nw_ipv).strip("_") if nw_ipv else ""
+        nw_stripped = _CONSOLE_SUFFIX_RE.sub("", nw_affix).strip("_") if nw_affix else ""
+        for cand in (canon, ipv_norm, affix_stripped, no_suffix, stripped, nw_affix, nw_stripped):
             if not cand:
                 continue
             nw = cand.replace("_", "")

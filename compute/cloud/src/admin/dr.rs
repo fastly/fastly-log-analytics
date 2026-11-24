@@ -407,22 +407,32 @@ fn validate_dr_views(
     Ok(())
 }
 
-fn validate_dr_catalog_head(head: &crate::ingest::catalog::Head, scope: &str) -> Result<(), Error> {
+fn is_foreign_svc_manifest_key(key: &str, expected_service_id: &str) -> bool {
+    let own_tag = format!("manifest-s-{expected_service_id}-rev-");
+    key.rsplit('/')
+        .next()
+        .is_some_and(|name| name.starts_with("manifest-s-") && !name.starts_with(&own_tag))
+}
+
+fn validate_dr_catalog_head(
+    head: &crate::ingest::catalog::Head,
+    scope: &str,
+    expected_service_id: &str,
+) -> Result<(), Error> {
     let catalog_prefix = format!("{scope}processed/_catalog/");
     let processed_prefix = format!("{scope}processed/");
-    if head
-        .manifest
-        .as_deref()
-        .is_some_and(|key| !safe_dr_object_key(key, &catalog_prefix))
-    {
+    if head.manifest.as_deref().is_some_and(|key| {
+        !safe_dr_object_key(key, &catalog_prefix)
+            || is_foreign_svc_manifest_key(key, expected_service_id)
+    }) {
         return Err(Error::new(400, "invalid_dr_catalog_head"));
     }
     for ev in &head.recent {
         if ev.cursor.chars().any(char::is_control)
-            || ev
-                .manifest
-                .as_deref()
-                .is_some_and(|key| !safe_dr_object_key(key, &catalog_prefix))
+            || ev.manifest.as_deref().is_some_and(|key| {
+                !safe_dr_object_key(key, &catalog_prefix)
+                    || is_foreign_svc_manifest_key(key, expected_service_id)
+            })
         {
             return Err(Error::new(400, "invalid_dr_catalog_head"));
         }
@@ -602,7 +612,7 @@ fn scan_catalog_head(
     service: &Service,
     creds: &(String, String),
     opts: CatalogScanOpts<'_>,
-) -> Result<(Option<ScannedHeadPair>, bool), Error> {
+) -> Result<(Option<ScannedHeadPair>, bool, bool), Error> {
     let CatalogScanOpts {
         reserve_calls,
         fallback_reserve_calls,
@@ -617,34 +627,88 @@ fn scan_catalog_head(
         expected_manifest,
         dr_head_gen,
     } = opts;
+    let opt_cat_floor = optional_manifest_reserve.0;
+    let opt_floor = optional_manifest_reserve.1;
+    let entry_floor = (fallback_reserve_calls + 1).max(opt_cat_floor);
     if must_verify_dr_state {
         if context.remaining_calls() <= fallback_reserve_calls {
             return Err(Error::new(503, "backend_budget"));
         }
-    } else if context.remaining_calls() <= fallback_reserve_calls + 1 {
-        return Ok((None, false));
+    } else if context.remaining_calls() <= entry_floor {
+        return Ok((None, false, true));
     }
+    let trunc_list_floor = if !must_verify_dr_state && opt_cat_floor > 0 {
+        (fallback_reserve_calls + 1).max(opt_cat_floor + 1)
+    } else {
+        fallback_reserve_calls + 1
+    };
     let scope = crate::ingest::scope(service);
     let prefix = format!("{scope}processed/_catalog/");
     let svc_rev_tag = format!("manifest-s-{}-rev-", service.service_id);
     let svc_rev_prefix = format!("{prefix}{svc_rev_tag}");
+    let legacy_m_prefix = format!("{prefix}manifest");
     let mut tried_svc_rev = false;
+    let mut only_scanned_manifests = false;
+    let mut legacy_m_truncated = false;
     let (mut raw_objects, mut next_cat_tok, page_was_truncated) = if !from_dr_state
         && expected_manifest.is_none()
-        && context.remaining_calls() >= fallback_reserve_calls + 7
+        && context.remaining_calls() >= (fallback_reserve_calls + 7).max(opt_cat_floor + 2)
     {
-        tried_svc_rev = true;
-        match fos::list_objects(context, service, creds, &svc_rev_prefix, None) {
-            Ok(svc_page) if !svc_page.objects.is_empty() => (svc_page.objects, None, false),
+        // List `legacy_m_prefix` (`processed/_catalog/manifest`) first: in the common non-truncated
+        // case (<1,000 manifests), this returns BOTH `manifest-s-{sid}-rev-*` AND legacy manifests
+        // (such as `manifest-0011-reset.json`) in a single FOS LIST call! Only when truncated do we
+        // also list `svc_rev_prefix` and paginate `legacy_m_prefix`.
+        match fos::list_objects(context, service, creds, &legacy_m_prefix, None) {
+            Ok(m_page) if !m_page.objects.is_empty() => {
+                only_scanned_manifests = true;
+                let mut merged = m_page.objects;
+                let mut m_tok = m_page.next_token;
+                if m_tok.is_some() {
+                    tried_svc_rev = true;
+                    if context.remaining_calls() > trunc_list_floor {
+                        match fos::list_objects(context, service, creds, &svc_rev_prefix, None) {
+                            Ok(svc_page) => merged.extend(svc_page.objects),
+                            Err(err) if err.status == 503 => return Err(err),
+                            Err(_) => {}
+                        }
+                    } else {
+                        legacy_m_truncated = true;
+                    }
+                    while let Some(tok) = m_tok {
+                        if context.remaining_calls() <= trunc_list_floor {
+                            legacy_m_truncated = true;
+                            break;
+                        }
+                        let next_page = match fos::list_objects(
+                            context,
+                            service,
+                            creds,
+                            &legacy_m_prefix,
+                            Some(&tok),
+                        ) {
+                            Ok(page) => page,
+                            Err(err) if err.status == 503 => return Err(err),
+                            Err(_) => {
+                                legacy_m_truncated = true;
+                                break;
+                            }
+                        };
+                        merged.extend(next_page.objects);
+                        m_tok = next_page.next_token;
+                    }
+                }
+                (merged, None, false)
+            }
             Err(err) if err.status == 503 => return Err(err),
             _ => {
-                if context.remaining_calls() <= fallback_reserve_calls + 1 {
-                    return Ok((None, false));
+                tried_svc_rev = true;
+                if context.remaining_calls() <= entry_floor {
+                    return Ok((None, false, true));
                 }
                 let page = match fos::list_objects(context, service, creds, &prefix, None) {
                     Ok(page) => page,
                     Err(err) if err.status == 503 => return Err(err),
-                    Err(_) => return Ok((None, false)),
+                    Err(_) => return Ok((None, false, false)),
                 };
                 let trunc = page.next_token.is_some();
                 (page.objects, page.next_token, trunc)
@@ -654,17 +718,12 @@ fn scan_catalog_head(
         let page = match fos::list_objects(context, service, creds, &prefix, None) {
             Ok(page) => page,
             Err(err) if err.status == 503 || must_verify_dr_state => return Err(err),
-            Err(_) => return Ok((None, false)),
+            Err(_) => return Ok((None, false, false)),
         };
         let trunc = page.next_token.is_some();
         (page.objects, page.next_token, trunc)
     };
     let mut budget_stopped = false;
-    let trunc_list_floor = if !must_verify_dr_state && optional_manifest_reserve.0 > 0 {
-        (fallback_reserve_calls + 1).max(optional_manifest_reserve.0 + 1)
-    } else {
-        fallback_reserve_calls + 1
-    };
 
     if page_was_truncated {
         let mut found_svc_rev = false;
@@ -689,7 +748,6 @@ fn scan_catalog_head(
         // `manifest-s-{sid}-rev-*` objects.
         if !budget_stopped {
             if context.remaining_calls() > trunc_list_floor {
-                let legacy_m_prefix = format!("{prefix}manifest");
                 let mut m_tok: Option<String> = next_cat_tok
                     .clone()
                     .filter(|t| t.starts_with(&legacy_m_prefix));
@@ -747,40 +805,8 @@ fn scan_catalog_head(
         }
     }
 
-    let expected_on_page =
-        expected_manifest.is_some_and(|m_key| raw_objects.iter().any(|o| o.key == m_key));
-    let has_newer_svc_manifest = dr_head_gen.is_some_and(|g| {
-        raw_objects.iter().any(|o| {
-            o.key
-                .rsplit('/')
-                .next()
-                .and_then(|n| n.strip_prefix(&svc_rev_tag))
-                .and_then(|rest| rest.split_once('-'))
-                .and_then(|(rev_s, _)| {
-                    (!rev_s.is_empty() && rev_s.bytes().all(|b| b.is_ascii_digit()))
-                        .then(|| rev_s.parse::<u64>().ok())
-                        .flatten()
-                        .map(|rev| u64::MAX - rev)
-                })
-                .is_some_and(|gen| gen > g)
-        })
-    });
-    let expected_missing = match expected_manifest {
-        Some(m_key) if !expected_on_page => {
-            if !page_was_truncated {
-                true
-            } else if has_newer_svc_manifest {
-                false
-            } else if context.remaining_calls() > fallback_reserve_calls + 1 {
-                fos::get_object(context, service, creds, m_key)?.is_none()
-            } else {
-                budget_stopped = true;
-                false
-            }
-        }
-        _ => false,
-    };
-
+    // Filter out invalid, duplicate, and foreign `manifest-s-*` objects BEFORE computing
+    // `expected_on_page` so cross-service manifests never satisfy `expected_manifest`.
     let mut saw_foreign_manifest = false;
     let mut seen_keys: BTreeSet<String> = BTreeSet::new();
     let mut objects: Vec<_> = raw_objects
@@ -801,6 +827,9 @@ fn scan_catalog_head(
             true
         })
         .collect();
+    let expected_on_page =
+        expected_manifest.is_some_and(|m_key| objects.iter().any(|o| o.key == m_key));
+
     let manifest_sort_rank = |k: &str| -> (u8, Option<u64>) {
         let Some(name) = k.rsplit('/').next() else {
             return (0, None);
@@ -812,7 +841,7 @@ fn scan_catalog_head(
                     .flatten()
                     .map(|rev| u64::MAX - rev)
             });
-            return (2, gen_hint);
+            return (3, gen_hint);
         }
         if !name.starts_with("manifest") {
             return (0, None);
@@ -825,13 +854,15 @@ fn scan_catalog_head(
                     .then(|| g.parse::<u64>().ok())
                     .flatten()
             });
-        (1, gen_hint)
+        let tier = if name.contains("reset") { 2 } else { 1 };
+        (tier, gen_hint)
     };
     objects.sort_by(|a, b| {
         let (a_m, a_g) = manifest_sort_rank(&a.key);
         let (b_m, b_g) = manifest_sort_rank(&b.key);
-        (b_m > 0)
-            .cmp(&(a_m > 0))
+        (b_m >= 2)
+            .cmp(&(a_m >= 2))
+            .then_with(|| (b_m > 0).cmp(&(a_m > 0)))
             .then_with(|| b_g.cmp(&a_g))
             .then_with(|| b_m.cmp(&a_m))
             .then_with(|| b.last_modified.cmp(&a.last_modified))
@@ -851,6 +882,8 @@ fn scan_catalog_head(
     let mut verified_own_blocks: BTreeSet<String> = BTreeSet::new();
     let mut known_bad_blocks: BTreeSet<String> = BTreeSet::new();
     let mut day_candidates: BTreeMap<i64, Vec<ScannedDay>> = BTreeMap::new();
+    let mut skipped_reset_manifest = false;
+    let mut expected_manifest_missing_on_get = false;
     let legacy_cutoff_day = (from_dr_state && service.log_retention_days > 0).then(|| {
         let cutoff =
             (now as i64 - i64::from(service.log_retention_days) * 86_400).div_euclid(3600) * 3600;
@@ -864,12 +897,15 @@ fn scan_catalog_head(
                 && !page_was_truncated
                 && !has_higher_or_unranked_manifest
                 && best_manifest.is_none()
+                && m_tier == 3
                 && expected_manifest == Some(obj.key.as_str())
                 && m_gen_hint.is_some()
                 && m_gen_hint == dr_head_gen
             {
-                // The highest-ranked manifest in the un-truncated listing is already the exact
-                // dr_state catalog_head manifest; no newer/reset manifest exists.
+                // Own service-scoped `manifest-s-{sid}-rev-*` (already ownership-validated in
+                // `validate_dr_catalog_head` and filtered before `expected_on_page`) is the
+                // highest-ranked manifest in the un-truncated listing; legacy manifests (`m_tier < 3`)
+                // never take this short-circuit and always verify JSON `service_id`.
                 break;
             }
             if let (Some(gh), Some((_, prev_bm))) = (m_gen_hint, best_manifest.as_ref()) {
@@ -892,7 +928,7 @@ fn scan_catalog_head(
         let has_nonempty_manifest_days = best_manifest_days
             .as_ref()
             .is_some_and(|(d, _)| !d.is_empty());
-        let use_primary_reserve = m_tier == 0
+        let use_primary_reserve = (m_tier == 0 || (m_tier == 1 && !must_verify_dr_state))
             && (best_manifest.is_some() || has_nonempty_manifest_days || has_verified_day);
         let cur_reserve = if use_primary_reserve {
             if !from_dr_state && day_candidates.is_empty() && !has_nonempty_manifest_days {
@@ -929,11 +965,15 @@ fn scan_catalog_head(
         } else {
             extra_if_catalog.1
         };
-        let optional_floor = if optional_manifest_reserve.0 > 0 {
-            let need = if effective_reset.is_some() || (m_tier > 0 && obj.key.contains("reset")) {
-                optional_manifest_reserve.1
+        let optional_floor = if opt_floor > 0 {
+            let need = if effective_reset.is_some()
+                || best_manifest
+                    .as_ref()
+                    .is_some_and(|(_, m)| m.batch == "reset")
+            {
+                opt_floor
             } else {
-                optional_manifest_reserve.0
+                opt_cat_floor
             };
             need + extra_verify_hold
         } else {
@@ -942,15 +982,32 @@ fn scan_catalog_head(
         if context.remaining_calls()
             <= (cur_reserve + extra_verify_hold + dynamic_reset_hold).max(optional_floor)
         {
-            if m_tier > 0 || (expected_missing && best_manifest.is_none()) {
+            if m_tier > 0
+                || (expected_manifest.is_some() && !expected_on_page && best_manifest.is_none())
+                || (opt_floor > 0 && best_manifest.is_none())
+            {
                 budget_stopped = true;
+            }
+            if m_tier == 2
+                && (m_gen_hint.is_none()
+                    || best_manifest
+                        .as_ref()
+                        .is_none_or(|(_, bm)| m_gen_hint.unwrap() > bm.generation))
+            {
+                skipped_reset_manifest = true;
             }
             break;
         }
+        let is_expected = expected_manifest == Some(obj.key.as_str());
         let bytes = match fos::get_object(context, service, creds, &obj.key) {
             Ok(Some(bytes)) => bytes,
-            Ok(None) => continue,
-            Err(err) if (expected_missing || must_verify_dr_state) && m_tier > 0 => {
+            Ok(None) => {
+                if is_expected {
+                    expected_manifest_missing_on_get = true;
+                }
+                continue;
+            }
+            Err(err) if (must_verify_dr_state || is_expected) && m_tier > 0 => {
                 return Err(err);
             }
             Err(_) => continue,
@@ -958,6 +1015,9 @@ fn scan_catalog_head(
         if let Ok(manifest) = serde_json::from_slice::<crate::ingest::catalog::Manifest>(&bytes) {
             if manifest.committed_at.chars().any(char::is_control) {
                 saw_foreign_manifest = true;
+                if is_expected {
+                    return Err(Error::new(400, "invalid_dr_catalog_head"));
+                }
                 continue;
             }
             if manifest.service_id == service.service_id {
@@ -977,6 +1037,12 @@ fn scan_catalog_head(
                     let ra = raw_val.get("reset_at").and_then(Value::as_i64);
                     record_scanned_reset(&mut effective_reset, rg, ra);
                 }
+                let matched_expected_latest = is_expected
+                    && !page_was_truncated
+                    && !has_higher_or_unranked_manifest
+                    && manifest.batch != "reset"
+                    && effective_reset.is_none()
+                    && dr_head_gen == Some(manifest.generation);
                 if best_manifest
                     .as_ref()
                     .is_none_or(|(_, prev)| manifest.generation > prev.generation)
@@ -1001,10 +1067,21 @@ fn scan_catalog_head(
                         });
                     best_manifest = Some((obj.key, manifest));
                 }
+                if matched_expected_latest {
+                    // Ownership of `dr_state.catalog_head.manifest` has been verified in FOS and
+                    // no newer/reset manifest exists in the un-truncated listing.
+                    break;
+                }
             } else {
                 saw_foreign_manifest = true;
+                if is_expected {
+                    return Err(Error::new(400, "invalid_dr_catalog_head"));
+                }
             }
             continue;
+        }
+        if is_expected {
+            return Err(Error::new(400, "invalid_dr_catalog_head"));
         }
         if let Ok(block) = serde_json::from_slice::<crate::ingest::catalog::Block>(&bytes) {
             if block.service_id == service.service_id {
@@ -1072,6 +1149,191 @@ fn scan_catalog_head(
                 });
             }
         }
+    }
+
+    // M2 fallback: if the `!from_dr_state` `svc_rev_prefix` path only scanned manifests and the
+    // selected non-reset manifest lacked `head_days`, fall back to listing `_catalog/` for days.
+    let day_list_floor = if !must_verify_dr_state && opt_cat_floor > 0 {
+        (fallback_reserve_calls + 1).max(opt_cat_floor + 1)
+    } else {
+        trunc_list_floor
+    };
+    if only_scanned_manifests
+        && !foreign_dr_state
+        && !budget_stopped
+        && !legacy_m_truncated
+        && best_manifest_days.is_none()
+        && effective_reset.is_none()
+        && best_manifest
+            .as_ref()
+            .is_some_and(|(_, m)| m.batch != "reset")
+        && context.remaining_calls() > day_list_floor
+    {
+        if let Ok(cat_page) = fos::list_objects(context, service, creds, &prefix, None) {
+            for obj in cat_page.objects {
+                if !obj.key.ends_with(".json")
+                    || !safe_dr_object_key(&obj.key, &prefix)
+                    || !seen_keys.insert(obj.key.clone())
+                    || manifest_sort_rank(&obj.key).0 > 0
+                {
+                    continue;
+                }
+                let extra_verify_hold = day_candidates
+                    .values()
+                    .flat_map(|v| v.iter())
+                    .filter(|d| !d.verified_own)
+                    .flat_map(|d| d.block_keys.iter())
+                    .filter(|bk| {
+                        !verified_own_blocks.contains(*bk) && !known_bad_blocks.contains(*bk)
+                    })
+                    .map(String::as_str)
+                    .collect::<BTreeSet<_>>()
+                    .len() as u32;
+                let day_reserve = if !from_dr_state && day_candidates.is_empty() {
+                    reserve_calls
+                        .saturating_sub(cursor_hold)
+                        .max(fallback_reserve_calls)
+                } else {
+                    reserve_calls
+                };
+                let day_floor = (day_reserve + extra_verify_hold + extra_if_catalog.0).max(
+                    if opt_cat_floor > 0 {
+                        opt_cat_floor + extra_verify_hold
+                    } else {
+                        0
+                    },
+                );
+                if context.remaining_calls() <= day_floor {
+                    break;
+                }
+                let Ok(Some(bytes)) = fos::get_object(context, service, creds, &obj.key) else {
+                    continue;
+                };
+                if let Ok(block) = serde_json::from_slice::<crate::ingest::catalog::Block>(&bytes) {
+                    if block.service_id == service.service_id {
+                        verified_own_blocks.insert(obj.key);
+                    } else {
+                        known_bad_blocks.insert(obj.key);
+                        saw_foreign_manifest = true;
+                    }
+                    continue;
+                }
+                if let Ok(day) = serde_json::from_slice::<crate::ingest::catalog::Day>(&bytes) {
+                    if day.version != crate::ingest::catalog::VERSION
+                        || day.hours.is_empty()
+                        || !day
+                            .hours
+                            .values()
+                            .all(|r| safe_dr_object_key(&r.key, &prefix))
+                    {
+                        continue;
+                    }
+                    let day_sid = serde_json::from_slice::<Value>(&bytes).ok().and_then(|v| {
+                        v.get("service_id")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    });
+                    if day_sid
+                        .as_deref()
+                        .is_some_and(|sid| sid != service.service_id)
+                    {
+                        saw_foreign_manifest = true;
+                        continue;
+                    }
+                    let verified_own = day_sid.as_deref() == Some(service.service_id.as_str());
+                    let min_gen = day.hours.values().map(|r| r.generation).min().unwrap_or(0);
+                    let max_gen = day.hours.values().map(|r| r.generation).max().unwrap_or(0);
+                    let block_keys: Vec<String> = day
+                        .hours
+                        .values()
+                        .map(|r| r.key.clone())
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect();
+                    if block_keys.is_empty() || min_gen == 0 || max_gen == 0 {
+                        continue;
+                    }
+                    if let Some(day_ts) = day
+                        .hours
+                        .keys()
+                        .next()
+                        .map(|h| day_start(*h))
+                        .or_else(|| day.statistics.earliest.map(day_start))
+                    {
+                        day_candidates.entry(day_ts).or_default().push(ScannedDay {
+                            min_gen,
+                            max_gen,
+                            key: obj.key,
+                            stats: day.statistics,
+                            verified_own,
+                            block_keys,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // M4b: Only clear `expected_missing` on truncated listings if a newer manifest was actually
+    // fetched, parsed cleanly, AND verified to belong to `service.service_id` (never filename-only).
+    let has_verified_newer_own = dr_head_gen.is_some_and(|g| {
+        best_manifest
+            .as_ref()
+            .is_some_and(|(_, m)| m.generation > g)
+    });
+    let expected_missing = match expected_manifest {
+        Some(_) if expected_manifest_missing_on_get => true,
+        Some(m_key) if !expected_on_page => {
+            if !page_was_truncated {
+                true
+            } else if has_verified_newer_own {
+                false
+            } else if context.remaining_calls() > fallback_reserve_calls + 1 {
+                match fos::get_object(context, service, creds, m_key)? {
+                    None => true,
+                    Some(bytes) => {
+                        let Ok(m) =
+                            serde_json::from_slice::<crate::ingest::catalog::Manifest>(&bytes)
+                        else {
+                            return Err(Error::new(400, "invalid_dr_catalog_head"));
+                        };
+                        if m.committed_at.chars().any(char::is_control)
+                            || m.service_id != service.service_id
+                        {
+                            return Err(Error::new(400, "invalid_dr_catalog_head"));
+                        }
+                        false
+                    }
+                }
+            } else {
+                budget_stopped = true;
+                false
+            }
+        }
+        _ => false,
+    };
+
+    if !must_verify_dr_state
+        && opt_floor > opt_cat_floor
+        && (effective_reset.is_some()
+            || best_manifest
+                .as_ref()
+                .is_some_and(|(_, m)| m.batch == "reset"))
+        && context.remaining_calls() < opt_floor
+    {
+        return Ok((None, false, true));
+    }
+
+    if !must_verify_dr_state
+        && (legacy_m_truncated
+            || skipped_reset_manifest
+            || (budget_stopped && best_manifest.is_none() && day_candidates.is_empty()))
+        && effective_reset.is_none()
+        && best_manifest
+            .as_ref()
+            .is_none_or(|(_, m)| m.batch != "reset")
+    {
+        return Ok((None, false, true));
     }
 
     if budget_stopped
@@ -1155,6 +1417,7 @@ fn scan_catalog_head(
                         if context.remaining_calls()
                             <= (fallback_reserve_calls + reset_hold).max(optional_blk_floor)
                         {
+                            budget_stopped = true;
                             all_ok = false;
                             break;
                         }
@@ -1195,7 +1458,7 @@ fn scan_catalog_head(
         }
         let _ = saw_foreign_manifest;
         if best_manifest.is_none() && days.is_empty() {
-            return Ok((None, expected_missing));
+            return Ok((None, expected_missing, budget_stopped));
         }
     }
 
@@ -1256,9 +1519,10 @@ fn scan_catalog_head(
                 has_authoritative_days,
             )),
             expected_missing,
+            false,
         ))
     } else {
-        Ok((None, expected_missing))
+        Ok((None, expected_missing, budget_stopped))
     }
 }
 
@@ -1322,6 +1586,10 @@ fn dr_svc_archived_removable(svc_val: &Value, cursor_val: Option<&Value>) -> (u6
     if len == 0 || archived == 0 {
         return (raw_base, 0);
     }
+    let Some(raw_end) = raw_base.checked_add(len) else {
+        // Overflowed `_audit_outbox_base`: fail closed -> 0 removable -> 409 audit_archive_required.
+        return (archived, 0);
+    };
     let svc_last_base = cv.get("svc_last_base").and_then(Value::as_u64);
     let svc_kv_archived = cv.get("svc_kv_archived").and_then(Value::as_u64);
     let svc_rebased_base = cv.get("svc_rebased_base").and_then(Value::as_u64);
@@ -1329,17 +1597,6 @@ fn dr_svc_archived_removable(svc_val: &Value, cursor_val: Option<&Value>) -> (u6
     let svc_prefix_anchor = cv.get("svc_prefix_anchor").and_then(Value::as_str);
     let svc_trimmed_base = cv.get("svc_trimmed_base").and_then(Value::as_u64);
     let svc_trimmed_prefix_anchor = cv.get("svc_trimmed_prefix_anchor").and_then(Value::as_str);
-    let svc_zero_anchor = cv.get("svc_zero_anchor").and_then(Value::as_str);
-    let svc_zero_virtual_base = cv
-        .get("svc_zero_virtual_base")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let last_flush_s = cv.get("last_flush_s").and_then(Value::as_u64).unwrap_or(0);
-    let eff_last_svc_s = cv
-        .get("last_svc_flush_s")
-        .and_then(Value::as_u64)
-        .unwrap_or(last_flush_s);
-    let cur_head_anchor = entries.first().map(dr_svc_entry_anchor);
 
     // 1a. Un-rebased KV epoch from a prior reset (`svc_kv_archived < archived`).
     // Guard against rebased `raw_base >= svc_rebased_base` so Parquet-space coordinates are
@@ -1349,30 +1606,13 @@ fn dr_svc_archived_removable(svc_val: &Value, cursor_val: Option<&Value>) -> (u6
             && svc_rebased_base.is_none_or(|rb| raw_base < rb)
             && svc_last_base == Some(raw_base)
             && raw_base < kv_arch
-            && kv_arch <= raw_base + len
+            && kv_arch <= raw_end
         {
             let removable = (kv_arch - raw_base) as usize;
             let slice_ok =
                 svc_prefix_anchor == Some(dr_svc_slice_anchor(&entries[..removable]).as_str());
             if slice_ok {
                 return (archived - removable as u64, removable);
-            }
-        }
-    } else if raw_base == 0 && svc_zero_virtual_base > 0 {
-        // 1b. Legacy cursor with `svc_zero_virtual_base > 0`.
-        let vb = svc_zero_virtual_base;
-        if svc_last_base.is_none_or(|lb| lb == 0)
-            && svc_zero_anchor.is_some()
-            && svc_zero_anchor == cur_head_anchor.as_deref()
-            && archived >= vb
-            && archived <= vb + len
-        {
-            let removable = (archived - vb) as usize;
-            let boundary_ok = removable == 0
-                || eff_last_svc_s == 0
-                || entries[removable - 1]["at"].as_u64().unwrap_or(0) <= eff_last_svc_s;
-            if boundary_ok {
-                return (vb, removable);
             }
         }
     }
@@ -1384,12 +1624,16 @@ fn dr_svc_archived_removable(svc_val: &Value, cursor_val: Option<&Value>) -> (u6
 
     // 2b. Normal or rebased space where `raw_base < archived`: verify bounds, exact untrimmed or
     // planned-trimmed base, and full archived-slice SHA-256 anchor over `entries[0..removable]`.
+    // Legacy anchorless and head-only `svc_zero_anchor` cursors fail closed -> 409.
     let min_expected_base = svc_rebased_base.or(svc_last_base);
-    let bounds_ok = archived <= raw_base + len && min_expected_base.is_none_or(|lb| raw_base >= lb);
+    let bounds_ok = archived <= raw_end && min_expected_base.is_none_or(|lb| raw_base >= lb);
     if bounds_ok {
         let removable = (archived - raw_base) as usize;
         let slice = &entries[..removable];
-        let verified = if svc_prefix_anchor.is_some() || svc_archived_anchor.is_some() {
+        let verified = if svc_prefix_anchor.is_some()
+            || svc_archived_anchor.is_some()
+            || svc_trimmed_prefix_anchor.is_some()
+        {
             if min_expected_base == Some(raw_base) {
                 svc_prefix_anchor == Some(dr_svc_slice_anchor(slice).as_str())
             } else if svc_trimmed_base == Some(raw_base) {
@@ -1397,13 +1641,7 @@ fn dr_svc_archived_removable(svc_val: &Value, cursor_val: Option<&Value>) -> (u6
             } else {
                 false
             }
-        } else if raw_base == 0 && svc_zero_anchor.is_some() {
-            svc_zero_virtual_base == 0
-                && svc_zero_anchor == cur_head_anchor.as_deref()
-                && (eff_last_svc_s == 0
-                    || entries[removable - 1]["at"].as_u64().unwrap_or(0) <= eff_last_svc_s)
         } else {
-            // Legacy anchorless cursor: fail closed -> 409 audit_archive_required.
             false
         };
         if verified {
@@ -1662,6 +1900,7 @@ pub(super) fn recover(
     let svc_key = format!("svc:{}", input.service_id);
     let existing_svc = context.get(&svc_key)?;
     let mut cached_existing_outbox_trim: Option<(u64, usize)> = None;
+    let mut cursor_trim_update: Option<(String, String, Value)> = None;
     if let Some(ref rec) = existing_svc {
         if rec.value.get("data_reset").is_some_and(|v| !v.is_null()) {
             return Err(Error::new(409, "data_reset_in_progress"));
@@ -1675,9 +1914,14 @@ pub(super) fn recover(
         {
             return Err(Error::new(409, "service_already_configured"));
         }
-        let prev_len = rec.value["_audit_outbox"].as_array().map_or(0, Vec::len);
+        let prev_entries = rec.value["_audit_outbox"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let prev_len = prev_entries.len();
         if prev_len >= super::AUDIT_OUTBOX_LIMIT {
-            let cur_rec = context.get(&format!("logs:cursor:{}", input.service_id))?;
+            let cur_key = format!("logs:cursor:{}", input.service_id);
+            let cur_rec = context.get(&cur_key)?;
             let (eff_base, removable) =
                 dr_svc_archived_removable(&rec.value, cur_rec.as_ref().map(|c| &c.value));
             let drop_n = ((prev_len + 1) - super::AUDIT_OUTBOX_LIMIT)
@@ -1686,9 +1930,26 @@ pub(super) fn recover(
             if (prev_len + 1).saturating_sub(drop_n) > super::JOB_RECOVERY_OUTBOX_LIMIT {
                 return Err(Error::new(409, "audit_archive_required"));
             }
+            let raw_base = rec.value["_audit_outbox_base"].as_u64().unwrap_or(0);
+            let base_after_rebase = eff_base.max(raw_base);
+            let Some(new_base) = base_after_rebase.checked_add(drop_n as u64) else {
+                return Err(Error::new(409, "audit_archive_required"));
+            };
+            if drop_n > 0 && removable > drop_n && removable <= prev_len {
+                if let Some(c_rec) = cur_rec {
+                    let remaining_anchor = dr_svc_slice_anchor(&prev_entries[drop_n..removable]);
+                    let mut updated_cursor = c_rec.value.clone();
+                    if let Some(obj) = updated_cursor.as_object_mut() {
+                        obj.insert("svc_trimmed_base".into(), json!(new_base));
+                        obj.insert("svc_trimmed_prefix_anchor".into(), json!(remaining_anchor));
+                        cursor_trim_update = Some((cur_key, c_rec.generation, updated_cursor));
+                    }
+                }
+            }
             cached_existing_outbox_trim = Some((eff_base, removable));
         }
     }
+    let base_commit_writes = 2u32 + u32::from(cursor_trim_update.is_some());
     let cold_start = install_rec.is_none() && existing_svc.is_none();
     let cursor_hold = u32::from(existing_svc.is_none());
     let has_front_dicts = config(context.runtime, "front_service_id").is_ok()
@@ -1810,7 +2071,7 @@ pub(super) fn recover(
             None => None,
         };
         if let Some(ref head) = dr_state.catalog_head {
-            validate_dr_catalog_head(head, &scope)?;
+            validate_dr_catalog_head(head, &scope, &service.service_id)?;
         }
         let valid_head = dr_state.catalog_head.filter(|h| {
             (h.generation > 0 || h.manifest.is_some() || !h.days.is_empty())
@@ -1864,10 +2125,11 @@ pub(super) fn recover(
         (min_svc, Vec::new(), None, None, None, None, "minimal")
     };
 
+    let mut scan_budget_skipped_u0 = false;
+    let base_upserts = u32::from(!views.is_empty())
+        + u32::from(catalog_head.is_some() || floor_key.is_some())
+        + u32::from(rum_stats.is_some() || rum_floor_key.is_some());
     {
-        let base_upserts = u32::from(!views.is_empty())
-            + u32::from(catalog_head.is_some() || floor_key.is_some())
-            + u32::from(rum_stats.is_some() || rum_floor_key.is_some());
         let plan_reserves = |u: u32| -> (u32, u32) {
             let rem = context
                 .remaining_calls()
@@ -1884,12 +2146,13 @@ pub(super) fn recover(
             // On cold start with all-absent KV, optimistic inserts take only `u` calls (so front
             // dicts / cursor fit after `u` calls when enough room remains for `safe_u` too).
             let opt_u = if cold_start { u } else { PER_UPSERT * u };
-            let full_no_f = 2 + safe_u;
-            let worst_no_f = 2 + PER_UPSERT * u;
+            let full_no_f = base_commit_writes + safe_u;
+            let worst_no_f = base_commit_writes + PER_UPSERT * u;
             let worst_with_front = worst_no_f + front_calls;
             let worst_with_front_cursor = worst_with_front + cursor_hold;
-            let opt_with_front = (2 + opt_u + front_calls).max(full_no_f);
-            let opt_with_front_cursor = (2 + opt_u + front_calls + cursor_hold).max(full_no_f);
+            let opt_with_front = (base_commit_writes + opt_u + front_calls).max(full_no_f);
+            let opt_with_front_cursor =
+                (base_commit_writes + opt_u + front_calls + cursor_hold).max(full_no_f);
             let base_r = if rem >= worst_no_f + 2 {
                 worst_no_f
             } else if catalog_head.is_some()
@@ -1915,8 +2178,10 @@ pub(super) fn recover(
                 opt_with_front_cursor.max(base_r)
             } else if has_front_dicts && rem >= opt_with_front + 2 {
                 opt_with_front.max(base_r)
-            } else if cursor_hold > 0 && rem >= (2 + opt_u + cursor_hold).max(full_no_f) + 2 {
-                (2 + opt_u + cursor_hold).max(base_r)
+            } else if cursor_hold > 0
+                && rem >= (base_commit_writes + opt_u + cursor_hold).max(full_no_f) + 2
+            {
+                (base_commit_writes + opt_u + cursor_hold).max(base_r)
             } else {
                 base_r
             };
@@ -1948,22 +2213,27 @@ pub(super) fn recover(
                 || floor_key.is_some()
                 || rum_floor_key.is_some()
                 || rum_stats.is_some());
-        let commit_calls_est = pending_secret_puts + 2;
-        let optional_manifest_reserve = if !must_verify_dr_state
-            && base_upserts > 0
-            && catalog_head.is_none()
-            && floor_key.is_none()
-        {
-            let u_rst =
-                base_upserts + 1 + u32::from(rum_stats.is_none() && rum_floor_key.is_none());
-            let need_rst = commit_calls_est + PER_UPSERT * u_rst + front_calls + cursor_hold;
-            (need_rst, need_rst)
-        } else {
-            (0u32, 0u32)
-        };
+        let commit_calls_est = pending_secret_puts + base_commit_writes;
+        let optional_manifest_reserve =
+            if !must_verify_dr_state && catalog_head.is_none() && floor_key.is_none() {
+                let u_cat = base_upserts + 1;
+                let u_rst =
+                    base_upserts + 1 + u32::from(rum_stats.is_none() && rum_floor_key.is_none());
+                if base_upserts > 0 {
+                    let need_rst =
+                        commit_calls_est + PER_UPSERT * u_rst + front_calls + cursor_hold;
+                    (need_rst, need_rst)
+                } else {
+                    let need_rst = commit_calls_est + PER_UPSERT * u_rst;
+                    let need_cat = commit_calls_est + PER_UPSERT * u_cat;
+                    (need_cat, need_rst)
+                }
+            } else {
+                (0u32, 0u32)
+            };
 
         if let Some(ref dr_head) = catalog_head {
-            let (scanned_opt, dr_manifest_missing) = scan_catalog_head(
+            let (scanned_opt, dr_manifest_missing, _) = scan_catalog_head(
                 context,
                 &service,
                 &creds,
@@ -2026,8 +2296,8 @@ pub(super) fn recover(
                 rum_stats = None;
                 catalog_head = None;
             }
-        } else if let (Some((scanned, scanned_manifest, effective_reset, _)), _) =
-            scan_catalog_head(
+        } else {
+            let (scanned_opt, _, budget_skipped) = scan_catalog_head(
                 context,
                 &service,
                 &creds,
@@ -2045,38 +2315,44 @@ pub(super) fn recover(
                     expected_manifest: None,
                     dr_head_gen: None,
                 },
-            )?
-        {
-            let reset_occurred = effective_reset.as_ref().is_some_and(|r| {
-                source != "dr_state"
-                    || r.reset_at
-                        .is_none_or(|ts| u64::try_from(ts).ok().is_none_or(|u| u >= dr_updated_at))
-            }) || scanned_manifest.as_ref().is_some_and(|m| {
-                m.batch == "reset"
-                    && (source != "dr_state"
-                        || manifest_unix_ts(m).is_none_or(|ts| ts >= dr_updated_at))
-            });
-            if let Some(ts) = effective_reset.as_ref().and_then(|r| r.reset_at) {
-                clamp_floors_to_ts(&service, ts, &mut floor_key, &mut rum_floor_key);
+            )?;
+            if base_upserts == 0 && budget_skipped {
+                scan_budget_skipped_u0 = true;
             }
-            if reset_occurred {
-                rum_stats = None;
-                let reset_ts = effective_reset
-                    .as_ref()
-                    .and_then(|r| r.reset_at)
-                    .or_else(|| {
-                        scanned_manifest
-                            .as_ref()
-                            .and_then(manifest_unix_ts)
-                            .map(|u| u as i64)
-                    });
-                if let Some(ts) = reset_ts {
+            if let Some((scanned, scanned_manifest, effective_reset, _)) = scanned_opt {
+                let reset_occurred = effective_reset.as_ref().is_some_and(|r| {
+                    source != "dr_state"
+                        || r.reset_at.is_none_or(|ts| {
+                            u64::try_from(ts).ok().is_none_or(|u| u >= dr_updated_at)
+                        })
+                }) || scanned_manifest.as_ref().is_some_and(|m| {
+                    m.batch == "reset"
+                        && (source != "dr_state"
+                            || manifest_unix_ts(m).is_none_or(|ts| ts >= dr_updated_at))
+                });
+                if let Some(ts) = effective_reset.as_ref().and_then(|r| r.reset_at) {
                     clamp_floors_to_ts(&service, ts, &mut floor_key, &mut rum_floor_key);
                 }
-            }
-            catalog_head = Some(scanned);
-            if source != "dr_state" {
-                source = "catalog_scan";
+                if reset_occurred {
+                    rum_stats = None;
+                    let reset_ts =
+                        effective_reset
+                            .as_ref()
+                            .and_then(|r| r.reset_at)
+                            .or_else(|| {
+                                scanned_manifest
+                                    .as_ref()
+                                    .and_then(manifest_unix_ts)
+                                    .map(|u| u as i64)
+                            });
+                    if let Some(ts) = reset_ts {
+                        clamp_floors_to_ts(&service, ts, &mut floor_key, &mut rum_floor_key);
+                    }
+                }
+                catalog_head = Some(scanned);
+                if source != "dr_state" {
+                    source = "catalog_scan";
+                }
             }
         }
     }
@@ -2137,14 +2413,15 @@ pub(super) fn recover(
     //     issuing any CAS, guaranteeing 0 partial KV writes on 503 and at most one 409 total.
     // - When `rem < commit + 2*u - 1`, read-only pre-check of ALL keys runs before the first CAS,
     //   guaranteeing 0 partial KV writes on 503.
-    let commit_calls = pending_secret_puts + 2;
+    let commit_calls = pending_secret_puts + base_commit_writes;
     let u_count = planned_upserts.len() as u32;
     if context.remaining_calls() < commit_calls + u_count {
         return Err(Error::new(503, "backend_budget"));
     }
     let use_optimistic = u_count >= 1
         && context.remaining_calls() >= commit_calls + 2 * u_count - 1
-        && context.remaining_calls() < commit_calls + 2 * u_count + front_calls + cursor_hold;
+        && context.remaining_calls() < commit_calls + 2 * u_count + front_calls + cursor_hold
+        && !(base_upserts == 0 && context.remaining_calls() == commit_calls + 2 * u_count);
     if use_optimistic {
         let mut iter = planned_upserts.into_iter();
         let (k0, v0) = iter.next().unwrap();
@@ -2241,8 +2518,11 @@ pub(super) fn recover(
                 .min(archived_removable)
                 .min(outbox.len().saturating_sub(1));
             if drop_n > 0 {
+                let Some(new_base) = base.checked_add(drop_n as u64) else {
+                    return Err(Error::new(409, "audit_archive_required"));
+                };
                 outbox.drain(..drop_n);
-                base += drop_n as u64;
+                base = new_base;
             }
             if outbox.len() > super::JOB_RECOVERY_OUTBOX_LIMIT {
                 return Err(Error::new(409, "audit_archive_required"));
@@ -2254,7 +2534,9 @@ pub(super) fn recover(
         }
     } else {
         svc_value["_audit_outbox"] = json!([audit_entry]);
-        if context.remaining_calls() > pending_secret_puts + 2 + front_calls {
+        if !scan_budget_skipped_u0
+            && context.remaining_calls() > pending_secret_puts + base_commit_writes + front_calls
+        {
             if let Ok(Some(cur_rec)) = context.get(&format!("logs:cursor:{}", input.service_id)) {
                 if let Some(archived) = cur_rec
                     .value
@@ -2267,7 +2549,7 @@ pub(super) fn recover(
             }
         }
     }
-    if context.remaining_calls() < pending_secret_puts + 2 {
+    if context.remaining_calls() < pending_secret_puts + base_commit_writes {
         return Err(Error::new(503, "backend_budget"));
     }
     put_secret(
@@ -2284,6 +2566,13 @@ pub(super) fn recover(
         existing_svc.as_ref().map(|r| r.generation.as_str()),
         &svc_value,
     )?;
+    if let Some((ref cur_key, ref cur_gen, ref cur_val)) = cursor_trim_update {
+        match context.cas(cur_key, Some(cur_gen.as_str()), cur_val) {
+            Ok(()) => {}
+            Err(err) if err.status == 409 => {}
+            Err(err) => return Err(err),
+        }
+    }
 
     install_val.service_id = Some(input.service_id.clone());
     install_val.job_id = None;
@@ -2294,7 +2583,8 @@ pub(super) fn recover(
         &serialize(&install_val)?,
     )?;
 
-    let front_synced = sync_front_dictionaries(context, &service, &input.token, &creds);
+    let front_synced =
+        !scan_budget_skipped_u0 && sync_front_dictionaries(context, &service, &input.token, &creds);
     let catalog_generation = catalog_head.as_ref().map(|h| h.generation);
 
     Ok(json!({

@@ -542,13 +542,19 @@ fn manifest_svc_matches(manifest: &Manifest, svc_val: Option<&Value>) -> bool {
         return false;
     }
     let eff_base = manifest.svc_virtual_base.unwrap_or(obs_base);
-    let kv_archived = manifest
+    let Some(archived_in_kv_u64) = manifest
         .svc_kv_archived
-        .unwrap_or_else(|| obs_base.saturating_add(manifest.svc_range.1.saturating_sub(eff_base)));
-    if kv_archived <= raw_base || kv_archived > raw_base + entries.len() as u64 {
+        .and_then(|kv_arch| kv_arch.checked_sub(raw_base))
+        .or_else(|| manifest.svc_range.1.checked_sub(eff_base))
+    else {
+        return false;
+    };
+    let Ok(archived_in_kv) = usize::try_from(archived_in_kv_u64) else {
+        return false;
+    };
+    if archived_in_kv == 0 || archived_in_kv > entries.len() {
         return false;
     }
-    let archived_in_kv = (kv_archived - raw_base) as usize;
     manifest.svc_prefix_anchor.as_deref()
         == Some(svc_slice_anchor(&entries[..archived_in_kv]).as_str())
 }
@@ -568,15 +574,27 @@ fn classify_svc_outbox(svc_val: &Value, cursor: &Cursor) -> SvcEpoch {
         .unwrap_or(&[]);
     let len = entries.len() as u64;
     let archived = cursor.svc_outbox_archived;
-    if len == 0 || archived == 0 {
+    if len == 0 {
         return SvcEpoch {
             is_reset: false,
             effective_seq_base: raw_base,
             archived_in_kv: 0,
         };
     }
-    let eff_last_svc_s = cursor.last_svc_flush_s.unwrap_or(cursor.last_flush_s);
-    let cur_head_anchor = entries.first().map(svc_entry_anchor);
+    let Some(raw_end) = raw_base.checked_add(len) else {
+        return SvcEpoch {
+            is_reset: true,
+            effective_seq_base: archived,
+            archived_in_kv: 0,
+        };
+    };
+    if archived == 0 {
+        return SvcEpoch {
+            is_reset: false,
+            effective_seq_base: raw_base,
+            archived_in_kv: 0,
+        };
+    }
 
     // 1a. Un-rebased KV epoch from a prior reset where `trim_svc_outbox` has not yet advanced
     // `_audit_outbox_base` into Parquet sequence space (`svc_kv_archived < archived`).
@@ -587,7 +605,7 @@ fn classify_svc_outbox(svc_val: &Value, cursor: &Cursor) -> SvcEpoch {
             && cursor.svc_rebased_base.is_none_or(|rb| raw_base < rb)
             && cursor.svc_last_base == Some(raw_base)
             && raw_base < kv_arch
-            && kv_arch <= raw_base + len
+            && kv_arch <= raw_end
         {
             let archived_in_kv = (kv_arch - raw_base) as usize;
             let slice_ok = cursor.svc_prefix_anchor.as_deref()
@@ -596,27 +614,6 @@ fn classify_svc_outbox(svc_val: &Value, cursor: &Cursor) -> SvcEpoch {
                 return SvcEpoch {
                     is_reset: false,
                     effective_seq_base: archived - archived_in_kv as u64,
-                    archived_in_kv,
-                };
-            }
-        }
-    } else if raw_base == 0 && cursor.svc_zero_virtual_base > 0 {
-        // 1b. Legacy cursor with `svc_zero_virtual_base > 0` (no `svc_kv_archived`).
-        let vb = cursor.svc_zero_virtual_base;
-        if cursor.svc_last_base.is_none_or(|lb| lb == 0)
-            && cursor.svc_zero_anchor.is_some()
-            && cursor.svc_zero_anchor == cur_head_anchor
-            && archived >= vb
-            && archived <= vb + len
-        {
-            let archived_in_kv = (archived - vb) as usize;
-            let boundary_ok = archived_in_kv == 0
-                || eff_last_svc_s == 0
-                || entries[archived_in_kv - 1]["at"].as_u64().unwrap_or(0) <= eff_last_svc_s;
-            if boundary_ok {
-                return SvcEpoch {
-                    is_reset: false,
-                    effective_seq_base: vb,
                     archived_in_kv,
                 };
             }
@@ -636,12 +633,15 @@ fn classify_svc_outbox(svc_val: &Value, cursor: &Cursor) -> SvcEpoch {
     // 2b. Normal or rebased space where `raw_base < archived`: KV claims `archived - raw_base`
     // prefix entries are already archived. Verify bounds, exact untrimmed or planned-trimmed
     // base, and cryptographic full-slice SHA-256 anchor over `entries[0..archived_in_kv]`.
+    // Legacy anchorless and head-only `svc_zero_anchor` cursors fail closed (re-archive).
     let min_expected_base = cursor.svc_rebased_base.or(cursor.svc_last_base);
-    let bounds_ok = archived <= raw_base + len && min_expected_base.is_none_or(|lb| raw_base >= lb);
+    let bounds_ok = archived <= raw_end && min_expected_base.is_none_or(|lb| raw_base >= lb);
     if bounds_ok {
         let archived_in_kv = (archived - raw_base) as usize;
         let slice = &entries[..archived_in_kv];
-        let verified = if cursor.svc_prefix_anchor.is_some() || cursor.svc_archived_anchor.is_some()
+        let verified = if cursor.svc_prefix_anchor.is_some()
+            || cursor.svc_archived_anchor.is_some()
+            || cursor.svc_trimmed_prefix_anchor.is_some()
         {
             if min_expected_base == Some(raw_base) {
                 cursor.svc_prefix_anchor.as_deref() == Some(svc_slice_anchor(slice).as_str())
@@ -651,13 +651,7 @@ fn classify_svc_outbox(svc_val: &Value, cursor: &Cursor) -> SvcEpoch {
             } else {
                 false
             }
-        } else if raw_base == 0 && cursor.svc_zero_anchor.is_some() {
-            cursor.svc_zero_virtual_base == 0
-                && cursor.svc_zero_anchor == cur_head_anchor
-                && (eff_last_svc_s == 0
-                    || entries[archived_in_kv - 1]["at"].as_u64().unwrap_or(0) <= eff_last_svc_s)
         } else {
-            // Legacy anchorless cursor: fail safe (re-archive rather than dropping unarchived rows).
             false
         };
         if verified {
@@ -740,8 +734,15 @@ fn read_source_with(
             };
             if let Some(value) = svc.or(fetched.as_ref()) {
                 let raw_base = value["_audit_outbox_base"].as_u64().unwrap_or(0);
+                let outbox_len = value["_audit_outbox"].as_array().map_or(0, Vec::len) as u64;
                 let base = match svc_virtual_base {
-                    Some(vb) if raw_base == 0 || vb >= raw_base => vb,
+                    Some(vb)
+                        if raw_base == 0
+                            || vb >= raw_base
+                            || raw_base.checked_add(outbox_len).is_none() =>
+                    {
+                        vb
+                    }
                     _ => raw_base,
                 };
                 for index in *from..*to {
@@ -1194,36 +1195,40 @@ fn collect(
             let epoch = classify_svc_outbox(&record.value, cursor);
             effective_svc_base = epoch.effective_seq_base;
             svc_epoch_archived_in_kv = epoch.archived_in_kv;
-            if len > 0 && effective_svc_base != base {
-                svc_virtual_base = Some(effective_svc_base);
-            }
-            if base == 0 && len > 0 {
-                svc_zero_anchor = cur_anchor;
-                svc_zero_virtual_base = effective_svc_base;
-            }
-            svc_observed_base = Some(base);
-            let total = effective_svc_base + len;
-            svc_effective_archived = effective_svc_base + epoch.archived_in_kv as u64;
-            let end = total.min(svc_effective_archived + MAX_SVC_ENTRIES);
-            svc_caught_up = len > 0 && svc_effective_archived == end && !epoch.is_reset;
-            let mut seg_start = svc_effective_archived;
-            while seg_start < end {
-                let hour_of = |idx: u64| -> u64 {
-                    entries
-                        .and_then(|arr| arr.get((idx - effective_svc_base) as usize))
-                        .and_then(|e| e["at"].as_u64())
-                        .unwrap_or(now)
-                        / 3600
-                };
-                let seg_hour = hour_of(seg_start);
-                let mut seg_end = seg_start + 1;
-                while seg_end < end && hour_of(seg_end) == seg_hour {
-                    seg_end += 1;
+            if let (Some(total), Some(eff_arch)) = (
+                effective_svc_base.checked_add(len),
+                effective_svc_base.checked_add(epoch.archived_in_kv as u64),
+            ) {
+                if len > 0 && effective_svc_base != base {
+                    svc_virtual_base = Some(effective_svc_base);
                 }
-                queues[3].push_back(SourceId::Svc(seg_start, seg_end));
-                seg_start = seg_end;
+                if base == 0 && len > 0 {
+                    svc_zero_anchor = cur_anchor;
+                    svc_zero_virtual_base = effective_svc_base;
+                }
+                svc_observed_base = Some(base);
+                svc_effective_archived = eff_arch;
+                let end = total.min(svc_effective_archived.saturating_add(MAX_SVC_ENTRIES));
+                svc_caught_up = len > 0 && svc_effective_archived == end && !epoch.is_reset;
+                let mut seg_start = svc_effective_archived;
+                while seg_start < end {
+                    let hour_of = |idx: u64| -> u64 {
+                        entries
+                            .and_then(|arr| arr.get((idx - effective_svc_base) as usize))
+                            .and_then(|e| e["at"].as_u64())
+                            .unwrap_or(now)
+                            / 3600
+                    };
+                    let seg_hour = hour_of(seg_start);
+                    let mut seg_end = seg_start + 1;
+                    while seg_end < end && hour_of(seg_end) == seg_hour {
+                        seg_end += 1;
+                    }
+                    queues[3].push_back(SourceId::Svc(seg_start, seg_end));
+                    seg_start = seg_end;
+                }
+                svc = Some(record.value);
             }
-            svc = Some(record.value);
         }
     }
 
@@ -1350,7 +1355,7 @@ fn collect(
             .unwrap_or(&[]);
         if manifest.svc_range.0 < manifest.svc_range.1 {
             let archived_in_kv_after = (manifest.svc_range.1 - effective_svc_base) as usize;
-            manifest.svc_kv_archived = Some(raw_base + archived_in_kv_after as u64);
+            manifest.svc_kv_archived = raw_base.checked_add(archived_in_kv_after as u64);
             manifest.svc_archived_anchor = entries
                 .get(archived_in_kv_after.saturating_sub(1))
                 .map(svc_entry_anchor);
@@ -1364,14 +1369,14 @@ fn collect(
                     .min(archived_in_kv_after);
                 manifest.svc_planned_trim = Some(planned_trim);
                 if planned_trim > 0 && planned_trim < archived_in_kv_after {
-                    manifest.svc_trimmed_base = Some(effective_svc_base + planned_trim as u64);
+                    manifest.svc_trimmed_base = effective_svc_base.checked_add(planned_trim as u64);
                     manifest.svc_trimmed_prefix_anchor = Some(svc_slice_anchor(
                         &entries[planned_trim..archived_in_kv_after],
                     ));
                 }
             }
         } else if manifest.svc_caught_up {
-            manifest.svc_kv_archived = Some(raw_base + svc_epoch_archived_in_kv as u64);
+            manifest.svc_kv_archived = raw_base.checked_add(svc_epoch_archived_in_kv as u64);
             manifest.svc_archived_anchor = if svc_epoch_archived_in_kv > 0 {
                 entries
                     .get(svc_epoch_archived_in_kv - 1)
@@ -1387,7 +1392,8 @@ fn collect(
         }
     }
     let svc_end = svc.as_ref().map_or(0, |value| {
-        effective_svc_base + value["_audit_outbox"].as_array().map_or(0, Vec::len) as u64
+        effective_svc_base
+            .saturating_add(value["_audit_outbox"].as_array().map_or(0, Vec::len) as u64)
     });
     left |= truncated || manifest.svc_range.1.max(svc_effective_archived) < svc_end;
     Ok(Collected {
@@ -1599,13 +1605,20 @@ fn trim_svc_outbox(runtime: &impl Runtime, sid: &str, manifest: &Manifest) -> Re
         return Ok(true);
     }
     let eff_base = manifest.svc_virtual_base.unwrap_or(obs_base);
-    let kv_archived = manifest
+    let Some(archived_in_kv_u64) = manifest
         .svc_kv_archived
-        .unwrap_or_else(|| obs_base.saturating_add(manifest.svc_range.1.saturating_sub(eff_base)));
-    if kv_archived <= raw_base || kv_archived > raw_base + outbox.len() as u64 {
+        .and_then(|kv_arch| kv_arch.checked_sub(raw_base))
+        .or_else(|| manifest.svc_range.1.checked_sub(eff_base))
+    else {
+        return Ok(true);
+    };
+    let Ok(archived_in_kv) = usize::try_from(archived_in_kv_u64) else {
+        return Ok(true);
+    };
+    if archived_in_kv == 0 || archived_in_kv > outbox.len() {
         return Ok(true);
     }
-    let anchor_pos = (kv_archived - 1 - raw_base) as usize;
+    let anchor_pos = archived_in_kv - 1;
     if outbox.get(anchor_pos).map(svc_entry_anchor).as_deref() != Some(exp_arch_anchor) {
         return Ok(true);
     }
@@ -1614,7 +1627,6 @@ fn trim_svc_outbox(runtime: &impl Runtime, sid: &str, manifest: &Manifest) -> Re
             return Ok(true);
         }
     }
-    let archived_in_kv = (kv_archived - raw_base) as usize;
     if let Some(exp_prefix) = manifest.svc_prefix_anchor.as_deref() {
         if svc_slice_anchor(&outbox[..archived_in_kv]) != exp_prefix {
             return Ok(true);
@@ -1631,7 +1643,9 @@ fn trim_svc_outbox(runtime: &impl Runtime, sid: &str, manifest: &Manifest) -> Re
             .saturating_sub(SVC_OUTBOX_KEEP)
             .min(archived_in_kv),
     };
-    let new_base = eff_base + removable as u64;
+    let Some(new_base) = eff_base.checked_add(removable as u64) else {
+        return Ok(true);
+    };
     if removable == 0 && new_base == raw_base {
         return Ok(true);
     }
@@ -1842,151 +1856,179 @@ pub fn log_flush_reserving(
     let manifest_record = runtime.admin_get(&manifest_key(sid))?;
     let mut manifest: Manifest = parse(&manifest_record);
     // `run_txn` does not write the commit mark separately: a cursor carrying the txn id is it.
-    if cursor_record
-        .as_ref()
-        .is_some_and(|r| r.value["txn_id"].as_str() == Some(manifest.txn_id.as_str()))
+    if !manifest.txn_id.is_empty()
+        && cursor_record
+            .as_ref()
+            .is_some_and(|r| r.value["txn_id"].as_str() == Some(manifest.txn_id.as_str()))
     {
         manifest.committed = true;
     }
     let mut skip = BTreeSet::new();
 
-    let mut manifest_abandoned = false;
-    if manifest_record.is_some() && !manifest.committed {
-        let Some(lease) = acquire_lease(runtime, Some(&manifest.txn_id))? else {
+    if manifest_record.is_some() && (!manifest.committed || !manifest.gc_done) {
+        if runtime.admin_remaining_calls() < 5 {
+            report.status = FlushStatus::Deferred;
+            return Ok(report);
+        }
+        let pre_lease_txn_id = manifest.txn_id.clone();
+        let Some(lease) = acquire_lease(runtime, Some(&pre_lease_txn_id))? else {
             report.status = FlushStatus::Busy;
             return Ok(report);
         };
-        match abandon_fenced(runtime, sid, target, &manifest, &cursor_record) {
-            Ok(true) => {
-                lease.release();
-                return Ok(report);
-            }
-            Ok(false) => {}
+        // Re-read both `manifest_key(sid)` and `cursor_key(sid)` strictly UNDER the lease so
+        // a worker holding a stale pre-lease manifest can never delete another worker's already-
+        // committed FOS outputs or a newer active transaction's manifest.
+        let live_manifest_record = match runtime.admin_get(&manifest_key(sid)) {
+            Ok(rec) => rec,
             Err(error) => {
                 lease.release();
                 return Err(error);
             }
-        }
-        let mut verified_svc: Option<Value> = None;
-        let stale_svc = if manifest.svc_range.0 < manifest.svc_range.1 {
-            let svc_rec = match runtime.admin_get(&format!("svc:{sid}")) {
-                Ok(rec) => rec,
-                Err(error) => {
-                    lease.release();
-                    return Err(error);
-                }
-            };
-            if manifest_svc_matches(&manifest, svc_rec.as_ref().map(|r| &r.value)) {
-                verified_svc = svc_rec.map(|r| r.value);
-                false
-            } else {
-                true
-            }
-        } else {
-            false
         };
-        if stale_svc {
-            // Verify cursor was not committed concurrently before abandoning the stale manifest.
-            let already_committed = match runtime.admin_get(&cursor_key(sid)) {
-                Ok(rec) => rec
-                    .is_some_and(|r| r.value["txn_id"].as_str() == Some(manifest.txn_id.as_str())),
-                Err(error) => {
-                    lease.release();
-                    return Err(error);
-                }
-            };
-            if already_committed {
-                manifest.committed = true;
-                let finished = finish_committed(
-                    runtime,
-                    sid,
-                    &mut manifest,
-                    settings,
-                    &mut report,
-                    reserve,
-                    true,
-                );
-                lease.release();
-                finished?;
-                return Ok(report);
-            }
-            if runtime.admin_remaining_calls() < manifest.outputs.len() as u32 + 2 {
-                report.status = FlushStatus::Deferred;
-                lease.release();
-                return Ok(report);
-            }
-            for key in &manifest.outputs {
-                if let Err(error) = delete_file(runtime, target, key) {
-                    lease.release();
-                    return Err(error);
-                }
-            }
-            if let Err(error) = runtime.kv_delete(&manifest_key(sid)) {
+        let (live_cursor_record, live_cursor) = match load_cursor() {
+            Ok(pair) => pair,
+            Err(error) => {
                 lease.release();
                 return Err(error);
             }
-            lease.release();
-            manifest_abandoned = true;
-            if runtime.admin_remaining_calls().saturating_sub(reserve) < FIXED_CALLS + 4 {
-                return Ok(report);
-            }
-            report.status = FlushStatus::NotDue;
-            (cursor_record, cursor) = load_cursor()?;
-        } else {
-            let result = run_txn_with(
-                runtime,
-                sid,
-                target,
-                &mut manifest,
-                None,
-                verified_svc.as_ref(),
-                started,
-                &mut report,
-            );
-            let finished = match result {
-                Ok(true) => finish_committed(
-                    runtime,
-                    sid,
-                    &mut manifest,
-                    settings,
-                    &mut report,
-                    reserve,
-                    true,
-                ),
-                Ok(false) => Ok(()),
-                Err(error) => Err(error),
-            };
-            lease.release();
-            finished?;
-            return Ok(report);
-        }
-    }
-    if manifest_record.is_some() && !manifest_abandoned && !manifest.gc_done {
-        skip.extend(manifest.outbox_keys.iter().cloned());
-        let Some(lease) = acquire_lease(runtime, Some(&manifest.txn_id))? else {
-            report.status = FlushStatus::Busy;
-            return Ok(report);
         };
-        let finished = finish_committed(
-            runtime,
-            sid,
-            &mut manifest,
-            settings,
-            &mut report,
-            reserve,
-            false,
-        );
-        lease.release();
-        finished?;
-        if report.status == FlushStatus::GcPending {
-            return Ok(report);
+        cursor_record = live_cursor_record;
+        cursor = live_cursor;
+
+        match live_manifest_record {
+            None => {
+                lease.release();
+                if runtime.admin_remaining_calls().saturating_sub(reserve) < FIXED_CALLS + 4 {
+                    return Ok(report);
+                }
+                report.status = FlushStatus::NotDue;
+            }
+            Some(live_rec) => {
+                let mut live_manifest: Manifest = parse(&Some(live_rec));
+                if live_manifest.txn_id != pre_lease_txn_id {
+                    // A newer manifest superseded `pre_lease_txn_id` before we acquired the lease:
+                    // never delete pre-lease outputs or the newer active manifest.
+                    report.status = FlushStatus::Busy;
+                    lease.release();
+                    return Ok(report);
+                }
+                if !live_manifest.txn_id.is_empty()
+                    && cursor_record.as_ref().is_some_and(|r| {
+                        r.value["txn_id"].as_str() == Some(live_manifest.txn_id.as_str())
+                    })
+                {
+                    live_manifest.committed = true;
+                }
+                if !live_manifest.committed {
+                    match abandon_fenced(runtime, sid, target, &live_manifest, &cursor_record) {
+                        Ok(true) => {
+                            lease.release();
+                            return Ok(report);
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            lease.release();
+                            return Err(error);
+                        }
+                    }
+                    let mut verified_svc: Option<Value> = None;
+                    let stale_svc = if live_manifest.svc_range.0 < live_manifest.svc_range.1 {
+                        let svc_rec = match runtime.admin_get(&format!("svc:{sid}")) {
+                            Ok(rec) => rec,
+                            Err(error) => {
+                                lease.release();
+                                return Err(error);
+                            }
+                        };
+                        if manifest_svc_matches(&live_manifest, svc_rec.as_ref().map(|r| &r.value))
+                        {
+                            verified_svc = svc_rec.map(|r| r.value);
+                            false
+                        } else {
+                            true
+                        }
+                    } else {
+                        false
+                    };
+                    if stale_svc {
+                        if runtime.admin_remaining_calls() < live_manifest.outputs.len() as u32 + 2
+                        {
+                            report.status = FlushStatus::Deferred;
+                            lease.release();
+                            return Ok(report);
+                        }
+                        for key in &live_manifest.outputs {
+                            if let Err(error) = delete_file(runtime, target, key) {
+                                lease.release();
+                                return Err(error);
+                            }
+                        }
+                        if let Err(error) = runtime.kv_delete(&manifest_key(sid)) {
+                            lease.release();
+                            return Err(error);
+                        }
+                        lease.release();
+                        if runtime.admin_remaining_calls().saturating_sub(reserve) < FIXED_CALLS + 4
+                        {
+                            return Ok(report);
+                        }
+                        report.status = FlushStatus::NotDue;
+                        (cursor_record, cursor) = load_cursor()?;
+                    } else {
+                        let result = run_txn_with(
+                            runtime,
+                            sid,
+                            target,
+                            &mut live_manifest,
+                            None,
+                            verified_svc.as_ref(),
+                            started,
+                            &mut report,
+                        );
+                        let finished = match result {
+                            Ok(true) => finish_committed(
+                                runtime,
+                                sid,
+                                &mut live_manifest,
+                                settings,
+                                &mut report,
+                                reserve,
+                                true,
+                            ),
+                            Ok(false) => Ok(()),
+                            Err(error) => Err(error),
+                        };
+                        lease.release();
+                        finished?;
+                        return Ok(report);
+                    }
+                } else if !live_manifest.gc_done {
+                    skip.extend(live_manifest.outbox_keys.iter().cloned());
+                    let finished = finish_committed(
+                        runtime,
+                        sid,
+                        &mut live_manifest,
+                        settings,
+                        &mut report,
+                        reserve,
+                        false,
+                    );
+                    lease.release();
+                    finished?;
+                    if report.status == FlushStatus::GcPending {
+                        return Ok(report);
+                    }
+                    if runtime.admin_remaining_calls().saturating_sub(reserve) < FIXED_CALLS + 4 {
+                        return Ok(report);
+                    }
+                    report.status = FlushStatus::NotDue;
+                    // The GC step may have advanced the cursor (purges), so its generation is stale.
+                    (cursor_record, cursor) = load_cursor()?;
+                } else {
+                    lease.release();
+                }
+            }
         }
-        if runtime.admin_remaining_calls().saturating_sub(reserve) < FIXED_CALLS + 4 {
-            return Ok(report);
-        }
-        report.status = FlushStatus::NotDue;
-        // The GC step may have advanced the cursor (purges), so its generation is stale.
-        (cursor_record, cursor) = load_cursor()?;
     }
     let generation = cursor_record
         .as_ref()
@@ -2060,9 +2102,10 @@ pub fn log_flush_reserving(
         let current = runtime.admin_get(&cursor_key(sid))?;
         let unchanged = current.as_ref().map(|r| r.generation.as_str()) == generation.as_deref();
         let existing = runtime.admin_get(&manifest_key(sid))?;
-        let open = existing
-            .as_ref()
-            .is_some_and(|record| !parse::<Manifest>(&Some(record.clone())).committed);
+        let open = existing.as_ref().is_some_and(|record| {
+            let m: Manifest = parse(&Some(record.clone()));
+            !m.committed || !m.gc_done
+        });
         if !unchanged || open {
             report.status = FlushStatus::Busy;
             return Ok(());

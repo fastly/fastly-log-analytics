@@ -3314,10 +3314,11 @@ fn bug_cloud_dr_08_cold_start_scoring_fits_24_call_budget_and_heals_partial_svc_
         .unwrap(),
     );
 
-    // Realistic Compute budget (CALLS=4 -> 28 calls, under 30 call_cap and 32-call cap) with mandatory
-    // 4-call [V-2C] active-version inspection, [STRICT-2B] catalog verification, and zero-partial-write upserts.
+    // Realistic Compute budget (CALLS=3 -> 29 calls, under 30 call_cap and 32-call cap) with mandatory
+    // 4-call [V-2C] active-version inspection, [STRICT-2B] catalog verification, [M4a] legacy manifest
+    // JSON ownership GET, and zero-partial-write upserts.
     ELAPSED_MS.with(|e| e.set(0));
-    CALLS.with(|c| c.set(4));
+    CALLS.with(|c| c.set(3));
     SECRETS.with(|s| {
         *s.borrow_mut() =
             std::collections::BTreeSet::from(["front_key".into(), "session_key".into()])
@@ -10920,6 +10921,15 @@ fn bug_cloud_dr_30abc_delete_data_saved_views_no_front_cursor_and_post_reset_412
                 })
                 .collect();
             let first_anchor = anchor_of(&entries4120[0]);
+            let prefix_100 = {
+                let mut h = Sha256::new();
+                h.update((100u64).to_be_bytes());
+                for e in &entries4120[..100] {
+                    h.update(anchor_of(e).as_bytes());
+                    h.update(b"\n");
+                }
+                hex::encode(h.finalize())
+            };
             let rec2 = p_adv2.adapter.get("svc:fixtureService").unwrap().unwrap();
             let mut val2 = rec2.value.clone();
             val2["_audit_outbox_base"] = json!(0);
@@ -10937,6 +10947,7 @@ fn bug_cloud_dr_30abc_delete_data_saved_views_no_front_cursor_and_post_reset_412
                         "svc_outbox_archived": 100,
                         "svc_last_base": 0,
                         "svc_zero_anchor": first_anchor,
+                        "svc_prefix_anchor": prefix_100,
                         "last_flush_s": 1_800_005_000
                     }),
                 )
@@ -13888,5 +13899,1458 @@ fn rt_d1_d2_d3_d4_cloud_dr_monotonic_fail_closed_catalog_and_outbox() {
             after["_audit_outbox_base"]
         );
         assert_eq!(after["_audit_outbox"].as_array().unwrap().len(), 4096);
+    }
+}
+
+#[test]
+fn iter35_m2_no_dr_state_svc_rev_does_not_hide_newer_legacy_reset_or_drop_days() {
+    use fastly_log_analytics::ingest;
+
+    struct RichGuard35M2;
+    impl Drop for RichGuard35M2 {
+        fn drop(&mut self) {
+            RICH_FOS.with(|r| r.set(false));
+            MTIMES.with(|m| m.borrow_mut().clear());
+        }
+    }
+    let _guard = RichGuard35M2;
+    RICH_FOS.with(|r| r.set(true));
+    MTIMES.with(|m| m.borrow_mut().clear());
+
+    let old_svc_rev =
+        "processed/_catalog/manifest-s-fixtureService-rev-18446744073709551605-old.json";
+    let newer_legacy_reset = "processed/_catalog/manifest-0011-reset.json";
+    let pre_day_ts = 1_795_132_800i64;
+    let pre_day_key = "processed/_catalog/day-2026-11-19-pre.json";
+
+    let mut old_m = serde_json::to_value(&Manifest {
+        version: VERSION,
+        service_id: "fixtureService".into(),
+        generation: 10,
+        batch: "ingest".into(),
+        schema: "v2".into(),
+        committed_at: "2026-11-20T00:00:00Z".into(),
+        previous: None,
+        files: vec![],
+        summaries: vec![],
+        sources: vec![],
+        replaces: vec![],
+        bytes: 1024,
+        rows: 500,
+        parents: BTreeMap::new(),
+    })
+    .unwrap();
+    old_m["head_days"] = json!({ pre_day_ts.to_string(): pre_day_key });
+    old_m["head_statistics"] = json!({
+        pre_day_ts.to_string(): {
+            "earliest": pre_day_ts,
+            "latest": pre_day_ts + 3600,
+            "rows": 500
+        }
+    });
+    let old_m_bytes = serde_json::to_vec(&old_m).unwrap();
+
+    let mut reset_m = serde_json::to_value(&Manifest {
+        version: VERSION,
+        service_id: "fixtureService".into(),
+        generation: 11,
+        batch: "reset".into(),
+        schema: "v2".into(),
+        committed_at: "2026-11-20T01:00:00Z".into(),
+        previous: None,
+        files: vec![],
+        summaries: vec![],
+        sources: vec![],
+        replaces: vec![],
+        bytes: 0,
+        rows: 0,
+        parents: BTreeMap::new(),
+    })
+    .unwrap();
+    reset_m["reset_at"] = json!(1_800_000_500i64);
+    let reset_m_bytes = serde_json::to_vec(&reset_m).unwrap();
+
+    // Part 1: Missing, corrupt, AND foreign cloud_dr_state.json -> older manifest-s-{sid}-rev-* (gen 10)
+    // MUST NOT hide newer legacy manifest-0011-reset.json (gen 11) at both tight (25) and full (32) budget!
+    for budget in [25u32, 32u32] {
+        for dr_mode in ["missing", "corrupt", "foreign"] {
+            let p = Platform::new();
+            p.adapter
+                .seed_object_bytes("fos-fixture-logs", old_svc_rev, old_m_bytes.clone());
+            p.adapter.seed_object_bytes(
+                "fos-fixture-logs",
+                newer_legacy_reset,
+                reset_m_bytes.clone(),
+            );
+            match dr_mode {
+                "missing" => {}
+                "corrupt" => {
+                    p.adapter.seed_object_bytes(
+                        "fos-fixture-logs",
+                        "meta/cloud_dr_state.json",
+                        b"{not valid json".to_vec(),
+                    );
+                }
+                "foreign" => {
+                    let foreign_dr = CloudDrState {
+                        schema_version: SCHEMA_VERSION,
+                        updated_at: 1_800_000_000,
+                        service_id: "foreignService22Chars0".into(),
+                        service: json!({}),
+                        views: vec![],
+                        catalog_head: None,
+                        floor_key: None,
+                        rum_stats: None,
+                    };
+                    p.adapter.seed_object_bytes(
+                        "fos-fixture-logs",
+                        "meta/cloud_dr_state.json",
+                        serde_json::to_vec(&foreign_dr).unwrap(),
+                    );
+                }
+                _ => unreachable!(),
+            }
+
+            ELAPSED_MS.with(|e| e.set(0));
+            CALLS.with(|c| c.set(32 - budget));
+            SECRETS.with(|s| {
+                *s.borrow_mut() =
+                    std::collections::BTreeSet::from(["front_key".into(), "session_key".into()])
+            });
+            let resp = fastly_log_analytics::admin::handle(
+                &p,
+                "fixtureAdmin",
+                &fastly_log_analytics::http::Request {
+                    method: "POST".into(),
+                    path: "/api/admin/provision/recover".into(),
+                    headers: BTreeMap::new(),
+                    body: json!({
+                        "token": "fixture-token",
+                        "service_id": "fixtureService",
+                        "fos_bucket": "fos-fixture-logs",
+                        "fos_region": "us-east-1"
+                    })
+                    .to_string()
+                    .into_bytes(),
+                },
+            );
+            assert_eq!(
+                resp.status,
+                200,
+                "M2 ({dr_mode}, b={budget}): {}",
+                String::from_utf8_lossy(&resp.body)
+            );
+            let body: Value = serde_json::from_slice(&resp.body).unwrap();
+            assert_eq!(
+                body["catalog_generation"], 11,
+                "M2 ({dr_mode}, b={budget}): older manifest-s-rev hid newer legacy reset manifest! body={body}"
+            );
+            let recs = p.adapter.records();
+            let wm = &recs[ingest::WATERMARK_KEY].value;
+            assert!(
+                wm["catalog"]["days"]
+                    .as_object()
+                    .is_none_or(serde_json::Map::is_empty),
+                "M2 ({dr_mode}, b={budget}): pre-reset days resurrected! wm={wm}"
+            );
+            assert!(
+                wm["floor_key"].as_str().is_some_and(|s| !s.is_empty()),
+                "M2 ({dr_mode}, b={budget}): floor_key must be set from gen 11 reset! wm={wm}"
+            );
+        }
+    }
+
+    // Part 2: Missing cloud_dr_state.json with manifest-s-{sid}-rev-* LACKING `head_days` + own day-*.json in _catalog/
+    // must fall back cleanly to _catalog/ day scan and recover the day at both tight (25) and full (32) budget!
+    for budget in [25u32, 32u32] {
+        let p = Platform::new();
+        let m_no_days = serde_json::to_vec(&Manifest {
+            version: VERSION,
+            service_id: "fixtureService".into(),
+            generation: 10,
+            batch: "ingest".into(),
+            schema: "v2".into(),
+            committed_at: "2026-11-20T00:00:00Z".into(),
+            previous: None,
+            files: vec![],
+            summaries: vec![],
+            sources: vec![],
+            replaces: vec![],
+            bytes: 1024,
+            rows: 500,
+            parents: BTreeMap::new(),
+        })
+        .unwrap();
+        let day_obj = Day {
+            version: VERSION,
+            service_id: Some("fixtureService".into()),
+            hours: BTreeMap::from([(
+                pre_day_ts,
+                Reference {
+                    key: "processed/_catalog/block-0010.json".into(),
+                    generation: 10,
+                },
+            )]),
+            statistics: Statistics {
+                earliest: Some(pre_day_ts),
+                latest: Some(pre_day_ts + 3599),
+                earliest_log: None,
+                latest_log: None,
+                rows: 500,
+            },
+            ..Day::default()
+        };
+        p.adapter
+            .seed_object_bytes("fos-fixture-logs", old_svc_rev, m_no_days);
+        p.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            pre_day_key,
+            serde_json::to_vec(&day_obj).unwrap(),
+        );
+        ELAPSED_MS.with(|e| e.set(0));
+        CALLS.with(|c| c.set(32 - budget));
+        SECRETS.with(|s| {
+            *s.borrow_mut() =
+                std::collections::BTreeSet::from(["front_key".into(), "session_key".into()])
+        });
+        let resp = fastly_log_analytics::admin::handle(
+            &p,
+            "fixtureAdmin",
+            &fastly_log_analytics::http::Request {
+                method: "POST".into(),
+                path: "/api/admin/provision/recover".into(),
+                headers: BTreeMap::new(),
+                body: json!({
+                    "token": "fixture-token",
+                    "service_id": "fixtureService",
+                    "fos_bucket": "fos-fixture-logs",
+                    "fos_region": "us-east-1"
+                })
+                .to_string()
+                .into_bytes(),
+            },
+        );
+        assert_eq!(resp.status, 200);
+        let recs = p.adapter.records();
+        let wm = &recs[ingest::WATERMARK_KEY].value;
+        assert_eq!(wm["catalog"]["generation"], 10);
+        assert_eq!(
+            wm["catalog"]["days"][pre_day_ts.to_string()].as_str(),
+            Some(pre_day_key),
+            "M2 Part 2 (b={budget}): manifest-s-rev lacking head_days failed to fall back to _catalog/ day scan! wm={wm}"
+        );
+    }
+}
+
+#[test]
+fn iter35_m3_u0_budget_monotonicity_sweep_1_to_32() {
+    use fastly_log_analytics::{admin, http::Request, ingest};
+    use std::collections::BTreeSet;
+
+    struct RichGuard35M3;
+    impl Drop for RichGuard35M3 {
+        fn drop(&mut self) {
+            RICH_FOS.with(|r| r.set(false));
+            MTIMES.with(|m| m.borrow_mut().clear());
+        }
+    }
+    let _guard = RichGuard35M3;
+    RICH_FOS.with(|r| r.set(true));
+    MTIMES.with(|m| m.borrow_mut().clear());
+
+    struct Wrap35<'a> {
+        inner: &'a Platform,
+        with_front: bool,
+    }
+    impl fastly_log_analytics::setup::SetupStores for Wrap35<'_> {
+        fn config_present(&self, n: &str) -> Result<bool, String> {
+            self.inner.config_present(n)
+        }
+        fn secret_present(&self, n: &str) -> Result<bool, String> {
+            self.inner.secret_present(n)
+        }
+        fn state_linked(&self) -> Result<bool, String> {
+            self.inner.state_linked()
+        }
+    }
+    impl Runtime for Wrap35<'_> {
+        fn config(&self, k: &str) -> Result<Option<String>, String> {
+            if !self.with_front
+                && matches!(k, "buckets_dictionary_id" | "credentials_dictionary_id")
+            {
+                return Ok(None);
+            }
+            self.inner.config(k)
+        }
+        fn secret(&self, k: &str) -> Result<Option<String>, String> {
+            self.inner.secret(k)
+        }
+        fn random(&self) -> Result<[u8; 32], String> {
+            self.inner.random()
+        }
+        fn now(&self) -> u64 {
+            self.inner.now()
+        }
+        fn checks(&self, l: bool) -> Result<Value, String> {
+            self.inner.checks(l)
+        }
+        fn versions(&self) -> Result<Value, String> {
+            self.inner.versions()
+        }
+        fn compute_service_id(&self) -> Option<String> {
+            self.inner.compute_service_id()
+        }
+        fn compute_service_version(&self) -> Option<String> {
+            self.inner.compute_service_version()
+        }
+        fn on_log_shield(&self) -> bool {
+            self.inner.on_log_shield()
+        }
+        fn admin_get(&self, key: &str) -> Result<Option<Record>, String> {
+            self.inner.admin_get(key)
+        }
+        fn admin_get_fresh(&self, key: &str, token: &str) -> Result<Option<Record>, String> {
+            self.inner.admin_get_fresh(key, token)
+        }
+        fn admin_cas(
+            &self,
+            key: &str,
+            generation: Option<&str>,
+            value: &Value,
+        ) -> Result<bool, String> {
+            self.inner.admin_cas(key, generation, value)
+        }
+        fn kv_delete(&self, key: &str) -> Result<(), String> {
+            self.inner.kv_delete(key)
+        }
+        fn admin_api(&self, req: admin::ApiRequest<'_>) -> Result<admin::ApiResponse, String> {
+            self.inner.admin_api(req)
+        }
+        fn admin_fos(&self, req: FosRequest<'_>) -> Result<FosResponse, String> {
+            self.inner.admin_fos(req)
+        }
+        fn admin_remaining_calls(&self) -> u32 {
+            self.inner.admin_remaining_calls()
+        }
+        fn admin_elapsed(&self, started: std::time::Instant) -> std::time::Duration {
+            self.inner.admin_elapsed(started)
+        }
+        fn admin_wait(&self, millis: u64) {
+            self.inner.admin_wait(millis)
+        }
+    }
+
+    let make_manifest_bytes =
+        |generation: u64, batch: &str, committed_at: &str, reset_at: Option<i64>| -> Vec<u8> {
+            let mut val = serde_json::to_value(&Manifest {
+                version: VERSION,
+                service_id: "fixtureService".into(),
+                generation,
+                batch: batch.into(),
+                schema: "v2".into(),
+                committed_at: committed_at.into(),
+                previous: None,
+                files: vec![],
+                summaries: vec![],
+                sources: vec![],
+                replaces: vec![],
+                bytes: 0,
+                rows: 0,
+                parents: BTreeMap::new(),
+            })
+            .unwrap();
+            if let Some(ts) = reset_at {
+                val["reset_at"] = json!(ts);
+            }
+            serde_json::to_vec(&val).unwrap()
+        };
+
+    let m_ingest = "processed/_catalog/manifest-s-fixtureService-rev-18446744073709551608-a.json";
+    let m_reset = "processed/_catalog/manifest-s-fixtureService-rev-18446744073709551607-rst.json";
+    let empty_dr_state = CloudDrState {
+        schema_version: SCHEMA_VERSION,
+        updated_at: 1_800_000_000,
+        service_id: "fixtureService".into(),
+        service: json!({}),
+        views: vec![],
+        catalog_head: None,
+        floor_key: None,
+        rum_stats: None,
+    };
+    let kv_keys = [ingest::WATERMARK_KEY, "ingest:rum:watermark"];
+    let stale_vals = [
+        json!({"floor_key": "raw/stale.zst"}),
+        json!({"rum_stats": {"rows": 1}}),
+    ];
+
+    // Exhaustive u=0 sweep across u0_minimal & u0_drstate_empty, ingest & reset, front & nofront,
+    // explicit & apikey, pre-existing KV states (absent / stale) x budgets 1..=32:
+    let configs = [
+        ("u0_minimal_ingest_explicit_front", false, false, true, true),
+        ("u0_minimal_reset_explicit_front", false, true, true, true),
+        ("u0_minimal_reset_apikey_front", false, true, false, true),
+        (
+            "u0_minimal_reset_explicit_nofront",
+            false,
+            true,
+            true,
+            false,
+        ),
+        (
+            "u0_drstate_empty_ingest_explicit_front",
+            true,
+            false,
+            true,
+            true,
+        ),
+        (
+            "u0_drstate_empty_reset_explicit_front",
+            true,
+            true,
+            true,
+            true,
+        ),
+        (
+            "u0_drstate_empty_reset_apikey_front",
+            true,
+            true,
+            false,
+            true,
+        ),
+        (
+            "u0_drstate_empty_reset_explicit_nofront",
+            true,
+            true,
+            true,
+            false,
+        ),
+    ];
+
+    for (label, has_dr_state, fos_is_reset, explicit, with_front) in configs {
+        for kv_mask in 0..4usize {
+            let mut saw_200 = false;
+            let mut saw_front = false;
+            let mut saw_cursor = false;
+            for budget in 1..=32u32 {
+                let p = Platform::new();
+                if fos_is_reset {
+                    p.adapter.seed_object_bytes(
+                        "fos-fixture-logs",
+                        m_reset,
+                        make_manifest_bytes(
+                            8,
+                            "reset",
+                            "2026-11-20T01:00:00Z",
+                            Some(1_800_000_500),
+                        ),
+                    );
+                } else {
+                    p.adapter.seed_object_bytes(
+                        "fos-fixture-logs",
+                        m_ingest,
+                        make_manifest_bytes(7, "ingest", "2026-11-20T00:00:00Z", None),
+                    );
+                }
+                if has_dr_state {
+                    p.adapter.seed_object_bytes(
+                        "fos-fixture-logs",
+                        "meta/cloud_dr_state.json",
+                        serde_json::to_vec(&empty_dr_state).unwrap(),
+                    );
+                }
+                p.adapter
+                    .cas(
+                        "logs:cursor:fixtureService",
+                        None,
+                        &json!({"svc_outbox_archived": 42, "last_flush_s": 1_799_999_000}),
+                    )
+                    .unwrap();
+                let mut pre_snapshot = BTreeMap::new();
+                for (bit, key) in kv_keys.iter().enumerate() {
+                    if (kv_mask & (1 << bit)) != 0 {
+                        p.adapter.cas(key, None, &stale_vals[bit]).unwrap();
+                        pre_snapshot.insert(*key, stale_vals[bit].clone());
+                    }
+                }
+                let mut req_body = json!({
+                    "token": "fixture-token",
+                    "service_id": "fixtureService",
+                    "fos_bucket": "fos-fixture-logs",
+                    "fos_region": "us-east-1"
+                });
+                if explicit {
+                    p.adapter
+                        .seed_fos_key("explicit-ak", "explicit-sk", "fos-fixture-logs");
+                    req_body["fos_access_key"] = json!("explicit-ak");
+                    req_body["fos_secret_key"] = json!("explicit-sk");
+                }
+                ELAPSED_MS.with(|e| e.set(0));
+                CALLS.with(|c| c.set(32 - budget));
+                SECRETS.with(|s| {
+                    *s.borrow_mut() = BTreeSet::from(["front_key".into(), "session_key".into()])
+                });
+                let wrap = Wrap35 {
+                    inner: &p,
+                    with_front,
+                };
+                let resp = admin::handle(
+                    &wrap,
+                    "fixtureAdmin",
+                    &Request {
+                        method: "POST".into(),
+                        path: "/api/admin/provision/recover".into(),
+                        headers: BTreeMap::new(),
+                        body: req_body.to_string().into_bytes(),
+                    },
+                );
+                let recs = p.adapter.records();
+                if resp.status == 503 {
+                    assert!(
+                        !saw_200,
+                        "M3 [{label}] kv_mask={kv_mask}: regressed 200 -> 503 at b={budget}!"
+                    );
+                    assert!(
+                        !recs.contains_key("svc:fixtureService")
+                            && !recs.contains_key("admin:install"),
+                        "M3 [{label}] kv_mask={kv_mask} b={budget}: svc/install written on 503"
+                    );
+                    for key in kv_keys {
+                        assert_eq!(
+                            recs.get(key).map(|r| &r.value),
+                            pre_snapshot.get(key),
+                            "M3 [{label}] kv_mask={kv_mask} b={budget}: partial KV write to {key} on 503!"
+                        );
+                    }
+                } else {
+                    assert_eq!(
+                        resp.status,
+                        200,
+                        "M3 [{label}] kv_mask={kv_mask} b={budget}: {}",
+                        String::from_utf8_lossy(&resp.body)
+                    );
+                    saw_200 = true;
+                    let body: Value = serde_json::from_slice(&resp.body).unwrap();
+                    let cur_front = body["front_synced"] == true;
+                    let cur_cursor =
+                        recs["svc:fixtureService"].value["_audit_outbox_base"].as_u64() == Some(42);
+                    if saw_front {
+                        assert!(
+                            cur_front,
+                            "M3 [{label}] kv_mask={kv_mask}: regressed front_synced true -> false at b={budget}!"
+                        );
+                    }
+                    if saw_cursor {
+                        assert!(
+                            cur_cursor,
+                            "M3 [{label}] kv_mask={kv_mask}: regressed cursor_seeded true -> false at b={budget}!"
+                        );
+                    }
+                    saw_front |= cur_front;
+                    saw_cursor |= cur_cursor;
+                }
+            }
+            assert!(
+                saw_200 && saw_cursor && (!with_front || saw_front),
+                "M3 [{label}] kv_mask={kv_mask}: must reach 200 + cursor + front by b=32"
+            );
+        }
+    }
+}
+
+#[test]
+fn iter35_m4_cross_service_manifest_hijack_and_probe_d_corrupt_newer_svc_manifest() {
+    use fastly_log_analytics::{admin, http::Request, ingest};
+    use std::collections::BTreeSet;
+
+    struct RichGuard35M4;
+    impl Drop for RichGuard35M4 {
+        fn drop(&mut self) {
+            RICH_FOS.with(|r| r.set(false));
+            MTIMES.with(|m| m.borrow_mut().clear());
+        }
+    }
+    let _guard = RichGuard35M4;
+    RICH_FOS.with(|r| r.set(true));
+    MTIMES.with(|m| m.borrow_mut().clear());
+
+    struct TruncWrap35<'a> {
+        inner: &'a Platform,
+        list_page_size: usize,
+    }
+    impl fastly_log_analytics::setup::SetupStores for TruncWrap35<'_> {
+        fn config_present(&self, n: &str) -> Result<bool, String> {
+            self.inner.config_present(n)
+        }
+        fn secret_present(&self, n: &str) -> Result<bool, String> {
+            self.inner.secret_present(n)
+        }
+        fn state_linked(&self) -> Result<bool, String> {
+            self.inner.state_linked()
+        }
+    }
+    impl Runtime for TruncWrap35<'_> {
+        fn config(&self, k: &str) -> Result<Option<String>, String> {
+            self.inner.config(k)
+        }
+        fn secret(&self, k: &str) -> Result<Option<String>, String> {
+            self.inner.secret(k)
+        }
+        fn random(&self) -> Result<[u8; 32], String> {
+            self.inner.random()
+        }
+        fn now(&self) -> u64 {
+            self.inner.now()
+        }
+        fn checks(&self, l: bool) -> Result<Value, String> {
+            self.inner.checks(l)
+        }
+        fn versions(&self) -> Result<Value, String> {
+            self.inner.versions()
+        }
+        fn compute_service_id(&self) -> Option<String> {
+            self.inner.compute_service_id()
+        }
+        fn compute_service_version(&self) -> Option<String> {
+            self.inner.compute_service_version()
+        }
+        fn on_log_shield(&self) -> bool {
+            self.inner.on_log_shield()
+        }
+        fn admin_get(&self, key: &str) -> Result<Option<Record>, String> {
+            self.inner.admin_get(key)
+        }
+        fn admin_get_fresh(&self, key: &str, token: &str) -> Result<Option<Record>, String> {
+            self.inner.admin_get_fresh(key, token)
+        }
+        fn admin_cas(
+            &self,
+            key: &str,
+            generation: Option<&str>,
+            value: &Value,
+        ) -> Result<bool, String> {
+            self.inner.admin_cas(key, generation, value)
+        }
+        fn kv_delete(&self, key: &str) -> Result<(), String> {
+            self.inner.kv_delete(key)
+        }
+        fn admin_api(&self, req: admin::ApiRequest<'_>) -> Result<admin::ApiResponse, String> {
+            self.inner.admin_api(req)
+        }
+        fn admin_fos(&self, req: FosRequest<'_>) -> Result<FosResponse, String> {
+            if req.method == "GET" && req.key.is_empty() && req.query.contains("list-type=2") {
+                charge()?;
+                let mut prefix = String::new();
+                let mut token = String::new();
+                for pair in req.query.split('&') {
+                    if let Some((k, v)) = pair.split_once('=') {
+                        let d = |s: &str| {
+                            s.replace("%2F", "/")
+                                .replace("%2f", "/")
+                                .replace("%3A", ":")
+                                .replace("%3a", ":")
+                        };
+                        if k == "prefix" {
+                            prefix = d(v);
+                        } else if k == "continuation-token" {
+                            token = d(v);
+                        }
+                    }
+                }
+                let mut keys: Vec<(String, usize)> = self
+                    .inner
+                    .adapter
+                    .bucket_objects(req.bucket)
+                    .into_iter()
+                    .filter(|(k, _)| k.starts_with(&prefix) && (token.is_empty() || k > &token))
+                    .map(|(k, b)| (k, b.len()))
+                    .collect();
+                keys.sort_by(|a, b| a.0.cmp(&b.0));
+                let truncated = keys.len() > self.list_page_size;
+                let page_items: Vec<(String, usize)> =
+                    keys.into_iter().take(self.list_page_size).collect();
+                let next_tok = truncated
+                    .then(|| page_items.last().map(|(k, _)| k.clone()))
+                    .flatten();
+                let mut xml = String::from("<ListBucketResult>");
+                if truncated {
+                    xml.push_str("<IsTruncated>true</IsTruncated>");
+                    if let Some(nt) = next_tok {
+                        xml.push_str(&format!(
+                            "<NextContinuationToken>{nt}</NextContinuationToken>"
+                        ));
+                    }
+                }
+                for (k, sz) in page_items {
+                    xml.push_str(&format!(
+                        "<Contents><Key>{k}</Key><Size>{sz}</Size><LastModified>2026-11-20T00:00:00.000Z</LastModified></Contents>"
+                    ));
+                }
+                xml.push_str("</ListBucketResult>");
+                return Ok(FosResponse {
+                    status: 200,
+                    body: xml.into_bytes(),
+                    cdn_cache: None,
+                    retry_after: None,
+                });
+            }
+            self.inner.admin_fos(req)
+        }
+        fn admin_remaining_calls(&self) -> u32 {
+            self.inner.admin_remaining_calls()
+        }
+        fn admin_elapsed(&self, started: std::time::Instant) -> std::time::Duration {
+            self.inner.admin_elapsed(started)
+        }
+        fn admin_wait(&self, millis: u64) {
+            self.inner.admin_wait(millis)
+        }
+    }
+
+    // === Probe C1 (M4a): Svc-scoped foreign manifest in cloud_dr_state.json ===
+    {
+        let p = Platform::new();
+        let foreign_m_key =
+            "processed/_catalog/manifest-s-foreignService22Chars0-rev-18446744073709551605-x.json";
+        let foreign_manifest = Manifest {
+            version: VERSION,
+            service_id: "foreignService22Chars0".into(),
+            generation: 10,
+            batch: "ingest".into(),
+            schema: "v2".into(),
+            committed_at: "2026-11-20T00:00:00Z".into(),
+            previous: None,
+            files: vec![],
+            summaries: vec![],
+            sources: vec![],
+            replaces: vec![],
+            bytes: 1024,
+            rows: 500,
+            parents: BTreeMap::new(),
+        };
+        p.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            foreign_m_key,
+            serde_json::to_vec(&foreign_manifest).unwrap(),
+        );
+        let poisoned_dr = CloudDrState {
+            schema_version: SCHEMA_VERSION,
+            updated_at: 1_800_000_000,
+            service_id: "fixtureService".into(),
+            service: json!({}),
+            views: vec![],
+            catalog_head: Some(Head {
+                version: VERSION,
+                generation: 10,
+                manifest: Some(foreign_m_key.into()),
+                recent: vec![Event {
+                    cursor: "foreignService22Chars0:10".into(),
+                    generation: 10,
+                    committed_at: Some("2026-11-20T00:00:00Z".into()),
+                    manifest: Some(foreign_m_key.into()),
+                }],
+                days: BTreeMap::from([(
+                    1_795_132_800,
+                    "processed/_catalog/day-foreign.json".into(),
+                )]),
+                ..Head::default()
+            }),
+            floor_key: None,
+            rum_stats: None,
+        };
+        p.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            "meta/cloud_dr_state.json",
+            serde_json::to_vec(&poisoned_dr).unwrap(),
+        );
+        let resp = p.call(
+            "POST",
+            "/api/admin/provision/recover",
+            json!({
+                "token": "fixture-token",
+                "service_id": "fixtureService",
+                "fos_bucket": "fos-fixture-logs",
+                "fos_region": "us-east-1"
+            }),
+        );
+        assert_eq!(
+            resp.status,
+            400,
+            "M4a Probe C1: foreign manifest-s-<other>-rev-* in cloud_dr_state.json must be rejected 400! got {}: {}",
+            resp.status,
+            String::from_utf8_lossy(&resp.body)
+        );
+        let recs = p.adapter.records();
+        assert!(
+            !recs.contains_key(ingest::WATERMARK_KEY),
+            "M4a Probe C1: foreign catalog_head was persisted into ingest:watermark!"
+        );
+    }
+
+    // === Probe C2 (M4a): Legacy foreign manifest in cloud_dr_state.json ===
+    {
+        let p = Platform::new();
+        let foreign_legacy_key = "processed/_catalog/manifest-0010-foreign.json";
+        let foreign_manifest = Manifest {
+            version: VERSION,
+            service_id: "foreignService22Chars0".into(),
+            generation: 10,
+            batch: "ingest".into(),
+            schema: "v2".into(),
+            committed_at: "2026-11-20T00:00:00Z".into(),
+            previous: None,
+            files: vec![],
+            summaries: vec![],
+            sources: vec![],
+            replaces: vec![],
+            bytes: 1024,
+            rows: 500,
+            parents: BTreeMap::new(),
+        };
+        p.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            foreign_legacy_key,
+            serde_json::to_vec(&foreign_manifest).unwrap(),
+        );
+        let poisoned_dr = CloudDrState {
+            schema_version: SCHEMA_VERSION,
+            updated_at: 1_800_000_000,
+            service_id: "fixtureService".into(),
+            service: json!({}),
+            views: vec![],
+            catalog_head: Some(Head {
+                version: VERSION,
+                generation: 10,
+                manifest: Some(foreign_legacy_key.into()),
+                recent: vec![Event {
+                    cursor: "fixtureService:10".into(),
+                    generation: 10,
+                    committed_at: Some("2026-11-20T00:00:00Z".into()),
+                    manifest: Some(foreign_legacy_key.into()),
+                }],
+                days: BTreeMap::from([(
+                    1_795_132_800,
+                    "processed/_catalog/day-foreign.json".into(),
+                )]),
+                ..Head::default()
+            }),
+            floor_key: None,
+            rum_stats: None,
+        };
+        p.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            "meta/cloud_dr_state.json",
+            serde_json::to_vec(&poisoned_dr).unwrap(),
+        );
+        let resp = p.call(
+            "POST",
+            "/api/admin/provision/recover",
+            json!({
+                "token": "fixture-token",
+                "service_id": "fixtureService",
+                "fos_bucket": "fos-fixture-logs",
+                "fos_region": "us-east-1"
+            }),
+        );
+        let recs = p.adapter.records();
+        assert!(
+            !recs.contains_key(ingest::WATERMARK_KEY),
+            "M4a Probe C2: legacy foreign manifest catalog_head was persisted into ingest:watermark! status={} wm={:?}",
+            resp.status,
+            recs.get(ingest::WATERMARK_KEY).map(|r| &r.value)
+        );
+        assert_eq!(
+            resp.status,
+            400,
+            "M4a Probe C2: legacy foreign manifest in cloud_dr_state.json must be rejected 400 invalid_dr_catalog_head, got {}: {}",
+            resp.status,
+            String::from_utf8_lossy(&resp.body)
+        );
+    }
+
+    // === Probe D (M4b): Corrupt OR foreign-service_id newer `manifest-s-{sid}-rev-*` on truncated listing with wiped `expected_manifest` ===
+    for variant in ["corrupt_json", "foreign_service_id"] {
+        let p = Platform::new();
+        let wiped_expected =
+            "processed/_catalog/manifest-s-fixtureService-rev-18446744073709551605-wiped.json";
+        let spoofed_newer =
+            "processed/_catalog/manifest-s-fixtureService-rev-18446744073709551604-spoof.json";
+        let stale_dr = CloudDrState {
+            schema_version: SCHEMA_VERSION,
+            updated_at: 1_800_000_000,
+            service_id: "fixtureService".into(),
+            service: json!({}),
+            views: vec![],
+            catalog_head: Some(Head {
+                version: VERSION,
+                generation: 10,
+                manifest: Some(wiped_expected.into()),
+                recent: vec![Event {
+                    cursor: "fixtureService:10".into(),
+                    generation: 10,
+                    committed_at: Some("2026-11-20T00:00:00Z".into()),
+                    manifest: Some(wiped_expected.into()),
+                }],
+                days: BTreeMap::from([(
+                    1_795_132_800,
+                    "processed/_catalog/day-2026-11-19-wiped.json".into(),
+                )]),
+                ..Head::default()
+            }),
+            floor_key: None,
+            rum_stats: Some(json!({"rows": 999, "at": 1_800_000_000})),
+        };
+        p.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            "meta/cloud_dr_state.json",
+            serde_json::to_vec(&stale_dr).unwrap(),
+        );
+        // Seed 3 blocks so page_size=2 truncates _catalog/ listing; do NOT seed `wiped_expected`!
+        for i in 0..3 {
+            p.adapter.seed_object_bytes(
+                "fos-fixture-logs",
+                &format!("processed/_catalog/block-{i:04}.json"),
+                b"{}".to_vec(),
+            );
+        }
+        let spoof_bytes = match variant {
+            "corrupt_json" => b"{corrupt manifest".to_vec(),
+            "foreign_service_id" => serde_json::to_vec(&Manifest {
+                version: VERSION,
+                service_id: "foreignService22Chars0".into(),
+                generation: 11,
+                batch: "ingest".into(),
+                schema: "v2".into(),
+                committed_at: "2026-11-20T01:00:00Z".into(),
+                previous: None,
+                files: vec![],
+                summaries: vec![],
+                sources: vec![],
+                replaces: vec![],
+                bytes: 0,
+                rows: 0,
+                parents: BTreeMap::new(),
+            })
+            .unwrap(),
+            _ => unreachable!(),
+        };
+        p.adapter
+            .seed_object_bytes("fos-fixture-logs", spoofed_newer, spoof_bytes);
+
+        ELAPSED_MS.with(|e| e.set(0));
+        CALLS.with(|c| c.set(0));
+        SECRETS
+            .with(|s| *s.borrow_mut() = BTreeSet::from(["front_key".into(), "session_key".into()]));
+        let wrap = TruncWrap35 {
+            inner: &p,
+            list_page_size: 2,
+        };
+        let resp = admin::handle(
+            &wrap,
+            "fixtureAdmin",
+            &Request {
+                method: "POST".into(),
+                path: "/api/admin/provision/recover".into(),
+                headers: BTreeMap::new(),
+                body: json!({
+                    "token": "fixture-token",
+                    "service_id": "fixtureService",
+                    "fos_bucket": "fos-fixture-logs",
+                    "fos_region": "us-east-1"
+                })
+                .to_string()
+                .into_bytes(),
+            },
+        );
+        assert_eq!(
+            resp.status,
+            200,
+            "M4b Probe D ({variant}): {}",
+            String::from_utf8_lossy(&resp.body)
+        );
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(
+            body["catalog_generation"].is_null(),
+            "M4b Probe D ({variant}): spoofed newer manifest cleared expected_missing and resurrected stale gen 10! body={body}"
+        );
+        let recs = p.adapter.records();
+        assert!(
+            !recs.contains_key(ingest::WATERMARK_KEY),
+            "M4b Probe D ({variant}): stale ingest:watermark resurrected!"
+        );
+        assert!(
+            !recs.contains_key("ingest:rum:watermark"),
+            "M4b Probe D ({variant}): stale rum_stats resurrected!"
+        );
+    }
+}
+
+#[test]
+fn iter35_m5_legacy_svc_zero_anchor_without_prefix_anchor_returns_409() {
+    use sha2::{Digest, Sha256};
+
+    let anchor_of = |entry: &Value| -> String {
+        let canonical = json!([
+            entry.get("at"),
+            entry.get("event"),
+            entry.get("actor"),
+            entry.get("job_id"),
+            entry.get("config_version"),
+            entry.get("source"),
+            entry,
+        ]);
+        hex::encode(Sha256::digest(canonical.to_string().as_bytes()))
+    };
+
+    let head_entry = json!({
+        "actor": "admin",
+        "at": 1_800_000_000u64,
+        "event": "service.updated",
+        "config_version": 1,
+    });
+    let head_anchor = anchor_of(&head_entry);
+
+    // Challenger 1 Probe F in dr.rs — BOTH Branch 2b (svc_zero_virtual_base == 0) AND Branch 1b (svc_zero_virtual_base > 0):
+    // Head-only `svc_zero_anchor` without full-slice `svc_prefix_anchor` MUST fail closed 409 audit_archive_required
+    // with 0 KV writes instead of permanently draining 29 unverified entries!
+    for (label, archived, virtual_base) in [
+        ("dr_branch_2b_zero_vb", 50u64, 0u64),
+        ("dr_branch_1b_nonzero_vb", 150u64, 100u64),
+    ] {
+        let p = Platform::new();
+        let mut outbox = vec![head_entry.clone()];
+        for i in 1..4125usize {
+            outbox.push(json!({
+                "actor": "admin",
+                "at": 1_800_000_000u64 + (i as u64).min(100),
+                "event": format!("forged_{label}.{i}"),
+                "config_version": i + 1,
+            }));
+        }
+        p.adapter
+            .cas(
+                "svc:fixtureService",
+                None,
+                &json!({
+                    "service_id": "fixtureService",
+                    "status": "torn_down",
+                    "_audit_outbox_base": 0,
+                    "_audit_outbox": outbox
+                }),
+            )
+            .unwrap();
+        p.adapter
+            .cas(
+                "logs:cursor:fixtureService",
+                None,
+                &json!({
+                    "svc_outbox_archived": archived,
+                    "svc_last_base": 0,
+                    "svc_zero_anchor": head_anchor,
+                    "svc_zero_virtual_base": virtual_base,
+                    "last_flush_s": 1_800_005_000,
+                    "last_svc_flush_s": 1_800_005_000
+                }),
+            )
+            .unwrap();
+        KV_CLASS.with(|ops| ops.borrow_mut().clear());
+        let resp = p.call(
+            "POST",
+            "/api/admin/provision/recover",
+            json!({
+                "token": "fixture-token",
+                "service_id": "fixtureService",
+                "fos_bucket": "fos-fixture-logs",
+                "fos_region": "us-east-1"
+            }),
+        );
+        assert_eq!(
+            resp.status,
+            409,
+            "M5 Probe F ({label}): head-only svc_zero_anchor bypassed 409 and drained entries! got {}: {}",
+            resp.status,
+            String::from_utf8_lossy(&resp.body)
+        );
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["error"], "audit_archive_required", "M5 ({label})");
+        let kv_writes: Vec<_> = KV_CLASS.with(|ops| {
+            ops.borrow()
+                .iter()
+                .filter(|(c, _)| *c == "write")
+                .cloned()
+                .collect()
+        });
+        assert!(kv_writes.is_empty(), "M5 ({label}): 0 KV writes on 409");
+        assert_eq!(
+            p.adapter.records()["svc:fixtureService"].value["_audit_outbox"]
+                .as_array()
+                .unwrap()
+                .len(),
+            4125,
+            "M5 ({label}): all 4125 entries must remain intact"
+        );
+    }
+}
+
+#[test]
+fn iter35_m1_dr_outbox_u64_max_base_overflow_fails_closed_without_panic() {
+    let entries4120: Vec<Value> = (0..4120usize)
+        .map(|i| {
+            json!({
+                "actor": "admin",
+                "at": 1_800_000_000u64 + i as u64,
+                "event": format!("ovf.{i}"),
+                "config_version": i + 1,
+            })
+        })
+        .collect();
+
+    for (label, archived, kv_arch) in [
+        ("dr_ovf_arch_max", u64::MAX, Some(u64::MAX - 1)),
+        ("dr_ovf_arch_100", 100u64, None),
+    ] {
+        let p = Platform::new();
+        p.adapter
+            .cas(
+                "svc:fixtureService",
+                None,
+                &json!({
+                    "service_id": "fixtureService",
+                    "status": "torn_down",
+                    "_audit_outbox_base": u64::MAX - 2,
+                    "_audit_outbox": entries4120
+                }),
+            )
+            .unwrap();
+        let mut cursor = json!({
+            "svc_outbox_archived": archived,
+            "svc_last_base": u64::MAX - 2,
+            "last_flush_s": 1_800_005_000,
+        });
+        if let Some(ka) = kv_arch {
+            cursor["svc_kv_archived"] = json!(ka);
+        }
+        p.adapter
+            .cas("logs:cursor:fixtureService", None, &cursor)
+            .unwrap();
+        KV_CLASS.with(|ops| ops.borrow_mut().clear());
+        let resp = p.call(
+            "POST",
+            "/api/admin/provision/recover",
+            json!({
+                "token": "fixture-token",
+                "service_id": "fixtureService",
+                "fos_bucket": "fos-fixture-logs",
+                "fos_region": "us-east-1"
+            }),
+        );
+        assert_eq!(
+            resp.status,
+            409,
+            "m1 ({label}): u64::MAX - 2 overflow must fail closed 409 without panic/wrap, got {}: {}",
+            resp.status,
+            String::from_utf8_lossy(&resp.body)
+        );
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["error"], "audit_archive_required");
+        let kv_writes: Vec<_> = KV_CLASS.with(|ops| {
+            ops.borrow()
+                .iter()
+                .filter(|(c, _)| *c == "write")
+                .cloned()
+                .collect()
+        });
+        assert!(kv_writes.is_empty(), "m1 ({label}): 0 KV writes on 409");
+    }
+}
+
+#[test]
+fn iter35_m3_post_dr_partial_trim_updates_cursor_for_zero_duplicate_next_flush() {
+    use fastly_log_analytics::{
+        admin,
+        http::Request,
+        telemetry::{
+            flush::{log_flush, FlushStatus, FlushTarget},
+            schema, LogKind, OperationalLogSettings,
+        },
+    };
+    use sha2::{Digest, Sha256};
+    use std::collections::BTreeSet;
+    use std::sync::atomic::Ordering;
+
+    let anchor_of = |entry: &Value| -> String {
+        let canonical = json!([
+            entry.get("at"),
+            entry.get("event"),
+            entry.get("actor"),
+            entry.get("job_id"),
+            entry.get("config_version"),
+            entry.get("source"),
+            entry,
+        ]);
+        hex::encode(Sha256::digest(canonical.to_string().as_bytes()))
+    };
+    let slice_anchor_of = |entries: &[Value]| -> String {
+        let mut hasher = Sha256::new();
+        hasher.update((entries.len() as u64).to_be_bytes());
+        for e in entries {
+            hasher.update(anchor_of(e).as_bytes());
+            hasher.update(b"\n");
+        }
+        hex::encode(hasher.finalize())
+    };
+
+    // Part 1: 4120 entries where entries[0..30] are verified archived (`svc_outbox_archived = 30`),
+    // DR recover trims 25 (`_audit_outbox_base: 0 -> 25`, leaving 5 archived entries at head + 4091 unarchived),
+    // THEN next `log_flush` MUST archive ONLY new unarchived entries (starting at source_seq=30), 0 duplicates!
+    {
+        let p = Platform::new();
+        p.adapter
+            .seed_object_bytes("fos-fixture-logs", "meta/bucket-init", Vec::new());
+        let base_s = 1_800_000_000u64;
+        p.clock.store(base_s + 5_000, Ordering::SeqCst);
+        let entries4120: Vec<Value> = (0..4120usize)
+            .map(|i| {
+                json!({
+                    "actor": "fixtureAdmin",
+                    "at": base_s + (i as u64).min(4_000),
+                    "event": if i < 30 {
+                        format!("already_archived.{i}")
+                    } else {
+                        format!("unarchived.{i}")
+                    },
+                    "config_version": i + 1,
+                })
+            })
+            .collect();
+        let prefix30 = slice_anchor_of(&entries4120[..30]);
+        let arch_anchor = anchor_of(&entries4120[29]);
+        let head_anchor = anchor_of(&entries4120[0]);
+
+        p.adapter
+            .cas(
+                "svc:fixtureService",
+                None,
+                &json!({
+                    "service_id": "fixtureService",
+                    "status": "torn_down",
+                    "_audit_outbox_base": 0,
+                    "_audit_outbox": entries4120
+                }),
+            )
+            .unwrap();
+        p.adapter
+            .cas(
+                "logs:cursor:fixtureService",
+                None,
+                &json!({
+                    "scan_min": (base_s + 5_000) / 60 - 2,
+                    "cache_min": (base_s + 5_000) / 60 - 2,
+                    "svc_outbox_archived": 30,
+                    "svc_last_base": 0,
+                    "svc_kv_archived": 30,
+                    "svc_archived_anchor": arch_anchor,
+                    "svc_head_anchor": head_anchor,
+                    "svc_prefix_anchor": prefix30,
+                    "last_flush_s": base_s + 4_500,
+                    "last_svc_flush_s": base_s + 4_500,
+                }),
+            )
+            .unwrap();
+
+        let resp = p.call(
+            "POST",
+            "/api/admin/provision/recover",
+            json!({
+                "token": "fixture-token",
+                "service_id": "fixtureService",
+                "fos_bucket": "fos-fixture-logs",
+                "fos_region": "us-east-1"
+            }),
+        );
+        assert_eq!(
+            resp.status,
+            200,
+            "m3: DR recover failed: {}",
+            String::from_utf8_lossy(&resp.body)
+        );
+        let svc_after = &p.adapter.records()["svc:fixtureService"].value;
+        assert_eq!(svc_after["_audit_outbox_base"].as_u64(), Some(25));
+        assert_eq!(svc_after["_audit_outbox"].as_array().unwrap().len(), 4096);
+        assert_eq!(
+            svc_after["_audit_outbox"][0]["event"],
+            "already_archived.25"
+        );
+
+        // Now run log_flush: must recognize entries[0..5] (`already_archived.25..29`) as already archived
+        // via cursor's updated svc_trimmed_base / svc_trimmed_prefix_anchor and archive ONLY unarchived entries!
+        p.clock.store(base_s + 6_000, Ordering::SeqCst);
+        CALLS.with(|c| c.set(0));
+        SECRETS.with(|s| s.borrow_mut().clear());
+        fastly_log_analytics::telemetry::append_outbox(
+            &p,
+            "fixtureService",
+            "m3",
+            &format!(
+                "{{\"kind\":\"cron_runs\",\"timestamp\":{},\"event_id\":\"m3-run\",\"service_id\":\"fixtureService\",\"severity\":\"info\",\"cron_kind\":\"request_ingest\"}}\n",
+                (base_s + 5_500) * 1000
+            ),
+        )
+        .unwrap();
+        p.clock.store(base_s + 6_600, Ordering::SeqCst);
+        CALLS.with(|c| c.set(0));
+        SECRETS.with(|s| s.borrow_mut().clear());
+        let (ak, sk) = fastly_log_analytics::admin::fos_credentials(
+            &p,
+            &serde_json::from_value(p.adapter.records()["svc:fixtureService"].value.clone())
+                .unwrap(),
+        )
+        .unwrap();
+        let target = FlushTarget {
+            region: "us-east-1",
+            bucket: "fos-fixture-logs",
+            access_key: &ak,
+            secret_key: &sk,
+            ops_prefix: "processed/ops/",
+        };
+        let fl = log_flush(
+            &p,
+            "fixtureService",
+            Some(&target),
+            &OperationalLogSettings::default(),
+            true,
+            std::time::Instant::now(),
+        )
+        .unwrap();
+        assert!(
+            matches!(fl.status, FlushStatus::Committed | FlushStatus::GcPending),
+            "m3: post-DR log_flush status={:?}",
+            fl.status
+        );
+        let audit_rows: Vec<Value> = p
+            .adapter
+            .bucket_objects("fos-fixture-logs")
+            .into_iter()
+            .filter(|(k, _)| k.contains("/admin_audit/"))
+            .flat_map(|(_, body)| schema::from_parquet(LogKind::AdminAudit, body).unwrap())
+            .collect();
+        assert!(
+            !audit_rows.is_empty(),
+            "m3: expected new unarchived entries to be archived"
+        );
+        let dup_rows: Vec<&Value> = audit_rows
+            .iter()
+            .filter(|r| {
+                r["action"]
+                    .as_str()
+                    .is_some_and(|a| a.starts_with("already_archived."))
+            })
+            .collect();
+        assert!(
+            dup_rows.is_empty(),
+            "m3: post-DR log_flush duplicated {} already-archived entries! first={:?}",
+            dup_rows.len(),
+            dup_rows.first()
+        );
+        assert!(
+            audit_rows.iter().any(|r| r["action"] == "unarchived.30"),
+            "m3: unarchived.30 must be archived cleanly"
+        );
+    }
+
+    // Part 2: Budget monotonicity 1..=32 + zero partial writes when cursor trim update runs!
+    {
+        let base_s = 1_800_000_000u64;
+        let entries4120: Vec<Value> = (0..4120usize)
+            .map(|i| {
+                json!({
+                    "actor": "fixtureAdmin",
+                    "at": base_s + (i as u64).min(4_000),
+                    "event": format!("m3_mono.{i}"),
+                    "config_version": i + 1,
+                })
+            })
+            .collect();
+        let prefix30 = slice_anchor_of(&entries4120[..30]);
+        let arch_anchor = anchor_of(&entries4120[29]);
+        let head_anchor = anchor_of(&entries4120[0]);
+        let cursor_init = json!({
+            "svc_outbox_archived": 30,
+            "svc_last_base": 0,
+            "svc_kv_archived": 30,
+            "svc_archived_anchor": arch_anchor,
+            "svc_head_anchor": head_anchor,
+            "svc_prefix_anchor": prefix30,
+            "last_flush_s": base_s + 4_500,
+            "last_svc_flush_s": base_s + 4_500,
+        });
+        let svc_init = json!({
+            "service_id": "fixtureService",
+            "status": "torn_down",
+            "_audit_outbox_base": 0,
+            "_audit_outbox": entries4120,
+        });
+
+        let mut saw_200 = false;
+        let mut saw_front = false;
+        for budget in 1..=32u32 {
+            let p = Platform::new();
+            p.adapter
+                .cas("svc:fixtureService", None, &svc_init)
+                .unwrap();
+            p.adapter
+                .cas("logs:cursor:fixtureService", None, &cursor_init)
+                .unwrap();
+            ELAPSED_MS.with(|e| e.set(0));
+            CALLS.with(|c| c.set(32 - budget));
+            SECRETS.with(|s| {
+                *s.borrow_mut() = BTreeSet::from(["front_key".into(), "session_key".into()])
+            });
+            let resp = admin::handle(
+                &p,
+                "fixtureAdmin",
+                &Request {
+                    method: "POST".into(),
+                    path: "/api/admin/provision/recover".into(),
+                    headers: BTreeMap::new(),
+                    body: json!({
+                        "token": "fixture-token",
+                        "service_id": "fixtureService",
+                        "fos_bucket": "fos-fixture-logs",
+                        "fos_region": "us-east-1"
+                    })
+                    .to_string()
+                    .into_bytes(),
+                },
+            );
+            let recs = p.adapter.records();
+            if resp.status == 503 {
+                assert!(!saw_200, "m3-mono: regressed 200 -> 503 at b={budget}!");
+                assert_eq!(
+                    recs["logs:cursor:fixtureService"].value, cursor_init,
+                    "m3-mono b={budget}: cursor mutated on 503!"
+                );
+                assert_eq!(
+                    recs["svc:fixtureService"].value["_audit_outbox_base"].as_u64(),
+                    Some(0),
+                    "m3-mono b={budget}: svc mutated on 503!"
+                );
+                assert!(!recs.contains_key("admin:install"));
+            } else {
+                assert_eq!(resp.status, 200, "m3-mono b={budget}");
+                saw_200 = true;
+                let body: Value = serde_json::from_slice(&resp.body).unwrap();
+                let cur_front = body["front_synced"] == true;
+                if saw_front {
+                    assert!(cur_front, "m3-mono: front_synced regressed at b={budget}!");
+                }
+                saw_front |= cur_front;
+                assert_eq!(
+                    recs["logs:cursor:fixtureService"].value["svc_trimmed_base"].as_u64(),
+                    Some(25),
+                    "m3-mono b={budget}: cursor svc_trimmed_base not updated on 200!"
+                );
+            }
+        }
+        assert!(saw_200 && saw_front, "m3-mono must succeed by b=32");
     }
 }

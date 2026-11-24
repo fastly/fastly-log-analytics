@@ -3167,3 +3167,409 @@ fn rt_f1_f2_f3_cloud_outbox_coordinate_space_slice_anchor_and_stopped_resume() {
         assert_eq!(rt.cursor().svc_outbox_archived, 120);
     }
 }
+
+#[test]
+fn iter35_m1_pre_lease_stale_manifest_cannot_delete_committed_fos_or_active_manifest() {
+    let audit_rows = |r: &Rt| -> Vec<Value> {
+        r.objects
+            .borrow()
+            .iter()
+            .filter(|(k, _)| k.contains("/admin_audit/"))
+            .flat_map(|(_, body)| schema::from_parquet(LogKind::AdminAudit, body.clone()).unwrap())
+            .collect()
+    };
+    let make_entries = |prefix: &str, count: usize, start_at: u64| -> Vec<Value> {
+        (0..count)
+            .map(|i| {
+                json!({
+                    "actor": "admin",
+                    "at": start_at + i as u64,
+                    "event": format!("{prefix}.{i}"),
+                    "config_version": i + 1,
+                })
+            })
+            .collect()
+    };
+
+    // Challenger 1 Probe A:
+    // 1. T1 is written as uncommitted manifest (Stopped) for 60 svc audit entries.
+    // 2. Worker A reads cursor_record + manifest_record (T1) BEFORE acquiring `logs:flush_lease`.
+    // 3. Before Worker A acquires `logs:flush_lease`:
+    //    - Worker B commits T1 (writes 60 FOS Parquet rows, trims svc base 0 -> 10, deletes manifest).
+    //    - Worker C commits T2 (advances cursor txn_id to T2 != T1).
+    //    - If `with_t3`, Worker D leaves uncommitted manifest T3 (Stopped).
+    // 4. Worker A acquires `logs:flush_lease` and runs -> MUST NOT delete T1's 60 committed FOS
+    //    rows and MUST NOT delete T3's active manifest!
+    for with_t3 in [true, false] {
+        struct PreLeaseRaceRt {
+            inner: Rt,
+            with_t3: bool,
+            raced: Cell<bool>,
+            t3_txn_id: RefCell<Option<String>>,
+        }
+        impl SetupStores for PreLeaseRaceRt {
+            fn config_present(&self, n: &str) -> Result<bool, String> {
+                self.inner.config_present(n)
+            }
+            fn secret_present(&self, n: &str) -> Result<bool, String> {
+                self.inner.secret_present(n)
+            }
+            fn state_linked(&self) -> Result<bool, String> {
+                self.inner.state_linked()
+            }
+        }
+        impl Runtime for PreLeaseRaceRt {
+            fn config(&self, k: &str) -> Result<Option<String>, String> {
+                self.inner.config(k)
+            }
+            fn secret(&self, k: &str) -> Result<Option<String>, String> {
+                self.inner.secret(k)
+            }
+            fn random(&self) -> Result<[u8; 32], String> {
+                self.inner.random()
+            }
+            fn now(&self) -> u64 {
+                self.inner.now()
+            }
+            fn checks(&self, l: bool) -> Result<Value, String> {
+                self.inner.checks(l)
+            }
+            fn versions(&self) -> Result<Value, String> {
+                self.inner.versions()
+            }
+            fn compute_service_id(&self) -> Option<String> {
+                self.inner.compute_service_id()
+            }
+            fn compute_service_version(&self) -> Option<String> {
+                self.inner.compute_service_version()
+            }
+            fn admin_get(&self, key: &str) -> Result<Option<Record>, String> {
+                if key == LEASE_KEY && !self.raced.replace(true) {
+                    // Worker B commits T1:
+                    self.inner.elapsed_s.set(0);
+                    self.inner.budget.set(self.inner.calls.get() + 64);
+                    let rep_b = run(&self.inner, true);
+                    assert_eq!(rep_b.status, FlushStatus::Committed);
+                    let t1_cursor_txn = self.inner.cursor().txn_id;
+
+                    // Worker C commits T2 (cursor txn_id moves from T1 -> T2):
+                    self.inner.put_kv(
+                        &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 39, Some("c")),
+                        cron_line("worker-c"),
+                    );
+                    self.inner.budget.set(self.inner.calls.get() + 64);
+                    let rep_c = run(&self.inner, true);
+                    assert_eq!(rep_c.status, FlushStatus::Committed);
+                    assert_ne!(self.inner.cursor().txn_id, t1_cursor_txn);
+
+                    if self.with_t3 {
+                        // Worker D starts T3 and hits WALL_STOP -> leaves active uncommitted T3 manifest:
+                        self.inner.put_kv(
+                            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 38, Some("d")),
+                            cron_line("worker-d"),
+                        );
+                        self.inner.elapsed_s.set(WALL_STOP.as_secs());
+                        self.inner.budget.set(self.inner.calls.get() + 64);
+                        let rep_d = run(&self.inner, true);
+                        assert_eq!(rep_d.status, FlushStatus::Stopped);
+                        let m_t3 = self.inner.get_kv(&manifest_key(SID)).unwrap();
+                        *self.t3_txn_id.borrow_mut() =
+                            Some(m_t3["txn_id"].as_str().unwrap().to_owned());
+                    }
+
+                    // Restore normal wall-clock and generous budget for Worker A:
+                    self.inner.elapsed_s.set(0);
+                    self.inner.budget.set(self.inner.calls.get() + 64);
+                }
+                self.inner.admin_get(key)
+            }
+            fn admin_cas(
+                &self,
+                key: &str,
+                generation: Option<&str>,
+                value: &Value,
+            ) -> Result<bool, String> {
+                self.inner.admin_cas(key, generation, value)
+            }
+            fn kv_list(
+                &self,
+                prefix: &str,
+                cursor: Option<&str>,
+                limit: u32,
+            ) -> Result<KvPage, String> {
+                self.inner.kv_list(prefix, cursor, limit)
+            }
+            fn kv_delete(&self, key: &str) -> Result<(), String> {
+                self.inner.kv_delete(key)
+            }
+            fn admin_fos(&self, req: FosRequest<'_>) -> Result<FosResponse, String> {
+                self.inner.admin_fos(req)
+            }
+            fn admin_remaining_calls(&self) -> u32 {
+                self.inner.admin_remaining_calls()
+            }
+            fn core_cache_lookup(
+                &self,
+                key: &str,
+            ) -> Result<Option<CoreCacheEntry>, CoreCacheError> {
+                self.inner.core_cache_lookup(key)
+            }
+            fn core_cache_replace(
+                &self,
+                key: &str,
+                surrogate_keys: &[&str],
+                ttl: Duration,
+                update: &dyn Fn(Option<CoreCacheEntry>) -> CoreCacheEntry,
+            ) -> Result<(), CoreCacheError> {
+                self.inner
+                    .core_cache_replace(key, surrogate_keys, ttl, update)
+            }
+            fn core_cache_purge(&self, surrogate: &str) -> Result<(), CoreCacheError> {
+                self.inner.core_cache_purge(surrogate)
+            }
+            fn vcpu_ms(&self) -> u64 {
+                self.inner.vcpu_ms()
+            }
+            fn admin_elapsed(&self, started: Instant) -> Duration {
+                self.inner.admin_elapsed(started)
+            }
+        }
+
+        let inner = Rt::new();
+        inner.set_cursor(NOW_MIN - 2);
+        inner.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": 0,
+                "_audit_outbox": make_entries("t1_audit", 60, NOW_S - 200),
+            }),
+        );
+        inner.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("a")),
+            cron_line("worker-a"),
+        );
+        // Create uncommitted T1 manifest (Stopped at WALL_STOP):
+        inner.elapsed_s.set(WALL_STOP.as_secs());
+        inner.budget.set(inner.calls.get() + 64);
+        assert_eq!(run(&inner, true).status, FlushStatus::Stopped);
+        assert!(inner.get_kv(&manifest_key(SID)).is_some());
+
+        inner.elapsed_s.set(0);
+        inner.budget.set(inner.calls.get() + 64);
+        let race_rt = PreLeaseRaceRt {
+            inner,
+            with_t3,
+            raced: Cell::new(false),
+            t3_txn_id: RefCell::new(None),
+        };
+        let rep_a = log_flush(
+            &race_rt,
+            SID,
+            Some(&target()),
+            &OperationalLogSettings::default(),
+            true,
+            Instant::now(),
+        )
+        .unwrap();
+        assert!(race_rt.raced.get());
+        let rows_after = audit_rows(&race_rt.inner);
+        assert_eq!(
+            rows_after.len(),
+            60,
+            "M1 Probe A (with_t3={with_t3}): stale Worker A deleted T1's 60 committed FOS audit rows! status={:?}, remaining={}",
+            rep_a.status,
+            rows_after.len()
+        );
+        if with_t3 {
+            let expected_t3 = race_rt.t3_txn_id.borrow().clone().unwrap();
+            let cur_m = race_rt.inner.get_kv(&manifest_key(SID));
+            assert_eq!(
+                cur_m.as_ref().and_then(|v| v["txn_id"].as_str()),
+                Some(expected_t3.as_str()),
+                "M1 Probe A: stale Worker A deleted or clobbered T3's active manifest! got {cur_m:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn iter35_m5_legacy_svc_zero_anchor_without_prefix_anchor_fails_closed() {
+    let audit_rows = |r: &Rt| -> Vec<Value> {
+        r.objects
+            .borrow()
+            .iter()
+            .filter(|(k, _)| k.contains("/admin_audit/"))
+            .flat_map(|(_, body)| schema::from_parquet(LogKind::AdminAudit, body.clone()).unwrap())
+            .collect()
+    };
+
+    let head_entry = json!({
+        "actor": "admin",
+        "at": NOW_S - 100,
+        "event": "service.updated",
+        "config_version": 1,
+    });
+    let head_anchor = svc_entry_anchor(&head_entry);
+
+    // Challenger 1 Probe F — BOTH Branch 2b (svc_zero_virtual_base == 0) AND Branch 1b (svc_zero_virtual_base > 0):
+    // Head-only `svc_zero_anchor` cursors lacking full-slice `svc_prefix_anchor` MUST fail closed
+    // and re-archive all 50 entries instead of silently dropping 49 forged middle/boundary entries!
+    for (label, archived, virtual_base) in [
+        ("branch_2b_zero_vb", 50u64, 0u64),
+        ("branch_1b_nonzero_vb", 150u64, 100u64),
+    ] {
+        let rt = Rt::new();
+        rt.put_kv(
+            &cursor_key(SID),
+            json!({
+                "scan_min": NOW_MIN - 2,
+                "cache_min": NOW_MIN - 2,
+                "svc_outbox_archived": archived,
+                "svc_last_base": 0,
+                "svc_zero_anchor": head_anchor,
+                "svc_zero_virtual_base": virtual_base,
+                "last_flush_s": NOW_S,
+                "last_svc_flush_s": NOW_S,
+            }),
+        );
+        let mut entries = vec![head_entry.clone()];
+        for i in 1..50usize {
+            entries.push(json!({
+                "actor": "admin",
+                "at": NOW_S - 50 + (i as u64).min(40),
+                "event": format!("forged_{label}.{i}"),
+                "config_version": i + 1,
+            }));
+        }
+        rt.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": 0,
+                "_audit_outbox": entries,
+            }),
+        );
+        rt.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some(label)),
+            cron_line(label),
+        );
+        rt.budget.set(rt.calls.get() + 64);
+        assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+
+        let rows = audit_rows(&rt);
+        assert_eq!(
+            rows.len(),
+            50,
+            "M5 Probe F ({label}): head-only svc_zero_anchor cursor failed open and dropped entries! archived={}",
+            rows.len()
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r["action"] == format!("forged_{label}.1")),
+            "M5 Probe F ({label}): forged entry 1 was silently dropped"
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r["action"] == format!("forged_{label}.49")),
+            "M5 Probe F ({label}): forged entry 49 was silently dropped"
+        );
+        assert_eq!(rt.cursor().svc_outbox_archived, archived + 50);
+    }
+}
+
+#[test]
+fn iter35_m1_svc_outbox_u64_max_base_overflow_resets_cleanly() {
+    let audit_rows = |r: &Rt| -> Vec<Value> {
+        r.objects
+            .borrow()
+            .iter()
+            .filter(|(k, _)| k.contains("/admin_audit/"))
+            .flat_map(|(_, body)| schema::from_parquet(LogKind::AdminAudit, body.clone()).unwrap())
+            .collect()
+    };
+    let entries5: Vec<Value> = (0..5usize)
+        .map(|i| {
+            json!({
+                "actor": "admin",
+                "at": NOW_S - 50 + i as u64,
+                "event": format!("u64_ovf.{i}"),
+                "config_version": i + 1,
+            })
+        })
+        .collect();
+
+    // Case (a) archived=0 and Case (b) archived=10 with `_audit_outbox_base = u64::MAX - 2` (len=5 -> base+len overflows u64!):
+    for (label, archived) in [("ovf_arch0", 0u64), ("ovf_arch10", 10u64)] {
+        let rt = Rt::new();
+        rt.put_kv(
+            &cursor_key(SID),
+            json!({
+                "scan_min": NOW_MIN - 2,
+                "cache_min": NOW_MIN - 2,
+                "svc_outbox_archived": archived,
+                "svc_last_base": 0,
+                "last_flush_s": NOW_S - 600,
+            }),
+        );
+        rt.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": u64::MAX - 2,
+                "_audit_outbox": entries5,
+            }),
+        );
+        rt.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some(label)),
+            cron_line(label),
+        );
+        rt.budget.set(rt.calls.get() + 64);
+        assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+        let rows = audit_rows(&rt);
+        assert_eq!(
+            rows.len(),
+            5,
+            "m1 ({label}): must cleanly reset overflow base and archive all 5 entries, got {}",
+            rows.len()
+        );
+        assert_eq!(rt.cursor().svc_outbox_archived, archived + 5);
+        assert_eq!(
+            rt.get_kv("svc:svc1").unwrap()["_audit_outbox_base"].as_u64(),
+            Some(archived),
+            "m1 ({label}): must rebase overflowed _audit_outbox_base cleanly to {archived}"
+        );
+    }
+
+    // Case (c): archived near u64::MAX (u64::MAX - 1) + raw_base = u64::MAX - 2 + len = 5 -> must NOT panic or wrap!
+    {
+        let rt = Rt::new();
+        rt.put_kv(
+            &cursor_key(SID),
+            json!({
+                "scan_min": NOW_MIN - 2,
+                "cache_min": NOW_MIN - 2,
+                "svc_outbox_archived": u64::MAX - 1,
+                "svc_last_base": u64::MAX - 2,
+                "svc_kv_archived": u64::MAX - 1,
+                "last_flush_s": NOW_S - 600,
+            }),
+        );
+        rt.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": u64::MAX - 2,
+                "_audit_outbox": entries5,
+            }),
+        );
+        rt.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("ovf_arch_max")),
+            cron_line("ovf_arch_max"),
+        );
+        rt.budget.set(rt.calls.get() + 64);
+        let rep = run(&rt, true);
+        assert_eq!(rep.status, FlushStatus::Committed);
+        assert_eq!(rt.cursor().svc_outbox_archived, u64::MAX - 1);
+    }
+}

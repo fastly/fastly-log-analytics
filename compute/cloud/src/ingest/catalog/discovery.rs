@@ -36,6 +36,8 @@ struct State {
     seen: BTreeSet<String>,
     summaries_seen: BTreeSet<String>,
     #[serde(default)]
+    visited_blocks: BTreeSet<String>,
+    #[serde(default)]
     hour_bundles: BTreeMap<i64, Reference>,
     #[serde(default)]
     open_bundles: BTreeMap<i64, Reference>,
@@ -366,6 +368,7 @@ fn enter_day(
     state.retired.clear();
     state.seen.clear();
     state.summaries_seen.clear();
+    state.visited_blocks.clear();
     state.summary_ready = false;
     state.covered_windows.clear();
 }
@@ -507,6 +510,7 @@ fn walk<R: Runtime>(
             state.retired.clear();
             state.seen.clear();
             state.summaries_seen.clear();
+            state.visited_blocks.clear();
             state.summary_ready = false;
             state.covered_windows.clear();
             continue;
@@ -569,16 +573,24 @@ fn walk<R: Runtime>(
             state.summary_offset = manifest.summaries.len();
         }
         if state.offset == outputs.len() && state.summary_offset == manifest.summaries.len() {
+            state.visited_blocks.insert(reference.key.clone());
             state.current = manifest.previous;
             if state.current.as_ref().is_some_and(|parent| {
-                parent.generation > reference.generation || parent.key == reference.key
+                parent.generation > reference.generation
+                    || parent.key == reference.key
+                    || state.visited_blocks.contains(&parent.key)
             }) {
                 return Err("catalog_parent_invalid".into());
             }
             state.offset = 0;
             state.summary_offset = 0;
         }
-        if state.seen.len() + state.retired.len() + state.summaries_seen.len() > IDENTITY_LIMIT {
+        if state.seen.len()
+            + state.retired.len()
+            + state.summaries_seen.len()
+            + state.visited_blocks.len()
+            > IDENTITY_LIMIT
+        {
             return Err("catalog_identity_admission".into());
         }
     }
@@ -1588,5 +1600,187 @@ mod tests {
             assert_eq!(all_keys.len(), FILES_PAGE + 1);
             assert!(all_keys.contains(&h2_key));
         }
+    }
+
+    #[test]
+    fn iter35_m2_two_node_equal_gen_block_cycle_terminates_with_error() {
+        use std::cell::Cell;
+
+        struct BoundedRt {
+            inner: MockRt,
+            remaining: Cell<u32>,
+            gets: Cell<u32>,
+        }
+        impl SetupStores for BoundedRt {
+            fn config_present(&self, n: &str) -> Result<bool, String> {
+                self.inner.config_present(n)
+            }
+            fn secret_present(&self, n: &str) -> Result<bool, String> {
+                self.inner.secret_present(n)
+            }
+            fn state_linked(&self) -> Result<bool, String> {
+                self.inner.state_linked()
+            }
+        }
+        impl Runtime for BoundedRt {
+            fn config(&self, k: &str) -> Result<Option<String>, String> {
+                self.inner.config(k)
+            }
+            fn secret(&self, k: &str) -> Result<Option<String>, String> {
+                self.inner.secret(k)
+            }
+            fn random(&self) -> Result<[u8; 32], String> {
+                self.inner.random()
+            }
+            fn now(&self) -> u64 {
+                self.inner.now()
+            }
+            fn checks(&self, l: bool) -> Result<Value, String> {
+                self.inner.checks(l)
+            }
+            fn versions(&self) -> Result<Value, String> {
+                self.inner.versions()
+            }
+            fn compute_service_id(&self) -> Option<String> {
+                self.inner.compute_service_id()
+            }
+            fn compute_service_version(&self) -> Option<String> {
+                self.inner.compute_service_version()
+            }
+            fn admin_get(&self, key: &str) -> Result<Option<Record>, String> {
+                self.inner.admin_get(key)
+            }
+            fn admin_get_fresh(&self, key: &str, token: &str) -> Result<Option<Record>, String> {
+                self.inner.admin_get_fresh(key, token)
+            }
+            fn admin_cas(&self, k: &str, g: Option<&str>, v: &Value) -> Result<bool, String> {
+                self.inner.admin_cas(k, g, v)
+            }
+            fn admin_fos(&self, request: FosRequest<'_>) -> Result<FosResponse, String> {
+                let rem = self.remaining.get();
+                if rem == 0 {
+                    return Err("backend_budget_exhausted".into());
+                }
+                self.remaining.set(rem - 1);
+                if request.method == "GET" {
+                    self.gets.set(self.gets.get() + 1);
+                }
+                self.inner.admin_fos(request)
+            }
+            fn admin_fos_etag(
+                &self,
+                request: FosRequest<'_>,
+            ) -> Result<(FosResponse, Option<String>), String> {
+                let rem = self.remaining.get();
+                if rem == 0 {
+                    return Err("backend_budget_exhausted".into());
+                }
+                self.remaining.set(rem - 1);
+                self.inner.admin_fos_etag(request)
+            }
+            fn admin_remaining_calls(&self) -> u32 {
+                self.remaining.get()
+            }
+        }
+
+        let svc = test_service();
+        let hour = BASE;
+        let day = day_start(hour);
+        let key_a = "processed/_catalog/block-cycle-a.json".to_owned();
+        let key_b = "processed/_catalog/block-cycle-b.json".to_owned();
+        let day_key = "processed/_catalog/day-cycle.json".to_owned();
+
+        // 2-node equal-generation cycle: A (gen 5) -> B (gen 5) -> A (gen 5)
+        let block_a = Block {
+            version: VERSION,
+            service_id: svc.service_id.clone(),
+            generation: 5,
+            hour,
+            previous: Some(Reference {
+                key: key_b.clone(),
+                generation: 5,
+            }),
+            files: vec![],
+            summaries: vec![],
+            replaces: vec![],
+            committed_at: BTreeMap::new(),
+        };
+        let block_b = Block {
+            version: VERSION,
+            service_id: svc.service_id.clone(),
+            generation: 5,
+            hour,
+            previous: Some(Reference {
+                key: key_a.clone(),
+                generation: 5,
+            }),
+            files: vec![],
+            summaries: vec![],
+            replaces: vec![],
+            committed_at: BTreeMap::new(),
+        };
+        let day_index = Day {
+            version: VERSION,
+            service_id: Some(svc.service_id.clone()),
+            hours: BTreeMap::from([(
+                hour,
+                Reference {
+                    key: key_a.clone(),
+                    generation: 5,
+                },
+            )]),
+            ..Default::default()
+        };
+        let head = Head {
+            version: VERSION,
+            generation: 5,
+            recent: vec![super::super::Event {
+                cursor: "5".into(),
+                generation: 5,
+                committed_at: None,
+                manifest: None,
+            }],
+            days: BTreeMap::from([(day, day_key.clone())]),
+            ..Default::default()
+        };
+
+        let inner = MockRt {
+            now: (BASE + 3600) as u64,
+            kv: RefCell::new(BTreeMap::from([(
+                WATERMARK_KEY.into(),
+                json!({ "catalog": head }),
+            )])),
+            objects: RefCell::new(BTreeMap::from([
+                (day_key, serde_json::to_vec(&day_index).unwrap()),
+                (key_a, serde_json::to_vec(&block_a).unwrap()),
+                (key_b, serde_json::to_vec(&block_b).unwrap()),
+            ])),
+        };
+        let rt = BoundedRt {
+            inner,
+            remaining: Cell::new(24),
+            gets: Cell::new(0),
+        };
+        let store = Store {
+            runtime: &rt,
+            service: &svc,
+            access_key: "ak".into(),
+            secret_key: "sk".into(),
+            started: Instant::now(),
+            vcpu_start: 0,
+        };
+
+        let res = page(&store, hour, hour + 3600, false, false, None);
+        assert_eq!(
+            res.err().as_deref(),
+            Some("catalog_parent_invalid"),
+            "m2: 2-node equal-generation Block cycle A <-> B must terminate cleanly with catalog_parent_invalid (gets={})",
+            rt.gets.get()
+        );
+        assert!(
+            rt.gets.get() <= 4,
+            "m2: cycle must terminate immediately after visiting A and B, not burn budget (gets={})",
+            rt.gets.get()
+        );
     }
 }

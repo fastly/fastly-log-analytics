@@ -1301,6 +1301,7 @@ def _get_tok_meta_entry(
             "map": {},
             "on_op": {},
             "fact": {},
+            "clause_open": {},
             "pos_in_ready": False,
             "pos_in_idx": None,
         }
@@ -1516,44 +1517,94 @@ def _cannot_end_aliasable_tok(tokens: list[_Tok], pos: int, r: int, after_as_idx
             and not _is_non_keyword_ident_pos(tokens, pos - 1)
         )
     if wu in _AS_CLAUSE_OPENING_WORDS:
-        if pos == 0:
-            return True
-        prev = tokens[pos - 1]
+        return _is_clause_open_word_at(tokens, pos)
+    return False
+
+
+def _is_clause_open_word_at(tokens: list[_Tok], pos: int) -> bool:
+    """Return True when ``tokens[pos]`` (in ``_AS_CLAUSE_OPENING_WORDS``) acts as a clause opener."""
+    _, _, _, case_state = _get_tok_meta_entry(tokens)
+    co_memo: dict[int, bool] | None = case_state["clause_open"] if case_state is not None else None
+    if co_memo is not None and pos in co_memo:
+        return co_memo[pos]
+    cur = pos
+    while cur > 0:
+        if co_memo is not None and (cur - 1) in co_memo:
+            break
+        prev = tokens[cur - 1]
+        if (
+            prev.kind == "WORD"
+            and prev.val.upper() in _AS_CLAUSE_OPENING_WORDS
+            and not _is_non_keyword_ident_pos(tokens, cur - 1)
+            and not (prev.val.upper() == "FROM" and _is_distinct_from_op(tokens, cur - 1))
+        ):
+            cur -= 1
+            continue
+        break
+    if cur > 0 and co_memo is not None and (cur - 1) in co_memo:
+        cur_val = not co_memo[cur - 1]
+    elif cur == 0:
+        cur_val = True
+    else:
+        prev = tokens[cur - 1]
+        cur_val = True
+        is_star_wildcard = (
+            prev.kind == "OTHER"
+            and prev.val == "*"
+            and (
+                cur == 1
+                or _is_qualified_star_tok(tokens, cur - 1)
+                or tokens[cur - 2].kind == "COMMA"
+                or (
+                    tokens[cur - 2].kind == "WORD"
+                    and tokens[cur - 2].val.upper() in ("SELECT", "DISTINCT", "ALL")
+                    and not _is_non_keyword_ident_pos(tokens, cur - 2)
+                )
+            )
+        )
         if (
             prev.kind in ("OTHER", "RPAREN")
             or (prev.kind == "WORD" and len(prev.val) == 4 and prev.val.upper() == "TIES")
-        ) and _is_select_head_modifier_end_tok(tokens, pos - 1):
-            return False
-        if prev.kind in ("COMMA", "LPAREN", "LBRACK", "LBRACE", "DOT") or (
-            prev.kind == "OTHER" and not _is_num_tok_val(prev.val) and not _is_postfix_factorial_tok(tokens, pos - 1)
+        ) and _is_select_head_modifier_end_tok(tokens, cur - 1):
+            cur_val = False
+        elif prev.kind in ("COMMA", "LPAREN", "LBRACK", "LBRACE", "DOT") or (
+            prev.kind == "OTHER"
+            and not is_star_wildcard
+            and not _is_num_tok_val(prev.val)
+            and not _is_postfix_factorial_tok(tokens, cur - 1)
         ):
-            return False
-        if prev.kind == "WORD" and not _is_non_keyword_ident_pos(tokens, pos - 1):
+            cur_val = False
+        elif prev.kind == "WORD" and not _is_non_keyword_ident_pos(tokens, cur - 1):
             pw = prev.val.upper()
-            if pw in ("SELECT", "FROM", "JOIN", "TABLE", "IN", "GLOBAL"):
-                return False
-            if pw in ("DISTINCT", "ALL"):
+            if pw in ("IN", "GLOBAL"):
+                cur_val = False
+            elif pw in ("DISTINCT", "ALL"):
                 is_setop_mod = (
-                    pos >= 2
-                    and tokens[pos - 2].kind == "WORD"
-                    and tokens[pos - 2].val.upper() in ("UNION", "INTERSECT", "EXCEPT")
-                    and not _is_non_keyword_ident_pos(tokens, pos - 2)
+                    cur >= 2
+                    and tokens[cur - 2].kind == "WORD"
+                    and tokens[cur - 2].val.upper() in ("UNION", "INTERSECT", "EXCEPT")
+                    and not _is_non_keyword_ident_pos(tokens, cur - 2)
                 )
                 if not is_setop_mod:
-                    return False
-            if _is_prev_word_operator_at(tokens, pos - 1, tk):
+                    cur_val = False
+            elif _is_prev_word_operator_at(tokens, cur - 1, tokens[cur]):
                 is_bare_table_alias = (
-                    pos >= 3
-                    and tokens[pos - 2].kind in ("WORD", "QIDENT")
-                    and tokens[pos - 3].kind == "WORD"
-                    and tokens[pos - 3].val.upper() in ("FROM", "JOIN")
-                    and not _is_non_keyword_ident_pos(tokens, pos - 3)
-                    and not _is_distinct_from_op(tokens, pos - 3)
+                    cur >= 3
+                    and tokens[cur - 2].kind in ("WORD", "QIDENT")
+                    and tokens[cur - 3].kind == "WORD"
+                    and tokens[cur - 3].val.upper() in ("FROM", "JOIN")
+                    and not _is_non_keyword_ident_pos(tokens, cur - 3)
+                    and not _is_distinct_from_op(tokens, cur - 3)
                 )
                 if not is_bare_table_alias:
-                    return False
-        return True
-    return False
+                    cur_val = False
+    while True:
+        if co_memo is not None:
+            co_memo[cur] = cur_val
+        if cur >= pos:
+            return cur_val
+        cur += 1
+        cur_val = not cur_val
 
 
 def _is_non_keyword_ident_pos(tokens: list[_Tok], idx: int) -> bool:
@@ -1824,13 +1875,129 @@ def _find_with_expr_cte_as_alias(tokens: list[_Tok], start_idx: int) -> tuple[in
                         if rp_sub != -1 and _is_subquery_token_list(tokens[after_idx : rp_sub + 1]):
                             return k, k + 1
             elif (
-                wu in _SUBQUERY_HEAD_KEYWORDS
+                wu == "SELECT"
                 and not _is_non_keyword_ident_pos(tokens, k)
                 and not _is_dot_qualifier_at(tokens, k)
+                and (k == start_idx or not _is_on_operator_tok_at(tokens, k - 1))
             ):
                 return None
         k += 1
     return None
+
+
+def _parse_with_prefix_tokens(
+    tokens: list[_Tok],
+    node: dict[str, Any],
+    active_expr_ctes: dict[str, dict[str, Any]],
+) -> int:
+    """Parse a leading ``WITH [RECURSIVE] ...`` clause, returning the index of the body start."""
+    n = len(tokens)
+    i = 1
+    is_recursive = False
+    if i < n and tokens[i].kind == "WORD" and tokens[i].val.upper() == "RECURSIVE":
+        is_recursive = True
+        i += 1
+    cte_entries: list[dict[str, Any]] = []
+    expecting_cte_item = True
+    while i < n:
+        entry_start = i
+        matched_std_cte = False
+        if tokens[i].kind in ("WORD", "QIDENT"):
+            cte_name = tokens[i].val
+            j = i + 1
+            cols_ok = True
+            if j < n and tokens[j].kind == "LPAREN":
+                rp_cols = _find_matching_rparen(tokens, j)
+                if rp_cols == -1 or not _is_valid_ident_list(tokens[j + 1 : rp_cols]):
+                    cols_ok = False
+                else:
+                    j = rp_cols + 1
+            if (
+                cols_ok
+                and j < n
+                and tokens[j].kind == "WORD"
+                and tokens[j].val.upper() == "AS"
+                and not _is_non_keyword_ident_pos(tokens, j)
+            ):
+                j += 1
+                while j < n and tokens[j].kind == "WORD" and tokens[j].val.upper() in ("MATERIALIZED", "NOT"):
+                    j += 1
+                if j < n and tokens[j].kind == "LPAREN":
+                    rp = _find_matching_rparen(tokens, j)
+                    if rp != -1 and _is_subquery_token_list(tokens[j + 1 : rp]):
+                        if is_recursive:
+                            cte_body = _parse_recursive_cte_tokens(tokens[j + 1 : rp], expr_cte_refs=active_expr_ctes)
+                        else:
+                            cte_body = _parse_query_tokens(tokens[j + 1 : rp], expr_cte_refs=active_expr_ctes)
+                        cte_entries.append({"key": cte_name, "value": {"query": {"node": cte_body}}})
+                        active_expr_ctes.pop(cte_name.strip().lower(), None)
+                        i = rp + 1
+                        matched_std_cte = True
+        if matched_std_cte:
+            if i < n and tokens[i].kind == "COMMA":
+                i += 1
+                expecting_cte_item = True
+                continue
+            expecting_cte_item = False
+            break
+        expr_cte_hit = _find_with_expr_cte_as_alias(tokens, entry_start)
+        if expr_cte_hit is not None:
+            as_idx, alias_idx = expr_cte_hit
+            expr_toks = tokens[entry_start:as_idx]
+            alias_low = tokens[alias_idx].val.strip().lower()
+            _scan_expr_tokens(expr_toks, node, allow_direct_subquery=False, expr_cte_refs=active_expr_ctes)
+            tbl_ref = _parse_in_rhs_table_ref(expr_toks)
+            if tbl_ref is not None:
+                if (
+                    tbl_ref.get("type") == "BASE_TABLE"
+                    and not tbl_ref.get("schema_name")
+                    and not tbl_ref.get("catalog_name")
+                ):
+                    ref_low = str(tbl_ref.get("table_name") or "").strip().lower()
+                    if ref_low in active_expr_ctes:
+                        tbl_ref = active_expr_ctes[ref_low]
+                active_expr_ctes[alias_low] = tbl_ref
+                node["children"].append(
+                    {
+                        "type": "EXPR_CTE_TABLE_ALIAS",
+                        "alias": alias_low,
+                        "target_type": tbl_ref.get("type") or "",
+                        "target_table": tbl_ref.get("table_name") or "",
+                        "target_schema": tbl_ref.get("schema_name") or "",
+                        "target_catalog": tbl_ref.get("catalog_name") or "",
+                        "target_message": tbl_ref.get("message") or "",
+                    }
+                )
+            else:
+                active_expr_ctes.pop(alias_low, None)
+            i = alias_idx + 1
+            if i < n and tokens[i].kind == "COMMA":
+                i += 1
+                expecting_cte_item = True
+                continue
+            expecting_cte_item = False
+            break
+        node["children"].append({"type": "PARSE_ERROR_NODE", "message": "SQL parse error: invalid WITH clause item"})
+        expecting_cte_item = False
+        i = entry_start
+        break
+    if expecting_cte_item:
+        node["children"].append({"type": "PARSE_ERROR_NODE", "message": "SQL parse error: incomplete WITH clause"})
+    node["cte_map"] = {"map": cte_entries}
+    return i
+
+
+def _parse_branch_with_tokens(
+    tokens: list[_Tok], *, expr_cte_refs: dict[str, dict[str, Any]] | None = None
+) -> tuple[dict[str, Any], int]:
+    """Parse an unparenthesized set-op branch starting with ``WITH`` up to the next top-level set-op."""
+    branch_node: dict[str, Any] = {"type": "SELECT_NODE", "children": []}
+    active_expr_ctes: dict[str, dict[str, Any]] = dict(expr_cte_refs) if expr_cte_refs else {}
+    after_with = _parse_with_prefix_tokens(tokens, branch_node, active_expr_ctes)
+    body_consumed = _scan_body_tokens(
+        tokens[after_with:], branch_node, expr_cte_refs=active_expr_ctes or None, stop_at_setop=True
+    )
+    return branch_node, after_with + body_consumed
 
 
 def _parse_query_tokens(
@@ -1864,93 +2031,8 @@ def _parse_query_tokens(
 
     active_expr_ctes: dict[str, dict[str, Any]] = dict(expr_cte_refs) if expr_cte_refs else {}
     i = 0
-    n = len(tokens)
     if tokens[0].kind == "WORD" and tokens[0].val.upper() == "WITH":
-        i = 1
-        is_recursive = False
-        if i < n and tokens[i].kind == "WORD" and tokens[i].val.upper() == "RECURSIVE":
-            is_recursive = True
-            i += 1
-        cte_entries: list[dict[str, Any]] = []
-        while i < n:
-            entry_start = i
-            matched_std_cte = False
-            if tokens[i].kind in ("WORD", "QIDENT"):
-                cte_name = tokens[i].val
-                j = i + 1
-                cols_ok = True
-                if j < n and tokens[j].kind == "LPAREN":
-                    rp_cols = _find_matching_rparen(tokens, j)
-                    if rp_cols == -1 or not _is_valid_ident_list(tokens[j + 1 : rp_cols]):
-                        cols_ok = False
-                    else:
-                        j = rp_cols + 1
-                if (
-                    cols_ok
-                    and j < n
-                    and tokens[j].kind == "WORD"
-                    and tokens[j].val.upper() == "AS"
-                    and not _is_non_keyword_ident_pos(tokens, j)
-                ):
-                    j += 1
-                    while j < n and tokens[j].kind == "WORD" and tokens[j].val.upper() in ("MATERIALIZED", "NOT"):
-                        j += 1
-                    if j < n and tokens[j].kind == "LPAREN":
-                        rp = _find_matching_rparen(tokens, j)
-                        if rp != -1 and _is_subquery_token_list(tokens[j + 1 : rp]):
-                            if is_recursive:
-                                cte_body = _parse_recursive_cte_tokens(
-                                    tokens[j + 1 : rp], expr_cte_refs=active_expr_ctes
-                                )
-                            else:
-                                cte_body = _parse_query_tokens(tokens[j + 1 : rp], expr_cte_refs=active_expr_ctes)
-                            cte_entries.append({"key": cte_name, "value": {"query": {"node": cte_body}}})
-                            active_expr_ctes.pop(cte_name.strip().lower(), None)
-                            i = rp + 1
-                            matched_std_cte = True
-            if matched_std_cte:
-                if i < n and tokens[i].kind == "COMMA":
-                    i += 1
-                    continue
-                break
-            expr_cte_hit = _find_with_expr_cte_as_alias(tokens, entry_start)
-            if expr_cte_hit is not None:
-                as_idx, alias_idx = expr_cte_hit
-                expr_toks = tokens[entry_start:as_idx]
-                alias_low = tokens[alias_idx].val.strip().lower()
-                _scan_expr_tokens(expr_toks, node, expr_cte_refs=active_expr_ctes)
-                tbl_ref = _parse_in_rhs_table_ref(expr_toks)
-                if tbl_ref is not None:
-                    if (
-                        tbl_ref.get("type") == "BASE_TABLE"
-                        and not tbl_ref.get("schema_name")
-                        and not tbl_ref.get("catalog_name")
-                    ):
-                        ref_low = str(tbl_ref.get("table_name") or "").strip().lower()
-                        if ref_low in active_expr_ctes:
-                            tbl_ref = active_expr_ctes[ref_low]
-                    active_expr_ctes[alias_low] = tbl_ref
-                    node["children"].append(
-                        {
-                            "type": "EXPR_CTE_TABLE_ALIAS",
-                            "alias": alias_low,
-                            "target_type": tbl_ref.get("type") or "",
-                            "target_table": tbl_ref.get("table_name") or "",
-                            "target_schema": tbl_ref.get("schema_name") or "",
-                            "target_catalog": tbl_ref.get("catalog_name") or "",
-                            "target_message": tbl_ref.get("message") or "",
-                        }
-                    )
-                else:
-                    active_expr_ctes.pop(alias_low, None)
-                i = alias_idx + 1
-                if i < n and tokens[i].kind == "COMMA":
-                    i += 1
-                    continue
-                break
-            i = entry_start
-            break
-        node["cte_map"] = {"map": cte_entries}
+        i = _parse_with_prefix_tokens(tokens, node, active_expr_ctes)
 
     _scan_body_tokens(tokens if i == 0 else tokens[i:], node, expr_cte_refs=active_expr_ctes or None)
     return node
@@ -2438,6 +2520,11 @@ _IN_LHS_ABSENT_EXTRA_WORDS = frozenset(
         "LIMIT",
         "OFFSET",
         "FETCH",
+        "FIRST",
+        "NEXT",
+        "STEP",
+        "STALENESS",
+        "TO",
         "RETURN",
         "SET",
         "VALUES",
@@ -2494,6 +2581,9 @@ def _parse_in_rhs_table_ref(rhs_tokens: list[_Tok]) -> dict[str, Any] | None:
         peeled = _strip_outer_parens(unwrapped)
         if len(peeled) != len(unwrapped):
             unwrapped = peeled
+            continue
+        if unwrapped[0].kind == "OTHER" and bool(unwrapped[0].val) and unwrapped[0].val.strip("+") == "":
+            unwrapped = unwrapped[1:]
             continue
         if (
             len(unwrapped) >= 3
@@ -2788,7 +2878,8 @@ def _scan_body_tokens(
     in_from: bool = False,
     expect_table: bool = False,
     expr_cte_refs: dict[str, dict[str, Any]] | None = None,
-) -> None:
+    stop_at_setop: bool = False,
+) -> int:
     i = 0
     n = len(tokens)
     at_branch_start = not in_from
@@ -2938,7 +3029,7 @@ def _scan_body_tokens(
                             "message": "SHOW / DESCRIBE / SUMMARIZE statements are not allowed via /api/query",
                         }
                     )
-                    return
+                    return i
                 if wu in _NON_SELECT_STATEMENTS and not (
                     wu in ("REPLACE", "TRUNCATE") and i + 1 < n and tokens[i + 1].kind == "LPAREN"
                 ):
@@ -2949,7 +3040,7 @@ def _scan_body_tokens(
                             "message": f"only SELECT / WITH / UNION statements allowed (got {wu}_NODE)",
                         }
                     )
-                    return
+                    return i
             is_dot_qual = i + 2 < n and tokens[i + 1].kind == "DOT" and _is_dot_qualifier_at(tokens, i)
             is_on_ident = (
                 in_on_clause
@@ -2960,11 +3051,26 @@ def _scan_body_tokens(
             if is_dot_qual or is_on_ident:
                 in_sample_clause = False
             else:
+                if at_branch_start and wu == "WITH":
+                    if i == 0:
+                        node["children"].append(
+                            {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: unexpected WITH clause"}
+                        )
+                        i += 1
+                        at_branch_start = False
+                        continue
+                    branch_node, consumed = _parse_branch_with_tokens(tokens[i:], expr_cte_refs=expr_cte_refs)
+                    node["children"].append(branch_node)
+                    i += consumed
+                    at_branch_start = False
+                    continue
                 if wu in ("UNION", "INTERSECT", "EXCEPT") and not _is_star_except_clause(tokens, i):
                     if expect_table or in_join_mod:
                         node["children"].append(
                             {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: expected table reference"}
                         )
+                    if stop_at_setop:
+                        return i
                     node["type"] = "SET_OPERATION_NODE"
                     in_from = False
                     expect_table = False
@@ -3574,6 +3680,7 @@ def _scan_body_tokens(
 
     if expect_table or in_join_mod:
         node["children"].append({"type": "PARSE_ERROR_NODE", "message": "SQL parse error: expected table reference"})
+    return n
 
 
 def _parse_single_select_node(

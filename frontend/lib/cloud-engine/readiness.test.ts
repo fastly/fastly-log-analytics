@@ -1417,3 +1417,440 @@ it("SEC-T5-ITER34-FE-02: redacts Stage-2A/2B delimited/spaced secrets, spaced SQ
     window.removeEventListener("fla:cloud-query", listener);
   }
 }, 30000);
+
+it("SEC-T5-ITER35-FE-01: redacts camelCase and dot-separated secret keys in Stage 2A JSON and Stage 2B k=v without over-redacting benign identifiers", async () => {
+  setCloudModeRuntime(true);
+  const events: { state?: string; error?: string }[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    const camelDotSecretCases: readonly [string, readonly string[], string][] = [
+      [
+        'Runtime Error: {"accessToken": cache, "clientSecret": true, "sessionId": server, "userPassword": valid, "auth.token": cache}',
+        ["accessToken", "clientSecret", "sessionId", "userPassword", "auth.token", "cache", "true", "server", "valid"],
+        "Error: Runtime Error: [redacted], [redacted], [redacted], [redacted], [redacted]",
+      ],
+      [
+        'Runtime Error: {"accessToken": 500ms, "apiKey": 1024 bytes} rejected',
+        ["accessToken", "500ms", "apiKey", "1024", "bytes"],
+        "Error: Runtime Error: [redacted], [redacted] rejected",
+      ],
+      [
+        'Runtime Error: {"auth.token": server, "user.secret": cache, "x.api.key": valid} rejected',
+        ["auth.token", "user.secret", "x.api.key", "server", "cache", "valid"],
+        "Error: Runtime Error: [redacted], [redacted], [redacted] rejected",
+      ],
+      [
+        'Runtime Error: {"csrfToken": cache, "authToken": server, "refreshToken": valid, "bearerToken": true, "privateKey": cache, "secretKey": server, "signingKey": valid, "sessionCookie": cache, "oauthToken": server, "req.cookie": cache, "http.authorization": server} rejected',
+        ["csrfToken", "authToken", "refreshToken", "bearerToken", "privateKey", "secretKey", "signingKey", "sessionCookie", "oauthToken", "req.cookie", "http.authorization", "cache", "server", "valid", "true"],
+        "Error: Runtime Error: [redacted], [redacted], [redacted], [redacted], [redacted], [redacted], [redacted], [redacted], [redacted], [redacted], [redacted] rejected",
+      ],
+      [
+        'Runtime Error: {"APIKey": cache, "CSRFToken": server, "sessionID": valid, "myJWT": cache} rejected',
+        ["APIKey", "CSRFToken", "sessionID", "myJWT", "cache", "server", "valid"],
+        "Error: Runtime Error: [redacted], [redacted], [redacted], [redacted] rejected",
+      ],
+      [
+        "Runtime Error: accessToken = cache clientSecret = true sessionId = server auth.token = cache",
+        ["accessToken", "clientSecret", "sessionId", "auth.token", "cache", "true", "server", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: accessToken=(server) rejected",
+        ["accessToken", "server", "=", "("],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: auth.token = server rejected",
+        ["auth.token", "server", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: apiKey = 1024 bytes rejected",
+        ["apiKey", "1024", "bytes", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: req.cookie: sid=tok99; mode = server rejected",
+        ["req.cookie", "sid", "tok99", "mode", "server", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: http.authorization: Digest username=alice, response = cache rejected",
+        ["http.authorization", "Digest", "alice", "response", "cache", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+    ];
+    for (const [msg, forbidden, expectedExact] of camelDotSecretCases) {
+      const err = new Error(msg);
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+      const got = events.at(-1)?.error ?? "";
+      for (const frag of forbidden) {
+        expect(got, `msg=${msg} got=${got}`).not.toContain(frag);
+      }
+      expect(got, `msg=${msg}`).toBe(expectedExact);
+    }
+
+    // Benign camelCase / dot-separated non-secret terms and legitimate diagnostics must NOT over-redact:
+    const benignCases: readonly [string, string][] = [
+      ["Runtime Error: chunkSize = 1024 bytes", "Error: Runtime Error: [redacted] = 1024 bytes"],
+      ["Runtime Error: rowCount = 500ms", "Error: Runtime Error: [redacted] = 500ms"],
+      ["Runtime Error: cacheHit = true", "Error: Runtime Error: [redacted] = true"],
+      ["Runtime Error: serverError = HTTP 503", "Error: Runtime Error: [redacted] = HTTP 503"],
+      ["Runtime Error: db.table = cache", "Error: Runtime Error: [redacted] = cache"],
+      ["Runtime Error: byteOffset = 1024 bytes fileName = valid tableName = cache columnType = text bufferLength = 16 MB memoryLimit = 256 MiB", "Error: Runtime Error: [redacted] = 1024 bytes [redacted] = valid [redacted] = cache [redacted] = text [redacted] = 16 MB [redacted] = 256 MiB"],
+      ['Runtime Error: {"chunkSize": 1024 bytes, "cacheHit": true, "db.table": cache}', "Error: Runtime Error: [redacted]: 1024 bytes, [redacted]: true, [redacted]: cache[redacted]"],
+      ["Runtime Error: basic syntax error", "Error: Runtime Error: [redacted] syntax error"],
+      ["Runtime Error: digest syntax error", "Error: Runtime Error: [redacted] syntax error"],
+      ["Runtime Error: (token=847291) rejected", "Error: Runtime Error: ([redacted]) rejected"],
+      ["Out of Memory Error: could not allocate block of size 256.0 KiB (243.8 MiB/244.1 MiB used)", "Error: Out of Memory Error: could not allocate block of size 256.0 KiB (243.8 MiB/244.1 MiB used)"],
+      ["IO Error: upstream HTTP 503 timeout after 30s", "Error: IO Error: upstream HTTP 503 timeout after 30s"],
+      ["Invalid Input Error: Malformed JSON at byte 4 of input: unexpected character. Input: \"x\"", "Error: Invalid Input Error: Malformed JSON at byte 4 of input: unexpected character. Input: [redacted]"],
+      ["Out of Range Error: Left-shift value 847291 is out of range", "Error: Out of Range Error: Left-shift value [redacted] is out of range"],
+    ];
+    for (const [msg, expectedExact] of benignCases) {
+      const err = new Error(msg);
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+      expect(events.at(-1)?.error, `msg=${msg}`).toBe(expectedExact);
+    }
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+  }
+});
+
+it("SEC-T5-ITER35-FE-02: redacts Stage 2A quoted secret keys with = and backticks, glued post-quote values, and real @duckdb/duckdb-wasm error() probes", async () => {
+  const { createNodeBackend } = await import("./dashboard/duckdb");
+  const backend = await createNodeBackend();
+  setCloudModeRuntime(true);
+  const events: { state?: string; error?: string }[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    await backend.query("CREATE TABLE t_iter35 (pin INT)");
+    await backend.query("INSERT INTO t_iter35 VALUES (847291)");
+
+    const realDuckWave34: readonly [string, readonly string[], string][] = [
+      [
+        `SELECT error('"secret" = server')`,
+        ["secret", "server", "="],
+        "Error: Invalid Input Error: [redacted]",
+      ],
+      [
+        `SELECT error('{"accessToken": cache, "apiKey": 1024 bytes}')`,
+        ["accessToken", "cache", "apiKey", "1024", "bytes"],
+        "Error: Invalid Input Error: [redacted], [redacted]",
+      ],
+      [
+        `SELECT error('Authorization: OAuth field = server, response = cache rejected')`,
+        ["OAuth", "field", "server", "response", "cache", "="],
+        "Error: Invalid Input Error: [redacted]",
+      ],
+      [
+        `SELECT error('Authorization=OAuth field = server, response = cache rejected')`,
+        ["OAuth", "field", "server", "response", "cache", "="],
+        "Error: Invalid Input Error: [redacted] rejected",
+      ],
+      [
+        `SELECT error('Set-Cookie: sid=tok99; Expires=Wed, 21 Oct 2026 07:28:00 GMT; mode = server rejected')`,
+        ["sid", "tok99", "Expires", "2026", "GMT", "mode", "server", "="],
+        "Error: Invalid Input Error: [redacted]",
+      ],
+      [
+        `SELECT error('Set-Cookie=sid=tok99; Expires=Wed, 21 Oct 2026 07:28:00 GMT; mode = server rejected')`,
+        ["sid", "tok99", "Expires", "2026", "GMT", "mode", "server", "="],
+        "Error: Invalid Input Error: [redacted]: [redacted]",
+      ],
+      [
+        `SELECT error('Cookie=sid=tok99; $Path=/; mode = server rejected')`,
+        ["Cookie", "sid", "tok99", "Path", "mode", "server", "="],
+        "Error: Invalid Input Error: [redacted] rejected",
+      ],
+      [
+        `SELECT error('dIgEsT username=client, response = cache rejected')`,
+        ["dIgEsT", "username", "client", "response", "cache", "="],
+        "Error: Invalid Input Error: [redacted] rejected",
+      ],
+      [
+        `SELECT error('bAsIc server rejected')`,
+        ["bAsIc", "server"],
+        "Error: Invalid Input Error: [redacted] rejected",
+      ],
+      [
+        `SELECT error('accessToken = ' || pin || ' rejected') FROM t_iter35`,
+        ["accessToken", "847291", "="],
+        "Error: Invalid Input Error: [redacted] rejected",
+      ],
+      [
+        `SELECT error('"token" = ' || pin || ' rejected') FROM t_iter35`,
+        ["token", "847291", "="],
+        "Error: Invalid Input Error: [redacted] rejected",
+      ],
+    ];
+    for (const [sql, forbidden, expectedExact] of realDuckWave34) {
+      await expect(measureCloudQuery("query.console", () => backend.query(sql))).rejects.toThrow();
+      const got = events.at(-1)?.error ?? "";
+      for (const frag of forbidden) {
+        expect(got, `sql=${sql} got=${got}`).not.toContain(frag);
+      }
+      expect(got, `sql=${sql}`).toBe(expectedExact);
+    }
+
+    const quotedEqCases: readonly [string, readonly string[], string][] = [
+      [
+        'Runtime Error: "secret" = server and "api_key" = cache rejected',
+        ["secret", "server", "api_key", "cache", "="],
+        "Error: Runtime Error: [redacted] and [redacted] rejected",
+      ],
+      [
+        'Invalid Input Error: "secret" = server',
+        ["secret", "server", "="],
+        "Error: Invalid Input Error: [redacted]",
+      ],
+      [
+        "Runtime Error: `secret` = server rejected",
+        ["secret", "server", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: 'token' = ( cache ) rejected",
+        ["token", "cache", "=", "("],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: token='a'server rejected",
+        ["token", "server", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: token = 'a'server rejected",
+        ["token", "server", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: token=prefix'a'server rejected",
+        ["token", "prefix", "server", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: Authorization: Bearer 'a'server rejected",
+        ["Authorization", "Bearer", "server"],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        `Runtime Error: "secret" = 'a'server rejected`,
+        ["secret", "server", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        'Runtime Error: "secret" := server and "token" => cache and "apiKey" == valid rejected',
+        ["secret", "server", "token", "cache", "apiKey", "valid", "="],
+        "Error: Runtime Error: [redacted] and [redacted] and [redacted] rejected",
+      ],
+      [
+        "Runtime Error: token := server and apiKey => cache and secret == valid rejected",
+        ["token", "server", "apiKey", "cache", "secret", "valid", "="],
+        "Error: Runtime Error: [redacted] and [redacted] and [redacted] rejected",
+      ],
+      [
+        "Runtime Error: token:= server and apiKey=> cache and secret== valid rejected",
+        ["token", "server", "apiKey", "cache", "secret", "valid", "="],
+        "Error: Runtime Error: [redacted] and [redacted] and [redacted] rejected",
+      ],
+    ];
+    for (const [msg, forbidden, expectedExact] of quotedEqCases) {
+      const err = new Error(msg);
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+      const got = events.at(-1)?.error ?? "";
+      for (const frag of forbidden) {
+        expect(got, `msg=${msg} got=${got}`).not.toContain(frag);
+      }
+      expect(got, `msg=${msg}`).toBe(expectedExact);
+    }
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+    await backend.dispose();
+  }
+}, 45000);
+
+it("SEC-T5-ITER35-FE-03: redacts Cookie/Set-Cookie/Authorization headers with no-space colons, quoted keys, expanded/mixed-case schemes, URL params, RFC 6265 Expires, and RFC 2965 $ attrs", async () => {
+  setCloudModeRuntime(true);
+  const events: { state?: string; error?: string }[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    const headerCases: readonly [string, readonly string[], string][] = [
+      [
+        'Runtime Error: Cookie:sid="tok_999"; mode = cache',
+        ["Cookie", "sid", "tok_999", "mode", "cache", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: Cookie: "sid"="tok_999"; mode = cache',
+        ["Cookie", "sid", "tok_999", "mode", "cache", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: Cookie:"sid"="tok_999"; mode = cache',
+        ["Cookie", "sid", "tok_999", "mode", "cache", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: Authorization: Digest "realm"="foo", response = cache rejected',
+        ["Authorization", "Digest", "realm", "foo", "response", "cache", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        'Runtime Error: Authorization:username="alice", response = cache rejected',
+        ["Authorization", "username", "alice", "response", "cache", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: Authorization: OAuth server rejected",
+        ["Authorization", "OAuth", "server"],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: Authorization: OAuth field = server, response = cache rejected",
+        ["Authorization", "OAuth", "field", "server", "response", "cache", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: Authorization: ApiKey server rejected",
+        ["Authorization", "ApiKey", "server"],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: Authorization: HMAC server rejected",
+        ["Authorization", "HMAC", "server"],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: Authorization: JWT server rejected",
+        ["Authorization", "JWT", "server"],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: Authorization: Negotiate server rejected",
+        ["Authorization", "Negotiate", "server"],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: Authorization: AWS4-HMAC-SHA256 Credential=alice, SignedHeaders=host, Signature = cache rejected",
+        ["Authorization", "AWS4", "Credential", "alice", "SignedHeaders", "host", "Signature", "cache", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: bAsIc server rejected",
+        ["bAsIc", "server"],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: dIgEsT username=client, response = cache rejected",
+        ["dIgEsT", "username", "client", "response", "cache", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: digest username=client, response = cache rejected",
+        ["digest", "username", "client", "response", "cache", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: Authorization: Digest username=alice, uri=https://secret.example/x, response = cache rejected",
+        ["Authorization", "Digest", "username", "alice", "uri", "secret.example", "response", "cache", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: Cookie: next=https://example.com/ ; mode = server rejected",
+        ["Cookie", "next", "example.com", "mode", "server", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: Cookie: next=https://example.com/; mode = server rejected",
+        ["Cookie", "next", "example.com", "mode", "server", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: Set-Cookie: sid=tok99; Expires=Wed, 21 Oct 2026 07:28:00 GMT; mode = server rejected",
+        ["Set-Cookie", "sid", "tok99", "Expires", "Wed", "Oct", "2026", "GMT", "mode", "server", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: Set-Cookie: sid=tok99; Expires=Wed, 21 Oct 2026 07:28:00 GMT rejected",
+        ["Set-Cookie", "sid", "tok99", "Expires", "Wed", "Oct", "2026", "GMT", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: Cookie: $Version=1; sid=tok99; mode = server rejected",
+        ["Cookie", "Version", "sid", "tok99", "mode", "server", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: Cookie: sid=tok99; $Path=/; $Domain=.example.com; mode = server rejected",
+        ["Cookie", "sid", "tok99", "Path", "Domain", "example.com", "mode", "server", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        'Runtime Error: Cookie: $Version = 1; sid="tok99"; mode = server rejected',
+        ["Cookie", "Version", "sid", "tok99", "mode", "server", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "Runtime Error: Cookie: prefs=a,b,c; mode = server rejected",
+        ["Cookie", "prefs", "mode", "server", "="],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        "IO Error: failed fetching https://secret.example/a,cache;mode=server",
+        ["secret.example", "cache", "mode", "server"],
+        "Error: IO Error: failed fetching [url]",
+      ],
+    ];
+    for (const [msg, forbidden, expectedExact] of headerCases) {
+      const err = new Error(msg);
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+      const got = events.at(-1)?.error ?? "";
+      for (const frag of forbidden) {
+        expect(got, `msg=${msg} got=${got}`).not.toContain(frag);
+      }
+      expect(got, `msg=${msg}`).toBe(expectedExact);
+    }
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+  }
+});
+
+it("SEC-T5-ITER35-FE-04: maintains strict O(N) performance (<10ms) across 64 KiB Wave 34/35 adversarial inputs", async () => {
+  setCloudModeRuntime(true);
+  const events: { state?: string; error?: string }[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    const perfPayloads64k = [
+      "Runtime Error: " + "aB".repeat(32000) + " = server",
+      "Runtime Error: " + "abcDef".repeat(10500) + " = server",
+      "Runtime Error: " + '{"accessToken": 500ms},'.repeat(2800),
+      "Runtime Error: Set-Cookie: " + "Expires=Wed, 21 Oct 2026 07:28:00 GMT; ".repeat(1600),
+      "Runtime Error: Cookie: " + "Expires=x ".repeat(6400),
+      "Runtime Error: Authorization: Digest " + "uri=https://s.example/x, ".repeat(2500),
+      "Runtime Error: Cookie: " + "$Version=1; ".repeat(5000),
+      "Runtime Error: " + "`secret` = server ".repeat(3500),
+      "Runtime Error: " + "token='a'server ".repeat(4000),
+      "Runtime Error: " + "digest ".repeat(9000),
+    ];
+    for (const payload of perfPayloads64k) {
+      const err = new Error(payload);
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+      const trials: number[] = [];
+      for (let k = 0; k < 5; k += 1) {
+        const t0 = performance.now();
+        await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+        trials.push(performance.now() - t0);
+      }
+      const sorted = [...trials].sort((a, b) => a - b);
+      const max = sorted.at(-1)!;
+      expect(max, `len=${payload.length} trials=${trials.map((v) => v.toFixed(2)).join(",")}`).toBeLessThan(10);
+    }
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+  }
+}, 30000);
